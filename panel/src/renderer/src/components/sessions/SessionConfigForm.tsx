@@ -1318,8 +1318,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {/* Performance */}
       <Section title={t('sessions.config.performanceGeneration')} expanded={expandedSections.performance} onToggle={() => toggleSection('performance')} hidden={isImage}>
         <PerformanceHint text="Controls token streaming, response length, and prompt-window limits. Max Output Tokens caps generated tokens; Max Context Tokens caps accepted prompt/context tokens." />
-        {/* JIT is not available for image models or VLM chat models. */}
-        <Field label="JIT Compile (mx.compile)" tooltip="Enable Metal kernel fusion via mx.compile on the model forward pass. This optimizes GPU operations for faster inference after a one-time warmup on the first request. May not work with all models — falls back gracefully if compilation fails. Requires restart.">
+        {/* Whole-model JIT is not available for path-dependent cache models. */}
+        <Field label="Model-wide JIT (mx.compile)" tooltip="Compile the entire model forward graph for Metal kernel fusion. This is separate from model-native compiled kernels, which remain automatic when supported. Whole-model JIT requires a trace-safe cache topology and a restart.">
           <label className={`flex items-center gap-2 ${flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
@@ -1335,7 +1335,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         </Field>
         {(flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive) && (
           <IncompatWarning text={dsv4Active
-            ? "JIT is disabled for DeepSeek-V4 native composite cache. DSV4 uses path-dependent SWA+CSA/HCA state that must stay on the uncompiled scheduler path."
+            ? "Whole-model JIT is not trace-safe for DeepSeek-V4's path-dependent SWA+CSA/HCA cache. Native compiled decode remains automatic: the supported DSV4 runtime uses compiled router/SwiGLU operations and a fused Metal mHC single-token decode kernel."
             : m3Active
             ? "JIT is disabled for MiniMax-M3 native MSA cache. The Lightning-Indexer idx_keys path must stay on the uncompiled scheduler path."
             : zayaCcaActive
@@ -1351,6 +1351,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             : flashMoeActive
             ? "JIT is disabled while Flash MoE is on. Flash MoE's on-demand expert loading is incompatible with mx.compile tracing."
             : "JIT is disabled while distributed mode is on. Distributed orchestration cannot safely compile the local coordinator graph."} />
+        )}
+        {dsv4Active && (
+          <PerformanceHint text="Native compiled decode: Automatic. Only unsafe whole-model cache tracing is unavailable." />
         )}
 
         <SliderField

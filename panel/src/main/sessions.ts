@@ -4322,7 +4322,7 @@ export class SessionManager extends EventEmitter {
     }
     if (config.enableJit && !effectiveEnableJit) {
       const reason = dsv4Active
-        ? 'DeepSeek-V4 uses native SWA+CSA/HCA composite cache'
+        ? 'DeepSeek-V4 full-model tracing is unsafe for native SWA+CSA/HCA state; native compiled router/SwiGLU and fused Metal mHC decode remain automatic'
         : m3Active
         ? 'MiniMax-M3 uses native MSA idx_keys and must stay on the uncompiled scheduler path'
         : zayaCcaActive

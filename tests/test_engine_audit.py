@@ -13935,13 +13935,17 @@ class TestTurboQuantKVTelemetry:
             assert "if (compatibleExternalSpeculative)" in source
             assert "if (config.enableJit) args.push('--enable-jit')" not in source
 
-        assert "normalizedDetectedFamily === 'deepseek-v4'" in form_source
+        assert "normalizedEffectiveFamily === 'deepseek-v4'" in form_source
         # JIT incompat list includes TurboQuant and Laguna mixed-SWA live TQ
         # (engine skips mx.compile for TurboQuantKVCache; UI now matches).
         assert "lagunaMixedSwaTurboQuantActive" in form_source
         assert "turboQuantActive || lagunaMixedSwaTurboQuantActive" in form_source
         assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}" in form_source
         assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
+        assert "Native compiled decode: Automatic" in form_source
+        assert "compiled router/SwiGLU operations" in form_source
+        assert "fused Metal mHC single-token decode kernel" in form_source
+        assert "native compiled router/SwiGLU and fused Metal mHC decode remain automatic" in sessions_source
         assert "disabled={config.continuousBatching || multimodalActive || dsv4Active}" in form_source
 
     def test_responses_long_context_tool_cache_gate_script_pins_artifacts(self):

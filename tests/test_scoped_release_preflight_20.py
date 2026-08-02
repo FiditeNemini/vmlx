@@ -964,7 +964,7 @@ def _fixture_cache_capture(
             "configured": {
                 "use_paged_cache": paged,
                 "kv_cache_quantization": "q4" if tq_enabled else "none",
-                "kv_cache_quantization_explicit": cache_policy == "ssd-only",
+                "kv_cache_quantization_explicit": cache_policy != "q4",
             },
             "instantiated": {
                 "paged_ram_enabled": paged,
@@ -978,12 +978,42 @@ def _fixture_cache_capture(
             },
             "kv_cache_quantization": {"enabled": tq_enabled},
             "native_cache": {
-                "family": "minimax_m3" if is_native else "standard_kv",
+                "family": "deepseek_v4" if is_native else "standard_kv",
                 "cache_type": (
-                    "native_msa_sparse_kv" if is_native else "standard_kv"
+                    "native_composite" if is_native else "standard_kv"
                 ),
-                "schema": "minimax_m3_msa_v1" if is_native else "standard_v1",
-                "generic_turboquant_kv": {"enabled": tq_enabled},
+                "schema": (
+                    "deepseek_v4_v10_delta" if is_native else "standard_v1"
+                ),
+                "components": (
+                    [
+                        "swa_local",
+                        "csa_compressed_pool",
+                        "hca_compressed_pool",
+                        "incomplete_tail_state",
+                    ]
+                    if is_native
+                    else []
+                ),
+                "generic_turboquant_kv": (
+                    {
+                        "enabled": False,
+                        "reason": "native_dsv4_composite",
+                    }
+                    if is_native
+                    else {"enabled": tq_enabled}
+                ),
+                "pool_quant": (
+                    {
+                        "requested": True,
+                        "observed": True,
+                        "enabled": True,
+                        "matches_request": True,
+                        "error": None,
+                    }
+                    if is_native
+                    else None
+                ),
             },
         }
         topology_attestation = {
@@ -1098,7 +1128,7 @@ def _fixture_cache_capture(
             "base_url": "http://127.0.0.1:8001",
             "model": phase_model,
             "cache_contract_profile": (
-                "minimax_m3_sparse_block" if is_native else "generic"
+                "deepseek_v4_native_delta" if is_native else "generic"
             ),
             "gate_ok": True,
             "scenario_contract_ok": True,
@@ -2083,23 +2113,32 @@ def native_bundle_attestation(module, root: Path) -> tuple[dict, dict[str, str]]
     root.mkdir(parents=True, exist_ok=True)
     contents = {
         "config.json": (
-            '{"model_type":"minimax_m3",'
-            '"architectures":["MiniMaxM3ForCausalLM"]}\n'
+            '{"model_type":"deepseek_v4",'
+            '"architectures":["DeepseekV4ForCausalLM"]}\n'
         ),
-        "generation_config.json": '{"temperature":0.7,"top_p":0.9}\n',
+        "generation_config.json": (
+            '{"temperature":1.0,"top_p":0.95,"top_k":0}\n'
+        ),
         "jang_config.json": (
-            '{"profile":"JANG_2L","quantization":"affine",'
-            '"model_family":"minimax_m3"}\n'
+            '{"profile":"JANG","quantization":"affine","chat":{'
+            '"encoder":"encoding_dsv4",'
+            '"encoder_fn":"encode_messages",'
+            '"chat_template_source":"official_python_encoder"}}\n'
         ),
-        "tokenizer_config.json": '{"chat_template":"{{ messages }}"}\n',
-        "chat_template.jinja": "{{ messages }}\n",
+        "tokenizer_config.json": '{}\n',
     }
     for name, content in contents.items():
         path = root / name
         path.write_text(content, encoding="utf-8")
+    encoder = root / "encoding" / "encoding_dsv4.py"
+    encoder.parent.mkdir()
+    encoder.write_text(
+        "def encode_messages(messages, **kwargs):\n    return str(messages)\n",
+        encoding="utf-8",
+    )
     snapshot = module._read_bundle_directory_snapshot(root.resolve())
     assert snapshot is not None
-    assert snapshot["derived"]["native_cache"] == "minimax_m3_sparse"
+    assert snapshot["derived"]["native_cache"] == "dsv4_composite"
     observed = {
         key: snapshot[key]
         for key in (
@@ -2112,7 +2151,9 @@ def native_bundle_attestation(module, root: Path) -> tuple[dict, dict[str, str]]
         )
     }
     hashes = {
-        name: row["sha256"] for name, row in snapshot["files"].items()
+        name: row["sha256"]
+        for name, row in snapshot["files"].items()
+        if "sha256" in row
     }
     return observed, hashes
 
@@ -5125,7 +5166,7 @@ def test_r20_v5_run_intent_is_canonical_ordered_and_non_circular(
         bundle["derived"]["native_cache"]
     )
     assert intent["phase_plan"][-1]["native_cache_policy"] == (
-        "minimax_m3_sparse"
+        "dsv4_composite"
     )
     unsigned = deepcopy(intent)
     canonical_sha256 = unsigned.pop("canonical_sha256")
@@ -6171,7 +6212,7 @@ def test_r20_v5_canonicalizes_retained_pids_for_the_ui_worker(monkeypatch):
         module._v5_release_retained_pid_environment()
 
 
-def test_r20_v5_ui_emits_dsv4_cache_disabled_expectation_only_for_dsv4():
+def test_r20_v5_ui_emits_dsv4_pool_quant_expectation_only_for_dsv4():
     module = load_module()
     dsv4 = {"derived": {"native_cache": "dsv4_composite"}}
     for not_dsv4 in (
@@ -6182,7 +6223,7 @@ def test_r20_v5_ui_emits_dsv4_cache_disabled_expectation_only_for_dsv4():
     ):
         assert module._v5_ui_cache_expectation_environment(not_dsv4) == {}
     assert module._v5_ui_cache_expectation_environment(dsv4) == {
-        "VMLINUX_REAL_UI_EXPECT_DSV4_CACHE_DISABLED": "1"
+        "VMLINUX_REAL_UI_EXPECT_DSV4_POOL_QUANT": "1"
     }
 
 

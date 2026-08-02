@@ -7524,24 +7524,43 @@ def _v5_cache_facts(
                 if isinstance(native_cache, dict)
                 else None
             )
+            pool_quant = (
+                native_cache.get("pool_quant")
+                if isinstance(native_cache, dict)
+                else None
+            )
             if (
                 representative_id != V5_NATIVE_REPRESENTATIVE_ID
-                or derived_native != "minimax_m3_sparse"
+                or derived_native != "dsv4_composite"
                 or summary.get("cache_contract_profile")
-                != "minimax_m3_sparse_block"
+                != "deepseek_v4_native_delta"
                 or not isinstance(configured, dict)
                 or configured.get("kv_cache_quantization") != "none"
-                or configured.get("kv_cache_quantization_explicit") is not False
+                or configured.get("kv_cache_quantization_explicit") is not True
                 or not isinstance(tq, dict)
                 or tq.get("enabled") is not False
                 or not isinstance(kv_quant, dict)
                 or kv_quant.get("enabled") is not False
                 or not isinstance(native_cache, dict)
-                or native_cache.get("family") != "minimax_m3"
-                or native_cache.get("cache_type") != "native_msa_sparse_kv"
-                or native_cache.get("schema") != "minimax_m3_msa_v1"
+                or native_cache.get("family") != "deepseek_v4"
+                or native_cache.get("cache_type") != "native_composite"
+                or native_cache.get("schema") != "deepseek_v4_v10_delta"
+                or set(native_cache.get("components") or ())
+                != {
+                    "swa_local",
+                    "csa_compressed_pool",
+                    "hca_compressed_pool",
+                    "incomplete_tail_state",
+                }
                 or not isinstance(generic_tq, dict)
                 or generic_tq.get("enabled") is not False
+                or generic_tq.get("reason") != "native_dsv4_composite"
+                or not isinstance(pool_quant, dict)
+                or pool_quant.get("requested") is not True
+                or pool_quant.get("observed") is not True
+                or pool_quant.get("enabled") is not True
+                or pool_quant.get("matches_request") is not True
+                or pool_quant.get("error") is not None
                 or codec_before is None
                 or codec_after is None
                 or encode_delta != (0, 0, 0)
@@ -11356,10 +11375,10 @@ def _v5_ui_harness_environment(
 def _v5_ui_cache_expectation_environment(
     bundle: dict[str, Any],
 ) -> dict[str, str]:
-    """Enable the DSV4 fail-closed UI contract only for DSV4 bundles."""
+    """Enable the DSV4 pool-quant UI contract only for DSV4 bundles."""
 
     if nested(bundle, "derived", "native_cache") == "dsv4_composite":
-        return {"VMLINUX_REAL_UI_EXPECT_DSV4_CACHE_DISABLED": "1"}
+        return {"VMLINUX_REAL_UI_EXPECT_DSV4_POOL_QUANT": "1"}
     return {}
 
 

@@ -160,6 +160,10 @@ class _Request:
     # prompt snapshots globally, but skip_prefix_cache/cache_salt must suppress
     # the associated native block-delta work for this individual request too.
     capture_prompt_snapshot: bool = True
+    # Number of terminal prompt tokens that must be fed after the reusable
+    # snapshot boundary. Normal prompts use one token for the N-1 contract;
+    # rendered generation rails add their exact token length to that tail.
+    prompt_snapshot_tail_tokens: int = 1
 
 
 @dataclass
@@ -1199,6 +1203,7 @@ class DSV4BatchGenerator:
         logits_processors: Optional[List[List[Callable]]] = None,
         state_machines: Optional[List[Any]] = None,
         capture_prompt_snapshots: Optional[List[bool]] = None,
+        prompt_snapshot_tail_tokens: Optional[List[int]] = None,
     ):
         # Auto-evict any already-finished requests so the scheduler can
         # queue the next one. Without this, the scheduler keeps retrying
@@ -1217,6 +1222,7 @@ class DSV4BatchGenerator:
         logits_processors = logits_processors or [None] * len(prompts)
         state_machines = state_machines or [None] * len(prompts)
         capture_prompt_snapshots = capture_prompt_snapshots or [True] * len(prompts)
+        prompt_snapshot_tail_tokens = prompt_snapshot_tail_tokens or [1] * len(prompts)
         for i, p in enumerate(prompts):
             req = _Request(
                 uid=self._uid_count,
@@ -1228,6 +1234,9 @@ class DSV4BatchGenerator:
                 logits_processors=logits_processors[i] or self.logits_processors,
                 state_machine=state_machines[i],
                 capture_prompt_snapshot=bool(capture_prompt_snapshots[i]),
+                prompt_snapshot_tail_tokens=max(
+                    1, int(prompt_snapshot_tail_tokens[i] or 1)
+                ),
             )
             if state_machines[i] is not None and hasattr(state_machines[i], "make_state"):
                 req.matcher_state = state_machines[i].make_state()
@@ -1345,35 +1354,42 @@ class DSV4BatchGenerator:
                         r.prompt_processed = True
                         continue
 
-                    # TWO-PHASE PREFILL FOR N-1 SNAPSHOT.
+                    # TWO-PHASE PREFILL FOR THE REUSABLE SNAPSHOT BOUNDARY.
                     #
-                    # Scheduler stores prefix cache under N-1 token keys
-                    # so the last prompt token gets re-fed on cache hit
-                    # (avoids positional duplication). Our snapshot must
-                    # match that convention or hits drift positionally.
+                    # Scheduler stores prefix cache under generation-rail-
+                    # stripped N-1 keys so the final ordinary prompt token and
+                    # rail are re-fed on a hit. Our snapshot must match that
+                    # convention or native block intervals drift positionally.
                     #
-                    # Phase 1: prefill all but last token, snapshot the
-                    #          cache state at N-1.
-                    # Phase 2: prefill the last token to advance the
-                    #          live cache to N (used for first-token
-                    #          decode logits).
+                    # Phase 1: prefill through the generation-rail-stripped
+                    #          N-1 boundary and snapshot there.
+                    # Phase 2: prefill the final ordinary token plus any
+                    #          generation-rail tokens to advance the live
+                    #          cache to N for first-token decode logits.
+                    snapshot_tail_tokens = min(
+                        len(r.prompt_tokens),
+                        max(1, int(r.prompt_snapshot_tail_tokens or 1)),
+                    )
+                    snapshot_target_tokens = (
+                        len(r.prompt_tokens) - snapshot_tail_tokens
+                    )
                     snapshot_requested = (
                         self.capture_prompt_snapshot
                         and r.capture_prompt_snapshot
-                        and len(r.prompt_tokens) >= 2
-                        and len(r.prompt_tokens) - 1 >= self.prompt_snapshot_min_tokens
+                        and snapshot_target_tokens > 0
+                        and snapshot_target_tokens >= self.prompt_snapshot_min_tokens
                     )
                     should_capture_snapshot = bool(
                         snapshot_requested
                         and self._delta_capture_admitted(
                             r.cache,
-                            len(r.prompt_tokens) - 1,
+                            snapshot_target_tokens,
                         )
                     )
 
                     if should_capture_snapshot:
-                        head_tokens = r.prompt_tokens[:-1]
-                        last_token = r.prompt_tokens[-1:]
+                        head_tokens = r.prompt_tokens[:-snapshot_tail_tokens]
+                        generation_tail = r.prompt_tokens[-snapshot_tail_tokens:]
                         # Phase 1
                         _t_prefill_head = time.perf_counter()
                         _ = self._prefill_last_logits(
@@ -1403,7 +1419,8 @@ class DSV4BatchGenerator:
                                 logger.debug(
                                     f"DSV4Gen: captured N-1 prompt-boundary "
                                     f"snapshot ({len(r.prompt_snapshot)} layers, "
-                                    f"N-1={len(head_tokens)} tokens) "
+                                    f"reusable_boundary={len(head_tokens)} tokens, "
+                                    f"tail={len(generation_tail)} tokens) "
                                     f"for uid={r.uid}"
                                 )
                         except Exception as _snap_err:
@@ -1411,20 +1428,22 @@ class DSV4BatchGenerator:
                                 f"DSV4Gen: snapshot capture failed: {_snap_err}"
                             )
                             r.prompt_snapshot = None
-                        # Phase 2 — feed the last token, get its logits
+                        # Phase 2 — feed the final ordinary prompt token plus
+                        # the generation rail and get the final prompt logits.
                         _t_prefill_last = time.perf_counter()
-                        last_logits = self._prefill_last_logits(last_token, r.cache)
+                        last_logits = self._prefill_last_logits(
+                            generation_tail, r.cache
+                        )
                         self._trace_timing(
                             "prefill_last",
                             _t_prefill_last,
                             r.uid,
-                            tokens=len(last_token),
+                            tokens=len(generation_tail),
                         )
                     else:
                         if (
                             self.capture_prompt_snapshot
                             and r.capture_prompt_snapshot
-                            and len(r.prompt_tokens) >= 2
                             and not snapshot_requested
                         ):
                             _t_snapshot_skip = time.perf_counter()
@@ -1432,13 +1451,14 @@ class DSV4BatchGenerator:
                                 "prompt_snapshot_skipped",
                                 _t_snapshot_skip,
                                 r.uid,
-                                tokens=len(r.prompt_tokens) - 1,
+                                tokens=snapshot_target_tokens,
                                 min_tokens=self.prompt_snapshot_min_tokens,
                             )
                             logger.debug(
                                 "DSV4Gen: skipped prompt-boundary snapshot for "
-                                "short prompt (N-1=%d < min_tokens=%d) uid=%s",
-                                len(r.prompt_tokens) - 1,
+                                "short prompt (reusable_boundary=%d < "
+                                "min_tokens=%d) uid=%s",
+                                snapshot_target_tokens,
                                 self.prompt_snapshot_min_tokens,
                                 r.uid,
                             )
@@ -1501,20 +1521,28 @@ class DSV4BatchGenerator:
                     # the pre-tool prefix.
                     #
                     # The restored cache already represents the matched
-                    # prefix exactly.  Feed all remaining tokens except the
-                    # final one, snapshot that extended cache at the same N-1
-                    # boundary used by cold stores, then feed the final token
-                    # for first-token logits.  This is correctness-safe for
-                    # SWA + CSA/HCA and costs only the uncached tail; it never
-                    # re-prefills the matched prefix.
+                    # prefix exactly. Feed the uncached head through the same
+                    # generation-rail-stripped N-1 boundary used by cold
+                    # stores, snapshot there, then feed the final ordinary
+                    # prompt token and rail for first-token logits. This costs
+                    # only the uncached tail and never re-prefills the match.
+                    snapshot_tail_tokens = min(
+                        len(r.prompt_tokens),
+                        max(1, int(r.prompt_snapshot_tail_tokens or 1)),
+                    )
+                    context_snapshot_target = max(
+                        0,
+                        len(r.context_tokens)
+                        - max(1, int(r.prompt_snapshot_tail_tokens or 1)),
+                    )
                     extension_snapshot_requested = (
                         self.capture_prompt_snapshot
                         and r.capture_prompt_snapshot
-                        and len(r.context_tokens) >= 2
-                        and len(r.context_tokens) - 1
+                        and context_snapshot_target > 0
+                        and context_snapshot_target
                         >= self.prompt_snapshot_min_tokens
                     )
-                    tail_head = r.prompt_tokens[:-1]
+                    tail_head = r.prompt_tokens[:-snapshot_tail_tokens]
                     should_capture_extension_snapshot = bool(
                         extension_snapshot_requested
                         and (
@@ -1527,7 +1555,7 @@ class DSV4BatchGenerator:
                     )
                     _t_prefill_tail = time.perf_counter()
                     if should_capture_extension_snapshot:
-                        final_prompt_token = r.prompt_tokens[-1:]
+                        generation_tail = r.prompt_tokens[-snapshot_tail_tokens:]
                         if tail_head:
                             _ = self._prefill_last_logits(
                                 tail_head,
@@ -1551,10 +1579,10 @@ class DSV4BatchGenerator:
                                     logger.info(
                                         "DSV4Gen: captured cache-hit N-1 extension "
                                         "snapshot (%d layers, uncached_head=%d, "
-                                        "full_N_minus_1=%d) for uid=%s",
+                                        "full_reusable_boundary=%d) for uid=%s",
                                         len(r.prompt_snapshot),
                                         len(tail_head),
-                                        len(r.context_tokens) - 1,
+                                        context_snapshot_target,
                                         r.uid,
                                     )
                             except Exception as _snap_err:
@@ -1574,7 +1602,7 @@ class DSV4BatchGenerator:
                             # duplicate.
                             r.prompt_snapshot = None
                         last_logits = self._prefill_last_logits(
-                            final_prompt_token,
+                            generation_tail,
                             r.cache,
                         )
                     else:

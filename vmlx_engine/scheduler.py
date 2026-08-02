@@ -6810,6 +6810,15 @@ class Scheduler:
                                 getattr(request, "_bypass_prefix_cache", False)
                             )
                         ]
+                        insert_kwargs["prompt_snapshot_tail_tokens"] = [
+                            max(
+                                1,
+                                int(
+                                    getattr(request, "_gen_prompt_len", 0) or 0
+                                )
+                                + 1,
+                            )
+                        ]
                         request_processors = self._request_logits_processors(
                             request, list(request.prompt_token_ids)
                         )
@@ -6909,6 +6918,16 @@ class Scheduler:
                                         "_bypass_prefix_cache",
                                         False,
                                     )
+                                )
+                            ]
+                            insert_kwargs["prompt_snapshot_tail_tokens"] = [
+                                max(
+                                    1,
+                                    int(
+                                        getattr(request, "_gen_prompt_len", 0)
+                                        or 0
+                                    )
+                                    + 1,
                                 )
                             ]
                             request_processors = self._request_logits_processors(

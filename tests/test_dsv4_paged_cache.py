@@ -1943,6 +1943,8 @@ def test_dsv4_repetition_penalty_uses_generated_only_prompt_context():
         schedule_src.index("else:", schedule_src.index('== "DSV4BatchGenerator"'))
     ]
     assert 'insert_kwargs["all_tokens"] = [request.prompt_token_ids]' in dsv4_insert_block
+    assert 'insert_kwargs["prompt_snapshot_tail_tokens"]' in dsv4_insert_block
+    assert schedule_src.count('insert_kwargs["prompt_snapshot_tail_tokens"]') == 2
     assert "request_processors = self._request_logits_processors(" in dsv4_insert_block
     assert "request, list(request.prompt_token_ids)" in dsv4_insert_block
     assert 'insert_kwargs["logits_processors"]' in dsv4_insert_block
@@ -2953,6 +2955,52 @@ def test_dsv4_generator_captures_prompt_snapshot_when_cache_store_enabled(monkey
     assert prompt_responses[0].prompt_cache_snapshot == ["snapshot"]
 
 
+def test_dsv4_generator_snapshot_excludes_generation_rail_tokens(monkeypatch):
+    """Native deltas end at the rail-stripped N-1 cache-key boundary."""
+    import mlx.core as mx
+
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
+    model_calls = []
+
+    class DeepseekV4Cache:
+        def export_block_delta(self, start, end, **_kwargs):
+            return {"start_token": start, "end_token": end}
+
+    class _Model:
+        def make_cache(self):
+            return [DeepseekV4Cache()]
+
+        def __call__(self, ids, cache=None):
+            model_calls.append(ids.tolist()[0])
+            return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
+
+    # This fake record has no native append-safe anchor payload. That contract
+    # has separate real-topology coverage; this row owns only the terminal
+    # generation-rail boundary.
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_capture_dsv4_append_safe_checkpoint",
+        classmethod(lambda cls, cache, target: None),
+    )
+    gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
+    gen._warmed_up = True
+    prompt = list(range(368))
+    gen.insert(
+        [prompt],
+        max_tokens=[2],
+        prompt_snapshot_tail_tokens=[3],
+    )
+
+    prompt_responses, _ = gen.next()
+
+    assert sum(len(call) for call in model_calls[:-1]) == 365
+    assert len(model_calls[-1]) == 3
+    snapshot = prompt_responses[0].prompt_cache_snapshot
+    assert snapshot[0]["dsv4_record_intervals"] == ((0, 256), (256, 365))
+
+
 def test_dsv4_generator_rejects_oversize_nested_snapshot_before_copy(monkeypatch):
     """Finite block budgets reject delta capture before record allocation."""
     import mlx.core as mx
@@ -3196,6 +3244,49 @@ def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):
     assert model_calls == [[70, 71], [72]]
     assert snapshots == [restored_cache]
     assert prompt_responses[0].prompt_cache_snapshot == ["extended-snapshot"]
+
+
+def test_dsv4_cache_hit_extension_excludes_generation_rail_tokens(monkeypatch):
+    """A partial hit snapshots before the ordinary N-1 token and rail."""
+    import mlx.core as mx
+
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    monkeypatch.setenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", "0")
+    model_calls = []
+    snapshots = []
+
+    class _Model:
+        def __call__(self, ids, cache=None):
+            model_calls.append(ids.tolist()[0])
+            return mx.array([[[0.0, 1.0, 0.0]]], dtype=mx.float32)
+
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_snapshot_dsv4_cache",
+        staticmethod(lambda cache: snapshots.append(cache) or ["snapshot"]),
+    )
+    monkeypatch.setattr(
+        DSV4BatchGenerator,
+        "_capture_dsv4_terminal_anchor",
+        classmethod(lambda cls, cache, target_token: None),
+    )
+    restored_cache = [SimpleNamespace()]
+    gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
+    gen._warmed_up = True
+    gen.insert(
+        [[70, 71, 72, 73, 74]],
+        max_tokens=[2],
+        caches=[restored_cache],
+        all_tokens=[[10, 11, 12, 70, 71, 72, 73, 74]],
+        prompt_snapshot_tail_tokens=[3],
+    )
+
+    prompt_responses, _ = gen.next()
+
+    assert model_calls == [[70, 71], [72, 73, 74]]
+    assert snapshots == [restored_cache]
+    assert prompt_responses[0].prompt_cache_snapshot == ["snapshot"]
 
 
 def test_dsv4_exact_n_minus_one_hit_skips_zero_delta_full_snapshot(monkeypatch):

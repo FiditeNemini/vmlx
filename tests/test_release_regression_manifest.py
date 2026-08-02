@@ -15938,10 +15938,10 @@ def test_release_regression_manifest_tracks_cache_architecture_with_runner_artif
     assert "current-cache-architecture-contract-20260522-dsv4-pool-quant-append.json" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-timing.json" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-pool-env-gate.json" in joined
-    assert "Diagnostic-only DSV4 pool quant reads reuse a materialized pool view" in joined
+    assert "Native DSV4 pool quant reads reuse a materialized pool view" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-pool-materialized-cache.json" in joined
-    assert "Diagnostic-only JANG DSV4 pool quant codec appends only newly generated CSA/HCA pool rows" in joined
-    assert "DSV4 panel UI/env mapping hides product cache opt-in and keeps pool quant off by default" in joined
+    assert "Native JANG DSV4 pool quant codec appends only newly generated CSA/HCA pool rows" in joined
+    assert "DSV4 panel UI/env mapping keeps native pool quant family-scoped, follows the bundle default, and preserves explicit user opt-out" in joined
     assert "current-cache-architecture-contract-20260522-dsv4-pool-ui-wired.json" in joined
     assert "Historical DSV4 timing probes remain diagnostics" in joined
     assert "Panel session launch builder keeps DSV4 composite reuse fail-closed" in joined

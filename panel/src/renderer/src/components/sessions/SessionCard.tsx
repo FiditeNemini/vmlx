@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { AlertTriangle, FolderSearch, Settings, ScrollText, Moon, Sun, Trash2 } from "lucide-react";
 import { useSessionsContext } from "../../contexts/SessionsContext";
 import { useTranslation } from "../../i18n";
+import { compactQuantizationBadgeLabel } from "../../lib/quantizationBadge";
 
 interface Session {
   id: string;
@@ -156,9 +157,9 @@ export function SessionCard({
   return (
     <div className="bg-card border border-border rounded-lg p-4 hover:border-primary/50 transition-colors">
       {/* Header */}
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex-1 min-w-0 mr-2">
-          <div className="flex items-center gap-1.5">
+      <div className="flex min-w-0 items-start justify-between gap-2 mb-3">
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <div className="flex min-w-0 items-center gap-1.5">
             {isRemote && (
               <span className="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded flex-shrink-0">
                 Remote
@@ -170,14 +171,18 @@ export function SessionCard({
               </span>
             )}
             <h3
-              className="font-semibold text-sm truncate"
+              className="min-w-0 font-semibold text-sm truncate"
               title={session.modelPath}
             >
               {shortName}
             </h3>
             {jangLabel && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium flex-shrink-0">
-                {jangLabel}
+              <span
+                className="min-w-0 max-w-[9rem] shrink truncate text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 font-medium"
+                title={jangLabel}
+                aria-label={`Quantization: ${jangLabel}`}
+              >
+                {compactQuantizationBadgeLabel(jangLabel)}
               </span>
             )}
             {session.modelPathMissing && (

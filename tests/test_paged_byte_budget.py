@@ -349,3 +349,40 @@ def test_finished_paged_store_reenforces_budget_after_ref_release():
     branch = source[post_store_release:next_handler]
 
     assert "self.block_aware_cache.paged_cache.enforce_byte_budget()" in branch
+
+def test_cache_occupancy_reflects_live_cached_blocks():
+    """Occupancy must not read 0% while the cache holds reusable content.
+
+    ``allocated_blocks``/``free_blocks`` track the paged allocator's pin state,
+    which architecture-native caches never drive. Measured live on DSV4: those
+    stayed at 1/4096 across a 4509-token prefill while total_tokens_cached rose
+    to 6257. ``cached_blocks``/``cache_occupancy`` are derived from the live
+    block table so they cannot drift the same way.
+    """
+    cache = PagedCacheManager(block_size=16, max_blocks=9)
+    usage = cache.get_memory_usage()
+    assert usage["cached_blocks"] == 0
+    assert usage["cache_occupancy"] == 0.0
+
+    class _Block:
+        def __init__(self, bid, ref_count=0, block_hash=None, cache_data=None,
+                     token_count=0, is_null=False):
+            self.block_id = bid
+            self.ref_count = ref_count
+            self.block_hash = block_hash
+            self.cache_data = cache_data
+            self.token_count = token_count
+            self.is_null = is_null
+
+    # One null block plus three blocks holding reusable content.
+    cache.allocated_blocks = {
+        0: _Block(0, is_null=True),
+        1: _Block(1, ref_count=1, token_count=16),
+        2: _Block(2, block_hash="h", token_count=16),
+        3: _Block(3, cache_data=object(), token_count=16),
+    }
+
+    usage = cache.get_memory_usage()
+    assert usage["cached_blocks"] == 3, usage["cached_blocks"]
+    assert usage["cache_occupancy"] == 3 / usage["usable_blocks"]
+    assert usage["total_tokens_cached"] == 48

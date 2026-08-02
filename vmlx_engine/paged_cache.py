@@ -1987,6 +1987,32 @@ class PagedCacheManager:
             )
             return self.stats
 
+    def _live_cached_blocks(self) -> int:
+        """Blocks currently holding reusable cached content.
+
+        Derived from the live block table for the same reason
+        ``total_tokens_cached`` is: incrementally maintained counters drift
+        across the reuse/free/evict paths.
+
+        This is deliberately *not* ``allocated_blocks``. That counter reflects
+        the paged allocator's own pin state, which architecture-native caches
+        (DSV4's SWA+CSA/HCA composite) never drive — it was observed pinned at
+        1 with ``free_blocks`` at capacity across 48 samples taken during a live
+        4509-token prefill, while ``total_tokens_cached`` rose from 1751 to
+        6257. Occupancy reported from the allocator counters therefore reads
+        0% on a cache holding tens of thousands of reusable tokens.
+        """
+        return sum(
+            1
+            for b in self.allocated_blocks.values()
+            if not getattr(b, "is_null", False)
+            and (
+                getattr(b, "ref_count", 0) > 0
+                or getattr(b, "block_hash", None) is not None
+                or getattr(b, "cache_data", None) is not None
+            )
+        )
+
     def get_memory_usage(self) -> Dict[str, Any]:
         """Get memory usage information."""
         with self._lock:
@@ -1994,7 +2020,12 @@ class PagedCacheManager:
             total_hits = stats.cache_hits + stats.cache_misses
             usable_blocks = max(0, self.max_blocks - 1)
             allocated_usable_blocks = max(0, stats.allocated_blocks - 1)
+            cached_blocks = self._live_cached_blocks()
             return {
+                "cached_blocks": cached_blocks,
+                "cache_occupancy": (
+                    cached_blocks / usable_blocks if usable_blocks > 0 else 0.0
+                ),
                 "backend_mode": "block_disk_only" if self.disk_only else "paged",
                 "paged_ram_enabled": not self.disk_only,
                 "disk_only": self.disk_only,

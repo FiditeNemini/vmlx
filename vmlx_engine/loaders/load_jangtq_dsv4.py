@@ -1273,7 +1273,31 @@ def _install_dsv4_memory_defaults() -> None:
     try:
         import mlx.core as mx
 
-        cache_gb = float(os.environ.get("DSV4_MLX_CACHE_LIMIT_GB", "8"))
+        # Measured on the M5 Max (137 GB, 95 GB DSV4 bundle): an 8 GB ceiling
+        # makes MLX free and re-allocate decode graph buffers it could have
+        # reused, costing 8-11% decode throughput at every context length.
+        #
+        #   ceiling   6835 tok   7715 tok   9915 tok
+        #      8 GB     17.6       17.5       10.5
+        #     24 GB     19.5       19.4       11.4
+        #     48 GB     19.7       19.6       11.4   (no further gain)
+        #
+        # Peak process memory was identical at 8 and 48 GB (101.2 GB) because
+        # this is a ceiling on *purgeable* cache, not an allocation — MLX
+        # reclaims it under pressure. Scale with physical RAM so the original
+        # concern (a fixed 24 GB of purgeable cache crowding a small machine
+        # and tripping the memory-pressure guard) cannot bite on smaller
+        # hardware, and keep the env override for benchmarking.
+        try:
+            _total_ram_gb = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1024**3
+        except (AttributeError, ValueError, OSError):
+            _total_ram_gb = 0.0
+        _default_cache_gb = 8.0
+        if _total_ram_gb > 0:
+            _default_cache_gb = min(24.0, max(4.0, _total_ram_gb * 0.18))
+        cache_gb = float(
+            os.environ.get("DSV4_MLX_CACHE_LIMIT_GB", "%g" % _default_cache_gb)
+        )
         if cache_gb > 0:
             mx.set_cache_limit(int(cache_gb * 1024**3))
             print(

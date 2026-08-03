@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from .abstract_tool_parser import (
+    is_valid_tool_name,
     ExtractedToolCallInformation,
     ToolParser,
     ToolParserManager,
@@ -180,7 +181,7 @@ class Gemma4ToolParser(ToolParser):
                     data = json.loads(match)
                     name = data.get("name", "")
                     arguments = data.get("arguments", {})
-                    if name:
+                    if is_valid_tool_name(name):
                         tool_calls.append({
                             "id": generate_tool_id(),
                             "name": name,

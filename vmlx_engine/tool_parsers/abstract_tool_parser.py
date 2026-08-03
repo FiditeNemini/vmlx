@@ -32,6 +32,21 @@ def generate_tool_id() -> str:
     return f"call_{uuid.uuid4().hex[:8]}"
 
 
+def is_valid_tool_name(name: Any) -> bool:
+    """A tool name must be a non-empty string.
+
+    JSON tool markup can carry any type in ``name``. A bare truthiness check
+    lets ``{"name": 12345}`` through, and response validation then nulls the
+    non-string name — so the turn emits a tool call whose name is ``None``.
+    That consumes a tool iteration and dispatches nothing, which is worse than
+    treating the emission as plain content.
+
+    Only applies where ``name`` comes from decoded JSON; sites that slice it
+    out of a regex match are already strings.
+    """
+    return isinstance(name, str) and bool(name.strip())
+
+
 @dataclass
 class ExtractedToolCallInformation:
     """Information extracted from model output about tool calls."""

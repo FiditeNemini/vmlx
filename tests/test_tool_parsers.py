@@ -1928,3 +1928,42 @@ class TestThinkTagStripping:
 
         assert result.tools_called is False
         assert result.content == "The answer is 42."
+
+
+def test_non_string_tool_name_is_not_a_tool_call():
+    """A JSON tool name that is not a string must not produce a tool call.
+
+    `if name:` is a truthiness check, so `{"name": 12345}` passed it. The call
+    was appended with an int name, response validation then nulled it, and the
+    turn emitted a tool call whose function name was None: a phantom call that
+    consumes a tool iteration and dispatches nothing. Rejecting and keeping the
+    text as content is the safe behaviour.
+
+    Sites that slice the name out of a regex match are already strings and are
+    deliberately not covered here.
+    """
+    from vmlx_engine.tool_parsers.abstract_tool_parser import (
+        ToolParserManager,
+        is_valid_tool_name,
+    )
+
+    assert is_valid_tool_name("read_file")
+    assert not is_valid_tool_name(12345)
+    assert not is_valid_tool_name(None)
+    assert not is_valid_tool_name("")
+    assert not is_valid_tool_name("   ")
+
+    malformed = '<tool_call>{"name": 12345, "arguments": {}}</tool_call>'
+    valid = '<tool_call>{"name": "read_file", "arguments": {"path": "a.txt"}}</tool_call>'
+
+    for parser_name in ("hermes", "qwen", "qwen3", "nous"):
+        parser = ToolParserManager.get_tool_parser(parser_name)(None)
+
+        rejected = parser.extract_tool_calls(malformed, None)
+        assert not rejected.tools_called, (
+            f"{parser_name} accepted a non-string tool name"
+        )
+        assert not rejected.tool_calls
+
+        accepted = parser.extract_tool_calls(valid, None)
+        assert accepted.tools_called, f"{parser_name} rejected a valid tool call"

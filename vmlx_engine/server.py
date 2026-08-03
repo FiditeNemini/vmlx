@@ -4125,6 +4125,25 @@ def _is_required_tool_choice(tool_choice: Any) -> bool:
     return bool(tool_choice.get("type") in {"required", "function"} or target_name)
 
 
+def _describe_required_tool_choice(tool_choice: Any) -> str:
+    """Render the caller's own tool_choice for an error message.
+
+    ``_is_required_tool_choice()`` deliberately treats ``"required"`` and a
+    named-function choice the same way, because both mean "a tool call must
+    happen". The failure message must not inherit that conflation: a caller who
+    asked for ``{"type": "function", "function": {"name": "write_file"}}`` and
+    is told ``tool_choice='required'`` has no way to tell which of their two
+    knobs misfired.
+    """
+    if isinstance(tool_choice, dict):
+        function = tool_choice.get("function")
+        name = function.get("name") if isinstance(function, dict) else None
+        name = name or tool_choice.get("name")
+        if name:
+            return "tool_choice={'type': 'function', 'function': {'name': %r}}" % (name,)
+    return "tool_choice=%r" % (tool_choice if tool_choice else "required",)
+
+
 def _drop_colliding_mcp_tools(
     mcp_tools: list[dict[str, Any]],
     request_tools: Any,
@@ -17423,9 +17442,9 @@ async def create_chat_completion(
             status_code=400,
             detail={
                 "message": (
-                    "tool_choice='required' was set but the model did not produce "
-                    "any tool calls. Try rephrasing your prompt or using a model "
-                    "with better tool-calling support."
+                    f"{_describe_required_tool_choice(_tool_choice)} was set but the model did not "
+                    "produce any tool calls. Try rephrasing your prompt or using a "
+                    "model with better tool-calling support."
                 ),
                 "raw_preview": tool_required_preview,
             },
@@ -20578,9 +20597,9 @@ async def create_response(
             status_code=400,
             detail={
                 "message": (
-                    "tool_choice='required' was set but the model did not produce "
-                    "any tool calls. Try rephrasing your prompt or using a model "
-                    "with better tool-calling support."
+                    f"{_describe_required_tool_choice(_resp_tool_choice)} was set but the model did not "
+                    "produce any tool calls. Try rephrasing your prompt or using a "
+                    "model with better tool-calling support."
                 ),
                 "raw_preview": tool_required_preview,
             },
@@ -22913,7 +22932,8 @@ async def stream_chat_completion(
         yield f"data: {_dump_chat_chunk(empty_chunk)}\n\n"
 
     # Enforce tool_choice="required" in streaming: emit error SSE if no tool calls
-    if _is_required_tool_choice(getattr(request, "tool_choice", None)) and not tool_calls_emitted:
+    _stream_tool_choice = getattr(request, "tool_choice", None)
+    if _is_required_tool_choice(_stream_tool_choice) and not tool_calls_emitted:
         # tool_calls_emitted is set True only when tool calls were actually parsed and yielded.
         # tool_call_buffering can be True even on false-positive marker detection with no actual calls.
         logger.warning(
@@ -22924,9 +22944,9 @@ async def stream_chat_completion(
             "object": "chat.completion.chunk",
             "error": {
                 "message": (
-                    "tool_choice='required' was set but the model did not produce "
-                    "any tool calls. Try rephrasing your prompt or using a model "
-                    "with better tool-calling support."
+                    f"{_describe_required_tool_choice(_stream_tool_choice)} was set but the model did not "
+                    "produce any tool calls. Try rephrasing your prompt or using a "
+                    "model with better tool-calling support."
                 ),
                 "type": "invalid_request_error",
                 "code": "tool_calls_required",
@@ -24930,9 +24950,9 @@ async def stream_responses_api(
         _required_tool_error = {
             "type": "invalid_request_error",
             "message": (
-                "tool_choice='required' was set but the model did not produce "
-                "any tool calls. Try rephrasing your prompt or using a model "
-                "with better tool-calling support."
+                f"{_describe_required_tool_choice(_resp_stream_tc)} was set but the model did not "
+                "produce any tool calls. Try rephrasing your prompt or using a "
+                "model with better tool-calling support."
             ),
             "code": "tool_calls_required",
         }

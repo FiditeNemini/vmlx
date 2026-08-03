@@ -2,6 +2,27 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.22] - 2026-08-02
+
+### Performance
+
+- DeepSeek V4 Flash decodes about 11% faster at every context length. The MLX
+  cache ceiling was a fixed 8 GB, which made MLX free and re-allocate decode
+  graph buffers it could have reused; it now scales with installed memory
+  (16 GB machine → 4 GB, 128 GB → 23 GB, capped at 24 GB). Peak process memory
+  is unchanged, because this bounds reclaimable cache rather than reserving it.
+
+### Fixed
+
+- Tool markup carrying a non-string name, such as `{"name": 12345}`, no longer
+  produces a tool call whose function name is empty. Affected the Hermes, Qwen,
+  Nous and Gemma 4 parsers; such markup is now treated as ordinary content.
+- Tool-choice enforcement errors report the caller's own `tool_choice` instead
+  of always naming `'required'`, so a request that pinned a specific function
+  can tell which setting failed.
+- DeepSeek V4 Flash delta-cache restore reads its block size and anchor interval
+  from the cache records rather than assuming fixed values.
+
 ## [1.6.21] - 2026-08-02
 
 ### Fixed

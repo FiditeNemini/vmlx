@@ -1,19 +1,19 @@
 {
-  "version": "1.6.21",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.21/vMLX-1.6.21-tahoe-arm64.dmg",
-  "sha256": "d9c418c4995b35ec2b96d13c96d0b65abd0f78de48033e10852c804a1c7dc19d",
-  "sha512": "+Z2BPC2qx55wDg++ivFvSA3nQ5SocBItMbzw954tV3XvJ7XAN/7GG2Zepy/WiGRosG5XmgNE/dVN3LjmpQyF/A==",
+  "version": "1.6.22",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.22/vMLX-1.6.22-tahoe-arm64.dmg",
+  "sha256": "8c1645dfad3907db9df5682ec4d1293d09fdf87a0331788feb30e92248303155",
+  "sha512": "NpAWGeynRQmZztD0oUN4ejVzUYal9z1cxi2k8vtDC5SzfLwI6WZHP8gvlva+tgX5VJKs1HDu75DuAtvm/ivkRQ==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.21/vMLX-1.6.21-sequoia-arm64.dmg",
-      "sha256": "cc88356e88143eb8d44f7c7c13e34777b0ccdd9be8f5476e1ab03fee7152d4ac",
-      "sha512": "W/LkXCjrdzg0gCNLtRnWOXy3/ZyHIey073T2woniQzqpimyRk32Rhh68f+N7UzHOOUAEWWz5xWs7wc/mCFcMKg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.22/vMLX-1.6.22-sequoia-arm64.dmg",
+      "sha256": "c7ef8e36f51ef4a99d9d9008da1a3885845cf9ec78c3e1a9c8d0ed8fc4ba5859",
+      "sha512": "DPUHykVWQmgAFMqx9yyxYGszNrODw23tuSD0cRJL2SPSseQzYD3xY8ogJfUjg4p2ulQBopcJY+kloJNKOhPOmg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.21/vMLX-1.6.21-tahoe-arm64.dmg",
-      "sha256": "d9c418c4995b35ec2b96d13c96d0b65abd0f78de48033e10852c804a1c7dc19d",
-      "sha512": "+Z2BPC2qx55wDg++ivFvSA3nQ5SocBItMbzw954tV3XvJ7XAN/7GG2Zepy/WiGRosG5XmgNE/dVN3LjmpQyF/A=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.22/vMLX-1.6.22-tahoe-arm64.dmg",
+      "sha256": "8c1645dfad3907db9df5682ec4d1293d09fdf87a0331788feb30e92248303155",
+      "sha512": "NpAWGeynRQmZztD0oUN4ejVzUYal9z1cxi2k8vtDC5SzfLwI6WZHP8gvlva+tgX5VJKs1HDu75DuAtvm/ivkRQ=="
     }
   },
-  "notes": "## vMLX 1.6.21 for macOS\n\nThis Electron/Python checkpoint is built from source commit `498b357bf`.\n\n### Highlights\n\n- Streams that stop at `max_tokens` report their token usage again. Previously a reasoning turn cut short by the token cap emitted no terminal usage chunk, so OpenAI-compatible clients requesting `stream_options.include_usage` received nothing and the Anthropic route reported zero tokens with no cache-read accounting on an almost fully cached prompt.\n- DeepSeek V4 Flash delta-cache restore reads its block size and anchor interval from the cache records instead of assuming fixed values.\n- Built-in tools name an unusable working directory and the setting that fixes it rather than surfacing a raw filesystem error per call.\n- Reasoning-rail DSML tool calls are recovered from their markup span, and prompt tool catalogs stay turn-independent so agentic loops keep reusing their cached prefix.\n- The bundled runtime uses JANG 2.5.39.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download. This focused checkpoint does not imply exhaustive certification of every model family or maximum-context configuration."
+  "notes": "## vMLX 1.6.22 for macOS\n\nBuilt from source commit `8dd421b2a`.\n\n### Highlights\n\n- DeepSeek V4 Flash decodes about 11% faster at every context length. The MLX cache ceiling was a fixed 8 GB, which made MLX free and re-allocate decode graph buffers it could have reused; it now scales with installed memory and peak process memory is unchanged.\n- Tool markup carrying a non-string name no longer produces a tool call with an empty function name (Hermes, Qwen, Nous, Gemma 4 parsers).\n- Tool-choice enforcement errors report the caller's own tool_choice instead of always naming 'required'.\n- DeepSeek V4 Flash delta-cache restore reads block size and anchor interval from the cache records rather than assuming fixed values.\n- The bundled runtime uses JANG 2.5.39.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download."
 }

@@ -2567,6 +2567,9 @@ _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
 _DSV4_ANSWER_RESERVE_FRACTION = 0.25
 _DSV4_ANSWER_RESERVE_MIN = 256
 _DSV4_ANSWER_RESERVE_MAX = 2048
+# Smallest budget worth splitting at all. Below this, half the budget is too
+# little for the answer pass to say anything useful.
+_DSV4_MIN_SPLITTABLE_TOKENS = 128
 
 
 def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
@@ -2576,9 +2579,9 @@ def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
     or an explicit DSV4_ANSWER_RESERVE=0 opt-out).
     """
     total = int(max_tokens or 0)
-    if total < 512:
-        # Too small to split usefully: a tiny cap truncates reasoning without
-        # leaving a usable answer either.
+    if total < _DSV4_MIN_SPLITTABLE_TOKENS:
+        # Below this even half the budget cannot hold a useful answer, so a
+        # split would truncate reasoning without buying anything.
         return None
     raw = os.environ.get("DSV4_ANSWER_RESERVE", "").strip()
     if raw:
@@ -2589,9 +2592,14 @@ def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
         if reserve <= 0 or reserve >= total:
             return None
     else:
-        reserve = int(total * _DSV4_ANSWER_RESERVE_FRACTION)
-        reserve = max(_DSV4_ANSWER_RESERVE_MIN,
-                      min(_DSV4_ANSWER_RESERVE_MAX, reserve))
+        reserve = min(_DSV4_ANSWER_RESERVE_MAX,
+                      int(total * _DSV4_ANSWER_RESERVE_FRACTION))
+        # The floor must never exceed half the budget. A flat 256-token floor
+        # made every budget under 512 unsplittable, so reasoning consumed all
+        # of it and the answer came back empty -- the same failure this whole
+        # mechanism exists to prevent, just at small budgets. Measured before
+        # this: 160/256/400 all returned content=0, 512 and above answered.
+        reserve = max(reserve, min(_DSV4_ANSWER_RESERVE_MIN, total // 2))
     if reserve >= total:
         return None
     return max(1, total - reserve)

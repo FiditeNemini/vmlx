@@ -19,6 +19,13 @@ All notable changes to vMLX Engine will be documented in this file.
   an unspecified one is clamped, instead of both crashing twelve minutes in.
   Conventional KV caches are measured at 0.000 buffers per token (Qwen 3.6 held
   its count flat across 600 decode steps) and are deliberately left uncapped.
+- DeepSeek V4 Flash answers again at small output budgets. The answer reserve
+  had a flat 256-token floor, which made every budget under 512 unsplittable —
+  so reasoning consumed all of it and the answer came back empty, the same
+  failure the reserve exists to prevent. Measured before: 160, 256 and 400 all
+  returned no content while 512 and above answered. The floor is now capped at
+  half the budget, so 128 and up split; every budget at or above 512 is
+  unchanged.
 - The chat Max Tokens field no longer sits blank while a budget is silently in
   force. Bundles are not required to declare `max_new_tokens`; when one does
   not, the engine resolves its own default and clamps it to projected headroom,

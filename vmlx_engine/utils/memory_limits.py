@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 _MB = 1024**2
 _GB = 1024**3
@@ -606,6 +606,114 @@ def projected_output_token_cap(
     effective_budget = int(headroom * fraction)
     effective_bpt = max(1, int(bpt * multiplier))
     return max(0, effective_budget // effective_bpt)
+
+
+# Metal caps the number of LIVE buffers, not just their bytes. On an M5 Max
+# `mx.device_info()["resource_limit"]` is 499000, and exceeding it raises
+#     [metal::malloc] Resource limit (499000) exceeded.
+# which kills the generation with a 500. Proven to be a pure COUNT limit:
+# allocating 499000 one-byte arrays throws with ~0 GB active memory.
+#
+# Most architectures never approach it. Measured live, decoding with a warm
+# model and sampling the live buffer count by allocator saturation:
+#
+#   model                layers   buffers/decode-token
+#   Qwen3.6-27B-JANG_4M      64   0.000   (live count flat at 1978 over 600 steps)
+#   DeepSeek-V4-Flash        43   ~42     (one per layer per token)
+#
+# A conventional mlx_lm KVCache grows in 256-token steps and reuses buffers, so
+# its count is flat. DSV4 keeps cumulative per-layer compressor/indexer pool
+# state, so its live count climbs linearly and hits the ceiling around 12k
+# generated tokens -- which is exactly where DSV4 died at max_tokens=16384 while
+# 12000 succeeded. `mx.clear_cache()` frees NONE of it (cache memory is already
+# 0 B): this is retained state, not reclaimable allocator cache, so the ceiling
+# is hard and has to be projected rather than recovered from.
+_BUFFER_GUARD_SAFETY_FRACTION = 0.90
+
+
+def projected_output_token_cap_by_buffers(
+    *,
+    resource_limit: int,
+    live_baseline_buffers: int,
+    buffers_per_token: float,
+    safety_fraction: float = _BUFFER_GUARD_SAFETY_FRACTION,
+) -> Optional[int]:
+    """Safe generated-token cap from the Metal live-buffer ceiling.
+
+    Returns ``None`` when the architecture retains no per-token buffers, which
+    is the measured case for conventional KV caches — those must not be capped
+    on a limit they provably cannot reach.
+    """
+    try:
+        limit = int(resource_limit)
+        baseline = int(live_baseline_buffers)
+        per_token = float(buffers_per_token)
+        fraction = float(safety_fraction)
+    except (TypeError, ValueError):
+        return None
+    if limit <= 0 or per_token <= 0:
+        return None
+    if fraction <= 0 or fraction > 1:
+        fraction = _BUFFER_GUARD_SAFETY_FRACTION
+    budget = int(limit * fraction) - max(0, baseline)
+    if budget <= 0:
+        return 0
+    return max(0, int(budget / per_token))
+
+
+def metal_resource_limit() -> Optional[int]:
+    """Live-buffer ceiling reported by the Metal device, or None."""
+    try:
+        import mlx.core as mx
+
+        info = mx.device_info()
+    except Exception:
+        return None
+    try:
+        value = int(info.get("resource_limit", 0))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def retained_buffers_per_token(config: Any) -> float:
+    """Live MLX buffers retained per decoded token for this architecture.
+
+    Only architectures whose retention has actually been MEASURED are reported
+    here. Returning 0.0 for everything else is deliberate: inventing a rate for
+    an unmeasured family would cap it on a limit it may never reach, which is
+    the cross-family regression this guard must not cause. Measure first, then
+    add the entry.
+    """
+    if not isinstance(config, dict):
+        return 0.0
+    model_type = str(
+        config.get("model_type")
+        or (config.get("text_config") or {}).get("model_type")
+        or ""
+    ).lower()
+    if model_type != "deepseek_v4":
+        return 0.0
+    layers = 0
+    for key in ("num_hidden_layers", "n_layers", "num_layers"):
+        try:
+            layers = int(config.get(key) or 0)
+        except (TypeError, ValueError):
+            layers = 0
+        if layers > 0:
+            break
+    if layers <= 0:
+        text_config = config.get("text_config")
+        if isinstance(text_config, dict):
+            try:
+                layers = int(text_config.get("num_hidden_layers") or 0)
+            except (TypeError, ValueError):
+                layers = 0
+    if layers <= 0:
+        return 0.0
+    # Measured 41.7-42.0 per token against 43 layers: one retained buffer per
+    # layer per decode step, from the cumulative compressor/indexer pools.
+    return float(layers)
 
 
 def _parse_working_set_bytes(raw: str) -> Optional[int]:

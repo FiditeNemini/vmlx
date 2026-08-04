@@ -186,6 +186,47 @@ export interface GenerationDefaults {
   thinkingBudgetSupported?: boolean;
   supportsThinkingBudget?: boolean;
   source?: "jang_config" | "generation_config";
+  /**
+   * True when maxNewTokens came from the running engine's own resolution
+   * rather than a bundle declaration, so the UI can label it honestly.
+   */
+  maxNewTokensFromEngine?: boolean;
+}
+
+/**
+ * The output budget the running engine will actually use for this model.
+ *
+ * Bundles are not required to declare `max_new_tokens`. When they don't, the
+ * engine resolves its own default (for reasoning-capable families that is 4x
+ * the base fallback) and then clamps it to projected Metal headroom — a number
+ * the panel cannot derive from bundle files. Leaving Max Tokens blank in that
+ * case showed the user nothing while the engine silently generated to a budget
+ * they were never told about. `/health.effective_defaults.max_output_tokens` is
+ * the engine's own post-clamp answer, so ask it.
+ *
+ * Best-effort only: no running session, an unreachable engine, or a malformed
+ * payload all leave the placeholder as it was.
+ */
+async function engineEffectiveMaxOutputTokens(
+  modelPath: string,
+): Promise<number | undefined> {
+  try {
+    const session = db.getSessionByModelPath(modelPath);
+    if (!session || session.status !== "running" || !session.port) return undefined;
+    const res = await fetch(`http://127.0.0.1:${session.port}/health`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return undefined;
+    const health = (await res.json()) as {
+      effective_defaults?: { max_output_tokens?: unknown };
+    };
+    const value = health?.effective_defaults?.max_output_tokens;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const REMOTE_CAPABILITIES_CACHE_MS = 2_500;
@@ -400,6 +441,18 @@ export async function readGenerationDefaults(
       Object.keys(defaults).some((key) => key !== "source")
     ) {
       defaults.source = "generation_config";
+    }
+
+    // A bundle that declares no output budget leaves the user with no idea
+    // what the engine will actually generate to. Fill the gap from the
+    // engine's own post-clamp resolution so Max Tokens never shows blank
+    // while a real budget is silently in force.
+    if (defaults.maxNewTokens == null) {
+      const effective = await engineEffectiveMaxOutputTokens(modelPath);
+      if (effective != null) {
+        defaults.maxNewTokens = effective;
+        defaults.maxNewTokensFromEngine = true;
+      }
     }
 
     // Only return if at least one param was found

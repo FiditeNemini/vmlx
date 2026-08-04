@@ -809,29 +809,74 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
     try:
         from vmlx_engine.utils.memory_limits import (
             estimate_kv_bytes_per_token_from_config,
+            metal_resource_limit,
             projected_output_token_cap,
+            projected_output_token_cap_by_buffers,
+            retained_buffers_per_token,
         )
 
         config = _loaded_model_config_for_memory_projection()
+        byte_cap: int | None = None
         bytes_per_token = estimate_kv_bytes_per_token_from_config(config)
-        if bytes_per_token <= 0:
-            return None
         active, max_ws = _metal_projection_stats()
-        if max_ws <= 0:
+        if bytes_per_token > 0 and max_ws > 0:
+            budget_fraction = float(
+                _projection_env("VMLX_METAL_PROJECTED_TOKEN_BUDGET_FRACTION", "0.50")
+            )
+            transient_multiplier = float(
+                _projection_env(
+                    "VMLX_METAL_PROJECTED_TOKEN_TRANSIENT_MULTIPLIER", "4.0"
+                )
+            )
+            byte_cap = projected_output_token_cap(
+                active_bytes=active,
+                max_working_set_bytes=max_ws,
+                bytes_per_token=bytes_per_token,
+                budget_fraction=budget_fraction,
+                transient_multiplier=transient_multiplier,
+            )
+
+        # Metal also caps the NUMBER of live buffers, not just their bytes, and
+        # the byte projection is structurally blind to it: DSV4 died with
+        # "[metal::malloc] Resource limit (499000) exceeded" at max_tokens=16384
+        # while the byte guard was still advertising safe_cap=17575. Architectures
+        # that retain per-token buffers need that ceiling projected too.
+        buffer_cap: int | None = None
+        if _projection_env("VMLX_METAL_BUFFER_COUNT_GUARD", "1") != "0":
+            per_token = retained_buffers_per_token(config)
+            limit = metal_resource_limit()
+            if per_token > 0 and limit:
+                fraction = float(
+                    _projection_env("VMLX_METAL_BUFFER_GUARD_FRACTION", "0.90")
+                )
+                # Model weights plus prompt-side buffers before decoding starts.
+                # Measured 417 for the loaded model and ~2.1k after a short
+                # prefill; a long prompt raises it, so reserve generously.
+                baseline = int(
+                    _projection_env("VMLX_METAL_BUFFER_GUARD_BASELINE", "16384")
+                )
+                buffer_cap = projected_output_token_cap_by_buffers(
+                    resource_limit=limit,
+                    live_baseline_buffers=baseline,
+                    buffers_per_token=per_token,
+                    safety_fraction=fraction,
+                )
+
+        caps = [c for c in (byte_cap, buffer_cap) if c is not None]
+        if not caps:
             return None
-        budget_fraction = float(
-            _projection_env("VMLX_METAL_PROJECTED_TOKEN_BUDGET_FRACTION", "0.50")
-        )
-        transient_multiplier = float(
-            _projection_env("VMLX_METAL_PROJECTED_TOKEN_TRANSIENT_MULTIPLIER", "4.0")
-        )
-        return projected_output_token_cap(
-            active_bytes=active,
-            max_working_set_bytes=max_ws,
-            bytes_per_token=bytes_per_token,
-            budget_fraction=budget_fraction,
-            transient_multiplier=transient_multiplier,
-        )
+        cap = min(caps)
+        if buffer_cap is not None and buffer_cap == cap and buffer_cap != byte_cap:
+            logger.info(
+                "Metal live-buffer ceiling is the binding output limit: "
+                "cap=%d tokens (resource_limit=%s, %.1f buffers/token). "
+                "The byte projection alone would have allowed %s.",
+                buffer_cap,
+                metal_resource_limit(),
+                retained_buffers_per_token(config),
+                byte_cap if byte_cap is not None else "no limit",
+            )
+        return cap
     except Exception:
         return None
 

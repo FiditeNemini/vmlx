@@ -2,6 +2,29 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.24] - 2026-08-04
+
+### Fixed
+
+- Long DeepSeek V4 Flash generations no longer fail with
+  `[metal::malloc] Resource limit (499000) exceeded`. Metal caps the *number*
+  of live buffers, not just their bytes, and the output guard only modelled
+  bytes — so it advertised a safe cap of 17,575 tokens for a model that dies
+  around 12,000. Measured by sampling the live-buffer count while decoding,
+  DeepSeek V4 Flash retains about one buffer per layer per generated token
+  (~42 on a 43-layer model) because its compressor/indexer pools are
+  cumulative; `mx.clear_cache()` frees none of it, so the ceiling is hard.
+  The guard now projects that ceiling as well and takes whichever limit binds
+  first, so an oversized request is refused up front with a clear message and
+  an unspecified one is clamped, instead of both crashing twelve minutes in.
+  Conventional KV caches are measured at 0.000 buffers per token (Qwen 3.6 held
+  its count flat across 600 decode steps) and are deliberately left uncapped.
+- The chat Max Tokens field no longer sits blank while a budget is silently in
+  force. Bundles are not required to declare `max_new_tokens`; when one does
+  not, the engine resolves its own default and clamps it to projected headroom,
+  and the panel now shows that resolved number as the placeholder instead of
+  nothing.
+
 ## [1.6.23] - 2026-08-04
 
 ### Fixed

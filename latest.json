@@ -1,19 +1,19 @@
 {
-  "version": "1.6.22",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.22/vMLX-1.6.22-tahoe-arm64.dmg",
-  "sha256": "8c1645dfad3907db9df5682ec4d1293d09fdf87a0331788feb30e92248303155",
-  "sha512": "NpAWGeynRQmZztD0oUN4ejVzUYal9z1cxi2k8vtDC5SzfLwI6WZHP8gvlva+tgX5VJKs1HDu75DuAtvm/ivkRQ==",
+  "version": "1.6.23",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.23/vMLX-1.6.23-tahoe-arm64.dmg",
+  "sha256": "cac8612b813c53284360a9977685601f0f0dce89bd1edd5e92735fcb1da16862",
+  "sha512": "xs1vs7W24KYL0Z2FFLVB4Kt7w0QwGsFo6hXIhaBe40bUZ1L8mKqukaI1R7T0xgrhR8SrCCyBp7efakbNZSXi2w==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.22/vMLX-1.6.22-sequoia-arm64.dmg",
-      "sha256": "c7ef8e36f51ef4a99d9d9008da1a3885845cf9ec78c3e1a9c8d0ed8fc4ba5859",
-      "sha512": "DPUHykVWQmgAFMqx9yyxYGszNrODw23tuSD0cRJL2SPSseQzYD3xY8ogJfUjg4p2ulQBopcJY+kloJNKOhPOmg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.23/vMLX-1.6.23-sequoia-arm64.dmg",
+      "sha256": "6ae2b2c499077ba49714d941efa4816d04b1d6a67c3b48a68aa48d918702481f",
+      "sha512": "FZf+e9EFWP2UJn+5tCQejFhTtLmDsbv6tpkpMCSi0NA/cwxLN6XC05JAXyWU1groLUAlttcoSzJXTCcbYVuimg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.22/vMLX-1.6.22-tahoe-arm64.dmg",
-      "sha256": "8c1645dfad3907db9df5682ec4d1293d09fdf87a0331788feb30e92248303155",
-      "sha512": "NpAWGeynRQmZztD0oUN4ejVzUYal9z1cxi2k8vtDC5SzfLwI6WZHP8gvlva+tgX5VJKs1HDu75DuAtvm/ivkRQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.23/vMLX-1.6.23-tahoe-arm64.dmg",
+      "sha256": "cac8612b813c53284360a9977685601f0f0dce89bd1edd5e92735fcb1da16862",
+      "sha512": "xs1vs7W24KYL0Z2FFLVB4Kt7w0QwGsFo6hXIhaBe40bUZ1L8mKqukaI1R7T0xgrhR8SrCCyBp7efakbNZSXi2w=="
     }
   },
-  "notes": "## vMLX 1.6.22 for macOS\n\nBuilt from source commit `8dd421b2a`.\n\n### Highlights\n\n- DeepSeek V4 Flash decodes about 11% faster at every context length. The MLX cache ceiling was a fixed 8 GB, which made MLX free and re-allocate decode graph buffers it could have reused; it now scales with installed memory and peak process memory is unchanged.\n- Tool markup carrying a non-string name no longer produces a tool call with an empty function name (Hermes, Qwen, Nous, Gemma 4 parsers).\n- Tool-choice enforcement errors report the caller's own tool_choice instead of always naming 'required'.\n- DeepSeek V4 Flash delta-cache restore reads block size and anchor interval from the cache records rather than assuming fixed values.\n- The bundled runtime uses JANG 2.5.39.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download."
+  "notes": "## vMLX 1.6.23 for macOS\n\nBuilt from source commit `bf69aacfa`.\n\n### Highlights\n\n- DeepSeek V4 Flash now produces a visible answer on prompts that need a long response. The model does not reliably emit its end-of-thinking marker, so reasoning consumed the entire output budget and the answer was left with nothing. Part of the budget is now reserved for the answer: a bounded reserve, so a 2000-token budget still spends 75% on thinking and a 384K budget spends 99.5%. Set DSV4_ANSWER_RESERVE to override, or 0 to disable.\n- No other model family is affected, and sampling is unchanged.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download."
 }

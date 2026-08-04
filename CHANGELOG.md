@@ -2,6 +2,27 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+## [1.6.23] - 2026-08-04
+
+### Fixed
+
+- DeepSeek V4 Flash now produces a visible answer on prompts that need a long
+  response. The model does not reliably emit `</think>`, so reasoning consumed
+  the entire output budget and the answer was left with nothing: a 2000-token
+  budget produced 7,980 characters of reasoning and zero content, 4000 produced
+  15,980, 8000 produced 31,980. The engine already had a never-empty answer
+  pass for exactly this, but it could only arm when the caller supplied
+  `max_thinking_tokens`, which no caller does, so it never ran.
+  When no split is requested, DeepSeek V4 Flash now reserves part of the output
+  budget for the answer, which makes that answer pass reachable. The reservation
+  is a bounded reserve rather than a percentage, so deep reasoning is not taxed:
+  `clamp(25% of the budget, 256, 2048)` tokens, leaving 75% of a 2000-token
+  budget and 99.5% of a 384K budget for thinking. Budgets under 512 tokens are
+  left unsplit. Set `DSV4_ANSWER_RESERVE` to override, or `0` to disable.
+  No tokens are forced or injected and sampling is unchanged. Applies to Chat
+  Completions, Responses, Anthropic and Ollama, streaming and non-streaming.
+  Other model families are unaffected.
+
 ## [1.6.22] - 2026-08-02
 
 ### Performance

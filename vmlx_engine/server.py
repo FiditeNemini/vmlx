@@ -2495,6 +2495,89 @@ _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
 }
 
 
+# DSV4-Flash reasons until it decides to stop, and on hard prompts it never
+# decides -- </think> (token 128822) is not generated at all. Reasoning then
+# consumes the entire output budget and the visible answer gets nothing.
+#
+# The never-empty answer pass already handles "reasoning produced no content",
+# but it is armed only when the first pass is capped, which needs a client-sent
+# max_thinking_tokens. Callers do not send one, so for DSV4 it never armed.
+#
+# Reserve a slice of the caller's budget for the answer when the caller did not
+# specify a split. antirez's ds4 -- the reference engine that runs this model
+# without this failure -- ships the same idea as a soft/hard </think> budget
+# cutoff "so the model has room to produce a visible answer".
+#
+# DSV4 stays out of _THINKING_BUDGET_CAP_FAMILIES above: that set means "an
+# EXPLICIT max_thinking_tokens may cap this family", which remains wrong for
+# DSV4 (it keys on reasoning_effort). This is a separate default, applied only
+# when the caller specified nothing.
+#
+# The split is expressed as an answer RESERVE, not a thinking fraction. A
+# fraction scales the wrong way with reasoning_effort: the model card allows up
+# to 384K output tokens at the high and max levels, and taking a fixed
+# percentage of that would confiscate tens of thousands of tokens from
+# legitimate deep reasoning. A bounded reserve keeps small budgets usable and
+# costs deep reasoning almost nothing (99.5% of a 384K budget still reasons).
+_DSV4_ANSWER_RESERVE_FRACTION = 0.25
+_DSV4_ANSWER_RESERVE_MIN = 256
+_DSV4_ANSWER_RESERVE_MAX = 2048
+
+
+def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
+    """First-pass thinking cap for DSV4 when the caller supplied none.
+
+    Returns the cap, or None to leave the budget unsplit (very small budgets,
+    or an explicit DSV4_ANSWER_RESERVE=0 opt-out).
+    """
+    total = int(max_tokens or 0)
+    if total < 512:
+        # Too small to split usefully: a tiny cap truncates reasoning without
+        # leaving a usable answer either.
+        return None
+    raw = os.environ.get("DSV4_ANSWER_RESERVE", "").strip()
+    if raw:
+        try:
+            reserve = int(raw)
+        except ValueError:
+            reserve = 0
+        if reserve <= 0 or reserve >= total:
+            return None
+    else:
+        reserve = int(total * _DSV4_ANSWER_RESERVE_FRACTION)
+        reserve = max(_DSV4_ANSWER_RESERVE_MIN,
+                      min(_DSV4_ANSWER_RESERVE_MAX, reserve))
+    if reserve >= total:
+        return None
+    return max(1, total - reserve)
+
+
+def _dsv4_answer_pass_thinking_cap(
+    family_name: str | None,
+    effective_thinking,
+    max_tokens,
+) -> int | None:
+    """Default DSV4 first-pass cap, or None for every other case.
+
+    Returns None unless this is deepseek_v4 with thinking on, so no other
+    family's behaviour can change.
+    """
+    if family_name != "deepseek_v4":
+        return None
+    if effective_thinking is False:
+        return None
+    cap = _dsv4_default_thinking_cap(int(max_tokens or 0))
+    if cap is not None:
+        total = int(max_tokens or 0)
+        logger.info(
+            "DSV4 thinking budget: first pass capped at %d of %d output tokens "
+            "(%.0f%%); %d reserved so the answer pass can emit visible content. "
+            "Override with DSV4_ANSWER_RESERVE.",
+            cap, total, (cap / max(1, total)) * 100.0, total - cap,
+        )
+    return cap
+
+
 def _reasoning_answer_pass_family_label(family_name: str) -> str:
     return {
         "gemma4": "Gemma4",
@@ -16913,6 +16996,22 @@ async def create_chat_completion(
     # thinking cap always receives the full native generation budget.
     _ns_answer_pass_original_cap = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
+    if _ns_pre_mtt is None:
+        # DSV4 only — see _dsv4_answer_pass_thinking_cap.
+        try:
+            from .model_config_registry import get_model_config_registry as _ns_dsv4_mcr
+            _ns_dsv4_family = getattr(
+                _ns_dsv4_mcr().lookup(_model_path or _model_name or request.model),
+                "family_name", None,
+            )
+        except Exception:
+            _ns_dsv4_family = None
+        _ns_pre_mtt = _dsv4_answer_pass_thinking_cap(
+            _ns_dsv4_family,
+            None if chat_kwargs.get("enable_thinking") is None
+            else chat_kwargs.get("enable_thinking"),
+            chat_kwargs.get("max_tokens"),
+        )
     if (
         _ns_pre_mtt is not None
         and chat_kwargs.get("enable_thinking") is not False
@@ -16929,6 +17028,7 @@ async def create_chat_completion(
             _ns_pre_family = None
         _ns_pre_cap_family = (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
+            or _ns_pre_family == "deepseek_v4"
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
             # A served alias is not necessarily a readable bundle path. The
             # configured native parser is still source-owned runtime evidence
@@ -20044,6 +20144,22 @@ async def create_response(
     _ns_answer_pass_original_cap = None
     _ns_visible_answer_finish_reason: str | None = None
     _ns_pre_mtt = getattr(request, "max_thinking_tokens", None)
+    if _ns_pre_mtt is None:
+        # DSV4 only — see _dsv4_answer_pass_thinking_cap.
+        try:
+            from .model_config_registry import get_model_config_registry as _ns_dsv4_mcr
+            _ns_dsv4_family = getattr(
+                _ns_dsv4_mcr().lookup(_model_path or _model_name or request.model),
+                "family_name", None,
+            )
+        except Exception:
+            _ns_dsv4_family = None
+        _ns_pre_mtt = _dsv4_answer_pass_thinking_cap(
+            _ns_dsv4_family,
+            None if chat_kwargs.get("enable_thinking") is None
+            else chat_kwargs.get("enable_thinking"),
+            chat_kwargs.get("max_tokens"),
+        )
     if (
         _ns_pre_mtt is not None
         and chat_kwargs.get("enable_thinking") is not False
@@ -20060,6 +20176,7 @@ async def create_response(
             _ns_pre_family = None
         _ns_pre_cap_family = (
             _ns_pre_family in _THINKING_BUDGET_CAP_FAMILIES
+            or _ns_pre_family == "deepseek_v4"
             or _ns_pre_family in ("minimax_m3", "minimax_m3_vl")
             or _tool_call_parser == "minimax_m3"
         )
@@ -21444,6 +21561,12 @@ async def stream_chat_completion(
     reasoning_only_answer_family = ""
     reasoning_tools_fallback_answer_budget: int | None = None
     _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
+    if _explicit_answer_pass_mtt is None:
+        # DSV4 only: reserve answer budget so the never-empty answer pass below
+        # can arm. No-op for every other family.
+        _explicit_answer_pass_mtt = _dsv4_answer_pass_thinking_cap(
+            _family_name, _effective_thinking, kwargs.get("max_tokens")
+        )
     if (
         _explicit_answer_pass_mtt is not None
         and _is_minimax_m3
@@ -21489,7 +21612,10 @@ async def stream_chat_completion(
     if (
         not reasoning_only_answer_enabled
         and _explicit_answer_pass_mtt is not None
-        and _family_name in _THINKING_BUDGET_CAP_FAMILIES
+        and (
+            _family_name in _THINKING_BUDGET_CAP_FAMILIES
+            or _family_name == "deepseek_v4"
+        )
         and _effective_thinking is not False
     ):
         # The two-stage path is an explicit API contract only. Auto/On without
@@ -23438,6 +23564,12 @@ async def stream_responses_api(
     reasoning_only_answer_family = ""
     reasoning_tools_fallback_answer_budget: int | None = None
     _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
+    if _explicit_answer_pass_mtt is None:
+        # DSV4 only: reserve answer budget so the never-empty answer pass below
+        # can arm. No-op for every other family.
+        _explicit_answer_pass_mtt = _dsv4_answer_pass_thinking_cap(
+            _family_name, _effective_thinking, kwargs.get("max_tokens")
+        )
     if (
         _explicit_answer_pass_mtt is not None
         and _is_minimax_m3
@@ -23483,7 +23615,10 @@ async def stream_responses_api(
     if (
         not reasoning_only_answer_enabled
         and _explicit_answer_pass_mtt is not None
-        and _family_name in _THINKING_BUDGET_CAP_FAMILIES
+        and (
+            _family_name in _THINKING_BUDGET_CAP_FAMILIES
+            or _family_name == "deepseek_v4"
+        )
         and _effective_thinking is not False
     ):
         # Explicit two-stage parity with Chat. Implicit Auto/On is always a

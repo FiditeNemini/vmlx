@@ -1,19 +1,19 @@
 {
-  "version": "1.6.23",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.23/vMLX-1.6.23-tahoe-arm64.dmg",
-  "sha256": "cac8612b813c53284360a9977685601f0f0dce89bd1edd5e92735fcb1da16862",
-  "sha512": "xs1vs7W24KYL0Z2FFLVB4Kt7w0QwGsFo6hXIhaBe40bUZ1L8mKqukaI1R7T0xgrhR8SrCCyBp7efakbNZSXi2w==",
+  "version": "1.6.24",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.24/vMLX-1.6.24-tahoe-arm64.dmg",
+  "sha256": "9ff7a841e933074fe44e353318e4eeeb9b3a44f3cad9308d70df0d191fcf233b",
+  "sha512": "jM81f6d/CqKcVVks1cuXZ5m7QwkX2qcuN07HjvVYHYr1Bv+mYpvrzPLQZ9Q2b/4dkafdYUxLDZd7WAFI7JDc1g==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.23/vMLX-1.6.23-sequoia-arm64.dmg",
-      "sha256": "6ae2b2c499077ba49714d941efa4816d04b1d6a67c3b48a68aa48d918702481f",
-      "sha512": "FZf+e9EFWP2UJn+5tCQejFhTtLmDsbv6tpkpMCSi0NA/cwxLN6XC05JAXyWU1groLUAlttcoSzJXTCcbYVuimg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.24/vMLX-1.6.24-sequoia-arm64.dmg",
+      "sha256": "f169fd27026d29d41114531f033f88856309ca69024b5f4afa8c6b7f5c5309f8",
+      "sha512": "vhfBojK4hfpyMVER+MGwCWg4wHxhxvp3NOy3UcBZcFW6cqW0V6l07Onb7JSKRRmk6yk0uRGL0FkMUu2UXmrYvg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.23/vMLX-1.6.23-tahoe-arm64.dmg",
-      "sha256": "cac8612b813c53284360a9977685601f0f0dce89bd1edd5e92735fcb1da16862",
-      "sha512": "xs1vs7W24KYL0Z2FFLVB4Kt7w0QwGsFo6hXIhaBe40bUZ1L8mKqukaI1R7T0xgrhR8SrCCyBp7efakbNZSXi2w=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.24/vMLX-1.6.24-tahoe-arm64.dmg",
+      "sha256": "9ff7a841e933074fe44e353318e4eeeb9b3a44f3cad9308d70df0d191fcf233b",
+      "sha512": "jM81f6d/CqKcVVks1cuXZ5m7QwkX2qcuN07HjvVYHYr1Bv+mYpvrzPLQZ9Q2b/4dkafdYUxLDZd7WAFI7JDc1g=="
     }
   },
-  "notes": "## vMLX 1.6.23 for macOS\n\nBuilt from source commit `bf69aacfa`.\n\n### Highlights\n\n- DeepSeek V4 Flash now produces a visible answer on prompts that need a long response. The model does not reliably emit its end-of-thinking marker, so reasoning consumed the entire output budget and the answer was left with nothing. Part of the budget is now reserved for the answer: a bounded reserve, so a 2000-token budget still spends 75% on thinking and a 384K budget spends 99.5%. Set DSV4_ANSWER_RESERVE to override, or 0 to disable.\n- No other model family is affected, and sampling is unchanged.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download."
+  "notes": "## vMLX 1.6.24 for macOS\n\nBuilt from source commit `2121e57fc`.\n\n### Highlights\n\n- Long DeepSeek V4 Flash generations no longer crash the engine. Metal caps the NUMBER of live buffers, not just their bytes, and the output guard only modelled bytes \u2014 so it allowed budgets the model could not survive. It now projects that ceiling too and refuses or clamps up front. Architectures measured at zero retained buffers per token are left uncapped, so nothing else is affected.\n- DeepSeek V4 Flash answers again at small output budgets; anything under 512 tokens previously came back empty.\n- The chat Max Tokens field shows the budget actually in force instead of sitting blank.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download."
 }

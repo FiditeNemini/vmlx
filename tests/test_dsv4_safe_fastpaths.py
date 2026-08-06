@@ -72,7 +72,9 @@ def test_lm_head_failure_falls_back_without_advancing_cache_twice(monkeypatch):
     monkeypatch.setattr(mod, "_CLASS_PATCHES", {})
     monkeypatch.setattr(mod, "_cache_admitted", lambda *_args: True)
     monkeypatch.setattr(mod, "_reserve_allocator_cache", lambda *_args: True)
-    monkeypatch.setattr(mod, "_release_cache_reservation", lambda *_args: None)
+    monkeypatch.setattr(
+        mod, "_release_cache_reservation", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(mod, "_materialize_weight", lambda _head: _Array((16, 64), "float32"))
     monkeypatch.setenv("VMLX_DSV4_LM_HEAD_MODE", "exact-cache")
     model = _Model()

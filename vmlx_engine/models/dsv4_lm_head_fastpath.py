@@ -211,7 +211,7 @@ def configure_dsv4_lm_head_cache_budget(base_limit_bytes: int) -> int:
         _CACHE_LIMIT_BASE_BYTES = int(base_limit_bytes)
         floor = _allocator_floor_bytes_locked()
         if _reservation_bytes_locked() + floor > _CACHE_LIMIT_BASE_BYTES:
-            logger.info(
+            logger.warning(
                 "Releasing DSV4 lm_head caches to honor a reduced MLX cache ceiling"
             )
             for reference, _reserved in tuple(_RESERVATIONS.values()):
@@ -233,11 +233,18 @@ def configure_dsv4_lm_head_cache_budget(base_limit_bytes: int) -> int:
 def _release_cache_reservation(
     identity: int,
     reference: weakref.ReferenceType[Any] | None = None,
+    owner: Any = None,
 ) -> None:
     with _RESERVATION_LOCK:
         current = _RESERVATIONS.get(identity)
         if current is None or (reference is not None and current[0] is not reference):
             return
+        if owner is not None:
+            # id() values can be recycled after GC; never drop a reservation
+            # that belongs to a different, still-live model.
+            target = current[0]()
+            if target is not None and target is not owner:
+                return
         _RESERVATIONS.pop(identity, None)
         try:
             _apply_allocator_limit_locked()
@@ -254,7 +261,7 @@ def _reserve_allocator_cache(model: Any, estimated: int) -> bool:
         if current is not None and current[0]() is model:
             return True
         if _CACHE_LIMIT_BASE_BYTES is None:
-            logger.info(
+            logger.warning(
                 "DSV4 exact lm_head cache skipped: allocator budget was not configured"
             )
             return False
@@ -287,7 +294,33 @@ def _release_model_cache(model: Any, config: _HeadConfig, reason: str) -> None:
     config.disabled_reason = reason
     config.weight = None
     config.reservation_bytes = 0
-    _release_cache_reservation(id(model))
+    _release_cache_reservation(id(model), owner=model)
+
+
+def release_all_dsv4_lm_head_caches(reason: str) -> int:
+    """Release every pinned lm_head cache and restore the allocator ceiling.
+
+    Cache-error recovery clears the allocator caches, but the persistent FP32
+    head survives that; releasing it here lets the rescheduled requests run
+    under genuinely lower memory pressure. The fastpath reinstalls on the
+    next model load.
+    """
+
+    with _RESERVATION_LOCK:
+        entries = tuple(_RESERVATIONS.items())
+    released = 0
+    for identity, (reference, _reserved) in entries:
+        model = reference()
+        if model is None:
+            _release_cache_reservation(identity, reference)
+            continue
+        config = _CONFIGS.get(model)
+        if config is None:
+            _release_cache_reservation(identity, reference)
+            continue
+        _release_model_cache(model, config, reason)
+        released += 1
+    return released
 
 
 def _parameter_bytes(model: Any) -> int:
@@ -320,7 +353,9 @@ def _cache_admitted(model: Any, estimated: int) -> bool:
 
         active, maximum = get_effective_metal_working_set_bytes(mx)
     except Exception as exc:
-        logger.info("DSV4 exact lm_head cache skipped: headroom lookup failed: %s", exc)
+        logger.warning(
+            "DSV4 exact lm_head cache skipped: headroom lookup failed: %s", exc
+        )
         return False
     parameters = _parameter_bytes(model)
     if maximum <= 0 or parameters <= 0:
@@ -470,4 +505,5 @@ __all__ = [
     "configure_dsv4_lm_head_cache_budget",
     "dsv4_lm_head_fastpath_status",
     "install_dsv4_lm_head_fastpath",
+    "release_all_dsv4_lm_head_caches",
 ]

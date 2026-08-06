@@ -9278,6 +9278,24 @@ class Scheduler:
         if self._ssm_state_cache is not None:
             self._ssm_state_cache.clear()
 
+        # The pinned DSV4 exact lm_head cache survives allocator-cache
+        # clearing; release it so rescheduled requests retry under genuinely
+        # lower memory pressure instead of failing through the same path.
+        try:
+            from .models.dsv4_lm_head_fastpath import (
+                release_all_dsv4_lm_head_caches,
+            )
+
+            released = release_all_dsv4_lm_head_caches("cache-error recovery")
+            if released:
+                logger.warning(
+                    "Released %d DSV4 exact lm_head cache(s) during cache "
+                    "recovery; the fastpath reinstalls on the next model load",
+                    released,
+                )
+        except Exception:
+            pass
+
         # Clear UID mappings
         self.request_id_to_uid.clear()
         self.uid_to_request_id.clear()

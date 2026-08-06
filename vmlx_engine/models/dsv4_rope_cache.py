@@ -84,6 +84,8 @@ _CONFIGS = _WeakIdentityMap()
 _GROUPS: dict[tuple[float, ...], _TableGroup] = {}
 _GROUP_LOCK = threading.RLock()
 _CLASS_PATCHES: dict[type, tuple[Any, Any]] = {}
+_MISS_FAILURE_WARNINGS = 0
+_MISS_FAILURE_WARNING_LIMIT = 5
 
 
 def _release_group(group: _TableGroup) -> None:
@@ -91,7 +93,10 @@ def _release_group(group: _TableGroup) -> None:
         group.registrations = max(0, group.registrations - 1)
         if group.registrations == 0 and _GROUPS.get(group.signature) is group:
             _GROUPS.pop(group.signature, None)
-            group.tables.clear()
+            # Hold the per-group lock so an in-flight _cached_call on another
+            # thread never races the clear on the same OrderedDict.
+            with group.lock:
+                group.tables.clear()
 
 
 def _table_group(signature: tuple[float, ...]) -> _TableGroup:
@@ -176,7 +181,18 @@ def _install_class_wrapper(rope_class: type) -> bool:
                     group.tables.move_to_end(key)
             return _rotate_with_tables(x, entry[0], entry[1], inverse)
         except Exception as exc:
-            logger.warning("DSV4 RoPE table cache miss failed; using reference path: %s", exc)
+            global _MISS_FAILURE_WARNINGS
+            if _MISS_FAILURE_WARNINGS < _MISS_FAILURE_WARNING_LIMIT:
+                _MISS_FAILURE_WARNINGS += 1
+                logger.warning(
+                    "DSV4 RoPE table cache miss failed; using reference path: %s",
+                    exc,
+                )
+            else:
+                logger.debug(
+                    "DSV4 RoPE table cache miss failed; using reference path: %s",
+                    exc,
+                )
             return original_call(
                 self,
                 x,
@@ -204,7 +220,7 @@ def _install_for_class(model: Any, rope_class: type) -> int:
         try:
             signature = _frequency_signature(rope)
         except Exception as exc:
-            logger.info("DSV4 RoPE instance not cached: %s", exc)
+            logger.warning("DSV4 RoPE instance not cached: %s", exc)
             continue
         group = _table_group(signature)
         _CONFIGS[rope] = group

@@ -1194,6 +1194,36 @@ def _to_numpy_tree(obj):
     return obj
 
 
+_DSV4_SHARED_POOL_KEYS = ("compressor_pool", "indexer_pool")
+
+
+def _copy_dsv4_delta_record(record):
+    """Copy a DSV4 block-delta record without duplicating pool payloads.
+
+    Pool arrays (q8 segment tuples / bf16 rows) are immutable by contract:
+    the live cache only appends, and compaction/slicing rebinds list entries
+    to NEW arrays without mutating shared buffers. Deep-copying them doubled
+    resident pool bytes during reconstruct (originals in the paged blocks +
+    copies in the live cache) — linear in context, and it OOM'd Metal at
+    ~183k tokens on a 128GB box (95GB weights leave ~12GB headroom). Share
+    the arrays; copy only the bounded mutable remainder (anchor local
+    window, metadata).
+    """
+    if not isinstance(record, dict):
+        return _copy_mlx_tree(record)
+    copied = {}
+    for key, value in record.items():
+        if key in _DSV4_SHARED_POOL_KEYS and isinstance(value, dict):
+            shared = dict(value)
+            segments = shared.get("segments")
+            if isinstance(segments, list):
+                shared["segments"] = list(segments)
+            copied[key] = shared
+        else:
+            copied[key] = _copy_mlx_tree(value)
+    return copied
+
+
 def _copy_mlx_tree(obj):
     """Materialize independent MLX-array copies in a nested cache state tree."""
     if obj is None or not HAS_MLX:
@@ -5876,7 +5906,7 @@ class BlockAwarePrefixCache:
                                 f"unsupported DSV4 delta cache class {class_name!r}"
                             )
                         restore_records = [
-                            _copy_mlx_tree(entry[1])
+                            _copy_dsv4_delta_record(entry[1])
                             for entry in dsv4_delta_entries
                         ]
                         # Restore geometry is a property of the chain, not of

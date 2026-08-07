@@ -22040,6 +22040,9 @@ async def stream_chat_completion(
     cache_detail: str | None = None
     last_output = None
     stream_logprob_offset = 0
+    _decode_first_ts: float | None = None
+    _decode_last_ts = 0.0
+    _decode_last_count = 0
 
     # Use per-request timeout if provided, otherwise server default
     _stream_timeout = (
@@ -22094,6 +22097,11 @@ async def stream_chat_completion(
                 prompt_tokens = output.prompt_tokens
             if hasattr(output, "completion_tokens") and output.completion_tokens:
                 completion_tokens = output.completion_tokens
+            if completion_tokens > _decode_last_count:
+                _decode_last_ts = time.perf_counter()
+                if _decode_first_ts is None:
+                    _decode_first_ts = _decode_last_ts
+                _decode_last_count = completion_tokens
             if hasattr(output, "cached_tokens") and output.cached_tokens:
                 cached_tokens = output.cached_tokens
             _detail = getattr(output, "cache_detail", "") or None
@@ -23660,6 +23668,18 @@ async def stream_chat_completion(
         )
         yield f"data: {_dump_chat_chunk(usage_chunk, terminal_usage=True)}\n\n"
 
+    if (
+        completion_tokens > 1
+        and _decode_first_ts is not None
+        and _decode_last_ts > _decode_first_ts
+    ):
+        _decode_elapsed = _decode_last_ts - _decode_first_ts
+        logger.info(
+            f"Chat completion (stream): {completion_tokens} tokens in "
+            f"{_decode_elapsed:.2f}s "
+            f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode)"
+        )
+
     yield "data: [DONE]\n\n"
 
 
@@ -24027,6 +24047,9 @@ async def stream_responses_api(
     completion_tokens = 0
     _cached = 0
     _cache_detail: str | None = None
+    _decode_first_ts: float | None = None
+    _decode_last_ts = 0.0
+    _decode_last_count = 0
     last_output = (
         None  # Track last engine output for finish_reason (status: incomplete)
     )
@@ -24318,6 +24341,11 @@ async def stream_responses_api(
                 prompt_tokens = output.prompt_tokens
             if hasattr(output, "completion_tokens") and output.completion_tokens:
                 completion_tokens = output.completion_tokens
+            if completion_tokens > _decode_last_count:
+                _decode_last_ts = time.perf_counter()
+                if _decode_first_ts is None:
+                    _decode_first_ts = _decode_last_ts
+                _decode_last_count = completion_tokens
             _chunk_cached = int(getattr(output, "cached_tokens", 0) or 0)
             if _chunk_cached > 0:
                 _cached = _chunk_cached
@@ -25775,6 +25803,17 @@ async def stream_responses_api(
             (history_messages if history_messages is not None else messages)
             + _responses_output_to_assistant_messages(all_output_items),
             reasoning_only=_stream_reasoning_only,
+        )
+    if (
+        completion_tokens > 1
+        and _decode_first_ts is not None
+        and _decode_last_ts > _decode_first_ts
+    ):
+        _decode_elapsed = _decode_last_ts - _decode_first_ts
+        logger.info(
+            f"Response (stream): {completion_tokens} tokens in "
+            f"{_decode_elapsed:.2f}s "
+            f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode)"
         )
     yield _sse(
         _response_terminal.event_type,

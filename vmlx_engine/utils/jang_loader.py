@@ -2982,6 +2982,30 @@ def _load_jang_v2(
     )
     _mimo_v2_runtime_quantized_count = 0
 
+    # Legacy zero-centered RMSNorm repair (mlxstudio#130): qwen3_5-family
+    # bundles converted before jang_norms_pre_shifted store raw (gamma-1)
+    # norms, and mlx_lm's sanitize gate (mtp keys / HF-layout conv1d) never
+    # fires on JANG-stored shards (mtp stripped, conv1d MLX layout) →
+    # nn.RMSNorm runs with gamma≈0 → degenerate output. Repair stamp-less
+    # bundles here, skipping shards where mlx_lm's own sanitize shifts
+    # (gate mirrored per shard — no value heuristics, no double shift).
+    from jang_tools.zero_centered_norms import (
+        ZeroCenteredNormShift as _ZeroCenteredNormShift,
+        mlx_lm_sanitize_would_shift as _mlx_lm_sanitize_would_shift,
+    )
+
+    _bundle_cfg_for_norms = _mimo_v2_bundle_config or config
+    _norm_shift = None
+    if not _bundle_cfg_for_norms.get("jang_norms_pre_shifted"):
+        _norm_shift = _ZeroCenteredNormShift.from_config(
+            _bundle_cfg_for_norms, vl_wrapped=False
+        )
+        if _norm_shift is not None:
+            logger.info(
+                "  Legacy bundle without jang_norms_pre_shifted — applying "
+                "+1.0 zero-centered RMSNorm repair (mlxstudio#130)"
+            )
+
     _affine1_expanded_count = 0
     for sf in weight_files:
         weights = mx.load(str(sf))
@@ -3185,6 +3209,7 @@ def _load_jang_v2(
                 )
 
         step3p7_shard_had_vanilla_moe_keys = False
+        _shard_mlx_lm_shifted = False
         if weights and hasattr(model, "sanitize"):
             step3p7_shard_had_vanilla_moe_keys = any(
                 (
@@ -3193,6 +3218,14 @@ def _load_jang_v2(
                 )
                 for key in weights
             )
+            if _norm_shift is not None:
+                # Mirror mlx_lm's gate on the exact dict sanitize receives:
+                # shards it shifts itself must not be repaired again.
+                _shard_mlx_lm_shifted = _mlx_lm_sanitize_would_shift(
+                    _norm_shift.model_type,
+                    weights.keys(),
+                    [v.shape[-1] for k, v in weights.items() if "conv1d.weight" in k],
+                )
             weights = model.sanitize(weights)
         weights = _fix_step3p7_zero_centered_norm_weights(
             weights,
@@ -3205,6 +3238,8 @@ def _load_jang_v2(
             weights = _sanitize_deepseek_v4_regular_layout(weights)
         else:
             weights = _sanitize_qwen3_next_conv1d_layout(weights)
+        if _norm_shift is not None and not _shard_mlx_lm_shifted:
+            weights = {k: _norm_shift.apply(k, v) for k, v in weights.items()}
         if _is_mimo_v2_model:
             for key, value in weights.items():
                 if not (

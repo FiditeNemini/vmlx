@@ -1501,6 +1501,35 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                 _affine_fastpath_err,
             )
 
+        # Fused pair-SwiGLU decode kernels for the validated DSV4 routed
+        # layout (gate/up b2gs64, down b2gs32, k=6). Installer self-tests
+        # against the stock method and leaves everything stock on any
+        # mismatch; prefill always takes the stock path.
+        try:
+            from ..metal.fused_pair_moe_decode import (
+                dsv4_fused_pair_moe_status,
+                install_dsv4_fused_pair_moe,
+            )
+
+            fused_pair = install_dsv4_fused_pair_moe(model)
+            if fused_pair > 0:
+                _log.info(
+                    "DSV4 fused pair-SwiGLU MoE decode installed for %d modules",
+                    fused_pair,
+                )
+            else:
+                _log.info(
+                    "DSV4 fused pair-SwiGLU MoE decode not installed (%s); "
+                    "using stock SwitchGLU",
+                    dsv4_fused_pair_moe_status().get("reason"),
+                )
+        except Exception as _pair_fastpath_err:
+            _log.warning(
+                "DSV4 fused pair-SwiGLU MoE decode unavailable (%s); "
+                "using stock SwitchGLU",
+                _pair_fastpath_err,
+            )
+
     # These optimizations retain the source model's arithmetic and are scoped
     # to the exact instances validated by their installers. Neither fallback
     # replays the transformer against a mutable request cache.

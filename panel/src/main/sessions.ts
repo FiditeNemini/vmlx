@@ -1463,7 +1463,12 @@ export class SessionManager extends EventEmitter {
       buffer = []
       this.logBuffers.set(sessionId, buffer)
     }
-    const timestamp = new Date().toISOString().slice(11, 23) // HH:mm:ss.SSS
+    // Local time to match chat-bubble timestamps (was UTC via toISOString)
+    const now = new Date()
+    const timestamp =
+      [now.getHours(), now.getMinutes(), now.getSeconds()]
+        .map((n) => String(n).padStart(2, '0'))
+        .join(':') + `.${String(now.getMilliseconds()).padStart(3, '0')}`
     const lines = data.split('\n')
     for (const line of lines) {
       if (!line && lines.length > 1) continue // skip empty splits from trailing newline

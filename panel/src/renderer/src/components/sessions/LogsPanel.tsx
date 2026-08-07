@@ -46,7 +46,12 @@ export function LogsPanel({ sessionId, sessionStatus, isRemote }: LogsPanelProps
 
     const unsub = window.api.sessions.onLog((data: any) => {
       if (data.sessionId !== sessionId) return
-      const timestamp = new Date().toISOString().slice(11, 23)
+      // Local time to match chat-bubble timestamps (was UTC via toISOString)
+      const now = new Date()
+      const timestamp =
+        [now.getHours(), now.getMinutes(), now.getSeconds()]
+          .map((n) => String(n).padStart(2, '0'))
+          .join(':') + `.${String(now.getMilliseconds()).padStart(3, '0')}`
       const newLines = data.data.split('\n').filter((l: string) => l)
         .map((l: string) => `[${timestamp}] ${l}`)
       setLines(prev => {

@@ -3086,7 +3086,12 @@ class LogBuffer {
   }
 
   push(data: string): void {
-    const timestamp = new Date().toISOString().slice(11, 23);
+    // Local time to match chat-bubble timestamps (mirrors sessions.ts pushLog)
+    const now = new Date();
+    const timestamp =
+      [now.getHours(), now.getMinutes(), now.getSeconds()]
+        .map((n) => String(n).padStart(2, "0"))
+        .join(":") + `.${String(now.getMilliseconds()).padStart(3, "0")}`;
     const lines = data.split("\n");
     for (const line of lines) {
       if (!line && lines.length > 1) continue;

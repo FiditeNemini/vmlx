@@ -45,6 +45,8 @@ DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS = 12_288
 DEFAULT_DSV4_LONG_PREFILL_STEP_TOKENS = 512
 DSV4_NATIVE_BLOCK_SIZE = 256
 DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS = 8
+# Diagnostic Metal-memory telemetry per prefill chunk (active/cache/peak).
+_PREFILL_MEM_LOG = os.environ.get("DSV4_PREFILL_MEM_LOG", "") == "1"
 
 
 def dsv4_max_prefill_tokens() -> int:
@@ -1307,6 +1309,8 @@ class DSV4BatchGenerator:
                         append_safe_boundary - cached_tokens,
                     )
             chunk = all_ids[:, off:end_off]
+            if _PREFILL_MEM_LOG and hasattr(mx, "reset_peak_memory"):
+                mx.reset_peak_memory()
             logits = self.model(chunk, cache=cache)
             last_logits = logits[:, -1, :]
             # Force the logits graph and cache side effects to materialize
@@ -1318,6 +1322,17 @@ class DSV4BatchGenerator:
                 self._sync()
             else:
                 mx.eval(last_logits)
+            if _PREFILL_MEM_LOG:
+                logger.info(
+                    "DSV4Gen: prefill-mem chunk=[%d:%d) ctx=%d "
+                    "active=%.2fGB cache=%.2fGB peak=%.2fGB",
+                    cached_tokens + off,
+                    cached_tokens + end_off,
+                    cached_tokens + end_off,
+                    mx.get_active_memory() / 2**30,
+                    mx.get_cache_memory() / 2**30,
+                    mx.get_peak_memory() / 2**30,
+                )
             if hasattr(mx, "clear_cache") and self._prefill_should_clear_cache():
                 mx.clear_cache()
             off = end_off

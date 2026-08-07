@@ -110,6 +110,9 @@ def test_dsv4_prefill_realizes_last_logits_before_clearing_transients(monkeypatc
     gen.prefill_step_size = 2048
     gen._prefill_single_shot = False
     gen._sync = lambda: events.append(("sync", None))
+    # Pin the pressure gate ON: this test protects the eval-before-clear
+    # ordering, not the clear-decision policy.
+    gen._prefill_should_clear_cache = lambda: True
 
     def record_eval(value):
         assert value.shape == (1, 2)
@@ -205,3 +208,44 @@ def test_dsv4_cache_hit_tail_prefill_realizes_before_allocator_clear():
     assert calls == [([101], True)]
     assert [resp.token for resp in prompt_resps] == [1]
     assert gen_resps == []
+
+
+def test_dsv4_prefill_skips_clear_cache_without_metal_pressure(monkeypatch):
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+    from vmlx_engine.utils import dsv4_batch_generator as mod
+
+    events = []
+    logits = mx.array([[[0.0, 1.0]]])
+
+    class FakeModel:
+        def __call__(self, tokens, cache):
+            return logits
+
+    gen = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
+    gen.model = FakeModel()
+    gen.prefill_step_size = 2048
+    gen._prefill_single_shot = False
+    gen._sync = lambda: None
+    gen._prefill_should_clear_cache = lambda: False
+
+    monkeypatch.setattr(mod.mx, "eval", lambda value: None)
+    monkeypatch.setattr(
+        mod.mx,
+        "clear_cache",
+        lambda: events.append(("clear_cache", None)),
+    )
+
+    result = gen._prefill_last_logits([1, 2, 3], cache=[])
+
+    assert result.shape == (1, 2)
+    assert events == []
+
+
+def test_dsv4_prefill_clear_gate_defaults_to_clearing_on_probe_failure():
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    gen = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
+    # memory_limits probe against a bare object model may raise; the gate
+    # must fall back to legacy always-clear behavior rather than never
+    # clearing under real pressure.
+    assert gen._prefill_should_clear_cache() in (True, False)

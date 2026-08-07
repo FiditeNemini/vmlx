@@ -3425,8 +3425,15 @@ def test_dsv4_batch_generator_prefill_step_default_and_legacy_override(monkeypat
     assert gen.prefill_step_size == 1 << 30
 
     assert dsv4_effective_prefill_step(2048, 12_288) == 2048
+    # Attention sub-chunking (default on) bounds per-layer attention width,
+    # so the long-context 512 clamp only applies when it is disabled.
+    monkeypatch.delenv("DSV4_ATTN_SUBCHUNK", raising=False)
+    assert dsv4_effective_prefill_step(2048, 12_289) == 2048
+    assert dsv4_effective_prefill_step(2048, 32_768) == 2048
+    monkeypatch.setenv("DSV4_ATTN_SUBCHUNK", "0")
     assert dsv4_effective_prefill_step(2048, 12_289) == 512
     assert dsv4_effective_prefill_step(2048, 32_768) == 512
+    monkeypatch.delenv("DSV4_ATTN_SUBCHUNK", raising=False)
     assert dsv4_effective_prefill_step(256, 32_768) == 256
     assert (
         dsv4_effective_prefill_step(
@@ -3459,11 +3466,24 @@ def test_dsv4_prompt_only_prefill_uses_adaptive_long_context_chunks(monkeypatch)
     scheduler.config = SimpleNamespace(prefill_step_size=2048)
     scheduler._uses_dsv4_cache = True
 
+    # Legacy clamp path: with attention sub-chunking disabled, long-context
+    # prefill falls back to bounded 512-token chunks.
+    monkeypatch.setenv("DSV4_ATTN_SUBCHUNK", "0")
     cache = scheduler._prefill_for_prompt_only_cache(list(range(12_289)))
 
     assert cache is not None
     assert calls
     assert max(calls) == 512
+    assert sum(calls) == 12_289
+
+    # Default path: sub-chunking active keeps the configured wide step.
+    monkeypatch.delenv("DSV4_ATTN_SUBCHUNK", raising=False)
+    calls.clear()
+    cache = scheduler._prefill_for_prompt_only_cache(list(range(12_289)))
+
+    assert cache is not None
+    assert calls
+    assert max(calls) == 2048
     assert sum(calls) == 12_289
 
 

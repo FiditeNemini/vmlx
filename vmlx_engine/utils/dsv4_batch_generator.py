@@ -80,6 +80,20 @@ def dsv4_prefill_step_policy(default_step: int) -> tuple[int, bool]:
     return max(1, configured), False
 
 
+def dsv4_attn_subchunk_active() -> bool:
+    """Mirror jang_tools' ``DSV4_ATTN_SUBCHUNK`` gate (default 512, 0=off).
+
+    When active, the model runs prefill attention in bounded 512-token
+    sub-slices inside each decoder layer regardless of the outer chunk
+    width, so the wide-chunk Metal command-buffer watchdog risk that
+    motivated the long-context 512 clamp no longer applies.
+    """
+    try:
+        return int(os.environ.get("DSV4_ATTN_SUBCHUNK", "512")) > 0
+    except (TypeError, ValueError):
+        return True
+
+
 def dsv4_effective_prefill_step(
     configured_step: int,
     prompt_tokens: int,
@@ -91,10 +105,15 @@ def dsv4_effective_prefill_step(
 
     Ratio-4 CSA/HCA layers form query-by-compressed-pool score tensors.  A
     2,048-token chunk is live-proven through 12,288 total tokens, while the
-    same chunk size triggers the Metal command-buffer watchdog at 32,768.
-    A 512-token chunk completes the 32,768-token native q8 snapshot/L2
-    discriminator exactly.  Both sizes align with every shipped compression
-    ratio (4 and 128), so chunk boundaries do not split compressor windows.
+    same chunk size with FULL-WIDTH attention triggers the Metal
+    command-buffer watchdog at 32,768.  With intra-layer attention
+    sub-chunking active (model-side ``DSV4_ATTN_SUBCHUNK``, default on),
+    attention score tensors are bounded at 512 query rows regardless of the
+    outer chunk, so wide chunks stay watchdog-safe (24,576-token curve
+    proven standalone) and keep the MoE gather_qmm batch win.  The 512
+    clamp is therefore applied only when sub-chunking is disabled.  All
+    sizes align with every shipped compression ratio (4 and 128), so chunk
+    boundaries do not split compressor windows.
 
     ``DSV4_PREFILL_STEP_SIZE=0`` remains an explicit diagnostic single-shot
     override.  Normal callers treat the configured value as an upper bound.
@@ -106,7 +125,10 @@ def dsv4_effective_prefill_step(
         return prompt_tokens
     step = max(1, int(configured_step or 2048))
     final_context = max(0, int(cached_tokens or 0)) + prompt_tokens
-    if final_context > DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS:
+    if (
+        final_context > DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS
+        and not dsv4_attn_subchunk_active()
+    ):
         step = min(step, DEFAULT_DSV4_LONG_PREFILL_STEP_TOKENS)
     return min(prompt_tokens, step)
 
@@ -164,6 +186,12 @@ class _Request:
     # snapshot boundary. Normal prompts use one token for the N-1 contract;
     # rendered generation rails add their exact token length to that tail.
     prompt_snapshot_tail_tokens: int = 1
+    # Pipelined decode: still-lazy sampled token whose forward pass is already
+    # submitted via mx.async_eval. None when the pipeline is not primed.
+    pending_sampled: Any = None
+    # Memo of the scheduler's logprob-capture decision. Static per request,
+    # but probing it costs an import + registry walk on the decode hot path.
+    capture_logprobs_memo: Optional[bool] = None
 
 
 @dataclass
@@ -286,6 +314,13 @@ class DSV4BatchGenerator:
         # absent in the scheduler worker thread on cache-hit replay.
         self._device = mx.default_device()
         self._stream = stream or mx.default_stream(self._device)
+        # Pipelined decode fast path: keep one forward in flight so Python
+        # graph construction + caller bookkeeping overlap the GPU forward.
+        # Kill switch: VMLX_DSV4_PIPELINED_DECODE=0.
+        self._pipelined_decode = hasattr(mx, "async_eval") and (
+            os.environ.get("VMLX_DSV4_PIPELINED_DECODE", "1").strip().lower()
+            not in {"0", "false", "no", "off"}
+        )
 
     def _trace_timing(self, event: str, start: float, uid: Optional[int] = None, **fields: Any) -> None:
         if os.environ.get("VMLINUX_DSV4_TRACE_TIMINGS", "").lower() not in {
@@ -1032,6 +1067,69 @@ class DSV4BatchGenerator:
         except Exception:
             return False
 
+    def _capture_logprobs_for(self, req: _Request) -> bool:
+        if req.capture_logprobs_memo is None:
+            req.capture_logprobs_memo = self._should_capture_logprobs(req.uid)
+        return req.capture_logprobs_memo
+
+    def _pipelined_decode_step(self, req: _Request) -> int:
+        """One decode step with one forward pass kept in flight.
+
+        The forward for token t+1 is built from the still-lazy sampled token t
+        and submitted with mx.async_eval BEFORE token t is materialized, so
+        Python graph construction and the caller's per-token bookkeeping
+        overlap the GPU forward instead of serializing behind it. Emitted
+        tokens are numerically identical to the synchronous path — the same
+        ops run in the same order on the same cache state.
+
+        The only behavioral difference: when token t turns out to be a stop,
+        the live cache has already advanced one speculative token. That is
+        safe for DSV4 because terminal prefix-cache stores consume the clean
+        prompt snapshot (never the live cache), PLD/extract_cache paths are
+        gated off for this generator, and remove() discards the live cache.
+
+        Only called for requests with no logits processors, no state machine,
+        and no logprob capture — eligibility is static per request, so the
+        live cache never has a speculative token when the sync path runs.
+        """
+        if req.pending_sampled is None:
+            # Prime: submit the forward for this step from the last
+            # materialized token.
+            ids = mx.array([[req.out_tokens[-1]]], dtype=mx.int32)
+            logits = self.model(ids, cache=req.cache)
+            sampled, _ = self._sample(
+                logits[:, -1, :], req.sampler, None, (), capture_logprobs=False
+            )
+            mx.async_eval(sampled)
+            req.pending_sampled = sampled
+        cur = req.pending_sampled
+        next_sampled = None
+        if len(req.out_tokens) + 1 < self._effective_max_tokens(req):
+            _t_build = time.perf_counter()
+            ids = cur[:, None].astype(mx.int32)
+            logits = self.model(ids, cache=req.cache)
+            self._trace_timing("pipe_graph", _t_build, req.uid, pipelined=True)
+            _t_s = time.perf_counter()
+            next_sampled, _ = self._sample(
+                logits[:, -1, :], req.sampler, None, (), capture_logprobs=False
+            )
+            self._trace_timing("pipe_sample", _t_s, req.uid, pipelined=True)
+            _t_d = time.perf_counter()
+            mx.async_eval(next_sampled)
+            self._trace_timing("pipe_dispatch", _t_d, req.uid, pipelined=True)
+            self._trace_timing(
+                "decode_model",
+                _t_build,
+                req.uid,
+                output_tokens=len(req.out_tokens),
+                pipelined=True,
+            )
+        _t_mat = time.perf_counter()
+        tok_id = self._sampled_token_id(cur)
+        self._trace_timing("sample_materialize", _t_mat, req.uid, pipelined=True)
+        req.pending_sampled = next_sampled
+        return tok_id
+
     def _sample(
         self,
         logits,
@@ -1075,6 +1173,32 @@ class DSV4BatchGenerator:
     @staticmethod
     def _realize_last_logits(last_logits: Any) -> None:
         mx.eval(last_logits)
+
+    def _prefill_should_clear_cache(self) -> bool:
+        """Clear transient MLX buffers between prefill chunks only under real
+        Metal working-set pressure.
+
+        Unconditional clearing dropped the allocator pool after every
+        2048-token chunk, forcing the next chunk to re-grow it from Metal
+        while providing no benefit on machines with headroom. The clear stays
+        as the pressure valve for the near-limit long-prompt case it was
+        introduced for (v1.5.49). Falls back to clearing (legacy behavior)
+        whenever the headroom probe fails.
+        """
+        try:
+            from .memory_limits import (
+                get_effective_metal_working_set_bytes,
+                get_metal_ws_guard_threshold,
+            )
+
+            active_bytes, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+            if max_ws_bytes <= 0:
+                return True
+            threshold = get_metal_ws_guard_threshold() / 100.0
+            # Start clearing before the guard threshold itself would trip.
+            return active_bytes >= max_ws_bytes * threshold * 0.8
+        except Exception:
+            return True
 
     def _prefill_last_logits(
         self,
@@ -1175,7 +1299,7 @@ class DSV4BatchGenerator:
                 self._sync()
             else:
                 mx.eval(last_logits)
-            if hasattr(mx, "clear_cache"):
+            if hasattr(mx, "clear_cache") and self._prefill_should_clear_cache():
                 mx.clear_cache()
             off = end_off
             if capture_block_deltas:
@@ -1478,7 +1602,7 @@ class DSV4BatchGenerator:
                         last_logits, r.sampler, r.logits_processors,
                         self._processor_context(r),
                         generated_tokens=list(r.out_tokens),
-                        capture_logprobs=self._should_capture_logprobs(r.uid),
+                        capture_logprobs=self._capture_logprobs_for(r),
                     )
                     tok_id = self._sampled_token_id(sampled)
                     self._trace_timing(
@@ -1624,7 +1748,7 @@ class DSV4BatchGenerator:
                         last_logits, r.sampler, r.logits_processors,
                         self._processor_context(r),
                         generated_tokens=list(r.out_tokens),
-                        capture_logprobs=self._should_capture_logprobs(r.uid),
+                        capture_logprobs=self._capture_logprobs_for(r),
                     )
                     tok_id = self._sampled_token_id(sampled)
                     self._trace_timing(
@@ -1648,33 +1772,47 @@ class DSV4BatchGenerator:
                         # Already finished — just emit nothing. Caller
                         # should remove() it.
                         continue
-                    last_id = r.out_tokens[-1]
-                    ids = mx.array([[last_id]], dtype=mx.int32)
-                    _t_decode_model = time.perf_counter()
-                    logits = self.model(ids, cache=r.cache)
-                    last_logits = logits[:, -1, :]
-                    self._trace_timing(
-                        "decode_model",
-                        _t_decode_model,
-                        r.uid,
-                        output_tokens=len(r.out_tokens),
-                    )
-                    _t_sample = time.perf_counter()
-                    sampled, logprobs = self._sample(
-                        last_logits, r.sampler, r.logits_processors,
-                        self._processor_context(r),
-                        generated_tokens=list(r.out_tokens),
-                        capture_logprobs=self._should_capture_logprobs(r.uid),
-                    )
-                    tok_id = self._sampled_token_id(sampled)
-                    self._trace_timing(
-                        "sample_materialize",
-                        _t_sample,
-                        r.uid,
-                        capture_logprobs=logprobs is not None,
-                    )
+                    if (
+                        self._pipelined_decode
+                        and not r.logits_processors
+                        and r.state_machine is None
+                        and not self._capture_logprobs_for(r)
+                    ):
+                        tok_id = self._pipelined_decode_step(r)
+                        logprobs = None
+                    else:
+                        last_id = r.out_tokens[-1]
+                        ids = mx.array([[last_id]], dtype=mx.int32)
+                        _t_decode_model = time.perf_counter()
+                        logits = self.model(ids, cache=r.cache)
+                        last_logits = logits[:, -1, :]
+                        self._trace_timing(
+                            "decode_model",
+                            _t_decode_model,
+                            r.uid,
+                            output_tokens=len(r.out_tokens),
+                        )
+                        _t_sample = time.perf_counter()
+                        sampled, logprobs = self._sample(
+                            last_logits, r.sampler, r.logits_processors,
+                            self._processor_context(r),
+                            generated_tokens=list(r.out_tokens),
+                            capture_logprobs=self._capture_logprobs_for(r),
+                        )
+                        tok_id = self._sampled_token_id(sampled)
+                        self._trace_timing(
+                            "sample_materialize",
+                            _t_sample,
+                            r.uid,
+                            capture_logprobs=logprobs is not None,
+                        )
                     r.out_tokens.append(tok_id)
                     self._update_finish_reason_after_token(r, tok_id)
+                    if r.finish_reason is not None:
+                        # Drop the in-flight speculative token, if any. Its
+                        # forward already advanced the live cache; that cache
+                        # is discarded on remove(), never stored.
+                        r.pending_sampled = None
                     gen_resps.append(_Response(
                         uid=r.uid, token=tok_id, logprobs=logprobs,
                         finish_reason=r.finish_reason,

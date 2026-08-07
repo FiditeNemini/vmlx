@@ -1,19 +1,9 @@
 import Database from "better-sqlite3";
-import { app, safeStorage } from "electron";
+import { app } from "electron";
 import { join } from "path";
 import { existsSync, unlinkSync, renameSync } from "fs";
 import { migrateLegacySessionStartupConfig } from "../shared/sessionConfigMigrations";
-
-function encryptValue(value: string): string {
-  if (!value || !safeStorage.isEncryptionAvailable()) return value;
-  return "enc:" + safeStorage.encryptString(value).toString("base64");
-}
-
-function decryptValue(value: string): string {
-  if (!value || !value.startsWith("enc:")) return value; // legacy plaintext
-  if (!safeStorage.isEncryptionAvailable()) return "";
-  return safeStorage.decryptString(Buffer.from(value.slice(4), "base64"));
-}
+import { decryptValue, encryptValue } from "./secretStorage";
 
 export interface Chat {
   id: string;

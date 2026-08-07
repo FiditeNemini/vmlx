@@ -20959,6 +20959,68 @@ async def stream_completions_multi(
             if request.logprobs is not None:
                 gen_kwargs["logprobs"] = True
                 gen_kwargs["top_logprobs"] = request.logprobs
+            if _is_loaded_dsv4_model(request.model):
+                # DSV4 on the streaming /v1/completions rail: the generic path
+                # below streams raw `<think>RC</think>content` deltas. The
+                # canonical DSV4 template glues reasoning to content with no
+                # separator, so raw-text consumers that fence-match code
+                # (HumanEval-style harnesses) see `</think>```python` and
+                # fail. Route through engine.chat() and emit one aggregate
+                # chunk carrying only the visible text — exact parity with the
+                # non-stream DSV4 completion branch.
+                chat_prompt = _dsv4_completion_prompt_for_chat_rail(
+                    prompt, request
+                )
+                chat_kwargs = {
+                    key: value
+                    for key, value in gen_kwargs.items()
+                    if key != "prompt"
+                }
+                chat_kwargs["max_tokens"] = _dsv4_completion_internal_max_tokens(
+                    chat_kwargs["max_tokens"],
+                    request,
+                )
+                decision = _resolve_dsv4_thinking_policy(
+                    requested_enable_thinking=True,
+                    effort_requested=False,
+                    tools_present=False,
+                    tool_choice=None,
+                    default_mode=_jang_chat_default_mode(
+                        _model_path or _model_name or request.model or ""
+                    ),
+                )
+                chat_kwargs["enable_thinking"] = decision.enable_thinking
+                _set_resolved_repetition_penalty(
+                    chat_kwargs,
+                    request.repetition_penalty,
+                    request.model,
+                    enable_thinking=decision.enable_thinking,
+                )
+                output = await asyncio.wait_for(
+                    engine.chat(
+                        messages=[{"role": "user", "content": chat_prompt}],
+                        **chat_kwargs,
+                    ),
+                    timeout=_stream_timeout,
+                )
+                data = {
+                    "id": response_id,
+                    "object": "text_completion",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [
+                        {
+                            "index": prompt_index,
+                            "text": _visible_text_for_dsv4_completion(
+                                output, engine, request
+                            ),
+                            "finish_reason": output.finish_reason,
+                        }
+                    ],
+                    "usage": get_usage(output).model_dump(exclude_none=True),
+                }
+                yield f"data: {json.dumps(data, ensure_ascii=True)}\n\n"
+                continue
             if _is_loaded_mimo_v2_model(request.model) or bool(
                 getattr(engine, "is_mllm", False)
                 or getattr(engine, "_is_mllm", False)

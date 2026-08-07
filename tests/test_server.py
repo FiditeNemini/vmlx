@@ -1468,6 +1468,105 @@ class TestOpenAILogprobsFormatting:
         assert engine.kwargs["max_tokens"] == 512
 
     @pytest.mark.asyncio
+    async def test_dsv4_streaming_completion_uses_chat_rail_and_strips_think_glue(
+        self, monkeypatch, tmp_path
+    ):
+        import json
+
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import CompletionRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
+
+        (tmp_path / "config.json").write_text(
+            json.dumps({"model_type": "deepseek_v4"}),
+            encoding="utf-8",
+        )
+
+        class _Engine:
+            is_mllm = False
+            preserve_native_tool_format = False
+            tokenizer = self._Tokenizer()
+
+            def __init__(self):
+                self.chat_calls = []
+
+            async def stream_generate(self, **kwargs):
+                raise AssertionError(
+                    "DSV4 streaming completions must not stream raw "
+                    "think-tagged text"
+                )
+                yield  # pragma: no cover
+
+            async def chat(self, messages, **kwargs):
+                self.chat_calls.append({"messages": messages, "kwargs": kwargs})
+                text = (
+                    "I will fence the solution.</think>```python\n"
+                    "def has_close_elements(numbers, threshold):\n"
+                    "    return False\n"
+                    "```"
+                )
+                return GenerationOutput(
+                    text=text,
+                    raw_text=text,
+                    prompt_tokens=9,
+                    completion_tokens=24,
+                    finish_reason="stop",
+                )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_model_path", str(tmp_path))
+        monkeypatch.setattr(server, "_model_name", "dsv4-route-code-probe")
+        monkeypatch.setattr(server, "_served_model_name", "dsv4-route-code-probe")
+        monkeypatch.setattr(server, "_reasoning_parser", DeepSeekR1ReasoningParser())
+        monkeypatch.setattr(server, "_default_timeout", 60)
+        monkeypatch.setattr(server, "_default_max_tokens", 512)
+        monkeypatch.setattr(server, "_default_temperature", None)
+        monkeypatch.setattr(server, "_default_top_p", None)
+        monkeypatch.setattr(server, "_default_repetition_penalty", None)
+        server._jang_sampling_defaults_cache.clear()
+
+        request = CompletionRequest(
+            model="dsv4-route-code-probe",
+            prompt="Complete the function:\ndef has_close_elements(...):",
+            max_tokens=64,
+            temperature=0,
+            top_p=1,
+            stream=True,
+        )
+        lines = []
+        async for line in server.stream_completions_multi(
+            engine, [request.prompt], request
+        ):
+            lines.append(line)
+
+        assert len(engine.chat_calls) == 1
+        call = engine.chat_calls[0]
+        assert call["messages"] == [
+            {
+                "role": "user",
+                "content": "Complete the function:\ndef has_close_elements(...):",
+            }
+        ]
+        assert call["kwargs"]["enable_thinking"] is True
+        assert call["kwargs"]["max_tokens"] == 64
+
+        data_lines = [
+            line
+            for line in lines
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        assert len(data_lines) == 1
+        chunk = json.loads(data_lines[0].removeprefix("data: ").strip())
+        text = chunk["choices"][0]["text"]
+        assert "</think>" not in text
+        assert text.startswith("```python\n")
+        assert chunk["choices"][0]["finish_reason"] == "stop"
+        assert chunk["usage"]["completion_tokens"] == 24
+        assert lines[-1] == "data: [DONE]\n\n"
+
+    @pytest.mark.asyncio
     async def test_chat_endpoint_passes_logprobs_to_text_engine(self, monkeypatch):
         import vmlx_engine.server as server
         from vmlx_engine.api.models import ChatCompletionRequest, Message

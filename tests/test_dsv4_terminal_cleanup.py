@@ -203,3 +203,129 @@ def test_scheduler_forwards_request_cache_bypass_to_dsv4_generator():
 
     assert 'insert_kwargs["capture_prompt_snapshots"]' in source
     assert 'getattr(request, "_bypass_prefix_cache", False)' in source
+
+
+class _SalvageGenerator(DSV4BatchGenerator):
+    """DSV4-gate generator that hands out one prompt snapshot for uid 7."""
+
+    def __init__(self, events, snapshot):
+        super().__init__(events)
+        self._snapshot = snapshot
+
+    def take_prompt_snapshots(self, uids):
+        self.events.append(("take_snapshots", tuple(uids)))
+        if self._snapshot is None:
+            return {}
+        return {7: (self._snapshot, [10])}
+
+
+class _SalvageBlockCache:
+    def __init__(self, events):
+        self.events = events
+        self._request_tables = {}
+        self.paged_cache = SimpleNamespace(
+            delete_block_table=lambda rid: events.append(
+                ("delete_table", rid)
+            ),
+            release_request_refs=lambda table: events.append(
+                ("release_refs", table)
+            ),
+            detach_request=lambda rid: events.append(("detach", rid)),
+            max_resident_bytes=0,
+        )
+
+    def store_cache(self, request_id, tokens, cache_data, **kwargs):
+        self.events.append(
+            (
+                "store_cache",
+                request_id,
+                tuple(tokens),
+                kwargs.get("cache_type"),
+            )
+        )
+        return None
+
+
+def _salvage_scheduler(monkeypatch, *, bypass, snapshot):
+    events = []
+    generator = _SalvageGenerator(events, snapshot)
+    scheduler, request = _cleanup_scheduler(
+        monkeypatch,
+        status=RequestStatus.RUNNING,
+        generator=generator,
+        bypass=bypass,
+    )
+    scheduler.waiting = []
+    scheduler._pending_aborts = set()
+    scheduler._abort_salvage_requests = {}
+    scheduler.block_aware_cache = _SalvageBlockCache(events)
+    scheduler._dsv4_trace_timing = lambda *_a, **_k: None
+    scheduler._extract_cache_states = lambda cache: [{"state": cache}]
+    request.cached_tokens = 0
+    return scheduler, request, events
+
+
+def test_abort_salvages_prompt_snapshot_into_prefix_cache(monkeypatch):
+    snapshot = [SimpleNamespace()]
+    scheduler, request, events = _salvage_scheduler(
+        monkeypatch, bypass=False, snapshot=snapshot
+    )
+
+    assert scheduler.abort_request(request.request_id) is True
+    assert request.request_id in scheduler._abort_salvage_requests
+
+    scheduler._process_pending_aborts()
+
+    assert events == [
+        ("delete_table", request.request_id),
+        ("take_snapshots", (7,)),
+        ("store_cache", request.request_id, (10,), "user"),
+        ("release_refs", None),
+        ("detach", request.request_id),
+        ("remove", (7,)),
+    ]
+    assert scheduler._abort_salvage_requests == {}
+    assert scheduler.block_aware_cache._request_tables == {}
+
+
+def test_abort_salvage_skipped_for_cache_bypass_requests(monkeypatch):
+    scheduler, request, events = _salvage_scheduler(
+        monkeypatch, bypass=True, snapshot=[SimpleNamespace()]
+    )
+
+    assert scheduler.abort_request(request.request_id) is True
+    assert scheduler._abort_salvage_requests == {}
+
+    scheduler._process_pending_aborts()
+
+    assert ("remove", (7,)) in events
+    assert not any(e[0] == "store_cache" for e in events)
+    assert not any(e[0] == "take_snapshots" for e in events)
+
+
+def test_abort_salvage_skipped_when_no_snapshot_available(monkeypatch):
+    scheduler, request, events = _salvage_scheduler(
+        monkeypatch, bypass=False, snapshot=None
+    )
+
+    assert scheduler.abort_request(request.request_id) is True
+    scheduler._process_pending_aborts()
+
+    assert ("take_snapshots", (7,)) in events
+    assert ("remove", (7,)) in events
+    assert not any(e[0] == "store_cache" for e in events)
+
+
+def test_abort_salvage_skipped_when_key_fully_cached(monkeypatch):
+    snapshot = [SimpleNamespace()]
+    scheduler, request, events = _salvage_scheduler(
+        monkeypatch, bypass=False, snapshot=snapshot
+    )
+    request.cached_tokens = 1
+
+    assert scheduler.abort_request(request.request_id) is True
+    scheduler._process_pending_aborts()
+
+    assert ("take_snapshots", (7,)) in events
+    assert not any(e[0] == "store_cache" for e in events)
+    assert ("remove", (7,)) in events

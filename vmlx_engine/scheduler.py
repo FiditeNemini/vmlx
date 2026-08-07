@@ -517,6 +517,9 @@ class Scheduler:
         self.requests: Dict[str, Request] = {}  # All requests by ID
         self.finished_req_ids: Set[str] = set()  # Recently finished
         self._pending_aborts: Set[str] = set()  # Deferred aborts (processed in step())
+        # Aborted requests eligible for prompt-snapshot salvage into the
+        # prefix cache (processed alongside _pending_aborts in step()).
+        self._abort_salvage_requests: Dict[str, Request] = {}
 
         # Mapping between our request IDs and BatchGenerator UIDs
         self.request_id_to_uid: Dict[str, int] = {}
@@ -5870,6 +5873,16 @@ class Scheduler:
         # Only defer if the request is actually in the batch generator.
         if request.request_id in self.request_id_to_uid:
             self._pending_aborts.add(request.request_id)
+            # Keep the request object so the deferred abort can publish its
+            # clean prompt-boundary snapshot into the prefix cache (#58) —
+            # otherwise an identical retry re-prefills the whole prompt.
+            if (
+                self.block_aware_cache is not None
+                and not getattr(request, "_bypass_prefix_cache", False)
+                and int(getattr(request, "cached_tokens", 0) or 0)
+                < len(request.prompt_token_ids)
+            ):
+                self._abort_salvage_requests[request.request_id] = request
 
         # Clean up per-request stop tokens from shared BatchGenerator
         # Must happen BEFORE removing from running, so we can still check
@@ -5931,9 +5944,33 @@ class Scheduler:
         self._pending_aborts.clear()
         for request_id in aborts:
             uid = self.request_id_to_uid.pop(request_id, None)
+            salvage_req = self._abort_salvage_requests.pop(request_id, None)
             if uid is not None:
                 unregister_generation_logprobs(self.model, uid)
                 if self.batch_generator is not None:
+                    # Salvage the clean prompt-boundary KV snapshot BEFORE
+                    # remove() drops the generator request (#58). Metal has
+                    # synchronized by this point so the snapshot is safe to
+                    # detach and store.
+                    if (
+                        salvage_req is not None
+                        and self.block_aware_cache is not None
+                        and hasattr(self.batch_generator, "take_prompt_snapshots")
+                    ):
+                        try:
+                            snaps = self.batch_generator.take_prompt_snapshots(
+                                [uid]
+                            )
+                            if uid in snaps:
+                                snapshot, key_tokens = snaps[uid]
+                                self._store_aborted_prompt_snapshot(
+                                    request_id, salvage_req, snapshot, key_tokens
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                f"Prompt-snapshot salvage failed for "
+                                f"{request_id}: {e}"
+                            )
                     try:
                         self.batch_generator.remove([uid])
                     except Exception as e:
@@ -5942,6 +5979,84 @@ class Scheduler:
                         )
                 self.uid_to_request_id.pop(uid, None)
             logger.debug(f"Processed deferred abort for {request_id}")
+
+    def _store_aborted_prompt_snapshot(
+        self,
+        request_id: str,
+        request: "Request",
+        snapshot: List[Any],
+        key_tokens: List[int],
+    ) -> None:
+        """Publish an aborted request's prompt-boundary KV into the prefix
+        cache (#58).
+
+        The snapshot is the clean prompt-boundary state captured after
+        prefill and before decode, so it matches the same N-1 key contract
+        as the completion-path store. Mirrors that path: optional TQ
+        quantization, extract, store, then settle the stored blocks to
+        cached-but-free so memory pressure can reclaim them.
+        """
+        cached = int(getattr(request, "cached_tokens", 0) or 0)
+        if len(key_tokens) <= cached:
+            return
+        _t_store = time.perf_counter()
+        cache_for_store = snapshot
+        if getattr(self, "_kv_cache_bits", 0):
+            cache_for_store = self._quantize_cache_for_storage(cache_for_store)
+        extracted = self._extract_cache_states(cache_for_store)
+        if not extracted:
+            return
+        store_kwargs: Dict[str, Any] = {
+            "cache_type": self._pick_cache_type_for_request(request),
+        }
+        if getattr(request, "_cache_extra_keys", None):
+            store_kwargs["cache_extra_keys"] = dict(request._cache_extra_keys)
+        if (
+            self._is_hybrid
+            and not self._uses_dsv4_cache
+            and not self._uses_zaya_cache
+            and not self._mixed_attention_cache_model
+        ):
+            store_kwargs["store_cumulative_state"] = False
+        self.block_aware_cache.store_cache(
+            request_id,
+            list(key_tokens),
+            extracted,
+            **store_kwargs,
+        )
+        self._dsv4_trace_timing(
+            "abort_salvage_store",
+            _t_store,
+            request_id,
+            tokens=len(key_tokens),
+            layers=len(extracted),
+        )
+        logger.info(
+            "Salvaged aborted request %s prompt KV into prefix cache "
+            "(%d cache-key tokens, %d layers)",
+            request_id,
+            len(key_tokens),
+            len(extracted),
+        )
+        # store_cache() re-registered this request in _request_tables with
+        # the stored blocks at ref_count>=1. Settle them to cached-but-free
+        # (same idiom as the completion-path post-store release).
+        try:
+            _stored_entry = self.block_aware_cache._request_tables.pop(
+                request_id, None
+            )
+            self.block_aware_cache.paged_cache.release_request_refs(
+                _stored_entry.block_table if _stored_entry else None
+            )
+            self.block_aware_cache.paged_cache.detach_request(request_id)
+            if self.block_aware_cache.paged_cache.max_resident_bytes > 0:
+                self.block_aware_cache.paged_cache.enforce_byte_budget()
+        except Exception as _rel_e:
+            logger.debug(
+                "Post-salvage paged ref release failed for %s: %s",
+                request_id,
+                _rel_e,
+            )
 
     def has_requests(self) -> bool:
         """Check for generation work or deferred abort cleanup.

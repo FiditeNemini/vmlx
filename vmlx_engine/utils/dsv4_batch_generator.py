@@ -1481,6 +1481,30 @@ class DSV4BatchGenerator:
         self._requests = keep
         return out if return_prompt_caches else None
 
+    def take_prompt_snapshots(self, uids):
+        """Detach clean prompt-boundary snapshots for ``uids``.
+
+        Used by the scheduler's deferred-abort salvage: without this, an
+        aborted request's prompt-side KV is discarded and an identical retry
+        pays a full cold re-prefill. The snapshot was captured at the reusable
+        boundary BEFORE decode advanced the live cache, so it carries no SWA
+        wrap or CSA/HCA pool drift and can be donated to the prefix cache
+        exactly like a completed request's snapshot store.
+
+        Returns ``{uid: (snapshot, key_tokens)}`` where ``key_tokens`` is the
+        prompt truncated by the snapshot tail contract (N-1 plus any rendered
+        generation-rail tokens). Ownership of the snapshot transfers to the
+        caller; the request's reference is cleared.
+        """
+        out = {}
+        for r in self._requests:
+            if r.uid in uids and r.prompt_snapshot is not None:
+                tail = max(1, int(r.prompt_snapshot_tail_tokens or 1))
+                if len(r.prompt_tokens) > tail:
+                    out[r.uid] = (r.prompt_snapshot, list(r.prompt_tokens[:-tail]))
+                r.prompt_snapshot = None
+        return out
+
     def extract_cache(self, uids):
         out = {}
         for r in self._requests:

@@ -367,17 +367,24 @@ class DSV4BatchGenerator:
         except TypeError:
             mx.synchronize()
 
-    def _sampled_token_id(self, sampled) -> int:
-        """Materialize a sampled token on this worker thread's stream."""
+    def _sampled_token_id(self, sampled, rehome: bool = True) -> int:
+        """Materialize a sampled token on this worker thread's stream.
+
+        `rehome=False` skips the stream re-home for scalars that were built
+        and dispatched on this worker's stream in the same method (the
+        pipelined decode path). The re-home add builds a new lazy array, so
+        tolist() pays a full ~2ms GPU eval round-trip per token instead of a
+        host copy of an already-evaluated scalar. It stays on for the
+        prefill/cache-hit-replay boundaries, where the scalar can be
+        associated with a stale Stream(gpu, 0) from an earlier
+        request/thread.
+        """
         with mx.stream(self._stream):
-            try:
-                # Re-home the scalar onto the active worker stream before
-                # tolist()/item() forces synchronization. Cache-hit replay can
-                # otherwise leave the sampled scalar associated with a stale
-                # Stream(gpu, 0) object from an earlier request/thread.
-                sampled = sampled + mx.zeros_like(sampled)
-            except Exception:
-                pass
+            if rehome:
+                try:
+                    sampled = sampled + mx.zeros_like(sampled)
+                except Exception:
+                    pass
             # Scalar materialization is the required sync point. Calling
             # _sync() here first adds a second host/GPU barrier to every
             # decode token on the DSV4 hot path.
@@ -1134,7 +1141,10 @@ class DSV4BatchGenerator:
                 pipelined=True,
             )
         _t_mat = time.perf_counter()
-        tok_id = self._sampled_token_id(cur)
+        # cur was built, sampled, and async_eval'd inside this method on this
+        # worker's stream (prime branch or previous iteration) — never a
+        # replayed scalar — so the stale-stream re-home is unnecessary here.
+        tok_id = self._sampled_token_id(cur, rehome=False)
         self._trace_timing("sample_materialize", _t_mat, req.uid, pipelined=True)
         req.pending_sampled = next_sampled
         return tok_id

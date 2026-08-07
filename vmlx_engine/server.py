@@ -881,6 +881,13 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
         return None
 
 
+# Implicit-clamp WARNINGs deduplicate on (requested, cap, model): the /health
+# poll re-resolves the implicit max output every few seconds, so an unchanged
+# clamp would otherwise emit hundreds of identical lines per session.  A new
+# tuple (cap moved, model swapped) still warns.
+_projected_guard_warned: set[tuple[int, int, str]] = set()
+
+
 def _apply_projected_output_guard(
     candidate: int,
     *,
@@ -907,12 +914,20 @@ def _apply_projected_output_guard(
                 "kernel-panic risk."
             ),
         )
-    logger.warning(
+    resolved_model = model_name or _model_path or _model_name or ""
+    dedup_key = (requested, int(cap), resolved_model)
+    log = (
+        logger.debug
+        if dedup_key in _projected_guard_warned
+        else logger.warning
+    )
+    _projected_guard_warned.add(dedup_key)
+    log(
         "Projected Metal headroom guard clamped implicit max output tokens: "
         "requested=%d safe_cap=%d model=%s",
         requested,
         cap,
-        model_name or _model_path or _model_name or "",
+        resolved_model,
     )
     return max(1, int(cap))
 

@@ -182,3 +182,36 @@ def test_projection_uses_loaded_model_config(monkeypatch):
 
     assert cap is not None
     assert cap > 0
+
+
+def test_implicit_clamp_warning_dedupes_on_repeat_resolutions(monkeypatch, caplog):
+    import logging
+
+    from vmlx_engine import server
+
+    monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
+    monkeypatch.setattr(server, "_default_max_tokens", 4096)
+    monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
+    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
+    monkeypatch.setattr(server, "_projected_guard_warned", set())
+
+    def clamp_warnings():
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "headroom guard clamped" in r.message
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger=server.logger.name):
+        # Simulate the /health poll re-resolving the same implicit default.
+        for _ in range(5):
+            assert server._resolve_max_tokens(None, "tight-headroom-model") == 1024
+        assert len(clamp_warnings()) == 1
+
+        # A changed cap is new information and must warn again.
+        monkeypatch.setattr(
+            server, "_metal_projected_output_token_cap", lambda model_name="": 512
+        )
+        assert server._resolve_max_tokens(None, "tight-headroom-model") == 512
+        assert server._resolve_max_tokens(None, "tight-headroom-model") == 512
+        assert len(clamp_warnings()) == 2

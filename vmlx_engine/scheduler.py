@@ -2419,6 +2419,10 @@ class Scheduler:
                             compress_ratio=getattr(layer_cache, "compress_ratio", None),
                         )
                         restored.local = local_rot
+                        # Direct dict read below bypasses the state-property
+                        # flush; drain any deferred pool tokens first.
+                        if hasattr(layer_cache, "flush_pool_pending"):
+                            layer_cache.flush_pool_pending()
                         restored.compressor_state = {
                             k: _as_mx_tree(v)
                             for k, v in (

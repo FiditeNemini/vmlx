@@ -867,7 +867,16 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
             return None
         cap = min(caps)
         if buffer_cap is not None and buffer_cap == cap and buffer_cap != byte_cap:
-            logger.info(
+            # The /health poll re-resolves this every few seconds; log each
+            # distinct binding cap once, then drop to debug (byte_cap drifts
+            # with live memory, so it is excluded from the dedup key).
+            log = (
+                logger.debug
+                if buffer_cap in _buffer_ceiling_logged
+                else logger.info
+            )
+            _buffer_ceiling_logged.add(buffer_cap)
+            log(
                 "Metal live-buffer ceiling is the binding output limit: "
                 "cap=%d tokens (resource_limit=%s, %.1f buffers/token). "
                 "The byte projection alone would have allowed %s.",
@@ -886,6 +895,10 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
 # clamp would otherwise emit hundreds of identical lines per session.  A new
 # tuple (cap moved, model swapped) still warns.
 _projected_guard_warned: set[tuple[int, int, str]] = set()
+
+# One-shot dedup for the buffer-ceiling INFO in the cap projection above,
+# which is also re-run by every /health poll.
+_buffer_ceiling_logged: set[int] = set()
 
 
 def _apply_projected_output_guard(
@@ -915,7 +928,11 @@ def _apply_projected_output_guard(
             ),
         )
     resolved_model = model_name or _model_path or _model_name or ""
-    dedup_key = (requested, int(cap), resolved_model)
+    # Dedup on the basename: boot resolves with the filesystem path while
+    # requests resolve with the API model name, and both describe the same
+    # loaded model — keying on the raw string warned twice per session.
+    model_key = os.path.basename(resolved_model.rstrip("/")) or resolved_model
+    dedup_key = (requested, int(cap), model_key)
     log = (
         logger.debug
         if dedup_key in _projected_guard_warned

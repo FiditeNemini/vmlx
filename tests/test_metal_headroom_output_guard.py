@@ -215,3 +215,92 @@ def test_implicit_clamp_warning_dedupes_on_repeat_resolutions(monkeypatch, caplo
         assert server._resolve_max_tokens(None, "tight-headroom-model") == 512
         assert server._resolve_max_tokens(None, "tight-headroom-model") == 512
         assert len(clamp_warnings()) == 2
+
+
+def test_implicit_clamp_warning_dedupes_path_and_api_name(monkeypatch, caplog):
+    """Boot resolves with the filesystem path, requests with the API model
+    name; both describe the same loaded model and must warn once total."""
+    import logging
+
+    from vmlx_engine import server
+
+    monkeypatch.setattr(server, "_default_max_tokens_explicit", False)
+    monkeypatch.setattr(server, "_default_max_tokens", 4096)
+    monkeypatch.setattr(server, "_bundle_sampling_default", lambda model_name, key: None)
+    monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
+    monkeypatch.setattr(server, "_projected_guard_warned", set())
+
+    with caplog.at_level(logging.DEBUG, logger=server.logger.name):
+        assert (
+            server._resolve_max_tokens(
+                None, "/Users/eric/.mlxstudio/models/DeepSeek-V4-Flash-0731-JANG"
+            )
+            == 1024
+        )
+        assert (
+            server._resolve_max_tokens(None, "models/DeepSeek-V4-Flash-0731-JANG")
+            == 1024
+        )
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "headroom guard clamped" in r.message
+    ]
+    assert len(warnings) == 1
+
+
+def test_buffer_ceiling_info_logs_once_per_binding_cap(monkeypatch, caplog):
+    """The /health poll re-runs the cap projection every few seconds; the
+    buffer-ceiling INFO must fire once per distinct binding cap, not per poll
+    (byte_cap drifts with live memory and is excluded from the dedup key)."""
+    import logging
+    from types import SimpleNamespace
+
+    from vmlx_engine import server
+    from vmlx_engine.utils import memory_limits
+
+    monkeypatch.setattr(
+        server,
+        "_loaded_model_config_for_memory_projection",
+        lambda: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        server,
+        "_metal_projection_stats",
+        lambda: (int(100 * 1024**3), int(107 * 1024**3)),
+    )
+    monkeypatch.setattr(
+        memory_limits, "estimate_kv_bytes_per_token_from_config", lambda cfg: 4096
+    )
+    monkeypatch.setattr(memory_limits, "retained_buffers_per_token", lambda cfg: 43.0)
+    monkeypatch.setattr(memory_limits, "metal_resource_limit", lambda: 499000)
+    byte_caps = iter([20000, 21000, 22000, 23000])
+    monkeypatch.setattr(
+        memory_limits,
+        "projected_output_token_cap",
+        lambda **kw: next(byte_caps),
+    )
+    buffer_cap_holder = {"cap": 10063}
+    monkeypatch.setattr(
+        memory_limits,
+        "projected_output_token_cap_by_buffers",
+        lambda **kw: buffer_cap_holder["cap"],
+    )
+    monkeypatch.setattr(server, "_buffer_ceiling_logged", set())
+
+    def ceiling_infos():
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO and "binding output limit" in r.message
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger=server.logger.name):
+        for _ in range(3):
+            assert server._metal_projected_output_token_cap("m") == 10063
+        assert len(ceiling_infos()) == 1
+
+        # A changed binding cap is new information and must log again.
+        buffer_cap_holder["cap"] = 9000
+        assert server._metal_projected_output_token_cap("m") == 9000
+        assert len(ceiling_infos()) == 2

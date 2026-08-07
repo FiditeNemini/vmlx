@@ -1215,6 +1215,12 @@ export function registerChatHandlers(
         endpoint: undefined,
         responseId: undefined,
       });
+      // The entry above must be removed on EVERY exit path. Setup below can
+      // throw (endpoint validation/resolution, health-check exhaustion while
+      // an engine is still loading); without this try/finally those throws
+      // leaked the entry, leaving the chat locked in "streaming" state until
+      // the stale-lock window expired.
+      try {
 
       // Resolve actual server endpoint: explicit endpoint > session by modelPath > detect > default
       // CRITICAL: When endpoint is passed from the renderer, attach the chatSession
@@ -1336,8 +1342,7 @@ export function registerChatHandlers(
         healthOk = true;
       }
       if (!healthOk) {
-        activeRequests.delete(chatId);
-        clearTimeout(fetchTimeout);
+        // Entry + timer cleanup handled by the enclosing finally.
         throw new Error(
           `Cannot reach server on port ${resolved.port} after ${maxHealthRetries} attempts (${(maxHealthRetries * healthRetryDelay) / 1000}s). The model may still be loading — wait for the status indicator to turn green, then try again.`,
         );
@@ -4877,10 +4882,19 @@ export function registerChatHandlers(
         }
         throw new Error(`Failed to send message: ${errMsg}`);
       } finally {
-        // Always clean up the active request tracker and periodic save
+        // stopPeriodicSave is scoped to this block; entry/timer cleanup lives
+        // in the outer finally so setup-phase throws are covered too.
         stopPeriodicSave();
+      }
+
+      } finally {
         clearTimeout(fetchTimeout);
-        activeRequests.delete(chatId);
+        // Only delete our own entry — after an abort or stale-lock recovery,
+        // a newer request may have already registered a replacement.
+        const current = activeRequests.get(chatId);
+        if (current && current.controller === abortController) {
+          activeRequests.delete(chatId);
+        }
       }
     },
   );

@@ -2547,14 +2547,44 @@ class MLLMScheduler:
         return True
 
     def has_requests(self) -> bool:
-        """Check for generation work or queued hybrid SSM idle rederive."""
+        """Check for generation work. Foreground only.
+
+        The queued hybrid SSM idle rederive is surfaced via
+        ``has_idle_tasks()`` and drained by ``_process_loop``'s idle branch
+        AFTER responses are finalized (vmlx#245) — it must never keep
+        ``step()`` on the response path.
+        """
+        return bool(self.waiting or self.running)
+
+    def has_idle_tasks(self) -> bool:
+        """Whether hybrid SSM rederive maintenance is queued (vmlx#245)."""
         generator = getattr(self, "batch_generator", None)
-        rederive_pending = bool(
+        return bool(
             getattr(self, "_is_hybrid", False)
             and generator is not None
             and getattr(generator, "_ssm_rederive_queue", None)
         )
-        return bool(self.waiting or self.running or rederive_pending)
+
+    def run_one_idle_task(self) -> bool:
+        """Run one queued SSM rederive at engine idle. Returns True if ran.
+
+        Must be called on the step executor (Metal stream affinity) and only
+        when no foreground work exists — the process loop's idle branch
+        guarantees both. The MLLM clean prefill is one-shot by design
+        (chunking breaks ArraysCache offset math), so preemption granularity
+        is one queue entry, not one chunk.
+        """
+        if self.waiting or self.running:
+            return False
+        generator = getattr(self, "batch_generator", None)
+        if generator is None or not hasattr(generator, "run_idle_rederive"):
+            return False
+        try:
+            with self._batch_lock:
+                return bool(generator.run_idle_rederive())
+        except Exception as _rd_err:
+            logger.debug(f"MLLM idle rederive tick failed: {_rd_err}")
+            return True
 
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""
@@ -4032,23 +4062,11 @@ class MLLMScheduler:
                 logger.debug("VLM periodic Metal memory cache cleanup")
         _trace_mark("metal_gc_s")
 
-        # Async SSM rederive for hybrid thinking MLLM models. When idle (no
-        # active requests), pop one task from the batch generator's rederive
-        # queue and run a clean prompt-only prefill to capture SSM state that
-        # matches its key. Future fetches then hit with is_complete=True and
-        # skip the full re-prefill. One task per tick keeps decode latency
-        # unaffected when requests arrive during queue processing.
-        if (
-            self._is_hybrid
-            and not self.running
-            and self.batch_generator is not None
-            and hasattr(self.batch_generator, "run_idle_rederive")
-        ):
-            try:
-                with self._batch_lock:
-                    self.batch_generator.run_idle_rederive()
-            except Exception as _rd_err:
-                logger.debug(f"MLLM idle rederive tick failed: {_rd_err}")
+        # Async SSM rederive no longer runs inside step(). It was moved onto
+        # the process loop's post-response idle branch (vmlx#245): running it
+        # here kept the drain on the response path and let an unpreemptable
+        # clean prefill inflate a newly-arrived request's TTFT. See
+        # has_idle_tasks() / run_one_idle_task().
         _trace_mark("idle_rederive_s")
         if trace_enabled:
             output.trace_timings["total_s"] = max(time.perf_counter() - step_t0, 0.0)
@@ -4255,6 +4273,13 @@ class MLLMScheduler:
                 pass
 
         if self.batch_generator is not None:
+            # Drop queued idle re-derives: they are pure cache optimizations,
+            # and no forward pass may run after teardown begins (vmlx#245).
+            rederive_queue = getattr(
+                self.batch_generator, "_ssm_rederive_queue", None
+            )
+            if rederive_queue:
+                rederive_queue.clear()
             self.batch_generator.close()
             self.batch_generator = None
 
@@ -4348,8 +4373,22 @@ class MLLMScheduler:
                             dispatch_s=dispatch_s,
                         )
                 else:
-                    # No work, wait a bit
-                    await asyncio.sleep(0.01)
+                    # Idle: drain AT MOST ONE hybrid SSM rederive per
+                    # iteration on the step executor (Metal stream affinity).
+                    # Only reached after the previous iteration dispatched
+                    # outputs and finished terminal cleanup, so maintenance
+                    # can never delay a response (vmlx#245). A request
+                    # arriving between entries takes the step() branch first.
+                    if self.has_idle_tasks():
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(
+                            self._step_executor,
+                            self.run_one_idle_task,
+                        )
+                        await asyncio.sleep(0)
+                    else:
+                        # No work, wait a bit
+                        await asyncio.sleep(0.01)
 
             except asyncio.CancelledError:
                 self._terminal_cleanup_complete.set()

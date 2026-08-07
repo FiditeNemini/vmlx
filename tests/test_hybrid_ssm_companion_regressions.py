@@ -196,17 +196,25 @@ def test_text_scheduler_partial_block_hit_keeps_only_accepted_credit():
     assert cache._hit_credits == {"request-1": 64}
 
 
-def test_text_scheduler_keeps_engine_awake_for_idle_ssm_rederive():
+def test_text_scheduler_surfaces_ssm_rederive_as_idle_task_not_request():
+    # vmlx#245: the queued re-derive must NOT keep step() on the response
+    # path (has_requests stays False); it is surfaced via has_idle_tasks()
+    # and drained by the engine loop's idle branch after responses finalize.
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.waiting = []
     scheduler.running = {}
+    scheduler._pending_aborts = set()
     scheduler._is_hybrid = True
     scheduler._ssm_rederive_queue = [([1, 2, 3], 3, "request-1")]
 
-    assert scheduler.has_requests() is True
+    scheduler._ensure_ssm_rederive_idle_task()
 
-    scheduler._ssm_rederive_queue.clear()
     assert scheduler.has_requests() is False
+    assert scheduler.has_idle_tasks() is True
+
+    # Registration is once-per-queue-lifetime (ensure is idempotent).
+    scheduler._ensure_ssm_rederive_idle_task()
+    assert len(scheduler._idle_tasks) == 1
 
 
 def test_text_scheduler_retargets_ssm_rederive_to_truncated_kv_boundary():
@@ -229,7 +237,9 @@ def test_text_scheduler_retargets_ssm_rederive_to_truncated_kv_boundary():
     ]
 
 
-def test_mllm_scheduler_keeps_loop_awake_for_idle_ssm_rederive():
+def test_mllm_scheduler_surfaces_ssm_rederive_as_idle_task_not_request():
+    # vmlx#245: same contract as the text scheduler — the queue never keeps
+    # step() on the response path; _process_loop's idle branch drains it.
     scheduler = MLLMScheduler.__new__(MLLMScheduler)
     scheduler.waiting = []
     scheduler.running = {}
@@ -238,10 +248,11 @@ def test_mllm_scheduler_keeps_loop_awake_for_idle_ssm_rederive():
         _ssm_rederive_queue=[([1, 2, 3], 3, "request-1")]
     )
 
-    assert scheduler.has_requests() is True
+    assert scheduler.has_requests() is False
+    assert scheduler.has_idle_tasks() is True
 
     scheduler.batch_generator._ssm_rederive_queue.clear()
-    assert scheduler.has_requests() is False
+    assert scheduler.has_idle_tasks() is False
 
 
 def test_nonstream_generate_stamps_request_cache_metadata_on_final_output():
@@ -282,3 +293,209 @@ def test_nonstream_generate_stamps_request_cache_metadata_on_final_output():
     assert output.cached_tokens == 192
     assert output.cache_detail == "paged+ssm+disk"
     assert request_id not in scheduler.requests
+
+
+# ── vmlx#245: post-response idle-task hook regressions ───────────────────────
+
+
+def _idle_ready_scheduler():
+    """Text scheduler skeleton with an idle-drainable rederive queue."""
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.waiting = []
+    scheduler.running = {}
+    scheduler._pending_aborts = set()
+    scheduler._is_hybrid = True
+    scheduler._uses_zaya_cache = False
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
+    scheduler._hybrid_kv_positions = [0]
+    scheduler._ssm_rederive_queue = []
+    return scheduler
+
+
+def test_run_one_idle_task_processes_single_entry_and_stores(monkeypatch):
+    from types import MethodType
+
+    import vmlx_engine.scheduler as scheduler_mod
+
+    monkeypatch.setattr(
+        scheduler_mod, "clear_mlx_memory_cache", lambda **_kwargs: None
+    )
+
+    scheduler = _idle_ready_scheduler()
+    stored = []
+    scheduler._ssm_state_cache = SimpleNamespace(
+        store=lambda tokens, plen, layers: stored.append(
+            (tokens, plen, layers)
+        )
+    )
+    kv_layer = SimpleNamespace()
+    ssm_layer = SimpleNamespace()
+
+    def _fake_prefill(self, tokens, should_stop=None):
+        return [kv_layer, ssm_layer]
+
+    scheduler._prefill_for_prompt_only_cache = MethodType(
+        _fake_prefill, scheduler
+    )
+    scheduler._ssm_rederive_queue.append(([1, 2, 3], 3, "req-1"))
+    scheduler._ensure_ssm_rederive_idle_task()
+
+    assert scheduler.run_one_idle_task() is True
+
+    # KV layer (position 0) excluded; SSM layer stored under the prompt key.
+    assert stored == [([1, 2, 3], 3, [ssm_layer])]
+    assert scheduler._ssm_rederive_queue == []
+    # DONE contract: task dequeued, registration flag reset for next queue.
+    assert scheduler.has_idle_tasks() is False
+    assert scheduler._ssm_rederive_task_queued is False
+
+
+def test_idle_rederive_parks_before_pop_when_foreground_pending():
+    scheduler = _idle_ready_scheduler()
+    scheduler._ssm_state_cache = SimpleNamespace(store=lambda *a: None)
+    scheduler._ssm_rederive_queue.append(([1, 2, 3], 3, "req-1"))
+    scheduler._ensure_ssm_rederive_idle_task()
+    scheduler.running = {"req-live": object()}
+
+    assert scheduler.run_one_idle_task() is True
+
+    # PARKED contract: entry untouched, task re-queued at the front.
+    assert scheduler._ssm_rederive_queue == [([1, 2, 3], 3, "req-1")]
+    assert scheduler.has_idle_tasks() is True
+
+
+def test_idle_rederive_parks_mid_prefill_and_requeues_entry_at_front():
+    from types import MethodType
+
+    scheduler = _idle_ready_scheduler()
+    scheduler._ssm_state_cache = SimpleNamespace(store=lambda *a: None)
+    first = ([1, 2, 3], 3, "req-a")
+    second = ([9, 8], 2, "req-b")
+    scheduler._ssm_rederive_queue.extend([first, second])
+    scheduler._ensure_ssm_rederive_idle_task()
+
+    def _fake_prefill(self, tokens, should_stop=None):
+        # Foreground request arrives between prefill chunks: the park poll
+        # must abort the prefill so the engine can serve it immediately.
+        self.waiting.append(object())
+        assert should_stop is not None and should_stop() is True
+        return None
+
+    scheduler._prefill_for_prompt_only_cache = MethodType(
+        _fake_prefill, scheduler
+    )
+
+    assert scheduler.run_one_idle_task() is True
+
+    # The popped entry is re-queued at the FRONT (no loss, no reorder).
+    assert scheduler._ssm_rederive_queue == [first, second]
+    assert scheduler.has_idle_tasks() is True
+
+
+def test_idle_rederive_clears_unservable_queue():
+    scheduler = _idle_ready_scheduler()
+    scheduler._is_hybrid = False  # queue can never be consumed
+    scheduler._ssm_state_cache = None
+    scheduler._ssm_rederive_queue.append(([1], 1, "req-stale"))
+    scheduler._ensure_ssm_rederive_idle_task()
+
+    assert scheduler.run_one_idle_task() is True
+
+    assert scheduler._ssm_rederive_queue == []
+    assert scheduler.has_idle_tasks() is False
+    assert scheduler._ssm_rederive_task_queued is False
+
+
+def test_idle_task_exception_drops_task():
+    scheduler = Scheduler.__new__(Scheduler)
+
+    def _boom():
+        raise RuntimeError("idle task failure")
+
+    scheduler.register_idle_task(_boom, name="boom")
+
+    assert scheduler.run_one_idle_task() is True
+    assert scheduler.has_idle_tasks() is False
+
+
+def test_mllm_run_one_idle_task_yields_to_foreground_and_holds_batch_lock():
+    import threading
+
+    calls = []
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler.waiting = [object()]
+    scheduler.running = {}
+    scheduler._is_hybrid = True
+    scheduler._batch_lock = threading.Lock()
+    scheduler.batch_generator = SimpleNamespace(
+        _ssm_rederive_queue=[([1], 1, "req-1")],
+        run_idle_rederive=lambda: calls.append("ran") or True,
+    )
+
+    # Foreground pending → must NOT touch the generator.
+    assert scheduler.run_one_idle_task() is False
+    assert calls == []
+
+    scheduler.waiting = []
+    assert scheduler.run_one_idle_task() is True
+    assert calls == ["ran"]
+
+
+def test_scheduler_shutdown_drops_idle_tasks_and_rederive_queue():
+    """vmlx#245 shutdown contract: no forward pass after teardown begins."""
+    from pathlib import Path
+
+    import vmlx_engine.scheduler as scheduler_mod
+
+    src = Path(scheduler_mod.__file__).read_text()
+    shutdown_idx = src.index("def shutdown")
+    block = src[shutdown_idx : src.index("Flush prompt-level", shutdown_idx)]
+    assert "_idle_tasks" in block and ".clear()" in block
+    assert "_ssm_rederive_queue" in block
+    assert "_ssm_rederive_task_queued = False" in block
+
+
+def test_mllm_stop_drops_rederive_queue_before_generator_close():
+    """vmlx#245 shutdown contract on the MLLM path."""
+    from pathlib import Path
+
+    import vmlx_engine.mllm_scheduler as mllm_mod
+
+    src = Path(mllm_mod.__file__).read_text()
+    stop_idx = src.index("async def stop")
+    stop_block = src[stop_idx : src.index("MLLM Scheduler stopped", stop_idx)]
+    clear_idx = stop_block.index("rederive_queue.clear()")
+    close_idx = stop_block.index("self.batch_generator.close()")
+    assert clear_idx < close_idx
+
+
+def test_engine_loop_drains_idle_tasks_off_the_response_path():
+    """vmlx#245 engine contract: idle branch drains at most one task on the
+    step executor; the sync generate() path drains bounded post-loop so the
+    LFM disk-only-restore fix (3376b1dc6) keeps working without keeping
+    step() awake."""
+    from pathlib import Path
+
+    import vmlx_engine.engine_core as engine_mod
+
+    src = Path(engine_mod.__file__).read_text()
+    assert "has_idle_tasks" in src
+    assert "run_one_idle_task" in src
+    # Idle branch dispatches on the step executor (Metal stream affinity).
+    idle_idx = src.index("run_one_idle_task")
+    assert "_step_executor" in src[max(0, idle_idx - 800) : idle_idx + 800]
+
+
+def test_mllm_process_loop_idle_branch_drains_one_task():
+    """vmlx#245: _process_loop's idle arm must drain via run_one_idle_task
+    on the step executor instead of sleeping past queued maintenance."""
+    from pathlib import Path
+
+    import vmlx_engine.mllm_scheduler as mllm_mod
+
+    src = Path(mllm_mod.__file__).read_text()
+    loop_idx = src.index("async def _process_loop")
+    loop_block = src[loop_idx : src.index("\n    async def ", loop_idx + 10)]
+    assert "self.has_idle_tasks()" in loop_block
+    assert "self.run_one_idle_task" in loop_block
+    assert "_step_executor" in loop_block

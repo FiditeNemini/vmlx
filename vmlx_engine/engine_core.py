@@ -311,8 +311,28 @@ class EngineCore:
                         finally:
                             self._terminal_cleanup_complete.set()
                 else:
-                    # No work, yield control
-                    await asyncio.sleep(step_interval)
+                    # Idle: drain AT MOST ONE maintenance task (e.g. deferred
+                    # SSM re-derive) per iteration, on the same executor as
+                    # step() — Metal streams are thread-local. This branch is
+                    # only reached after the previous iteration dispatched all
+                    # outputs and finished terminal cleanup, so idle tasks can
+                    # never delay a response (vmlx#245). Tasks park themselves
+                    # when foreground work arrives; the next iteration takes
+                    # the step() branch first.
+                    if getattr(self.scheduler, "has_idle_tasks", None) and (
+                        self.scheduler.has_idle_tasks()
+                    ):
+                        if _step_executor is not None:
+                            await _async_loop.run_in_executor(
+                                _step_executor,
+                                self.scheduler.run_one_idle_task,
+                            )
+                        else:
+                            self.scheduler.run_one_idle_task()
+                        await asyncio.sleep(0)
+                    else:
+                        # No work, yield control
+                        await asyncio.sleep(step_interval)
 
             except asyncio.CancelledError:
                 self._terminal_cleanup_complete.set()
@@ -747,6 +767,24 @@ class EngineCore:
         # only removes from the running dict, leaving ghost entries elsewhere.
         for rid in request_ids:
             self.scheduler.abort_request(rid)
+
+        # Sync path has no engine loop to drain idle maintenance (deferred SSM
+        # re-derive). Drain here so companion snapshots aren't stranded in the
+        # queue — a stranded snapshot makes every later request fall back to a
+        # much shorter companion. Bounded so a forever-parking task can't hang
+        # the caller; with no concurrent producer each task completes promptly.
+        if getattr(self.scheduler, "has_idle_tasks", None):
+            for _ in range(4 * 8):  # 4x SSM_REDERIVE_QUEUE_CAP
+                if self.scheduler.has_requests() or (
+                    not self.scheduler.has_idle_tasks()
+                ):
+                    break
+                if _step_executor is not None:
+                    _step_executor.submit(
+                        self.scheduler.run_one_idle_task
+                    ).result()
+                else:
+                    self.scheduler.run_one_idle_task()
 
         # Return in original order — use .get() to handle requests that were
         # aborted or never produced output (avoids KeyError on missing keys)

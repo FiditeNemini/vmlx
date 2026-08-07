@@ -7635,9 +7635,13 @@ class TestHybridSSMCompanionCacheGating:
         store_block = source[store_idx : source.index("# Store cache for future reuse", store_idx)]
         assert "and self.config.enable_prefix_cache" in store_block
 
-        rederive_idx = source.index("# ── Deferred SSM re-derive")
-        rederive_block = source[rederive_idx : source.index("return output", rederive_idx)]
-        assert "and self.config.enable_prefix_cache" in rederive_block
+        # vmlx#245: the consumer moved into _drain_one_ssm_rederive (idle
+        # task); it must still bail when the prefix cache is disabled.
+        rederive_idx = source.index("── Deferred SSM re-derive")
+        rederive_block = source[
+            rederive_idx : source.index("def get_num_waiting", rederive_idx)
+        ]
+        assert "not self.config.enable_prefix_cache" in rederive_block
 
     def test_mllm_batch_generator_disables_hidden_ssm_work_without_prefix_cache(self):
         source = Path("./vmlx_engine/mllm_batch_generator.py").read_text()

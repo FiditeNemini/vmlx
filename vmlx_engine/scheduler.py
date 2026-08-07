@@ -331,6 +331,17 @@ SSM_REDERIVE_MIN_TOKENS = 1
 SSM_REDERIVE_QUEUE_CAP = 8
 
 
+class IdleTaskResult(Enum):
+    """Outcome of one idle-maintenance task invocation (vmlx#245).
+
+    DONE dequeues the task; PARKED re-queues it at the front so it retries at
+    the next idle iteration (used when foreground work arrives mid-task).
+    """
+
+    DONE = "done"
+    PARKED = "parked"
+
+
 @dataclass
 class SchedulerConfig:
     """Configuration for the scheduler."""
@@ -2446,7 +2457,9 @@ class Scheduler:
         return result
 
     def _prefill_for_prompt_only_cache(
-        self, prompt_tokens: List[int]
+        self,
+        prompt_tokens: List[int],
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> Optional[List[Any]]:
         """
         Run a prefill-only forward pass to get cache state for the given tokens.
@@ -2458,10 +2471,14 @@ class Scheduler:
 
         Args:
             prompt_tokens: Token IDs to prefill (typically prompt[:-1])
+            should_stop: Optional poll evaluated between prefill chunks. When
+                it returns True the partial prefill is abandoned and None is
+                returned, bounding the unpreemptable GPU window to one chunk
+                so idle maintenance yields to foreground requests (vmlx#245).
 
         Returns:
             List of cache objects with state for exactly the given tokens,
-            or None on failure
+            or None on failure or preemption
         """
         if not prompt_tokens:
             return None
@@ -2491,6 +2508,10 @@ class Scheduler:
             else:
                 chunk_size = 2048
             for start in range(0, len(prompt_tokens), chunk_size):
+                if start > 0 and should_stop is not None and should_stop():
+                    del fresh_cache
+                    clear_mlx_memory_cache(log=logger)
+                    return None
                 chunk = prompt_tokens[start : start + chunk_size]
                 input_ids = mx.array([chunk])
                 _ = self.model(input_ids, cache=fresh_cache)
@@ -5904,7 +5925,7 @@ class Scheduler:
             logger.debug(f"Processed deferred abort for {request_id}")
 
     def has_requests(self) -> bool:
-        """Check for generation work, deferred abort cleanup, or idle work.
+        """Check for generation work or deferred abort cleanup.
 
         The async engine loop only calls ``step()`` while this returns true.
         A last-request abort removes the request from ``running`` but defers
@@ -5912,20 +5933,173 @@ class Scheduler:
         cleanup as work or the loop goes idle with the generator UID and its
         native cache still retained indefinitely.
 
-        Excluding the rederive queue left clean prompt-only SSM snapshots
-        permanently queued after terminal cleanup, so later requests could
-        restore KV pages but repeatedly fall back to a much shorter companion.
+        Foreground work ONLY. Idle maintenance (e.g. the deferred SSM
+        re-derive queue) is surfaced through ``has_idle_tasks()`` and drained
+        by the engine loop's idle branch AFTER responses are finalized
+        (vmlx#245) — it must never keep ``step()`` on the response path.
         """
-        rederive_pending = bool(
-            getattr(self, "_is_hybrid", False)
-            and getattr(self, "_ssm_rederive_queue", None)
-        )
         return bool(
             self.waiting
             or self.running
             or self._pending_aborts
-            or rederive_pending
         )
+
+    # ── Post-response idle-task hook (vmlx#245) ──────────────────────────
+    # Maintenance work that is a pure cache optimization (e.g. the deferred
+    # SSM companion re-derive) must run AFTER responses are finalized and
+    # must yield to newly-arrived foreground requests. The engine loop
+    # drains AT MOST ONE task per idle iteration, dispatched on the same
+    # executor as step() (Metal streams are thread-local). Tasks must be
+    # safe to skip: shutdown/model-eject drops the queue.
+
+    def register_idle_task(
+        self,
+        fn: Callable[[], "IdleTaskResult"],
+        *,
+        name: str = "",
+    ) -> None:
+        """Queue ``fn`` to run at engine idle, after responses are delivered.
+
+        ``fn`` runs on the step executor and returns ``IdleTaskResult.DONE``
+        to dequeue or ``IdleTaskResult.PARKED`` to re-queue at the front and
+        retry at the next idle iteration. Exceptions drop the task.
+        """
+        if not hasattr(self, "_idle_tasks"):
+            self._idle_tasks = deque()
+        self._idle_tasks.append((name or getattr(fn, "__name__", "idle-task"), fn))
+
+    def has_idle_tasks(self) -> bool:
+        """Whether idle maintenance work is queued (engine idle-branch gate)."""
+        return bool(getattr(self, "_idle_tasks", None))
+
+    def run_one_idle_task(self) -> bool:
+        """Run at most one queued idle task. Returns True if one ran.
+
+        Must be called on the step executor (Metal stream affinity), and only
+        when the scheduler has no foreground work — the engine loop's idle
+        branch guarantees both.
+        """
+        tasks = getattr(self, "_idle_tasks", None)
+        if not tasks:
+            return False
+        name, fn = tasks.popleft()
+        try:
+            result = fn()
+        except Exception as e:
+            logger.warning(f"Idle task {name!r} failed (dropped): {e}")
+            return True
+        if result is IdleTaskResult.PARKED:
+            tasks.appendleft((name, fn))
+        return True
+
+    def _foreground_pending(self) -> bool:
+        """Cheap poll: has foreground work arrived? (idle-task park signal)"""
+        return bool(
+            self.waiting
+            or self.running
+            or getattr(self, "unprocessed_requests", None)
+            or self._pending_aborts
+        )
+
+    def _ensure_ssm_rederive_idle_task(self) -> None:
+        """Register the SSM re-derive drain task once per queue lifetime."""
+        if getattr(self, "_ssm_rederive_task_queued", False):
+            return
+        self._ssm_rederive_task_queued = True
+        self.register_idle_task(self._drain_one_ssm_rederive, name="ssm-rederive")
+
+    def _drain_one_ssm_rederive(self) -> "IdleTaskResult":
+        """Idle-task body: process ONE deferred SSM re-derive queue entry.
+
+        ── Deferred SSM re-derive (idle-time processing) ── vmlx#103/#245
+        For thinking models (gen_prompt_len > 0), the SSM companion store
+        queues a re-derive task instead of skipping entirely. The re-derive
+        runs a separate prefill pass on just the prompt tokens (no
+        thinking/output contamination) and stores the clean SSM state for
+        future prefix cache hits. It runs ONLY at engine idle — the forward
+        pass uses the Metal GPU so it can't overlap with active or queued
+        work — and parks between prefill chunks when foreground work
+        arrives, bounding the unpreemptable window to one chunk (vmlx#245).
+        """
+        queue = getattr(self, "_ssm_rederive_queue", None)
+        if (
+            not queue
+            or not self._is_hybrid
+            or self._uses_zaya_cache
+            or not self.config.enable_prefix_cache
+            or self._ssm_state_cache is None
+        ):
+            # Drained, or this scheduler can never consume the queue —
+            # either way the task is complete. Drop stale entries so the
+            # engine loop doesn't spin on unservable work.
+            if queue is not None:
+                queue.clear()
+            self._ssm_rederive_task_queued = False
+            return IdleTaskResult.DONE
+        if self._foreground_pending():
+            return IdleTaskResult.PARKED
+        # Process ONE entry per idle iteration to avoid long GPU stalls.
+        tokens, prompt_len, orig_request_id = queue.pop(0)
+        try:
+            logger.info(
+                f"SSM re-derive: running deferred prefill for "
+                f"{orig_request_id} ({prompt_len} prompt tokens, "
+                f"{len(queue)} remaining in queue)"
+            )
+            parked = False
+
+            def _park_poll() -> bool:
+                nonlocal parked
+                parked = self._foreground_pending()
+                return parked
+
+            clean_cache = self._prefill_for_prompt_only_cache(
+                tokens, should_stop=_park_poll
+            )
+            if parked and clean_cache is None:
+                # Foreground arrived mid-prefill: partial work was discarded;
+                # retry this entry at the next idle iteration.
+                queue.insert(0, (tokens, prompt_len, orig_request_id))
+                logger.info(
+                    f"SSM re-derive: parked for foreground work "
+                    f"({orig_request_id}, {prompt_len} prompt tokens)"
+                )
+                return IdleTaskResult.PARKED
+            if clean_cache is not None:
+                # Extract SSM layers from the clean cache.
+                kv_set = set(self._hybrid_kv_positions or [])
+                ssm_layers = []
+                for layer_idx, c in enumerate(clean_cache):
+                    if layer_idx not in kv_set:
+                        if hasattr(c, "cache") and isinstance(c.cache, list):
+                            from copy import deepcopy
+                            import mlx.core as mx
+
+                            cloned = deepcopy(c)
+                            cloned.cache = [
+                                mx.contiguous(mx.array(a))
+                                if a is not None
+                                else None
+                                for a in c.cache
+                            ]
+                            ssm_layers.append(cloned)
+                        else:
+                            ssm_layers.append(c)
+                if ssm_layers:
+                    self._ssm_state_cache.store(tokens, prompt_len, ssm_layers)
+                    logger.info(
+                        f"SSM re-derive: stored clean companion for "
+                        f"{orig_request_id}: {len(ssm_layers)} SSM layers, "
+                        f"{prompt_len}-token key (next fetch will hit)"
+                    )
+                del clean_cache
+                clear_mlx_memory_cache(log=logger)
+        except Exception as e:
+            logger.warning(f"SSM re-derive failed for {orig_request_id}: {e}")
+        if queue:
+            return IdleTaskResult.PARKED
+        self._ssm_rederive_task_queued = False
+        return IdleTaskResult.DONE
 
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""
@@ -5979,6 +6153,15 @@ class Scheduler:
         if getattr(self, "_shutdown_done", False):
             return
         self._shutdown_done = True
+
+        # Idle maintenance is a pure cache optimization — safe to skip.
+        # Drop queued tasks so no forward pass runs after teardown begins
+        # (vmlx#245 shutdown contract).
+        if getattr(self, "_idle_tasks", None):
+            self._idle_tasks.clear()
+        if getattr(self, "_ssm_rederive_queue", None):
+            self._ssm_rederive_queue.clear()
+        self._ssm_rederive_task_queued = False
 
         # Flush prompt-level disk cache (DiskCacheManager)
         if getattr(self, "disk_cache", None) is not None:
@@ -6197,6 +6380,7 @@ class Scheduler:
                         self._ssm_rederive_queue.append(
                             (boundary_tokens, fetch_num, request.request_id)
                         )
+                        self._ensure_ssm_rederive_idle_task()
                         logger.info(
                             "SSM companion: queued block-boundary re-derive "
                             "for %s (%d cache-key tokens after hybrid miss)",
@@ -8352,6 +8536,7 @@ class Scheduler:
                             self._ssm_rederive_queue.append(
                                 (list(companion_tokens), companion_len, request_id)
                             )
+                            self._ensure_ssm_rederive_idle_task()
                             logger.info(
                                 f"SSM companion: queued deferred re-derive for "
                                 f"{request_id} (gpl={_gpl}, {companion_len} cache-key "
@@ -8409,6 +8594,7 @@ class Scheduler:
                             self._ssm_rederive_queue.append(
                                 (list(companion_tokens), companion_len, request_id)
                             )
+                            self._ensure_ssm_rederive_idle_task()
                             logger.info(
                                 f"SSM companion (gpl=0): queued deferred "
                                 f"re-derive for {request_id} ({companion_len} "
@@ -10112,71 +10298,12 @@ class Scheduler:
             if clear_mlx_memory_cache(log=logger):
                 logger.debug("Periodic Metal memory cache cleanup")
 
-        # ── Deferred SSM re-derive (idle-time processing) ── vmlx#103
-        # For thinking models (gen_prompt_len > 0), the SSM companion store
-        # queues a re-derive task instead of skipping entirely. We run the
-        # re-derive here ONLY when the scheduler is fully idle — no running
-        # requests, no waiting requests, and no unprocessed-prefill
-        # requests. The forward pass uses the Metal GPU so it can't overlap
-        # with active or queued work; without these guards the re-derive
-        # could starve queued requests by holding the GPU for a full second
-        # prefill while they wait for their first token (vmlx#103).
-        # The re-derive runs a separate prefill pass on just the prompt
-        # tokens (no thinking/output contamination) and stores the clean
-        # SSM state for future prefix cache hits.
-        _has_unprocessed = bool(getattr(self, "unprocessed_requests", []))
-        _has_waiting = bool(getattr(self, "waiting", []))
-        if (
-            self._is_hybrid
-            and not self._uses_zaya_cache
-            and self.config.enable_prefix_cache
-            and not self.running
-            and not _has_waiting
-            and not _has_unprocessed
-            and hasattr(self, "_ssm_rederive_queue")
-            and self._ssm_rederive_queue
-            and self._ssm_state_cache is not None
-        ):
-            # Process ONE task per step to avoid long GPU stalls
-            tokens, prompt_len, orig_request_id = self._ssm_rederive_queue.pop(0)
-            try:
-                logger.info(
-                    f"SSM re-derive: running deferred prefill for "
-                    f"{orig_request_id} ({prompt_len} prompt tokens, "
-                    f"{len(self._ssm_rederive_queue)} remaining in queue)"
-                )
-                clean_cache = self._prefill_for_prompt_only_cache(tokens)
-                if clean_cache is not None:
-                    # Extract SSM layers from the clean cache.
-                    kv_set = set(self._hybrid_kv_positions or [])
-                    ssm_layers = []
-                    for layer_idx, c in enumerate(clean_cache):
-                        if layer_idx not in kv_set:
-                            if hasattr(c, "cache") and isinstance(c.cache, list):
-                                from copy import deepcopy
-                                import mlx.core as mx
-
-                                cloned = deepcopy(c)
-                                cloned.cache = [
-                                    mx.contiguous(mx.array(a))
-                                    if a is not None
-                                    else None
-                                    for a in c.cache
-                                ]
-                                ssm_layers.append(cloned)
-                            else:
-                                ssm_layers.append(c)
-                    if ssm_layers:
-                        self._ssm_state_cache.store(tokens, prompt_len, ssm_layers)
-                        logger.info(
-                            f"SSM re-derive: stored clean companion for "
-                            f"{orig_request_id}: {len(ssm_layers)} SSM layers, "
-                            f"{prompt_len}-token key (next fetch will hit)"
-                        )
-                    del clean_cache
-                    clear_mlx_memory_cache(log=logger)
-            except Exception as e:
-                logger.warning(f"SSM re-derive failed for {orig_request_id}: {e}")
+        # Deferred SSM re-derive no longer runs here. It was moved off the
+        # response path onto the engine loop's post-response idle-task drain
+        # (vmlx#245): running it inside step() delayed the finishing
+        # request's final chunk and inflated a newly-arrived request's TTFT
+        # by an unpreemptable full prefill. See register_idle_task /
+        # run_one_idle_task and _drain_one_ssm_rederive.
 
         return output
 

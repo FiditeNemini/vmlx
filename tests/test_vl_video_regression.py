@@ -3192,30 +3192,38 @@ class TestAsyncSSMRederiveReasoningHybrid:
         )
 
     def test_scheduler_idle_processes_one_rederive_per_step(self):
-        """Idle consumer must pop ONE entry per scheduler step (avoid
-        long GPU stalls blocking new incoming requests)."""
+        """Idle consumer must pop ONE entry per idle invocation (avoid
+        long GPU stalls blocking new incoming requests). vmlx#245 moved
+        the consumer off step() into _drain_one_ssm_rederive, drained by
+        the engine loop's idle branch via run_one_idle_task."""
         import vmlx_engine.scheduler as sched
         src = Path(sched.__file__).read_text()
         idle_block_idx = src.find("Deferred SSM re-derive (idle-time")
         assert idle_block_idx > 0, (
             "idle consumer block missing — re-derives will never execute"
         )
-        # The consumer must check `not self.running` before running the
+        # The consumer must yield to foreground work before running the
         # clean prefill (GPU is exclusive; running + re-derive = deadlock)
-        block_end = src.find("return output", idle_block_idx)
+        block_end = src.find("def get_num_waiting", idle_block_idx)
         assert block_end > idle_block_idx
         block = src[idle_block_idx:block_end]
-        assert "not self.running" in block, (
-            "idle guard missing: re-derive would collide with active "
-            "generation on the GPU"
+        assert "self._foreground_pending()" in block, (
+            "foreground guard missing: re-derive would collide with active "
+            "generation on the GPU (must PARK when work arrives)"
         )
-        assert "_ssm_state_cache is not None" in block, (
+        assert "_ssm_state_cache is None" in block, (
             "must guard on companion cache presence (non-hybrid models "
             "don't have one)"
         )
-        # One-per-step contract: a single .pop(0)
-        assert block.count("self._ssm_rederive_queue.pop(0)") == 1, (
-            "exactly one entry per step — more means long stalls"
+        # One-per-invocation contract: a single .pop(0)
+        assert block.count(".pop(0)") == 1, (
+            "exactly one entry per idle invocation — more means long stalls"
+        )
+        # Park contract: mid-prefill preemption re-queues the entry at the
+        # front instead of losing it.
+        assert "IdleTaskResult.PARKED" in block and "insert(0," in block, (
+            "park path missing: foreground arrival mid-prefill must "
+            "re-queue the entry, not drop it"
         )
 
     def test_clean_prefill_helper_exists(self):
@@ -3234,7 +3242,7 @@ class TestAsyncSSMRederiveReasoningHybrid:
         import vmlx_engine.scheduler as sched
         src = Path(sched.__file__).read_text()
         idle_block_idx = src.find("Deferred SSM re-derive (idle-time")
-        block_end = src.find("return output", idle_block_idx)
+        block_end = src.find("def get_num_waiting", idle_block_idx)
         block = src[idle_block_idx:block_end]
         assert "deepcopy" in block or "mx.array(a)" in block, (
             "SSM re-derive must deep-copy state before storing"
@@ -8644,19 +8652,19 @@ class TestAsyncSsmRederiveQueue:
 
     def test_queue_drain_one_per_step(self):
         """The idle-time drain must process exactly one queued
-        re-derive per scheduler step — otherwise a long prefill
-        blocks the next active request. Pin via the 'Process ONE
-        task per step' comment and single pop(0) in the drain branch."""
+        re-derive per idle invocation — otherwise a long prefill
+        blocks the next active request. vmlx#245 moved the drain off
+        step() into _drain_one_ssm_rederive (engine idle branch)."""
         from vmlx_engine import scheduler as sched
         import inspect
         src = inspect.getsource(sched)
-        assert "Process ONE task per step" in src, (
-            "Drain must process one task per step — multi-drain would "
-            "stall the scheduler under queue backlog"
+        assert "Process ONE entry per idle iteration" in src, (
+            "Drain must process one entry per idle iteration — "
+            "multi-drain would stall foreground work under queue backlog"
         )
-        # Drain only fires when scheduler is idle (no running requests)
-        assert "not self.running" in src, (
-            "Drain must gate on 'not self.running' (scheduler idle) — "
+        # Drain must yield when foreground work exists (GPU is exclusive)
+        assert "self._foreground_pending()" in src, (
+            "Drain must gate on _foreground_pending() (park signal) — "
             "otherwise drain and active generation contend for GPU"
         )
 

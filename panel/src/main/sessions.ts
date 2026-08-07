@@ -3401,6 +3401,13 @@ export class SessionManager extends EventEmitter {
                   db.updateSession(session.id, { lastRequestAt: serverLastReq })
                 }
               }
+              // An actively generating engine is NOT idle — last_request_time only
+              // marks submission, so a generation longer than the idle timeout
+              // would get its caches deep-reset mid-stream by auto-sleep.
+              const sched = data.scheduler
+              if (sched && ((sched.num_running || 0) > 0 || (sched.num_waiting || 0) > 0)) {
+                this.lastRequestAt.set(session.id, Date.now())
+              }
             } else if (isStandby && session.status === 'loading') {
               // Wake failed — server reverted to standby but DB says loading.
               // Sync DB back to standby so user can retry.
@@ -3562,6 +3569,25 @@ export class SessionManager extends EventEmitter {
   }
 
   /** Trigger soft sleep on a session — clear caches, model stays loaded */
+  /** Engine refused sleep because requests are running/waiting (409 busy).
+   *  Reset the idle clock so auto-sleep backs off a full idle window instead
+   *  of retrying every monitor tick against a live generation. */
+  private async _handleSleepBusy(sessionId: string, res: Response, depth: string): Promise<boolean> {
+    if (res.status !== 409) return false
+    try {
+      const body = await res.json()
+      if (body?.error !== 'busy') return false
+      this.lastRequestAt.set(sessionId, Date.now())
+      this.pushLog(
+        sessionId,
+        `[Sleep] ${depth} sleep deferred — engine busy (${body.num_running ?? '?'} running / ${body.num_waiting ?? '?'} waiting)`
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
   async softSleep(sessionId: string): Promise<{ success: boolean; error?: string }> {
     const session = db.getSession(sessionId)
     if (!session || session.status !== 'running') {
@@ -3584,6 +3610,9 @@ export class SessionManager extends EventEmitter {
         this.emit('session:standby', { sessionId, depth: 'soft' })
         this.pushLog(sessionId, '[Sleep] Entered soft sleep — caches cleared, model loaded')
         return { success: true }
+      }
+      if (await this._handleSleepBusy(sessionId, res, 'soft')) {
+        return { success: false, error: 'Engine busy — generation in progress' }
       }
       return { success: false, error: `Server returned ${res.status}` }
     } catch (e) {
@@ -3614,6 +3643,9 @@ export class SessionManager extends EventEmitter {
         this.emit('session:standby', { sessionId, depth: 'deep' })
         this.pushLog(sessionId, '[Sleep] Entered deep sleep — model unloaded, port alive')
         return { success: true }
+      }
+      if (await this._handleSleepBusy(sessionId, res, 'deep')) {
+        return { success: false, error: 'Engine busy — generation in progress' }
       }
       return { success: false, error: `Server returned ${res.status}` }
     } catch (e) {

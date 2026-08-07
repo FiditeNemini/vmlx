@@ -11335,6 +11335,50 @@ async def _post_async_engine_teardown_mlx_cleanup(reason: str) -> None:
 # ── Admin: Sleep / Wake ──
 
 
+def _scheduler_busy_counts() -> tuple[int, int]:
+    """Return (num_running, num_waiting) from the live scheduler, 0s if unavailable."""
+    scheduler = _get_scheduler()
+    if scheduler is None:
+        return (0, 0)
+    try:
+        stats = scheduler.get_stats()
+        return (
+            int(stats.get("num_running", 0) or 0),
+            int(stats.get("num_waiting", 0) or 0),
+        )
+    except Exception:
+        return (0, 0)
+
+
+def _sleep_busy_response(depth: str):
+    """409 guard: sleep must never tear down caches under a live request.
+
+    A deep_reset() while a request is decoding destroys its KV state and the
+    stream stalls silently until the client times out (observed live: 10min
+    idle-from-submission soft sleep killed a long DSV4 reasoning turn).
+    """
+    from starlette.responses import JSONResponse
+
+    num_running, num_waiting = _scheduler_busy_counts()
+    if num_running > 0 or num_waiting > 0:
+        logger.warning(
+            "Refusing %s sleep: scheduler busy (num_running=%d, num_waiting=%d)",
+            depth,
+            num_running,
+            num_waiting,
+        )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "busy",
+                "detail": f"{num_running} running / {num_waiting} waiting requests; retry when idle",
+                "num_running": num_running,
+                "num_waiting": num_waiting,
+            },
+        )
+    return None
+
+
 @app.post("/admin/soft-sleep", dependencies=[Depends(verify_api_key)])
 async def admin_soft_sleep():
     """Enter soft sleep: clear all caches, reduce Metal cache limit. Model stays loaded."""
@@ -11351,6 +11395,10 @@ async def admin_soft_sleep():
             )
         if _standby_state == "soft":
             return {"status": "already_soft"}
+
+        busy = _sleep_busy_response("soft")
+        if busy is not None:
+            return busy
 
         try:
             import mlx.core as mx
@@ -11394,6 +11442,10 @@ async def admin_deep_sleep():
             return JSONResponse(
                 status_code=409, content={"error": "Already in deep sleep"}
             )
+
+        busy = _sleep_busy_response("deep")
+        if busy is not None:
+            return busy
 
         try:
             import mlx.core as mx

@@ -1419,6 +1419,16 @@ class BatchedEngine(BaseEngine):
             if gen_len > 0:
                 logger.debug(f"Gen prompt len: {gen_len} tokens")
             gen_len = max(gen_len, 0)
+            if gen_len > 0 and self._model_family_name() == "deepseek_v4":
+                # DSV4 stores prefix KV truncated exactly to the stripped-key
+                # boundary and replays the request's own generation-prompt
+                # suffix on every fetch, so a prefix stored under the thinking
+                # rail (`<think>`) is replay-exact for the chat rail
+                # (`</think>`) and vice versa — the rails differ only in that
+                # final suffix token. Hashing the suffix into block keys (the
+                # default below) forced the bounded visible-answer pass to
+                # re-prefill the entire prompt (59s stall at 15k tokens).
+                return gen_len, {"generation_prompt": "dsv4-replay-exact"}
             return gen_len, _generation_prompt_cache_extra_key(
                 prompt_with_generation=prompt_with_gen,
                 prompt_without_generation=prompt_without_gen,

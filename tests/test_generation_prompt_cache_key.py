@@ -131,6 +131,59 @@ def test_generation_prompt_cache_context_returns_tuple_when_tokenizer_missing():
     ) == (0, None)
 
 
+def test_generation_prompt_cache_context_dsv4_rails_share_constant_key():
+    """DSV4 <think>/</think> rails must share one prefix-cache namespace.
+
+    DSV4 truncates stored prefix KV exactly to the stripped-key boundary and
+    replays the request's own generation-prompt suffix on fetch, so a prefix
+    stored under the thinking rail is replay-exact for the chat rail. Hashing
+    the suffix into block keys forced the visible-answer pass to re-prefill
+    the entire prompt (59s stall at 15k tokens).
+    """
+    from types import SimpleNamespace
+
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    base = "<user>hi</user><assistant>"
+
+    def make_engine(family):
+        engine = object.__new__(BatchedEngine)
+        engine._processor = None
+        engine._tokenizer = SimpleNamespace(
+            encode=lambda prompt, add_special_tokens=False: list(
+                prompt.encode("utf-8")
+            )
+        )
+        engine._apply_chat_template = lambda *args, **kwargs: base
+        engine._model_family_name = lambda: family
+        return engine
+
+    def context_for(engine, suffix):
+        return engine._compute_gen_prompt_cache_context(
+            messages=[],
+            tools=None,
+            num_images=0,
+            enable_thinking=True,
+            extra_template_kwargs=None,
+            prompt_with_gen=base + suffix,
+        )
+
+    dsv4 = make_engine("deepseek_v4")
+    think_len, think_key = context_for(dsv4, "<think>")
+    chat_len, chat_key = context_for(dsv4, "</think>")
+
+    assert think_len > 0
+    assert chat_len > 0
+    assert think_key == {"generation_prompt": "dsv4-replay-exact"}
+    assert chat_key == think_key
+
+    other = make_engine("qwen3")
+    _, on_key = context_for(other, "<think>")
+    _, off_key = context_for(other, "</think>")
+    assert on_key != off_key
+    assert on_key != think_key
+
+
 def test_mllm_media_cache_side_key_merge_preserves_generation_prompt_axis():
     from vmlx_engine.mllm_batch_generator import _merge_mllm_cache_extra_keys
 

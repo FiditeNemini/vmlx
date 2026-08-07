@@ -5,12 +5,17 @@ of the output budget for the answer the reasoning phase consumes all of it and
 the visible answer is empty. The reserve is a bounded slice rather than a
 percentage so that deep reasoning is not taxed at large budgets.
 
-Two properties are pinned here:
+Three properties are pinned here:
 
   * small budgets still split. A flat 256-token floor previously made every
     budget under 512 unsplittable, and 160/256/400 all measured content=0 while
     512 and above answered.
   * nothing at or above 512 changed when that floor was fixed.
+  * every splittable budget (>= 2 tokens) splits. Budgets under 128 were left
+    unsplit, which disarmed the never-empty answer pass entirely: reasoning-only
+    runs returned empty content at finish=length, and a hard 502
+    reasoning_only_no_content when the model EOSed inside the thinking block
+    (live-hit 2026-08-07: max_tokens=48 at 243K ctx).
 """
 import pytest
 
@@ -42,9 +47,19 @@ class TestSplitTable:
         # The answer must get a real share of a small budget, not a token or two.
         assert budget - cap >= budget // 4
 
-    @pytest.mark.parametrize("budget", [0, 1, 64, 127])
+    @pytest.mark.parametrize("budget", [0, 1])
     def test_budgets_too_small_to_split_are_left_alone(self, budget):
         assert _dsv4_default_thinking_cap(budget) is None
+
+    @pytest.mark.parametrize("budget", [2, 8, 48, 64, 127])
+    def test_sub_128_budgets_split_so_the_answer_pass_can_arm(self, budget):
+        # Unsplit budgets disarm the never-empty answer pass: reasoning-only
+        # runs return empty content (finish=length) or a hard 502 (EOS inside
+        # the thinking block). The reserve is exactly half the budget here.
+        cap = _dsv4_default_thinking_cap(budget)
+        assert cap is not None, budget
+        assert 0 < cap < budget
+        assert budget - cap == budget // 2
 
     def test_reserve_never_exceeds_the_ceiling(self):
         for budget in (2000, 8000, 32000, 131072, 393216):

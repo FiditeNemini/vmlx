@@ -2662,21 +2662,26 @@ _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
 _DSV4_ANSWER_RESERVE_FRACTION = 0.25
 _DSV4_ANSWER_RESERVE_MIN = 256
 _DSV4_ANSWER_RESERVE_MAX = 2048
-# Smallest budget worth splitting at all. Below this, half the budget is too
-# little for the answer pass to say anything useful.
-_DSV4_MIN_SPLITTABLE_TOKENS = 128
+# Smallest budget worth splitting at all: one thinking token + one answer
+# token. Budgets below 128 were previously left unsplit ("too little for the
+# answer pass to say anything useful"), but unsplit is worse than a tiny
+# split: with no reserve the never-empty answer pass never arms, so a
+# reasoning-only run returns EMPTY content at finish=length and a hard 502
+# reasoning_only_no_content when the model EOSes inside the thinking block
+# (live-hit 2026-08-07: max_tokens=48 at 243K ctx -- 5 reasoning tokens, EOS,
+# 502, 43 tokens of caller budget unspent). A half-budget truncated answer
+# always beats an empty turn or an error.
+_DSV4_MIN_SPLITTABLE_TOKENS = 2
 
 
 def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
     """First-pass thinking cap for DSV4 when the caller supplied none.
 
-    Returns the cap, or None to leave the budget unsplit (very small budgets,
+    Returns the cap, or None to leave the budget unsplit (a 1-token budget,
     or an explicit DSV4_ANSWER_RESERVE=0 opt-out).
     """
     total = int(max_tokens or 0)
     if total < _DSV4_MIN_SPLITTABLE_TOKENS:
-        # Below this even half the budget cannot hold a useful answer, so a
-        # split would truncate reasoning without buying anything.
         return None
     raw = os.environ.get("DSV4_ANSWER_RESERVE", "").strip()
     if raw:

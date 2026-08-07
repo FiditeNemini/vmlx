@@ -566,6 +566,10 @@ class EngineCore:
         self._cleanup_request(request_id)
         return found
 
+    def request_progress(self, request_id: str) -> Optional[int]:
+        """Monotonic progress counter for a live request, or None if unknown."""
+        return self.scheduler.request_progress(request_id)
+
     def _cleanup_request(self, request_id: str) -> None:
         """Clean up request tracking.
 
@@ -938,6 +942,10 @@ class AsyncEngineCore:
     async def abort_request(self, request_id: str) -> bool:
         """Abort a request."""
         return await self.engine.abort_request(request_id)
+
+    def request_progress(self, request_id: str) -> Optional[int]:
+        """Monotonic progress counter for a live request, or None if unknown."""
+        return self.engine.request_progress(request_id)
 
     async def stream_outputs(
         self,

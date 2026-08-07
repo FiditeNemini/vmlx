@@ -5833,6 +5833,22 @@ class Scheduler:
             f"Added request {request.request_id} with {request.num_prompt_tokens} prompt tokens"
         )
 
+    def request_progress(self, request_id: str) -> Optional[int]:
+        """Monotonic progress counter for a live request, or None if unknown.
+
+        Sums prefilled tokens and generated tokens so timeout logic can tell
+        a healthy long prefill/decode apart from a wedged request. Uses
+        total_output_tokens (survives _reschedule_running_requests zeroing
+        output_token_ids) rather than len(output_token_ids).
+        """
+        request = self.requests.get(request_id)
+        if request is None:
+            return None
+        return (
+            int(getattr(request, "num_computed_tokens", 0) or 0)
+            + int(getattr(request, "total_output_tokens", 0) or 0)
+        )
+
     def abort_request(self, request_id: str) -> bool:
         """
         Abort a request, cleaning up all associated resources.

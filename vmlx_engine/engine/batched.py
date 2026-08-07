@@ -2754,3 +2754,11 @@ class BatchedEngine(BaseEngine):
         elif self._engine:
             return await self._engine.abort_request(request_id)
         return False
+
+    def request_progress(self, request_id: str) -> int | None:
+        """Monotonic progress counter for a live request, or None if unknown."""
+        if self._mllm_scheduler:
+            return self._mllm_scheduler.request_progress(request_id)
+        elif self._engine:
+            return self._engine.request_progress(request_id)
+        return None

@@ -7120,6 +7120,21 @@ def _suppress_tool_parsing_when_no_tools(
     return True
 
 
+def _engine_request_progress(engine: Any, request_id: str) -> int | None:
+    """Best-effort monotonic progress (prefilled+generated tokens) for a request.
+
+    Returns None when the engine cannot report progress (SimpleEngine, or the
+    request is unknown) — callers fall back to hard wall-clock timeout.
+    """
+    probe = getattr(engine, "request_progress", None)
+    if probe is None:
+        return None
+    try:
+        return probe(request_id)
+    except Exception:
+        return None
+
+
 async def _await_chat_with_disconnect_abort(
     engine: Any,
     *,
@@ -7130,6 +7145,7 @@ async def _await_chat_with_disconnect_abort(
     request_id: str,
     endpoint: str,
     poll_interval: float = 0.25,
+    hard_timeout: bool = False,
 ):
     """Await non-streaming engine.chat while aborting scheduler work on disconnect.
 
@@ -7138,6 +7154,11 @@ async def _await_chat_with_disconnect_abort(
     HTTP client could leave a long prompt/generation running in the scheduler
     with no consumer. Pass the public response id through as the scheduler
     request id and abort it if the client disappears or the timeout fires.
+
+    The default (server-level) timeout is progress-aware: a healthy long
+    prefill/decode that keeps advancing tokens is never killed; only a request
+    that made zero progress across a full timeout window is aborted as wedged.
+    An explicit per-request timeout (hard_timeout=True) stays wall-clock.
     """
     chat_kwargs = dict(chat_kwargs)
     chat_kwargs.pop("request_id", None)
@@ -7145,6 +7166,7 @@ async def _await_chat_with_disconnect_abort(
         engine.chat(messages=messages, request_id=request_id, **chat_kwargs)
     )
     started = time.perf_counter()
+    last_progress: int | None = None
 
     # Active receive-channel drain. `Request.is_disconnected()` is a lazy
     # zero-timeout poll of receive — it can miss `http.disconnect` events
@@ -7235,6 +7257,24 @@ async def _await_chat_with_disconnect_abort(
                     raise HTTPException(status_code=499, detail="Client disconnected")
 
             if timeout is not None and (time.perf_counter() - started) >= timeout:
+                if not hard_timeout:
+                    progress = _engine_request_progress(engine, request_id)
+                    if progress is not None and progress > 0 and (
+                        last_progress is None or progress > last_progress
+                    ):
+                        logger.info(
+                            "%s: request %s still progressing "
+                            "(%d tokens, +%d this window) — extending "
+                            "%.1fs timeout window",
+                            endpoint,
+                            request_id,
+                            progress,
+                            progress - (last_progress or 0),
+                            timeout,
+                        )
+                        last_progress = progress
+                        started = time.perf_counter()
+                        continue
                 _stop_drain()
                 await _abort(f"timeout after {timeout:.1f}s")
                 task.cancel()
@@ -17262,6 +17302,7 @@ async def create_chat_completion(
             fastapi_request=fastapi_request,
             request_id=response_id,
             endpoint="Chat Completions",
+            hard_timeout=request.timeout is not None,
         )
     except asyncio.TimeoutError:
         raise HTTPException(
@@ -17567,6 +17608,7 @@ async def create_chat_completion(
                     fastapi_request=fastapi_request,
                     request_id=f"{response_id}:visible-answer",
                     endpoint="Chat Completions visible answer pass (non-stream)",
+                    hard_timeout=request.timeout is not None,
                 )
                 if _ns_native_tool_recovery:
                     _ns_text, _ = _answer_pass_visible_delta(
@@ -17673,6 +17715,7 @@ async def create_chat_completion(
                 fastapi_request=fastapi_request,
                 request_id=f"{response_id}-xml-retry",
                 endpoint="Chat Completions",
+                hard_timeout=request.timeout is not None,
             )
             if _retry_output is not None and _retry_report.get("is_valid"):
                 output = _retry_output
@@ -17710,6 +17753,7 @@ async def create_chat_completion(
                 fastapi_request=fastapi_request,
                 request_id=f"{response_id}-json-retry",
                 endpoint="Chat Completions",
+                hard_timeout=request.timeout is not None,
             )
             if _retry_output is not None and _retry_report.get("is_valid"):
                 output = _retry_output
@@ -18370,6 +18414,7 @@ async def _retry_structured_output_json_once(
     fastapi_request: Request | None,
     request_id: str,
     endpoint: str,
+    hard_timeout: bool = False,
 ) -> tuple[GenerationOutput | None, dict[str, Any]]:
     instruction = _structured_output_json_retry_instruction(response_format, error)
     if not instruction:
@@ -18400,6 +18445,7 @@ async def _retry_structured_output_json_once(
             fastapi_request=fastapi_request,
             request_id=request_id,
             endpoint=f"{endpoint} structured JSON retry",
+            hard_timeout=hard_timeout,
         )
     except Exception:
         logger.warning(
@@ -18427,6 +18473,7 @@ async def _retry_structured_output_xml_once(
     fastapi_request: Request | None,
     request_id: str,
     endpoint: str,
+    hard_timeout: bool = False,
 ) -> tuple[GenerationOutput | None, dict[str, Any]]:
     instruction = _structured_output_xml_retry_instruction(response_format, error)
     config = _xml_response_format_config(response_format)
@@ -18456,6 +18503,7 @@ async def _retry_structured_output_xml_once(
             fastapi_request=fastapi_request,
             request_id=request_id,
             endpoint=f"{endpoint} structured XML retry",
+            hard_timeout=hard_timeout,
         )
     except Exception:
         logger.warning(
@@ -20418,6 +20466,7 @@ async def create_response(
             fastapi_request=fastapi_request,
             request_id=response_id,
             endpoint="Responses API",
+            hard_timeout=request.timeout is not None,
         )
     except asyncio.TimeoutError:
         raise HTTPException(
@@ -20730,6 +20779,7 @@ async def create_response(
                     fastapi_request=fastapi_request,
                     request_id=f"{response_id}:visible-answer",
                     endpoint="Responses visible answer pass (non-stream)",
+                    hard_timeout=request.timeout is not None,
                 )
                 if _ns_native_tool_recovery:
                     _ns_text, _ = _answer_pass_visible_delta(
@@ -20847,6 +20897,7 @@ async def create_response(
                     fastapi_request=fastapi_request,
                     request_id=f"{response_id}-xml-retry",
                     endpoint="Responses API",
+                    hard_timeout=request.timeout is not None,
                 )
                 if _retry_output is not None and _retry_report.get("is_valid"):
                     output = _retry_output
@@ -20897,6 +20948,7 @@ async def create_response(
                     fastapi_request=fastapi_request,
                     request_id=f"{response_id}-json-retry",
                     endpoint="Responses API",
+                    hard_timeout=request.timeout is not None,
                 )
                 if _retry_output is not None and _retry_report.get("is_valid"):
                     output = _retry_output
@@ -21225,7 +21277,15 @@ async def stream_completions_multi(
                 continue
             stream_logprob_offset = 0
             async for output in _stream_with_keepalive(
-                engine.stream_generate(**gen_kwargs), total_timeout=_stream_timeout
+                engine.stream_generate(**gen_kwargs),
+                total_timeout=_stream_timeout,
+                progress_probe=(
+                    None
+                    if request.timeout is not None
+                    else lambda rid=prompt_request_id: _engine_request_progress(
+                        engine, rid
+                    )
+                ),
             ):
                 if output is None:
                     yield ": keep-alive\n\n"
@@ -21338,9 +21398,16 @@ async def _stream_with_keepalive(
     async_gen,
     interval: float = _SSE_KEEPALIVE_INTERVAL,
     total_timeout: float | None = None,
+    progress_probe=None,
 ):
     """Yield items from async generator, inserting None sentinels on timeout.
     If total_timeout is set, raises TimeoutError after that many seconds of total streaming.
+
+    When progress_probe is provided (server-default timeout, not an explicit
+    per-request one), the timeout is progress-aware: if the engine reports the
+    request advanced tokens since the last window, the window resets instead of
+    killing a healthy long prefill/decode. Only a request with zero progress
+    across a full window is treated as wedged.
 
     Uses asyncio.wait() which does NOT cancel the pending future on timeout —
     critical because cancelling an async generator's __anext__() finalizes it.
@@ -21350,10 +21417,32 @@ async def _stream_with_keepalive(
     it = async_gen.__aiter__()
     pending = asyncio.ensure_future(it.__anext__())
     start = time.monotonic()
+    last_progress: int | None = None
     try:
         while True:
             if total_timeout and (time.monotonic() - start) > total_timeout:
-                raise TimeoutError(f"Streaming exceeded {total_timeout}s timeout")
+                progress = None
+                if progress_probe is not None:
+                    try:
+                        progress = progress_probe()
+                    except Exception:
+                        progress = None
+                if progress is not None and progress > 0 and (
+                    last_progress is None or progress > last_progress
+                ):
+                    logger.info(
+                        "Stream still progressing (%d tokens, +%d this "
+                        "window) — extending %.1fs timeout window",
+                        progress,
+                        progress - (last_progress or 0),
+                        total_timeout,
+                    )
+                    last_progress = progress
+                    start = time.monotonic()
+                else:
+                    raise TimeoutError(
+                        f"Streaming exceeded {total_timeout}s timeout"
+                    )
             done, _ = await asyncio.wait({pending}, timeout=interval)
             if done:
                 try:
@@ -21967,6 +22056,11 @@ async def stream_chat_completion(
                 else _SSE_KEEPALIVE_INTERVAL
             ),
             total_timeout=_stream_timeout,
+            progress_probe=(
+                None
+                if request.timeout is not None
+                else lambda: _engine_request_progress(engine, response_id)
+            ),
         ):
             # Keep-alive sentinel — emit SSE comment to prevent connection timeout
             if output is None:
@@ -23051,6 +23145,13 @@ async def stream_chat_completion(
             async for answer_output in _stream_with_keepalive(
                 engine.stream_chat(messages=answer_messages, **answer_kwargs),
                 total_timeout=_stream_timeout,
+                progress_probe=(
+                    None
+                    if request.timeout is not None
+                    else lambda: _engine_request_progress(
+                        engine, f"{response_id}:visible-answer"
+                    )
+                ),
             ):
                 if answer_output is None:
                     yield ": keep-alive\n\n"
@@ -24189,6 +24290,11 @@ async def stream_responses_api(
         async for output in _stream_with_keepalive(
             engine.stream_chat(messages=messages, **kwargs),
             total_timeout=_stream_timeout,
+            progress_probe=(
+                None
+                if request.timeout is not None
+                else lambda: _engine_request_progress(engine, response_id)
+            ),
         ):
             # Keep-alive sentinel — emit SSE comment to prevent connection timeout
             if output is None:
@@ -25168,6 +25274,13 @@ async def stream_responses_api(
                 async for answer_output in _stream_with_keepalive(
                     engine.stream_chat(messages=answer_messages, **answer_kwargs),
                     total_timeout=_stream_timeout,
+                    progress_probe=(
+                        None
+                        if request.timeout is not None
+                        else lambda: _engine_request_progress(
+                            engine, f"{response_id}:visible-answer"
+                        )
+                    ),
                 ):
                     if answer_output is None:
                         continue

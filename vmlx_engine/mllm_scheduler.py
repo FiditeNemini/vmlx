@@ -2466,6 +2466,21 @@ class MLLMScheduler:
 
         return request_id
 
+    def request_progress(self, request_id: str) -> Optional[int]:
+        """Monotonic progress counter for a live request, or None if unknown.
+
+        MLLMRequest has no num_computed_tokens; approximate prefill progress
+        with num_prompt_tokens once known, plus generated token count.
+        """
+        with self._queue_lock:
+            request = self.requests.get(request_id)
+            if request is None:
+                return None
+            return (
+                int(getattr(request, "num_prompt_tokens", 0) or 0)
+                + int(getattr(request, "num_output_tokens", 0) or 0)
+            )
+
     def abort_request(self, request_id: str) -> bool:
         """
         Abort a request.

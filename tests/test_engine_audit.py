@@ -6982,6 +6982,236 @@ class TestNonStreamingDisconnectAbort:
         asyncio.run(run())
 
 
+class TestProgressAwareDefaultTimeout:
+    """Server-default timeout must not kill healthy long prefills (#64).
+
+    A 1M-ctx prompt needs 35-60+ min of prefill; the flat 300s default
+    wall-clock aborted it while the engine was advancing normally. The
+    default timeout now probes engine token progress at expiry and extends
+    the window while progress advances; explicit request.timeout stays
+    hard wall-clock.
+    """
+
+    def _fake_request(self):
+        class FakeRequest:
+            async def is_disconnected(self):
+                return False
+
+        return FakeRequest()
+
+    def test_default_timeout_extends_while_progress_advances(self):
+        import asyncio
+        from vmlx_engine.server import _await_chat_with_disconnect_abort
+
+        class FakeOutput:
+            completion_tokens = 1
+
+        class FakeEngine:
+            def __init__(self):
+                self.aborted = None
+                self.progress = 0
+
+            async def chat(self, **kwargs):
+                await asyncio.sleep(0.2)
+                return FakeOutput()
+
+            async def abort_request(self, request_id):
+                self.aborted = request_id
+                return True
+
+            def request_progress(self, request_id):
+                self.progress += 100
+                return self.progress
+
+        async def run():
+            engine = FakeEngine()
+            output = await _await_chat_with_disconnect_abort(
+                engine,
+                messages=[],
+                chat_kwargs={},
+                timeout=0.02,
+                fastapi_request=self._fake_request(),
+                request_id="req_progressing",
+                endpoint="test",
+                poll_interval=0.005,
+                hard_timeout=False,
+            )
+            assert output.completion_tokens == 1
+            assert engine.aborted is None
+
+        asyncio.run(run())
+
+    def test_default_timeout_aborts_wedged_request(self):
+        import asyncio
+        import pytest
+        from vmlx_engine.server import _await_chat_with_disconnect_abort
+
+        class FakeEngine:
+            def __init__(self):
+                self.aborted = None
+
+            async def chat(self, **kwargs):
+                await asyncio.sleep(10)
+
+            async def abort_request(self, request_id):
+                self.aborted = request_id
+                return True
+
+            def request_progress(self, request_id):
+                return 0  # never advances -> wedged
+
+        async def run():
+            engine = FakeEngine()
+            with pytest.raises(asyncio.TimeoutError):
+                await _await_chat_with_disconnect_abort(
+                    engine,
+                    messages=[],
+                    chat_kwargs={},
+                    timeout=0.02,
+                    fastapi_request=self._fake_request(),
+                    request_id="req_wedged",
+                    endpoint="test",
+                    poll_interval=0.005,
+                    hard_timeout=False,
+                )
+            assert engine.aborted == "req_wedged"
+
+        asyncio.run(run())
+
+    def test_explicit_timeout_stays_hard_wall_clock(self):
+        import asyncio
+        import pytest
+        from vmlx_engine.server import _await_chat_with_disconnect_abort
+
+        class FakeEngine:
+            def __init__(self):
+                self.aborted = None
+                self.progress = 0
+
+            async def chat(self, **kwargs):
+                await asyncio.sleep(10)
+
+            async def abort_request(self, request_id):
+                self.aborted = request_id
+                return True
+
+            def request_progress(self, request_id):
+                self.progress += 100
+                return self.progress
+
+        async def run():
+            engine = FakeEngine()
+            with pytest.raises(asyncio.TimeoutError):
+                await _await_chat_with_disconnect_abort(
+                    engine,
+                    messages=[],
+                    chat_kwargs={},
+                    timeout=0.02,
+                    fastapi_request=self._fake_request(),
+                    request_id="req_hard",
+                    endpoint="test",
+                    poll_interval=0.005,
+                    hard_timeout=True,
+                )
+            assert engine.aborted == "req_hard"
+
+        asyncio.run(run())
+
+    def test_engine_without_progress_probe_falls_back_to_hard(self):
+        import asyncio
+        import pytest
+        from vmlx_engine.server import _await_chat_with_disconnect_abort
+
+        class FakeEngine:  # no request_progress attr (SimpleEngine-like)
+            def __init__(self):
+                self.aborted = None
+
+            async def chat(self, **kwargs):
+                await asyncio.sleep(10)
+
+            async def abort_request(self, request_id):
+                self.aborted = request_id
+                return True
+
+        async def run():
+            engine = FakeEngine()
+            with pytest.raises(asyncio.TimeoutError):
+                await _await_chat_with_disconnect_abort(
+                    engine,
+                    messages=[],
+                    chat_kwargs={},
+                    timeout=0.02,
+                    fastapi_request=self._fake_request(),
+                    request_id="req_no_probe",
+                    endpoint="test",
+                    poll_interval=0.005,
+                    hard_timeout=False,
+                )
+            assert engine.aborted == "req_no_probe"
+
+        asyncio.run(run())
+
+    def test_stream_keepalive_extends_while_progress_advances(self):
+        import asyncio
+        from vmlx_engine.server import _stream_with_keepalive
+
+        progress = {"n": 0}
+
+        def probe():
+            progress["n"] += 50
+            return progress["n"]
+
+        async def slow_gen():
+            await asyncio.sleep(0.1)
+            yield "tok"
+
+        async def run():
+            items = []
+            async for item in _stream_with_keepalive(
+                slow_gen(),
+                interval=0.005,
+                total_timeout=0.02,
+                progress_probe=probe,
+            ):
+                if item is not None:
+                    items.append(item)
+            assert items == ["tok"]
+
+        asyncio.run(run())
+
+    def test_stream_keepalive_without_probe_stays_hard(self):
+        import asyncio
+        import pytest
+        from vmlx_engine.server import _stream_with_keepalive
+
+        async def slow_gen():
+            await asyncio.sleep(10)
+            yield "tok"
+
+        async def run():
+            with pytest.raises(TimeoutError):
+                async for _ in _stream_with_keepalive(
+                    slow_gen(),
+                    interval=0.005,
+                    total_timeout=0.02,
+                ):
+                    pass
+
+        asyncio.run(run())
+
+    def test_scheduler_request_progress_sums_prefill_and_decode(self):
+        from vmlx_engine.scheduler import Scheduler
+
+        class FakeReq:
+            num_computed_tokens = 700
+            total_output_tokens = 42
+
+        sched = Scheduler.__new__(Scheduler)
+        sched.requests = {"r1": FakeReq()}
+        assert sched.request_progress("r1") == 742
+        assert sched.request_progress("missing") is None
+
+
 # ===========================================================================
 # L. LOW severity fixes — port race, delta streaming, reasoning_effort
 # ===========================================================================

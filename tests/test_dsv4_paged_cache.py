@@ -2878,6 +2878,25 @@ def test_dsv4_short_prompt_snapshot_skip_does_not_sync_reprefill_for_store():
     assert "dsv4_prompt_snapshot_min_tokens" in src
 
 
+def test_dsv4_short_prompt_store_skip_does_not_warn_cannot_produce_cache():
+    """The by-design short-prompt skip must not double-log as a WARNING.
+
+    The threshold branch already emits a single INFO and sets
+    _dsv4_short_prompt_store_skipped; the terminal else-chain must honor that
+    flag instead of emitting the false-alarm "Cannot produce prompt-only
+    cache" WARNING for every short DSV4 request.
+    """
+    import inspect
+    from vmlx_engine import scheduler
+
+    src = inspect.getsource(scheduler.Scheduler._process_batch_responses)
+
+    assert src.count("_dsv4_short_prompt_store_skipped") >= 2
+    warn_idx = src.index("Cannot produce prompt-only cache")
+    guard_idx = src.rindex("_dsv4_short_prompt_store_skipped")
+    assert guard_idx < warn_idx
+
+
 def test_dsv4_generator_skips_prompt_snapshot_when_cache_store_disabled(monkeypatch):
     """No-cache DSV4 requests must not deep-copy composite cache snapshots.
 

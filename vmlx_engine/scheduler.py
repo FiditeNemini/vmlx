@@ -8164,6 +8164,10 @@ class Scheduler:
                                         request,
                                         "_dsv4_cache_hit_store_skipped",
                                         False,
+                                    ) or getattr(
+                                        request,
+                                        "_dsv4_short_prompt_store_skipped",
+                                        False,
                                     ):
                                         pass
                                     else:

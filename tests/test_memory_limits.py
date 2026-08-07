@@ -239,7 +239,13 @@ def test_dsv4_estimator_uses_native_swa_csa_hca_topology():
     assert estimate.total_bytes == 242_670_592
 
 
-def test_dsv4_pool_q8_admission_counts_encoded_storage_without_full_bf16_view():
+def test_dsv4_pool_q8_admission_counts_encoded_storage_without_full_bf16_view(
+    monkeypatch,
+):
+    # Pin the BF16 retention threshold below the 32K compressor pool so the
+    # promotion math is exercised; the runtime default (64 MiB) keeps 32K
+    # pools BF16 entirely (see the default-threshold test below).
+    monkeypatch.setenv("DSV4_POOL_BF16_MAX_BYTES", str(2 * 1024 * 1024))
     config = _dsv4_config()
     bf16 = estimate_dsv4_cache_memory_from_config(
         config,
@@ -264,6 +270,26 @@ def test_dsv4_pool_q8_admission_counts_encoded_storage_without_full_bf16_view():
     # their per-branch BF16 hot-tier threshold at 32K.
     assert q8.csa_indexer_bytes == bf16.csa_indexer_bytes
     assert q8.hca_pool_bytes == bf16.hca_pool_bytes
+
+
+def test_dsv4_pool_default_bf16_retention_matches_runtime_at_32k():
+    # Runtime default keeps pools attention-ready BF16 up to 64 MiB per
+    # retained state (jang_tools pool_quant_cache), so at 32K tokens the
+    # pool-quant estimate must equal the BF16 estimate — the admission
+    # estimator must not claim q8 savings the runtime no longer takes.
+    config = _dsv4_config()
+    bf16 = estimate_dsv4_cache_memory_from_config(
+        config,
+        32_768,
+        pool_quant_enabled=False,
+    )
+    q8 = estimate_dsv4_cache_memory_from_config(
+        config,
+        32_768,
+        pool_quant_enabled=True,
+    )
+    assert bf16 is not None and q8 is not None
+    assert q8.total_bytes == bf16.total_bytes
 
 
 def test_dsv4_admission_envelope_is_monotonic_at_pool_and_window_boundaries():

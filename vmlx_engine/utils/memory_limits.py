@@ -12,14 +12,33 @@ _MB = 1024**2
 _GB = 1024**3
 
 # jang-tools' native DSV4 pool codec keeps each compressed branch in BF16
-# through 2 MiB, then stores uint8 codes plus FP16 affine min/scale metadata in
-# groups of 32 features.  Keep these constants beside the admission estimator
-# so the server's memory policy describes the cache that the runtime actually
-# constructs rather than generic full-sequence K/V geometry.
-_DSV4_POOL_BF16_MAX_BYTES = 2 * _MB
+# until one state would retain more than the retention threshold, then stores
+# uint8 codes plus FP16 affine min/scale metadata in groups of 32 features.
+# Keep these constants beside the admission estimator so the server's memory
+# policy describes the cache that the runtime actually constructs rather than
+# generic full-sequence K/V geometry.
 _DSV4_POOL_QUANT_GROUP_SIZE = 32
 _DSV4_POOL_QUANT_CODE_BYTES = 1
 _DSV4_POOL_QUANT_PARAM_BYTES = 2
+
+
+def _dsv4_pool_bf16_max_bytes() -> int:
+    """Mirror jang_tools.dsv4.pool_quant_cache._POOL_BF16_MAX_BYTES.
+
+    Pools stay attention-ready BF16 until one retained state would exceed
+    this many bytes (default 64 MiB, ``DSV4_POOL_BF16_MAX_BYTES`` override);
+    only then do they promote to segmented q8.  Diverging from the runtime
+    threshold makes admission under-estimate BF16 retention for mid-length
+    contexts.
+    """
+
+    raw = os.environ.get("DSV4_POOL_BF16_MAX_BYTES", "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 64 * _MB
 
 
 @dataclass(frozen=True)
@@ -151,7 +170,8 @@ def _dsv4_pool_storage_bytes(
     if rows == 0 or feature_dim == 0:
         return 0
     bf16_bytes = rows * feature_dim * scalar_bytes
-    if not pool_quant_enabled or bf16_bytes <= _DSV4_POOL_BF16_MAX_BYTES:
+    bf16_max_bytes = _dsv4_pool_bf16_max_bytes()
+    if not pool_quant_enabled or bf16_bytes <= bf16_max_bytes:
         return bf16_bytes
 
     group_size = _DSV4_POOL_QUANT_GROUP_SIZE
@@ -168,7 +188,7 @@ def _dsv4_pool_storage_bytes(
     # view beside these codes. Preserve a monotonic admission envelope across
     # the BF16-to-q8 promotion boundary because the capacity search relies on
     # monotonicity and promotion briefly owns the old small BF16 value.
-    return max(_DSV4_POOL_BF16_MAX_BYTES, encoded_bytes)
+    return max(bf16_max_bytes, encoded_bytes)
 
 
 def estimate_dsv4_cache_memory_from_config(

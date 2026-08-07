@@ -89,6 +89,107 @@ def test_lm_head_failure_falls_back_without_advancing_cache_twice(monkeypatch):
     assert mod._CONFIGS.get(model).disabled_reason is not None
 
 
+def test_lm_head_qmm_default_installs_without_reservation(monkeypatch):
+    import vmlx_engine.models.dsv4_lm_head_fastpath as mod
+
+    class _Mx:
+        float32 = "float32"
+
+        @staticmethod
+        def quantized_matmul(*_args, **_kwargs):
+            return _Array((1, 1, 16), "float32", "qmm")
+
+        @staticmethod
+        def eval(*_args):
+            return None
+
+        @staticmethod
+        def dequantize(*_args, **_kwargs):
+            return _Array((16, 64), "float32")
+
+    class _Model:
+        model_type = "deepseek_v4"
+
+        def __init__(self):
+            self.lm_head = _Head()
+
+        def model(self, *_args, **_kwargs):
+            return _Array((1, 1, 64))
+
+        def __call__(self, *_args, **_kwargs):
+            return "stock"
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("qmm mode must not touch the FP32 cache machinery")
+
+    monkeypatch.setattr(mod, "mx", _Mx)
+    monkeypatch.setattr(mod, "_CONFIGS", mod._WeakIdentityMap())
+    monkeypatch.setattr(mod, "_CLASS_PATCHES", {})
+    monkeypatch.setattr(mod, "_cache_admitted", _must_not_run)
+    monkeypatch.setattr(mod, "_reserve_allocator_cache", _must_not_run)
+    monkeypatch.setattr(mod, "_materialize_weight", _must_not_run)
+    monkeypatch.delenv("VMLX_DSV4_LM_HEAD_MODE", raising=False)
+    model = _Model()
+
+    assert mod.install_dsv4_lm_head_fastpath(model)
+    status = mod.dsv4_lm_head_fastpath_status(model)
+    assert status["mode"] == "qmm"
+    assert status["cache_bytes"] == 0
+    assert status["reservation_bytes"] == 0
+    assert model("ids").value == "qmm"
+    assert mod._CONFIGS.get(model).validated is True
+    # Reinstall stays idempotent without re-registering.
+    assert mod.install_dsv4_lm_head_fastpath(model)
+
+
+def test_lm_head_qmm_failure_falls_back_without_advancing_cache_twice(monkeypatch):
+    import vmlx_engine.models.dsv4_lm_head_fastpath as mod
+
+    class _Mx:
+        float32 = "float32"
+
+        @staticmethod
+        def quantized_matmul(*_args, **_kwargs):
+            return _Array((1, 1, 16), "float32", "qmm")
+
+        @staticmethod
+        def eval(*_args):
+            raise RuntimeError("synthetic lazy dispatch failure")
+
+        @staticmethod
+        def dequantize(*_args, **_kwargs):
+            return _Array((16, 64), "float32")
+
+    class _Model:
+        model_type = "deepseek_v4"
+
+        def __init__(self):
+            self.lm_head = _Head()
+
+        def model(self, _input_ids, cache=None, mask=None):
+            del mask
+            cache.advances += 1
+            return _Array((1, 1, 64))
+
+        def __call__(self, input_ids, cache=None, mask=None):
+            hidden = self.model(input_ids, cache=cache, mask=mask)
+            return ("stock", hidden)
+
+    monkeypatch.setattr(mod, "mx", _Mx)
+    monkeypatch.setattr(mod, "_CONFIGS", mod._WeakIdentityMap())
+    monkeypatch.setattr(mod, "_CLASS_PATCHES", {})
+    monkeypatch.delenv("VMLX_DSV4_LM_HEAD_MODE", raising=False)
+    model = _Model()
+    cache = SimpleNamespace(advances=0)
+
+    assert mod.install_dsv4_lm_head_fastpath(model)
+    result = model("ids", cache=cache)
+
+    assert result.value == "reference"
+    assert cache.advances == 1
+    assert mod._CONFIGS.get(model).disabled_reason is not None
+
+
 def test_lm_head_registration_keeps_multiple_models_active(monkeypatch):
     import vmlx_engine.models.dsv4_lm_head_fastpath as mod
 

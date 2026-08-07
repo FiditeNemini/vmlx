@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Safe exact dequantized vocabulary-head cache for DeepSeek-V4.
+"""Safe exact vocabulary-head fastpath for DeepSeek-V4.
 
 The JANG DSV4 reference path dequantizes the vocabulary matrix on every
 forward call before applying an FP32 matrix multiplication. This module
-materializes the dequantized FP32 matrix once, subject to projected Metal
-headroom and allocator-cache budget gates, then reuses it for the same FP32
-matmul as the reference. The arithmetic is unchanged and fallback never runs
-the transformer or mutates its cache twice.
+offers two exact replacements:
+
+* ``qmm`` (default): apply ``mx.quantized_matmul`` on the FP32 hidden state
+  against the packed 8-bit head. This is the reference contraction
+  reassociated — FP32 accumulation against dequantized group values — and it
+  reads only the packed head (~0.55 GB/token) instead of a 2 GB FP32 copy.
+* ``exact-cache``: materialize the dequantized FP32 matrix once, subject to
+  projected Metal headroom and allocator-cache budget gates, then reuse it
+  for the same FP32 matmul as the reference.
+
+Fallback never runs the transformer or mutates its cache twice.
 """
 
 from __future__ import annotations
@@ -28,17 +35,17 @@ except ImportError:  # pragma: no cover - non-Apple package inspection
 logger = logging.getLogger(__name__)
 
 
+def _mode() -> str:
+    value = os.environ.get("VMLX_DSV4_LM_HEAD_MODE", "qmm").strip().lower()
+    if value in {"qmm", "quantized", "quantized-matmul"}:
+        return "qmm"
+    if value in {"1", "true", "yes", "on", "cache", "exact-cache", "fp32"}:
+        return "exact-cache"
+    return "off"
+
+
 def _enabled() -> bool:
-    value = os.environ.get("VMLX_DSV4_LM_HEAD_MODE", "exact-cache")
-    return value.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-        "cache",
-        "exact-cache",
-        "fp32",
-    }
+    return _mode() != "off"
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -113,6 +120,7 @@ def _validate_head(head: Any) -> tuple[Any, ...]:
 class _HeadConfig:
     signature: tuple[Any, ...]
     weight: Any
+    mode: str = "exact-cache"
     reservation_bytes: int = 0
     validated: bool = False
     disabled_reason: str | None = None
@@ -408,12 +416,26 @@ def _install_class_wrapper(model_class: type) -> bool:
         if head is None or _head_signature(head) != config.signature:
             _release_model_cache(self, config, "lm_head parameters changed")
             return original_call(self, input_ids, cache=cache, mask=mask)
-        if config.disabled_reason is not None or config.weight is None:
+        if config.disabled_reason is not None:
+            return original_call(self, input_ids, cache=cache, mask=mask)
+        if config.mode != "qmm" and config.weight is None:
             return original_call(self, input_ids, cache=cache, mask=mask)
 
         hidden = self.model(input_ids, cache=cache, mask=mask)
         try:
-            logits = hidden.astype(mx.float32) @ config.weight.T
+            if config.mode == "qmm":
+                logits = mx.quantized_matmul(
+                    hidden.astype(mx.float32),
+                    head.weight,
+                    head.scales,
+                    getattr(head, "biases", None),
+                    transpose=True,
+                    group_size=head.group_size,
+                    bits=head.bits,
+                    mode=getattr(head, "mode", "affine"),
+                )
+            else:
+                logits = hidden.astype(mx.float32) @ config.weight.T
             # Materialize the first matrix multiplication so any runtime
             # mismatch falls back against this hidden state, never by replaying
             # the mutable request cache.
@@ -448,28 +470,36 @@ def install_dsv4_lm_head_fastpath(model: Any) -> bool:
     except (AttributeError, TypeError, ValueError) as exc:
         logger.info("DSV4 exact lm_head cache not installed: %s", exc)
         return False
+    fast_mode = _mode()
+    if fast_mode == "qmm" and not hasattr(mx, "quantized_matmul"):
+        logger.info("DSV4 lm_head qmm is unavailable; using the exact FP32 cache")
+        fast_mode = "exact-cache"
     existing = _CONFIGS.get(model)
     if (
         existing is not None
         and existing.signature == signature
-        and existing.weight is not None
+        and existing.mode == fast_mode
         and existing.disabled_reason is None
+        and (fast_mode == "qmm" or existing.weight is not None)
     ):
         return True
     if existing is not None:
         _release_model_cache(model, existing, "lm_head cache was reconfigured")
     head = model.lm_head
-    estimated = _estimated_cache_bytes(head)
-    if not _cache_admitted(model, estimated):
-        return False
-    if not _reserve_allocator_cache(model, estimated):
-        return False
-    try:
-        cached_weight = _materialize_weight(head)
-    except Exception as exc:
-        _release_cache_reservation(id(model))
-        logger.warning("DSV4 exact lm_head cache materialization failed: %s", exc)
-        return False
+    cached_weight = None
+    estimated = 0
+    if fast_mode != "qmm":
+        estimated = _estimated_cache_bytes(head)
+        if not _cache_admitted(model, estimated):
+            return False
+        if not _reserve_allocator_cache(model, estimated):
+            return False
+        try:
+            cached_weight = _materialize_weight(head)
+        except Exception as exc:
+            _release_cache_reservation(id(model))
+            logger.warning("DSV4 exact lm_head cache materialization failed: %s", exc)
+            return False
     if not _install_class_wrapper(type(model)):
         _release_cache_reservation(id(model))
         logger.warning("DSV4 exact lm_head class wrapper was replaced; using native")
@@ -477,13 +507,20 @@ def install_dsv4_lm_head_fastpath(model: Any) -> bool:
     _CONFIGS[model] = _HeadConfig(
         signature=signature,
         weight=cached_weight,
+        mode=fast_mode,
         reservation_bytes=estimated,
     )
-    logger.info(
-        "DSV4 exact dequantized lm_head cache enabled for one validated model "
-        "instance (%.2f GB)",
-        estimated / 1024**3,
-    )
+    if fast_mode == "qmm":
+        logger.info(
+            "DSV4 quantized lm_head fastpath enabled for one validated model "
+            "instance (fused 8-bit qmm, no FP32 cache)"
+        )
+    else:
+        logger.info(
+            "DSV4 exact dequantized lm_head cache enabled for one validated model "
+            "instance (%.2f GB)",
+            estimated / 1024**3,
+        )
     return True
 
 
@@ -493,6 +530,7 @@ def dsv4_lm_head_fastpath_status(model: Any) -> dict[str, Any]:
     config = _CONFIGS.get(model)
     return {
         "installed": config is not None,
+        "mode": config.mode if config else None,
         "validated": bool(config and config.validated),
         "disabled_reason": config.disabled_reason if config else None,
         "cache_bytes": int(getattr(config.weight, "nbytes", 0) or 0) if config else 0,

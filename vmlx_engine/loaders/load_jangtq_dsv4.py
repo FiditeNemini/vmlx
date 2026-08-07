@@ -1508,10 +1508,10 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
         from ..models.dsv4_lm_head_fastpath import install_dsv4_lm_head_fastpath
 
         if install_dsv4_lm_head_fastpath(model):
-            _log.info("DSV4 exact dequantized lm_head cache installed")
+            _log.info("DSV4 exact lm_head fastpath installed")
     except Exception as _lm_head_err:
         _log.warning(
-            "DSV4 exact dequantized lm_head cache unavailable: %s",
+            "DSV4 exact lm_head fastpath unavailable: %s",
             _lm_head_err,
         )
 

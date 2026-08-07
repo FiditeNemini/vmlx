@@ -107,10 +107,14 @@ dependencies = [
     # einops — REQUIRED by the same Nemotron-Omni remote vision modules.
     # Without it the first image/video request fails after timm is present.
     "einops>=0.8.0",
-    # librosa — REQUIRED during Nemotron-Omni session construction because the
-    # Parakeet audio feature extractor is initialized with the multimodal
-    # wrapper even when the first request is image-only.
-    "librosa>=0.10.0",
+    # NOTE: librosa deliberately NOT a core dependency (vmlx#217 /
+    # mlxstudio#128): its numba requirement has no cp314 wheels below
+    # numba 0.63.1, so resolvers on Python 3.14 backtracked into ancient
+    # sdists (numba 0.53.1 → llvmlite 0.36.0, requires-python <3.10) and
+    # the whole install failed. All engine librosa imports are lazy and
+    # audio-request-scoped; jang_tools falls back to an inlined slaney mel
+    # filterbank. Audio users install `vmlx[audio]`; the Electron bundle
+    # installs librosa explicitly in panel/scripts/bundle-python.sh.
 ]
 
 [project.optional-dependencies]
@@ -146,7 +150,11 @@ audio = [
     "sounddevice>=0.4.0",
     "soundfile>=0.12.0",
     "scipy>=1.10.0",
-    "numba>=0.57.0",
+    "librosa>=0.10.0",
+    # 0.63.1 is the first numba with cp314 wheels; a lower floor lets
+    # resolvers backtrack into pre-3.10-capped sdists on Python 3.14
+    # (vmlx#217 / mlxstudio#128).
+    "numba>=0.63.1",
     "tiktoken>=0.5.0",
     "misaki[zh,ja]>=0.5.0",  # Chinese (zh) and Japanese (ja) support
     "spacy>=3.7.0",

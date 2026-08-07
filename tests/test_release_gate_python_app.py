@@ -1100,19 +1100,33 @@ def test_verify_bundled_python_import_gate_covers_step37_source_runtime():
 
 
 def test_nemotron_omni_media_dependency_timm_is_packaged_and_verified():
+    import tomllib
+
     pyproject = Path("pyproject.toml").read_text()
     bundle_script = Path("panel/scripts/bundle-python.sh").read_text()
     verifier = Path("panel/scripts/verify-bundled-python.sh").read_text()
 
     assert '"timm>=1.0.20"' in pyproject
     assert '"einops>=0.8.0"' in pyproject
-    assert '"librosa>=0.10.0"' in pyproject
     assert '"timm>=1.0.20"' in bundle_script
     assert '"einops>=0.8.0"' in bundle_script
     assert 'librosa sounddevice miniaudio pyloudnorm numba' in bundle_script
     assert '("timm", "timm vision backbone"' in verifier
     assert '("einops", "einops tensor rearrange"' in verifier
     assert '("librosa", "librosa audio features"' in verifier
+
+    # vmlx#217 / mlxstudio#128: librosa must NOT be a core dependency — its
+    # numba chain has no cp314 wheels below numba 0.63.1, so resolvers on
+    # Python 3.14 backtracked into pre-3.10-capped sdists and the whole
+    # install failed. Audio users get it via the audio extra; the Electron
+    # bundle installs it explicitly in bundle-python.sh (asserted above).
+    parsed = tomllib.loads(pyproject)
+    core_deps = parsed["project"]["dependencies"]
+    assert not any(dep.startswith("librosa") for dep in core_deps)
+    assert not any(dep.startswith("numba") for dep in core_deps)
+    audio_extra = parsed["project"]["optional-dependencies"]["audio"]
+    assert any(dep.startswith("librosa") for dep in audio_extra)
+    assert any(dep.startswith("numba>=0.63.1") for dep in audio_extra)
 
 
 def test_electron_builder_before_pack_hook_runs_verifier_in_direct_smoke(tmp_path):

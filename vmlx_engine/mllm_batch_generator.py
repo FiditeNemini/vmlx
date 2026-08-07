@@ -1336,7 +1336,14 @@ def _mimo_audio_log_mel(path: str, processor_config: Dict[str, Any]):
     """Decode one audio file and produce MiMo tokenizer mel frames [T, n_mels]."""
 
     import numpy as np
-    import librosa
+
+    try:
+        import librosa
+    except ImportError as exc:
+        raise ImportError(
+            "Audio ingestion requires librosa, which is not installed. "
+            "Install the audio extra: pip install 'vmlx[audio]'"
+        ) from exc
 
     target_sr = int(processor_config.get("audio_sampling_rate") or 24000)
     n_fft = int(processor_config.get("audio_nfft") or 960)

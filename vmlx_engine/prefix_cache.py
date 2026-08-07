@@ -3812,6 +3812,29 @@ class BlockAwarePrefixCache:
                 existing_block = self.paged_cache.cached_block_hash_to_block.get_block(
                     block_chain_hash
                 )
+                if (
+                    existing_block is not None
+                    and existing_block.cache_data is None
+                    and disk_store is not None
+                ):
+                    # Global disk-budget eviction deletes payload files while
+                    # the L1 hash index survives. Reusing such a block skips
+                    # the disk write below and leaves the chain permanently
+                    # unrestorable: every repeat of the prompt pays a full
+                    # prefill (observed as a double full prefill per request
+                    # in disk-only mode). Verify the L2 payload is still
+                    # readable before honoring the dedup; fall through to a
+                    # fresh allocation + rewrite when it is gone. get_block
+                    # prefers the newest duplicate, so the rewritten block
+                    # shadows the stale entry.
+                    has_block = getattr(disk_store, "has_block", None)
+                    try:
+                        if callable(has_block) and not bool(
+                            has_block(block_chain_hash)
+                        ):
+                            existing_block = None
+                    except Exception:
+                        pass
                 if existing_block:
                     # If this is the last block in the new sequence and the
                     # existing block was stored as non-last (SSM layers tagged

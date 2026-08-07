@@ -906,6 +906,7 @@ def _apply_projected_output_guard(
     *,
     explicit: bool,
     model_name: str = "",
+    source: str = "implicit",
 ) -> int:
     try:
         requested = int(candidate)
@@ -940,8 +941,9 @@ def _apply_projected_output_guard(
     )
     _projected_guard_warned.add(dedup_key)
     log(
-        "Projected Metal headroom guard clamped implicit max output tokens: "
+        "Projected Metal headroom guard clamped %s max output tokens: "
         "requested=%d safe_cap=%d model=%s",
+        source,
         requested,
         cap,
         resolved_model,
@@ -2308,10 +2310,16 @@ def _resolve_max_tokens(request_value: int | None, model_name: str = "") -> int:
             model_name=model_name,
         )
     if _default_max_tokens_explicit:
+        # A session-level --max-tokens default above the projected cap must
+        # clamp, not 413: the request author sent no max_tokens and cannot fix
+        # the config. Rejecting made every defaults-driven request fail while
+        # the session looked healthy (live 2026-08-07: UI-saved 12288 vs DSV4
+        # safe_cap 10063). Per-request values above the cap still 413 above.
         return _apply_projected_output_guard(
             int(_default_max_tokens),
-            explicit=True,
+            explicit=False,
             model_name=model_name,
+            source="session-default (--max-tokens)",
         )
     v = _bundle_sampling_default(model_name, "max_new_tokens")
     if v is not None and v > 0:
@@ -2319,6 +2327,7 @@ def _resolve_max_tokens(request_value: int | None, model_name: str = "") -> int:
             int(v),
             explicit=False,
             model_name=model_name,
+            source="bundle-default",
         )
     return _apply_projected_output_guard(
         _effective_fallback_max_tokens(),

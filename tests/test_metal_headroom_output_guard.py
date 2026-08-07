@@ -59,19 +59,35 @@ def test_implicit_default_with_zero_safe_cap_clamps_to_one(monkeypatch):
     assert server._resolve_max_tokens(None, "no-headroom-model") == 1
 
 
-def test_explicit_default_over_safe_headroom_rejects(monkeypatch):
+def test_session_default_over_safe_headroom_clamps_instead_of_rejecting(
+    monkeypatch, caplog
+):
+    """A session-level --max-tokens default above the cap clamps with a
+    warning. It previously raised the per-request 413, which made EVERY
+    request that omitted max_tokens fail while the session looked healthy
+    (live 2026-08-07: UI-saved Max Output 12288 vs DSV4 safe_cap 10063 —
+    plain chat/completions requests were unservable). The request author
+    sent no max_tokens and cannot fix the config, so the hard 413 is
+    reserved for per-request values."""
+    import logging
+
     from vmlx_engine import server
 
     monkeypatch.setattr(server, "_default_max_tokens_explicit", True)
     monkeypatch.setattr(server, "_default_max_tokens", 4096)
     monkeypatch.setattr(server, "_metal_projected_output_token_cap", lambda model_name="": 1024)
+    monkeypatch.setattr(server, "_projected_guard_warned", set())
 
-    with pytest.raises(HTTPException) as exc:
-        server._resolve_max_tokens(None, "tight-headroom-model")
+    with caplog.at_level(logging.DEBUG, logger=server.logger.name):
+        assert server._resolve_max_tokens(None, "tight-headroom-model") == 1024
 
-    assert exc.value.status_code == 413
-    assert "4096" in str(exc.value.detail)
-    assert "1024" in str(exc.value.detail)
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "headroom guard clamped" in r.message
+    ]
+    assert len(warnings) == 1
+    assert "session-default (--max-tokens)" in warnings[0].message
 
 
 def test_reasoning_model_fallback_gets_larger_headroom(monkeypatch):

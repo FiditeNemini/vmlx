@@ -148,55 +148,29 @@ def _install_fake_loaded_engine(
     server._metal_projected_output_token_cap = lambda model_name="": 1
 
 
-def _post_default_chat_reject(server: Any) -> dict[str, Any]:
-    client = TestClient(server.app, raise_server_exceptions=False)
-    response = client.post(
-        "/v1/chat/completions",
-        json={
-            "model": "fake",
-            "messages": [{"role": "user", "content": "hi"}],
-        },
-    )
-    text = response.text
-    ok = (
-        response.status_code == 413
-        and "requested=8192" in text
-        and "safe_cap=1" in text
-        and "projected safe Metal headroom" in text
-        and "Metal OOM / kernel-panic risk" in text
-    )
-    return {
-        "path": "/v1/chat/completions",
-        "status_code": response.status_code,
-        "ok": ok,
-        "body_excerpt": text[:500],
-    }
+def _resolve_default_clamp(server: Any) -> dict[str, Any]:
+    """A CLI --max-tokens session default above the cap must CLAMP, not 413.
 
-
-def _resolve_default_reject(server: Any) -> dict[str, Any]:
+    Defaults-driven requests carry no max_tokens the caller could reduce, so
+    rejecting made every plain request fail while the session looked healthy
+    (live 2026-08-07: UI-saved 12288 vs DSV4 safe_cap 10063). The hard 413 is
+    reserved for per-request values, pinned by the route surfaces above.
+    """
     try:
         value = server._resolve_max_tokens(None, "fake-metal-headroom-model")
+    except Exception as exc:
         return {
             "ok": False,
-            "resolved": value,
-            "status_code": None,
-            "body_excerpt": "resolver returned instead of rejecting",
+            "resolved": None,
+            "status_code": getattr(exc, "status_code", None),
+            "body_excerpt": str(getattr(exc, "detail", exc))[:500],
         }
-    except Exception as exc:
-        status_code = getattr(exc, "status_code", None)
-        detail = str(getattr(exc, "detail", exc))
-        ok = (
-            status_code == 413
-            and "requested=8192" in detail
-            and "safe_cap=1" in detail
-            and "projected safe Metal headroom" in detail
-            and "Metal OOM / kernel-panic risk" in detail
-        )
-        return {
-            "ok": ok,
-            "status_code": status_code,
-            "body_excerpt": detail[:500],
-        }
+    return {
+        "ok": value == 1,
+        "resolved": value,
+        "status_code": None,
+        "body_excerpt": "",
+    }
 
 
 def _run_server_main_cli_contract() -> dict[str, Any]:
@@ -236,7 +210,7 @@ def _run_server_main_cli_contract() -> dict[str, Any]:
     ):
         server.main()
 
-    route = _resolve_default_reject(server)
+    route = _resolve_default_clamp(server)
     load = observed.get("load_model") or {}
     ok = (
         route["ok"]
@@ -289,7 +263,7 @@ def _run_vmlx_engine_serve_cli_contract() -> dict[str, Any]:
     ):
         cli.main()
 
-    route = _resolve_default_reject(server)
+    route = _resolve_default_clamp(server)
     load = observed.get("load_model") or {}
     ok = (
         route["ok"]

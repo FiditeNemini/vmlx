@@ -1541,6 +1541,7 @@ def _answer_pass_visible_delta(
     *,
     holdback: int | None = None,
     think_in_prompt: bool = False,
+    markup_guard: bool = False,
 ) -> tuple[str, str]:
     """Incremental visible-content delta for the STREAMED bounded answer pass (F6).
 
@@ -1552,6 +1553,12 @@ def _answer_pass_visible_delta(
     streamed text is byte-identical to the old single chunk. A shared raw-control
     state withholds only an unresolved leading reasoning/channel marker; callers
     may additionally request a tail holdback for a full-pass safety lane.
+
+    With ``markup_guard=True`` (the progressive streaming sites) the emit target
+    is additionally capped at the prose that safely precedes any native
+    tool-call marker, so raw control markup can never escape as a content
+    delta; the terminal markup disposition (parse into structured calls or
+    suppress) belongs to ``_answer_pass_finalize_visible``.
 
     Returns ``(delta_to_emit, new_sent_cursor)``. ``delta_to_emit`` is ``""`` when
     nothing new is safe to emit yet (held back, or a non-monotonic clean revision
@@ -1577,6 +1584,13 @@ def _answer_pass_visible_delta(
         target = full[:-safe_holdback]
     else:
         target = ""
+    if markup_guard and target:
+        # Both are prefixes of ``full``: taking the shorter keeps the sent
+        # cursor monotonic while holding everything from the first (possibly
+        # still-partial) native tool marker onward out of the live stream.
+        _markup_safe = _visible_prefix_before_unparsed_tool_markup(full)
+        if len(_markup_safe) < len(target):
+            target = _markup_safe
     if not target:
         return "", already_sent
     if not target.startswith(already_sent):
@@ -1584,6 +1598,55 @@ def _answer_pass_visible_delta(
         # hadn't emitted): resync the cursor without emitting to avoid duplicates.
         return "", target
     return target[len(already_sent):], target
+
+
+def _answer_pass_finalize_visible(
+    raw_text: str,
+    request: Any,
+    *,
+    think_in_prompt: bool = False,
+    suppress_tools: bool = True,
+) -> tuple[str, list | None]:
+    """Terminal visible text (+ parsed tool calls) for a STREAMED answer pass.
+
+    The bounded answer pass runs on a tools-free direct rail, but it is
+    conditioned on the same reasoning that already tried (and failed) to call a
+    tool, so it can re-emit native tool markup verbatim. The non-streaming
+    answer pass always routes its text through the parse/suppress pipeline;
+    this applies the same terminal contract to the streamed sites: prose passes
+    through unchanged, markup either parses into structured tool calls (when
+    the original request offered tools) or is stripped exactly like any other
+    suppressed native control payload — never surfaced as raw content.
+
+    Returns ``(final_visible_text, tool_calls_or_None)``.
+    """
+    full, _ = _answer_pass_visible_delta(
+        raw_text,
+        "",
+        request,
+        True,
+        holdback=0,
+        think_in_prompt=think_in_prompt,
+    )
+    if not full:
+        return "", None
+    safe_prefix = _visible_prefix_before_unparsed_tool_markup(full)
+    if safe_prefix == full:
+        return full, None
+    parse_text = _strip_think_for_tool_parse(full)
+    if suppress_tools:
+        return (
+            _clean_suppressed_tool_markup_for_display(parse_text or full, request),
+            None,
+        )
+    try:
+        cleaned_text, tool_calls = _parse_tool_calls_with_parser(parse_text, request)
+    except Exception as exc:
+        logger.debug("Answer-pass terminal tool parse failed: %s", exc)
+        cleaned_text, tool_calls = None, None
+    if tool_calls:
+        return _strip_tool_markup_residue_for_display(cleaned_text or ""), tool_calls
+    return safe_prefix, None
 
 
 def _main_pass_finish_reason(
@@ -21625,6 +21688,12 @@ async def stream_chat_completion(
     _stream_tools_available = _tools_available_for_generation(
         request, kwargs.get("tools")
     )
+    # Streaming ``_suppress_tools`` only records tool_choice=="none".  The
+    # non-stream handlers additionally flip it via
+    # _suppress_tool_parsing_when_no_tools when the request carries no tool
+    # schema at all; mirror that union for every visible-display decision so
+    # native tool markup never streams as content on a no-tools request.
+    _suppress_markup_display = _suppress_tools or not _stream_tools_available
     tool_call_active = (
         _stream_tools_available
         and not _suppress_tools
@@ -22152,7 +22221,7 @@ async def stream_chat_completion(
                 # bounded direct answer pass remains only for truly content-empty
                 # reasoning runs, where nothing has been sent and replacement is
                 # still possible without duplicate or unretractable output.
-                if _suppress_tools and emit_content:
+                if _suppress_markup_display and emit_content:
                     safe_content_prefix = (
                         _tool_safe_stream_prefix(
                             accumulated_content, finished=output.finished
@@ -22305,7 +22374,7 @@ async def stream_chat_completion(
                         yield f"data: {_dump_chat_chunk(heartbeat)}\n\n"
                     continue
 
-                if _suppress_tools and content:
+                if _suppress_markup_display and content:
                     safe_text_prefix = (
                         _tool_safe_stream_prefix(
                             accumulated_text, finished=output.finished
@@ -22647,7 +22716,14 @@ async def stream_chat_completion(
                 # ``<parameter=path>...`` residue through Anthropic/Chat clients.
                 remainder = ""
             elif remainder:
-                remainder = _strip_tool_markup_residue_for_display(remainder)
+                # Mirror the non-streaming visible-answer gate: only prose that
+                # safely precedes the first unparsed native marker is assistant
+                # text. Residue-stripping the whole rejected candidate instead
+                # surfaced bare parameter values (e.g. a lone "Paris") as the
+                # visible answer while non-stream honestly returned nothing.
+                remainder = _strip_tool_markup_residue_for_display(
+                    _visible_prefix_before_unparsed_tool_markup(remainder)
+                )
             if remainder:
                 # Use the engine's actual finish_reason (e.g., "length" if max_tokens
                 # was hit) instead of hardcoding "stop"
@@ -22668,6 +22744,13 @@ async def stream_chat_completion(
                     ],
                 )
                 yield f"data: {_dump_chat_chunk(flush_chunk)}\n\n"
+                # This chunk already carried visible content and the terminal
+                # finish_reason. Without recording it, the answer-pass re-arm
+                # and reasoning-only terminals below fire afterwards and append
+                # a contradictory "no visible answer" warning + error to a
+                # stream that just delivered content.
+                content_was_emitted = True
+                streamed_content += remainder
 
     if (
         not tool_calls_emitted
@@ -22843,6 +22926,8 @@ async def stream_chat_completion(
             _ans_ct = 0
             _ans_any = False
             _ans_last_out = None
+            _ans_disconnected = False
+            _ans_tool_calls = None
             async for answer_output in _stream_with_keepalive(
                 engine.stream_chat(messages=answer_messages, **answer_kwargs),
                 total_timeout=_stream_timeout,
@@ -22858,6 +22943,7 @@ async def stream_chat_completion(
                     )
                     if hasattr(engine, "abort_request"):
                         await engine.abort_request(f"{response_id}:visible-answer")
+                    _ans_disconnected = True
                     break
                 _ans_last_out = answer_output
                 _ans_ct = (
@@ -22877,6 +22963,7 @@ async def stream_chat_completion(
                         buffer_answer_pass=_buffer_answer_pass,
                     ),
                     think_in_prompt=_native_reasoning_retry,
+                    markup_guard=True,
                 )
                 if not _delta:
                     continue
@@ -22961,38 +23048,107 @@ async def stream_chat_completion(
                         "content (ct=%d/%d) — client should raise max_tokens",
                         _answer_family, _ans_ct, _ans_budget_cap,
                     )
-            _answer_pass_succeeded = _ans_any
+            if not _buffer_answer_pass and not _ans_disconnected and _ans_raw:
+                # Terminal disposition for the progressive lane: the in-loop
+                # markup guard held back everything from the first native tool
+                # marker onward, so resolve that remainder here exactly like the
+                # non-streaming answer pass — parse into structured tool_calls
+                # when the original request offered tools, otherwise strip it
+                # as suppressed control markup. Clean prose finalizes to the
+                # already-streamed text and emits nothing new.
+                _ans_final_text, _ans_tool_calls = _answer_pass_finalize_visible(
+                    _ans_raw,
+                    request,
+                    think_in_prompt=_native_reasoning_retry,
+                    suppress_tools=_suppress_markup_display,
+                )
+                if _ans_final_text and _ans_final_text.startswith(_ans_sent):
+                    _ans_final_tail = _ans_final_text[len(_ans_sent):]
+                    if _ans_final_tail:
+                        _ans_any = True
+                        _ans_sent = _ans_final_text
+                        answer_chunk = ChatCompletionChunk(
+                            id=response_id,
+                            created=_created_ts,
+                            model=request.model,
+                            choices=[
+                                ChatCompletionChunkChoice(
+                                    delta=ChatCompletionChunkDelta(
+                                        content=_ans_final_tail
+                                    ),
+                                    finish_reason=None,
+                                )
+                            ],
+                        )
+                        yield f"data: {_dump_chat_chunk(answer_chunk)}\n\n"
+                if _ans_tool_calls:
+                    logger.info(
+                        "%s bounded answer pass re-emitted a schema-valid "
+                        "native tool call; emitting structured tool_calls "
+                        "instead of raw markup",
+                        _answer_family,
+                    )
+                    _ans_tc_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                delta=ChatCompletionChunkDelta(
+                                    tool_calls=[
+                                        {
+                                            "index": i,
+                                            "id": tc.id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": tc.function.name,
+                                                "arguments": tc.function.arguments,
+                                            },
+                                        }
+                                        for i, tc in enumerate(_ans_tool_calls)
+                                    ],
+                                ),
+                                finish_reason="tool_calls",
+                            )
+                        ],
+                    )
+                    tool_calls_emitted = True
+                    yield f"data: {_dump_chat_chunk(_ans_tc_chunk)}\n\n"
+            _answer_pass_succeeded = _ans_any or bool(_ans_tool_calls)
             _ans_truncated_for_terminal = bool(
                 getattr(_ans_last_out, "finish_reason", None) == "length"
                 or (_ans_budget_cap and _ans_ct >= _ans_budget_cap)
             )
             if _answer_pass_succeeded:
-                content_was_emitted = True
-                streamed_content += _ans_sent
+                if _ans_any:
+                    content_was_emitted = True
+                    streamed_content += _ans_sent
                 completion_tokens += int(_ans_ct or 0)
                 # Terminal finish for the answer-pass stream satisfies the OpenAI
                 # terminal-finish contract so strict clients do not hang.  Preserve
                 # an honest length terminal when the bounded answer pass itself
                 # truncated/spent its cap; otherwise Chat-derived adapters
                 # (Anthropic/Ollama) report a cut-off visible answer as a normal
-                # end_turn/stop.
-                _answer_finish_reason = (
-                    "length"
-                    if _ans_truncated_for_terminal
-                    else (getattr(_ans_last_out, "finish_reason", None) or "stop")
-                )
-                answer_finish_chunk = ChatCompletionChunk(
-                    id=response_id,
-                    created=_created_ts,
-                    model=request.model,
-                    choices=[
-                        ChatCompletionChunkChoice(
-                            delta=ChatCompletionChunkDelta(),
-                            finish_reason=_answer_finish_reason,
-                        )
-                    ],
-                )
-                yield f"data: {_dump_chat_chunk(answer_finish_chunk)}\n\n"
+                # end_turn/stop.  A structured-tool-call disposition already
+                # carried its own finish_reason="tool_calls" terminal.
+                if not _ans_tool_calls:
+                    _answer_finish_reason = (
+                        "length"
+                        if _ans_truncated_for_terminal
+                        else (getattr(_ans_last_out, "finish_reason", None) or "stop")
+                    )
+                    answer_finish_chunk = ChatCompletionChunk(
+                        id=response_id,
+                        created=_created_ts,
+                        model=request.model,
+                        choices=[
+                            ChatCompletionChunkChoice(
+                                delta=ChatCompletionChunkDelta(),
+                                finish_reason=_answer_finish_reason,
+                            )
+                        ],
+                    )
+                    yield f"data: {_dump_chat_chunk(answer_finish_chunk)}\n\n"
         except asyncio.CancelledError:
             logger.info(
                 "%s Chat Completions visible answer pass cancelled, aborting %s",
@@ -23016,10 +23172,15 @@ async def stream_chat_completion(
     # try to extract tool calls from reasoning before showing the diagnostic.
     # MiniMax M2.7 and similar models may emit tool calls inside <think> blocks
     # when reasoning OFF — the tool call parser needs to see the reasoning text.
-    if suppress_reasoning and not content_was_emitted and accumulated_reasoning:
+    if (
+        suppress_reasoning
+        and not content_was_emitted
+        and not tool_calls_emitted
+        and accumulated_reasoning
+    ):
         # Last-chance tool call extraction from reasoning text
         _has_tc_markers = _private_reasoning_has_tool_syntax(accumulated_reasoning)
-        if _has_tc_markers and not _suppress_tools:
+        if _has_tc_markers and not _suppress_markup_display:
             logger.info(f"Request {response_id}: tool call markers found in suppressed reasoning — extracting")
             _tc_text = accumulated_reasoning.strip()
             _tc_calls = _parse_private_reasoning_tool_calls(_tc_text, request)
@@ -23398,6 +23559,100 @@ async def stream_responses_api(
             ),
         ]
 
+    def _function_call_item_events(calls: list) -> list[str]:
+        """Emit parsed tool calls as complete function_call output items."""
+        nonlocal next_output_index
+        events: list[str] = []
+        for tc in calls:
+            func = tc.function if hasattr(tc, "function") else tc
+            tc_name = func.name if hasattr(func, "name") else func.get("name", "")
+            tc_args = (
+                func.arguments
+                if hasattr(func, "arguments")
+                else func.get("arguments", "")
+            )
+            call_id = tc.id if hasattr(tc, "id") else f"call_{uuid.uuid4().hex[:8]}"
+            fc_id = f"fc_{uuid.uuid4().hex[:12]}"
+            output_index = next_output_index
+            next_output_index += 1
+
+            events.append(
+                _sse(
+                    "response.output_item.added",
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": fc_id,
+                            "type": "function_call",
+                            "status": "in_progress",
+                            "call_id": call_id,
+                            "name": tc_name,
+                            "arguments": "",
+                        },
+                    },
+                )
+            )
+            # Emit arguments incrementally in ~16-char chunks per OpenAI spec
+            _ARG_CHUNK = 16
+            if tc_args:
+                for _ci in range(0, len(tc_args), _ARG_CHUNK):
+                    events.append(
+                        _sse(
+                            "response.function_call_arguments.delta",
+                            {
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": fc_id,
+                                "output_index": output_index,
+                                "delta": tc_args[_ci : _ci + _ARG_CHUNK],
+                            },
+                        )
+                    )
+            else:
+                # Empty arguments — emit one delta to satisfy clients
+                events.append(
+                    _sse(
+                        "response.function_call_arguments.delta",
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": fc_id,
+                            "output_index": output_index,
+                            "delta": "",
+                        },
+                    )
+                )
+            events.append(
+                _sse(
+                    "response.function_call_arguments.done",
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "item_id": fc_id,
+                        "output_index": output_index,
+                        "arguments": tc_args,
+                    },
+                )
+            )
+            fc_item = {
+                "id": fc_id,
+                "type": "function_call",
+                "status": _response_output_status,
+                "call_id": call_id,
+                "name": tc_name,
+                "arguments": tc_args,
+            }
+            events.append(
+                _sse(
+                    "response.output_item.done",
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": fc_item,
+                    },
+                )
+            )
+            _record_output_item(output_index, fc_item)
+        return events
+
     def _start_reasoning_item_events() -> list[str]:
         nonlocal reasoning_item_started, reasoning_output_index, next_output_index
         if reasoning_item_started:
@@ -23493,6 +23748,12 @@ async def stream_responses_api(
     _stream_tools_available = _tools_available_for_generation(
         request, kwargs.get("tools")
     )
+    # Streaming ``_suppress_tools`` only records tool_choice=="none".  The
+    # non-stream handlers additionally flip it via
+    # _suppress_tool_parsing_when_no_tools when the request carries no tool
+    # schema at all; mirror that union for every visible-display decision so
+    # native tool markup never streams as content on a no-tools request.
+    _suppress_markup_display = _suppress_tools or not _stream_tools_available
     tool_call_active = (
         _stream_tools_available
         and not _suppress_tools
@@ -24072,7 +24333,7 @@ async def stream_responses_api(
                                     else None
                                 )
 
-                            if _suppress_tools and emit_content:
+                            if _suppress_markup_display and emit_content:
                                 safe_content_prefix = (
                                     _tool_safe_stream_prefix(
                                         accumulated_content, finished=output.finished
@@ -24156,7 +24417,7 @@ async def stream_responses_api(
                         )
                         continue
                     else:
-                        if _suppress_tools and content:
+                        if _suppress_markup_display and content:
                             safe_text_prefix = (
                                 _tool_safe_stream_prefix(
                                     full_text, finished=output.finished
@@ -24378,7 +24639,7 @@ async def stream_responses_api(
             # not actually a tool call, never recycle it as visible output_text;
             # that creates hidden-only/empty UI rows or pollutes chat history.
             cleaned_text = ""
-    elif _suppress_tools:
+    elif _suppress_markup_display:
         cleaned_text = _clean_suppressed_tool_markup_for_display(
             full_text,
             request,
@@ -24397,7 +24658,7 @@ async def stream_responses_api(
     if (
         not tool_calls
         and accumulated_reasoning
-        and not _suppress_tools
+        and not _suppress_markup_display
         and _private_reasoning_has_tool_syntax(accumulated_reasoning)
     ):
         logger.info(
@@ -24472,14 +24733,14 @@ async def stream_responses_api(
     # text so raw native tool markup remains hidden from ordinary content.
     if request_parser and accumulated_reasoning.strip():
         _fallback_visible_content = accumulated_content
-        if _suppress_tools and _fallback_visible_content:
+        if _suppress_markup_display and _fallback_visible_content:
             _fallback_visible_content = _clean_suppressed_tool_markup_for_display(
                 _fallback_visible_content,
                 request,
             )
     else:
         _fallback_visible_content = (
-            cleaned_text if _suppress_tools else accumulated_content
+            cleaned_text if _suppress_markup_display else accumulated_content
         )
     _explicit_tool_intent = _request_explicitly_requests_tool_use(request)
 
@@ -24624,90 +24885,15 @@ async def stream_responses_api(
             _record_output_item(message_output_index, message_item)
 
         # Emit each tool call as a function_call output item
-        for tc in tool_calls:
-            func = tc.function if hasattr(tc, "function") else tc
-            tc_name = func.name if hasattr(func, "name") else func.get("name", "")
-            tc_args = (
-                func.arguments
-                if hasattr(func, "arguments")
-                else func.get("arguments", "")
-            )
-            call_id = tc.id if hasattr(tc, "id") else f"call_{uuid.uuid4().hex[:8]}"
-            fc_id = f"fc_{uuid.uuid4().hex[:12]}"
-            output_index = next_output_index
-            next_output_index += 1
-
-            yield _sse(
-                "response.output_item.added",
-                {
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": {
-                        "id": fc_id,
-                        "type": "function_call",
-                        "status": "in_progress",
-                        "call_id": call_id,
-                        "name": tc_name,
-                        "arguments": "",
-                    },
-                },
-            )
-            # Emit arguments incrementally in ~16-char chunks per OpenAI spec
-            _ARG_CHUNK = 16
-            if tc_args:
-                for _ci in range(0, len(tc_args), _ARG_CHUNK):
-                    yield _sse(
-                        "response.function_call_arguments.delta",
-                        {
-                            "type": "response.function_call_arguments.delta",
-                            "item_id": fc_id,
-                            "output_index": output_index,
-                            "delta": tc_args[_ci : _ci + _ARG_CHUNK],
-                        },
-                    )
-            else:
-                # Empty arguments — emit one delta to satisfy clients
-                yield _sse(
-                    "response.function_call_arguments.delta",
-                    {
-                        "type": "response.function_call_arguments.delta",
-                        "item_id": fc_id,
-                        "output_index": output_index,
-                        "delta": "",
-                    },
-                )
-            yield _sse(
-                "response.function_call_arguments.done",
-                {
-                    "type": "response.function_call_arguments.done",
-                    "item_id": fc_id,
-                    "output_index": output_index,
-                    "arguments": tc_args,
-                },
-            )
-            fc_item = {
-                "id": fc_id,
-                "type": "function_call",
-                "status": _response_output_status,
-                "call_id": call_id,
-                "name": tc_name,
-                "arguments": tc_args,
-            }
-            yield _sse(
-                "response.output_item.done",
-                {
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": fc_item,
-                },
-            )
-            _record_output_item(output_index, fc_item)
+        for _event in _function_call_item_events(tool_calls):
+            yield _event
     else:
         # No tool calls — use content accumulated during streaming (reasoning already separated)
+        _ans_tool_calls = None
         display_text = cleaned_text or ""
         if request_parser:
             # Reasoning was already emitted during streaming — use content-only text
-            if accumulated_content and not _suppress_tools:
+            if accumulated_content and not _suppress_markup_display:
                 display_text = accumulated_content
             elif (
                 accumulated_reasoning
@@ -24844,6 +25030,7 @@ async def stream_responses_api(
                 _ans_sent = ""
                 _ans_ct = 0
                 _ans_last_out = None
+                _ans_disconnected = False
                 async for answer_output in _stream_with_keepalive(
                     engine.stream_chat(messages=answer_messages, **answer_kwargs),
                     total_timeout=_stream_timeout,
@@ -24853,6 +25040,7 @@ async def stream_responses_api(
                     if fastapi_request and await fastapi_request.is_disconnected():
                         if hasattr(engine, "abort_request"):
                             await engine.abort_request(f"{response_id}:visible-answer")
+                        _ans_disconnected = True
                         break
                     _ans_last_out = answer_output
                     _ans_ct = (
@@ -24902,6 +25090,7 @@ async def stream_responses_api(
                             buffer_answer_pass=_buffer_answer_pass,
                         ),
                         think_in_prompt=_native_reasoning_retry,
+                        markup_guard=True,
                     )
                     if not _delta:
                         continue
@@ -24974,7 +25163,38 @@ async def stream_responses_api(
                                 "no visible content (ct=%d/%d) — raise max_tokens",
                                 _answer_family, _ans_ct, _ans_budget_cap,
                             )
-                _answer_pass_succeeded = bool(_ans_sent)
+                if not _buffer_answer_pass and not _ans_disconnected and _ans_raw:
+                    # Terminal disposition for the progressive lane (mirror of
+                    # the Chat Completions site): the in-loop markup guard held
+                    # back everything from the first native tool marker onward;
+                    # resolve that remainder like the non-streaming answer pass
+                    # — parse into structured function_call items when the
+                    # original request offered tools, otherwise strip it as
+                    # suppressed control markup. Clean prose finalizes to the
+                    # already-streamed text and emits nothing new.
+                    _ans_final_text, _ans_tool_calls = _answer_pass_finalize_visible(
+                        _ans_raw,
+                        request,
+                        think_in_prompt=_native_reasoning_retry,
+                        suppress_tools=_suppress_markup_display,
+                    )
+                    if _ans_final_text and _ans_final_text.startswith(_ans_sent):
+                        _ans_final_tail = _ans_final_text[len(_ans_sent):]
+                        if _ans_final_tail:
+                            _ans_sent = _ans_final_text
+                            for _event in _start_message_item_events():
+                                yield _event
+                            yield _sse(
+                                "response.output_text.delta",
+                                {
+                                    "type": "response.output_text.delta",
+                                    "item_id": msg_id,
+                                    "output_index": message_output_index,
+                                    "content_index": 0,
+                                    "delta": _ans_final_tail,
+                                },
+                            )
+                _answer_pass_succeeded = bool(_ans_sent) or bool(_ans_tool_calls)
                 if _answer_pass_succeeded:
                     display_text = _ans_sent
                     streamed_text += _ans_sent
@@ -24991,6 +25211,15 @@ async def stream_responses_api(
                             cancelled=_response_was_cancelled,
                         )
                         _response_output_status = _response_terminal.item_status
+                    if _ans_tool_calls:
+                        logger.info(
+                            "%s bounded Responses answer pass re-emitted a "
+                            "schema-valid native tool call; emitting structured "
+                            "function_call items instead of raw markup",
+                            _answer_family,
+                        )
+                        for _event in _function_call_item_events(_ans_tool_calls):
+                            yield _event
             except asyncio.CancelledError:
                 logger.info(
                     "%s Responses visible answer pass cancelled, aborting %s",
@@ -25009,7 +25238,7 @@ async def stream_responses_api(
                     e,
                     exc_info=True,
                 )
-        if not display_text:
+        if not display_text and not _ans_tool_calls:
             # If reasoning was suppressed and model produced reasoning, the response
             # is intentionally empty. Report it as a diagnostic warning, not as
             # assistant output that would pollute user-visible text/history.
@@ -25058,7 +25287,7 @@ async def stream_responses_api(
                     },
                 )
 
-        if _suppress_tools and display_text:
+        if _suppress_markup_display and display_text:
             display_text = _clean_suppressed_tool_markup_for_display(
                 display_text,
                 request,

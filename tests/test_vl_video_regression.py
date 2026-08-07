@@ -1695,7 +1695,12 @@ class TestReasoningOnOffRegressions:
         src = (REPO_ROOT / "vmlx_engine/server.py").read_text()
         assert "accumulated_content += delta_msg.reasoning" not in src
         assert "Suppressed reasoning is never redirected into visible content" in src
-        assert "suppress_reasoning and not content_was_emitted and accumulated_reasoning" in src
+        assert (
+            "suppress_reasoning\n"
+            "        and not content_was_emitted\n"
+            "        and not tool_calls_emitted\n"
+            "        and accumulated_reasoning"
+        ) in src
 
     def test_mistral4_reasoning_effort_auto_map(self):
         """Mistral 4 needs enable_thinking → reasoning_effort auto-map."""

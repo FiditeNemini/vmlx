@@ -323,21 +323,25 @@ class TestSuppressReasoningInvariants:
               was returned (current behavior; the reasoning output is withheld
               per user setting but the user gets a meaningful hint).
 
-        Either implementation references `suppress_reasoning` on the same line
-        as the `content_was_emitted` / `accumulated_reasoning` check. This test
-        only verifies the guard is present, not which branch it takes.
+        Either implementation references `suppress_reasoning` in the same
+        condition block as the `content_was_emitted` / `accumulated_reasoning`
+        check. This test only verifies the guard is present, not which branch
+        it takes.
         """
         from vmlx_engine.server import stream_chat_completion
         import inspect
 
         source = inspect.getsource(stream_chat_completion)
-        idx = source.index("not content_was_emitted and accumulated_reasoning")
-        line_start = source.rfind("\n", 0, idx)
-        line_end = source.index("\n", idx)
-        line = source[line_start:line_end]
-        assert "suppress_reasoning" in line, (
-            "reasoning-only fallback must reference suppress_reasoning flag "
-            f"(either `suppress_reasoning` or `not suppress_reasoning`). Line: {line!r}"
+        gate = (
+            "suppress_reasoning\n"
+            "        and not content_was_emitted\n"
+            "        and not tool_calls_emitted\n"
+            "        and accumulated_reasoning"
+        )
+        assert gate in source, (
+            "reasoning-only fallback must reference suppress_reasoning in the "
+            "same condition block as the content_was_emitted / "
+            "accumulated_reasoning check"
         )
 
 
@@ -1131,7 +1135,12 @@ class TestSuppressReasoningDiagnostic:
         from vmlx_engine.server import stream_chat_completion
 
         source = inspect.getsource(stream_chat_completion)
-        assert "suppress_reasoning and not content_was_emitted and accumulated_reasoning" in source, (
+        assert (
+            "suppress_reasoning\n"
+            "        and not content_was_emitted\n"
+            "        and not tool_calls_emitted\n"
+            "        and accumulated_reasoning"
+        ) in source, (
             "Chat completions must detect reasoning-only + suppress"
         )
         assert "Model produced only internal reasoning" not in source

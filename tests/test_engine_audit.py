@@ -6108,7 +6108,14 @@ class TestV3ReasoningDoubleAccumulation:
         source = inspect.getsource(stream_chat_completion)
         assert "accumulated_content += delta_msg.reasoning" not in source
         assert "Suppressed reasoning is never redirected into visible content" in source
-        assert "suppress_reasoning and not content_was_emitted and accumulated_reasoning" in source
+        # Last-chance suppressed-reasoning gate: content-free, reasoning-bearing
+        # turns only, and never after a structured tool call already streamed.
+        assert (
+            "suppress_reasoning\n"
+            "        and not content_was_emitted\n"
+            "        and not tool_calls_emitted\n"
+            "        and accumulated_reasoning"
+        ) in source
 
     def test_responses_accumulated_content_mirror_under_suppress(self):
         import inspect

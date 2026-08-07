@@ -343,8 +343,19 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             {schedulerCache.hits != null && (
               <StatCard label="Hits / Misses" value={`${schedulerCache.hits} / ${schedulerCache.misses || 0}`} />
             )}
-            {(schedulerCache.tokens_saved ?? schedulerCache.total_cached_tokens) != null && (
-              <StatCard label="Cached Tokens" value={(schedulerCache.tokens_saved ?? schedulerCache.total_cached_tokens).toLocaleString()} />
+            {/* Paged/native backends never drive allocated_blocks / utilization /
+                tokens_saved-as-residency (allocator counters stay pinned at the
+                null block; see PagedCacheManager._live_cached_blocks). Prefer the
+                live-derived fields and fall back to legacy ones only when the
+                paged fields are absent. */}
+            {(schedulerCache.total_tokens_cached ?? schedulerCache.tokens_saved) != null && (
+              <StatCard
+                label="Cached Tokens"
+                value={(schedulerCache.total_tokens_cached ?? schedulerCache.tokens_saved).toLocaleString()}
+              />
+            )}
+            {schedulerCache.total_tokens_cached != null && schedulerCache.tokens_saved != null && (
+              <StatCard label="Tokens Saved" value={schedulerCache.tokens_saved.toLocaleString()} />
             )}
             {schedulerCache.evictions != null && (
               <StatCard label="Evictions" value={String(schedulerCache.evictions)} />
@@ -352,11 +363,17 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             {schedulerCache.block_size != null && (
               <StatCard label="Block Size" value={`${schedulerCache.block_size} tokens`} />
             )}
-            {schedulerCache.allocated_blocks != null && (
-              <StatCard label="Blocks" value={`${schedulerCache.allocated_blocks} / ${schedulerCache.max_blocks} (${schedulerCache.shared_blocks ?? 0} shared)`} />
+            {(schedulerCache.cached_blocks ?? schedulerCache.allocated_blocks) != null && (
+              <StatCard
+                label="Blocks"
+                value={`${schedulerCache.cached_blocks ?? schedulerCache.allocated_blocks} / ${schedulerCache.max_blocks} (${schedulerCache.shared_blocks ?? 0} shared)`}
+              />
             )}
-            {schedulerCache.utilization != null && (
-              <StatCard label="Utilization" value={`${(schedulerCache.utilization * 100).toFixed(1)}%`} />
+            {(schedulerCache.cache_occupancy ?? schedulerCache.utilization) != null && (
+              <StatCard
+                label="Utilization"
+                value={`${((schedulerCache.cache_occupancy ?? schedulerCache.utilization) * 100).toFixed(1)}%`}
+              />
             )}
             {!blockDiskCache && schedulerCache.disk_hits != null && (schedulerCache.disk_hits > 0 || schedulerCache.disk_misses > 0) && (
               <StatCard label="L2 Disk Hits" value={`${schedulerCache.disk_hits} / ${schedulerCache.disk_misses} miss`} />

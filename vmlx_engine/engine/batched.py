@@ -2051,6 +2051,7 @@ class BatchedEngine(BaseEngine):
         request_id = kwargs.pop("request_id", None)
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
         cache_extra_keys = kwargs.pop("_cache_extra_keys", None)
+        dsv4_thinking_soft_cap = kwargs.pop("dsv4_thinking_soft_cap", None)
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -2150,6 +2151,7 @@ class BatchedEngine(BaseEngine):
             cache_extra_keys=cache_extra_keys,
             encode_add_special_tokens=encode_add_special_tokens,
             max_prompt_tokens=max_prompt_tokens,
+            dsv4_thinking_soft_cap=dsv4_thinking_soft_cap,
             **_m3vl_extra,
         )
 
@@ -2209,6 +2211,7 @@ class BatchedEngine(BaseEngine):
         bypass_prefix_cache = bool(kwargs.pop("_bypass_prefix_cache", False))
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
         cache_extra_keys = kwargs.pop("_cache_extra_keys", None)
+        dsv4_thinking_soft_cap = kwargs.pop("dsv4_thinking_soft_cap", None)
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -2304,6 +2307,7 @@ class BatchedEngine(BaseEngine):
             cache_extra_keys=cache_extra_keys,
             encode_add_special_tokens=encode_add_special_tokens,
             max_prompt_tokens=max_prompt_tokens,
+            dsv4_thinking_soft_cap=dsv4_thinking_soft_cap,
             **_m3vl_extra,
         )
 

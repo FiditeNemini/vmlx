@@ -413,6 +413,7 @@ class EngineCore:
         video_grid_thw: Optional[Any] = None,
         prompt_token_ids: Optional[List[int]] = None,
         cache_extra_keys: Optional[Any] = None,
+        dsv4_thinking_soft_cap: Optional[int] = None,
     ) -> str:
         """
         Add a request for processing.
@@ -524,6 +525,12 @@ class EngineCore:
 
         if max_prompt_tokens is not None and int(max_prompt_tokens) > 0:
             request._max_prompt_tokens = int(max_prompt_tokens)
+
+        # DSV4 answer-reserve soft cap: enforced by DSV4BatchGenerator only
+        # while generation is still inside the thinking rail; lifts at </think>
+        # so the same pass continues into the reserved answer budget.
+        if dsv4_thinking_soft_cap is not None and int(dsv4_thinking_soft_cap) > 0:
+            request._dsv4_thinking_soft_cap = int(dsv4_thinking_soft_cap)
 
         # A prior terminal output may already be visible to the caller while
         # its prefix/TQ/SSM state is still being persisted.  Wait before

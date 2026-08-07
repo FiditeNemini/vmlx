@@ -192,6 +192,15 @@ class _Request:
     # Memo of the scheduler's logprob-capture decision. Static per request,
     # but probing it costs an import + registry walk on the decode hot path.
     capture_logprobs_memo: Optional[bool] = None
+    # DSV4 answer-reserve soft cap: while the request is still inside the
+    # thinking rail (no </think> generated yet), the length check enforces
+    # min(max_tokens, thinking_soft_cap). Once </think> is generated the cap
+    # lifts and the SAME pass continues into the reserved answer budget — the
+    # reserve exists to guarantee a visible answer, not to strand tokens when
+    # the answer has already started (v1.6.23 hard split truncated answers
+    # that began just before the cap). No tokens are ever injected.
+    thinking_soft_cap: Optional[int] = None
+    visible_started: bool = False
 
 
 @dataclass
@@ -1328,6 +1337,7 @@ class DSV4BatchGenerator:
         state_machines: Optional[List[Any]] = None,
         capture_prompt_snapshots: Optional[List[bool]] = None,
         prompt_snapshot_tail_tokens: Optional[List[int]] = None,
+        thinking_soft_caps: Optional[List[Optional[int]]] = None,
     ):
         # Auto-evict any already-finished requests so the scheduler can
         # queue the next one. Without this, the scheduler keeps retrying
@@ -1347,6 +1357,7 @@ class DSV4BatchGenerator:
         state_machines = state_machines or [None] * len(prompts)
         capture_prompt_snapshots = capture_prompt_snapshots or [True] * len(prompts)
         prompt_snapshot_tail_tokens = prompt_snapshot_tail_tokens or [1] * len(prompts)
+        thinking_soft_caps = thinking_soft_caps or [None] * len(prompts)
         for i, p in enumerate(prompts):
             req = _Request(
                 uid=self._uid_count,
@@ -1364,6 +1375,23 @@ class DSV4BatchGenerator:
             )
             if state_machines[i] is not None and hasattr(state_machines[i], "make_state"):
                 req.matcher_state = state_machines[i].make_state()
+            soft_cap = thinking_soft_caps[i]
+            if soft_cap is not None and int(soft_cap) > 0:
+                req.thinking_soft_cap = int(soft_cap)
+                # Rail check over the FULL context (cache-hit inserts pass only
+                # the un-cached suffix as `p`): if the last think marker in the
+                # context is </think>, generation starts in visible content and
+                # the soft cap is already lifted.
+                ctx = req.context_tokens
+                try:
+                    last_open = len(ctx) - 1 - ctx[::-1].index(THINK_OPEN_ID)
+                except ValueError:
+                    last_open = -1
+                try:
+                    last_close = len(ctx) - 1 - ctx[::-1].index(THINK_CLOSE_ID)
+                except ValueError:
+                    last_close = -1
+                req.visible_started = last_close > last_open
             self._requests.append(req)
             uids.append(self._uid_count)
             self._uid_count += 1
@@ -1406,9 +1434,24 @@ class DSV4BatchGenerator:
         return last_open > last_close
 
     def _effective_max_tokens(self, req: _Request) -> int:
+        if req.thinking_soft_cap is not None and not req.visible_started:
+            return min(req.max_tokens, req.thinking_soft_cap)
         return req.max_tokens
 
     def _update_finish_reason_after_token(self, req: _Request, token_id: int) -> None:
+        if (
+            req.thinking_soft_cap is not None
+            and not req.visible_started
+            and token_id == THINK_CLOSE_ID
+        ):
+            # Reasoning closed within the thinking soft cap: lift it so the
+            # same pass spends the reserved answer budget (up to max_tokens).
+            req.visible_started = True
+            logger.info(
+                "DSV4 answer reserve: </think> at output token %d (soft cap "
+                "%d); continuing same pass into reserved budget (max %d)",
+                len(req.out_tokens), req.thinking_soft_cap, req.max_tokens,
+            )
         if token_id == DSV4_EOS_ID or token_id in self.stop_tokens:
             req.finish_reason = "stop"
         elif len(req.out_tokens) >= self._effective_max_tokens(req):

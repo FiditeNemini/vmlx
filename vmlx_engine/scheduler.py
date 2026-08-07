@@ -2607,6 +2607,21 @@ class Scheduler:
         except Exception:
             pass
 
+    def _dsv4_remaining_thinking_soft_cap(self, request: Any) -> Optional[int]:
+        # DSV4 answer-reserve soft cap, decremented by lifetime output so a
+        # re-inserted request resumes with the correct remaining thinking
+        # budget (mirrors Request.remaining_output_budget semantics).
+        cap = getattr(request, "_dsv4_thinking_soft_cap", None)
+        if not cap:
+            return None
+        try:
+            cap = int(cap)
+        except (TypeError, ValueError):
+            return None
+        if cap <= 0:
+            return None
+        return max(1, cap - request.total_output_tokens)
+
     def _get_actual_tokenizer(self, tokenizer: Any) -> Any:
         """
         Get the actual tokenizer from a processor or tokenizer.
@@ -7007,6 +7022,9 @@ class Scheduler:
                                 + 1,
                             )
                         ]
+                        _soft_cap = self._dsv4_remaining_thinking_soft_cap(request)
+                        if _soft_cap is not None:
+                            insert_kwargs["thinking_soft_caps"] = [_soft_cap]
                         request_processors = self._request_logits_processors(
                             request, list(request.prompt_token_ids)
                         )
@@ -7118,6 +7136,11 @@ class Scheduler:
                                     + 1,
                                 )
                             ]
+                            _soft_cap = self._dsv4_remaining_thinking_soft_cap(
+                                request
+                            )
+                            if _soft_cap is not None:
+                                insert_kwargs["thinking_soft_caps"] = [_soft_cap]
                             request_processors = self._request_logits_processors(
                                 request, list(request.prompt_token_ids)
                             )

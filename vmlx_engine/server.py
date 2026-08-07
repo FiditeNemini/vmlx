@@ -17180,6 +17180,9 @@ async def create_chat_completion(
             else chat_kwargs.get("enable_thinking"),
             chat_kwargs.get("max_tokens"),
         )
+        _ns_dsv4_default_reserve = _ns_pre_mtt is not None
+    else:
+        _ns_dsv4_default_reserve = False
     if (
         _ns_pre_mtt is not None
         and chat_kwargs.get("enable_thinking") is not False
@@ -17209,7 +17212,14 @@ async def create_chat_completion(
             if _ns_pre_capped < _ns_pre_orig:
                 _ns_answer_pass_original_cap = _ns_pre_orig
                 chat_kwargs = dict(chat_kwargs)
-                chat_kwargs["max_tokens"] = _ns_pre_capped
+                if _ns_dsv4_default_reserve:
+                    # DSV4 default reserve: SOFT cap — lifts engine-side at
+                    # </think> so the same pass spends the reserved answer
+                    # budget instead of stranding it. Reasoning-only runs still
+                    # finish=length at the cap and arm the answer pass below.
+                    chat_kwargs["dsv4_thinking_soft_cap"] = _ns_pre_capped
+                else:
+                    chat_kwargs["max_tokens"] = _ns_pre_capped
 
     try:
         output = await _await_chat_with_disconnect_abort(
@@ -17510,6 +17520,7 @@ async def create_chat_completion(
                     _ns_ct["thinking"] = False
                 _ns_ct.pop("enable_thinking", None)
             _ns_kwargs["chat_template_kwargs"] = _ns_ct
+            _ns_kwargs.pop("dsv4_thinking_soft_cap", None)
             _ns_kwargs.pop("tools", None)
             _ns_kwargs.pop("_vmlx_tools_present", None)
             _ns_kwargs.pop("_vmlx_template_tools", None)
@@ -20328,6 +20339,9 @@ async def create_response(
             else chat_kwargs.get("enable_thinking"),
             chat_kwargs.get("max_tokens"),
         )
+        _ns_dsv4_default_reserve = _ns_pre_mtt is not None
+    else:
+        _ns_dsv4_default_reserve = False
     if (
         _ns_pre_mtt is not None
         and chat_kwargs.get("enable_thinking") is not False
@@ -20354,7 +20368,14 @@ async def create_response(
             if _ns_pre_capped < _ns_pre_orig:
                 _ns_answer_pass_original_cap = _ns_pre_orig
                 chat_kwargs = dict(chat_kwargs)
-                chat_kwargs["max_tokens"] = _ns_pre_capped
+                if _ns_dsv4_default_reserve:
+                    # DSV4 default reserve: SOFT cap — lifts engine-side at
+                    # </think> so the same pass spends the reserved answer
+                    # budget instead of stranding it. Reasoning-only runs still
+                    # finish=length at the cap and arm the answer pass below.
+                    chat_kwargs["dsv4_thinking_soft_cap"] = _ns_pre_capped
+                else:
+                    chat_kwargs["max_tokens"] = _ns_pre_capped
 
     try:
         output = await _await_chat_with_disconnect_abort(
@@ -20662,6 +20683,7 @@ async def create_response(
                     _ns_ct["thinking"] = False
                 _ns_ct.pop("enable_thinking", None)
             _ns_kwargs["chat_template_kwargs"] = _ns_ct
+            _ns_kwargs.pop("dsv4_thinking_soft_cap", None)
             _ns_kwargs.pop("tools", None)
             _ns_kwargs.pop("_vmlx_tools_present", None)
             _ns_kwargs.pop("_vmlx_template_tools", None)
@@ -21797,12 +21819,14 @@ async def stream_chat_completion(
     reasoning_only_answer_family = ""
     reasoning_tools_fallback_answer_budget: int | None = None
     _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
+    _dsv4_default_reserve = False
     if _explicit_answer_pass_mtt is None:
         # DSV4 only: reserve answer budget so the never-empty answer pass below
         # can arm. No-op for every other family.
         _explicit_answer_pass_mtt = _dsv4_answer_pass_thinking_cap(
             _family_name, _effective_thinking, kwargs.get("max_tokens")
         )
+        _dsv4_default_reserve = _explicit_answer_pass_mtt is not None
     if (
         _explicit_answer_pass_mtt is not None
         and _is_minimax_m3
@@ -21870,7 +21894,18 @@ async def stream_chat_completion(
                     reasoning_only_answer_budget = _requested_output_budget
                     reasoning_only_answer_enabled = True
                 kwargs = dict(kwargs)
-                kwargs["max_tokens"] = _requested_thinking_budget
+                if _dsv4_default_reserve:
+                    # DSV4 default reserve: SOFT cap enforced engine-side only
+                    # while inside the thinking rail; lifts at </think> so the
+                    # same pass spends the reserved answer budget instead of
+                    # stranding it (v1.6.23 hard split truncated answers that
+                    # started just before the cap). Reasoning-only runs still
+                    # finish=length at the cap, so the answer pass below arms
+                    # exactly as before. Explicit max_thinking_tokens keeps the
+                    # hard split contract.
+                    kwargs["dsv4_thinking_soft_cap"] = _requested_thinking_budget
+                else:
+                    kwargs["max_tokens"] = _requested_thinking_budget
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
@@ -22945,6 +22980,7 @@ async def stream_chat_completion(
             # keep the bounded visible-answer retry on the direct rail.
             answer_ct_kwargs["enable_thinking"] = False
         answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
+        answer_kwargs.pop("dsv4_thinking_soft_cap", None)
         answer_kwargs.pop("tools", None)
         answer_kwargs.pop("_vmlx_tools_present", None)
         answer_kwargs.pop("_vmlx_template_tools", None)
@@ -23992,12 +24028,14 @@ async def stream_responses_api(
     reasoning_only_answer_family = ""
     reasoning_tools_fallback_answer_budget: int | None = None
     _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
+    _dsv4_default_reserve = False
     if _explicit_answer_pass_mtt is None:
         # DSV4 only: reserve answer budget so the never-empty answer pass below
         # can arm. No-op for every other family.
         _explicit_answer_pass_mtt = _dsv4_answer_pass_thinking_cap(
             _family_name, _effective_thinking, kwargs.get("max_tokens")
         )
+        _dsv4_default_reserve = _explicit_answer_pass_mtt is not None
     if (
         _explicit_answer_pass_mtt is not None
         and _is_minimax_m3
@@ -24064,7 +24102,18 @@ async def stream_responses_api(
                     reasoning_only_answer_budget = _requested_output_budget
                     reasoning_only_answer_enabled = True
                 kwargs = dict(kwargs)
-                kwargs["max_tokens"] = _requested_thinking_budget
+                if _dsv4_default_reserve:
+                    # DSV4 default reserve: SOFT cap enforced engine-side only
+                    # while inside the thinking rail; lifts at </think> so the
+                    # same pass spends the reserved answer budget instead of
+                    # stranding it (v1.6.23 hard split truncated answers that
+                    # started just before the cap). Reasoning-only runs still
+                    # finish=length at the cap, so the answer pass below arms
+                    # exactly as before. Explicit max_thinking_tokens keeps the
+                    # hard split contract.
+                    kwargs["dsv4_thinking_soft_cap"] = _requested_thinking_budget
+                else:
+                    kwargs["max_tokens"] = _requested_thinking_budget
         except Exception:
             reasoning_only_answer_budget = None
             reasoning_only_answer_enabled = False
@@ -25057,6 +25106,7 @@ async def stream_responses_api(
                 # keep the bounded visible-answer retry on the direct rail.
                 answer_ct_kwargs["enable_thinking"] = False
             answer_kwargs["chat_template_kwargs"] = answer_ct_kwargs
+            answer_kwargs.pop("dsv4_thinking_soft_cap", None)
             answer_kwargs.pop("tools", None)
             answer_kwargs.pop("_vmlx_tools_present", None)
             answer_kwargs.pop("_vmlx_template_tools", None)

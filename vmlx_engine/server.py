@@ -1055,13 +1055,11 @@ def _prompt_too_long_response(
     from starlette.responses import JSONResponse
 
     limit = int(max_prompt_tokens or _max_prompt_tokens or 0)
-    _est_gb = (estimated_tokens * 0.4) / 1024  # ~0.4MB per token KV
     return JSONResponse(
         status_code=413,
         content={
             "error": {
-                "message": f"Prompt too long ({source}: ~{estimated_tokens:,} tokens). "
-                f"This would need ~{_est_gb:.1f}GB of KV cache memory, "
+                "message": f"Prompt too long ({source}: ~{estimated_tokens:,} tokens), "
                 f"exceeding the configured prompt/context limit of "
                 f"~{limit:,} tokens. Shorten the prompt, raise "
                 "--max-prompt-tokens, or use a model/session with a larger "

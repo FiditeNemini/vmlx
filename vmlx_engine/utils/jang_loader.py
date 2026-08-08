@@ -284,12 +284,15 @@ def _apply_large_expert_bfloat16_compute(
     *,
     log_prefix: str = "  ",
 ) -> bool:
-    """Use bfloat16 compute for 512-expert/MLA models that overflow fp16.
+    """Use bfloat16 compute for models whose activations overflow fp16.
 
     397B-class Qwen/N2 bundles have 512 routed experts at hidden size 4096.
     Their shared/routed expert products can exceed float16 range even when the
-    quantized weights are valid. The affine JANG loader already applies this
-    rule; JANGTQ fast paths must apply the same compute dtype before returning.
+    quantized weights are valid. falcon_h1's muP-folded residual stream
+    overflows float16 by layer 5 (HF reference runs bfloat16) — proven on
+    Falcon-H1R-7B JANG_6M: fp16 logits NaN, bf16 clean. The affine JANG loader
+    already applies this rule; JANGTQ fast paths must apply the same compute
+    dtype before returning.
     """
     try:
         model_cfg = config if isinstance(config, dict) else {}
@@ -307,9 +310,18 @@ def _apply_large_expert_bfloat16_compute(
         hidden = text_cfg.get("hidden_size") or 0
         text_mt = text_cfg.get("model_type", model_cfg.get("model_type", ""))
         is_mla = (text_cfg.get("kv_lora_rank") or 0) > 0
-        if (n_experts >= 512 and hidden >= 4096) or text_mt == "mistral4" or is_mla:
+        is_mup_residual = text_mt == "falcon_h1"
+        if (
+            (n_experts >= 512 and hidden >= 4096)
+            or text_mt == "mistral4"
+            or is_mla
+            or is_mup_residual
+        ):
             model.set_dtype(mx.bfloat16)
-            reason = "MLA" if is_mla else f"{n_experts} experts"
+            if is_mup_residual:
+                reason = "muP-scaled residual (falcon_h1)"
+            else:
+                reason = "MLA" if is_mla else f"{n_experts} experts"
             logger.info(
                 "%sbfloat16 enabled: %s, hidden=%s "
                 "(float16 overflow prevention)",
@@ -3510,27 +3522,11 @@ def _load_jang_v2(
     if not hasattr(model, "config"):
         model.config = config
 
-    # bfloat16 compute for 512+ expert models — float16 norm/embedding
-    # layers overflow at shared expert down_proj (SiLU*up → 4096-dim dot
-    # product exceeds float16 max 65504). bfloat16 has float32 range.
+    # bfloat16 compute for models whose activations overflow float16
+    # (512+ expert products, MLA, falcon_h1 muP residual) — single
+    # predicate shared with the JANGTQ fast path.
     _model_cfg = json.loads((path / "config.json").read_text())
-    _text_cfg = _model_cfg.get("text_config", _model_cfg)
-    _n_experts = (
-        _text_cfg.get("num_experts")
-        or _text_cfg.get("num_local_experts")
-        or _text_cfg.get("n_routed_experts")
-        or 0
-    )
-    _hidden = _text_cfg.get("hidden_size") or 0
-    _text_mt = _text_cfg.get("model_type", _model_cfg.get("model_type", ""))
-    _is_mla = (_text_cfg.get("kv_lora_rank") or 0) > 0
-    if (_n_experts >= 512 and _hidden >= 4096) or _text_mt == "mistral4" or _is_mla:
-        model.set_dtype(mx.bfloat16)
-        _reason = "MLA" if _is_mla else f"{_n_experts} experts"
-        logger.info(
-            f"  bfloat16 enabled: {_reason}, hidden={_hidden} "
-            f"(float16 overflow prevention)"
-        )
+    _apply_large_expert_bfloat16_compute(model, path, _model_cfg)
 
     if not skip_eval:
         _set_wired_limit_for_model(_get_v2_weight_files(path))

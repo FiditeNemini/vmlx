@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Plus, Trash2, ChevronLeft, ImageIcon } from 'lucide-react'
+import { useRelativeTimeTick } from '../ui/use-relative-time'
 import type { ImageSessionInfo } from './ImageTab'
 
 interface ImageHistoryProps {
@@ -13,6 +14,8 @@ interface ImageHistoryProps {
 
 export function ImageHistory({ sessions, currentId, onSelect, onNew, onDelete, onCollapse }: ImageHistoryProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  // Relative labels ("5m ago") go stale while mounted; re-render on the shared tick.
+  useRelativeTimeTick()
 
   const handleDelete = (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation()

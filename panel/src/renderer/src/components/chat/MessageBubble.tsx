@@ -9,6 +9,7 @@ import { ToolCallStatus } from './ToolCallStatus'
 import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
+import { useRelativeTime } from '../ui/use-relative-time'
 import {
   prepareAssistantMarkdownWithMath,
   prepareUserMarkdownWithMath,
@@ -199,6 +200,7 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
 
 export const MessageBubble = memo(function MessageBubble({ message, isStreaming, metrics, reasoningContent, reasoningSegments, reasoningDone, answerPassPending, toolStatuses, warnings, sessionId, sessionEndpoint, isLastAssistant, onRegenerate, onEdit }: MessageBubbleProps) {
   const { t } = useTranslation()
+  const timeLabel = useRelativeTime(message.timestamp, formatTimestamp)
   const [copied, setCopied] = useState(false)
   const [zoomedImage, setZoomedImage] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -491,7 +493,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
             {renderUserContent()}
           </div>
           <span className="text-[10px] text-muted-foreground/50 mt-1 mr-1">
-            {formatTimestamp(message.timestamp)}
+            {timeLabel}
           </span>
         </div>
         <div className="w-7 h-7 rounded-full bg-primary/15 flex items-center justify-center flex-shrink-0 mt-0.5">
@@ -538,7 +540,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         {/* Header: timestamp + actions */}
         <div className="flex items-center gap-2 mb-1">
           <span className="text-[10px] text-muted-foreground/50">
-            {formatTimestamp(message.timestamp)}
+            {timeLabel}
           </span>
           {!isStreaming && message.content && (
             <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">

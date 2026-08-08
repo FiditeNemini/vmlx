@@ -324,9 +324,12 @@ class TestHelperFunctions:
         engine = SimpleNamespace(_model=SimpleNamespace(args=config))
         monkeypatch.setattr(server, "get_engine", lambda: engine)
         # 60% of 20 GiB covers the architecture-native q8 estimate plus its
-        # attention-ready hot view at 1M tokens — but NOT the paged-block
-        # records captured alongside prefill. Generic 43-layer full-KV
-        # geometry would still falsely cap this far below the declared limit.
+        # attention-ready hot view at 1M tokens. Generic 43-layer full-KV
+        # geometry would falsely cap this far below the declared limit.
+        # Admission is deliberately live-cache-only: paged-block records are
+        # evictable under Metal pressure (enforce_byte_budget) and fresh
+        # oversized captures are skipped by _delta_capture_admitted, so they
+        # must not shrink the advertised context.
         monkeypatch.setattr(
             server,
             "_metal_projection_stats",
@@ -335,20 +338,10 @@ class TestHelperFunctions:
         monkeypatch.setenv("DSV4_POOL_QUANT", "1")
         monkeypatch.delenv("DSV4_MAX_PREFILL_TOKENS", raising=False)
 
-        # With the prefix cache enabled (conservative default when scheduler
-        # state is unresolved) the in-flight block records ride the admission:
-        # 12 GiB retains ~708k of the declared 1M, not the full context.
-        assert server._estimate_max_prompt_tokens() == 708_608
-
-        # With the prefix cache disabled no block records are captured, so
-        # the architecture-native q8 estimate admits the full declared limit.
-        engine.scheduler = SimpleNamespace(
-            config=SimpleNamespace(enable_prefix_cache=False)
-        )
         assert server._estimate_max_prompt_tokens() == 1_048_576
 
         # An explicit operator guard still overrides architecture-aware
-        # admission in both modes.
+        # admission.
         monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "32768")
         assert server._estimate_max_prompt_tokens() == 32_768
 

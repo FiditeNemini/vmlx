@@ -40,6 +40,58 @@ logger = logging.getLogger(__name__)
 # Type alias for block hash (content-based hash for prefix caching)
 BlockHash = NewType("BlockHash", bytes)
 
+# Metal-pressure-aware L1 eviction. The static resident ceiling
+# (max_resident_bytes) derives from a system-RAM percent and never sees the
+# Metal working set, so on a machine whose weights nearly fill unified memory
+# the L1 pool can push Metal active memory into the working-set limit long
+# before the RAM ceiling is reached (measured on the 128GB box: 96.5GB weights
+# + 4.9GB retained L1 + ~3.4GB prefill transient crossed the 107.5GB limit at
+# ~430k tokens with zero evictions against a ~23GB static ceiling). When active
+# Metal memory plus a transient margin exceeds the guard threshold, the LRU
+# write-through eviction below sheds the overage regardless of the static
+# ceiling. Blocks are disk-mirrored before dropping RAM, so this trades
+# re-promotion latency for process survival.
+_PRESSURE_EVICT_ENV = "VMLX_PAGED_METAL_PRESSURE_EVICT"
+_PRESSURE_MARGIN_ENV = "VMLX_PAGED_METAL_PRESSURE_MARGIN_GB"
+# Default margin must cover the largest observed prefill transient (~3.4GB on
+# the box 1M gate) with slack.
+_DEFAULT_PRESSURE_MARGIN_BYTES = 4 * 1024**3
+
+
+def paged_metal_pressure_evict_enabled() -> bool:
+    raw = os.environ.get(_PRESSURE_EVICT_ENV, "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+def paged_metal_pressure_margin_bytes() -> int:
+    raw = os.environ.get(_PRESSURE_MARGIN_ENV, "").strip()
+    if raw:
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = -1.0
+        if parsed >= 0:
+            return int(parsed * 1024**3)
+    return _DEFAULT_PRESSURE_MARGIN_BYTES
+
+
+def compute_metal_pressure_overage_bytes(
+    active_bytes: int,
+    max_ws_bytes: int,
+    threshold_pct: float,
+    margin_bytes: int,
+) -> int:
+    """Bytes the resident pool must shed so ``active + margin`` fits back
+    under ``threshold_pct%`` of the Metal working-set limit. Pure so tests can
+    pin the arithmetic; 0 when unpressured or when either byte figure is
+    unavailable (<= 0)."""
+    if active_bytes <= 0 or max_ws_bytes <= 0:
+        return 0
+    limit = int(max_ws_bytes * (threshold_pct / 100.0))
+    return max(0, int(active_bytes) + max(0, int(margin_bytes)) - limit)
+
 
 def compute_block_hash(
     parent_hash: Optional[BlockHash],
@@ -1098,17 +1150,38 @@ class PagedCacheManager:
         longer evictable; admission must therefore make room *before* the ref
         becomes active. Evicts least-recently-used first and returns the number
         of blocks evicted. No-op when the ceiling is disabled
-        (``max_resident_bytes <= 0``).
+        (``max_resident_bytes <= 0`` — resident accounting is off in that
+        mode, so neither target can be measured).
+
+        Beyond the static RAM ceiling, this also enforces Metal working-set
+        pressure: when active Metal memory plus a transient margin exceeds the
+        guard threshold (98% of the device working-set limit by default), the
+        pool sheds the overage even though the static ceiling isn't hit. The
+        static ceiling derives from a system-RAM percent and cannot see how
+        much unified memory the lazily-faulted weights occupy, so on
+        weight-heavy machines it never fires (measured: 0 evictions while L1
+        growth OOM'd the process at ~430k tokens).
         """
         if self.max_resident_bytes <= 0:
             return 0
         required_bytes = max(0, int(required_bytes or 0))
-        target_resident_bytes = max(
-            0,
-            self.max_resident_bytes - required_bytes,
-        )
+        # Metal query stays outside the lock: cheap allocator-counter reads,
+        # and the device limit is static.
+        pressure_overage = self._metal_pressure_overage_bytes()
         evicted = 0
         with self._lock:
+            target_resident_bytes = max(
+                0,
+                self.max_resident_bytes - required_bytes,
+            )
+            if pressure_overage > 0:
+                pressure_target = max(
+                    0,
+                    self.resident_bytes - pressure_overage - required_bytes,
+                )
+                target_resident_bytes = min(
+                    target_resident_bytes, pressure_target
+                )
             if self.resident_bytes <= target_resident_bytes:
                 return 0
             # LRU order: oldest access first. Only free (ref_count==0), still-cached
@@ -1128,7 +1201,49 @@ class PagedCacheManager:
                     break
                 if self._maybe_evict_cached_block(block):
                     evicted += 1
+        if evicted and pressure_overage > 0:
+            logger.info(
+                "Paged L1 Metal-pressure eviction: evicted %d block(s) "
+                "(%.2fGB overage) to keep active Metal memory under the "
+                "working-set guard threshold",
+                evicted,
+                pressure_overage / 1024**3,
+            )
         return evicted
+
+    def _metal_pressure_overage_bytes(self) -> int:
+        """Query Metal and return the current pressure overage in bytes.
+
+        Returns 0 whenever pressure eviction is disabled, Metal telemetry is
+        unavailable, or active memory (plus the transient margin) still fits
+        under the guard threshold.
+        """
+        if not paged_metal_pressure_evict_enabled():
+            return 0
+        try:
+            import mlx.core as mx  # local: keep CPU-only/test paths import-safe
+        except Exception:
+            return 0
+        if not hasattr(mx, "get_active_memory"):
+            return 0
+        try:
+            from .utils.memory_limits import (
+                get_effective_metal_working_set_bytes,
+                get_metal_ws_guard_threshold,
+            )
+
+            active_bytes, max_ws_bytes = get_effective_metal_working_set_bytes(
+                mx
+            )
+            threshold_pct = get_metal_ws_guard_threshold()
+        except Exception:
+            return 0
+        return compute_metal_pressure_overage_bytes(
+            active_bytes,
+            max_ws_bytes,
+            threshold_pct,
+            paged_metal_pressure_margin_bytes(),
+        )
 
     def free_block(self, block_id: int) -> bool:
         """

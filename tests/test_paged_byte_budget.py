@@ -386,3 +386,127 @@ def test_cache_occupancy_reflects_live_cached_blocks():
     assert usage["cached_blocks"] == 3, usage["cached_blocks"]
     assert usage["cache_occupancy"] == 3 / usage["usable_blocks"]
     assert usage["total_tokens_cached"] == 48
+
+
+# --- Metal-pressure-aware eviction (#67 follow-up) -------------------------
+#
+# The static resident ceiling derives from a system-RAM percent and never sees
+# the Metal working set, so on a weight-heavy machine the pool OOM'd the
+# process at ~430k tokens with ZERO evictions against a ~23GB ceiling. When
+# active Metal memory plus a transient margin exceeds the working-set guard
+# threshold, enforce_byte_budget must shed the overage (oldest-first,
+# disk-mirrored) even though the static ceiling isn't hit.
+
+
+def test_compute_metal_pressure_overage_arithmetic():
+    from vmlx_engine.paged_cache import compute_metal_pressure_overage_bytes
+
+    GiB = 1024**3
+    # Unpressured: 100GB active + 4GB margin fits under 98% of 107.5GB.
+    assert (
+        compute_metal_pressure_overage_bytes(
+            100 * GiB, int(107.5 * GiB), 98.0, 4 * GiB
+        )
+        == 0
+    )
+    # Pressured (box shape at stage 7 of the 1M gate): 103.5GB active +
+    # 4GB margin exceeds the 105.35GB guard limit.
+    limit = int(int(107.5 * GiB) * 0.98)
+    expected = int(103.5 * GiB) + 4 * GiB - limit
+    assert (
+        compute_metal_pressure_overage_bytes(
+            int(103.5 * GiB), int(107.5 * GiB), 98.0, 4 * GiB
+        )
+        == expected
+        > 0
+    )
+    # Missing telemetry (either figure <= 0) never signals pressure.
+    assert compute_metal_pressure_overage_bytes(0, int(107.5 * GiB), 98.0, 4 * GiB) == 0
+    assert compute_metal_pressure_overage_bytes(100 * GiB, 0, 98.0, 4 * GiB) == 0
+
+
+def test_metal_pressure_evicts_lru_below_static_ceiling(monkeypatch):
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)
+    _cache_a_block(mgr, mgr.blocks[1], 111, 400, last_access=30.0)  # newest
+    _cache_a_block(mgr, mgr.blocks[2], 222, 400, last_access=10.0)  # oldest
+    _cache_a_block(mgr, mgr.blocks[3], 333, 400, last_access=20.0)
+    assert mgr.resident_bytes == 1200  # far under the 100k static ceiling
+    monkeypatch.setattr(mgr, "_metal_pressure_overage_bytes", lambda: 500)
+
+    evicted = mgr.enforce_byte_budget()
+
+    # pressure target = 1200 - 500 = 700; oldest-first: 222 (→800), 333 (→400).
+    assert evicted == 2
+    assert mgr.resident_bytes == 400
+    assert mgr.blocks[2].cache_data is None
+    assert mgr.blocks[3].cache_data is None
+    assert mgr.blocks[1].cache_data is not None
+
+
+def test_metal_pressure_never_evicts_referenced_blocks(monkeypatch):
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)
+    _cache_a_block(mgr, mgr.blocks[1], 111, 900, ref_count=1, last_access=1.0)
+    _cache_a_block(mgr, mgr.blocks[2], 222, 100, ref_count=0, last_access=2.0)
+    monkeypatch.setattr(mgr, "_metal_pressure_overage_bytes", lambda: 10_000)
+
+    evicted = mgr.enforce_byte_budget()
+
+    # Overage demands more than the free pool holds; the in-flight block is
+    # still untouchable. Never corrupt an active sequence for a RAM target.
+    assert evicted == 1
+    assert mgr.blocks[1].cache_data is not None
+    assert mgr.blocks[2].cache_data is None
+
+
+def test_metal_pressure_noop_when_unpressured(monkeypatch):
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=100_000)
+    _cache_a_block(mgr, mgr.blocks[1], 111, 400)
+    monkeypatch.setattr(mgr, "_metal_pressure_overage_bytes", lambda: 0)
+    assert mgr.enforce_byte_budget() == 0
+    assert mgr.blocks[1].cache_data is not None
+
+
+def test_metal_pressure_disabled_via_env(monkeypatch):
+    from vmlx_engine import paged_cache as pc
+
+    monkeypatch.setenv("VMLX_PAGED_METAL_PRESSURE_EVICT", "0")
+    assert pc.paged_metal_pressure_evict_enabled() is False
+    mgr = PagedCacheManager(block_size=4, max_blocks=4, max_resident_bytes=100)
+    assert mgr._metal_pressure_overage_bytes() == 0
+
+
+def test_metal_pressure_margin_env_override(monkeypatch):
+    from vmlx_engine import paged_cache as pc
+
+    monkeypatch.delenv("VMLX_PAGED_METAL_PRESSURE_MARGIN_GB", raising=False)
+    assert pc.paged_metal_pressure_margin_bytes() == 4 * 1024**3
+    monkeypatch.setenv("VMLX_PAGED_METAL_PRESSURE_MARGIN_GB", "2.5")
+    assert pc.paged_metal_pressure_margin_bytes() == int(2.5 * 1024**3)
+    # Unparseable values fall back to the default instead of raising.
+    monkeypatch.setenv("VMLX_PAGED_METAL_PRESSURE_MARGIN_GB", "junk")
+    assert pc.paged_metal_pressure_margin_bytes() == 4 * 1024**3
+
+
+def test_metal_pressure_overage_uses_ws_guard_threshold(monkeypatch):
+    """The live query path wires memory_limits telemetry into the pure math."""
+    import vmlx_engine.utils.memory_limits as ml
+    from vmlx_engine import paged_cache as pc
+
+    GiB = 1024**3
+    monkeypatch.delenv("VMLX_PAGED_METAL_PRESSURE_EVICT", raising=False)
+    monkeypatch.setattr(
+        ml,
+        "get_effective_metal_working_set_bytes",
+        lambda mx_module=None: (104 * GiB, 107 * GiB),
+    )
+    mgr = PagedCacheManager(block_size=4, max_blocks=4, max_resident_bytes=100)
+
+    overage = mgr._metal_pressure_overage_bytes()
+
+    expected = pc.compute_metal_pressure_overage_bytes(
+        104 * GiB,
+        107 * GiB,
+        ml.get_metal_ws_guard_threshold(),
+        pc.paged_metal_pressure_margin_bytes(),
+    )
+    assert overage == expected > 0

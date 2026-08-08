@@ -644,39 +644,20 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
-def _dsv4_block_record_projection_enabled() -> bool:
-    """Whether prompt admission must count native DSV4 paged-block records.
-
-    Block records are captured during prefill whenever the prefix cache is
-    enabled (`capture_prompt_snapshots` defaults on). While the request is in
-    flight those records live in the same Metal working set as the live cache
-    and cannot be evicted, so they are part of the admission footprint.
-    Conservative default is True when scheduler state cannot be resolved.
-    """
-    try:
-        engine = get_engine()
-    except Exception:
-        return True
-    for attr in ("scheduler", "_scheduler"):
-        scheduler = getattr(engine, attr, None)
-        if scheduler is None:
-            continue
-        config = getattr(scheduler, "config", None)
-        if config is not None and hasattr(config, "enable_prefix_cache"):
-            return bool(getattr(config, "enable_prefix_cache", True))
-    return True
-
-
 def _estimate_max_prompt_tokens() -> int:
     """Estimate max safe prompt length based on available GPU memory.
 
     Standard caches use linear K+V geometry. Native DSV4 uses its bounded SWA
-    ring plus ratio-4 CSA/indexer and ratio-128 HCA pool geometry, PLUS the
-    paged-block records captured alongside prefill — both retained in the
-    Metal working set for the whole request. We allow that retained footprint
-    to use at most 60% of free memory (after model weights); the remaining
-    40% covers transient prefill peaks (~3.4GB measured on DSV4-Flash at
-    430k tokens). Returns 0 if estimation fails (no limit enforced).
+    ring plus ratio-4 CSA/indexer and ratio-128 HCA pool geometry. We allow the
+    live cache to use at most 60% of free memory (after model weights); the
+    remaining 40% covers transient prefill peaks (~3.4GB measured on
+    DSV4-Flash at 430k tokens). Paged-block records captured alongside prefill
+    are deliberately NOT part of admission: prior-request records are
+    evictable (Metal-pressure eviction in PagedCacheManager.enforce_byte_budget
+    sheds them under working-set pressure) and fresh oversized captures are
+    skipped up front by _delta_capture_admitted. Counting them here would cap
+    a 1M-context model at ~350k on weight-heavy machines even though that
+    context is servable. Returns 0 if estimation fails (no limit enforced).
     """
     try:
         from vmlx_engine.utils.memory_limits import (
@@ -686,7 +667,7 @@ def _estimate_max_prompt_tokens() -> int:
 
         active, max_ws = _metal_projection_stats()
         free = max_ws - active
-        # Allow retained cache + block records at most 60% of free memory
+        # Allow live KV cache to use at most 60% of free memory
         kv_budget = int(free * 0.6)
         config = _loaded_model_config_for_memory_projection()
         declared_limit = 0
@@ -699,9 +680,6 @@ def _estimate_max_prompt_tokens() -> int:
                 config,
                 kv_budget,
                 max_tokens=declared_limit,
-                include_dsv4_block_records=(
-                    is_dsv4 and _dsv4_block_record_projection_enabled()
-                ),
             )
             if is_dsv4:
                 from vmlx_engine.utils.dsv4_batch_generator import (

@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-_OFFICIAL_VEC = Path("/tmp/ds4-read/tests/test-vectors/official.vec")
+_OFFICIAL_VEC = Path("/tmp/dsv4-reference/tests/test-vectors/official.vec")
 
 from tests.cross_matrix.dsv4_vector_probe import (
     _cache_disabled_requested,
@@ -17,7 +17,7 @@ from tests.cross_matrix.dsv4_vector_probe import (
 )
 
 
-def test_parse_ds4_official_vec_fixture():
+def test_parse_reference_official_vec_fixture():
     if not _OFFICIAL_VEC.exists():
         pytest.skip(
             f"DSV4 official vector fixture not present at {_OFFICIAL_VEC}; "
@@ -26,7 +26,7 @@ def test_parse_ds4_official_vec_fixture():
         )
     cases = parse_official_vec(
         _OFFICIAL_VEC,
-        base_dir=Path("/tmp/ds4-read"),
+        base_dir=Path("/tmp/dsv4-reference"),
     )
 
     ids = [case.case_id for case in cases]
@@ -122,7 +122,7 @@ def test_parse_official_vec_rejects_malformed_top_count(tmp_path):
     vec.write_text(
         "\n".join(
             [
-                "# ds4-official-logprob-vectors-v1",
+                "# dsv4-official-logprob-vectors-v1",
                 f"case bad 128 1 {prompt.name}",
                 "step 0 61 2",
                 "top 61 0",

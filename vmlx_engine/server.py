@@ -2653,9 +2653,8 @@ _THINKING_BUDGET_CAP_FAMILIES = _REASONING_ANSWER_PASS_FAMILIES - {
 # max_thinking_tokens. Callers do not send one, so for DSV4 it never armed.
 #
 # Reserve a slice of the caller's budget for the answer when the caller did not
-# specify a split. antirez's ds4 -- the reference engine that runs this model
-# without this failure -- ships the same idea as a soft/hard </think> budget
-# cutoff "so the model has room to produce a visible answer".
+# specify a split: a soft/hard </think> budget cutoff so the model always has
+# room to produce a visible answer.
 #
 # DSV4 stays out of _THINKING_BUDGET_CAP_FAMILIES above: that set means "an
 # EXPLICIT max_thinking_tokens may cap this family", which remains wrong for

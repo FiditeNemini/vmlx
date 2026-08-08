@@ -1,4 +1,4 @@
-"""DSV4 ds4-style official-vector diagnostics.
+"""DSV4 official-vector diagnostics.
 
 This module is intentionally split into a cheap parser and an optional runtime
 probe. Unit tests cover the parser. The runtime path is opt-in because it
@@ -47,7 +47,7 @@ def hex_to_bytes(data: str) -> bytes:
 def token_bytes(tokenizer: Any, token_id: int) -> bytes:
     """Return UTF-8 bytes for one decoded token.
 
-    ds4's vectors compare token *bytes*, not token IDs, so this stays tokenizer
+    The reference vectors compare token *bytes*, not token IDs, so this stays tokenizer
     implementation agnostic. DSV4's official selected tokens are normal text
     bytes in the checked-in vectors.
     """
@@ -105,7 +105,7 @@ def _resolve_prompt_path(raw: str, *, vec_path: Path, base_dir: Path | None) -> 
 
 
 def parse_official_vec(path: Path, *, base_dir: Path | None = None) -> list[VectorCase]:
-    """Parse ds4 ``official.vec`` with strict row-count validation."""
+    """Parse the reference ``official.vec`` with strict row-count validation."""
     vec_path = Path(path)
     cases: list[VectorCase] = []
     current_id: str | None = None
@@ -281,7 +281,7 @@ def run_probe(
     top_k: int = 20,
     continue_with: str = "local",
 ) -> dict[str, Any]:
-    """Hydrate DSV4 and compare local greedy next-token bytes to ds4 vectors."""
+    """Hydrate DSV4 and compare local greedy next-token bytes to the reference vectors."""
     import mlx.core as mx
 
     from vmlx_engine.loaders.load_jangtq_dsv4 import load_jangtq_dsv4_model
@@ -370,7 +370,7 @@ def run_probe(
                     break
                 case_rows[-1]["official_next_token_resolved"] = True
             else:
-                # Continue with the local token, matching ds4's test loop once
+                # Continue with the local token, matching the reference test loop once
                 # the selected-token check passes. If it fails, later rows are
                 # a local divergence trace.
                 next_id = local_id
@@ -393,7 +393,7 @@ def run_probe(
             }
         )
     return {
-        "schema": "vmlx-dsv4-ds4-vector-probe-v1",
+        "schema": "vmlx-dsv4-official-vector-probe-v1",
         "model_path": str(model_path),
         "vec_path": str(vec_path),
         "continue_with": continue_with,
@@ -407,8 +407,8 @@ def run_probe(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
-    parser.add_argument("--vec", type=Path, default=Path("/tmp/ds4-read/tests/test-vectors/official.vec"))
-    parser.add_argument("--base-dir", type=Path, default=Path("/tmp/ds4-read"))
+    parser.add_argument("--vec", type=Path, default=Path("/tmp/dsv4-reference/tests/test-vectors/official.vec"))
+    parser.add_argument("--base-dir", type=Path, default=Path("/tmp/dsv4-reference"))
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--continue-with", choices=("local", "official"), default="local")

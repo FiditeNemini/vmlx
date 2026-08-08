@@ -1,7 +1,7 @@
 """DSV4 real-activation routed-expert diagnostic.
 
 This is a private release-gate probe, not a runtime patch. It captures the
-actual MoE routed-expert inputs/indices/outputs for a ds4 official-vector prompt
+actual MoE routed-expert inputs/indices/outputs for a reference official-vector prompt
 and compares the selected experts against source FP4-dequantized weights.
 """
 
@@ -426,8 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--vec", type=Path, default=Path("/tmp/ds4-read/tests/test-vectors/official.vec"))
-    parser.add_argument("--base-dir", type=Path, default=Path("/tmp/ds4-read"))
+    parser.add_argument("--vec", type=Path, default=Path("/tmp/dsv4-reference/tests/test-vectors/official.vec"))
+    parser.add_argument("--base-dir", type=Path, default=Path("/tmp/dsv4-reference"))
     parser.add_argument("--case", default="short_code_completion")
     parser.add_argument("--layer", type=int, action="append", default=None)
     parser.add_argument("--token-scope", choices=("final", "all"), default="final")

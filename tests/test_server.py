@@ -240,6 +240,14 @@ class TestHelperFunctions:
         main_body = src.split("def main():", 1)[1]
         assert "_raise_nofile_soft_limit()" in main_body[:200]
 
+        # The shipping entry point is vmlx-serve -> cli.serve_command, which
+        # runs its own uvicorn and never enters server.main(). It must raise
+        # the limit too.
+        with open("vmlx_engine/cli.py") as f:
+            cli_src = f.read()
+        serve_body = cli_src.split("def serve_command(", 1)[1]
+        assert "_raise_nofile_soft_limit()" in serve_body[:1200]
+
     def test_resolve_max_prompt_tokens_uses_user_context_cap(self):
         from vmlx_engine import server
 

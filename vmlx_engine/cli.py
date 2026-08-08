@@ -553,6 +553,8 @@ def serve_command(args):
 
     logger = logging.getLogger(__name__)
 
+    server._raise_nofile_soft_limit()
+
     # --text-only: set the server-global sentinel BEFORE any model-load routing so
     # EVERY is_mllm_model() caller (incl. argless server-side VL routing) forces a
     # detected-VL model to load text-only.

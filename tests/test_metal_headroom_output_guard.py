@@ -249,7 +249,7 @@ def test_implicit_clamp_warning_dedupes_path_and_api_name(monkeypatch, caplog):
     with caplog.at_level(logging.DEBUG, logger=server.logger.name):
         assert (
             server._resolve_max_tokens(
-                None, "/Users/eric/.mlxstudio/models/DeepSeek-V4-Flash-0731-JANG"
+                None, "/Users/example/.mlxstudio/models/DeepSeek-V4-Flash-0731-JANG"
             )
             == 1024
         )

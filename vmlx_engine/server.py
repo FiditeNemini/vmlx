@@ -25951,8 +25951,39 @@ async def init_mcp(config_path: str):
 # =============================================================================
 
 
+def _raise_nofile_soft_limit() -> None:
+    """Raise the open-file soft limit before serving.
+
+    macOS shells default RLIMIT_NOFILE to 256, which a long-context serve can
+    burst through (per-thread SQLite handles + block payload reads + sockets).
+    Running out mid-request degrades importlib/disk reads into broad-except
+    fallbacks and poisons cache lookups, so lift the ceiling up front.
+    """
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        for target in (65536, 10240, 8192, 4096):
+            if soft >= target:
+                return
+            new_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
+            if new_soft <= soft:
+                continue
+            try:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+            except (ValueError, OSError):
+                continue
+            logger.info(
+                "Raised RLIMIT_NOFILE soft limit %d -> %d", soft, new_soft
+            )
+            return
+    except Exception as exc:
+        logger.warning("Could not raise RLIMIT_NOFILE soft limit: %s", exc)
+
+
 def main():
     """Run the server."""
+    _raise_nofile_soft_limit()
     parser = argparse.ArgumentParser(
         description="vmlx-engine OpenAI-compatible server for LLM and MLLM inference",
         formatter_class=argparse.RawDescriptionHelpFormatter,

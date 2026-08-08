@@ -216,6 +216,30 @@ class TestCompletionRequest:
 class TestHelperFunctions:
     """Test server helper functions."""
 
+    def test_main_raises_nofile_soft_limit_before_serving(self):
+        """macOS default soft cap of 256 fds must be lifted at server boot.
+
+        A long-context serve bursts through 256 (per-thread SQLite handles +
+        block payload reads + sockets); running out mid-request degrades
+        importlib/disk reads into broad-except fallbacks and poisons cache
+        lookups (live incident 2026-08-07).
+        """
+        import resource
+
+        from vmlx_engine import server
+
+        soft_before, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        server._raise_nofile_soft_limit()
+        soft_after, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        assert soft_after >= soft_before
+        if hard == resource.RLIM_INFINITY or hard >= 4096:
+            assert soft_after >= 4096
+
+        with open("vmlx_engine/server.py") as f:
+            src = f.read()
+        main_body = src.split("def main():", 1)[1]
+        assert "_raise_nofile_soft_limit()" in main_body[:200]
+
     def test_resolve_max_prompt_tokens_uses_user_context_cap(self):
         from vmlx_engine import server
 

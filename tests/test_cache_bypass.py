@@ -641,6 +641,38 @@ class TestServerForwarding:
         assert "runtime_cache_fingerprint()" in sched
         assert "runtime_cache_fingerprint()" in mllm
 
+    def test_runtime_cache_fingerprint_frozen_against_midsession_failures(
+        self, monkeypatch
+    ):
+        """Mid-session importlib failures must not flip the process fingerprint.
+
+        Live incident 2026-08-07: resource pressure at ~600k-token context made
+        ``importlib.metadata.version`` raise on every call, the per-call
+        fingerprint degraded to ``jang=unknown,mlx=unknown,...``, and every
+        stored L2 block was rejected as a runtime mismatch (a 547k-token chain
+        stored seconds earlier cold-missed 608k tokens). Package versions are
+        immutable within a process: the fingerprint is resolved once at import
+        and must stay constant no matter what importlib does afterwards.
+        """
+        import importlib.metadata as ilm
+
+        from vmlx_engine import prefix_cache
+
+        baseline = prefix_cache.runtime_cache_fingerprint()
+        assert baseline == prefix_cache._RUNTIME_CACHE_FINGERPRINT
+
+        def _boom(_name):
+            raise OSError(24, "Too many open files")
+
+        monkeypatch.setattr(ilm, "version", _boom)
+        # The public fingerprint stays frozen...
+        assert prefix_cache.runtime_cache_fingerprint() == baseline
+        # ...while a fresh resolution under the same failure would have
+        # degraded — this is exactly the old per-call failure mode.
+        degraded = prefix_cache._resolve_runtime_cache_fingerprint()
+        assert "jang=unknown" in degraded
+        assert "mlx=unknown" in degraded
+
     def test_block_disk_record_rejects_runtime_fingerprint_drift(
         self, monkeypatch, tmp_path
     ):

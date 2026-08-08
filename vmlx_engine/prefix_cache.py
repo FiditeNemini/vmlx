@@ -96,14 +96,7 @@ DSV4_APPEND_SAFE_CHECKPOINT_POLICY = "full_block_v1"
 _LOOPED_CACHE_LAYOUT = "looped_kv_v1"
 
 
-def runtime_cache_fingerprint() -> str:
-    """Fingerprint runtime packages that define cache tensor semantics.
-
-    Disk L2 is intentionally reusable across same-version process restarts.
-    It must not, however, silently cross an app/runtime update when a cache
-    schema string was not bumped. Keep this compact string inside cache
-    namespaces and model keys so old blocks miss cleanly after package drift.
-    """
+def _resolve_runtime_cache_fingerprint() -> str:
     parts: List[str] = []
     try:
         from . import __version__ as engine_version
@@ -119,6 +112,28 @@ def runtime_cache_fingerprint() -> str:
             version = "unknown"
         parts.append(f"{package}={version}")
     return "runtime_cache=" + ",".join(parts)
+
+
+# Resolved exactly once at import. Package versions cannot change inside a
+# running process, but importlib.metadata re-reads dist-info from disk on
+# every call — under mid-session resource pressure (fd exhaustion / memory
+# pressure at very long contexts) those reads start failing, every package
+# resolves to "unknown", and the flipped fingerprint rejects every stored
+# L2 block as a mismatch (live incident 2026-08-07: 547k-token chain stored
+# seconds earlier cold-missed 608k tokens). Freezing the string at import
+# makes the process's cache identity immune to runtime resource failures.
+_RUNTIME_CACHE_FINGERPRINT = _resolve_runtime_cache_fingerprint()
+
+
+def runtime_cache_fingerprint() -> str:
+    """Fingerprint runtime packages that define cache tensor semantics.
+
+    Disk L2 is intentionally reusable across same-version process restarts.
+    It must not, however, silently cross an app/runtime update when a cache
+    schema string was not bumped. Keep this compact string inside cache
+    namespaces and model keys so old blocks miss cleanly after package drift.
+    """
+    return _RUNTIME_CACHE_FINGERPRINT
 
 
 def _looped_cache_identity_parts(model: Any) -> List[str]:

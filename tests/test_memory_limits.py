@@ -639,19 +639,23 @@ def test_dsv4_prefill_loop_wires_adaptive_shrink():
 
 
 def test_dsv4_hw_context_ceiling_binary_search_hits_budget_boundary():
-    """Ceiling lands within one native block of the exact budget boundary."""
+    """Ceiling lands within one native block of the exact budget boundary.
+
+    The margin is context-dependent (RUN C-2: the prefill transient grows
+    ~14KB per token of context), so the boundary check is self-consistent:
+    the returned ceiling fits under its own margin, and two blocks more
+    does not fit under its.
+    """
     from vmlx_engine.utils.dsv4_batch_generator import (
         DSV4_NATIVE_BLOCK_SIZE,
         DSV4_PREFILL_MIN_STEP_TOKENS,
-        DSV4_PREFILL_TRANSIENT_REFERENCE_BYTES,
-        DSV4_PREFILL_TRANSIENT_REFERENCE_WIDTH,
         dsv4_hw_context_ceiling_tokens,
         dsv4_prefill_valve_min_margin_bytes,
-        dsv4_scale_transient_for_width,
+        dsv4_projected_transient_bytes,
     )
 
     gib = 1024**3
-    bytes_per_token = 11_600  # measured DSV4-Flash pool-quant growth
+    bytes_per_token = 11_600
     active = int(91.6 * gib)
     max_ws = int(107.52 * gib)
 
@@ -659,19 +663,43 @@ def test_dsv4_hw_context_ceiling_binary_search_hits_budget_boundary():
         active, max_ws, lambda tokens: tokens * bytes_per_token
     )
 
-    transient_floor = dsv4_scale_transient_for_width(
-        DSV4_PREFILL_TRANSIENT_REFERENCE_BYTES,
-        DSV4_PREFILL_TRANSIENT_REFERENCE_WIDTH,
-        DSV4_PREFILL_MIN_STEP_TOKENS,
-    )
-    margin = max(
-        int(transient_floor * 1.25), dsv4_prefill_valve_min_margin_bytes()
-    )
-    budget = max_ws - active - margin
-    assert ceiling * bytes_per_token <= budget
-    assert (ceiling + 2 * DSV4_NATIVE_BLOCK_SIZE) * bytes_per_token > budget
+    min_margin = dsv4_prefill_valve_min_margin_bytes()
+
+    def margin(tokens: int) -> int:
+        transient = dsv4_projected_transient_bytes(
+            tokens, DSV4_PREFILL_MIN_STEP_TOKENS
+        )
+        return max(int(transient * 1.25), min_margin)
+
+    assert active + ceiling * bytes_per_token + margin(ceiling) <= max_ws
+    over = ceiling + 2 * DSV4_NATIVE_BLOCK_SIZE
+    assert active + over * bytes_per_token + margin(over) > max_ws
     # Strictly below the dishonest declared 1M+ advertisement.
     assert 0 < ceiling < 1_048_576
+
+
+def test_dsv4_projected_transient_matches_run_c2_datum():
+    """Projection reproduces the live RUN C-2 measurements at width 512.
+
+    Reference point: 4.2GiB at ~530k (RUN A). Valve abort datum: 6.63GiB
+    at 718,336 (RUN C-2 stage12, projected 8.29GB = 1.25x). The 14KB/token
+    slope must land within 5% of the measured abort transient.
+    """
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        dsv4_projected_transient_bytes,
+    )
+
+    gib = 1024**3
+    ref = dsv4_projected_transient_bytes(530_000, 512)
+    assert abs(ref - int(4.2 * gib)) <= int(0.01 * gib)
+
+    abort = dsv4_projected_transient_bytes(718_336, 512)
+    measured = 6.63 * gib
+    assert abs(abort - measured) <= 0.05 * measured
+
+    # Monotone in context; width scaling shrinks, never grows, the margin.
+    assert dsv4_projected_transient_bytes(1_000_000, 512) > abort
+    assert dsv4_projected_transient_bytes(718_336, 256) < abort
 
 
 def test_dsv4_hw_context_ceiling_zero_without_headroom():
@@ -685,9 +713,9 @@ def test_dsv4_hw_context_ceiling_zero_without_headroom():
     assert dsv4_hw_context_ceiling_tokens(int(108 * gib), int(107 * gib), linear) == 0
     assert dsv4_hw_context_ceiling_tokens(0, int(107 * gib), linear) == 0
     assert dsv4_hw_context_ceiling_tokens(int(90 * gib), 0, linear) == 0
-    # Headroom smaller than the transient margin: not even one block fits.
+    # Headroom smaller than even the minimum-margin floor: not one block fits.
     assert (
-        dsv4_hw_context_ceiling_tokens(int(103 * gib), int(107.52 * gib), linear)
+        dsv4_hw_context_ceiling_tokens(int(105.5 * gib), int(107.52 * gib), linear)
         == 0
     )
     # Estimator failure propagates as "no claim", not a crash.
@@ -713,14 +741,13 @@ def test_dsv4_hw_context_ceiling_saturates_at_search_limit():
 
 
 def test_dsv4_hw_context_ceiling_with_real_pool_geometry():
-    """Real DSV4-Flash geometry: box envelope clears 1M only via floor margin.
+    """Real DSV4-Flash geometry: box does NOT clear the declared 1M.
 
-    Weights-active ~96.5GiB + pool-quant admission (4.44GiB at 1M) + the
-    floor-width transient margin (~6.45GiB) sits just inside the 107.52GiB
-    limit — the fixed-2048 margin (8.73GB projected, RUN A) is what aborted
-    at ~524k, and the adaptive shrink is what makes the declared 1M honest.
-    A heavier active (co-resident model / bigger weights) must bind BELOW
-    the declared limit instead of advertising it.
+    RUN C-2 valve abort at 718,336 (width 512, transient 6.63GiB) proved
+    the transient grows with context. With weights-active ~96.5GiB, pool
+    admission ~4.5KB/token, and the floor-width (256) context-dependent
+    margin, the honest ceiling sits around ~768k — well below the declared
+    1,048,576. A heavier active must bind strictly lower still.
     """
     from vmlx_engine.utils.dsv4_batch_generator import (
         dsv4_hw_context_ceiling_tokens,
@@ -738,12 +765,15 @@ def test_dsv4_hw_context_ceiling_with_real_pool_geometry():
     ceiling = dsv4_hw_context_ceiling_tokens(
         int(96.5 * gib), int(107.52 * gib), cache_bytes
     )
-    assert ceiling >= 1_000_000
+    assert 650_000 < ceiling < 850_000
+    # The step-512 valve abort landed at 718,336; the floor-width (256)
+    # advertisement must not promise wildly beyond what step-512 survived.
+    assert ceiling < 1_048_576
 
     heavy = dsv4_hw_context_ceiling_tokens(
         int(99.5 * gib), int(107.52 * gib), cache_bytes
     )
-    assert 0 < heavy < 1_000_000
+    assert 0 < heavy < ceiling
 
 
 def test_estimate_max_prompt_tokens_wires_dsv4_hw_ceiling():

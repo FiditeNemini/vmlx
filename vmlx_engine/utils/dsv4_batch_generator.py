@@ -173,12 +173,34 @@ def dsv4_prefill_adaptive_step(
         step = new_step
 
 
-# Measured DSV4-Flash prefill transient peak-over-active at chunk width 2048
-# (~530k ctx, RUN A 2026-08-07). Reference point for projecting the
-# floor-width transient when advertising the hardware context ceiling before
-# any live observation exists. RUN D (adaptive-shrink live run) calibrates.
-DSV4_PREFILL_TRANSIENT_REFERENCE_BYTES = int(7.0 * (1024**3))
-DSV4_PREFILL_TRANSIENT_REFERENCE_WIDTH = 2048
+# Measured DSV4-Flash prefill transient peak-over-active at chunk width 512.
+# The transient GROWS with context (the attention invariant runs over the
+# compressed pool): 4.2GiB at ~530k (RUN A), 5.79GiB max through ~640k
+# (RUN C-2 stage11), 6.63GiB at the 718,336 valve abort (RUN C-2 stage12,
+# 8.29GB projected = 1.25x). Two-point slope 530k->718k = ~13.6KB/token of
+# context; 14KB/token keeps the projection conservative.
+DSV4_PREFILL_TRANSIENT_REF_BYTES = int(4.2 * (1024**3))
+DSV4_PREFILL_TRANSIENT_REF_WIDTH = 512
+DSV4_PREFILL_TRANSIENT_REF_CTX_TOKENS = 530_000
+DSV4_PREFILL_TRANSIENT_CTX_SLOPE_BYTES_PER_TOKEN = 14_000
+
+
+def dsv4_projected_transient_bytes(ctx_tokens: int, width: int) -> int:
+    """Project the prefill transient at ``ctx_tokens`` for a narrow chunk.
+
+    Linear-in-context model anchored at the width-512 reference; width
+    scaling only shrinks (``dsv4_scale_transient_for_width`` is identity for
+    widths at or above the reference), so this is only meaningful for the
+    adaptive floor widths used by the hardware-ceiling projection.
+    """
+    base = DSV4_PREFILL_TRANSIENT_REF_BYTES + int(
+        DSV4_PREFILL_TRANSIENT_CTX_SLOPE_BYTES_PER_TOKEN
+        * (int(ctx_tokens) - DSV4_PREFILL_TRANSIENT_REF_CTX_TOKENS)
+    )
+    base = max(base, dsv4_prefill_valve_min_margin_bytes())
+    return dsv4_scale_transient_for_width(
+        base, DSV4_PREFILL_TRANSIENT_REF_WIDTH, max(1, int(width))
+    )
 
 
 def dsv4_hw_context_ceiling_tokens(
@@ -192,11 +214,13 @@ def dsv4_hw_context_ceiling_tokens(
 
     The declared model context (1M+) is not servable on weight-heavy
     machines: the binding constraint is ``active (weights) + KV pool(C) +
-    prefill transient`` against the Metal working-set limit, which the
-    linear 60%%-of-free KV heuristic never modeled. Projects the transient
-    at the adaptive floor width (one native block) from the measured
-    wide-chunk reference, applies the same 1.25x valve margin, and
-    binary-searches the largest token count that fits.
+    prefill transient(C)`` against the Metal working-set limit, which the
+    linear 60%%-of-free KV heuristic never modeled. The transient term is
+    context-dependent (RUN C-2 aborted at 718,336 with 6.63GiB observed at
+    width 512 vs 4.2GiB at 530k), projected at the adaptive floor width
+    with the same 1.25x valve margin. Binary-searches the largest token
+    count that fits; the capacity function stays monotonic because the
+    pool admission and the transient model are both monotonic in tokens.
 
     ``cache_bytes_for_tokens(tokens) -> int | None`` must be monotonic
     (native DSV4 pool geometry is). Call with a freshly loaded model so
@@ -206,23 +230,18 @@ def dsv4_hw_context_ceiling_tokens(
     """
     if active_bytes <= 0 or max_ws_bytes <= 0 or active_bytes >= max_ws_bytes:
         return 0
-    transient_floor = dsv4_scale_transient_for_width(
-        DSV4_PREFILL_TRANSIENT_REFERENCE_BYTES,
-        DSV4_PREFILL_TRANSIENT_REFERENCE_WIDTH,
-        DSV4_PREFILL_MIN_STEP_TOKENS,
-    )
-    margin = max(
-        int(transient_floor * 1.25), dsv4_prefill_valve_min_margin_bytes()
-    )
-    budget = max_ws_bytes - active_bytes - margin
-    if budget <= 0:
-        return 0
+
+    min_margin = dsv4_prefill_valve_min_margin_bytes()
 
     def fits(tokens: int) -> bool:
         cache_bytes = cache_bytes_for_tokens(tokens)
         if cache_bytes is None:
             return False
-        return int(cache_bytes) <= budget
+        transient = dsv4_projected_transient_bytes(
+            tokens, DSV4_PREFILL_MIN_STEP_TOKENS
+        )
+        margin = max(int(transient * 1.25), min_margin)
+        return active_bytes + int(cache_bytes) + margin <= max_ws_bytes
 
     lo = DSV4_NATIVE_BLOCK_SIZE
     if not fits(lo):

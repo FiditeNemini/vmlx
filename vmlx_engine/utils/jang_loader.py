@@ -1247,6 +1247,21 @@ def _sanitize_qwen3_next_conv1d_layout(weights: dict) -> dict:
     return _sanitize_grouped_conv1d_layout(weights)
 
 
+def _skip_mlx_lm_hf_repair_sanitize(model_type: str) -> bool:
+    """Families whose mlx_lm ``Model.sanitize`` exists solely to repair raw HF
+    checkpoints and must NOT run on JANG shards (mlxstudio#129).
+
+    falcon_h1's sanitize hard-indexes ``model.layers.0.mamba.conv1d.weight``
+    as its "already sanitized?" gate — a KeyError on every shard that lacks
+    layer 0. JANG bundles always store conv1d in MLX layout with the muP
+    multipliers folded at conversion (``jang_mup_folded`` stamp), so when the
+    gate can run it always early-returns; if it ever misfired it would
+    multiply packed-uint32 quantized tensors. Conv1d layout is still covered
+    idempotently by ``_sanitize_grouped_conv1d_layout`` after this skip.
+    """
+    return str(model_type or "") == "falcon_h1"
+
+
 def _set_wired_limit_for_model(weight_files):
     """Raise MLX wired memory limit to fit model + headroom.
 
@@ -3210,7 +3225,13 @@ def _load_jang_v2(
 
         step3p7_shard_had_vanilla_moe_keys = False
         _shard_mlx_lm_shifted = False
-        if weights and hasattr(model, "sanitize"):
+        if (
+            weights
+            and hasattr(model, "sanitize")
+            and not _skip_mlx_lm_hf_repair_sanitize(
+                _jang_effective_model_type(config)
+            )
+        ):
             step3p7_shard_had_vanilla_moe_keys = any(
                 (
                     (".moe." in key or ".share_expert." in key)
@@ -5042,6 +5063,9 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
 
     result, tmp_dir = _repack_jang_to_mlx(path, block_size, config)
 
+    _skip_hf_repair = _skip_mlx_lm_hf_repair_sanitize(
+        _jang_effective_model_type(config)
+    )
     try:
         if tmp_dir is not None:
             logger.info(f"  Loading {len(result)} repacked shards via mmap")
@@ -5053,7 +5077,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
             del _shape_map_xshard
             for sf in result:
                 shard_weights = mx.load(sf)
-                if hasattr(model, "sanitize"):
+                if hasattr(model, "sanitize") and not _skip_hf_repair:
                     shard_weights = model.sanitize(shard_weights)
                 shard_weights = _sanitize_qwen3_next_conv1d_layout(shard_weights)
                 _pre_fix_bits_from_shard(model, shard_weights, block_size)
@@ -5062,7 +5086,7 @@ def _load_jang_v1(path: Path, jang_cfg: dict, config_path: Path):
                 gc.collect()
         else:
             weights = result
-            if hasattr(model, "sanitize"):
+            if hasattr(model, "sanitize") and not _skip_hf_repair:
                 weights = model.sanitize(weights)
             weights = _sanitize_qwen3_next_conv1d_layout(weights)
             _pre_fix_bits_from_shard(model, weights, block_size)

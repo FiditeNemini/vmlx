@@ -2193,3 +2193,43 @@ class TestBailingHybridFlatSwitchMlpRepair:
         assert out == {}
         assert len(model.model.layers) == 2
         assert model.args.num_nextn_predict_layers == 0
+
+
+class TestFalconH1SkipHfRepairSanitize:
+    """mlxstudio#129 follow-up: mlx_lm's falcon_h1.sanitize is an HF-checkpoint
+    repair pass whose gate hard-indexes model.layers.0.mamba.conv1d.weight —
+    a KeyError on every JANG shard that lacks layer 0. The loader must skip it
+    (JANG bundles are MLX-layout + muP-folded at conversion)."""
+
+    def test_predicate_skips_falcon_h1_only(self):
+        from vmlx_engine.utils.jang_loader import _skip_mlx_lm_hf_repair_sanitize
+
+        assert _skip_mlx_lm_hf_repair_sanitize("falcon_h1") is True
+        for mt in ("qwen3", "deepseek_v4", "falcon_mamba", "", None):
+            assert _skip_mlx_lm_hf_repair_sanitize(mt) is False
+
+    def test_mlx_lm_sanitize_still_hard_indexes_layer0(self):
+        """Sentinel: if mlx_lm ever fixes the hard-index, this fails and the
+        skip predicate should be re-evaluated."""
+        import mlx.core as mx
+        from mlx_lm.models import falcon_h1
+
+        shard_without_layer0 = {
+            "model.layers.1.mamba.conv1d.weight": mx.zeros((8, 4, 1)),
+        }
+        with pytest.raises(KeyError):
+            falcon_h1.Model.sanitize(None, shard_without_layer0)
+
+    def test_mlx_lm_sanitize_noop_on_mlx_layout(self):
+        """When the gate CAN run on a JANG shard (layer 0 present, MLX layout
+        (out, kernel, 1)), sanitize early-returns unchanged — proving the
+        loader-side skip loses nothing."""
+        import mlx.core as mx
+        from mlx_lm.models import falcon_h1
+
+        weights = {
+            "model.layers.0.mamba.conv1d.weight": mx.zeros((8, 4, 1)),
+            "lm_head.weight": mx.ones((4, 4)),
+        }
+        out = falcon_h1.Model.sanitize(None, weights)
+        assert out is weights

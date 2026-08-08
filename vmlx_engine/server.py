@@ -671,6 +671,7 @@ def _estimate_max_prompt_tokens() -> int:
         kv_budget = int(free * 0.6)
         config = _loaded_model_config_for_memory_projection()
         declared_limit = 0
+        dsv4_ceiling_logged = False
         if config is not None:
             declared_limit = _declared_context_limit_from_config(config)
             is_dsv4 = (
@@ -683,9 +684,35 @@ def _estimate_max_prompt_tokens() -> int:
             )
             if is_dsv4:
                 from vmlx_engine.utils.dsv4_batch_generator import (
+                    dsv4_hw_context_ceiling_tokens,
                     dsv4_max_prefill_tokens,
                 )
 
+                def _dsv4_cache_bytes(tokens: int):
+                    est = estimate_dsv4_cache_memory_from_config(config, tokens)
+                    return None if est is None else est.total_bytes
+
+                hw_ceiling = dsv4_hw_context_ceiling_tokens(
+                    active, max_ws, _dsv4_cache_bytes
+                )
+                if hw_ceiling > 0 and (
+                    max_tokens <= 0 or hw_ceiling < max_tokens
+                ):
+                    max_tokens = hw_ceiling
+                if 0 < hw_ceiling < declared_limit:
+                    dsv4_ceiling_logged = True
+                    logger.warning(
+                        "DSV4 hardware context ceiling: model declares %d "
+                        "tokens but weights + KV pool + prefill transient "
+                        "fit ~%d within the %.1fGB Metal working-set limit "
+                        "(weights active=%.1fGB); advertising the honest "
+                        "ceiling — longer prompts would hit the prefill "
+                        "memory valve",
+                        declared_limit,
+                        hw_ceiling,
+                        max_ws / (1024**3),
+                        active / (1024**3),
+                    )
                 dsv4_guard = dsv4_max_prefill_tokens()
                 if dsv4_guard > 0:
                     max_tokens = min(max_tokens, dsv4_guard)
@@ -695,7 +722,7 @@ def _estimate_max_prompt_tokens() -> int:
             estimated = max(1024, max_tokens)  # preserve the existing 1K floor
             if declared_limit > 0:
                 estimated = min(estimated, declared_limit)
-            if 0 < estimated < declared_limit:
+            if 0 < estimated < declared_limit and not dsv4_ceiling_logged:
                 logger.info(
                     "Metal-memory-limited context: model declares %d tokens "
                     "but the current free working set supports ~%d "

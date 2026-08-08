@@ -173,6 +173,72 @@ def dsv4_prefill_adaptive_step(
         step = new_step
 
 
+# Measured DSV4-Flash prefill transient peak-over-active at chunk width 2048
+# (~530k ctx, RUN A 2026-08-07). Reference point for projecting the
+# floor-width transient when advertising the hardware context ceiling before
+# any live observation exists. RUN D (adaptive-shrink live run) calibrates.
+DSV4_PREFILL_TRANSIENT_REFERENCE_BYTES = int(7.0 * (1024**3))
+DSV4_PREFILL_TRANSIENT_REFERENCE_WIDTH = 2048
+
+
+def dsv4_hw_context_ceiling_tokens(
+    active_bytes: int,
+    max_ws_bytes: int,
+    cache_bytes_for_tokens,
+    *,
+    search_limit_tokens: int = 2_097_152,
+) -> int:
+    """Largest context whose KV pool plus floor-width prefill transient fits.
+
+    The declared model context (1M+) is not servable on weight-heavy
+    machines: the binding constraint is ``active (weights) + KV pool(C) +
+    prefill transient`` against the Metal working-set limit, which the
+    linear 60%%-of-free KV heuristic never modeled. Projects the transient
+    at the adaptive floor width (one native block) from the measured
+    wide-chunk reference, applies the same 1.25x valve margin, and
+    binary-searches the largest token count that fits.
+
+    ``cache_bytes_for_tokens(tokens) -> int | None`` must be monotonic
+    (native DSV4 pool geometry is). Call with a freshly loaded model so
+    ``active_bytes`` does not already include a populated KV pool; a
+    populated pool only makes the answer conservative. Returns 0 when the
+    inputs are unusable so callers fall back to other limits.
+    """
+    if active_bytes <= 0 or max_ws_bytes <= 0 or active_bytes >= max_ws_bytes:
+        return 0
+    transient_floor = dsv4_scale_transient_for_width(
+        DSV4_PREFILL_TRANSIENT_REFERENCE_BYTES,
+        DSV4_PREFILL_TRANSIENT_REFERENCE_WIDTH,
+        DSV4_PREFILL_MIN_STEP_TOKENS,
+    )
+    margin = max(
+        int(transient_floor * 1.25), dsv4_prefill_valve_min_margin_bytes()
+    )
+    budget = max_ws_bytes - active_bytes - margin
+    if budget <= 0:
+        return 0
+
+    def fits(tokens: int) -> bool:
+        cache_bytes = cache_bytes_for_tokens(tokens)
+        if cache_bytes is None:
+            return False
+        return int(cache_bytes) <= budget
+
+    lo = DSV4_NATIVE_BLOCK_SIZE
+    if not fits(lo):
+        return 0
+    hi = max(lo, int(search_limit_tokens))
+    if fits(hi):
+        return hi
+    while hi - lo > DSV4_NATIVE_BLOCK_SIZE:
+        mid = (lo + hi) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
 def dsv4_max_prefill_tokens() -> int:
     """Return an explicit operator prefill guard, or zero when unset.
 

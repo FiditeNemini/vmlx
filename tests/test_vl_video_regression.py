@@ -9462,8 +9462,9 @@ class TestReasoningParserWiring:
         assert "none" in src.lower(), (
             "--reasoning-parser none choice must be valid CLI"
         )
-        # cli source must set server._reasoning_parser = None on 'none'
-        assert "server._reasoning_parser = None" in src, (
+        # cli source must explicitly disable the parser on 'none' via the
+        # setter (refactored from direct assignment in bd193e93a)
+        assert "server._set_active_reasoning_parser(None, None)" in src, (
             "--reasoning-parser none must explicitly disable the parser"
         )
         assert "_user_disabled_reasoning_parser" in src

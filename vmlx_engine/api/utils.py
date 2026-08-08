@@ -417,6 +417,51 @@ def _has_native_mtp_vl_artifact(local_path: str) -> bool:
         return False
 
 
+_VISION_WEIGHT_MARKERS = (
+    "vision_tower.",
+    "vision_model.",
+    "vision_encoder.",
+    "visual.",
+    "image_encoder.",
+    "multi_modal_projector.",
+    "mm_projector.",
+)
+
+
+def _checkpoint_lacks_vision_weights(local_path: str) -> bool:
+    """True when the checkpoint verifiably contains ZERO vision-tower weights.
+
+    A config can advertise vision (vision_config / VLM model_type) while the
+    weights ship with the tower stripped (e.g. text-only re-quants of VLM
+    checkpoints). Loading such a model through the MLLM path aborts with
+    "Missing N parameters: vision_tower.*", so autodetect must route it
+    text-only instead. Conservative: any read failure returns False so the
+    existing behavior is unchanged.
+    """
+    try:
+        keys: list[str] = []
+        index_path = os.path.join(local_path, "model.safetensors.index.json")
+        if os.path.isfile(index_path):
+            weight_map = json.loads(open(index_path).read()).get("weight_map", {})
+            if isinstance(weight_map, dict):
+                keys = [str(k) for k in weight_map]
+        else:
+            import glob as _glob
+            import struct as _struct
+            for shard in _glob.glob(os.path.join(local_path, "*.safetensors")):
+                with open(shard, "rb") as fh:
+                    header_len = _struct.unpack("<Q", fh.read(8))[0]
+                    if header_len <= 0 or header_len > 500_000_000:
+                        return False
+                    header = json.loads(fh.read(header_len))
+                keys.extend(str(k) for k in header if k != "__metadata__")
+        if not keys:
+            return False
+        return not any(marker in key for key in keys for marker in _VISION_WEIGHT_MARKERS)
+    except Exception:
+        return False
+
+
 def _is_mllm_cache_key(model_name: str, local_path: str) -> tuple:
     """Build a cache key that invalidates on config.json / jang_config.json edits."""
     try:
@@ -787,7 +832,27 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
         if os.path.isfile(config_path):
             try:
                 model_config = json.loads(open(config_path).read())
+                # GH #251: explicit text-only marker wins over vision metadata.
+                if model_config.get("language_model_only") is True:
+                    _logger.info(
+                        "is_mllm_model(%s): tier=config_language_model_only "
+                        "result=False",
+                        model_name,
+                    )
+                    return False
                 if "vision_config" in model_config:
+                    # GH #251: stripped-tower checkpoints (config advertises
+                    # vision but weights contain no tower) would abort the MLLM
+                    # load with "Missing N parameters: vision_tower.*".
+                    if _checkpoint_lacks_vision_weights(local_path):
+                        _logger.warning(
+                            "is_mllm_model(%s): tier=stripped_vision_tower "
+                            "result=False — config.json has vision_config but "
+                            "the checkpoint contains no vision-tower weights; "
+                            "routing text-only",
+                            model_name,
+                        )
+                        return False
                     _logger.info(
                         "is_mllm_model(%s): tier=config_json_vision_config result=True",
                         model_name,
@@ -805,6 +870,16 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
             if reg_config.family_name == "unknown" and local_path != model_name:
                 reg_config = registry.lookup(model_name)
             if reg_config.family_name != "unknown":
+                if reg_config.is_mllm and _checkpoint_lacks_vision_weights(local_path):
+                    _logger.warning(
+                        "is_mllm_model(%s): tier=registry_family_%s "
+                        "overridden result=False — family is VLM but the "
+                        "checkpoint contains no vision-tower weights "
+                        "(stripped tower); routing text-only",
+                        model_name,
+                        reg_config.family_name,
+                    )
+                    return False
                 _logger.info(
                     "is_mllm_model(%s): tier=registry_family_%s result=%s",
                     model_name,

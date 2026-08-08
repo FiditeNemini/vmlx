@@ -164,6 +164,63 @@ class TestIsMllmModel:
         (tmp_path / "config.json").write_text(json.dumps(config))
         assert is_mllm_model(str(tmp_path)) is True
 
+    def test_language_model_only_overrides_vision_config(self, tmp_path):
+        """GH #251: explicit language_model_only routes text-only."""
+        import json
+        _IS_MLLM_CACHE.clear()
+        config = {
+            "model_type": "qwen3_5",
+            "vision_config": {"hidden_size": 1024},
+            "language_model_only": True,
+        }
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        assert is_mllm_model(str(tmp_path)) is False
+
+    def test_stripped_vision_tower_index_routes_text_only(self, tmp_path):
+        """GH #251: vision_config present but zero vision weights → text-only."""
+        import json
+        _IS_MLLM_CACHE.clear()
+        config = {"model_type": "qwen3_5", "vision_config": {"hidden_size": 1024}}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        index = {"weight_map": {
+            "model.embed_tokens.weight": "model-00001.safetensors",
+            "model.layers.0.self_attn.q_proj.weight": "model-00001.safetensors",
+            "lm_head.weight": "model-00001.safetensors",
+        }}
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+        assert is_mllm_model(str(tmp_path)) is False
+
+    def test_intact_vision_tower_index_stays_vlm(self, tmp_path):
+        """Checkpoint WITH vision_tower weights keeps VLM routing."""
+        import json
+        _IS_MLLM_CACHE.clear()
+        config = {"model_type": "qwen3_5", "vision_config": {"hidden_size": 1024}}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        index = {"weight_map": {
+            "model.embed_tokens.weight": "model-00001.safetensors",
+            "vision_tower.patch_embed.proj.weight": "model-00001.safetensors",
+        }}
+        (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+        assert is_mllm_model(str(tmp_path)) is True
+
+    def test_stripped_tower_single_shard_header(self, tmp_path):
+        """Stripped-tower detection reads raw safetensors headers when no index."""
+        import json
+        import struct
+        _IS_MLLM_CACHE.clear()
+        config = {"model_type": "qwen3_5", "vision_config": {"hidden_size": 1024}}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        header = {
+            "model.layers.0.mlp.gate_proj.weight": {
+                "dtype": "F32", "shape": [1], "data_offsets": [0, 4],
+            }
+        }
+        header_bytes = json.dumps(header).encode()
+        (tmp_path / "model.safetensors").write_bytes(
+            struct.pack("<Q", len(header_bytes)) + header_bytes + b"\x00\x00\x00\x00"
+        )
+        assert is_mllm_model(str(tmp_path)) is False
+
     def test_minimax_m3_vl_routes_text_runtime_even_when_force_mllm(self, tmp_path):
         """MiniMax-M3 VL must never route to generic mlx_vlm minimax_m3_vl."""
         import json

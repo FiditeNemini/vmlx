@@ -16637,7 +16637,7 @@ async def create_completion(request: CompletionRequest):
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = total_completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
-        f"Completion: {total_prompt_tokens} prompt + {total_completion_tokens} completion tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s)"
+        f"Completion: {total_prompt_tokens} prompt + {total_completion_tokens} completion tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill)"
     )
 
     return CompletionResponse(
@@ -17345,7 +17345,7 @@ async def create_chat_completion(
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = output.completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
-        f"Chat completion: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s)"
+        f"Chat completion: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill)"
     )
 
     # Extract reasoning content FIRST from raw output (before stripping tags).
@@ -20502,7 +20502,7 @@ async def create_response(
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = output.completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
-        f"Response: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s)"
+        f"Response: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill)"
     )
 
     # Extract reasoning content FIRST from raw output (before stripping tags).
@@ -23189,6 +23189,12 @@ async def stream_chat_completion(
                     _ans_disconnected = True
                     break
                 _ans_last_out = answer_output
+                # Keep the decode-window timestamps live through the answer
+                # pass; otherwise the final decode tok/s line divides BOTH
+                # passes' tokens by only the first pass's span and overreports.
+                _decode_last_ts = time.perf_counter()
+                if _decode_first_ts is None:
+                    _decode_first_ts = _decode_last_ts
                 _ans_ct = (
                     int(getattr(answer_output, "completion_tokens", 0) or 0) or _ans_ct
                 )
@@ -25332,6 +25338,13 @@ async def stream_responses_api(
                         _ans_disconnected = True
                         break
                     _ans_last_out = answer_output
+                    # Keep the decode-window timestamps live through the answer
+                    # pass; otherwise the final decode tok/s line divides BOTH
+                    # passes' tokens by only the first pass's span and
+                    # overreports.
+                    _decode_last_ts = time.perf_counter()
+                    if _decode_first_ts is None:
+                        _decode_first_ts = _decode_last_ts
                     _ans_ct = (
                         int(getattr(answer_output, "completion_tokens", 0) or 0)
                         or _ans_ct

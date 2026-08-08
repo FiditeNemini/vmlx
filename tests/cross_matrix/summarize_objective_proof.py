@@ -3786,7 +3786,11 @@ def _collect_decode_speeds(value: Any) -> list[float]:
             for line in log_tail:
                 if not isinstance(line, str):
                     continue
-                for match in re.finditer(r"\(([0-9]+(?:\.[0-9]+)?) tok/s\)", line):
+                for match in re.finditer(
+                    r"\(([0-9]+(?:\.[0-9]+)?) tok/s"
+                    r"(?: decode| end-to-end incl\. prefill)?\)",
+                    line,
+                ):
                     speeds.append(float(match.group(1)))
         for child in value.values():
             speeds.extend(_collect_decode_speeds(child))

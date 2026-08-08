@@ -1265,6 +1265,10 @@ class DSV4BatchGenerator:
             and cached_tokens + total
             > DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS
             and step < self.prefill_step_size
+            # A remainder smaller than the configured step is not an adaptive
+            # reduction — logging it ("step=3") reads like the policy
+            # collapsed when a cache-hit tail simply had 3 tokens left.
+            and step < total
         ):
             logger.info(
                 "DSV4Gen: adaptive long-context prefill step=%s "

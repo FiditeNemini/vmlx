@@ -10428,6 +10428,16 @@ class Scheduler:
                     is_pattern_match = self._is_cache_corruption_error(e)
                     is_gen_type_error = isinstance(e, (IndexError, TypeError))
                     is_cache_error = is_pattern_match or is_gen_type_error
+                    # A DSV4 prefill-valve abort is a deterministic
+                    # capacity rejection, not corruption: clearing caches
+                    # and rescheduling would re-run the doomed prefill in a
+                    # loop. Match by class name (mirrors
+                    # _is_dsv4_cache_class_name) to avoid an import cycle.
+                    if any(
+                        cls.__name__ == "DSV4PrefillMemoryError"
+                        for cls in type(e).__mro__
+                    ):
+                        is_cache_error = False
                     if is_gen_type_error:
                         logger.warning(
                             f"Treating {type(e).__name__} as potential cache error "

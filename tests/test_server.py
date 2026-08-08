@@ -323,8 +323,9 @@ class TestHelperFunctions:
         )
         engine = SimpleNamespace(_model=SimpleNamespace(args=config))
         monkeypatch.setattr(server, "get_engine", lambda: engine)
-        # 60% of 20 GiB is enough for the architecture-native q8 estimate plus
-        # its attention-ready hot view at 1M tokens. Generic 43-layer full-KV
+        # 60% of 20 GiB covers the architecture-native q8 estimate plus its
+        # attention-ready hot view at 1M tokens — but NOT the paged-block
+        # records captured alongside prefill. Generic 43-layer full-KV
         # geometry would still falsely cap this far below the declared limit.
         monkeypatch.setattr(
             server,
@@ -334,10 +335,20 @@ class TestHelperFunctions:
         monkeypatch.setenv("DSV4_POOL_QUANT", "1")
         monkeypatch.delenv("DSV4_MAX_PREFILL_TOKENS", raising=False)
 
-        # An absent operator guard must not override architecture-aware
-        # admission when the declared context fits the machine.
+        # With the prefix cache enabled (conservative default when scheduler
+        # state is unresolved) the in-flight block records ride the admission:
+        # 12 GiB retains ~708k of the declared 1M, not the full context.
+        assert server._estimate_max_prompt_tokens() == 708_608
+
+        # With the prefix cache disabled no block records are captured, so
+        # the architecture-native q8 estimate admits the full declared limit.
+        engine.scheduler = SimpleNamespace(
+            config=SimpleNamespace(enable_prefix_cache=False)
+        )
         assert server._estimate_max_prompt_tokens() == 1_048_576
 
+        # An explicit operator guard still overrides architecture-aware
+        # admission in both modes.
         monkeypatch.setenv("DSV4_MAX_PREFILL_TOKENS", "32768")
         assert server._estimate_max_prompt_tokens() == 32_768
 

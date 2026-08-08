@@ -644,13 +644,39 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
+def _dsv4_block_record_projection_enabled() -> bool:
+    """Whether prompt admission must count native DSV4 paged-block records.
+
+    Block records are captured during prefill whenever the prefix cache is
+    enabled (`capture_prompt_snapshots` defaults on). While the request is in
+    flight those records live in the same Metal working set as the live cache
+    and cannot be evicted, so they are part of the admission footprint.
+    Conservative default is True when scheduler state cannot be resolved.
+    """
+    try:
+        engine = get_engine()
+    except Exception:
+        return True
+    for attr in ("scheduler", "_scheduler"):
+        scheduler = getattr(engine, attr, None)
+        if scheduler is None:
+            continue
+        config = getattr(scheduler, "config", None)
+        if config is not None and hasattr(config, "enable_prefix_cache"):
+            return bool(getattr(config, "enable_prefix_cache", True))
+    return True
+
+
 def _estimate_max_prompt_tokens() -> int:
     """Estimate max safe prompt length based on available GPU memory.
 
     Standard caches use linear K+V geometry. Native DSV4 uses its bounded SWA
-    ring plus ratio-4 CSA/indexer and ratio-128 HCA pool geometry. We allow the
-    retained cache to use at most 60% of free memory (after model weights).
-    Returns 0 if estimation fails (no limit enforced).
+    ring plus ratio-4 CSA/indexer and ratio-128 HCA pool geometry, PLUS the
+    paged-block records captured alongside prefill — both retained in the
+    Metal working set for the whole request. We allow that retained footprint
+    to use at most 60% of free memory (after model weights); the remaining
+    40% covers transient prefill peaks (~3.4GB measured on DSV4-Flash at
+    430k tokens). Returns 0 if estimation fails (no limit enforced).
     """
     try:
         from vmlx_engine.utils.memory_limits import (
@@ -660,18 +686,24 @@ def _estimate_max_prompt_tokens() -> int:
 
         active, max_ws = _metal_projection_stats()
         free = max_ws - active
-        # Allow KV to use at most 60% of free memory
+        # Allow retained cache + block records at most 60% of free memory
         kv_budget = int(free * 0.6)
         config = _loaded_model_config_for_memory_projection()
         declared_limit = 0
         if config is not None:
             declared_limit = _declared_context_limit_from_config(config)
+            is_dsv4 = (
+                estimate_dsv4_cache_memory_from_config(config, 1) is not None
+            )
             max_tokens = estimate_cache_token_capacity_from_config(
                 config,
                 kv_budget,
                 max_tokens=declared_limit,
+                include_dsv4_block_records=(
+                    is_dsv4 and _dsv4_block_record_projection_enabled()
+                ),
             )
-            if estimate_dsv4_cache_memory_from_config(config, 1) is not None:
+            if is_dsv4:
                 from vmlx_engine.utils.dsv4_batch_generator import (
                     dsv4_max_prefill_tokens,
                 )
@@ -685,6 +717,18 @@ def _estimate_max_prompt_tokens() -> int:
             estimated = max(1024, max_tokens)  # preserve the existing 1K floor
             if declared_limit > 0:
                 estimated = min(estimated, declared_limit)
+            if 0 < estimated < declared_limit:
+                logger.info(
+                    "Metal-memory-limited context: model declares %d tokens "
+                    "but the current free working set supports ~%d "
+                    "(active=%.1fGB, limit=%.1fGB, free=%.1fGB); advertising "
+                    "the memory-derived cap",
+                    declared_limit,
+                    estimated,
+                    active / (1024**3),
+                    max_ws / (1024**3),
+                    free / (1024**3),
+                )
             return max(1, estimated)
         return 0
     except Exception:

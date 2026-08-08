@@ -47,6 +47,70 @@ DSV4_NATIVE_BLOCK_SIZE = 256
 DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS = 8
 # Diagnostic Metal-memory telemetry per prefill chunk (active/cache/peak).
 _PREFILL_MEM_LOG = os.environ.get("DSV4_PREFILL_MEM_LOG", "") == "1"
+# Mid-prefill Metal working-set safety valve (default on). Retained DSV4
+# pool + block-record growth is deterministic (~18.3KB/token measured on
+# DSV4-Flash), so a prompt that outgrows the device dies INSIDE a Metal
+# command buffer (`kIOGPUCommandBufferCallbackErrorOutOfMemory`), which
+# libc++ turns into process death. The valve projects the next chunk's
+# peak before submitting GPU work and aborts the request cleanly instead.
+_PREFILL_MEM_VALVE = os.environ.get("DSV4_PREFILL_MEM_VALVE", "1") == "1"
+
+
+class DSV4PrefillMemoryError(RuntimeError):
+    """Prefill valve abort: the next chunk's projected Metal working set
+    would exceed the device limit.
+
+    Raised BEFORE submitting GPU work so the request fails cleanly and the
+    engine survives. The message must NOT contain scheduler
+    ``CACHE_CORRUPTION_PATTERNS`` substrings (e.g. "out of memory",
+    "Allocation failed") — matching one would trigger cache-clear +
+    reschedule and re-run the doomed prefill forever. The scheduler also
+    excludes this class by name from its recoverable-error path.
+    """
+
+
+def dsv4_prefill_valve_min_margin_bytes() -> int:
+    """Transient-headroom floor for the prefill valve (default 2 GiB).
+
+    Measured transient peak-over-active on DSV4-Flash reaches ~3.4GB at
+    430k context; the valve adapts upward from observed per-chunk peaks,
+    and this floor covers the first chunks before any observation exists.
+    """
+    try:
+        gb = float(os.environ.get("DSV4_PREFILL_MEM_VALVE_MIN_MARGIN_GB", "2.0"))
+    except (TypeError, ValueError):
+        gb = 2.0
+    return max(0, int(gb * (1024**3)))
+
+
+def dsv4_prefill_valve_check(
+    active_bytes: int,
+    max_ws_bytes: int,
+    observed_transient_bytes: int,
+    min_margin_bytes: int,
+    *,
+    chunk_start: int,
+    chunk_end: int,
+) -> None:
+    """Raise ``DSV4PrefillMemoryError`` when the next chunk cannot fit.
+
+    Projects the chunk peak as current active memory plus 1.25x the largest
+    transient observed this prefill (floored at ``min_margin_bytes``).
+    Pure function so the abort threshold is unit-testable without Metal.
+    """
+    if max_ws_bytes <= 0 or active_bytes <= 0:
+        return
+    margin = max(int(observed_transient_bytes * 1.25), int(min_margin_bytes))
+    if active_bytes + margin > max_ws_bytes:
+        gib = 1024**3
+        raise DSV4PrefillMemoryError(
+            f"DSV4 prefill valve: aborting before chunk "
+            f"[{chunk_start}:{chunk_end}) — active Metal working set "
+            f"{active_bytes / gib:.2f}GB plus projected transient "
+            f"{margin / gib:.2f}GB exceeds the device working-set limit "
+            f"{max_ws_bytes / gib:.2f}GB. A context of this length cannot "
+            f"be served on this hardware; reduce the prompt/context size."
+        )
 
 
 def dsv4_max_prefill_tokens() -> int:
@@ -1295,6 +1359,32 @@ class DSV4BatchGenerator:
                 )
             ):
                 append_safe_boundary = preceding_full
+        # The valve targets multi-chunk long-context prefills, where retained
+        # pool/record growth accumulates across chunks (the ~430k OOM class).
+        # Single-chunk prompts cannot accumulate, and the first-chunk margin
+        # floor is calibrated to full chunk transients, so arming there would
+        # misfire on small prompts.
+        valve_active = (
+            _PREFILL_MEM_VALVE
+            and total > step
+            and hasattr(mx, "get_active_memory")
+            and hasattr(mx, "get_peak_memory")
+            and hasattr(mx, "reset_peak_memory")
+        )
+        valve_max_ws = 0
+        valve_min_margin = 0
+        valve_observed_transient = 0
+        if valve_active:
+            try:
+                from .memory_limits import (
+                    get_effective_metal_working_set_bytes,
+                )
+
+                _, valve_max_ws = get_effective_metal_working_set_bytes(mx)
+            except Exception:
+                valve_max_ws = 0
+            valve_active = valve_max_ws > 0
+            valve_min_margin = dsv4_prefill_valve_min_margin_bytes()
         off = 0
         while off < total:
             end_off = min(off + step, total)
@@ -1313,7 +1403,20 @@ class DSV4BatchGenerator:
                         append_safe_boundary - cached_tokens,
                     )
             chunk = all_ids[:, off:end_off]
-            if _PREFILL_MEM_LOG and hasattr(mx, "reset_peak_memory"):
+            valve_active_before = 0
+            if valve_active:
+                valve_active_before = int(mx.get_active_memory())
+                dsv4_prefill_valve_check(
+                    valve_active_before,
+                    valve_max_ws,
+                    valve_observed_transient,
+                    valve_min_margin,
+                    chunk_start=cached_tokens + off,
+                    chunk_end=cached_tokens + end_off,
+                )
+            if (valve_active or _PREFILL_MEM_LOG) and hasattr(
+                mx, "reset_peak_memory"
+            ):
                 mx.reset_peak_memory()
             logits = self.model(chunk, cache=cache)
             last_logits = logits[:, -1, :]
@@ -1326,6 +1429,12 @@ class DSV4BatchGenerator:
                 self._sync()
             else:
                 mx.eval(last_logits)
+            if valve_active:
+                chunk_transient = (
+                    int(mx.get_peak_memory()) - valve_active_before
+                )
+                if chunk_transient > valve_observed_transient:
+                    valve_observed_transient = chunk_transient
             if _PREFILL_MEM_LOG:
                 logger.info(
                     "DSV4Gen: prefill-mem chunk=[%d:%d) ctx=%d "

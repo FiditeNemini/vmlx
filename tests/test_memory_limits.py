@@ -7,9 +7,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from vmlx_engine.utils.memory_limits import (
     _parse_float_env,
     _parse_working_set_bytes,
+    estimate_cache_bytes_for_tokens_from_config,
     estimate_cache_token_capacity_from_config,
     estimate_dsv4_delta_transport_bytes_from_config,
     estimate_dsv4_cache_memory_from_config,
@@ -377,3 +380,125 @@ def test_scheduler_waiting_uses_shared_memory_helper():
     assert "get_metal_ws_guard_threshold(85.0)" not in inspect.getsource(
         MLLMScheduler._schedule_waiting
     )
+
+
+def test_dsv4_admission_with_block_records_shrinks_advertised_capacity():
+    config = _dsv4_config()
+    budget = int(6.6 * 1024**3)
+
+    live_only = estimate_cache_token_capacity_from_config(
+        config,
+        budget,
+        max_tokens=1_048_576,
+        dsv4_pool_quant_enabled=True,
+    )
+    with_records = estimate_cache_token_capacity_from_config(
+        config,
+        budget,
+        max_tokens=1_048_576,
+        dsv4_pool_quant_enabled=True,
+        include_dsv4_block_records=True,
+    )
+
+    # Live q8 pools alone claim the full declared 1M context fits, which is
+    # exactly the over-admission that crashed the 430k-token gate: the paged
+    # L1 block records captured during prefill were never budgeted.
+    assert live_only == 1_048_576
+    assert 300_000 < with_records < 400_000
+
+
+def test_dsv4_block_record_bytes_match_measured_430k_growth():
+    config = _dsv4_config()
+    tokens = 430_080
+    gib = 1024**3
+
+    live = estimate_cache_bytes_for_tokens_from_config(
+        config, tokens, dsv4_pool_quant_enabled=True
+    )
+    full = estimate_cache_bytes_for_tokens_from_config(
+        config,
+        tokens,
+        dsv4_pool_quant_enabled=True,
+        include_dsv4_block_records=True,
+    )
+
+    # Measured on the 128GB box at the crash point: live q8 pools 1.9GB plus
+    # block records 5.6GB = 7.5GB of Metal active-memory growth.
+    assert live < 2.1 * gib
+    assert 7.0 * gib < full < 8.0 * gib
+
+
+def test_dsv4_prefill_valve_threshold_is_pure_and_deterministic():
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        DSV4PrefillMemoryError,
+        dsv4_prefill_valve_check,
+    )
+
+    gib = 1024**3
+
+    # Comfortable headroom: active + 1.25x observed transient fits.
+    dsv4_prefill_valve_check(
+        active_bytes=100 * gib,
+        max_ws_bytes=107 * gib,
+        observed_transient_bytes=3 * gib,
+        min_margin_bytes=2 * gib,
+        chunk_start=0,
+        chunk_end=2048,
+    )
+
+    # Projected peak exceeds the working-set limit: abort before GPU submit.
+    with pytest.raises(DSV4PrefillMemoryError):
+        dsv4_prefill_valve_check(
+            active_bytes=104 * gib,
+            max_ws_bytes=107 * gib,
+            observed_transient_bytes=3 * gib,
+            min_margin_bytes=2 * gib,
+            chunk_start=428_032,
+            chunk_end=430_080,
+        )
+
+    # Unknown telemetry (zero readings) must never abort.
+    dsv4_prefill_valve_check(
+        active_bytes=0,
+        max_ws_bytes=107 * gib,
+        observed_transient_bytes=0,
+        min_margin_bytes=2 * gib,
+        chunk_start=0,
+        chunk_end=2048,
+    )
+    dsv4_prefill_valve_check(
+        active_bytes=104 * gib,
+        max_ws_bytes=0,
+        observed_transient_bytes=0,
+        min_margin_bytes=2 * gib,
+        chunk_start=0,
+        chunk_end=2048,
+    )
+
+
+def test_dsv4_prefill_valve_error_is_not_treated_as_cache_corruption():
+    import inspect
+
+    from vmlx_engine.scheduler import CACHE_CORRUPTION_PATTERNS, Scheduler
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        DSV4PrefillMemoryError,
+        dsv4_prefill_valve_check,
+    )
+
+    gib = 1024**3
+    with pytest.raises(DSV4PrefillMemoryError) as excinfo:
+        dsv4_prefill_valve_check(
+            active_bytes=104 * gib,
+            max_ws_bytes=107 * gib,
+            observed_transient_bytes=3 * gib,
+            min_margin_bytes=2 * gib,
+            chunk_start=428_032,
+            chunk_end=430_080,
+        )
+
+    message = str(excinfo.value)
+    # If the message matched a recover-and-reschedule pattern the scheduler
+    # would clear caches and re-run a prefill that is doomed to fail forever.
+    assert not any(pattern in message for pattern in CACHE_CORRUPTION_PATTERNS)
+    # step() also carries an explicit type-based exclusion as a second guard.
+    assert "DSV4PrefillMemoryError" in inspect.getsource(Scheduler.step)

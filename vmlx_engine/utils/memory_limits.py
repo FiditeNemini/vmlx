@@ -327,8 +327,19 @@ def estimate_cache_bytes_for_tokens_from_config(
     token_count: int,
     *,
     dsv4_pool_quant_enabled: Optional[bool] = None,
+    include_dsv4_block_records: bool = False,
 ) -> int:
-    """Estimate retained cache bytes for a batch-one prompt of ``token_count``."""
+    """Estimate retained cache bytes for a batch-one prompt of ``token_count``.
+
+    ``include_dsv4_block_records`` adds the native DSV4 paged-block records
+    captured during prefill (pool deltas + anchors + metadata). While a
+    request is in flight those records are retained in the same Metal
+    working set as the live cache and cannot be evicted, so prompt
+    admission must count both. Measured on DSV4-Flash at 430k tokens:
+    live q8 pools 1.9GB + block records 5.6GB = 7.5GB, matching the
+    observed Metal active-memory growth exactly; the live-only estimate
+    under-admitted by ~3.9x and advertised an unservable 1M context.
+    """
 
     dsv4 = estimate_dsv4_cache_memory_from_config(
         config,
@@ -336,7 +347,17 @@ def estimate_cache_bytes_for_tokens_from_config(
         pool_quant_enabled=dsv4_pool_quant_enabled,
     )
     if dsv4 is not None:
-        return dsv4.total_bytes
+        total = dsv4.total_bytes
+        if include_dsv4_block_records:
+            records = estimate_dsv4_delta_transport_bytes_from_config(
+                config,
+                0,
+                token_count,
+                pool_quant_enabled=dsv4_pool_quant_enabled,
+            )
+            if records:
+                total += int(records)
+        return total
     return max(0, int(token_count)) * estimate_kv_bytes_per_token_from_config(config)
 
 
@@ -436,6 +457,7 @@ def estimate_cache_token_capacity_from_config(
     *,
     max_tokens: int = 0,
     dsv4_pool_quant_enabled: Optional[bool] = None,
+    include_dsv4_block_records: bool = False,
 ) -> int:
     """Return the largest cache length admitted by ``budget_bytes``.
 
@@ -468,6 +490,7 @@ def estimate_cache_token_capacity_from_config(
                 config,
                 ceiling,
                 dsv4_pool_quant_enabled=dsv4_pool_quant_enabled,
+                include_dsv4_block_records=include_dsv4_block_records,
             )
             <= budget
         ):
@@ -481,6 +504,7 @@ def estimate_cache_token_capacity_from_config(
             config,
             middle,
             dsv4_pool_quant_enabled=dsv4_pool_quant_enabled,
+            include_dsv4_block_records=include_dsv4_block_records,
         )
         if required <= budget:
             low = middle

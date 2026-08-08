@@ -136,7 +136,15 @@ function formatChatSendErrorMessage(error: any): string {
   if (isExpectedChatDisconnectError(error)) {
     return 'Server connection lost. The model server may have crashed or stopped. Try restarting the session.'
   }
-  return error?.message || 'Unknown error'
+  // ipcRenderer.invoke rejections arrive wrapped as
+  // "Error invoking remote method 'chat:sendMessage': Error: <real message>" —
+  // strip the plumbing so the toast reads like a sentence (GH #253).
+  return (
+    String(error?.message || 'Unknown error')
+      .replace(/^Error invoking remote method '[^']+':\s*/i, '')
+      .replace(/^Error:\s*/, '')
+      .trim() || 'Unknown error'
+  )
 }
 
 interface ChatInterfaceProps {

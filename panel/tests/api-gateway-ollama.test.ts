@@ -333,7 +333,7 @@ describe("Ollama gateway parity contracts", () => {
       'if (isExpectedChatBackendDisconnectError(err)) {',
     );
     expect(chatSource).toContain(
-      '!projectedMetalHeadroomErrorContent &&\n          !isExpectedChatBackendDisconnectError(error)',
+      '!projectedMetalHeadroomErrorContent &&\n          !promptTooLongErrorContent &&\n          !isExpectedChatBackendDisconnectError(error)',
     );
     expect(chatSource).toContain(
       'console.error("[CHAT] Error caught:",',

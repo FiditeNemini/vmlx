@@ -56,7 +56,10 @@ import {
   applyReasoningRequestFields,
   type ReasoningEffort,
 } from "../../shared/reasoningEffortPolicy";
-import { projectedMetalHeadroomChatErrorContent } from "../../shared/chatErrorDisplay";
+import {
+  projectedMetalHeadroomChatErrorContent,
+  promptTooLongChatErrorContent,
+} from "../../shared/chatErrorDisplay";
 import {
   reconcileResponsesToolBufferAtStreamEnd,
   TOOL_CALL_MARKER_LINE_START,
@@ -2360,6 +2363,13 @@ export function registerChatHandlers(
                         .map((d: any) => d.msg || JSON.stringify(d))
                         .join("; ")
                     : JSON.stringify(parsed.detail);
+            } else if (
+              typeof parsed.error?.message === "string" &&
+              parsed.error.message
+            ) {
+              // OpenAI-style envelope — what the engine actually sends for
+              // 4xx rejections like prompt_too_long
+              errorDetail = parsed.error.message;
             }
           } catch {
             /* use raw text */
@@ -4623,8 +4633,12 @@ export function registerChatHandlers(
         const errMsg = (error as Error).message || "";
         const projectedMetalHeadroomErrorContent =
           projectedMetalHeadroomChatErrorContent(errMsg);
+        // GH #253: honest engine 413 (prompt_too_long) must render as a
+        // graceful in-chat message, not a raw IPC error dialog.
+        const promptTooLongErrorContent = promptTooLongChatErrorContent(errMsg);
         if (
           !projectedMetalHeadroomErrorContent &&
+          !promptTooLongErrorContent &&
           !isExpectedChatBackendDisconnectError(error)
         ) {
           console.error("[CHAT] Error caught:", {
@@ -4735,14 +4749,26 @@ export function registerChatHandlers(
           partialContent ||
           abortReasoningContent.trim() ||
           projectedMetalHeadroomErrorContent ||
+          promptTooLongErrorContent ||
           collectedToolStatuses.length > 0 ||
           abortTotalTokens > 0;
+        // True when the ONLY thing to show is the prompt-too-long bubble — no
+        // generated content existed. Used below to keep the failed-media
+        // rollback intact (the oversized payload must not replay next turn).
+        const promptTooLongOnlyBubble =
+          Boolean(promptTooLongErrorContent) &&
+          !partialContent &&
+          !abortReasoningContent.trim() &&
+          collectedToolStatuses.length === 0 &&
+          abortTotalTokens === 0;
 
         // Save message if we have any content, reasoning, or visible tool activity
         if (hadVisibleActivity) {
           assistantMessage.content = partialContent
             ? partialContent + "\n\n[Generation interrupted]"
-            : projectedMetalHeadroomErrorContent || "[Generation interrupted]";
+            : projectedMetalHeadroomErrorContent ||
+              promptTooLongErrorContent ||
+              "[Generation interrupted]";
           assistantMessage.tokens = abortTotalTokens;
 
           // Calculate real metrics for the partial generation (not hardcoded zeros)
@@ -4823,7 +4849,11 @@ export function registerChatHandlers(
           } catch (_) {}
         }
 
-        if (hasMediaAttachments && !hadVisibleActivity && !wasAborted) {
+        if (
+          hasMediaAttachments &&
+          (!hadVisibleActivity || promptTooLongOnlyBubble) &&
+          !wasAborted
+        ) {
           // A failed oversized media turn must not remain in local history.
           // Otherwise the next text-only prompt replays the same image payload and
           // hits the same VLM image prefill guard until the user manually rolls back.
@@ -4857,6 +4887,11 @@ export function registerChatHandlers(
           return hadVisibleActivity ? assistantMessage : null;
         }
         if (projectedMetalHeadroomErrorContent) {
+          return assistantMessage;
+        }
+        if (promptTooLongErrorContent) {
+          // Graceful in-chat bubble already persisted + chat:complete sent —
+          // return like a normal turn so no raw IPC error dialog appears.
           return assistantMessage;
         }
         // Check both error message AND error code — Node.js ConnResetException has

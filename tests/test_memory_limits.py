@@ -648,6 +648,7 @@ def test_dsv4_hw_context_ceiling_binary_search_hits_budget_boundary():
     """
     from vmlx_engine.utils.dsv4_batch_generator import (
         DSV4_NATIVE_BLOCK_SIZE,
+        DSV4_PREFILL_ACTIVE_GROWTH_ALLOWANCE_BYTES,
         DSV4_PREFILL_MIN_STEP_TOKENS,
         dsv4_hw_context_ceiling_tokens,
         dsv4_prefill_valve_min_margin_bytes,
@@ -664,6 +665,7 @@ def test_dsv4_hw_context_ceiling_binary_search_hits_budget_boundary():
     )
 
     min_margin = dsv4_prefill_valve_min_margin_bytes()
+    projected = active + DSV4_PREFILL_ACTIVE_GROWTH_ALLOWANCE_BYTES
 
     def margin(tokens: int) -> int:
         transient = dsv4_projected_transient_bytes(
@@ -671,9 +673,9 @@ def test_dsv4_hw_context_ceiling_binary_search_hits_budget_boundary():
         )
         return max(int(transient * 1.25), min_margin)
 
-    assert active + ceiling * bytes_per_token + margin(ceiling) <= max_ws
+    assert projected + ceiling * bytes_per_token + margin(ceiling) <= max_ws
     over = ceiling + 2 * DSV4_NATIVE_BLOCK_SIZE
-    assert active + over * bytes_per_token + margin(over) > max_ws
+    assert projected + over * bytes_per_token + margin(over) > max_ws
     # Strictly below the dishonest declared 1M+ advertisement.
     assert 0 < ceiling < 1_048_576
 
@@ -744,10 +746,13 @@ def test_dsv4_hw_context_ceiling_with_real_pool_geometry():
     """Real DSV4-Flash geometry: box does NOT clear the declared 1M.
 
     RUN C-2 valve abort at 718,336 (width 512, transient 6.63GiB) proved
-    the transient grows with context. With weights-active ~96.5GiB, pool
-    admission ~4.5KB/token, and the floor-width (256) context-dependent
-    margin, the honest ceiling sits around ~768k — well below the declared
-    1,048,576. A heavier active must bind strictly lower still.
+    the transient grows with context; RUN D stage14 (admitted just under
+    the then-advertised ceiling, valve-aborted at 842,752) proved live
+    active runs up to ~1.5GB above load-active + modeled pool. With
+    weights-active ~96.5GiB, pool admission ~4.5KB/token, the floor-width
+    (256) context-dependent margin, and the 1.6GiB active-growth
+    allowance, the honest ceiling sits around ~680k — well below the
+    declared 1,048,576. A heavier active must bind strictly lower still.
     """
     from vmlx_engine.utils.dsv4_batch_generator import (
         dsv4_hw_context_ceiling_tokens,

@@ -184,6 +184,14 @@ DSV4_PREFILL_TRANSIENT_REF_WIDTH = 512
 DSV4_PREFILL_TRANSIENT_REF_CTX_TOKENS = 530_000
 DSV4_PREFILL_TRANSIENT_CTX_SLOPE_BYTES_PER_TOKEN = 14_000
 
+# Live active Metal working set runs above load-time weights + the modeled
+# KV pool by a fluctuating allocator-growth gap: RUN D measured 0.38-1.5GB
+# across ctx 723k-843k (stage14, admitted just under the then-advertised
+# ceiling, still valve-aborted at 842,752 because of this gap). The ceiling
+# must budget the worst observed gap so an admitted prompt can never trip
+# the valve.
+DSV4_PREFILL_ACTIVE_GROWTH_ALLOWANCE_BYTES = int(1.6 * (1024**3))
+
 
 def dsv4_projected_transient_bytes(ctx_tokens: int, width: int) -> int:
     """Project the prefill transient at ``ctx_tokens`` for a narrow chunk.
@@ -232,6 +240,7 @@ def dsv4_hw_context_ceiling_tokens(
         return 0
 
     min_margin = dsv4_prefill_valve_min_margin_bytes()
+    projected_active = active_bytes + DSV4_PREFILL_ACTIVE_GROWTH_ALLOWANCE_BYTES
 
     def fits(tokens: int) -> bool:
         cache_bytes = cache_bytes_for_tokens(tokens)
@@ -241,7 +250,7 @@ def dsv4_hw_context_ceiling_tokens(
             tokens, DSV4_PREFILL_MIN_STEP_TOKENS
         )
         margin = max(int(transient * 1.25), min_margin)
-        return active_bytes + int(cache_bytes) + margin <= max_ws_bytes
+        return projected_active + int(cache_bytes) + margin <= max_ws_bytes
 
     lo = DSV4_NATIVE_BLOCK_SIZE
     if not fits(lo):

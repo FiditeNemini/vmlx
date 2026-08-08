@@ -502,3 +502,137 @@ def test_dsv4_prefill_valve_error_is_not_treated_as_cache_corruption():
     assert not any(pattern in message for pattern in CACHE_CORRUPTION_PATTERNS)
     # step() also carries an explicit type-based exclusion as a second guard.
     assert "DSV4PrefillMemoryError" in inspect.getsource(Scheduler.step)
+
+
+def test_dsv4_prefill_adaptive_step_keeps_width_with_headroom():
+    from vmlx_engine.utils.dsv4_batch_generator import dsv4_prefill_adaptive_step
+
+    gib = 1024**3
+    step, transient = dsv4_prefill_adaptive_step(
+        2048,
+        active_bytes=90 * gib,
+        max_ws_bytes=107 * gib,
+        observed_transient_bytes=3 * gib,
+        min_margin_bytes=2 * gib,
+    )
+    assert step == 2048
+    assert transient == 3 * gib
+
+    # Unknown telemetry must never shrink.
+    step, transient = dsv4_prefill_adaptive_step(
+        2048,
+        active_bytes=0,
+        max_ws_bytes=107 * gib,
+        observed_transient_bytes=0,
+        min_margin_bytes=2 * gib,
+    )
+    assert step == 2048
+
+
+def test_dsv4_prefill_adaptive_step_halves_until_projection_fits():
+    """RUN A wall replay: 2048-wide chunk at ~524k ctx must shrink, not abort.
+
+    Measured at the abort: active=98.79GB, transient(2048)~7GB, limit
+    107.52GB. A single halving to 1024 already fits the conservative
+    projection, so the request continues instead of dying at 524k.
+    """
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        dsv4_prefill_adaptive_step,
+        dsv4_prefill_valve_check,
+        dsv4_scale_transient_for_width,
+    )
+
+    gib = 1024**3
+    active = int(98.79 * gib)
+    max_ws = int(107.52 * gib)
+    observed = 7 * gib
+
+    step, transient = dsv4_prefill_adaptive_step(
+        2048,
+        active_bytes=active,
+        max_ws_bytes=max_ws,
+        observed_transient_bytes=observed,
+        min_margin_bytes=2 * gib,
+    )
+    assert step == 1024
+    assert transient == dsv4_scale_transient_for_width(observed, 2048, 1024)
+    assert transient < observed
+
+    # The valve accepts the shrunk projection — no abort.
+    dsv4_prefill_valve_check(
+        active,
+        max_ws,
+        transient,
+        2 * gib,
+        chunk_start=524_288,
+        chunk_end=524_288 + step,
+    )
+
+
+def test_dsv4_prefill_adaptive_step_floors_at_native_block_then_valve_aborts():
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        DSV4_PREFILL_MIN_STEP_TOKENS,
+        DSV4PrefillMemoryError,
+        dsv4_prefill_adaptive_step,
+        dsv4_prefill_valve_check,
+        dsv4_scale_transient_for_width,
+    )
+
+    gib = 1024**3
+    active = 105 * gib
+    max_ws = int(107.52 * gib)
+    observed = 7 * gib
+
+    step, transient = dsv4_prefill_adaptive_step(
+        2048,
+        active_bytes=active,
+        max_ws_bytes=max_ws,
+        observed_transient_bytes=observed,
+        min_margin_bytes=2 * gib,
+    )
+    assert step == DSV4_PREFILL_MIN_STEP_TOKENS == 256
+    expected = observed
+    for old, new in ((2048, 1024), (1024, 512), (512, 256)):
+        expected = dsv4_scale_transient_for_width(expected, old, new)
+    assert transient == expected
+
+    # Even the floor-width projection exceeds the limit: the valve aborts.
+    with pytest.raises(DSV4PrefillMemoryError):
+        dsv4_prefill_valve_check(
+            active,
+            max_ws,
+            transient,
+            2 * gib,
+            chunk_start=700_000,
+            chunk_end=700_000 + step,
+        )
+
+
+def test_dsv4_scale_transient_for_width_is_conservative_vs_measured():
+    """Projection must stay above the measured narrow-chunk transient.
+
+    Box measurements at ~530k ctx: transient(2048)=7.0GB, transient(512)=
+    4.2GB. The invariant-fraction model predicts 0.775x for that 4x shrink
+    where 0.60x was measured — conservative by construction.
+    """
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        dsv4_scale_transient_for_width,
+    )
+
+    gib = 1024**3
+    projected = dsv4_scale_transient_for_width(7 * gib, 2048, 512)
+    assert projected >= int(4.2 * gib)
+    assert projected < 7 * gib
+
+    # Never scales up, never goes negative.
+    assert dsv4_scale_transient_for_width(7 * gib, 512, 2048) == 7 * gib
+    assert dsv4_scale_transient_for_width(0, 2048, 512) == 0
+
+
+def test_dsv4_prefill_loop_wires_adaptive_shrink():
+    """The generator prefill loop must consult the adaptive step picker."""
+    with open("vmlx_engine/utils/dsv4_batch_generator.py") as f:
+        src = f.read()
+    loop = src.split("off = 0\n        cur_step = step", 1)[1]
+    assert "dsv4_prefill_adaptive_step(" in loop[:1200]
+    assert "prefill adaptive shrink" in loop[:2000]

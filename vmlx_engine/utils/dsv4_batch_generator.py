@@ -113,6 +113,66 @@ def dsv4_prefill_valve_check(
         )
 
 
+# Narrowest adaptive prefill chunk: one native block. Below this the valve
+# aborts — MoE gather_qmm efficiency is already gone and the remaining
+# transient is dominated by the context-dependent attention invariant.
+DSV4_PREFILL_MIN_STEP_TOKENS = DSV4_NATIVE_BLOCK_SIZE
+
+# Fraction of an observed chunk transient treated as chunk-width-invariant
+# when projecting a narrower chunk. Measured on DSV4-Flash at ~530k ctx:
+# transient(2048)=7.0GB, transient(512)=4.2GB → true invariant fraction
+# ~0.47 of the 2048-row observation; 0.7 keeps projections conservative
+# (predicts 0.775x for a 4x shrink where 0.60x was measured).
+_TRANSIENT_INVARIANT_FRACTION = 0.7
+
+
+def dsv4_scale_transient_for_width(
+    observed_bytes: int, old_width: int, new_width: int
+) -> int:
+    """Conservatively project an observed chunk transient onto a narrower chunk.
+
+    Only the row-linear part (MoE/MLP activations) shrinks with chunk width;
+    the attention part runs in bounded 512-row sub-slices over the compressed
+    pool and scales with context, not chunk width, so it is kept whole.
+    """
+    if observed_bytes <= 0 or old_width <= 0 or new_width >= old_width:
+        return max(0, int(observed_bytes))
+    frac = _TRANSIENT_INVARIANT_FRACTION + (
+        1.0 - _TRANSIENT_INVARIANT_FRACTION
+    ) * (new_width / old_width)
+    return int(observed_bytes * frac)
+
+
+def dsv4_prefill_adaptive_step(
+    current_step: int,
+    active_bytes: int,
+    max_ws_bytes: int,
+    observed_transient_bytes: int,
+    min_margin_bytes: int,
+    *,
+    floor: int = DSV4_PREFILL_MIN_STEP_TOKENS,
+) -> tuple[int, int]:
+    """Pick the widest halving of ``current_step`` whose projected peak fits.
+
+    Returns ``(step, transient_estimate)``. Halvings of 2048 stay aligned to
+    the 256-token native block size, so anchor clipping is unaffected. Does
+    NOT raise: callers run ``dsv4_prefill_valve_check`` with the returned
+    estimate, which aborts only when even the floor-width chunk cannot fit.
+    Pure function so the shrink schedule is unit-testable without Metal.
+    """
+    step = max(1, int(current_step))
+    transient = max(0, int(observed_transient_bytes))
+    if max_ws_bytes <= 0 or active_bytes <= 0:
+        return step, transient
+    while True:
+        margin = max(int(transient * 1.25), int(min_margin_bytes))
+        if active_bytes + margin <= max_ws_bytes or step <= floor:
+            return step, transient
+        new_step = max(floor, step // 2)
+        transient = dsv4_scale_transient_for_width(transient, step, new_step)
+        step = new_step
+
+
 def dsv4_max_prefill_tokens() -> int:
     """Return an explicit operator prefill guard, or zero when unset.
 
@@ -1386,8 +1446,32 @@ class DSV4BatchGenerator:
             valve_active = valve_max_ws > 0
             valve_min_margin = dsv4_prefill_valve_min_margin_bytes()
         off = 0
+        cur_step = step
         while off < total:
-            end_off = min(off + step, total)
+            valve_active_before = 0
+            if valve_active:
+                valve_active_before = int(mx.get_active_memory())
+                new_step, scaled_transient = dsv4_prefill_adaptive_step(
+                    cur_step,
+                    valve_active_before,
+                    valve_max_ws,
+                    valve_observed_transient,
+                    valve_min_margin,
+                )
+                if new_step != cur_step:
+                    logger.info(
+                        "DSV4Gen: prefill adaptive shrink %d -> %d at ctx=%d "
+                        "(active=%.2fGB transient est %.2fGB -> %.2fGB)",
+                        cur_step,
+                        new_step,
+                        cached_tokens + off,
+                        valve_active_before / 2**30,
+                        valve_observed_transient / 2**30,
+                        scaled_transient / 2**30,
+                    )
+                    cur_step = new_step
+                    valve_observed_transient = scaled_transient
+            end_off = min(off + cur_step, total)
             if capture_block_deltas:
                 absolute_start = cached_tokens + off
                 anchor_interval = (
@@ -1403,9 +1487,7 @@ class DSV4BatchGenerator:
                         append_safe_boundary - cached_tokens,
                     )
             chunk = all_ids[:, off:end_off]
-            valve_active_before = 0
             if valve_active:
-                valve_active_before = int(mx.get_active_memory())
                 dsv4_prefill_valve_check(
                     valve_active_before,
                     valve_max_ws,

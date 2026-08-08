@@ -14,7 +14,7 @@ export function projectedMetalHeadroomChatErrorContent(
     .replace(/^API error:\s*413\s*-\s*/i, "")
     .trim()
 
-  return appendMetalWiredLimitGuidance(`Generation blocked: ${detail}`)
+  return appendMetalWiredLimitGuidance(`${METAL_HEADROOM_BUBBLE_PREFIX}${detail}`)
 }
 
 const PROMPT_TOO_LONG_RE = /prompt[_\s]too[_\s]long|prompt too long/i
@@ -27,6 +27,7 @@ export function promptTooLongChatErrorContent(
 
   let detail = raw
     .replace(/^Failed to send message:\s*/i, "")
+    .replace(/^Server error:\s*/i, "")
     .replace(/^API error:\s*4\d\d\s*-\s*/i, "")
     .trim()
 
@@ -41,8 +42,29 @@ export function promptTooLongChatErrorContent(
   }
 
   return (
-    `Message not sent — ${detail}\n\n` +
+    `${PROMPT_TOO_LONG_BUBBLE_PREFIX}${detail}\n\n` +
     "In the app: shorten this message, remove large attachments, raise the " +
     "session's max context in Settings, or start a new chat."
+  )
+}
+
+export const PROMPT_TOO_LONG_BUBBLE_PREFIX = "Message not sent — "
+export const METAL_HEADROOM_BUBBLE_PREFIX = "Generation blocked: "
+
+// Panel-synthesized error bubbles are UI-only annotations. They must never be
+// replayed to the model as assistant history — and for prompt-too-long, the
+// user message that produced the bubble is itself the oversized payload, so
+// replaying it poisons every later turn in the chat with the same 413.
+export function isPromptTooLongBubbleContent(content: unknown): boolean {
+  return (
+    typeof content === "string" &&
+    content.startsWith(PROMPT_TOO_LONG_BUBBLE_PREFIX)
+  )
+}
+
+export function isMetalHeadroomBubbleContent(content: unknown): boolean {
+  return (
+    typeof content === "string" &&
+    content.startsWith(METAL_HEADROOM_BUBBLE_PREFIX)
   )
 }

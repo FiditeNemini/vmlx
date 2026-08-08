@@ -57,6 +57,8 @@ import {
   type ReasoningEffort,
 } from "../../shared/reasoningEffortPolicy";
 import {
+  isMetalHeadroomBubbleContent,
+  isPromptTooLongBubbleContent,
   projectedMetalHeadroomChatErrorContent,
   promptTooLongChatErrorContent,
 } from "../../shared/chatErrorDisplay";
@@ -1721,6 +1723,19 @@ export function registerChatHandlers(
         )
           continue;
         let msgContent: any = m.content;
+        // Panel-synthesized error bubbles ("Message not sent — …" /
+        // "Generation blocked: …") are UI-only annotations — never replay them
+        // as assistant history. For prompt-too-long, ALSO drop the user message
+        // that produced the bubble: that message IS the oversized payload, and
+        // replaying it re-413s every later turn in the chat.
+        if (m.role === "assistant" && isPromptTooLongBubbleContent(m.content)) {
+          const prev = requestMessages[requestMessages.length - 1];
+          if (prev && prev.role === "user") requestMessages.pop();
+          continue;
+        }
+        if (m.role === "assistant" && isMetalHeadroomBubbleContent(m.content)) {
+          continue;
+        }
         // Strip "[Generation interrupted]" markers from previous assistant messages —
         // these are UI-only annotations saved to DB on abort, not meant for the model
         if (m.role === "assistant" && typeof msgContent === "string") {

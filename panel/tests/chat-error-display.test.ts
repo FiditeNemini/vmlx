@@ -1,5 +1,9 @@
+import { readFileSync } from 'fs'
+import { resolve } from 'path'
 import { describe, expect, it } from 'vitest'
 import {
+  isMetalHeadroomBubbleContent,
+  isPromptTooLongBubbleContent,
   projectedMetalHeadroomChatErrorContent,
   promptTooLongChatErrorContent,
 } from '../src/shared/chatErrorDisplay'
@@ -59,6 +63,46 @@ describe('chat error display policy', () => {
     )
     expect(content).toContain('Message not sent')
     expect(content).toContain('30000 tokens')
+  })
+
+  it('strips the streaming "Server error:" wrapper (live-observed shape)', () => {
+    const content = promptTooLongChatErrorContent(
+      'Server error: prompt_too_long: tokenized prompt has 6251 tokens, max prompt/context tokens is 2048',
+    )
+    expect(content).toContain('Message not sent — prompt_too_long: tokenized prompt has 6251 tokens')
+    expect(content).not.toContain('Server error:')
+  })
+
+  it('recognizes its own bubbles so history replay can exclude them', () => {
+    const ptl = promptTooLongChatErrorContent(
+      'API error: 413 - Prompt too long (prompt: ~30,000 tokens), exceeding the configured prompt/context limit of ~20,119 tokens.',
+    )
+    const metal = projectedMetalHeadroomChatErrorContent(
+      'API error: 413 - Requested max output tokens exceed projected safe Metal headroom: requested=8192, safe_cap=1.',
+    )
+    expect(isPromptTooLongBubbleContent(ptl)).toBe(true)
+    expect(isMetalHeadroomBubbleContent(metal)).toBe(true)
+    // classes stay distinct and ordinary content stays replayable
+    expect(isMetalHeadroomBubbleContent(ptl)).toBe(false)
+    expect(isPromptTooLongBubbleContent(metal)).toBe(false)
+    expect(isPromptTooLongBubbleContent('Here is my answer about tokens')).toBe(false)
+    expect(isMetalHeadroomBubbleContent(undefined)).toBe(false)
+  })
+
+  it('chat.ts history replay skips error bubbles and pops the poisoned user message', () => {
+    const chatSource = readFileSync(
+      resolve(process.cwd(), 'src/main/ipc/chat.ts'),
+      'utf8',
+    )
+    expect(chatSource).toContain(
+      'if (m.role === "assistant" && isPromptTooLongBubbleContent(m.content)) {',
+    )
+    expect(chatSource).toContain(
+      'if (prev && prev.role === "user") requestMessages.pop();',
+    )
+    expect(chatSource).toContain(
+      'if (m.role === "assistant" && isMetalHeadroomBubbleContent(m.content)) {',
+    )
   })
 
   it('does not convert unrelated errors into prompt_too_long bubbles', () => {

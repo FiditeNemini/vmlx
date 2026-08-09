@@ -11184,11 +11184,61 @@ def _request_lifecycle_health_snapshot(
     return result
 
 
+# The heavy diagnostics assembled by /health (engine/scheduler stats, Metal
+# allocator gauges, KV-quant + cache telemetry walks, attestations) contend
+# with the decode thread for the GIL, the Metal allocator lock and scheduler
+# state. With the panel's 5s poll this measured as a 330-410ms inter-token
+# stall per poll during DSV4 decode (2026-08-09 stall-map/log alignment).
+# Policy: while any request is running or queued, serve the last idle-time
+# snapshot with live O(1) overlays; recompute the full payload only when the
+# engine is idle, so idle polls stay perfectly fresh and busy polls cost
+# nothing on the generation path.
+_health_snapshot_cache: dict[str, Any] = {"result": None}
+
+
+def _health_status_value() -> str:
+    if _standby_state:
+        return f"standby_{_standby_state}"  # "standby_soft" or "standby_deep"
+    if _model_type == "image":
+        return (
+            "healthy"
+            if (_image_gen is not None and _image_gen.is_loaded)
+            else "no_model"
+        )
+    return "healthy" if _engine is not None else "no_model"
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
     if _standby_state == "deep" and _engine is None:
         await _post_async_engine_teardown_mlx_cleanup("health_standby_deep")
+
+    scheduler_probe = _get_scheduler() if _engine is not None else None
+    num_running = num_waiting = 0
+    if scheduler_probe is not None:
+        # Strict len() semantics: anything that is not a real sized container
+        # (e.g. test mocks) counts as idle so the full payload is computed.
+        try:
+            num_running = len(scheduler_probe.running)
+            num_waiting = len(scheduler_probe.waiting)
+        except Exception:
+            num_running = num_waiting = 0
+    cached_result = _health_snapshot_cache.get("result")
+    if (num_running or num_waiting) and cached_result is not None:
+        import copy as _copy
+
+        result = _copy.deepcopy(cached_result)
+        result["status"] = _health_status_value()
+        result["last_request_time"] = (
+            _last_request_time if _last_request_time > 0 else None
+        )
+        sched_block = result.get("scheduler")
+        if isinstance(sched_block, dict):
+            sched_block["num_running"] = num_running
+            sched_block["num_waiting"] = num_waiting
+        result["health_gauges_cached"] = True
+        return result
 
     mcp_info = None
     if _mcp_manager is not None:
@@ -11208,16 +11258,7 @@ async def health():
 
     # Differentiate status: "healthy" when model is loaded, "no_model" otherwise
     # Image models don't use _engine — they use _image_gen
-    if _standby_state:
-        status = f"standby_{_standby_state}"  # "standby_soft" or "standby_deep"
-    elif _model_type == "image":
-        status = (
-            "healthy"
-            if (_image_gen is not None and _image_gen.is_loaded)
-            else "no_model"
-        )
-    else:
-        status = "healthy" if _engine is not None else "no_model"
+    status = _health_status_value()
 
     # Include Metal GPU memory info when available
     memory_info = None
@@ -11473,6 +11514,12 @@ async def health():
         "model_bundle_provenance": model_bundle_provenance,
         "cache_topology_provenance": cache_topology_provenance,
     }
+    try:
+        import copy as _copy
+
+        _health_snapshot_cache["result"] = _copy.deepcopy(result)
+    except Exception:
+        _health_snapshot_cache["result"] = None
     return result
 
 

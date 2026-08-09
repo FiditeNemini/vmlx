@@ -1592,3 +1592,85 @@ class TestHealthEndpoint:
         # last_request_time should be present (non-zero value means it's not None)
         assert "last_request_time" in result
         assert result["last_request_time"] == 1700000000.0
+
+
+class TestHealthBusySnapshot:
+    """Busy engines serve the cached idle snapshot instead of recomputing
+    the heavy gauges (which contend with the decode thread — measured
+    330-410ms inter-token stall per poll)."""
+
+    def _mock_engine_and_scheduler(self):
+        mock_scheduler = MagicMock()
+        mock_scheduler.running = {}
+        mock_scheduler.waiting = []
+        mock_scheduler.get_stats.return_value = {
+            "num_waiting": 0,
+            "num_running": 0,
+        }
+        mock_engine = MagicMock()
+        mock_engine.get_stats.return_value = {"engine_type": "simple"}
+        mock_engine.is_mllm = False
+        mock_engine._mllm_scheduler = mock_scheduler
+        return mock_engine, mock_scheduler
+
+    def test_busy_serves_cached_gauges_with_live_overlays(self):
+        from vmlx_engine import server
+
+        mock_engine, mock_scheduler = self._mock_engine_and_scheduler()
+        server._health_snapshot_cache["result"] = None
+        try:
+            with (
+                patch.object(server, "_engine", mock_engine),
+                patch.object(server, "_model_name", "test-model"),
+                patch.object(server, "_model_load_error", None),
+                patch.object(server, "_mcp_manager", None),
+                patch.object(server, "_jang_metadata", None),
+                patch.object(server, "_last_request_time", 0.0),
+            ):
+                idle_result = _run(server.health())
+                assert "health_gauges_cached" not in idle_result
+                engine_stats_calls_after_idle = mock_engine.get_stats.call_count
+                sched_stats_calls_after_idle = mock_scheduler.get_stats.call_count
+                assert server._health_snapshot_cache["result"] is not None
+
+                mock_scheduler.running = {"req-1": object()}
+                busy_result = _run(server.health())
+
+            assert busy_result["health_gauges_cached"] is True
+            assert busy_result["status"] == "healthy"
+            assert busy_result["scheduler"]["num_running"] == 1
+            assert busy_result["scheduler"]["num_waiting"] == 0
+            # Heavy collectors must not have run again on the busy poll.
+            assert (
+                mock_engine.get_stats.call_count
+                == engine_stats_calls_after_idle
+            )
+            assert (
+                mock_scheduler.get_stats.call_count
+                == sched_stats_calls_after_idle
+            )
+        finally:
+            server._health_snapshot_cache["result"] = None
+
+    def test_busy_without_snapshot_computes_full_payload(self):
+        from vmlx_engine import server
+
+        mock_engine, mock_scheduler = self._mock_engine_and_scheduler()
+        mock_scheduler.running = {"req-1": object()}
+        server._health_snapshot_cache["result"] = None
+        try:
+            with (
+                patch.object(server, "_engine", mock_engine),
+                patch.object(server, "_model_name", "test-model"),
+                patch.object(server, "_model_load_error", None),
+                patch.object(server, "_mcp_manager", None),
+                patch.object(server, "_jang_metadata", None),
+                patch.object(server, "_last_request_time", 0.0),
+            ):
+                result = _run(server.health())
+
+            assert "health_gauges_cached" not in result
+            assert result["status"] == "healthy"
+            assert result["model_loaded"] is True
+        finally:
+            server._health_snapshot_cache["result"] = None

@@ -645,6 +645,12 @@ class VisionModel(nn.Module):
 
     def patch_embed(self, pixel_values: mx.array) -> tuple[mx.array, tuple[int, int]]:
         pixel_values = self._pixels_to_nhwc(pixel_values)
+        # Preprocessing emits fp32 pixels; without this cast the fp32 input
+        # promotes the whole tower (and everything downstream) off the bf16
+        # fast path.
+        weight_dtype = self.conv1.weight.dtype
+        if pixel_values.dtype != weight_dtype:
+            pixel_values = pixel_values.astype(weight_dtype)
         hidden_state = self.conv1(pixel_values)
         batch, grid_h, grid_w, channels = hidden_state.shape
         hidden_state = mx.reshape(hidden_state, (batch, grid_h * grid_w, channels))
@@ -871,6 +877,11 @@ class Model(nn.Module):
             if len(multimodal_embeddings) > 1
             else multimodal_embeddings[0]
         )
+        # Any fp32 image embedding would promote the merged prompt — and the
+        # prefilled KV cache — to fp32, poisoning every later decode token off
+        # the bf16 fast path (measured ~3x per-token cost, session-wide).
+        if flat_multimodal.dtype != inputs_embeds.dtype:
+            flat_multimodal = flat_multimodal.astype(inputs_embeds.dtype)
         for position in image_positions:
             if position > cursor:
                 pieces.append(inputs_embeds[cursor:position])

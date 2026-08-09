@@ -101,6 +101,11 @@ class VisionEmbedder(nn.Module):
             pixel_values = pixel_values.reshape(
                 pixel_values.shape[0], -1, self.patch_dim
             )
+        # Preprocessing emits fp32 patches; without this cast the fp32 input
+        # promotes the embedder (LayerNorm/Linear at bf16 weights) to fp32.
+        weight_dtype = self.patch_dense.weight.dtype
+        if pixel_values.dtype != weight_dtype:
+            pixel_values = pixel_values.astype(weight_dtype)
         hidden_states = self.patch_ln1(pixel_values)
         hidden_states = self.patch_dense(hidden_states)
         hidden_states = self.patch_ln2(hidden_states)

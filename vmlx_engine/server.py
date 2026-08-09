@@ -22843,9 +22843,12 @@ async def stream_chat_completion(
                     # Nothing was streamed yet — emit all cleaned content
                     unemitted_content = candidate
                 elif candidate.startswith(already_sent):
-                    # Subtract the already-streamed portion
-                    remainder = candidate[len(already_sent) :].strip()
-                    unemitted_content = remainder if remainder else None
+                    # Subtract the already-streamed portion. Leading whitespace
+                    # of the remainder is INTERNAL to the full text (e.g. the
+                    # \n\n paragraph separator before the flushed portion) —
+                    # stripping it glued paragraphs together in clients.
+                    remainder = candidate[len(already_sent) :]
+                    unemitted_content = remainder if remainder.strip() else None
                 else:
                     # Content doesn't overlap (rare: reasoning redirect, etc.)
                     # Emit the full candidate only if nothing was sent
@@ -22986,7 +22989,11 @@ async def stream_chat_completion(
                 else accumulated_text.strip()
             )
             if already_sent and full.startswith(already_sent):
-                remainder = full[len(already_sent) :].strip()
+                # Leading whitespace of the remainder is INTERNAL to the full
+                # text (paragraph separator before the flushed portion) — keep it.
+                remainder = full[len(already_sent) :]
+                if not remainder.strip():
+                    remainder = ""
             else:
                 remainder = full if not content_was_emitted else ""
             if _exact_once_tool_contract:

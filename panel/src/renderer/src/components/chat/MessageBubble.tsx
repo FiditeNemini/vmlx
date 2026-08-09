@@ -129,8 +129,8 @@ function groupToolStatuses(statuses: any[]): { groups: InlineToolGroup[]; hasOff
   return { groups, hasOffsets, processingStatus }
 }
 
-function stripStructuredToolMarkup(content: string): string {
-  return content
+function stripToolMarkupSegment(segment: string): string {
+  return segment
     .replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, '')
     .replace(/<zyphra_tool_call\b[^>]*>[\s\S]*?<\/zyphra_tool_call>/gi, '')
     .replace(/<minimax:tool_call\b[^>]*>[\s\S]*?<\/minimax:tool_call>/gi, '')
@@ -138,6 +138,14 @@ function stripStructuredToolMarkup(content: string): string {
     .replace(/<invoke\b[^>]*>[\s\S]*?<\/invoke>/gi, '')
     .replace(/<(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)\b[^>]*>[\s\S]*?<\/(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)>/gi, '')
     .replace(/(?:^|\n)\s*\[Calling tool:[^\n]*(?=\n|$)/gi, '\n')
+}
+
+function stripStructuredToolMarkup(content: string): string {
+  // Code fences / inline code may legitimately CONTAIN tool-markup examples
+  // (e.g. the model documenting DSML/XML tool syntax) — never strip inside
+  // them. Unterminated fences (mid-stream) protect through end of content.
+  const parts = content.split(/(```[\s\S]*?(?:```|$)|`[^`\n]*`)/)
+  return parts.map((part, i) => (i % 2 === 1 ? part : stripToolMarkupSegment(part))).join('')
 }
 
 /** Prose classes for rendered markdown */

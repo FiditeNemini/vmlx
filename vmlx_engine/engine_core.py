@@ -414,6 +414,7 @@ class EngineCore:
         prompt_token_ids: Optional[List[int]] = None,
         cache_extra_keys: Optional[Any] = None,
         dsv4_thinking_soft_cap: Optional[int] = None,
+        tools_present: bool = False,
     ) -> str:
         """
         Add a request for processing.
@@ -447,6 +448,11 @@ class EngineCore:
             images=images,
             videos=videos,
         )
+        # Preserve the exact template capability on the scheduler request.
+        # DSV4's reasoning-dropping shadow re-key is useful only for tools-off
+        # renders: tools-on continuations keep a different prompt/template
+        # prefix and already use the normal extended native chain.
+        request._vmlx_tools_present = bool(tools_present)
 
         # M3 VL: carry preprocessed image/video tensors and input ids whose
         # media placeholders are already expanded by the bundle processor.

@@ -2062,6 +2062,7 @@ class BatchedEngine(BaseEngine):
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
         cache_extra_keys = kwargs.pop("_cache_extra_keys", None)
         dsv4_thinking_soft_cap = kwargs.pop("dsv4_thinking_soft_cap", None)
+        tools_present = bool(kwargs.pop("_vmlx_tools_present", False))
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -2089,7 +2090,7 @@ class BatchedEngine(BaseEngine):
                 cache_extra_keys=cache_extra_keys,
                 request_id=request_id,
                 max_prompt_tokens=max_prompt_tokens,
-                _vmlx_tools_present=bool(kwargs.get("_vmlx_tools_present")),
+                _vmlx_tools_present=tools_present,
                 _vmlx_template_tools=kwargs.get("_vmlx_template_tools"),
                 _vmlx_tool_choice=kwargs.get("tool_choice"),
             )
@@ -2162,6 +2163,7 @@ class BatchedEngine(BaseEngine):
             encode_add_special_tokens=encode_add_special_tokens,
             max_prompt_tokens=max_prompt_tokens,
             dsv4_thinking_soft_cap=dsv4_thinking_soft_cap,
+            tools_present=tools_present,
             **_m3vl_extra,
         )
 
@@ -2222,6 +2224,7 @@ class BatchedEngine(BaseEngine):
         max_prompt_tokens = int(kwargs.pop("max_prompt_tokens", 0) or 0)
         cache_extra_keys = kwargs.pop("_cache_extra_keys", None)
         dsv4_thinking_soft_cap = kwargs.pop("dsv4_thinking_soft_cap", None)
+        tools_present = bool(kwargs.pop("_vmlx_tools_present", False))
 
         if self._is_mllm and self._mllm_scheduler:
             # Use MLLM scheduler for all requests (text-only and multimodal)
@@ -2249,7 +2252,7 @@ class BatchedEngine(BaseEngine):
                 bypass_prefix_cache=bypass_prefix_cache,
                 cache_extra_keys=cache_extra_keys,
                 max_prompt_tokens=max_prompt_tokens,
-                _vmlx_tools_present=bool(kwargs.get("_vmlx_tools_present")),
+                _vmlx_tools_present=tools_present,
                 _vmlx_template_tools=kwargs.get("_vmlx_template_tools"),
                 _vmlx_tool_choice=kwargs.get("tool_choice"),
             )
@@ -2318,6 +2321,7 @@ class BatchedEngine(BaseEngine):
             encode_add_special_tokens=encode_add_special_tokens,
             max_prompt_tokens=max_prompt_tokens,
             dsv4_thinking_soft_cap=dsv4_thinking_soft_cap,
+            tools_present=tools_present,
             **_m3vl_extra,
         )
 

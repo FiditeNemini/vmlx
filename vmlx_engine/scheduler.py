@@ -6439,6 +6439,11 @@ class Scheduler:
                 or not self.config.enable_prefix_cache
                 or finish_reason != "stop"
                 or getattr(request, "_bypass_prefix_cache", False)
+                # Tools-on renders keep a distinct template/tool prefix and
+                # already extend the normal native chain. Building a stripped
+                # tools-off prediction here cannot serve that continuation and
+                # only burns a redundant post-response prefill.
+                or getattr(request, "_vmlx_tools_present", False)
                 or not dsv4_shadow_rekey_enabled()
             ):
                 return

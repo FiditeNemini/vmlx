@@ -1841,7 +1841,10 @@ class DSV4BatchGenerator:
         off = 0
         cur_step = step
         while off < total:
-            if off > 0 and should_stop is not None and should_stop():
+            # Shadow maintenance is opportunistic. A foreground request can
+            # arrive after the idle-task drain check but before the first
+            # model call, so poll before every chunk, including offset zero.
+            if should_stop is not None and should_stop():
                 return None
             valve_active_before = 0
             if valve_active:

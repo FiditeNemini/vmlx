@@ -3707,12 +3707,26 @@ def test_dsv4_shadow_prefill_captures_zero_origin_native_chain():
     assert records[1]["anchor"]["terminal"] is True
 
 
-def test_dsv4_shadow_native_prefill_yields_to_foreground_between_chunks():
+def test_dsv4_shadow_native_prefill_yields_before_first_chunk():
     scheduler, model_calls = _dsv4_shadow_native_prefill_fixture()
 
     cache = scheduler._prefill_for_prompt_only_cache(
         list(range(3000)),
         should_stop=lambda: True,
+        capture_dsv4_deltas=True,
+    )
+
+    assert cache is None
+    assert model_calls == []
+
+
+def test_dsv4_shadow_native_prefill_yields_between_chunks():
+    scheduler, model_calls = _dsv4_shadow_native_prefill_fixture()
+    polls = iter((False, True))
+
+    cache = scheduler._prefill_for_prompt_only_cache(
+        list(range(3000)),
+        should_stop=lambda: next(polls),
         capture_dsv4_deltas=True,
     )
 
@@ -3796,6 +3810,236 @@ def test_dsv4_shadow_rekey_skips_ineligible_turns():
     assert Scheduler._dsv4_predict_shadow_rekey_tokens([], []) is None
 
 
+def _dsv4_shadow_queue_fixture(*, tools_present: bool):
+    from vmlx_engine.scheduler import Scheduler
+
+    topen, tclose, eos = _think_ids()
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._uses_dsv4_cache = True
+    scheduler.block_aware_cache = object()
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
+    scheduler._pick_cache_type_for_request = lambda _request: "assistant"
+    idle_registrations = []
+    scheduler._ensure_dsv4_shadow_rekey_idle_task = (
+        lambda: idle_registrations.append("registered")
+    )
+    request = SimpleNamespace(
+        prompt_token_ids=[10] * 300 + [topen],
+        output_token_ids=[500, tclose, 600, eos],
+        _vmlx_tools_present=tools_present,
+        _cache_extra_keys=None,
+    )
+    return scheduler, request, idle_registrations
+
+
+def test_dsv4_shadow_rekey_skips_tools_on_request():
+    scheduler, request, idle_registrations = _dsv4_shadow_queue_fixture(
+        tools_present=True
+    )
+
+    scheduler._queue_dsv4_shadow_rekey("tools-on", request, "stop")
+
+    assert getattr(scheduler, "_dsv4_shadow_rekey_queue", []) == []
+    assert idle_registrations == []
+
+
+def test_dsv4_shadow_rekey_still_queues_tools_off_request():
+    scheduler, request, idle_registrations = _dsv4_shadow_queue_fixture(
+        tools_present=False
+    )
+
+    scheduler._queue_dsv4_shadow_rekey("tools-off", request, "stop")
+
+    assert len(scheduler._dsv4_shadow_rekey_queue) == 1
+    assert scheduler._dsv4_shadow_rekey_queue[0][1] == "tools-off"
+    assert idle_registrations == ["registered"]
+
+
+def test_dsv4_shadow_rekey_drain_race_requeues_without_store():
+    from vmlx_engine.scheduler import IdleTaskResult, Scheduler
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._uses_dsv4_cache = True
+    scheduler.block_aware_cache = object()
+    scheduler.config = SimpleNamespace(enable_prefix_cache=True)
+    scheduler._dsv4_shadow_rekey_task_queued = True
+    entry = ([1] * 300, "race", "assistant", None)
+    scheduler._dsv4_shadow_rekey_queue = [entry]
+    foreground_checks = iter((False, True))
+    scheduler._foreground_pending = lambda: next(foreground_checks)
+    stores = []
+
+    def _prefill(tokens, *, should_stop, capture_dsv4_deltas):
+        assert tokens == entry[0]
+        assert capture_dsv4_deltas is True
+        assert should_stop() is True
+        return None
+
+    scheduler._prefill_for_prompt_only_cache = _prefill
+    scheduler._store_dsv4_shadow_chain = lambda *args: stores.append(args)
+
+    result = scheduler._drain_one_dsv4_shadow_rekey()
+
+    assert result is IdleTaskResult.PARKED
+    assert scheduler._dsv4_shadow_rekey_queue == [entry]
+    assert stores == []
+
+
+@pytest.mark.asyncio
+async def test_dsv4_llm_tools_present_reaches_engine_core_both_paths():
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    calls = []
+
+    class _Engine:
+        async def generate(self, **kwargs):
+            calls.append(("generate", kwargs))
+            return SimpleNamespace(
+                output_text="ok",
+                output_token_ids=[1],
+                prompt_tokens=1,
+                completion_tokens=1,
+                cached_tokens=0,
+                cache_detail="",
+                finish_reason="stop",
+                logprobs=None,
+            )
+
+        async def add_request(self, **kwargs):
+            calls.append(("stream", kwargs))
+            return "stream-request"
+
+        async def stream_outputs(self, request_id):
+            assert request_id == "stream-request"
+            yield SimpleNamespace(
+                output_text="ok",
+                new_text="ok",
+                prompt_tokens=1,
+                completion_tokens=1,
+                cached_tokens=0,
+                cache_detail="",
+                finished=True,
+                finish_reason="stop",
+                logprobs=None,
+            )
+
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._is_mllm = False
+    engine._mllm_scheduler = None
+    engine._engine = _Engine()
+
+    output = await engine.generate(
+        prompt="hello",
+        max_tokens=1,
+        _vmlx_tools_present=True,
+    )
+    streamed = [
+        item
+        async for item in engine.stream_generate(
+            prompt="hello",
+            max_tokens=1,
+            _vmlx_tools_present=True,
+        )
+    ]
+
+    assert output.text == "ok"
+    assert streamed[-1].text == "ok"
+    assert [kind for kind, _kwargs in calls] == ["generate", "stream"]
+    for _kind, kwargs in calls:
+        assert kwargs["tools_present"] is True
+        assert "_vmlx_tools_present" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_dsv4_tools_present_preserved_for_mllm_both_paths():
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    calls = []
+
+    class _Scheduler:
+        async def generate(self, **kwargs):
+            calls.append(("generate", kwargs))
+            return SimpleNamespace(
+                output_text="ok",
+                output_token_ids=[1],
+                prompt_tokens=1,
+                completion_tokens=1,
+                cached_tokens=0,
+                cache_detail="",
+                finish_reason="stop",
+                logprobs=None,
+            )
+
+        async def add_request_async(self, **kwargs):
+            calls.append(("stream", kwargs))
+            return "mllm-stream"
+
+        async def stream_outputs(self, request_id):
+            assert request_id == "mllm-stream"
+            yield SimpleNamespace(
+                output_text="ok",
+                new_text="ok",
+                prompt_tokens=1,
+                completion_tokens=1,
+                cached_tokens=0,
+                cache_detail="",
+                finished=True,
+                finish_reason="stop",
+            )
+
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._is_mllm = True
+    engine._mllm_scheduler = _Scheduler()
+
+    output = await engine.generate(
+        prompt="hello",
+        max_tokens=1,
+        _vmlx_tools_present=True,
+    )
+    streamed = [
+        item
+        async for item in engine.stream_generate(
+            prompt="hello",
+            max_tokens=1,
+            _vmlx_tools_present=True,
+        )
+    ]
+
+    assert output.text == "ok"
+    assert streamed[-1].text == "ok"
+    assert [kind for kind, _kwargs in calls] == ["generate", "stream"]
+    for _kind, kwargs in calls:
+        assert kwargs["_vmlx_tools_present"] is True
+        assert "tools_present" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_dsv4_engine_core_attaches_tools_present_default_and_true():
+    import asyncio
+
+    from vmlx_engine.engine_core import EngineCore
+
+    captured = []
+    core = EngineCore.__new__(EngineCore)
+    core.config = SimpleNamespace(stream_interval=1)
+    core.scheduler = SimpleNamespace(add_request=captured.append)
+    core._output_collectors = {}
+    core._stream_states = {}
+    core._finished_events = {}
+    core._terminal_cleanup_complete = asyncio.Event()
+    core._terminal_cleanup_complete.set()
+
+    await core.add_request(prompt=[1], request_id="default")
+    await core.add_request(
+        prompt=[1], request_id="tools", tools_present=True
+    )
+
+    assert captured[0]._vmlx_tools_present is False
+    assert captured[1]._vmlx_tools_present is True
+
+
 def test_dsv4_shadow_rekey_env_gates():
     """VMLX_DSV4_SHADOW_REKEY default-on kill switch + cap parsing."""
     from vmlx_engine.utils.dsv4_batch_generator import (
@@ -3857,6 +4101,7 @@ def test_dsv4_shadow_rekey_idle_task_contract():
     queue_src = inspect.getsource(Scheduler._queue_dsv4_shadow_rekey)
     assert 'finish_reason != "stop"' in queue_src
     assert "_bypass_prefix_cache" in queue_src
+    assert "_vmlx_tools_present" in queue_src
     assert "dsv4_shadow_rekey_enabled" in queue_src
     assert "dsv4_prompt_snapshot_min_tokens" in queue_src
 

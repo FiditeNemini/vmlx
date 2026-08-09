@@ -244,14 +244,12 @@ def _patch_attention_text_rope(qlang: Any) -> None:
         position_embeddings=None,
     ):
         if position_ids is not None and getattr(position_ids, "ndim", 0) != 2:
-            return original_call(
-                self,
-                x,
-                mask,
-                cache,
-                position_ids,
-                position_embeddings=position_embeddings,
-            )
+            if position_embeddings is None:
+                # Upstream mlx-vlm attention has no position_embeddings
+                # parameter; it recomputes M-RoPE cos/sin internally.
+                return original_call(self, x, mask, cache, position_ids)
+            # Hoisted media-row path: fall through so the reimplementation
+            # below consumes the shared cos/sin instead of recomputing them.
 
         batch_size, seq_len, _ = x.shape
 
@@ -536,14 +534,21 @@ def _patch_decoder_layer(qlang: Any) -> None:
         n_confirmed: int = 0,
     ):
         if n_confirmed == 0 and gdn_sink is None:
-            return original_call(
-                self,
-                x,
+            # Upstream mlx-vlm decoder layers have no position_embeddings
+            # parameter. Linear layers never use rope; without a hoisted
+            # cos/sin pair there is nothing to thread, so both take the
+            # untouched upstream path.
+            if position_embeddings is None or self.is_linear:
+                return original_call(self, x, mask, cache, position_ids)
+            r = self.self_attn(
+                self.input_layernorm(x),
                 mask,
                 cache,
                 position_ids,
                 position_embeddings=position_embeddings,
             )
+            h = x + r
+            return h + self.mlp(self.post_attention_layernorm(h))
 
         if self.is_linear:
             r = self.linear_attn(
@@ -586,14 +591,20 @@ def _patch_moe_decoder_layer(qmoe_lang: Any) -> None:
         n_confirmed: int = 0,
     ):
         if n_confirmed == 0 and gdn_sink is None:
-            return original_call(
-                self,
-                x,
+            # Same signature contract as the dense layer: upstream accepts
+            # no position_embeddings; thread the hoist only when present and
+            # only through full-attention layers.
+            if position_embeddings is None or self.is_linear:
+                return original_call(self, x, mask, cache, position_ids)
+            r = self.self_attn(
+                self.input_layernorm(x),
                 mask,
                 cache,
                 position_ids,
                 position_embeddings=position_embeddings,
             )
+            h = x + r
+            return h + self.mlp(self.post_attention_layernorm(h))
 
         if self.is_linear:
             r = self.linear_attn(

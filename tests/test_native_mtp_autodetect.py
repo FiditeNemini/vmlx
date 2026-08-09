@@ -1215,6 +1215,64 @@ class TestNativeMtpAutodetect:
         assert model(1, gdn_sink=None, n_confirmed=0) == 31
         assert model(1, cache=[None], gdn_sink=[], n_confirmed=0) == 2
 
+    def test_qwen36_vlm_hoisted_mrope_media_rows_bitexact_vs_upstream(self):
+        """Hoisted cos/sin path must match the upstream per-layer M-RoPE path.
+
+        Upstream mlx-vlm classes accept no position_embeddings parameter, so
+        the hoist is consumed only by the patched attention reimplementation.
+        With position_embeddings=None the patched wrappers must route media
+        rows through the untouched upstream call (signature-compatible), and
+        the hoisted route must be bit-exact against it.
+        """
+        import mlx.core as mx
+
+        qlang = pytest.importorskip("mlx_vlm.models.qwen3_5.language")
+        from vmlx_engine.patches.mlx_vlm_mtp import qwen35_vl
+
+        qwen35_vl._patch_attention_text_rope(qlang)
+        qwen35_vl._patch_decoder_layer(qlang)
+
+        args = SimpleNamespace(
+            hidden_size=64,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=16,
+            attention_bias=False,
+            rms_norm_eps=1e-6,
+            max_position_embeddings=512,
+            intermediate_size=128,
+            full_attention_interval=1,
+            rope_parameters={
+                "partial_rotary_factor": 1.0,
+                "rope_theta": 10000,
+                "mrope_section": [4, 2, 2],
+            },
+        )
+        mx.random.seed(7)
+        attn = qlang.Qwen3_5Attention(args)
+        x = mx.random.normal((1, 6, args.hidden_size))
+        position_ids = mx.stack(
+            [
+                mx.arange(6)[None, :],
+                mx.arange(6)[None, :] + 2,
+                mx.arange(6)[None, :] + 5,
+            ]
+        )
+        assert position_ids.ndim == 3
+        hoisted = attn.rotary_emb(x, position_ids)
+
+        reference = attn(x, None, None, position_ids)
+        via_hoist = attn(x, None, None, position_ids, position_embeddings=hoisted)
+        assert mx.array_equal(reference, via_hoist).item()
+
+        layer = qlang.Qwen3_5DecoderLayer(args, layer_idx=0)
+        assert not layer.is_linear
+        layer_ref = layer(x, None, None, position_ids)
+        layer_hoist = layer(
+            x, None, None, position_ids, position_embeddings=hoisted
+        )
+        assert mx.array_equal(layer_ref, layer_hoist).item()
+
     def test_qwen36_vlm_text_rope_fresh_prefill_uses_scalar_cache_offset(
         self, tmp_path
     ):

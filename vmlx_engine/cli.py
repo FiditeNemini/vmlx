@@ -540,6 +540,25 @@ def _suppress_image_resource_tracker_warning() -> None:
     )
 
 
+# Families whose native cache lane breaks under the generic paged prefix
+# default (mirrors the Electron app's registry: M3 lightning-index MSA and
+# openPangu-v2 DSA composite stay off; gemma4's typed mixed-SWA cache was
+# live-proven paged 2026-08-08 so it is no longer excluded).
+_PAGED_INCOMPATIBLE_FAMILIES = {
+    "minimax_m3",
+    "minimax_m3_vl",
+    "openpangu_v2",
+}
+
+# MLLM loads normally skip the generic paged default, but gemma4's typed
+# mixed-SWA paged lane is proven for VL/video and the app keeps it paged-ON
+# even for multimodal loads — exempt it so bare CLI launches match the UI.
+_PAGED_MLLM_EXEMPT_FAMILIES = {
+    "gemma4",
+    "gemma4_text",
+}
+
+
 def serve_command(args):
     """Start the OpenAI-compatible server."""
     import logging
@@ -1101,11 +1120,11 @@ def serve_command(args):
         # defaults ON for autodetected TEXT models at startup so long contexts
         # stay resident within a bounded block budget. Auto-exclusions (mirroring
         # the Electron app's exclusion set so UI parity holds):
-        #   - M3 lightning-index MSA (minimax_m3/_vl), openPangu-v2 DSA composite,
-        #     gemma4/gemma4_text mixed-SWA RotatingKVCache — paged breaks their
-        #     native cache lane.
-        #   - MLLM/VL loads — the MLLM paged path still lacks the byte ceiling
-        #     (#98); do NOT default MLLM/VL to paged until that lands. Text-only
+        #   - M3 lightning-index MSA (minimax_m3/_vl), openPangu-v2 DSA composite
+        #     — paged breaks their native cache lane. gemma4's mixed-SWA typed
+        #     cache was live-proven paged 2026-08-08, so it now takes the default
+        #     (and is exempt from the MLLM skip below, matching the app).
+        #   - Other MLLM/VL loads — do NOT default MLLM/VL to paged. Text-only
         #     forced loads of VL bundles are not MLLM here, so they still qualify.
         # DSV4 (composite) and Zaya (CCA) already decided their own paged state in
         # the policies above (so _is_dsv4_model / an already-set use_paged_cache are
@@ -1114,13 +1133,6 @@ def serve_command(args):
         # (paged is a prefix-cache backend) and continuous batching is on.
         # --no-paged-cache opts out of THIS generic default (families whose native
         # cache REQUIRES paged still enable it via their own policy/scheduler).
-        _PAGED_INCOMPATIBLE_FAMILIES = {
-            "minimax_m3",
-            "minimax_m3_vl",
-            "openpangu_v2",
-            "gemma4",
-            "gemma4_text",
-        }
         try:
             from .api.utils import is_mllm_model
             _paged_default_is_mllm = is_mllm_model(
@@ -1137,7 +1149,10 @@ def serve_command(args):
         if (
             getattr(args, "continuous_batching", True)
             and _paged_default_prefix_active
-            and not _paged_default_is_mllm
+            and (
+                not _paged_default_is_mllm
+                or _mc.family_name in _PAGED_MLLM_EXEMPT_FAMILIES
+            )
             and not getattr(args, "disable_paged_cache", False)
             and not getattr(args, "use_paged_cache", False)
             and not _is_dsv4_model

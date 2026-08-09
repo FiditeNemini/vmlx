@@ -229,8 +229,16 @@ def test_guarded_projection_is_bit_identical_to_reference(monkeypatch):
     mx.eval(optimized)
 
     assert optimized.dtype == reference.dtype == mx.float32
-    assert optimized.shape == reference.shape
-    assert bool(mx.array_equal(optimized, reference))
+    # Guarded multi-token calls project only the final position: every DSV4
+    # consumer samples logits[:, -1, :], so the fastpath skips the rest of the
+    # chunk. Bit-identity holds against a reference projection of the same
+    # sliced hidden state (an M=3 vs M=1 GEMM differs at the ULP level from
+    # accumulation order, so the full-chunk reference is only allclose).
+    assert optimized.shape == (1, 1, vocab)
+    reference_last = mod._reference_logits(hidden[:, -1:, :], model.lm_head)
+    mx.eval(reference_last)
+    assert bool(mx.array_equal(optimized, reference_last))
+    assert bool(mx.allclose(optimized, reference[:, -1:, :], atol=1e-4, rtol=1e-4))
     status = mod.dsv4_lm_head_fastpath_status(model)
     assert status["installed"] and status["validated"]
     assert status["cache_bytes"] == vocab * dims * 4

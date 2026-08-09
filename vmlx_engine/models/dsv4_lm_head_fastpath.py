@@ -422,6 +422,11 @@ def _install_class_wrapper(model_class: type) -> bool:
             return original_call(self, input_ids, cache=cache, mask=mask)
 
         hidden = self.model(input_ids, cache=cache, mask=mask)
+        if getattr(hidden, "ndim", 0) == 3 and hidden.shape[1] > 1:
+            # Every DSV4 consumer samples logits[:, -1, :]; projecting the
+            # full prefill chunk through the 129k vocab head is ~2 TFLOP of
+            # discarded logits per 2048-token chunk.
+            hidden = hidden[:, -1:, :]
         try:
             if config.mode == "qmm":
                 logits = mx.quantized_matmul(

@@ -7731,6 +7731,20 @@ class Scheduler:
                         snapshot_cache = getattr(
                             response, "prompt_cache_snapshot", None
                         )
+                        # DSV4 EXTENDED STORE: zero-copy delta transport that
+                        # continues the prompt chain through decode, ending at
+                        # a 256-token boundary. When valid it preempts both
+                        # the prompt-boundary snapshot store and the cache-hit
+                        # store-skip: the next turn re-renders prior output in
+                        # its history (tools keep reasoning), so storing the
+                        # exact fed sequence turns that hot re-prefill into a
+                        # block-aligned hit.
+                        extended_cache = getattr(
+                            response, "extended_cache_snapshot", None
+                        )
+                        extended_cache_tokens = int(
+                            getattr(response, "extended_cache_tokens", 0) or 0
+                        )
 
                         # prompt_cache may be callable or direct attribute
                         if callable(response.prompt_cache):
@@ -7753,7 +7767,69 @@ class Scheduler:
                                     pass  # Already cached, nothing to do
                                 else:
                                     prompt_len = len(request.prompt_token_ids)
-                                    if snapshot_cache is not None and not (
+                                    extended_store_armed = False
+                                    if (
+                                        extended_cache is not None
+                                        and extended_cache_tokens > 0
+                                        and self._uses_dsv4_cache
+                                    ):
+                                        full_fed_sequence = list(
+                                            request.prompt_token_ids
+                                        ) + list(request.output_token_ids)
+                                        try:
+                                            _ext_ivals = (
+                                                extended_cache[0].get(
+                                                    "dsv4_record_intervals"
+                                                )
+                                                or ()
+                                            )
+                                        except Exception:
+                                            _ext_ivals = ()
+                                        _ext_chain_end = (
+                                            int(_ext_ivals[-1][1])
+                                            if _ext_ivals
+                                            else -1
+                                        )
+                                        if (
+                                            extended_cache_tokens
+                                            <= len(full_fed_sequence)
+                                            and _ext_chain_end
+                                            == extended_cache_tokens
+                                        ):
+                                            request._extracted_cache_key_tokens = (
+                                                full_fed_sequence[
+                                                    :extended_cache_tokens
+                                                ]
+                                            )
+                                            cache_for_extract = extended_cache
+                                            extended_store_armed = True
+                                            request._dsv4_extended_store_used = True
+                                            logger.info(
+                                                "DSV4 prefix cache store using "
+                                                "extended prefill+decode delta "
+                                                "chain (%d cache-key tokens: "
+                                                "prompt=%d, generated_covered=%d).",
+                                                extended_cache_tokens,
+                                                prompt_len,
+                                                max(
+                                                    0,
+                                                    extended_cache_tokens
+                                                    - prompt_len,
+                                                ),
+                                            )
+                                        else:
+                                            logger.warning(
+                                                "DSV4 extended store rejected: "
+                                                "boundary=%d fed_sequence=%d "
+                                                "chain_end=%d; falling back to "
+                                                "prompt snapshot store.",
+                                                extended_cache_tokens,
+                                                len(full_fed_sequence),
+                                                _ext_chain_end,
+                                            )
+                                    if extended_store_armed:
+                                        pass  # cache_for_extract set above
+                                    elif snapshot_cache is not None and not (
                                         getattr(self, "_uses_m3_msa_cache", False)
                                         and int(
                                             getattr(request, "cached_tokens", 0) or 0
@@ -8095,6 +8171,11 @@ class Scheduler:
                                         if (
                                             self.disk_cache is not None
                                             and not self._is_hybrid
+                                            # Extended-store transports end past
+                                            # the prompt boundary; the legacy
+                                            # disk key is prompt-stripped and
+                                            # would mismatch the chain state.
+                                            and not extended_store_armed
                                         ):
                                             try:
                                                 from .mllm_batch_generator import (

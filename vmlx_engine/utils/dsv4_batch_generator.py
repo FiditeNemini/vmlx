@@ -378,6 +378,23 @@ def dsv4_prompt_snapshot_min_tokens() -> int:
         return DEFAULT_DSV4_PROMPT_SNAPSHOT_MIN_TOKENS
 
 
+def dsv4_extended_store_enabled() -> bool:
+    """Cross-turn extended store: continue native block-delta capture through
+    decode so terminal stores cover prompt + generated tokens.
+
+    With builtin tools enabled the DSV4 encoder contract keeps prior-turn
+    reasoning in the rendered history, so every next turn re-prefills the
+    previous output hot (~7k tokens / ~29s TTFT observed live). Extending the
+    delta chain through decode lets the next turn match the full fed sequence
+    instead of the prompt-only boundary. Kill switch for diagnostics:
+    VMLX_DSV4_EXTENDED_STORE=0.
+    """
+    raw = os.environ.get("VMLX_DSV4_EXTENDED_STORE")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 @dataclass
 class _Request:
     uid: int
@@ -421,6 +438,13 @@ class _Request:
     # that began just before the cap). No tokens are ever injected.
     thinking_soft_cap: Optional[int] = None
     visible_started: bool = False
+    # Cross-turn extended store: live fed-token counter (always equals the
+    # composite cache offset once prefill completes) plus the rolling
+    # decode-time block-delta capture state. See _arm_extended_capture.
+    fed_tokens: int = 0
+    extended_capture: bool = False
+    extended_next_boundary: int = 0
+    extended_last_stamped: int = 0
 
 
 @dataclass
@@ -437,6 +461,11 @@ class _Response:
     # `prompt_cache_snapshot` is the clean prefill-time copy used for store.
     prompt_cache: Any = None
     prompt_cache_snapshot: Any = None
+    # Cross-turn extended store: zero-copy delta transport covering
+    # prompt + generated tokens through `extended_cache_tokens` (a 256-token
+    # boundary). Only attached to the FINAL generation response.
+    extended_cache_snapshot: Any = None
+    extended_cache_tokens: int = 0
 
 
 class DSV4BatchGenerator:
@@ -454,6 +483,10 @@ class DSV4BatchGenerator:
     """
 
     Response = _Response  # so callers that do `BatchGenerator.Response(...)` keep working
+
+    # Class-level default so test fixtures that bypass __init__ keep the
+    # production default; __init__ re-resolves it from the environment.
+    _extended_store_enabled = True
 
     def __init__(
         self,
@@ -550,6 +583,8 @@ class DSV4BatchGenerator:
             os.environ.get("VMLX_DSV4_PIPELINED_DECODE", "1").strip().lower()
             not in {"0", "false", "no", "off"}
         )
+        # Cross-turn extended store (VMLX_DSV4_EXTENDED_STORE=0 to disable).
+        self._extended_store_enabled = dsv4_extended_store_enabled()
 
     def _trace_timing(self, event: str, start: float, uid: Optional[int] = None, **fields: Any) -> None:
         if os.environ.get("VMLINUX_DSV4_TRACE_TIMINGS", "").lower() not in {
@@ -1295,6 +1330,210 @@ class DSV4BatchGenerator:
 
         return self._snapshot_dsv4_cache(cache_list)
 
+    @staticmethod
+    def _is_delta_transport(snapshot: Any) -> bool:
+        try:
+            return bool(snapshot) and all(
+                isinstance(layer, dict) and "dsv4_block_records" in layer
+                for layer in snapshot
+            )
+        except TypeError:
+            return False
+
+    def _arm_extended_capture(self, r: _Request) -> None:
+        """Arm decode-time block-delta capture for the cross-turn store.
+
+        Called once per request, immediately after the prompt (or cache-hit
+        tail) has been fully fed and the first token sampled — the live cache
+        offset equals ``len(context_tokens)`` here. Capture continues the SAME
+        record chain the prompt snapshot transported: pool-row deltas per
+        256-token block, automatic periodic anchors every 2K tokens, and a
+        rolling append-safe stamp on the newest full block so the terminal
+        store always ends at a restore-eligible boundary.
+
+        Anchors need the live composite state exactly at their boundary, which
+        decode guarantees (+1 token per forward). The generation-rail tokens
+        fed without capture make the first new boundary land past the chain
+        end; the first crossing re-grids the partial prompt-terminal record
+        into a full aligned block (replace_last), after which the chain is a
+        pure 256-grid that store_cache can cut without translation.
+        """
+        r.fed_tokens = len(r.context_tokens)
+        if not self._extended_store_enabled or r.finish_reason is not None:
+            return
+        if not r.capture_prompt_snapshot or not r.cache:
+            return
+        if r.prompt_snapshot is None or not self._is_delta_transport(
+            r.prompt_snapshot
+        ):
+            return
+        chain_next = int(
+            getattr(r.cache[0], "_vmlx_dsv4_delta_next_token", 0) or 0
+        )
+        if chain_next <= 0:
+            return
+        if chain_next % DSV4_NATIVE_BLOCK_SIZE:
+            first_boundary = (
+                (chain_next // DSV4_NATIVE_BLOCK_SIZE) + 1
+            ) * DSV4_NATIVE_BLOCK_SIZE
+        else:
+            first_boundary = chain_next + DSV4_NATIVE_BLOCK_SIZE
+        if first_boundary < r.fed_tokens:
+            # The uncaptured generation rail spanned a full native block, so
+            # the re-grid boundary was fed without live state to anchor.
+            logger.debug(
+                "DSV4Gen: extended capture not armed for uid=%s: first "
+                "boundary %d already fed (context=%d, chain_next=%d)",
+                r.uid,
+                first_boundary,
+                r.fed_tokens,
+                chain_next,
+            )
+            return
+        r.extended_capture = True
+        r.extended_next_boundary = first_boundary
+        r.extended_last_stamped = 0
+        if first_boundary == r.fed_tokens:
+            # The prompt end sits exactly on the boundary; capture now while
+            # the live offset matches it.
+            self._capture_dsv4_extended_boundary(r)
+
+    def _capture_dsv4_extended_boundary(self, r: _Request) -> None:
+        """Extend the delta chain at a 256-token boundary during decode.
+
+        The live cache offset equals the boundary when this runs. Rolling
+        stamp discipline: the previous decode-stamped block loses its forced
+        anchor (unless it is a 2K periodic anchor or a prefill-owned stamp)
+        and the just-completed block gains a forced append-safe anchor, so
+        steady state carries exactly one extra anchor beyond the periodics.
+        Any failure disables extended capture for this request only — the
+        prompt-boundary snapshot store remains intact.
+        """
+        boundary = int(r.extended_next_boundary)
+        try:
+            chain_next = int(
+                getattr(r.cache[0], "_vmlx_dsv4_delta_next_token", 0) or 0
+            )
+            if chain_next % DSV4_NATIVE_BLOCK_SIZE:
+                # Re-grid the partial prompt-terminal record to the block grid.
+                aligned_start = (
+                    chain_next // DSV4_NATIVE_BLOCK_SIZE
+                ) * DSV4_NATIVE_BLOCK_SIZE
+                if boundary != aligned_start + DSV4_NATIVE_BLOCK_SIZE:
+                    raise ValueError(
+                        "extended re-grid misaligned: boundary="
+                        f"{boundary} chain_next={chain_next}"
+                    )
+                self._capture_dsv4_block_record(
+                    r.cache,
+                    aligned_start,
+                    boundary,
+                    force_anchor=True,
+                    append_safe=True,
+                    replace_last=True,
+                )
+            else:
+                if boundary != chain_next + DSV4_NATIVE_BLOCK_SIZE:
+                    raise ValueError(
+                        "extended chain discontinuity: boundary="
+                        f"{boundary} chain_next={chain_next}"
+                    )
+                anchor_interval = (
+                    DSV4_NATIVE_BLOCK_SIZE * DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS
+                )
+                if (
+                    r.extended_last_stamped == chain_next
+                    and chain_next % anchor_interval
+                    and chain_next >= DSV4_NATIVE_BLOCK_SIZE
+                ):
+                    # Strip our previous rolling stamp. Non-anchor re-export
+                    # is retroactive-safe (pool rows persist); periodic
+                    # anchors and prefill-owned stamps are never stripped.
+                    self._capture_dsv4_block_record(
+                        r.cache,
+                        chain_next - DSV4_NATIVE_BLOCK_SIZE,
+                        chain_next,
+                        replace_last=True,
+                    )
+                self._capture_dsv4_block_record(
+                    r.cache,
+                    boundary - DSV4_NATIVE_BLOCK_SIZE,
+                    boundary,
+                    force_anchor=True,
+                    append_safe=True,
+                )
+            r.extended_last_stamped = boundary
+            r.extended_next_boundary = boundary + DSV4_NATIVE_BLOCK_SIZE
+        except Exception as exc:
+            r.extended_capture = False
+            logger.warning(
+                "DSV4Gen: extended-store capture disabled at boundary %d "
+                "for uid=%s: %s",
+                boundary,
+                r.uid,
+                exc,
+            )
+
+    def _note_decode_fed(self, r: _Request) -> None:
+        """Account one decode-fed token; capture at native block boundaries."""
+        r.fed_tokens += 1
+        if r.extended_capture and r.fed_tokens == r.extended_next_boundary:
+            self._capture_dsv4_extended_boundary(r)
+
+    def _extended_store_snapshot(self, r: _Request) -> Tuple[Optional[List[Any]], int]:
+        """Zero-copy transport of the full prefill+decode delta chain.
+
+        Returns ``(transport, boundary_tokens)`` where the store key must be
+        the exact fed sequence ``(prompt + output)[:boundary_tokens]``, or
+        ``(None, 0)`` when the extended chain adds nothing over the prompt
+        snapshot (the scheduler then falls back to the snapshot store).
+        """
+        if not r.extended_capture or r.extended_last_stamped <= 0:
+            return None, 0
+        prompt_boundary = len(r.context_tokens) - min(
+            len(r.context_tokens),
+            max(1, int(r.prompt_snapshot_tail_tokens or 1)),
+        )
+        if r.extended_last_stamped <= prompt_boundary:
+            return None, 0
+        transport = self._dsv4_delta_transport(r.cache)
+        if transport is None:
+            return None, 0
+        intervals = transport[0].get("dsv4_record_intervals") or ()
+        chain_end = int(intervals[-1][1]) if intervals else -1
+        if chain_end != int(r.extended_last_stamped):
+            logger.warning(
+                "DSV4Gen: extended-store chain end %s does not match last "
+                "stamped boundary %d for uid=%s; skipping extended store",
+                chain_end,
+                r.extended_last_stamped,
+                r.uid,
+            )
+            return None, 0
+        estimated = self._estimate_dsv4_cache_nbytes(transport)
+        self.prompt_snapshot_last_estimated_bytes = estimated
+        backend_limit = self.prompt_snapshot_max_bytes
+        if backend_limit is not None and estimated > backend_limit:
+            self.prompt_snapshot_oversize_skips += 1
+            logger.warning(
+                "DSV4Gen: skipping extended-store transport: estimated "
+                "%.1fMB exceeds every enabled cache backend limit (%.1fMB)",
+                estimated / (1024 * 1024),
+                backend_limit / (1024 * 1024),
+            )
+            return None, 0
+        logger.info(
+            "DSV4Gen: extended-store transport ready for uid=%s "
+            "(chain_end=%d tokens, prompt_boundary=%d, generated_covered=%d, "
+            "estimated=%.1fMB)",
+            r.uid,
+            chain_end,
+            prompt_boundary,
+            chain_end - len(r.context_tokens),
+            estimated / (1024 * 1024),
+        )
+        return transport, chain_end
+
     def _should_capture_logprobs(self, uid: int) -> bool:
         try:
             from .mamba_cache import _should_capture_generation_logprobs
@@ -1333,6 +1572,10 @@ class DSV4BatchGenerator:
             # materialized token.
             ids = mx.array([[req.out_tokens[-1]]], dtype=mx.int32)
             logits = self.model(ids, cache=req.cache)
+            # Inline at THIS forward site: the prime step runs two forwards in
+            # one call, and extended-store anchors need the live offset
+            # exactly at the boundary being crossed.
+            self._note_decode_fed(req)
             sampled, _ = self._sample(
                 logits[:, -1, :], req.sampler, None, (), capture_logprobs=False
             )
@@ -1344,6 +1587,7 @@ class DSV4BatchGenerator:
             _t_build = time.perf_counter()
             ids = cur[:, None].astype(mx.int32)
             logits = self.model(ids, cache=req.cache)
+            self._note_decode_fed(req)
             self._trace_timing("pipe_graph", _t_build, req.uid, pipelined=True)
             _t_s = time.perf_counter()
             next_sampled, _ = self._sample(
@@ -1995,6 +2239,7 @@ class DSV4BatchGenerator:
                     r.out_tokens.append(tok_id)
                     r.prompt_processed = True
                     self._update_finish_reason_after_token(r, tok_id)
+                    self._arm_extended_capture(r)
                     prompt_resps.append(_Response(
                         uid=r.uid, token=tok_id, logprobs=logprobs,
                         finish_reason=r.finish_reason,
@@ -2141,6 +2386,7 @@ class DSV4BatchGenerator:
                     r.out_tokens.append(tok_id)
                     r.prompt_processed = True
                     self._update_finish_reason_after_token(r, tok_id)
+                    self._arm_extended_capture(r)
                     prompt_resps.append(_Response(
                         uid=r.uid, token=tok_id, logprobs=logprobs,
                         finish_reason=r.finish_reason,
@@ -2166,6 +2412,7 @@ class DSV4BatchGenerator:
                         ids = mx.array([[last_id]], dtype=mx.int32)
                         _t_decode_model = time.perf_counter()
                         logits = self.model(ids, cache=r.cache)
+                        self._note_decode_fed(r)
                         last_logits = logits[:, -1, :]
                         self._trace_timing(
                             "decode_model",
@@ -2189,16 +2436,27 @@ class DSV4BatchGenerator:
                         )
                     r.out_tokens.append(tok_id)
                     self._update_finish_reason_after_token(r, tok_id)
+                    extended_snapshot = None
+                    extended_tokens = 0
                     if r.finish_reason is not None:
                         # Drop the in-flight speculative token, if any. Its
                         # forward already advanced the live cache; that cache
-                        # is discarded on remove(), never stored.
+                        # is discarded on remove(), never stored. (The fed
+                        # accounting counted that forward, but boundaries are
+                        # only stamped up to extended_last_stamped, so the
+                        # extended transport never covers unmaterialized
+                        # speculative state beyond the stop token.)
                         r.pending_sampled = None
+                        extended_snapshot, extended_tokens = (
+                            self._extended_store_snapshot(r)
+                        )
                     gen_resps.append(_Response(
                         uid=r.uid, token=tok_id, logprobs=logprobs,
                         finish_reason=r.finish_reason,
                         prompt_cache=r.cache,
                         prompt_cache_snapshot=r.prompt_snapshot,
+                        extended_cache_snapshot=extended_snapshot,
+                        extended_cache_tokens=extended_tokens,
                     ))
 
         return prompt_resps, gen_resps

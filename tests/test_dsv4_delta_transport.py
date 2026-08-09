@@ -1258,3 +1258,183 @@ def test_dsv4_reconstruct_rejects_chain_metadata_change():
         table.num_tokens += 256
 
     assert cache.reconstruct_cache(table) is None
+
+
+def _extended_capture_fixture(prompt_len, *, exporter_fail_at=None):
+    """Bare generator + stub composite cache + request for extended capture."""
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    class DeepseekV4Cache:
+        def export_block_delta(
+            self,
+            start,
+            end,
+            *,
+            block_size,
+            anchor_interval_blocks,
+            force_anchor=False,
+        ):
+            if exporter_fail_at is not None and end == exporter_fail_at:
+                raise RuntimeError("stub exporter failure")
+            anchor_interval = block_size * anchor_interval_blocks
+            anchored = bool(force_anchor or end % anchor_interval == 0)
+            return {
+                "start_token": start,
+                "end_token": end,
+                "anchor": (
+                    {
+                        "tokens": end,
+                        "periodic": end % anchor_interval == 0,
+                        "terminal": bool(force_anchor),
+                    }
+                    if anchored
+                    else None
+                ),
+            }
+
+    gen = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
+    gen._extended_store_enabled = True
+    gen.prompt_snapshot_max_bytes = None
+    gen.prompt_snapshot_last_estimated_bytes = 0
+    gen.prompt_snapshot_oversize_skips = 0
+
+    cache = DeepseekV4Cache()
+    DSV4BatchGenerator._reset_dsv4_block_records([cache], 0)
+    full_blocks = (prompt_len // 256) * 256
+    if full_blocks:
+        DSV4BatchGenerator._capture_dsv4_completed_blocks([cache], full_blocks)
+        DSV4BatchGenerator._capture_dsv4_append_safe_checkpoint(
+            [cache], full_blocks
+        )
+    DSV4BatchGenerator._capture_dsv4_terminal_anchor([cache], prompt_len)
+
+    request = SimpleNamespace(
+        uid=7,
+        cache=[cache],
+        context_tokens=list(range(prompt_len)),
+        finish_reason=None,
+        capture_prompt_snapshot=True,
+        prompt_snapshot=DSV4BatchGenerator._dsv4_delta_transport([cache]),
+        prompt_snapshot_tail_tokens=1,
+        fed_tokens=0,
+        extended_capture=False,
+        extended_next_boundary=0,
+        extended_last_stamped=0,
+    )
+    assert request.prompt_snapshot is not None
+    return gen, cache, request
+
+
+def _feed_decode(gen, request, target_fed):
+    while request.fed_tokens < target_fed:
+        gen._note_decode_fed(request)
+
+
+def test_dsv4_extended_capture_rolls_stamp_and_preserves_periodic_anchor():
+    gen, cache, request = _extended_capture_fixture(331)
+
+    gen._arm_extended_capture(request)
+    assert request.extended_capture is True
+    assert request.fed_tokens == 331
+    assert request.extended_next_boundary == 512
+
+    _feed_decode(gen, request, 2304)
+    assert request.extended_capture is True
+    assert request.extended_last_stamped == 2304
+
+    records = cache._vmlx_dsv4_block_records
+    intervals = [(r["start_token"], r["end_token"]) for r in records]
+    assert intervals == [
+        (i * 256, (i + 1) * 256) for i in range(9)
+    ]
+    # Prefill-owned stamp at (0, 256) is never stripped by decode rolling.
+    assert records[0]["anchor"]["append_safe"] is True
+    # Rolled-off decode stamps lose their forced anchor entirely.
+    for record in records[1:6]:
+        assert record["anchor"] is None
+    assert records[6]["anchor"] is None
+    # The 2K periodic anchor keeps anchor state (and our stamp marker).
+    assert records[7]["end_token"] == 2048
+    assert records[7]["anchor"]["periodic"] is True
+    assert records[7]["anchor"]["append_safe"] is True
+    # Newest full block carries the rolling forced append-safe stamp.
+    assert records[8]["anchor"]["terminal"] is True
+    assert records[8]["anchor"]["append_safe"] is True
+
+
+def test_dsv4_extended_store_snapshot_chain_end_matches_key_boundary():
+    gen, cache, request = _extended_capture_fixture(331)
+    gen._arm_extended_capture(request)
+    _feed_decode(gen, request, 1024)
+
+    transport, boundary = gen._extended_store_snapshot(request)
+    assert boundary == 1024
+    assert transport is not None
+    intervals = transport[0]["dsv4_record_intervals"]
+    assert intervals[-1][1] == boundary
+    assert isinstance(transport[0]["dsv4_block_records"], tuple)
+
+    # A later decode boundary must not mutate the exported tuple contents.
+    exported_records = transport[0]["dsv4_block_records"]
+    _feed_decode(gen, request, 1280)
+    assert exported_records[-1]["end_token"] == 1024
+    assert cache._vmlx_dsv4_block_records[-1]["end_token"] == 1280
+
+
+def test_dsv4_extended_store_snapshot_requires_progress_past_prompt():
+    gen, _cache, request = _extended_capture_fixture(331)
+    gen._arm_extended_capture(request)
+    # No boundary crossed yet: nothing beyond the prompt snapshot.
+    transport, boundary = gen._extended_store_snapshot(request)
+    assert transport is None and boundary == 0
+
+
+def test_dsv4_extended_capture_disarms_when_rail_spans_full_block():
+    gen, _cache, request = _extended_capture_fixture(331)
+    # Simulate a generation rail that already fed past the next boundary.
+    request.context_tokens = list(range(600))
+    gen._arm_extended_capture(request)
+    assert request.extended_capture is False
+    assert request.fed_tokens == 600
+
+
+def test_dsv4_extended_capture_stamps_immediately_at_exact_boundary():
+    gen, cache, request = _extended_capture_fixture(512)
+    # Chain ends at 512 terminal; rewind stub chain to a 256-token partial so
+    # the first boundary (512) equals the prompt end exactly.
+    DSV4BatchGenerator_records = cache._vmlx_dsv4_block_records
+    assert DSV4BatchGenerator_records[-1]["end_token"] == 512
+
+    gen._arm_extended_capture(request)
+    assert request.extended_capture is True
+    # chain_next == 512 aligned -> first boundary 768, no immediate stamp.
+    assert request.extended_next_boundary == 768
+    assert request.extended_last_stamped == 0
+
+    gen2, cache2, request2 = _extended_capture_fixture(300)
+    request2.context_tokens = list(range(512))
+    gen2._arm_extended_capture(request2)
+    # chain_next=300 partial -> first boundary 512 == fed prompt end:
+    # immediate re-grid stamp while the live offset matches.
+    assert request2.extended_capture is True
+    assert request2.extended_last_stamped == 512
+    assert request2.extended_next_boundary == 768
+    records2 = cache2._vmlx_dsv4_block_records
+    assert records2[-1]["start_token"] == 256
+    assert records2[-1]["end_token"] == 512
+    assert records2[-1]["anchor"]["append_safe"] is True
+
+
+def test_dsv4_extended_capture_failure_disables_without_raising():
+    gen, cache, request = _extended_capture_fixture(331, exporter_fail_at=768)
+    gen._arm_extended_capture(request)
+    _feed_decode(gen, request, 512)
+    assert request.extended_capture is True
+    assert request.extended_last_stamped == 512
+
+    # Boundary 768 hits the stub failure: capture disables, no exception,
+    # and the chain still ends at the last good stamp for fallback stores.
+    _feed_decode(gen, request, 1024)
+    assert request.extended_capture is False
+    transport, boundary = gen._extended_store_snapshot(request)
+    assert transport is None and boundary == 0

@@ -657,9 +657,24 @@ def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
         import time as _time
 
         t0 = _time.perf_counter()
-    decoded = decode_tq_entries(entries, _stats=stats)
-    keys = mx.concatenate([k for k, _ in decoded], axis=2)
-    values = mx.concatenate([v for _, v in decoded], axis=2)
+    stacked = _stack_tq_block_entries(entries) if len(entries) > 1 else None
+    if stacked is not None:
+        # All pages share one batch signature: decode once and fold the outer
+        # page axis into the token axis. Equivalent to per-page split + concat
+        # (page-major, token-minor ordering) without materializing ~2N slice
+        # nodes per layer (vmlx#91).
+        stats["batched_runs"] = 1
+        stats["batched_entries"] = len(entries)
+        keys, values = decode_tq_block(stacked)
+        b, h = int(keys.shape[1]), int(keys.shape[2])
+        keys = mx.moveaxis(keys, 0, 2).reshape(b, h, -1, int(keys.shape[-1]))
+        values = mx.moveaxis(values, 0, 2).reshape(
+            b, h, -1, int(values.shape[-1])
+        )
+    else:
+        decoded = decode_tq_entries(entries, _stats=stats)
+        keys = mx.concatenate([k for k, _ in decoded], axis=2)
+        values = mx.concatenate([v for _, v in decoded], axis=2)
     if timing:
         # Diagnostic mode only: forcing eval here moves the lazy codec work
         # into this call so the wall time is attributable. The default path

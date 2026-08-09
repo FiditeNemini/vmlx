@@ -5327,6 +5327,11 @@ class BlockAwarePrefixCache:
             kv_count = 0
             cumulative_count = 0
             tq_native_entry_count = 0
+            # TQ codec decode graphs are kept lazy per layer and evaluated in
+            # one batch before returning: 16 per-layer eval sync points cost
+            # ~90ms each on an 8k restore (vmlx#91), a single combined eval
+            # lets Metal overlap the layers.
+            deferred_tq_eval: list = []
 
             for layer_idx in range(num_layers):
                 # Collect this layer's data from all blocks
@@ -5548,11 +5553,11 @@ class BlockAwarePrefixCache:
                     from .tq_disk_store import decode_tq_blocks
 
                     concat_keys, concat_values = decode_tq_blocks(tq_block_entries)
-                    mx.eval(concat_keys, concat_values)
                     if len(tq_block_entries) == 1:
                         concat_keys = concat_keys * 1
                         concat_values = concat_values * 1
-                        mx.eval(concat_keys, concat_values)
+                    deferred_tq_eval.append(concat_keys)
+                    deferred_tq_eval.append(concat_values)
 
                     allowed_kv = self._get_allowed_n_kv_heads()
                     if allowed_kv and concat_keys.shape[1] not in allowed_kv:
@@ -6219,7 +6224,11 @@ class BlockAwarePrefixCache:
                             from .tq_disk_store import decode_tq_blocks
 
                             ck, cv = decode_tq_blocks(sub_tq_entries)
-                            mx.eval(ck, cv)
+                            if len(sub_tq_entries) == 1:
+                                ck = ck * 1
+                                cv = cv * 1
+                            deferred_tq_eval.append(ck)
+                            deferred_tq_eval.append(cv)
                             allowed_kv = self._get_allowed_n_kv_heads()
                             if allowed_kv and ck.shape[1] not in allowed_kv:
                                 logger.warning(
@@ -6365,6 +6374,9 @@ class BlockAwarePrefixCache:
                 f"({kv_count} KV + {cumulative_count} cumulative), "
                 f"{block_table.num_tokens} tokens from {len(block_table.block_ids)} blocks"
             )
+
+            if deferred_tq_eval:
+                mx.eval(*deferred_tq_eval)
 
             self._last_reconstruct_disk_blocks = len(disk_backed_block_ids)
             self._last_reconstruct_tq_blocks = tq_native_entry_count

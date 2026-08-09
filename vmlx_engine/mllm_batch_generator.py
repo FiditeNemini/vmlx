@@ -515,18 +515,24 @@ def _vlm_image_request_cache_limit_bytes(
     return max(floor, min(max_limit, fractional))
 
 
-def _apply_vlm_image_request_cache_limit() -> None:
+def _apply_vlm_image_request_cache_limit() -> bool:
     """Tighten the Metal reusable cache before VLM media work.
 
     This is a preflight memory-safety control, not a model behavior change. It
     leaves text-only requests on the normal scheduler cache policy and only
     shrinks MLX's allocator free-list ceiling for media requests that otherwise
     have large transient tensors.
+
+    Returns True when a tightened limit was actually applied, so the caller
+    can restore the steady-state scheduler limit once the media prefill spike
+    is over instead of leaving a ~1GB allocator ceiling on the whole session.
+    (A/B measured this restore as hygiene, not a decode-speed lever: decode
+    throughput was unchanged with the limit still tightened.)
     """
     if os.environ.get("VMLX_VLM_IMAGE_CACHE_LIMIT", "1") == "0":
-        return
+        return False
     if not mx.metal.is_available():
-        return
+        return False
     try:
         max_limit = int(
             float(os.environ.get("VMLX_VLM_IMAGE_CACHE_LIMIT_GB", "1.0"))
@@ -549,7 +555,7 @@ def _apply_vlm_image_request_cache_limit() -> None:
         floor = 256 * 1024**2
 
     if max_limit <= 0:
-        return
+        return False
     try:
         active, max_ws = get_effective_metal_working_set_bytes(mx)
         limit = _vlm_image_request_cache_limit_bytes(
@@ -560,7 +566,7 @@ def _apply_vlm_image_request_cache_limit() -> None:
             floor_bytes=floor,
         )
         if limit <= 0:
-            return
+            return False
         set_cache = getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit
         set_cache(limit)
         logger.info(
@@ -571,8 +577,10 @@ def _apply_vlm_image_request_cache_limit() -> None:
             max_ws / (1024**3) if max_ws else 0.0,
             free_fraction,
         )
+        return True
     except Exception as exc:
         logger.debug("VLM image request cache limit not applied: %s", exc)
+        return False
 
 
 def _vlm_image_prefill_budget(
@@ -3278,11 +3286,25 @@ def _native_mtp_restore_object(snapshot: _NativeMTPCacheObjectSnapshot) -> None:
     )
 
 
-def _native_mtp_should_snapshot_layer(layer: Any) -> bool:
+def _native_mtp_should_snapshot_layer(layer: Any, advance_len: int = 0) -> bool:
     if layer is None:
         return False
     if hasattr(layer, "rollback_state"):
         return True
+    # TurboQuant live-encode crossing: trim() rewinds offset only, so if the
+    # one-time compress() fires inside a rejected verify advance, draft KV
+    # stays baked into the decoded/compressed buffers. compress() rebinds to
+    # new arrays, so a by-ref __dict__ snapshot is a sound rollback here.
+    compress_after = getattr(layer, "compress_after", None)
+    if compress_after is not None and advance_len > 0:
+        try:
+            threshold = int(compress_after or 0)
+            not_compressed = int(getattr(layer, "_compressed_tokens", 0) or 0) == 0
+            offset = int(getattr(layer, "offset", 0) or 0)
+            if threshold > 0 and not_compressed and offset + advance_len >= threshold:
+                return True
+        except (TypeError, ValueError):
+            return True
     is_trimmable = getattr(layer, "is_trimmable", None)
     if callable(is_trimmable):
         try:
@@ -3294,10 +3316,11 @@ def _native_mtp_should_snapshot_layer(layer: Any) -> bool:
 
 def _native_mtp_snapshot_replay_cache(
     cache: List[Any],
+    advance_len: int = 0,
 ) -> List[Optional[_NativeMTPCacheObjectSnapshot]]:
     return [
         _native_mtp_snapshot_object(layer)
-        if _native_mtp_should_snapshot_layer(layer)
+        if _native_mtp_should_snapshot_layer(layer, advance_len)
         else None
         for layer in cache
     ]
@@ -4407,6 +4430,11 @@ class MLLMBatchGenerator:
     # Generation stream for async eval
     _stream = None
 
+    # Class-level defaults so partially-constructed instances (tests build
+    # via __new__) can run _next without the media cache-limit machinery.
+    _steady_cache_limit = None
+    _vlm_cache_limit_tightened = False
+
     def __init__(
         self,
         model: nn.Module,
@@ -4670,6 +4698,8 @@ class MLLMBatchGenerator:
         # Memory management
         self._old_wired_limit = None
         self._old_cache_limit = None
+        self._steady_cache_limit = None
+        self._vlm_cache_limit_tightened = False
         self._tight_memory_prefill_drain = False
         if mx.metal.is_available():
             # Use non-deprecated API when available (MLX ≥ 0.25)
@@ -4710,6 +4740,7 @@ class MLLMBatchGenerator:
                     )
                     if max_ws > 0:
                         self._old_cache_limit = _set_cache(cache_limit)
+                        self._steady_cache_limit = cache_limit
                         self._tight_memory_prefill_drain = safety_limit < base_limit
                         logger.info(
                             f"Metal cache limit set to {cache_limit / (1024**3):.2f}GB "
@@ -5034,7 +5065,8 @@ class MLLMBatchGenerator:
                 raise ValueError("All audio inputs failed to process")
 
         if all_images or video_inputs or all_audio:
-            _apply_vlm_image_request_cache_limit()
+            if _apply_vlm_image_request_cache_limit():
+                self._vlm_cache_limit_tightened = True
             mx.clear_cache()
 
         # Check pixel cache first
@@ -6220,7 +6252,8 @@ class MLLMBatchGenerator:
             # Media-expanded prompts must use the one-shot VLM wrapper path.
             # Drop allocator free-list memory and reject impossible requests
             # before Metal executes a command buffer that can kill the server.
-            _apply_vlm_image_request_cache_limit()
+            if _apply_vlm_image_request_cache_limit():
+                self._vlm_cache_limit_tightened = True
             mx.clear_cache()
         _raise_if_image_prefill_exceeds_budget(
             has_images=has_images,
@@ -8580,7 +8613,9 @@ class MLLMBatchGenerator:
         sampler = self._make_request_sampler(request)
         verify_inputs = [state.next_main] + list(state.drafts)
         trace_t0 = _native_mtp_trace_start()
-        replay_snapshot = _native_mtp_snapshot_replay_cache(cache)
+        replay_snapshot = _native_mtp_snapshot_replay_cache(
+            cache, len(verify_inputs)
+        )
         _native_mtp_trace_stop(state.stats, "snapshot_ms", trace_t0)
         inputs = mx.concatenate(
             [_native_mtp_ensure_uint32(tok) for tok in verify_inputs]
@@ -8860,6 +8895,27 @@ class MLLMBatchGenerator:
             List of MLLMBatchResponse for this step
         """
         tic = time.perf_counter()
+
+        if self._vlm_cache_limit_tightened and self._steady_cache_limit is not None:
+            # The media-request tighten protects vision encode + one-shot
+            # prefill + the first decode step (all inside the previous _next
+            # call). Restore the steady-state scheduler limit afterwards so a
+            # ~1GB allocator ceiling doesn't outlive the media spike (A/B
+            # measured this as hygiene, not a decode-speed lever); a new media
+            # admission re-tightens.
+            try:
+                _set_cache = (
+                    getattr(mx, "set_cache_limit", None) or mx.metal.set_cache_limit
+                )
+                _set_cache(self._steady_cache_limit)
+                logger.info(
+                    "Restored steady-state Metal cache limit %.2fGB after "
+                    "media prefill spike",
+                    self._steady_cache_limit / (1024**3),
+                )
+            except Exception as exc:
+                logger.debug("Steady-state cache limit restore skipped: %s", exc)
+            self._vlm_cache_limit_tightened = False
 
         prompt_processing = False
         batch = self.active_batch

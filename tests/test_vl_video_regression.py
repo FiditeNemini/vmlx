@@ -1333,6 +1333,45 @@ class TestIssueGuards:
 
         assert limit == 256 * 1024**2
 
+    def test_media_cache_limit_restored_for_steady_state_decode(self):
+        """The media tighten must NOT persist across decode steps.
+
+        The ~1GB media allocator limit is a prefill-spike safety control; it
+        must not outlive the spike and cap the whole session's allocator
+        free-list (hygiene — A/B showed decode throughput itself was
+        unchanged). _next() must restore the generator's steady-state
+        scheduler limit once the tightened prefill window is over.
+        """
+        import inspect
+        import vmlx_engine.mllm_batch_generator as _m
+
+        apply_src = inspect.getsource(_m._apply_vlm_image_request_cache_limit)
+        assert "return True" in apply_src
+        assert "-> bool" in apply_src
+
+        next_src = inspect.getsource(_m.MLLMBatchGenerator._next)
+        restore_block = next_src.split("prompt_processing = False", 1)[0]
+        assert "_vlm_cache_limit_tightened" in restore_block
+        assert "_steady_cache_limit" in restore_block
+        assert "set_cache" in restore_block
+
+        # Both tighten sites must arm the restore flag.
+        pre_src = inspect.getsource(_m.MLLMBatchGenerator._preprocess_request)
+        enc_src = inspect.getsource(
+            _m.MLLMBatchGenerator._run_vision_encoding_inner
+        )
+        for src in (pre_src, enc_src):
+            idx = src.index("_apply_vlm_image_request_cache_limit()")
+            assert "_vlm_cache_limit_tightened = True" in src[idx : idx + 200]
+
+    def test_apply_vlm_cache_limit_env_kill_switch_returns_false(self, monkeypatch):
+        monkeypatch.setenv("VMLX_VLM_IMAGE_CACHE_LIMIT", "0")
+        from vmlx_engine.mllm_batch_generator import (
+            _apply_vlm_image_request_cache_limit,
+        )
+
+        assert _apply_vlm_image_request_cache_limit() is False
+
     def test_vmlx156_simple_mllm_paths_apply_image_prefill_guard(self):
         """SimpleEngine / direct MLXMultimodalLM paths must share the vmlx#156
         image-prefill guard. Otherwise disabling prefix/continuous batching can

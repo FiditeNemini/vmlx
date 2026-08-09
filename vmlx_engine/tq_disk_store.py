@@ -440,8 +440,18 @@ def decode_tq_block(
     return keys, values
 
 
-def _tq_block_batch_signature(entry: Tuple[Any, ...]) -> Optional[Tuple[Any, ...]]:
-    """Return a grouping signature for one independently packed TQ page."""
+def _tq_block_batch_signature(
+    entry: Tuple[Any, ...],
+    *,
+    include_seed: bool = True,
+) -> Optional[Tuple[Any, ...]]:
+    """Return a grouping signature for one independently packed TQ page.
+
+    ``include_seed=False`` yields the payload-compatibility signature used by
+    the cross-layer batch decode: layers share dimensions, bit widths, dtypes,
+    and packed shapes but carry per-layer seeds, so the seed is tracked
+    separately and applied through stacked per-layer codec constants.
+    """
     if not isinstance(entry, (tuple, list)) or len(entry) != 4:
         return None
     tag, encoded_keys, encoded_values, config = entry
@@ -463,7 +473,7 @@ def _tq_block_batch_signature(entry: Tuple[Any, ...]) -> Optional[Tuple[Any, ...
             int(config["value_bits"]),
             str(config["key_dtype"]),
             str(config["value_dtype"]),
-            int(config["seed"]),
+            int(config["seed"]) if include_seed else None,
             int(encoded_keys.index_bits),
             int(encoded_values.index_bits),
         )
@@ -471,7 +481,24 @@ def _tq_block_batch_signature(entry: Tuple[Any, ...]) -> Optional[Tuple[Any, ...
         return None
 
 
-def _stack_tq_block_entries(entries: List[Tuple[Any, ...]]) -> Optional[Tuple[Any, ...]]:
+def _tq_entry_seed(entry: Tuple[Any, ...]) -> Optional[int]:
+    """Return the codec seed of one TQ page entry, or None if malformed."""
+    if not isinstance(entry, (tuple, list)) or len(entry) != 4:
+        return None
+    config = entry[3]
+    if not isinstance(config, dict):
+        return None
+    try:
+        return int(config["seed"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _stack_tq_block_entries(
+    entries: List[Tuple[Any, ...]],
+    *,
+    match_seed: bool = True,
+) -> Optional[Tuple[Any, ...]]:
     """Stack equal-shaped independently packed pages as an outer batch.
 
     TurboQuant packs every page independently and pads its final uint32 word.
@@ -491,7 +518,7 @@ def _stack_tq_block_entries(entries: List[Tuple[Any, ...]]) -> Optional[Tuple[An
 
     key_payloads = []
     value_payloads = []
-    signature = _tq_block_batch_signature(first)
+    signature = _tq_block_batch_signature(first, include_seed=match_seed)
     if signature is None:
         return None
 
@@ -501,7 +528,7 @@ def _stack_tq_block_entries(entries: List[Tuple[Any, ...]]) -> Optional[Tuple[An
         entry_tag, encoded_keys, encoded_values, config = entry
         if entry_tag != "turboquant_kv" or not isinstance(config, dict):
             return None
-        if _tq_block_batch_signature(entry) != signature:
+        if _tq_block_batch_signature(entry, include_seed=match_seed) != signature:
             return None
 
         key_shape = tuple(int(dim) for dim in encoded_keys.shape)
@@ -692,6 +719,283 @@ def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
             elapsed,
         )
     return keys, values
+
+
+def _decode_tq_stacked_layers(
+    stacked: Tuple[Any, ...],
+    seeds: List[int],
+    per_layer: int,
+) -> Tuple[Any, Any]:
+    """Decode one multi-layer stacked TQ payload with per-layer codec state.
+
+    ``stacked`` is a ``_stack_tq_block_entries(..., match_seed=False)`` entry
+    whose outer axis is ``len(seeds) * per_layer`` pages ordered layer-major.
+    Every arithmetic step mirrors ``jang_tools`` ``decode_keys``/
+    ``decode_values`` element-for-element; per-layer seeds only swap in stacked
+    rotation signs and QJL projections, and codebooks depend solely on
+    (dim, bits) so they are shared. Output: per-layer folded KV tensors of
+    shape (layers, B, H, per_layer * T, D), fully lazy.
+    """
+    import math
+
+    from jang_tools.turboquant import pipeline as _tq_pipeline
+    from jang_tools.turboquant.codebook import dequantize_scalar
+    from jang_tools.turboquant.pipeline import unpack_bits, unpack_signs
+
+    _, merged_keys, merged_values, config = stacked
+    layers = len(seeds)
+    key_dim = int(config["key_dim"])
+    value_dim = int(config["value_dim"])
+    key_bits = int(config["key_bits"])
+    value_bits = int(config["value_bits"])
+
+    encoder_pairs = [
+        _tq_decoder_pair(key_dim, value_dim, key_bits, value_bits, int(seed))
+        for seed in seeds
+    ]
+    key_encoders = [pair[0] for pair in encoder_pairs]
+    value_encoders = [pair[1] for pair in encoder_pairs]
+
+    # Use the exact inverse-rotation entry point the installed pipeline's own
+    # decode uses (fused Metal butterfly when present, Python butterfly
+    # otherwise) so batched output stays bit-identical to per-layer decode.
+    hadamard = getattr(_tq_pipeline, "_hadamard_inverse_fast", None)
+    if hadamard is None:
+        hadamard = _tq_pipeline.hadamard_inverse
+
+    key_shape = tuple(int(dim) for dim in merged_keys.shape)
+    value_shape = tuple(int(dim) for dim in merged_values.shape)
+    n_key_elements = 1
+    for dim in key_shape:
+        n_key_elements *= dim
+    n_value_elements = 1
+    for dim in value_shape:
+        n_value_elements *= dim
+
+    # ---- keys: unpack → dequant → QJL correct → inverse rotate → scale ----
+    flat_key_indices = unpack_bits(
+        merged_keys.indices_packed, int(merged_keys.index_bits), n_key_elements
+    ).reshape(-1, key_dim)
+    key_mse = dequantize_scalar(flat_key_indices, key_encoders[0].key_codebook)
+    flat_qjl = unpack_signs(merged_keys.qjl_packed, n_key_elements).reshape(
+        layers, -1, key_dim
+    )
+    key_res_norms = merged_keys.residual_norms.astype(mx.float32).reshape(
+        layers, -1, 1
+    )
+    key_vec_norms = merged_keys.vector_norms.astype(mx.float32).reshape(
+        layers, -1, 1
+    )
+    qjl_projection = mx.stack(
+        [encoder.qjl_S for encoder in key_encoders], axis=0
+    )
+    qjl_scale = math.sqrt(math.pi / 2.0) / key_dim
+    qjl_dequant = qjl_scale * key_res_norms * (flat_qjl @ qjl_projection)
+    key_rotated = key_mse.reshape(layers, -1, key_dim) + qjl_dequant
+    key_ones = mx.ones(
+        (key_dim,), dtype=key_encoders[0].rotation_signs.dtype
+    )
+    key_signs = mx.stack(
+        [encoder.rotation_signs for encoder in key_encoders], axis=0
+    ).reshape(layers, 1, key_dim)
+    keys = hadamard(key_rotated, key_ones) * key_signs * key_vec_norms
+    keys = _restore_tq_dtype(keys, config.get("key_dtype"), "key")
+
+    # ---- values: unpack → dequant → inverse rotate → scale ----
+    flat_value_indices = unpack_bits(
+        merged_values.indices_packed,
+        int(merged_values.index_bits),
+        n_value_elements,
+    ).reshape(-1, value_dim)
+    value_mse = dequantize_scalar(
+        flat_value_indices, value_encoders[0].value_codebook
+    )
+    value_vec_norms = merged_values.vector_norms.astype(mx.float32).reshape(
+        layers, -1, 1
+    )
+    value_ones = mx.ones(
+        (value_dim,), dtype=value_encoders[0].rotation_signs.dtype
+    )
+    value_signs = mx.stack(
+        [encoder.rotation_signs for encoder in value_encoders], axis=0
+    ).reshape(layers, 1, value_dim)
+    values = (
+        hadamard(value_mse.reshape(layers, -1, value_dim), value_ones)
+        * value_signs
+        * value_vec_norms
+    )
+    values = _restore_tq_dtype(values, config.get("value_dtype"), "value")
+
+    # Fold layer-major pages into each layer's token axis: page-major,
+    # token-minor — identical element mapping to decode_tq_blocks' fold.
+    keys = keys.reshape(
+        layers, per_layer, key_shape[-4], key_shape[-3], key_shape[-2], key_dim
+    )
+    keys = mx.moveaxis(keys, 1, 3).reshape(
+        layers, key_shape[-4], key_shape[-3], per_layer * key_shape[-2], key_dim
+    )
+    values = values.reshape(
+        layers,
+        per_layer,
+        value_shape[-4],
+        value_shape[-3],
+        value_shape[-2],
+        value_dim,
+    )
+    values = mx.moveaxis(values, 1, 3).reshape(
+        layers,
+        value_shape[-4],
+        value_shape[-3],
+        per_layer * value_shape[-2],
+        value_dim,
+    )
+    return keys, values
+
+
+def decode_tq_layer_groups(
+    groups: Dict[Any, List[Tuple[Any, ...]]],
+) -> Dict[Any, Tuple[Any, Any]]:
+    """Decode many layers' paged TQ entries as one cross-layer lazy graph.
+
+    ``groups`` maps an opaque caller key (layer index, sub-cache index, …) to
+    that layer's ordered page entries. Layers whose per-position payload
+    signatures match (everything except the per-layer seed) are stacked and
+    decoded together, collapsing L independent per-layer codec graphs into a
+    handful of large fused ops with no eval points (vmlx#91). Layers that
+    cannot co-batch fall back to :func:`decode_tq_blocks` per layer and stay
+    lazy as well. Returns key → (keys, values) with output identical to
+    ``decode_tq_blocks(entries)`` for every key.
+    """
+    timing = _tq_decode_timing_enabled()
+    if timing:
+        import time as _time
+
+        t0 = _time.perf_counter()
+
+    results: Dict[Any, Tuple[Any, Any]] = {}
+    signature_families: Dict[Any, List[Any]] = {}
+    fallback_keys: List[Any] = []
+
+    for group_key, entries in groups.items():
+        if not entries:
+            continue
+        signature_seq = tuple(
+            _tq_block_batch_signature(entry, include_seed=False)
+            for entry in entries
+        )
+        entry_seeds = {_tq_entry_seed(entry) for entry in entries}
+        if (
+            any(signature is None for signature in signature_seq)
+            or len(entry_seeds) != 1
+            or None in entry_seeds
+        ):
+            # Malformed or mixed-seed layer: per-layer compatibility path.
+            fallback_keys.append(group_key)
+            continue
+        signature_families.setdefault(signature_seq, []).append(group_key)
+
+    batched_runs = 0
+    batched_layers = 0
+    for signature_seq, group_keys in signature_families.items():
+        if len(group_keys) < 2:
+            fallback_keys.extend(group_keys)
+            continue
+        try:
+            # Split entry positions into runs of one payload signature (full
+            # pages vs a shorter tail page). Positions align across layers
+            # because every layer in the family shares the signature sequence.
+            run_bounds: List[Tuple[int, int]] = []
+            start = 0
+            for position in range(1, len(signature_seq) + 1):
+                if (
+                    position == len(signature_seq)
+                    or signature_seq[position] != signature_seq[start]
+                ):
+                    run_bounds.append((start, position))
+                    start = position
+
+            per_key_runs: Dict[Any, List[Any]] = {key: [] for key in group_keys}
+            for run_start, run_end in run_bounds:
+                per_layer = run_end - run_start
+                flat_entries: List[Tuple[Any, ...]] = []
+                seeds: List[int] = []
+                for group_key in group_keys:
+                    layer_entries = groups[group_key][run_start:run_end]
+                    flat_entries.extend(layer_entries)
+                    seeds.append(_tq_entry_seed(layer_entries[0]))
+                stacked = _stack_tq_block_entries(
+                    flat_entries, match_seed=False
+                )
+                if stacked is None:
+                    raise ValueError(
+                        "cross-layer TQ payload stacking failed for a "
+                        "signature-matched run"
+                    )
+                run_keys, run_values = _decode_tq_stacked_layers(
+                    stacked, seeds, per_layer
+                )
+                first_config = flat_entries[0][3]
+                _record_tq_block_codec_event(
+                    "decode",
+                    blocks=len(flat_entries),
+                    tokens=int(first_config["offset"]) * len(flat_entries),
+                    metadata={
+                        "boundary": "decode_tq_layer_groups",
+                        "key_bits_values": [int(first_config["key_bits"])],
+                        "value_bits_values": [int(first_config["value_bits"])],
+                        "key_dim_values": [int(first_config["key_dim"])],
+                        "value_dim_values": [int(first_config["value_dim"])],
+                        "key_dtype_values": [str(first_config["key_dtype"])],
+                        "value_dtype_values": [str(first_config["value_dtype"])],
+                        "key_shape": [int(dim) for dim in run_keys.shape],
+                        "value_shape": [int(dim) for dim in run_values.shape],
+                    },
+                )
+                batched_runs += 1
+                batched_layers += len(group_keys)
+                for index, group_key in enumerate(group_keys):
+                    per_key_runs[group_key].append(
+                        (run_keys[index], run_values[index])
+                    )
+
+            for group_key in group_keys:
+                pairs = per_key_runs[group_key]
+                if len(pairs) == 1:
+                    results[group_key] = pairs[0]
+                else:
+                    results[group_key] = (
+                        mx.concatenate([keys for keys, _ in pairs], axis=2),
+                        mx.concatenate([values for _, values in pairs], axis=2),
+                    )
+        except Exception as exc:  # pragma: no cover - safety net
+            logger.warning(
+                "cross-layer TQ batch decode failed (%s); falling back to "
+                "per-layer decode for %d layer(s)",
+                exc,
+                len(group_keys),
+            )
+            for group_key in group_keys:
+                results.pop(group_key, None)
+            fallback_keys.extend(group_keys)
+
+    for group_key in fallback_keys:
+        results[group_key] = decode_tq_blocks(groups[group_key])
+
+    if timing:
+        flattened = [tensor for pair in results.values() for tensor in pair]
+        if flattened:
+            mx.eval(*flattened)
+        elapsed = _time.perf_counter() - t0
+        logger.info(
+            "TQ layer-group decode timing: layers=%d batched_runs=%d "
+            "batched_layers=%d fallback_layers=%d wall=%.4fs",
+            len(results),
+            batched_runs,
+            batched_layers,
+            len(fallback_keys),
+            elapsed,
+        )
+    return results
 
 
 def is_tq_compressed_cache(cache: List[Any]) -> bool:

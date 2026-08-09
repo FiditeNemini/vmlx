@@ -5348,6 +5348,56 @@ class BlockAwarePrefixCache:
             # lets Metal overlap the layers.
             deferred_tq_eval: list = []
 
+            # vmlx#91: pre-scan native TQ layers (and CacheList TQ sub-caches)
+            # so compatible layers decode as ONE stacked cross-layer graph
+            # instead of L independent per-layer codec graphs. Output is
+            # bit-identical to decode_tq_blocks per layer; layers that cannot
+            # co-batch fall back inside decode_tq_layer_groups. Everything
+            # stays lazy — the single deferred eval below is the only sync.
+            tq_predecoded: dict = {}
+            tq_group_candidates: dict = {}
+            for _pre_layer_idx in range(num_layers):
+                _pre_top: list = []
+                _pre_subs: dict = {}
+                _pre_blocked = False
+                for _pre_block_data in all_block_data:
+                    if _pre_layer_idx >= len(_pre_block_data):
+                        continue
+                    _pre_entry = _pre_block_data[_pre_layer_idx]
+                    if not isinstance(_pre_entry, (tuple, list)) or not _pre_entry:
+                        continue
+                    if _pre_entry[0] == "turboquant_kv":
+                        _pre_top.append(tuple(_pre_entry))
+                    elif _pre_entry[0] == "zaya_cca":
+                        # ZAYA branch outranks the TQ branch in the loop below;
+                        # don't waste a batched decode on entries it ignores.
+                        _pre_blocked = True
+                    elif _pre_entry[0] == "cache_list" and len(_pre_entry) > 1:
+                        _pre_sub_list = _pre_entry[1]
+                        if isinstance(_pre_sub_list, (tuple, list)):
+                            for _pre_sub_idx, _pre_sub in enumerate(_pre_sub_list):
+                                if (
+                                    isinstance(_pre_sub, (tuple, list))
+                                    and _pre_sub
+                                    and _pre_sub[0] == "turboquant_kv"
+                                ):
+                                    _pre_subs.setdefault(
+                                        _pre_sub_idx, []
+                                    ).append(tuple(_pre_sub))
+                if _pre_blocked:
+                    continue
+                if _pre_top:
+                    tq_group_candidates[("layer", _pre_layer_idx)] = _pre_top
+                elif _pre_subs:
+                    for _pre_sub_idx, _pre_sub_entries in _pre_subs.items():
+                        tq_group_candidates[
+                            ("sub", _pre_layer_idx, _pre_sub_idx)
+                        ] = _pre_sub_entries
+            if len(tq_group_candidates) >= 2:
+                from .tq_disk_store import decode_tq_layer_groups
+
+                tq_predecoded = decode_tq_layer_groups(tq_group_candidates)
+
             for layer_idx in range(num_layers):
                 # Collect this layer's data from all blocks
                 layer_entries = []
@@ -5565,9 +5615,15 @@ class BlockAwarePrefixCache:
                     cumulative_count += 1
 
                 elif tq_block_entries:
-                    from .tq_disk_store import decode_tq_blocks
+                    _tq_pre = tq_predecoded.get(("layer", layer_idx))
+                    if _tq_pre is not None:
+                        concat_keys, concat_values = _tq_pre
+                    else:
+                        from .tq_disk_store import decode_tq_blocks
 
-                    concat_keys, concat_values = decode_tq_blocks(tq_block_entries)
+                        concat_keys, concat_values = decode_tq_blocks(
+                            tq_block_entries
+                        )
                     if len(tq_block_entries) == 1:
                         concat_keys = concat_keys * 1
                         concat_values = concat_values * 1
@@ -6236,9 +6292,15 @@ class BlockAwarePrefixCache:
                                 sub_cumulative = sub
 
                         if sub_tq_entries:
-                            from .tq_disk_store import decode_tq_blocks
+                            _tq_pre = tq_predecoded.get(
+                                ("sub", layer_idx, sub_idx)
+                            )
+                            if _tq_pre is not None:
+                                ck, cv = _tq_pre
+                            else:
+                                from .tq_disk_store import decode_tq_blocks
 
-                            ck, cv = decode_tq_blocks(sub_tq_entries)
+                                ck, cv = decode_tq_blocks(sub_tq_entries)
                             if len(sub_tq_entries) == 1:
                                 ck = ck * 1
                                 cv = cv * 1

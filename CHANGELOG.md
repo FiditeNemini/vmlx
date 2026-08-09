@@ -2,6 +2,34 @@
 
 All notable changes to vMLX Engine will be documented in this file.
 
+---
+
+> **⚡ DeepSeek V4 Flash — status as of vMLX Engine 1.6.25**
+>
+> As of **1.6.25** the engine ships the full DSV4-Flash speedup + coherency rollup accumulated across 1.6.19 → 1.6.25 (this file). CRACK builds targeting DSV4-Flash-0731 (`dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK`) require vMLX 1.6.25+ to see these numbers.
+>
+> **Speedups now landed:**
+> - MLX allocator cache scales with installed RAM (128 GB → 23 GB, cap 24 GB) — **~11% faster decode at every context length** (1.6.22).
+> - Prefill projects only the final position through `lm_head` on chunked prefill (1.6.25).
+> - Extended prefill+decode delta-chain KV store for cross-turn reuse; extended-store armed for short prompts too; idle-time shadow re-key of the predicted visible transcript (1.6.25).
+> - Batched TQ restore decode — single-run fold + one deferred eval across layers (1.6.25).
+>
+> **Coherency + long-context fixes now landed:**
+> - DSV4 fails closed on misaligned/incomplete composite-cache; SWA ring + q8 CSA/HCA pool segments preserved through prompt snapshots and SSD/L2 reconstruct; long prefills use compression-ratio-aligned chunks to avoid Metal command-buffer timeouts (1.6.19).
+> - DSV4-0731 session caps derived from bundle (Low reasoning, DSML, top-p, q8 native pool quant, activation-QAT, cache tiers); native pooled-cache snapshots preserve short append checkpoints, lossless L2 writes, valid eviction ancestry, partial-tail replay, SSD-only op, RAM-to-SSD refault without repeated validation reads (1.6.20).
+> - Delta-cache restore reads its block size and anchor interval from the cache records themselves (1.6.21 + 1.6.22).
+> - Answer-reserve split (`clamp(25% of budget, 256, 2048)`) — DSV4 always emits a visible answer, even on long-reasoning prompts (1.6.23). Reserve floor capped at half the budget so budgets under 512 tokens still split (1.6.24). Override via `DSV4_ANSWER_RESERVE`.
+> - Metal **live-buffer count** cap for DSV4 long generations — no more `Resource limit (499000) exceeded` crashes at ~12k tokens (1.6.24).
+> - Honest hardware context ceiling from pool geometry + floor-width transient margin + active-growth allowance; context-dependent prefill transient in the hw ceiling — DSV4 refuses/clamps oversized requests up front with a clear message instead of crashing mid-generation (1.6.25).
+>
+> **Companion jang_tools fix** (not vMLX code but required for the DSV4-Flash 2-bit line): CSA/HCA pool BF16 → q8 promotion ceiling raised from 2 MiB → 16 MiB, eliminating the mid-decode promotion event that caused DSV4-Flash-2L to loop past ~15k tokens.
+
+---
+
+## [1.6.25] - unreleased (in-development rollup)
+
+Rolling summary above. Per-commit detail: `git log v1.6.24..HEAD`.
+
 ## [1.6.24] - 2026-08-04
 
 ### Fixed

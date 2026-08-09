@@ -3362,6 +3362,10 @@ def test_dsv4_generator_skips_prompt_snapshot_for_short_cache_store_prompt_by_de
     snapshot before decode. Prefix/L2 store still has value for long prompts,
     but tiny prompts should decode immediately and let the safe scheduler
     fallback skip or re-derive cache state instead of blocking the user path.
+
+    With the extended store enabled (the default) short prompts DO arm the
+    cheap delta-transport capture so the decode-time chain can grow past a
+    block boundary; this test pins the kill-switch contract.
     """
     import mlx.core as mx
 
@@ -3369,6 +3373,7 @@ def test_dsv4_generator_skips_prompt_snapshot_for_short_cache_store_prompt_by_de
 
     monkeypatch.delenv("DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", raising=False)
     monkeypatch.delenv("VMLINUX_DSV4_PROMPT_SNAPSHOT_MIN_TOKENS", raising=False)
+    monkeypatch.setenv("VMLX_DSV4_EXTENDED_STORE", "0")
 
     class _Model:
         def make_cache(self):
@@ -3392,6 +3397,29 @@ def test_dsv4_generator_skips_prompt_snapshot_for_short_cache_store_prompt_by_de
 
     assert calls == []
     assert prompt_responses[0].prompt_cache_snapshot is None
+
+
+def test_dsv4_short_prompt_arms_extended_capture_when_extended_store_enabled():
+    """Short prompts must still seed the extended decode-time chain.
+
+    A 74-token prompt with a 2.5k-token generation was observed live storing
+    nothing: the snapshot min-tokens gate skipped the two-phase capture, so
+    _arm_extended_capture bailed on prompt_snapshot=None and the next turn
+    re-prefilled the whole conversation. Both the cold and cache-hit snapshot
+    gates must relax the min-tokens threshold when the extended store is
+    enabled, and the scheduler must keep skipping tiny prompt-only snapshot
+    stores when the chain never crossed a block boundary.
+    """
+    import inspect
+
+    from vmlx_engine import scheduler
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    gen_src = inspect.getsource(DSV4BatchGenerator.next)
+    assert gen_src.count("or self._extended_store_enabled") == 2
+
+    sched_src = inspect.getsource(scheduler.Scheduler)
+    assert "_dsv4_snapshot_store_below_threshold" in sched_src
 
 
 def test_dsv4_long_prefill_guard_describes_bounded_chunk_default():

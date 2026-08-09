@@ -3494,6 +3494,32 @@ class Scheduler:
             cached_tokens = max(len(key_tokens) - len(cache_remaining), 0)
         return cache_remaining + suffix, cached_tokens
 
+    def _dsv4_snapshot_store_below_threshold(self, request) -> bool:
+        """True when a DSV4 prompt snapshot is too short to store on its own.
+
+        Short prompts now capture snapshots solely to seed the extended
+        decode-time chain. When that chain never reached a block boundary
+        (short output too), storing the tiny N-1 snapshot would recreate the
+        cost the snapshot threshold exists to avoid — fall through to the
+        deferred path, which logs the skip.
+        """
+        if not self._uses_dsv4_cache:
+            return False
+        prompt_tokens = list(request.prompt_token_ids or [])
+        gpl = int(getattr(request, "_gen_prompt_len", 0) or 0)
+        if 0 < gpl < len(prompt_tokens):
+            prompt_tokens = prompt_tokens[:-gpl]
+        key_len = max(0, len(prompt_tokens) - 1)
+        try:
+            from .utils.dsv4_batch_generator import (
+                dsv4_prompt_snapshot_min_tokens as _min_tokens,
+            )
+
+            min_tokens = _min_tokens()
+        except Exception:
+            min_tokens = 256
+        return key_len < min_tokens
+
     def _log_dsv4_extended_match_divergence(self, request) -> None:
         """Log where an incoming prompt diverges from the last extended store.
 
@@ -7887,12 +7913,23 @@ class Scheduler:
                                             )
                                     if extended_store_armed:
                                         pass  # cache_for_extract set above
-                                    elif snapshot_cache is not None and not (
-                                        getattr(self, "_uses_m3_msa_cache", False)
-                                        and int(
-                                            getattr(request, "cached_tokens", 0) or 0
+                                    elif (
+                                        snapshot_cache is not None
+                                        and not (
+                                            getattr(
+                                                self, "_uses_m3_msa_cache", False
+                                            )
+                                            and int(
+                                                getattr(
+                                                    request, "cached_tokens", 0
+                                                )
+                                                or 0
+                                            )
+                                            > 0
                                         )
-                                        > 0
+                                        and not self._dsv4_snapshot_store_below_threshold(
+                                            request
+                                        )
                                     ):
                                         # Snapshot was captured at the
                                         # prompt boundary — use it

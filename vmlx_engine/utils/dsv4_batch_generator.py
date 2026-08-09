@@ -2126,7 +2126,18 @@ class DSV4BatchGenerator:
                         self.capture_prompt_snapshot
                         and r.capture_prompt_snapshot
                         and snapshot_target_tokens > 0
-                        and snapshot_target_tokens >= self.prompt_snapshot_min_tokens
+                        and (
+                            snapshot_target_tokens
+                            >= self.prompt_snapshot_min_tokens
+                            # The extended store grows the chain through
+                            # decode, so a short prompt with a long generation
+                            # still ends in a block-aligned store worth
+                            # donating. Arm capture and let the terminal store
+                            # decide; the scheduler still skips tiny
+                            # prompt-only snapshots when the chain never
+                            # crosses a block boundary.
+                            or self._extended_store_enabled
+                        )
                     )
                     should_capture_snapshot = bool(
                         snapshot_requested
@@ -2289,8 +2300,14 @@ class DSV4BatchGenerator:
                         self.capture_prompt_snapshot
                         and r.capture_prompt_snapshot
                         and context_snapshot_target > 0
-                        and context_snapshot_target
-                        >= self.prompt_snapshot_min_tokens
+                        and (
+                            context_snapshot_target
+                            >= self.prompt_snapshot_min_tokens
+                            # Same relaxation as the cold path: extended
+                            # capture needs the delta-transport snapshot to
+                            # continue the chain through decode.
+                            or self._extended_store_enabled
+                        )
                     )
                     tail_head = r.prompt_tokens[:-snapshot_tail_tokens]
                     should_capture_extension_snapshot = bool(

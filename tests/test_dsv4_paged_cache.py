@@ -3615,3 +3615,147 @@ def test_dsv4_unsafe_override_in_cache_scope_key():
         "namespace with default safe runs."
     )
     assert "VMLX_DSV4_TRUST_TRIMMED_CACHE" in src
+
+
+# ── DSV4 shadow re-key (idle-time predicted-transcript store) ────────────
+
+
+def _think_ids():
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        DSV4_EOS_ID,
+        THINK_CLOSE_ID,
+        THINK_OPEN_ID,
+    )
+
+    return THINK_OPEN_ID, THINK_CLOSE_ID, DSV4_EOS_ID
+
+
+def test_dsv4_shadow_rekey_predicts_visible_transcript_chain():
+    """Reasoning-dropping turn: predicted chain must be exactly
+    prompt[:-1] + </think> + visible answer + eos (trailing output eos
+    normalized to one)."""
+    from vmlx_engine.scheduler import Scheduler
+
+    topen, tclose, eos = _think_ids()
+    prompt = [10, 11, 12, topen]
+    output = [500, 501, tclose, 600, 601, 602, eos]
+
+    predicted = Scheduler._dsv4_predict_shadow_rekey_tokens(prompt, output)
+
+    assert predicted == [10, 11, 12, tclose, 600, 601, 602, eos]
+
+
+def test_dsv4_shadow_rekey_appends_eos_when_output_omits_it():
+    from vmlx_engine.scheduler import Scheduler
+
+    topen, tclose, eos = _think_ids()
+    predicted = Scheduler._dsv4_predict_shadow_rekey_tokens(
+        [10, topen], [500, tclose, 600, 601]
+    )
+
+    assert predicted == [10, tclose, 600, 601, eos]
+
+
+def test_dsv4_shadow_rekey_skips_reasoning_keeping_render():
+    """THINK_OPEN in the fed history (tools-on render keeps prior
+    reasoning) means the extended store already covers the next turn; a
+    stripped shadow chain would never match."""
+    from vmlx_engine.scheduler import Scheduler
+
+    topen, tclose, eos = _think_ids()
+    prompt = [10, topen, 500, tclose, 600, 11, topen]
+    output = [700, tclose, 800, eos]
+
+    assert Scheduler._dsv4_predict_shadow_rekey_tokens(prompt, output) is None
+
+
+def test_dsv4_shadow_rekey_skips_ineligible_turns():
+    from vmlx_engine.scheduler import Scheduler
+
+    topen, tclose, eos = _think_ids()
+    # No thinking rail armed.
+    assert (
+        Scheduler._dsv4_predict_shadow_rekey_tokens(
+            [10, 11], [500, tclose, 600]
+        )
+        is None
+    )
+    # No reasoning transition in output.
+    assert (
+        Scheduler._dsv4_predict_shadow_rekey_tokens([10, topen], [500, 501])
+        is None
+    )
+    # Empty visible answer (reasoning ran to eos).
+    assert (
+        Scheduler._dsv4_predict_shadow_rekey_tokens(
+            [10, topen], [500, tclose, eos]
+        )
+        is None
+    )
+    # Empty inputs.
+    assert Scheduler._dsv4_predict_shadow_rekey_tokens([], []) is None
+
+
+def test_dsv4_shadow_rekey_env_gates():
+    """VMLX_DSV4_SHADOW_REKEY default-on kill switch + cap parsing."""
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS,
+        dsv4_shadow_rekey_enabled,
+        dsv4_shadow_rekey_max_tokens,
+    )
+
+    for name in ("VMLX_DSV4_SHADOW_REKEY", "VMLX_DSV4_SHADOW_REKEY_MAX_TOKENS"):
+        os.environ.pop(name, None)
+    try:
+        assert dsv4_shadow_rekey_enabled() is True
+        assert (
+            dsv4_shadow_rekey_max_tokens()
+            == DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS
+        )
+        os.environ["VMLX_DSV4_SHADOW_REKEY"] = "0"
+        assert dsv4_shadow_rekey_enabled() is False
+        os.environ["VMLX_DSV4_SHADOW_REKEY_MAX_TOKENS"] = "8192"
+        assert dsv4_shadow_rekey_max_tokens() == 8192
+        os.environ["VMLX_DSV4_SHADOW_REKEY_MAX_TOKENS"] = "bogus"
+        assert (
+            dsv4_shadow_rekey_max_tokens()
+            == DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS
+        )
+    finally:
+        for name in (
+            "VMLX_DSV4_SHADOW_REKEY",
+            "VMLX_DSV4_SHADOW_REKEY_MAX_TOKENS",
+        ):
+            os.environ.pop(name, None)
+
+
+def test_dsv4_shadow_rekey_idle_task_contract():
+    """Source contract: the drain task must follow the vmlx#245 idle-task
+    discipline (park on foreground, requeue on mid-prefill park, one entry
+    per iteration) and the store must settle refs to cached-but-free."""
+    import inspect
+    from vmlx_engine.scheduler import Scheduler
+
+    drain_src = inspect.getsource(Scheduler._drain_one_dsv4_shadow_rekey)
+    assert "_foreground_pending" in drain_src
+    assert "IdleTaskResult.PARKED" in drain_src
+    assert "queue.insert(" in drain_src
+    assert "_prefill_for_prompt_only_cache" in drain_src
+    assert "clear_mlx_memory_cache" in drain_src
+
+    store_src = inspect.getsource(Scheduler._store_dsv4_shadow_chain)
+    assert "_quantize_cache_for_storage" in store_src
+    assert "store_cache" in store_src
+    assert "release_request_refs" in store_src
+    assert "detach_request" in store_src
+    assert "enforce_byte_budget" in store_src
+
+    queue_src = inspect.getsource(Scheduler._queue_dsv4_shadow_rekey)
+    assert 'finish_reason != "stop"' in queue_src
+    assert "_bypass_prefix_cache" in queue_src
+    assert "dsv4_shadow_rekey_enabled" in queue_src
+    assert "dsv4_prompt_snapshot_min_tokens" in queue_src
+
+    # The completion path must actually queue the shadow re-key.
+    resp_src = inspect.getsource(Scheduler._process_batch_responses)
+    assert "_queue_dsv4_shadow_rekey" in resp_src

@@ -23,7 +23,7 @@ import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from mlx_lm.generate import BatchGenerator, generation_stream
 from .sampling import make_minimax_m3_sampler, make_sampler
@@ -6332,6 +6332,277 @@ class Scheduler:
         self._ssm_rederive_task_queued = False
         return IdleTaskResult.DONE
 
+    # ── DSV4 shadow re-key (idle-time predicted-transcript store) ────────
+    # With builtin tools OFF the DSV4 encoder strips prior-turn reasoning
+    # from the rendered history, so the reasoning-inclusive chain stored at
+    # completion cannot match the next turn past the assistant rail — the
+    # next turn re-prefills the whole visible transcript cold. The visible
+    # render is byte-predictable from this turn's fed prompt and output
+    # (`prompt[:-1] + </think> + answer + eos`), so at engine idle we
+    # prefill that predicted sequence and store it as a prompt-only chain
+    # keyed exactly like the next prompt's prefix.
+
+    @staticmethod
+    def _dsv4_predict_shadow_rekey_tokens(
+        prompt_ids: Sequence[int], output_ids: Sequence[int]
+    ) -> Optional[List[int]]:
+        """Predicted next-turn visible-transcript prefix, or None when the
+        turn is ineligible.
+
+        Eligibility is derived from the tokens alone — no render stamp
+        needed: a reasoning-keeping (tools-on) render leaves prior-turn
+        ``<think>`` openers in the fed history, while a reasoning-dropping
+        render never feeds THINK_OPEN outside the terminal generation rail.
+        """
+        from .utils.dsv4_batch_generator import (
+            DSV4_EOS_ID,
+            THINK_CLOSE_ID,
+            THINK_OPEN_ID,
+        )
+
+        prompt_ids = list(prompt_ids or [])
+        output_ids = list(output_ids or [])
+        if not prompt_ids or not output_ids:
+            return None
+        # Thinking rail must be armed (effort-prompt variants that append
+        # tokens after <think> are out of scope for v1 — skip cleanly).
+        if prompt_ids[-1] != THINK_OPEN_ID:
+            return None
+        # Prior-turn reasoning present in the fed history means this is a
+        # reasoning-keeping render; the extended store already covers the
+        # exact fed sequence and a stripped shadow chain would never match.
+        if THINK_OPEN_ID in prompt_ids[:-1]:
+            return None
+        try:
+            close_idx = output_ids.index(THINK_CLOSE_ID)
+        except ValueError:
+            return None
+        visible = list(output_ids[close_idx + 1 :])
+        while visible and visible[-1] == DSV4_EOS_ID:
+            visible.pop()
+        if not visible:
+            return None
+        return prompt_ids[:-1] + [THINK_CLOSE_ID] + visible + [DSV4_EOS_ID]
+
+    def _queue_dsv4_shadow_rekey(
+        self,
+        request_id: str,
+        request: "Request",
+        finish_reason: Optional[str],
+    ) -> None:
+        """Queue an idle-time shadow re-key for an eligible finished turn."""
+        try:
+            from .utils.dsv4_batch_generator import (
+                dsv4_prompt_snapshot_min_tokens,
+                dsv4_shadow_rekey_enabled,
+                dsv4_shadow_rekey_max_tokens,
+            )
+
+            if (
+                not self._uses_dsv4_cache
+                or self.block_aware_cache is None
+                or not self.config.enable_prefix_cache
+                or finish_reason != "stop"
+                or getattr(request, "_bypass_prefix_cache", False)
+                or not dsv4_shadow_rekey_enabled()
+            ):
+                return
+            predicted = self._dsv4_predict_shadow_rekey_tokens(
+                getattr(request, "prompt_token_ids", None) or [],
+                getattr(request, "output_token_ids", None) or [],
+            )
+            if predicted is None:
+                return
+            if len(predicted) < dsv4_prompt_snapshot_min_tokens():
+                # Below one cache block nothing is storable, and the next
+                # turn re-prefills this many tokens for free anyway.
+                return
+            cap = dsv4_shadow_rekey_max_tokens()
+            if cap > 0 and len(predicted) > cap:
+                logger.info(
+                    "DSV4 shadow re-key skipped for %s: predicted chain "
+                    "%d tokens exceeds cap %d.",
+                    request_id,
+                    len(predicted),
+                    cap,
+                )
+                return
+            entry = (
+                predicted,
+                request_id,
+                self._pick_cache_type_for_request(request),
+                dict(request._cache_extra_keys)
+                if getattr(request, "_cache_extra_keys", None)
+                else None,
+            )
+            queue = getattr(self, "_dsv4_shadow_rekey_queue", None)
+            if queue is None:
+                queue = []
+                self._dsv4_shadow_rekey_queue = queue
+            queue.append(entry)
+            # Newest-wins bound: idle GPU time should chase the latest
+            # conversation state, not a backlog of superseded turns.
+            while len(queue) > 2:
+                dropped = queue.pop(0)
+                logger.debug(
+                    "DSV4 shadow re-key queue bound: dropped stale entry "
+                    "for %s",
+                    dropped[1],
+                )
+            logger.info(
+                "DSV4 shadow re-key queued for %s: %d predicted "
+                "visible-transcript tokens (reasoning-dropping render).",
+                request_id,
+                len(predicted),
+            )
+            self._ensure_dsv4_shadow_rekey_idle_task()
+        except Exception as e:
+            logger.debug(
+                f"DSV4 shadow re-key queue failed for {request_id}: {e}"
+            )
+
+    def _ensure_dsv4_shadow_rekey_idle_task(self) -> None:
+        """Register the shadow re-key drain task once per queue lifetime."""
+        if getattr(self, "_dsv4_shadow_rekey_task_queued", False):
+            return
+        self._dsv4_shadow_rekey_task_queued = True
+        self.register_idle_task(
+            self._drain_one_dsv4_shadow_rekey, name="dsv4-shadow-rekey"
+        )
+
+    def _drain_one_dsv4_shadow_rekey(self) -> "IdleTaskResult":
+        """Idle-task body: prefill + store ONE predicted-transcript chain.
+
+        Mirrors the deferred SSM re-derive discipline (vmlx#245): runs only
+        at engine idle, parks between prefill chunks when foreground work
+        arrives, and processes one queue entry per idle iteration.
+        """
+        queue = getattr(self, "_dsv4_shadow_rekey_queue", None)
+        if (
+            not queue
+            or not self._uses_dsv4_cache
+            or self.block_aware_cache is None
+            or not self.config.enable_prefix_cache
+        ):
+            if queue is not None:
+                queue.clear()
+            self._dsv4_shadow_rekey_task_queued = False
+            return IdleTaskResult.DONE
+        if self._foreground_pending():
+            return IdleTaskResult.PARKED
+        predicted, orig_request_id, cache_type, extra_keys = queue.pop(0)
+        try:
+            logger.info(
+                "DSV4 shadow re-key: prefilling predicted visible "
+                "transcript for %s (%d tokens, %d remaining in queue)",
+                orig_request_id,
+                len(predicted),
+                len(queue),
+            )
+            parked = False
+
+            def _park_poll() -> bool:
+                nonlocal parked
+                parked = self._foreground_pending()
+                return parked
+
+            fresh_cache = self._prefill_for_prompt_only_cache(
+                predicted, should_stop=_park_poll
+            )
+            if parked and fresh_cache is None:
+                # Foreground arrived mid-prefill: partial work discarded;
+                # retry this entry at the next idle iteration.
+                queue.insert(
+                    0, (predicted, orig_request_id, cache_type, extra_keys)
+                )
+                logger.info(
+                    "DSV4 shadow re-key: parked for foreground work (%s)",
+                    orig_request_id,
+                )
+                return IdleTaskResult.PARKED
+            if fresh_cache is not None:
+                self._store_dsv4_shadow_chain(
+                    f"{orig_request_id}-rekey",
+                    predicted,
+                    fresh_cache,
+                    cache_type,
+                    extra_keys,
+                )
+                del fresh_cache
+                clear_mlx_memory_cache(log=logger)
+        except Exception as e:
+            logger.warning(
+                f"DSV4 shadow re-key failed for {orig_request_id}: {e}"
+            )
+        if queue:
+            return IdleTaskResult.PARKED
+        self._dsv4_shadow_rekey_task_queued = False
+        return IdleTaskResult.DONE
+
+    def _store_dsv4_shadow_chain(
+        self,
+        store_id: str,
+        key_tokens: List[int],
+        cache: List[Any],
+        cache_type: str,
+        extra_keys: Optional[Dict[str, Any]],
+    ) -> None:
+        """Store an idle-prefilled predicted chain, then settle refs.
+
+        Same recipe as the abort-salvage store: optional TQ quantization,
+        extract, store under a synthetic id, then release the stored blocks
+        to cached-but-free so memory pressure can reclaim them.
+        """
+        _t_store = time.perf_counter()
+        cache_for_store = cache
+        if getattr(self, "_kv_cache_bits", 0):
+            cache_for_store = self._quantize_cache_for_storage(cache_for_store)
+        extracted = self._extract_cache_states(cache_for_store)
+        if not extracted:
+            return
+        store_kwargs: Dict[str, Any] = {"cache_type": cache_type}
+        if extra_keys:
+            store_kwargs["cache_extra_keys"] = dict(extra_keys)
+        self.block_aware_cache.store_cache(
+            store_id,
+            list(key_tokens),
+            extracted,
+            **store_kwargs,
+        )
+        self._dsv4_trace_timing(
+            "shadow_rekey_store",
+            _t_store,
+            store_id,
+            tokens=len(key_tokens),
+            layers=len(extracted),
+        )
+        logger.info(
+            "DSV4 shadow re-key stored predicted visible-transcript chain "
+            "for %s (%d cache-key tokens, %d layers)",
+            store_id,
+            len(key_tokens),
+            len(extracted),
+        )
+        # store_cache() registered the synthetic id in _request_tables with
+        # the stored blocks at ref_count>=1. Settle them to cached-but-free
+        # (same idiom as the completion-path post-store release).
+        try:
+            _stored_entry = self.block_aware_cache._request_tables.pop(
+                store_id, None
+            )
+            self.block_aware_cache.paged_cache.release_request_refs(
+                _stored_entry.block_table if _stored_entry else None
+            )
+            self.block_aware_cache.paged_cache.detach_request(store_id)
+            if self.block_aware_cache.paged_cache.max_resident_bytes > 0:
+                self.block_aware_cache.paged_cache.enforce_byte_budget()
+        except Exception as _rel_e:
+            logger.debug(
+                "Post-shadow-store paged ref release failed for %s: %s",
+                store_id,
+                _rel_e,
+            )
+
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""
         return len(self.waiting)
@@ -8508,6 +8779,12 @@ class Scheduler:
                             )
                     except Exception as e:
                         logger.warning(f"Failed to extract cache for {request_id}: {e}")
+
+                # Tools-off renders strip prior reasoning, so the chain
+                # stored above cannot match the next turn's rendered
+                # history. Queue an idle-time shadow re-key of the
+                # predicted visible transcript (no-op unless eligible).
+                self._queue_dsv4_shadow_rekey(request_id, request, finish_reason)
 
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1

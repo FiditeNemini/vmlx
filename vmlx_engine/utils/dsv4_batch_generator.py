@@ -43,6 +43,7 @@ DSV4_ASSISTANT_ID = 128804
 DEFAULT_DSV4_PROMPT_SNAPSHOT_MIN_TOKENS = 256
 DEFAULT_DSV4_LONG_PREFILL_THRESHOLD_TOKENS = 12_288
 DEFAULT_DSV4_LONG_PREFILL_STEP_TOKENS = 512
+DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS = 4_096
 DSV4_NATIVE_BLOCK_SIZE = 256
 DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS = 8
 # Diagnostic Metal-memory telemetry per prefill chunk (active/cache/peak).
@@ -393,6 +394,47 @@ def dsv4_extended_store_enabled() -> bool:
     if raw is None:
         return True
     return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def dsv4_shadow_rekey_enabled() -> bool:
+    """Idle-time shadow re-key of the predicted next-turn visible transcript.
+
+    With builtin tools OFF the DSV4 encoder contract strips prior-turn
+    reasoning from the rendered history, so the reasoning-inclusive chain
+    stored at completion diverges right after the assistant rail and the
+    next turn re-prefills the visible transcript cold (short prompts lose
+    everything: matched=0 observed live). At engine idle, prefill the
+    predicted visible render (prompt + </think> + answer + eos) and store
+    it as a prompt-only chain so the next tools-off turn block-hits.
+    Kill switch for diagnostics: VMLX_DSV4_SHADOW_REKEY=0.
+    """
+    raw = os.environ.get("VMLX_DSV4_SHADOW_REKEY")
+    if raw is None:
+        return True
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def dsv4_shadow_rekey_max_tokens() -> int:
+    """Length cap for shadow re-key prefills (predicted-chain tokens).
+
+    v1 recomputes the full predicted transcript, so long contexts would
+    spend idle GPU redundantly re-prefilling the prompt region the cache
+    already covers. The proven pain is short/medium tools-off turns; cap
+    the idle prefill there until seeded prefill (reconstruct matched
+    blocks, prefill only the tail) lands. 0 disables the cap.
+    """
+    raw = os.environ.get("VMLX_DSV4_SHADOW_REKEY_MAX_TOKENS")
+    if raw is None:
+        return DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid DSV4 shadow re-key cap %r; using default %d",
+            raw,
+            DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS,
+        )
+        return DEFAULT_DSV4_SHADOW_REKEY_MAX_TOKENS
 
 
 @dataclass

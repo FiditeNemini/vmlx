@@ -28,7 +28,7 @@ def _req(enable_thinking=True):
     return SimpleNamespace(enable_thinking=enable_thinking)
 
 
-def _drive(raw_chunks, request, *, holdback=0):
+def _drive(raw_chunks, request, *, holdback=0, think_in_prompt=False):
     """Replicate the streaming loop: accumulate new_text, collect emitted deltas.
 
     The last chunk is delivered with finished=True (the engine's terminal chunk),
@@ -46,6 +46,7 @@ def _drive(raw_chunks, request, *, holdback=0):
             request,
             finished,
             holdback=holdback,
+            think_in_prompt=think_in_prompt,
         )
         if delta:
             deltas.append(delta)
@@ -154,6 +155,65 @@ def test_partial_close_think_marker_never_leaks_then_answer_streams():
     assert "".join(deltas) == "B1-OK"
 
 
+def test_native_retry_bundled_redundant_close_never_leaks():
+    deltas, _ = _drive(
+        ["private plan</think>POST-TOOL-VISIBLE</think>"],
+        _req(),
+        think_in_prompt=True,
+    )
+    assert deltas == ["POST-TOOL-VISIBLE"]
+    assert "think" not in "".join(deltas).lower()
+
+
+def test_dsv4_direct_rail_bundled_redundant_close_never_leaks():
+    deltas, _ = _drive(
+        ["POST-TOOL-VISIBLE</think>"],
+        _req(),
+        think_in_prompt=False,
+    )
+    assert deltas == ["POST-TOOL-VISIBLE"]
+
+
+def test_native_retry_split_redundant_close_is_held_then_removed():
+    chunks = [
+        "private plan",
+        "</think>",
+        "POST-TOOL",
+        "-VISIBLE",
+        "</",
+        "thi",
+        "nk>",
+    ]
+    deltas, _ = _drive(chunks, _req(), think_in_prompt=True)
+    assert deltas == ["POST-TOOL", "-VISIBLE"]
+    assert "".join(deltas) == "POST-TOOL-VISIBLE"
+
+
+def test_dsv4_direct_rail_split_redundant_close_is_never_emitted():
+    chunks = ["POST", "-TOOL", "-VISIBLE", "</", "thi", "nk>"]
+    deltas, _ = _drive(chunks, _req(), think_in_prompt=False)
+    assert deltas == ["POST", "-TOOL", "-VISIBLE"]
+    assert "".join(deltas) == "POST-TOOL-VISIBLE"
+
+
+def test_dsv4_direct_rail_terminal_partial_close_is_dropped():
+    deltas, _ = _drive(
+        ["POST-TOOL", "-VISIBLE", "</thi"],
+        _req(),
+        think_in_prompt=False,
+    )
+    assert deltas == ["POST-TOOL", "-VISIBLE"]
+
+
+def test_native_retry_redundant_close_preserves_visible_sides_and_spacing():
+    deltas, _ = _drive(
+        ["private</think>Visible left </thinking> visible right"],
+        _req(),
+        think_in_prompt=True,
+    )
+    assert deltas == ["Visible left  visible right"]
+
+
 def test_reopened_reasoning_is_hidden_until_close_then_answer_streams():
     chunks = ["<think>", "private plan", "</think>", "STEP", "-", "OK"]
     deltas, raw = _drive(chunks, _req(enable_thinking=False))
@@ -222,6 +282,13 @@ def test_both_stream_sites_use_the_delta_helper():
     assert "_answer_pass_visible_delta" in resp_src
     assert "_answer_pass_reconcile_delta" not in resp_src
     assert "engine.stream_chat(messages=answer_messages" in resp_src
+
+
+def test_both_nonstream_sites_use_the_same_visible_answer_helper():
+    chat_src = inspect.getsource(server_mod.create_chat_completion)
+    resp_src = inspect.getsource(server_mod.create_response)
+    assert "_ns_text, _ = _answer_pass_visible_delta(" in chat_src
+    assert "_ns_text, _ = _answer_pass_visible_delta(" in resp_src
 
 
 def test_partial_prefix_regeneration_helper_is_removed():

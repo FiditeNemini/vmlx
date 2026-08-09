@@ -1653,6 +1653,15 @@ def _answer_pass_visible_delta(
     )
     if vis is None:
         return "", already_sent
+    # Every bounded answer pass is a parser-owned direct/native answer rail.
+    # A redundant close after visible prose is therefore control residue even
+    # when this family did not inject an opening tag into the retry prompt
+    # (DSV4's direct rail is the live-proven case). Apply this to the cumulative
+    # view so split suffixes are held before an irreversible SSE delta.
+    vis = _answer_pass_strip_redundant_reasoning_closes(
+        vis,
+        finished=finished,
+    )
     if getattr(request, "enable_thinking", None) is False and "</think>" in vis:
         vis = vis.rsplit("</think>", 1)[1]
     full = _finalize_visible_text_for_request(clean_output_text(vis), request)
@@ -1782,6 +1791,48 @@ _ANSWER_PASS_CONTROL_PREFIXES = (
     "[/THINK]",
 )
 
+_ANSWER_PASS_REASONING_CLOSE_MARKERS = (
+    "</think>",
+    "</thinking>",
+    "</mm:think>",
+    "[/THINK]",
+)
+
+
+def _answer_pass_strip_redundant_reasoning_closes(
+    text: str,
+    *,
+    finished: bool,
+) -> str:
+    """Remove post-boundary close markers without leaking split prefixes.
+
+    A native retry whose prompt already owns the opening reasoning rail may
+    close that rail once before its visible answer and then emit a redundant
+    close at EOS.  The latter is parser-owned control markup, including when it
+    is glued between two visible spans.  Because streaming deltas are
+    irreversible, retain a trailing proper prefix (``</thi`` and friends)
+    until it either resolves to a marker or proves to be ordinary prose.
+
+    Whitespace is intentionally untouched: this helper operates on the
+    cumulative post-boundary view and must remain byte-stable for visible text.
+    """
+    visible = text or ""
+    for marker in _ANSWER_PASS_REASONING_CLOSE_MARKERS:
+        visible = re.sub(re.escape(marker), "", visible, flags=re.IGNORECASE)
+    if not visible:
+        return visible
+
+    folded = visible.casefold()
+    held = 0
+    for marker in _ANSWER_PASS_REASONING_CLOSE_MARKERS:
+        folded_marker = marker.casefold()
+        max_prefix = min(len(folded), len(folded_marker) - 1)
+        for length in range(max_prefix, 0, -1):
+            if folded.endswith(folded_marker[:length]):
+                held = max(held, length)
+                break
+    return visible[:-held] if held else visible
+
 
 def _answer_pass_safe_visible_raw(
     raw_text: str,
@@ -1821,10 +1872,15 @@ def _answer_pass_safe_visible_raw(
     # closing sentinel arrives, then expose only the model-generated answer.
     # This is parser semantics, not synthetic content or a forced closer.
     if think_in_prompt:
-        for closer in ("</think>", "</thinking>", "</mm:think>", "[/THINK]"):
-            close_index = stripped.find(closer)
-            if close_index >= 0:
-                return stripped[close_index + len(closer) :]
+        close_match: re.Match[str] | None = None
+        for closer in _ANSWER_PASS_REASONING_CLOSE_MARKERS:
+            candidate = re.search(re.escape(closer), stripped, flags=re.IGNORECASE)
+            if candidate is not None and (
+                close_match is None or candidate.start() < close_match.start()
+            ):
+                close_match = candidate
+        if close_match is not None:
+            return stripped[close_match.end() :]
         return "" if finished else None
 
     # Gemma's thought channel is not visible output. Its degraded form may omit
@@ -17678,18 +17734,13 @@ async def create_chat_completion(
                     endpoint="Chat Completions visible answer pass (non-stream)",
                     hard_timeout=request.timeout is not None,
                 )
-                if _ns_native_tool_recovery:
-                    _ns_text, _ = _answer_pass_visible_delta(
-                        getattr(_ns_out, "text", "") or "",
-                        "",
-                        request,
-                        True,
-                        think_in_prompt=True,
-                    )
-                else:
-                    _ns_text = clean_output_text(
-                        getattr(_ns_out, "text", "") or ""
-                    )
+                _ns_text, _ = _answer_pass_visible_delta(
+                    getattr(_ns_out, "text", "") or "",
+                    "",
+                    request,
+                    True,
+                    think_in_prompt=_ns_native_tool_recovery,
+                )
                 # For qwen3.5/3.6 ONLY, adopt the salvage when it actually
                 # COMPLETED. A salvage that itself hit the bounded budget
                 # (finish_reason="length") is an incomplete fragment: a
@@ -20849,18 +20900,13 @@ async def create_response(
                     endpoint="Responses visible answer pass (non-stream)",
                     hard_timeout=request.timeout is not None,
                 )
-                if _ns_native_tool_recovery:
-                    _ns_text, _ = _answer_pass_visible_delta(
-                        getattr(_ns_out, "text", "") or "",
-                        "",
-                        request,
-                        True,
-                        think_in_prompt=True,
-                    )
-                else:
-                    _ns_text = clean_output_text(
-                        getattr(_ns_out, "text", "") or ""
-                    )
+                _ns_text, _ = _answer_pass_visible_delta(
+                    getattr(_ns_out, "text", "") or "",
+                    "",
+                    request,
+                    True,
+                    think_in_prompt=_ns_native_tool_recovery,
+                )
                 # For qwen3.5/3.6 ONLY, adopt the salvage when it actually
                 # COMPLETED. A salvage that itself hit the bounded budget
                 # (finish_reason="length") is an incomplete fragment: a

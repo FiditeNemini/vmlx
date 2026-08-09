@@ -91,17 +91,70 @@ class TestDeepSeekR1ReasoningParserNoLeak:
         assert "</think>" not in content
 
     def test_double_close_tag_no_leak(self, parser):
-        """Defensive: if model emits an extra </think>, the first split wins
-        and the second </think> goes into content. Document the behavior."""
+        """A redundant close is parser-owned markup, never visible content."""
         parser.reset_state(think_in_prompt=True)
         text = "reasoning</think>answer with extra </think>tail"
         reasoning, content = parser.extract_reasoning(text)
-        # Behavior: first </think> splits; second goes into content (parser
-        # contract — surfaces a real model bug rather than hiding it).
         assert reasoning == "reasoning"
-        # Content here will contain the second </think> since the parser
-        # only splits on the FIRST occurrence — pin the actual behavior.
-        assert content is not None and content.startswith("answer")
+        assert content == "answer with extra tail"
+        assert "</think>" not in content
+
+    def test_implicit_alias_close_matches_streaming_contract(self, parser):
+        parser.reset_state(think_in_prompt=True)
+        reasoning, content = parser.extract_reasoning(
+            "private</thinking>VISIBLE"
+        )
+        assert reasoning == "private"
+        assert content == "VISIBLE"
+
+    def test_streaming_redundant_close_preserves_visible_sides(self, parser):
+        parser.reset_state(think_in_prompt=True)
+        chunks = [
+            "reasoning</think>",
+            "answer with extra ",
+            "</",
+            "think>",
+            "tail",
+        ]
+        raw = ""
+        visible = []
+        for piece in chunks:
+            previous = raw
+            raw += piece
+            delta = parser.extract_reasoning_streaming(previous, raw, piece)
+            if delta and delta.content:
+                visible.append(delta.content)
+        assert "".join(visible) == "answer with extra tail"
+        assert "think" not in "".join(visible).lower()
+
+    def test_streaming_bundled_double_close_never_leaks(self, parser):
+        parser.reset_state(think_in_prompt=True)
+        raw = "reasoning</think>answer</think>tail"
+        delta = parser.extract_reasoning_streaming("", raw, raw)
+        assert delta is not None
+        assert delta.reasoning == "reasoning"
+        assert delta.content == "answertail"
+
+    def test_streaming_explicit_rail_double_close_never_leaks(self, parser):
+        parser.reset_state(think_in_prompt=False)
+        raw = "<think>reasoning</think>answer</think>tail"
+        delta = parser.extract_reasoning_streaming("", raw, raw)
+        assert delta is not None
+        assert delta.reasoning == "reasoning"
+        assert delta.content == "answertail"
+
+    def test_direct_rail_redundant_close_preserves_next_delta_space(self, parser):
+        parser.reset_state(think_in_prompt=False)
+        chunks = ["Visible", "</think>", " tail"]
+        raw = ""
+        visible = []
+        for piece in chunks:
+            previous = raw
+            raw += piece
+            delta = parser.extract_reasoning_streaming(previous, raw, piece)
+            if delta and delta.content:
+                visible.append(delta.content)
+        assert "".join(visible) == "Visible tail"
 
     def test_registry_resolves_deepseek_r1(self):
         """Parser must be registered under `deepseek_r1` alias."""

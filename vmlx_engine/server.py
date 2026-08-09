@@ -148,6 +148,7 @@ from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
 from .tool_parsers.abstract_tool_parser import generate_tool_id
 from .utils.hybrid_tq_cache import is_turboquant_make_cache
+from .utils.thermal import thermal_state_name
 from .utils.ssm_companion_cache import (
     normalize_ssm_telemetry_request_id,
     sanitize_ssm_prefix_lookup,
@@ -16683,7 +16684,7 @@ async def create_completion(request: CompletionRequest):
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = total_completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
-        f"Completion: {total_prompt_tokens} prompt + {total_completion_tokens} completion tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill)"
+        f"Completion: {total_prompt_tokens} prompt + {total_completion_tokens} completion tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill) therm={thermal_state_name()}"
     )
 
     return CompletionResponse(
@@ -17391,7 +17392,7 @@ async def create_chat_completion(
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = output.completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
-        f"Chat completion: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill)"
+        f"Chat completion: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill) therm={thermal_state_name()}"
     )
 
     # Extract reasoning content FIRST from raw output (before stripping tags).
@@ -20548,7 +20549,7 @@ async def create_response(
     elapsed = time.perf_counter() - start_time
     tokens_per_sec = output.completion_tokens / elapsed if elapsed > 0 else 0
     logger.info(
-        f"Response: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill)"
+        f"Response: {output.completion_tokens} tokens in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s end-to-end incl. prefill) therm={thermal_state_name()}"
     )
 
     # Extract reasoning content FIRST from raw output (before stripping tags).
@@ -23743,7 +23744,8 @@ async def stream_chat_completion(
         logger.info(
             f"Chat completion (stream): {completion_tokens} tokens in "
             f"{_decode_elapsed:.2f}s "
-            f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode)"
+            f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode) "
+            f"therm={thermal_state_name()}"
         )
 
     yield "data: [DONE]\n\n"
@@ -25886,7 +25888,8 @@ async def stream_responses_api(
         logger.info(
             f"Response (stream): {completion_tokens} tokens in "
             f"{_decode_elapsed:.2f}s "
-            f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode)"
+            f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode) "
+            f"therm={thermal_state_name()}"
         )
     yield _sse(
         _response_terminal.event_type,

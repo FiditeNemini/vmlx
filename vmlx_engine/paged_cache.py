@@ -37,6 +37,8 @@ from typing import Any, Dict, List, NewType, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+_CACHE_HASH_DEBUG = os.environ.get("VMLX_CACHE_HASH_DEBUG", "") == "1"
+
 # Type alias for block hash (content-based hash for prefix caching)
 BlockHash = NewType("BlockHash", bytes)
 
@@ -1492,6 +1494,19 @@ class PagedCacheManager:
                 block_tokens,
                 extra_keys=extra_keys,
             )
+
+            if _CACHE_HASH_DEBUG:
+                logger.info(
+                    "cache-hash-debug FETCH pos=%d hash=%s parent=%s "
+                    "tok[:4]=%s tok[-4:]=%s n=%d extra=%r",
+                    i,
+                    block_hash.hex()[:16],
+                    parent_hash.hex()[:16] if parent_hash else None,
+                    block_tokens[:4],
+                    block_tokens[-4:],
+                    len(block_tokens),
+                    extra_keys,
+                )
 
             # Look up in L1 cache (under lock)
             with self._lock:

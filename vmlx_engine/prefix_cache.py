@@ -36,6 +36,8 @@ from .paged_cache import BlockTable, PagedCacheManager, compute_block_hash
 
 logger = logging.getLogger(__name__)
 
+_CACHE_HASH_DEBUG = os.environ.get("VMLX_CACHE_HASH_DEBUG", "") == "1"
+
 # Bump this when the token->cache-state contract changes for paged prefix
 # caches or their block-level L2 disk namespace. 2026-05-03 changed paged
 # stores to index truncated N-1 prompt cache state under N-1 prompt-token
@@ -3847,6 +3849,19 @@ class BlockAwarePrefixCache:
                 block_tokens,
                 extra_keys=cache_extra_keys,
             )
+
+            if _CACHE_HASH_DEBUG:
+                logger.info(
+                    "cache-hash-debug STORE pos=%d hash=%s parent=%s "
+                    "tok[:4]=%s tok[-4:]=%s n=%d extra=%r",
+                    (global_start // self.block_size),
+                    block_chain_hash.hex()[:16],
+                    parent_hash.hex()[:16] if parent_hash else None,
+                    list(block_tokens[:4]),
+                    list(block_tokens[-4:]),
+                    len(block_tokens),
+                    cache_extra_keys,
+                )
 
             # Check if this block already exists via chain hash (deduplication)
             # IMPORTANT: lookup + ref bump must be atomic under _lock to prevent

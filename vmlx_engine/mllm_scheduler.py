@@ -3529,18 +3529,98 @@ class MLLMScheduler:
                                                 _paged_store_kwargs[
                                                     "store_cumulative_state"
                                                 ] = False
-                                            self.block_aware_cache.store_cache(
-                                                request_id,
-                                                truncated_tokens,
-                                                cache_states,
-                                                **_paged_store_kwargs,
+                                            stored_table = (
+                                                self.block_aware_cache.store_cache(
+                                                    request_id,
+                                                    truncated_tokens,
+                                                    cache_states,
+                                                    **_paged_store_kwargs,
+                                                )
                                             )
-                                            logger.info(
-                                                f"VLM Scheduler stored paged Prefix Cache for "
-                                                f"{request_id}: {len(cache_states)} layers, "
-                                                f"truncated to {len(truncated_tokens)} tokens"
-                                                f"{' with cache side-key' if getattr(request, '_cache_extra_keys', None) else ''}"
+                                            side_key_suffix = (
+                                                " with cache side-key"
+                                                if getattr(
+                                                    request,
+                                                    "_cache_extra_keys",
+                                                    None,
+                                                )
+                                                else ""
                                             )
+                                            raw_retained_tokens = getattr(
+                                                stored_table,
+                                                "num_tokens",
+                                                None,
+                                            )
+                                            retained_tokens = (
+                                                raw_retained_tokens
+                                                if isinstance(
+                                                    raw_retained_tokens,
+                                                    int,
+                                                )
+                                                and not isinstance(
+                                                    raw_retained_tokens,
+                                                    bool,
+                                                )
+                                                else None
+                                            )
+                                            block_table_ids = getattr(
+                                                stored_table,
+                                                "block_ids",
+                                                None,
+                                            )
+                                            block_table_blocks = (
+                                                len(block_table_ids)
+                                                if isinstance(
+                                                    block_table_ids,
+                                                    (list, tuple),
+                                                )
+                                                else None
+                                            )
+                                            if (
+                                                retained_tokens is None
+                                                or block_table_blocks is None
+                                            ):
+                                                logger.warning(
+                                                    "VLM Scheduler paged Prefix Cache store "
+                                                    "returned incomplete retention receipt "
+                                                    "for %s: %d layers, retained_tokens=%s, "
+                                                    "block_table_blocks=%s, "
+                                                    "requested_cache_key_tokens=%d%s",
+                                                    request_id,
+                                                    len(cache_states),
+                                                    retained_tokens,
+                                                    block_table_blocks,
+                                                    len(truncated_tokens),
+                                                    side_key_suffix,
+                                                )
+                                            elif (
+                                                len(truncated_tokens) > 0
+                                                and retained_tokens <= 0
+                                            ):
+                                                logger.warning(
+                                                    "VLM Scheduler paged Prefix Cache store "
+                                                    "retained no cache-key tokens for %s: "
+                                                    "%d layers, block_table_blocks=%s, "
+                                                    "requested_cache_key_tokens=%d%s",
+                                                    request_id,
+                                                    len(cache_states),
+                                                    block_table_blocks,
+                                                    len(truncated_tokens),
+                                                    side_key_suffix,
+                                                )
+                                            else:
+                                                logger.info(
+                                                    "VLM Scheduler stored paged Prefix Cache "
+                                                    "for %s: %d layers, retained_tokens=%s, "
+                                                    "block_table_blocks=%s, "
+                                                    "requested_cache_key_tokens=%d%s",
+                                                    request_id,
+                                                    len(cache_states),
+                                                    retained_tokens,
+                                                    block_table_blocks,
+                                                    len(truncated_tokens),
+                                                    side_key_suffix,
+                                                )
                                         else:
                                             logger.info(
                                                 "Skipping VLM paged cache store for %s: "

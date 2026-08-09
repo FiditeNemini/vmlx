@@ -2688,18 +2688,22 @@ class RotatingKVCache:
 
 class TestMLLMMixedSWACleanStorePolicy:
     class FakeBlockAwareCache:
-        def __init__(self):
+        def __init__(self, store_result=None):
             self.stores = []
             self._request_tables = {}
+            self.store_result = store_result
 
-        def store_cache(self, request_id, token_ids, cache_states, cache_extra_keys=None):
+        def store_cache(
+            self, request_id, token_ids, cache_states, cache_extra_keys=None
+        ):
             self.stores.append(
                 (request_id, list(token_ids), list(cache_states), cache_extra_keys)
             )
+            return self.store_result
 
-    def _scheduler(self, tokens, monkeypatch):
+    def _scheduler(self, tokens, monkeypatch, store_result=None):
         scheduler = MLLMScheduler.__new__(MLLMScheduler)
-        scheduler.block_aware_cache = self.FakeBlockAwareCache()
+        scheduler.block_aware_cache = self.FakeBlockAwareCache(store_result)
         scheduler.paged_cache_manager = MagicMock()
         scheduler.memory_aware_cache = None
         scheduler.prefix_cache = None
@@ -2754,6 +2758,103 @@ class TestMLLMMixedSWACleanStorePolicy:
         assert scheduler.block_aware_cache.stores == [
             ("mimo-clean", [10, 11, 12], [{"class_name": "RotatingKVCache"}], None)
         ]
+
+    def test_partial_paged_store_logs_actual_retained_tokens(self, monkeypatch, caplog):
+        import logging
+
+        scheduler = self._scheduler(
+            [10, 11, 12, 13],
+            monkeypatch,
+            store_result=SimpleNamespace(num_tokens=2, block_ids=[1]),
+        )
+
+        with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
+            scheduler._cleanup_finished({"mimo-clean"})
+
+        assert (
+            "VLM Scheduler stored paged Prefix Cache for mimo-clean: "
+            "1 layers, retained_tokens=2, block_table_blocks=1, "
+            "requested_cache_key_tokens=3"
+        ) in caplog.messages
+        assert all(
+            "truncated to 3 tokens" not in message for message in caplog.messages
+        )
+
+    def test_missing_paged_store_receipt_is_not_logged_as_success(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        scheduler = self._scheduler([10, 11, 12, 13], monkeypatch)
+
+        with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
+            scheduler._cleanup_finished({"mimo-clean"})
+
+        assert any(
+            "returned incomplete retention receipt for mimo-clean" in message
+            for message in caplog.messages
+        )
+        assert all(
+            "VLM Scheduler stored paged Prefix Cache for mimo-clean" not in message
+            for message in caplog.messages
+        )
+
+    def test_zero_token_paged_store_receipt_is_not_logged_as_success(
+        self, monkeypatch, caplog
+    ):
+        import logging
+
+        scheduler = self._scheduler(
+            [10, 11, 12, 13],
+            monkeypatch,
+            store_result=SimpleNamespace(num_tokens=0, block_ids=[]),
+        )
+
+        with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
+            scheduler._cleanup_finished({"mimo-clean"})
+
+        assert any(
+            "retained no cache-key tokens for mimo-clean: 1 layers, "
+            "block_table_blocks=0, requested_cache_key_tokens=3" in message
+            for message in caplog.messages
+        )
+        assert all(
+            "VLM Scheduler stored paged Prefix Cache for mimo-clean" not in message
+            for message in caplog.messages
+        )
+
+    @pytest.mark.parametrize(
+        "store_result",
+        [
+            SimpleNamespace(num_tokens="invalid", block_ids=[1]),
+            SimpleNamespace(num_tokens=2, block_ids=object()),
+        ],
+    )
+    def test_malformed_paged_store_receipt_does_not_raise_after_storage(
+        self, monkeypatch, caplog, store_result
+    ):
+        import logging
+
+        scheduler = self._scheduler(
+            [10, 11, 12, 13],
+            monkeypatch,
+            store_result=store_result,
+        )
+
+        with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
+            scheduler._cleanup_finished({"mimo-clean"})
+
+        assert not any(
+            "Failed to store VLM paged cache" in message for message in caplog.messages
+        )
+        assert any(
+            "returned incomplete retention receipt for mimo-clean" in message
+            for message in caplog.messages
+        )
+        assert all(
+            "VLM Scheduler stored paged Prefix Cache for mimo-clean" not in message
+            for message in caplog.messages
+        )
 
     def test_tight_memory_mixed_swa_skips_clean_prompt_above_configured_cap(
         self, monkeypatch

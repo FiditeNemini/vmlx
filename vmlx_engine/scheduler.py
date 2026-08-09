@@ -3494,6 +3494,57 @@ class Scheduler:
             cached_tokens = max(len(key_tokens) - len(cache_remaining), 0)
         return cache_remaining + suffix, cached_tokens
 
+    def _log_dsv4_extended_match_divergence(self, request) -> None:
+        """Log where an incoming prompt diverges from the last extended store.
+
+        Block-hash matching only reports reuse at block granularity; when the
+        panel's re-rendered history drifts from the raw fed+generated stream
+        (the #93 lead), this pinpoints the exact first differing token so the
+        glue defect can be fixed instead of guessed at.
+        """
+        stored = getattr(self, "_dsv4_last_extended_key_tokens", None)
+        if not stored:
+            return
+        prompt = list(request.prompt_token_ids or [])
+        matched = int(getattr(request, "_cache_matched_tokens", 0) or 0)
+        limit = min(len(stored), len(prompt))
+        if limit <= 0 or matched >= limit:
+            return
+        first_diff = next(
+            (i for i in range(limit) if stored[i] != prompt[i]), limit
+        )
+        if first_diff >= limit and len(prompt) >= len(stored):
+            return
+        lo = max(0, first_diff - 8)
+        hi = min(limit, first_diff + 8)
+        stored_win = stored[lo:hi]
+        prompt_win = prompt[lo:hi]
+        decode = getattr(
+            getattr(self, "_actual_tokenizer", None) or self.tokenizer,
+            "decode",
+            None,
+        )
+        try:
+            stored_txt = decode(stored_win) if decode else ""
+            prompt_txt = decode(prompt_win) if decode else ""
+        except Exception:
+            stored_txt = prompt_txt = "<decode failed>"
+        logger.info(
+            "DSV4 extended-match divergence: first_diff=%d matched=%d "
+            "stored_len=%d prompt_len=%d window=[%d:%d) stored_ids=%s "
+            "prompt_ids=%s stored_text=%r prompt_text=%r",
+            first_diff,
+            matched,
+            len(stored),
+            len(prompt),
+            lo,
+            hi,
+            stored_win,
+            prompt_win,
+            stored_txt,
+            prompt_txt,
+        )
+
     @staticmethod
     def _disk_prefix_hit_tail_and_cached_tokens(
         *,
@@ -5519,6 +5570,8 @@ class Scheduler:
                         request.shared_prefix_blocks,
                         len(remaining),
                     )
+                    if self._uses_dsv4_cache:
+                        self._log_dsv4_extended_match_divergence(request)
             else:
                 request.remaining_tokens = request.prompt_token_ids
                 _block_backend_label = (
@@ -5530,6 +5583,8 @@ class Scheduler:
                     f"Request {request.request_id}: {_block_backend_label} cache miss, "
                     f"processing all {len(request.prompt_token_ids)} tokens"
                 )
+                if self._uses_dsv4_cache:
+                    self._log_dsv4_extended_match_divergence(request)
         elif (
             self.memory_aware_cache is not None
             and not _bypass
@@ -7804,6 +7859,9 @@ class Scheduler:
                                             cache_for_extract = extended_cache
                                             extended_store_armed = True
                                             request._dsv4_extended_store_used = True
+                                            self._dsv4_last_extended_key_tokens = list(
+                                                request._extracted_cache_key_tokens
+                                            )
                                             logger.info(
                                                 "DSV4 prefix cache store using "
                                                 "extended prefill+decode delta "

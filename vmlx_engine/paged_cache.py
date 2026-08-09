@@ -185,6 +185,61 @@ def compute_block_hash(
     return BlockHash(hasher.digest())
 
 
+def _native_dsv4_interval_from_payload(
+    cache_data: Optional[List[Tuple[Any, ...]]],
+) -> Optional[Tuple[int, int]]:
+    """Read a validated native DSV4 interval without retaining tensor state."""
+    interval: Optional[Tuple[int, int]] = None
+    saw_delta = False
+    rotating_ends: List[int] = []
+    for entry in cache_data or ():
+        if not isinstance(entry, (tuple, list)) or not entry:
+            return None
+        tag = entry[0]
+        if tag == "deepseek_v4_delta_v1":
+            if (
+                len(entry) < 4
+                or not isinstance(entry[1], dict)
+                or entry[1].get("schema") != "deepseek_v4_block_delta_v1"
+                or not isinstance(entry[2], str)
+                or not isinstance(entry[3], dict)
+            ):
+                return None
+            try:
+                current = (
+                    int(entry[1]["start_token"]),
+                    int(entry[1]["end_token"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                return None
+            if current[1] <= current[0]:
+                return None
+            if interval is None:
+                interval = current
+            elif current != interval:
+                return None
+            saw_delta = True
+        elif tag == "rotating_kv":
+            if len(entry) < 7:
+                return None
+            try:
+                rotating_ends.append(int(entry[5]))
+            except (TypeError, ValueError):
+                return None
+        elif tag == "rotating_kv_pending":
+            if len(entry) < 2:
+                return None
+        else:
+            return None
+    if (
+        not saw_delta
+        or interval is None
+        or any(end != interval[1] for end in rotating_ends)
+    ):
+        return None
+    return interval
+
+
 # =============================================================================
 # KVCacheBlock - Following vLLM's design
 # =============================================================================
@@ -235,6 +290,14 @@ class CacheBlock:
     # are resident cache; reconstruction drops the payload before request refs
     # are released.
     cache_data_transient: bool = False
+    # Native DSV4 payload contract retained independently of the resident
+    # tensors. Disk-only extension stores can validate a long parent chain in
+    # O(blocks) metadata checks without reloading every page from SSD.
+    dsv4_native_interval: Optional[Tuple[int, int]] = None
+    # A richer native representation superseded this block's payload under
+    # the same token hash. Active request refs may continue reading it, but a
+    # later eviction must never republish the stale representation to L2.
+    suppress_l2_republish: bool = False
     # Resident RAM bytes currently attributed to this block's cache_data mirror
     # (0 when cache_data is None). Tracked so the manager can hold a byte ceiling
     # like the memory-aware path instead of an unbounded block count.
@@ -277,6 +340,8 @@ class CacheBlock:
         self.hash_value = None
         self.cache_data_from_disk = False
         self.cache_data_transient = False
+        self.dsv4_native_interval = None
+        self.suppress_l2_republish = False
         # Protection is scoped to the native composite payload currently held
         # by this block. Once the hash/payload is evicted, carrying the flag
         # into a later ordinary KV/TQ allocation makes that unrelated block
@@ -557,6 +622,22 @@ class BlockHashToBlockMap:
             return block
 
         return None
+
+    def pop_all(self, block_hash: BlockHash) -> List[CacheBlock]:
+        """Retire every discoverable representation for one content hash.
+
+        Blocks remain allocated and active request tables retain their refs;
+        only future content-addressed lookup is removed. This is required when
+        a richer native payload supersedes any number of generic siblings.
+        """
+        blocks = self._cache.pop(block_hash, None)
+        if blocks is None:
+            return []
+        if isinstance(blocks, CacheBlock):
+            return [blocks]
+        if isinstance(blocks, dict):
+            return list(blocks.values())
+        return []
 
     def __len__(self) -> int:
         return len(self._cache)
@@ -909,6 +990,11 @@ class PagedCacheManager:
         a later bounded allocator scan to retry without corrupting ancestry.
         """
         if block.cache_data is None:
+            return True
+        if block.suppress_l2_republish:
+            block.keep_resident = False
+            block.durability_write_pending = False
+            block.durability_retry_after = 0.0
             return True
         disk_store = self._disk_store
         native = bool(block.keep_resident) or self._payload_requires_durable_l2(
@@ -1737,6 +1823,7 @@ class PagedCacheManager:
         block.cache_data = cache_data
         block.cache_data_from_disk = True
         block.cache_data_transient = not persistent_l1_admitted
+        block.dsv4_native_interval = _native_dsv4_interval_from_payload(cache_data)
         block.token_count = token_count
         block.touch()
         if self.max_resident_bytes > 0 or self.disk_only:

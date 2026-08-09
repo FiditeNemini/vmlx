@@ -183,6 +183,82 @@ def _topology_block(
     )
 
 
+def _native_transport(*interval_payloads):
+    """Convert serialized 43-layer intervals into generator transport."""
+    assert interval_payloads
+    intervals = tuple(
+        (
+            int(payload[2][1]["start_token"]),
+            int(payload[2][1]["end_token"]),
+        )
+        for payload in interval_payloads
+    )
+    transport = []
+    for layer_index in range(43):
+        entries = [payload[layer_index] for payload in interval_payloads]
+        if layer_index < 2:
+            class_name = "RotatingKVCache"
+            records = tuple(entries)
+            compress_ratio = 0
+            sliding_window = 128
+            pool_quant = False
+        else:
+            class_name = entries[0][2]
+            records = tuple(entry[1] for entry in entries)
+            meta = entries[0][3]
+            compress_ratio = meta["compress_ratio"]
+            sliding_window = meta["sliding_window"]
+            pool_quant = meta["pool_quant"]
+        transport.append(
+            {
+                "state": None,
+                "class_name": class_name,
+                "compress_ratio": compress_ratio,
+                "sliding_window": sliding_window,
+                "pool_quant": pool_quant,
+                "dsv4_block_records": records,
+                "dsv4_record_intervals": intervals,
+            }
+        )
+    return transport
+
+
+def _generic_dsv4_snapshot_43(tokens: int):
+    """Build the old shadow-rekey shape: two rotating + 41 composite layers."""
+    rotating = mx.arange(128 * 8, dtype=mx.float32).reshape(1, 1, 128, 8)
+
+    def generic_state(compress_ratio):
+        local = mx.zeros((1, 1, 128, 8), dtype=mx.float16)
+        pooled = mx.zeros(
+            (1, (tokens + compress_ratio - 1) // compress_ratio, 8),
+            dtype=mx.float16,
+        )
+        return (
+            (local, local + 1),
+            (None, None, pooled),
+            (None, None, pooled + 1),
+        )
+
+    return [
+        {
+            "state": (rotating, rotating + 1),
+            "meta_state": ("0", "128", str(tokens), str(tokens % 128)),
+            "class_name": "RotatingKVCache",
+        }
+        for _ in range(2)
+    ] + [
+        {
+            "state": generic_state(4 if layer % 2 == 0 else 128),
+            "meta_state": ("0", "128", str(tokens), str(tokens % 128)),
+            "class_name": "DeepseekV4Cache",
+            "compress_ratio": 4 if layer % 2 == 0 else 128,
+            "sliding_window": 128,
+            "pool_quant": False,
+        }
+        for layer in range(41)
+    ]
+
+
 def _write_native_block(store, *, request_id: str, block_hash: bytes, block_index: int):
     fence_id = store.begin_write_fence(request_id)
     assert store.write_block_async(
@@ -284,6 +360,430 @@ def test_dsv4_terminal_capture_retains_preceding_aligned_checkpoint():
     assert records[0]["anchor"]["terminal"] is True
     assert records[1]["anchor"]["terminal"] is True
     assert records[1]["anchor"].get("append_safe") is not True
+
+
+def test_dsv4_prefill_mid_block_restore_rearms_capture_on_256_grid():
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    class DeepseekV4Cache:
+        offset = 326
+
+        def export_block_delta(
+            self,
+            start,
+            end,
+            *,
+            block_size,
+            anchor_interval_blocks,
+            force_anchor=False,
+        ):
+            assert self.offset >= end
+            return {
+                "start_token": start,
+                "end_token": end,
+                "anchor": None,
+            }
+
+    cache = DeepseekV4Cache()
+
+    class Model:
+        def __call__(self, tokens, cache):
+            cache[0].offset += tokens.shape[1]
+            return mx.zeros((1, tokens.shape[1], 2), dtype=mx.float32)
+
+    gen = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
+    gen.model = Model()
+    gen.prefill_step_size = 2048
+    gen._prefill_single_shot = False
+    gen._sync = lambda: None
+    gen._prefill_should_clear_cache = lambda: False
+
+    gen._prefill_last_logits(
+        list(range(186)),
+        [cache],
+        realize_before_clear=False,
+        capture_block_deltas=True,
+    )
+
+    assert cache.offset == 512
+    assert cache._vmlx_dsv4_delta_next_token == 512
+    assert [
+        (record["start_token"], record["end_token"])
+        for record in cache._vmlx_dsv4_block_records
+    ] == [(256, 512)]
+
+
+def test_dsv4_generic_shadow_parent_refuses_native_extension_without_mutation():
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    paged = PagedCacheManager(block_size=256, max_blocks=16)
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+    shadow_tokens = list(range(326))
+    extended_tokens = list(range(512))
+
+    generic_snapshot = _generic_dsv4_snapshot_43(326)
+    shadow_table = cache.store_cache(
+        "shadow-rekey", shadow_tokens, generic_snapshot
+    )
+    assert shadow_table is not None
+    assert shadow_table.num_tokens == 326
+    shadow_block_ids = list(shadow_table.block_ids)
+    shadow_entry = cache._request_tables.pop("shadow-rekey")
+    paged.release_request_refs(shadow_entry.block_table)
+    paged.detach_request("shadow-rekey")
+
+    parent_table, remaining = cache.fetch_cache("continuation", extended_tokens)
+    assert parent_table is not None
+    assert parent_table.num_tokens == 326
+    assert parent_table.block_ids == shadow_block_ids
+    assert remaining == extended_tokens[326:]
+    restored_parent = cache.reconstruct_cache(parent_table)
+    assert restored_parent is not None
+    assert len(restored_parent) == 43
+    assert all(layer.offset == 326 for layer in restored_parent)
+
+    native_snapshot = _native_transport(
+        _topology_interval(256, 512, terminal=True, append_safe=True)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot append native DSV4 deltas to a non-native parent",
+    ):
+        cache.store_cache("continuation", extended_tokens, native_snapshot)
+
+    # Refusal happens before partial-table realignment. The valid generic
+    # parent remains intact and no mixed generic/native child is published.
+    assert parent_table.num_tokens == 326
+    assert parent_table.block_ids == shadow_block_ids
+    assert cache.reconstruct_cache(parent_table) is not None
+    assert all(
+        paged.allocated_blocks[block_id].cache_data[0][0]
+        != "deepseek_v4_delta_v1"
+        for block_id in parent_table.block_ids
+    )
+
+
+def test_dsv4_native_shadow_parent_extends_and_reconstructs_all_layers():
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    paged = PagedCacheManager(block_size=256, max_blocks=16)
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+    cache._expected_num_layers = 43
+    shadow_tokens = list(range(326))
+    extended_tokens = list(range(512))
+    native_shadow = _native_transport(
+        _topology_interval(0, 256, terminal=True, append_safe=True),
+        _topology_interval(256, 326, terminal=True),
+    )
+
+    shadow_table = cache.store_cache("native-shadow", shadow_tokens, native_shadow)
+    assert shadow_table is not None
+    shadow_entry = cache._request_tables.pop("native-shadow")
+    paged.release_request_refs(shadow_entry.block_table)
+    paged.detach_request("native-shadow")
+
+    parent_table, remaining = cache.fetch_cache("continuation", extended_tokens)
+    assert parent_table is not None
+    assert parent_table.num_tokens == 256
+    assert parent_table.matched_tokens == 326
+    assert parent_table.checkpoint_tokens == 256
+    assert parent_table.replayed_tokens == 70
+    assert remaining == extended_tokens[256:]
+
+    native_extension = _native_transport(
+        _topology_interval(256, 512, terminal=True, append_safe=True)
+    )
+    extended_table = cache.store_cache(
+        "continuation",
+        extended_tokens,
+        native_extension,
+    )
+
+    assert extended_table is not None
+    assert extended_table.num_tokens == 512
+    assert len(extended_table.block_ids) == 2
+    rebuilt = cache.reconstruct_cache(extended_table)
+    assert rebuilt is not None
+    assert len(rebuilt) == 43
+    assert all(layer.offset == 512 for layer in rebuilt)
+
+
+def test_dsv4_native_shadow_store_promotes_generic_hash_collisions():
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    paged = PagedCacheManager(block_size=256, max_blocks=16)
+    cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+    cache._expected_num_layers = 43
+    tokens = list(range(326))
+
+    generic_snapshot = _generic_dsv4_snapshot_43(326)
+    generic_table = cache.store_cache("generic-shadow", tokens, generic_snapshot)
+    assert generic_table is not None
+    generic_ids = list(generic_table.block_ids)
+    generic_entry = cache._request_tables.pop("generic-shadow")
+    paged.release_request_refs(generic_entry.block_table)
+    paged.detach_request("generic-shadow")
+
+    # Seed a second generic sibling for every hash. Promotion must retire the
+    # whole discoverable bucket, not merely the newest generic candidate.
+    generic_sibling_ids = []
+    for block_id in generic_ids:
+        original = paged.allocated_blocks[block_id]
+        sibling = paged.allocate_block()
+        assert sibling is not None
+        sibling.token_count = original.token_count
+        sibling.block_hash = original.block_hash
+        sibling.parent_hash = original.parent_hash
+        sibling.cache_data = original.cache_data
+        generic_sibling_ids.append(sibling.block_id)
+        with paged._lock:
+            paged.cached_block_hash_to_block.insert(
+                sibling.block_hash,
+                sibling,
+            )
+
+    native_snapshot = _native_transport(
+        _topology_interval(0, 256, terminal=True, append_safe=True),
+        _topology_interval(256, 326, terminal=True),
+    )
+    native_table = cache.store_cache("native-shadow", tokens, native_snapshot)
+
+    assert native_table is not None
+    assert native_table.block_ids != generic_ids
+    assert all(
+        paged.allocated_blocks[block_id].cache_data[2][0]
+        == "deepseek_v4_delta_v1"
+        for block_id in native_table.block_ids
+    )
+    rebuilt = cache.reconstruct_cache(native_table)
+    assert rebuilt is not None
+    assert len(rebuilt) == 43
+    assert all(layer.offset == 326 for layer in rebuilt)
+
+    class MissingNativeL2:
+        def __init__(self):
+            self.writes = []
+
+        def has_block(self, _block_hash):
+            return False
+
+        def write_block_async(self, *args, **kwargs):
+            self.writes.append((args, kwargs))
+            return True
+
+    missing_l2 = MissingNativeL2()
+    paged._disk_store = missing_l2
+    for block_id in generic_ids + generic_sibling_ids:
+        retired = paged.allocated_blocks[block_id]
+        assert retired.suppress_l2_republish is True
+        assert paged._persist_before_cached_block_eviction(retired) is True
+    assert missing_l2.writes == []
+
+    for block_id in native_table.block_ids:
+        native_block = paged.allocated_blocks[block_id]
+        paged.cached_block_hash_to_block.pop(
+            native_block.block_hash,
+            native_block.block_id,
+        )
+        assert (
+            paged.cached_block_hash_to_block.get_block(native_block.block_hash)
+            is None
+        )
+
+
+def test_dsv4_native_shadow_store_promotes_disk_only_generic_collisions(
+    tmp_path,
+):
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    store = BlockDiskStore(
+        str(tmp_path),
+        max_size_gb=1,
+        expected_num_layers=43,
+        allow_tq_native=False,
+    )
+    reopened = None
+    try:
+        def wait_for_writes():
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                pipeline = store.get_stats()["write_pipeline"]
+                if pipeline["queue_depth"] == 0 and pipeline["inflight"] == 0:
+                    return
+                time.sleep(0.01)
+            raise AssertionError("disk-only DSV4 writes did not settle")
+
+        paged = PagedCacheManager(
+            block_size=256,
+            max_blocks=16,
+            disk_store=store,
+            disk_only=True,
+        )
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        cache._expected_num_layers = 43
+        tokens = list(range(326))
+
+        generic_table = cache.store_cache(
+            "generic-shadow-l2",
+            tokens,
+            _generic_dsv4_snapshot_43(326),
+        )
+        assert generic_table is not None
+        wait_for_writes()
+        generic_hashes = [
+            paged.allocated_blocks[block_id].block_hash
+            for block_id in generic_table.block_ids
+        ]
+        generic_entry = cache._request_tables.pop("generic-shadow-l2")
+        paged.release_request_refs(generic_entry.block_table)
+        paged.detach_request("generic-shadow-l2")
+
+        # Drop every L1 candidate: after restart the generic representation
+        # exists only in L2 under the colliding token hashes.
+        store.shutdown()
+        store = BlockDiskStore(
+            str(tmp_path),
+            max_size_gb=1,
+            expected_num_layers=43,
+            allow_tq_native=False,
+        )
+        for block_hash in generic_hashes:
+            generic_payload = store.read_block(block_hash)
+            assert generic_payload is not None
+            assert generic_payload[2][0] in {
+                "deepseek_v4_pending",
+                "deepseek_v4",
+            }
+        paged = PagedCacheManager(
+            block_size=256,
+            max_blocks=16,
+            disk_store=store,
+            disk_only=True,
+        )
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=paged)
+        cache._expected_num_layers = 43
+
+        native_table = cache.store_cache(
+            "native-shadow-l2",
+            tokens,
+            _native_transport(
+                _topology_interval(0, 256, terminal=True, append_safe=True),
+                _topology_interval(256, 326, terminal=True),
+            ),
+        )
+
+        assert native_table is not None
+        wait_for_writes()
+        rebuilt = cache.reconstruct_cache(native_table)
+        assert rebuilt is not None
+        assert len(rebuilt) == 43
+        assert all(layer.offset == 326 for layer in rebuilt)
+        native_hashes = []
+        for block_id in native_table.block_ids:
+            block = paged.allocated_blocks[block_id]
+            native_hashes.append(block.block_hash)
+            assert (
+                paged.cached_block_hash_to_block.get_block(block.block_hash)
+                is block
+            )
+            payload = block.cache_data or store.read_block(block.block_hash)
+            assert payload is not None
+            assert payload[2][0] == "deepseek_v4_delta_v1"
+
+        # Aggregate-budget eviction can remove an L2 file while its stamped L1
+        # metadata survives. A repeat native store must detect that absence,
+        # retire the stale mapping, and republish the durable chain.
+        stale_native_ids = list(native_table.block_ids)
+        for block_hash in native_hashes:
+            store._hash_to_path(block_hash.hex()).unlink()
+            assert store.has_block_record(block_hash) is False
+        native_table = cache.store_cache(
+            "native-shadow-l2-repair",
+            tokens,
+            _native_transport(
+                _topology_interval(0, 256, terminal=True, append_safe=True),
+                _topology_interval(256, 326, terminal=True),
+            ),
+        )
+        assert native_table is not None
+        wait_for_writes()
+        assert native_table.block_ids != stale_native_ids
+        native_hashes = [
+            paged.allocated_blocks[block_id].block_hash
+            for block_id in native_table.block_ids
+        ]
+        assert all(store.has_block_record(block_hash) for block_hash in native_hashes)
+
+        # Retiring the promoted native blocks must not make the superseded
+        # generic duplicates discoverable again under the same token hashes.
+        for block_id, block_hash in zip(native_table.block_ids, native_hashes):
+            paged.cached_block_hash_to_block.pop(block_hash, block_id)
+            assert paged.cached_block_hash_to_block.get_block(block_hash) is None
+
+        # Reopen the L2 namespace with no L1 state and prove the same 326-token
+        # chain refaults as native 43-layer state, not the overwritten generic
+        # shadow representation.
+        store.shutdown()
+        store = None
+        reopened = BlockDiskStore(
+            str(tmp_path),
+            max_size_gb=1,
+            expected_num_layers=43,
+            allow_tq_native=False,
+        )
+        restarted_paged = PagedCacheManager(
+            block_size=256,
+            max_blocks=16,
+            disk_store=reopened,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_paged,
+        )
+        restarted._expected_num_layers = 43
+        restarted_table, remaining = restarted.fetch_cache(
+            "restart-refault",
+            tokens,
+        )
+        assert restarted_table is not None
+        assert restarted_table.matched_tokens == 326
+        assert remaining == []
+        restarted_cache = restarted.reconstruct_cache(restarted_table)
+        assert restarted_cache is not None
+        assert len(restarted_cache) == 43
+        assert all(layer.offset == 326 for layer in restarted_cache)
+
+        parent_reads = 0
+        original_read_block = reopened.read_block
+
+        def counted_read_block(block_hash):
+            nonlocal parent_reads
+            parent_reads += 1
+            return original_read_block(block_hash)
+
+        reopened.read_block = counted_read_block
+        extended_table = restarted.store_cache(
+            "restart-refault",
+            list(range(512)),
+            _native_transport(
+                _topology_interval(256, 512, terminal=True, append_safe=True)
+            ),
+        )
+        assert extended_table is not None
+        assert extended_table.num_tokens == 512
+        assert parent_reads == 0
+    finally:
+        if store is not None:
+            store.shutdown()
+        if reopened is not None:
+            reopened.shutdown()
 
 
 def test_dsv4_append_safe_marker_roundtrips_through_block_disk_transport():

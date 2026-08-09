@@ -2467,6 +2467,7 @@ class Scheduler:
         self,
         prompt_tokens: List[int],
         should_stop: Optional[Callable[[], bool]] = None,
+        capture_dsv4_deltas: bool = False,
     ) -> Optional[List[Any]]:
         """
         Run a prefill-only forward pass to get cache state for the given tokens.
@@ -2493,6 +2494,40 @@ class Scheduler:
             import mlx.core as mx
 
             fresh_cache = self.model.make_cache()
+
+            if capture_dsv4_deltas:
+                # Shadow re-key chains are later extended from native
+                # DSV4 checkpoints. A generic full-cache snapshot would store
+                # ``deepseek_v4_pending`` parents which cannot be composed
+                # with the generator's immutable delta records. Reuse the
+                # owning generator's capture loop so periodic and append-safe
+                # anchors are stamped while the live cache is at the exact
+                # boundary. Never fall back to a generic shadow store.
+                from .utils.dsv4_batch_generator import DSV4BatchGenerator
+
+                generator = getattr(self, "batch_generator", None)
+                if (
+                    not self._uses_dsv4_cache
+                    or not isinstance(generator, DSV4BatchGenerator)
+                    or not generator._delta_capture_admitted(
+                        fresh_cache,
+                        len(prompt_tokens),
+                    )
+                ):
+                    del fresh_cache
+                    return None
+                last_logits = generator._prefill_last_logits(
+                    prompt_tokens,
+                    fresh_cache,
+                    capture_block_deltas=True,
+                    force_terminal_anchor=True,
+                    should_stop=should_stop,
+                )
+                if last_logits is None:
+                    del fresh_cache
+                    clear_mlx_memory_cache(log=logger)
+                    return None
+                return fresh_cache
 
             # Process in chunks to avoid Metal GPU timeout. DSV4 must use the
             # same architecture-aligned policy as DSV4BatchGenerator; the old
@@ -6507,7 +6542,9 @@ class Scheduler:
                 return parked
 
             fresh_cache = self._prefill_for_prompt_only_cache(
-                predicted, should_stop=_park_poll
+                predicted,
+                should_stop=_park_poll,
+                capture_dsv4_deltas=True,
             )
             if parked and fresh_cache is None:
                 # Foreground arrived mid-prefill: partial work discarded;
@@ -6549,15 +6586,60 @@ class Scheduler:
     ) -> None:
         """Store an idle-prefilled predicted chain, then settle refs.
 
-        Same recipe as the abort-salvage store: optional TQ quantization,
-        extract, store under a synthetic id, then release the stored blocks
-        to cached-but-free so memory pressure can reclaim them.
+        The shadow prefill must donate the same native delta transport used by
+        request-time DSV4 snapshots. Generic composite snapshots produce
+        pending parent pages that cannot be extended by native deltas. Store
+        under a synthetic id, then release the blocks to cached-but-free so
+        memory pressure can reclaim them.
         """
         _t_store = time.perf_counter()
-        cache_for_store = cache
-        if getattr(self, "_kv_cache_bits", 0):
-            cache_for_store = self._quantize_cache_for_storage(cache_for_store)
-        extracted = self._extract_cache_states(cache_for_store)
+        from .utils.dsv4_batch_generator import DSV4BatchGenerator
+
+        transport = DSV4BatchGenerator._dsv4_delta_transport(cache)
+        if not transport:
+            logger.warning(
+                "DSV4 shadow re-key skipped for %s: native delta transport "
+                "was not captured",
+                store_id,
+            )
+            return
+        expected_end = len(key_tokens)
+        try:
+            intervals = tuple(
+                (int(start), int(end))
+                for start, end in transport[0]["dsv4_record_intervals"]
+            )
+            complete = bool(
+                intervals
+                and intervals[0][0] == 0
+                and intervals[-1][1] == expected_end
+                and all(
+                    start >= 0
+                    and end > start
+                    and end - start <= 256
+                    and (index == 0 or start == intervals[index - 1][1])
+                    for index, (start, end) in enumerate(intervals)
+                )
+                and all(
+                    tuple(
+                        (int(start), int(end))
+                        for start, end in layer["dsv4_record_intervals"]
+                    )
+                    == intervals
+                    for layer in transport
+                )
+            )
+        except (AttributeError, IndexError, TypeError, ValueError):
+            complete = False
+        if not complete:
+            logger.warning(
+                "DSV4 shadow re-key skipped for %s: native delta chain does "
+                "not cover one contiguous [0, %d) interval",
+                store_id,
+                expected_end,
+            )
+            return
+        extracted = self._extract_cache_states(transport)
         if not extracted:
             return
         store_kwargs: Dict[str, Any] = {"cache_type": cache_type}

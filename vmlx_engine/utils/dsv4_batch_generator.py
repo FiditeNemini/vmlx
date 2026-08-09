@@ -1733,6 +1733,7 @@ class DSV4BatchGenerator:
         realize_before_clear: bool = True,
         capture_block_deltas: bool = False,
         force_terminal_anchor: bool = False,
+        should_stop: Optional[Callable[[], bool]] = None,
     ):
         """DSV4 prefill returning logits for the last prompt token.
 
@@ -1782,7 +1783,19 @@ class DSV4BatchGenerator:
                 cached_tokens + total,
             )
         if capture_block_deltas:
-            self._reset_dsv4_block_records(cache, cached_tokens)
+            # A restored cache may sit mid-block: whole-record N-1 matches and
+            # sub-block L2 tails land at arbitrary token counts (live defect:
+            # a 326-token restore after a shadow re-key hit). Block records
+            # must stay on the global 256-token grid or their store keys
+            # drift, and pool exports are positional over the restored rows,
+            # so arm capture from the preceding checkpoint — the next grid
+            # crossing then exports the full on-grid block, contiguous with
+            # the chain already in the store.
+            self._reset_dsv4_block_records(
+                cache,
+                (cached_tokens // DSV4_NATIVE_BLOCK_SIZE)
+                * DSV4_NATIVE_BLOCK_SIZE,
+            )
         append_safe_boundary = 0
         if capture_block_deltas and force_terminal_anchor:
             final_boundary = cached_tokens + total
@@ -1828,6 +1841,8 @@ class DSV4BatchGenerator:
         off = 0
         cur_step = step
         while off < total:
+            if off > 0 and should_stop is not None and should_stop():
+                return None
             valve_active_before = 0
             if valve_active:
                 valve_active_before = int(mx.get_active_memory())

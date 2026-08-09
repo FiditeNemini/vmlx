@@ -996,6 +996,104 @@ def _cache_data_has_dsv4_deltas(cache_data) -> bool:
         return False
 
 
+def _block_has_complete_dsv4_delta_interval(
+    cache_data,
+    *,
+    start_token: int,
+    end_token: int,
+    expected_layers: Optional[int] = None,
+    expected_transport: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Return whether one stored page is a complete native DSV4 interval.
+
+    Non-anchor pages legitimately carry ``rotating_kv_pending`` for the two
+    ratio-zero SWA layers. Every composite layer must still carry a native
+    delta record with geometry matching this exact page. Generic
+    ``deepseek_v4_pending``/``deepseek_v4`` pages are not interchangeable:
+    appending native deltas to them creates a mixed chain which the restore
+    contract correctly rejects.
+    """
+    entries = list(cache_data or ())
+    if not entries or (
+        expected_layers is not None and len(entries) != int(expected_layers)
+    ):
+        return False
+    wanted_start = int(start_token)
+    wanted_end = int(end_token)
+    saw_delta = False
+    if expected_transport is not None and len(expected_transport) != len(entries):
+        return False
+    for layer_index, entry in enumerate(entries):
+        if not isinstance(entry, (tuple, list)) or not entry:
+            return False
+        expected = (
+            expected_transport[layer_index]
+            if expected_transport is not None
+            else None
+        )
+        expected_class = (
+            str(expected.get("class_name", ""))
+            if isinstance(expected, dict)
+            else ""
+        )
+        tag = entry[0]
+        if tag == "deepseek_v4_delta_v1":
+            if (
+                len(entry) < 4
+                or not isinstance(entry[1], dict)
+                or entry[1].get("schema") != "deepseek_v4_block_delta_v1"
+                or not isinstance(entry[2], str)
+                or not isinstance(entry[3], dict)
+                or (
+                    expected_class
+                    and entry[2] != expected_class
+                )
+            ):
+                return False
+            try:
+                if (
+                    int(entry[1].get("start_token", -1)) != wanted_start
+                    or int(entry[1].get("end_token", -1)) != wanted_end
+                ):
+                    return False
+            except (TypeError, ValueError):
+                return False
+            if isinstance(expected, dict):
+                expected_meta = (
+                    expected.get("compress_ratio"),
+                    expected.get("sliding_window"),
+                    bool(expected.get("pool_quant")),
+                )
+                actual_meta = (
+                    entry[3].get("compress_ratio"),
+                    entry[3].get("sliding_window"),
+                    bool(entry[3].get("pool_quant")),
+                )
+                if actual_meta != expected_meta:
+                    return False
+            saw_delta = True
+        elif tag == "rotating_kv":
+            if (
+                len(entry) < 7
+                or (expected_class and "RotatingKVCache" not in expected_class)
+            ):
+                return False
+            try:
+                if int(entry[5]) != wanted_end:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif tag == "rotating_kv_pending":
+            if (
+                len(entry) < 2
+                or (expected_class and "RotatingKVCache" not in expected_class)
+            ):
+                return False
+        else:
+            return False
+    return saw_delta
+
+
 def _dsv4_delta_record_for_interval(
     layer_state: Dict[str, Any], start_idx: int, end_idx: int
 ):
@@ -3482,11 +3580,52 @@ class BlockAwarePrefixCache:
         rotating_kv_layer_count = (
             _rotating_kv_layer_count(cache_data) if has_rotating_kv_cache_data else 0
         )
+        disk_store = self.paged_cache._disk_store  # May be None
 
         # Get or create block table
         block_table = self.paged_cache.get_block_table(request_id)
         if not block_table:
             block_table = self.paged_cache.create_block_table(request_id)
+
+        if has_dsv4_delta_cache_data and block_table.block_ids:
+            # A resumed delta transport begins at the restored checkpoint and
+            # depends on every retained parent page already being native. The
+            # older shadow-rekey implementation donated generic pending/full
+            # composite pages; retaining one here would publish a mixed chain
+            # that cannot reconstruct. Refuse it before partial-table
+            # realignment mutates the still-valid generic entry.
+            parent_start = 0
+            for block_id in block_table.block_ids:
+                block = self.paged_cache.allocated_blocks.get(block_id)
+                token_count = int(getattr(block, "token_count", 0) or 0)
+                parent_end = parent_start + token_count
+                interval_stamp = getattr(
+                    block,
+                    "dsv4_native_interval",
+                    None,
+                )
+                if interval_stamp == (parent_start, parent_end):
+                    parent_start = parent_end
+                    continue
+                payload = getattr(block, "cache_data", None)
+                if payload is None and disk_store is not None and block is not None:
+                    try:
+                        payload = disk_store.read_block(block.block_hash)
+                    except Exception:
+                        payload = None
+                if not _block_has_complete_dsv4_delta_interval(
+                    payload,
+                    start_token=parent_start,
+                    end_token=parent_end,
+                    expected_layers=len(cache_data),
+                    expected_transport=cache_data,
+                ):
+                    raise ValueError(
+                        "cannot append native DSV4 deltas to a non-native "
+                        f"parent interval [{parent_start}, {parent_end})"
+                    )
+                block.dsv4_native_interval = (parent_start, parent_end)
+                parent_start = parent_end
 
         # Determine tokens we need to cache (not already in block_table)
         existing_tokens = block_table.num_tokens
@@ -3585,7 +3724,6 @@ class BlockAwarePrefixCache:
                     extra_keys=cache_extra_keys,
                 )
 
-        disk_store = self.paged_cache._disk_store  # May be None
         disk_write_fence_id: Optional[str] = None
         if disk_store is not None:
             begin_write_fence = getattr(disk_store, "begin_write_fence", None)
@@ -3661,6 +3799,8 @@ class BlockAwarePrefixCache:
                     "request_id": request_id,
                     "fence_id": disk_write_fence_id,
                 }
+            if block_hash in dsv4_disk_replacements:
+                fence_kwargs["replace_existing"] = True
             admitted = bool(
                 disk_store.write_block_async(
                     block_hash,
@@ -3833,6 +3973,7 @@ class BlockAwarePrefixCache:
         pending_disk_writes: list = []
         disk_only_fallbacks: dict = {}
         native_paged_holds: dict = {}
+        dsv4_disk_replacements: set[bytes] = set()
 
         for i in range(num_new_blocks):
             start_idx = i * self.block_size
@@ -3868,10 +4009,93 @@ class BlockAwarePrefixCache:
             # the block from being freed between get_block and increment_ref.
             is_last = (i == num_new_blocks - 1)
             reused = False
+            preloaded_dsv4_block_id = None
+            preloaded_dsv4_payload = None
+            preloaded_dsv4_l2_readable = None
+            if has_dsv4_delta_cache_data and disk_store is not None:
+                preloaded_dsv4_needs_payload = False
+                with self.paged_cache._lock:
+                    candidate = (
+                        self.paged_cache.cached_block_hash_to_block.get_block(
+                            block_chain_hash
+                        )
+                    )
+                    if candidate is not None:
+                        preloaded_dsv4_block_id = candidate.block_id
+                        preloaded_dsv4_needs_payload = (
+                            candidate.cache_data is None
+                            and getattr(
+                                candidate,
+                                "dsv4_native_interval",
+                                None,
+                            )
+                            != (global_start, global_end)
+                        )
+                try:
+                    has_record = getattr(
+                        disk_store,
+                        "has_block_record",
+                        None,
+                    )
+                    if not callable(has_record):
+                        has_record = getattr(disk_store, "has_block", None)
+                    preloaded_dsv4_l2_readable = bool(
+                        callable(has_record)
+                        and has_record(block_chain_hash)
+                    )
+                    if preloaded_dsv4_l2_readable and (
+                        preloaded_dsv4_block_id is None
+                        or preloaded_dsv4_needs_payload
+                    ):
+                        preloaded_dsv4_payload = disk_store.read_block(
+                            block_chain_hash
+                        )
+                except Exception:
+                    preloaded_dsv4_l2_readable = False
+                    preloaded_dsv4_payload = None
+                    if preloaded_dsv4_block_id is None:
+                        dsv4_disk_replacements.add(block_chain_hash)
+                if (
+                    preloaded_dsv4_block_id is None
+                    and preloaded_dsv4_l2_readable
+                    and not _block_has_complete_dsv4_delta_interval(
+                        preloaded_dsv4_payload,
+                        start_token=global_start,
+                        end_token=global_end,
+                        expected_layers=len(cache_data),
+                        expected_transport=cache_data,
+                    )
+                ):
+                    # Restart/recycling can leave an old generic payload only
+                    # in L2. The token hash still collides, so explicitly
+                    # replace that representation even though no L1 candidate
+                    # exists to trigger the normal promotion branch below.
+                    dsv4_disk_replacements.add(block_chain_hash)
             with self.paged_cache._lock:
                 existing_block = self.paged_cache.cached_block_hash_to_block.get_block(
                     block_chain_hash
                 )
+                if (
+                    existing_block is not None
+                    and has_dsv4_delta_cache_data
+                    and disk_store is not None
+                ):
+                    if (
+                        existing_block.block_id != preloaded_dsv4_block_id
+                        or preloaded_dsv4_l2_readable is not True
+                    ):
+                        # The candidate changed after the off-lock probe, or
+                        # its stamped native payload was evicted from L2.
+                        # Retire it from hash discovery and publish a fresh
+                        # native copy rather than trusting stale metadata.
+                        retired_blocks = (
+                            self.paged_cache.cached_block_hash_to_block.pop_all(
+                                block_chain_hash
+                            )
+                        )
+                        for retired_block in retired_blocks:
+                            retired_block.suppress_l2_republish = True
+                        existing_block = None
                 if (
                     existing_block is not None
                     and existing_block.cache_data is None
@@ -3887,14 +4111,64 @@ class BlockAwarePrefixCache:
                     # fresh allocation + rewrite when it is gone. get_block
                     # prefers the newest duplicate, so the rewritten block
                     # shadows the stale entry.
-                    has_block = getattr(disk_store, "has_block", None)
-                    try:
-                        if callable(has_block) and not bool(
-                            has_block(block_chain_hash)
-                        ):
-                            existing_block = None
-                    except Exception:
-                        pass
+                    if not has_dsv4_delta_cache_data:
+                        has_block = getattr(disk_store, "has_block", None)
+                        try:
+                            if callable(has_block) and not bool(
+                                has_block(block_chain_hash)
+                            ):
+                                existing_block = None
+                        except Exception:
+                            pass
+                if existing_block is not None and has_dsv4_delta_cache_data:
+                    # Native shadow re-key may collide with an older generic
+                    # DSV4 store at the exact same token-chain hash. Hash
+                    # identity proves token identity, not payload-contract
+                    # identity. Reuse only a complete native interval;
+                    # otherwise allocate a richer duplicate below. The hash
+                    # map deliberately prefers the newest live duplicate.
+                    native_interval = getattr(
+                        existing_block,
+                        "dsv4_native_interval",
+                        None,
+                    )
+                    existing_payload = existing_block.cache_data
+                    if (
+                        existing_payload is None
+                        and existing_block.block_id == preloaded_dsv4_block_id
+                    ):
+                        existing_payload = preloaded_dsv4_payload
+                    native_payload = native_interval == (
+                        global_start,
+                        global_end,
+                    ) or _block_has_complete_dsv4_delta_interval(
+                        existing_payload,
+                        start_token=global_start,
+                        end_token=global_end,
+                        expected_layers=len(cache_data),
+                        expected_transport=cache_data,
+                    )
+                    if not native_payload:
+                        # Preserve active request-table refs, but retire this
+                        # representation from content-hash discovery. If the
+                        # new native duplicate is later evicted, the generic
+                        # block must not silently resurface as the preferred
+                        # match for the same token chain.
+                        retired_blocks = (
+                            self.paged_cache.cached_block_hash_to_block.pop_all(
+                                block_chain_hash
+                            )
+                        )
+                        for retired_block in retired_blocks:
+                            retired_block.suppress_l2_republish = True
+                        if disk_store is not None:
+                            dsv4_disk_replacements.add(block_chain_hash)
+                        existing_block = None
+                    else:
+                        existing_block.dsv4_native_interval = (
+                            global_start,
+                            global_end,
+                        )
                 if existing_block:
                     # If this is the last block in the new sequence and the
                     # existing block was stored as non-last (SSM layers tagged
@@ -4059,6 +4333,11 @@ class BlockAwarePrefixCache:
                     store_cumulative_state=store_cumulative_state,
                 )
                 if block_kv_data:
+                    if has_dsv4_delta_cache_data:
+                        block.dsv4_native_interval = (
+                            global_start,
+                            global_end,
+                        )
                     # DSV4, ZAYA CCA, and mixed-SWA rotating KV are not normal
                     # per-block KV payloads.
                     # DSV4 terminal blocks carry SWA+CSA/HCA composite state;

@@ -3620,6 +3620,106 @@ def test_dsv4_unsafe_override_in_cache_scope_key():
 # ── DSV4 shadow re-key (idle-time predicted-transcript store) ────────────
 
 
+def _dsv4_shadow_native_prefill_fixture():
+    from vmlx_engine.scheduler import Scheduler
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    model_calls = []
+
+    class DeepseekV4Cache:
+        def __init__(self):
+            self.offset = 0
+            self.compress_ratio = 4
+
+        def export_block_delta(
+            self,
+            start,
+            end,
+            *,
+            block_size,
+            anchor_interval_blocks,
+            force_anchor=False,
+        ):
+            assert self.offset == end
+            periodic = end % (block_size * anchor_interval_blocks) == 0
+            anchored = bool(force_anchor or periodic)
+            return {
+                "start_token": start,
+                "end_token": end,
+                "block_size": block_size,
+                "anchor_interval_blocks": anchor_interval_blocks,
+                "anchor": (
+                    {
+                        "tokens": end,
+                        "periodic": periodic,
+                        "terminal": bool(force_anchor),
+                    }
+                    if anchored
+                    else None
+                ),
+            }
+
+    class _Model:
+        def make_cache(self):
+            return [DeepseekV4Cache()]
+
+        def __call__(self, input_ids, cache=None):
+            width = int(input_ids.shape[-1])
+            model_calls.append(width)
+            cache[0].offset += width
+            return mx.zeros((1, width, 2), dtype=mx.float32)
+
+    model = _Model()
+    generator = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
+    generator.model = model
+    generator.prefill_step_size = 2048
+    generator._prefill_single_shot = False
+    generator._sync = lambda: None
+    generator._prefill_should_clear_cache = lambda: False
+    generator._delta_capture_admitted = lambda cache, tokens: True
+
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.model = model
+    scheduler.batch_generator = generator
+    scheduler._uses_dsv4_cache = True
+    return scheduler, model_calls
+
+
+def test_dsv4_shadow_prefill_captures_zero_origin_native_chain():
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    scheduler, model_calls = _dsv4_shadow_native_prefill_fixture()
+
+    cache = scheduler._prefill_for_prompt_only_cache(
+        list(range(326)),
+        capture_dsv4_deltas=True,
+    )
+
+    assert cache is not None
+    # The owning generator splits at the final preceding full block so it can
+    # stamp an append-safe checkpoint while the live cache is exactly at 256.
+    assert model_calls == [256, 70]
+    transport = DSV4BatchGenerator._dsv4_delta_transport(cache)
+    assert transport is not None
+    assert transport[0]["dsv4_record_intervals"] == ((0, 256), (256, 326))
+    records = transport[0]["dsv4_block_records"]
+    assert records[0]["anchor"]["append_safe"] is True
+    assert records[1]["anchor"]["terminal"] is True
+
+
+def test_dsv4_shadow_native_prefill_yields_to_foreground_between_chunks():
+    scheduler, model_calls = _dsv4_shadow_native_prefill_fixture()
+
+    cache = scheduler._prefill_for_prompt_only_cache(
+        list(range(3000)),
+        should_stop=lambda: True,
+        capture_dsv4_deltas=True,
+    )
+
+    assert cache is None
+    assert model_calls == [2048]
+
+
 def _think_ids():
     from vmlx_engine.utils.dsv4_batch_generator import (
         DSV4_EOS_ID,
@@ -3742,9 +3842,13 @@ def test_dsv4_shadow_rekey_idle_task_contract():
     assert "queue.insert(" in drain_src
     assert "_prefill_for_prompt_only_cache" in drain_src
     assert "clear_mlx_memory_cache" in drain_src
+    assert "capture_dsv4_deltas=True" in drain_src
 
     store_src = inspect.getsource(Scheduler._store_dsv4_shadow_chain)
-    assert "_quantize_cache_for_storage" in store_src
+    assert "_dsv4_delta_transport" in store_src
+    assert "expected_end = len(key_tokens)" in store_src
+    assert "if not complete" in store_src
+    assert "_quantize_cache_for_storage" not in store_src
     assert "store_cache" in store_src
     assert "release_request_refs" in store_src
     assert "detach_request" in store_src

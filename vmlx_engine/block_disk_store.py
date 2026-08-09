@@ -336,10 +336,10 @@ class BlockDiskStore:
         # CPU safetensors encoding or an immutable safetensors image. Live MLX
         # arrays never cross the queue boundary:
         # ("__numpy_block__", block_hash, tensor_dict, dtype, num_layers,
-        #  token_count, fence_id, reserved_bytes)
+        #  token_count, parent_hash, fence_id, reserved_bytes, replace_existing)
         # or
         # (block_hash, payload_bytes, dtype, num_layers, token_count,
-        #  fence_id, reserved_bytes)
+        #  parent_hash, fence_id, reserved_bytes, replace_existing)
         # or special commands: ("__access__", ...) or ("__cleanup__", ...)
         self._write_queue: queue.Queue = queue.Queue(maxsize=1000)
         self._tmp_seq = 0  # Monotonic counter for unique temp file names
@@ -533,6 +533,37 @@ class BlockDiskStore:
             if not locked:
                 return False
             return self._has_block_guarded(block_hash)
+
+    def has_block_record(self, block_hash: bytes) -> bool:
+        """Check finalized index/file readability without loading tensors.
+
+        Callers may already hold a validated representation stamp and only
+        need to know whether aggregate-budget eviction removed its payload.
+        Unlike :meth:`has_block`, this does not deserialize for codec-policy
+        compatibility and does not count a cache hit or touch the durable LRU.
+        """
+        with self.global_budget.mutation_guard() as locked:
+            if not locked:
+                return False
+            hash_hex = block_hash.hex()
+            try:
+                row = self._read_conn.execute(
+                    "SELECT file_name FROM blocks WHERE block_hash = ?",
+                    (hash_hex,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                self._thread_local.read_conn = sqlite3.connect(
+                    str(self._db_path),
+                    timeout=1.0,
+                )
+                row = self._read_conn.execute(
+                    "SELECT file_name FROM blocks WHERE block_hash = ?",
+                    (hash_hex,),
+                ).fetchone()
+            return bool(
+                row is not None
+                and self._indexed_payload_is_readable(str(row[0]))
+            )
 
     def _has_block_guarded(self, block_hash: bytes) -> bool:
         """Guarded implementation of :meth:`has_block`."""
@@ -1440,6 +1471,7 @@ class BlockDiskStore:
         parent_hash: Optional[bytes] = None,
         request_id: Optional[str] = None,
         fence_id: Optional[str] = None,
+        replace_existing: bool = False,
     ) -> bool:
         """Admit one producer across freeze and immutable queue publication."""
 
@@ -1453,6 +1485,7 @@ class BlockDiskStore:
                 parent_hash=parent_hash,
                 request_id=request_id,
                 fence_id=fence_id,
+                replace_existing=replace_existing,
             )
         finally:
             self._end_write_producer()
@@ -1466,6 +1499,7 @@ class BlockDiskStore:
         parent_hash: Optional[bytes] = None,
         request_id: Optional[str] = None,
         fence_id: Optional[str] = None,
+        replace_existing: bool = False,
     ) -> bool:
         """
         Detach a block on the model-owning thread and queue disk publication.
@@ -1639,6 +1673,7 @@ class BlockDiskStore:
                 parent_hash,
                 fence_id,
                 reserved_bytes,
+                bool(replace_existing),
             ),
             timeout=_remaining_admission_time(),
         )
@@ -1923,6 +1958,7 @@ class BlockDiskStore:
                 parent_hash,
                 fence_id,
                 reserved_bytes,
+                replace_existing,
             ) = item
             try:
                 payload = self._freeze_numpy_safetensors_bytes(tensors)
@@ -1951,6 +1987,7 @@ class BlockDiskStore:
                         parent_hash,
                         fence_id,
                         len(payload),
+                        bool(replace_existing),
                     )
                 )
             except Exception as exc:
@@ -2062,6 +2099,11 @@ class BlockDiskStore:
                                 num_layers,
                                 token_count,
                                 parent_hash,
+                                replace_existing=(
+                                    bool(metadata[2])
+                                    if len(metadata) > 2
+                                    else False
+                                ),
                             )
                             self._pin_write_fence_block_locked(
                                 write_conn,
@@ -2485,6 +2527,8 @@ class BlockDiskStore:
         num_layers: int,
         token_count: int,
         parent_hash: Optional[bytes],
+        *,
+        replace_existing: bool = False,
     ) -> int:
         """Write and publish a frozen block (background writer thread only)."""
         hash_hex = block_hash.hex()
@@ -2514,17 +2558,24 @@ class BlockDiskStore:
         # Skip if already on disk, but allow an ordered current write-through to
         # upgrade a legacy row after its parent chain has been established.
         exists = conn.execute(
-            "SELECT parent_hash, ancestry_known, file_name "
+            "SELECT parent_hash, ancestry_known, file_name, file_size "
             "FROM blocks WHERE block_hash = ?",
             (hash_hex,),
         ).fetchone()
         if exists:
-            existing_parent, ancestry_known, existing_file = exists
+            existing_parent, ancestry_known, existing_file, _existing_size = exists
             if not self._indexed_payload_is_readable(str(existing_file)):
                 self._cleanup_entry(conn, hash_hex)
                 exists = None
+        replaced_file_size = 0
+        replacing_existing = False
         if exists:
-            existing_parent, ancestry_known, _existing_file = exists
+            (
+                existing_parent,
+                ancestry_known,
+                _existing_file,
+                existing_file_size,
+            ) = exists
             if int(ancestry_known or 0) == 0:
                 conn.execute(
                     "UPDATE blocks SET parent_hash = ?, ancestry_known = 1 "
@@ -2536,7 +2587,10 @@ class BlockDiskStore:
                 raise ValueError(
                     "block hash already exists with different parent ancestry"
                 )
-            return 0
+            if not replace_existing:
+                return 0
+            replaced_file_size = max(0, int(existing_file_size or 0))
+            replacing_existing = True
 
         file_path = self._hash_to_path(hash_hex)
         rel_path = file_path.relative_to(self.cache_dir)
@@ -2562,15 +2616,44 @@ class BlockDiskStore:
         file_size = file_path.stat().st_size
         now = time.time()
 
-        conn.execute(
-            """INSERT OR IGNORE INTO blocks
-               (block_hash, parent_hash, ancestry_known,
-                file_name, num_tokens, num_layers, dtype,
-                file_size, created_at, last_accessed)
-               VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)""",
-            (hash_hex, parent_hex, str(rel_path), token_count, num_layers, dtype,
-             file_size, now, now)
-        )
+        if replacing_existing:
+            conn.execute(
+                """UPDATE blocks
+                   SET parent_hash = ?, ancestry_known = 1, file_name = ?,
+                       num_tokens = ?, num_layers = ?, dtype = ?, file_size = ?,
+                       created_at = ?, last_accessed = ?
+                   WHERE block_hash = ?""",
+                (
+                    parent_hex,
+                    str(rel_path),
+                    token_count,
+                    num_layers,
+                    dtype,
+                    file_size,
+                    now,
+                    now,
+                    hash_hex,
+                ),
+            )
+        else:
+            conn.execute(
+                """INSERT OR IGNORE INTO blocks
+                   (block_hash, parent_hash, ancestry_known,
+                    file_name, num_tokens, num_layers, dtype,
+                    file_size, created_at, last_accessed)
+                   VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    hash_hex,
+                    parent_hex,
+                    str(rel_path),
+                    token_count,
+                    num_layers,
+                    dtype,
+                    file_size,
+                    now,
+                    now,
+                ),
+            )
         conn.commit()
 
         with self._stats_lock:
@@ -2579,7 +2662,7 @@ class BlockDiskStore:
             f"Disk cache write: {hash_hex[:12]} ({dtype}, {num_layers} layers, "
             f"{file_size / 1024:.1f}KB, {token_count} tokens)"
         )
-        return max(0, int(file_size))
+        return int(file_size) - replaced_file_size
 
     def _index_physical_bytes(self) -> int:
         """Return physical bytes for this namespace's SQLite index files."""

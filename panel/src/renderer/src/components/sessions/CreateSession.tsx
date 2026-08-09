@@ -102,6 +102,12 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : detected?.family === 'deepseek-v4' ? 'auto' : prev.kvCacheQuantization,
         pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : prev.pagedCacheBlockSize,
         maxCacheBlocks: detected?.family === 'deepseek-v4' ? DSV4_MAX_CACHE_BLOCKS : prev.maxCacheBlocks,
+        // Mirror the main-process family timeout bump (sessions.ts normalizer)
+        // so the form displays the value launch will actually use.
+        timeout: ['deepseek-v4', 'minimax_m3', 'openpangu_v2'].includes(detected?.family) &&
+          (prev.timeout == null || prev.timeout === 300)
+          ? 900
+          : prev.timeout,
       }
       return applyBundleGenerationDefaultsToSessionConfig(next, gen)
     })
@@ -213,8 +219,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
         if (detected && detected.family !== 'unknown') {
           base.enableAutoToolChoice = undefined
-          if (detected.family === 'deepseek-v4') {
+          if (['deepseek-v4', 'minimax_m3', 'openpangu_v2'].includes(detected.family)) {
             base.timeout = 900
+          }
+          if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true
             base.dsv4PoolQuant = typeof detected.dsv4PoolQuantDefault === 'boolean'
               ? detected.dsv4PoolQuantDefault

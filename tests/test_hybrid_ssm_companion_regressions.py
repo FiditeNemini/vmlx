@@ -392,6 +392,51 @@ def test_idle_rederive_parks_mid_prefill_and_requeues_entry_at_front():
     assert scheduler.has_idle_tasks() is True
 
 
+def test_idle_rederive_foreground_race_yields_before_first_model_chunk(
+    monkeypatch,
+):
+    """A request arriving after dequeue must not pay one maintenance chunk."""
+    import vmlx_engine.scheduler as scheduler_mod
+
+    monkeypatch.setattr(
+        scheduler_mod, "clear_mlx_memory_cache", lambda **_kwargs: None
+    )
+
+    scheduler = _idle_ready_scheduler()
+    stored = []
+    model_calls = []
+    scheduler._ssm_state_cache = SimpleNamespace(
+        store=lambda *args: stored.append(args)
+    )
+    first = ([1, 2, 3], 3, "req-raced")
+    second = ([9, 8], 2, "req-next")
+    scheduler._ssm_rederive_queue.extend([first, second])
+    scheduler._ensure_ssm_rederive_idle_task()
+    scheduler._uses_dsv4_cache = False
+    kv_layer = SimpleNamespace()
+    ssm_layer = SimpleNamespace()
+
+    class _Model:
+        def make_cache(self):
+            # The idle drain already passed its initial foreground check and
+            # popped `first`; foreground arrives just before chunk zero.
+            scheduler.waiting.append(object())
+            return [kv_layer, ssm_layer]
+
+        def __call__(self, input_ids, cache=None):
+            model_calls.append(int(input_ids.shape[-1]))
+            return mx.zeros((1, int(input_ids.shape[-1]), 1))
+
+    scheduler.model = _Model()
+
+    assert scheduler.run_one_idle_task() is True
+
+    assert model_calls == []
+    assert stored == []
+    assert scheduler._ssm_rederive_queue == [first, second]
+    assert scheduler.has_idle_tasks() is True
+
+
 def test_idle_rederive_clears_unservable_queue():
     scheduler = _idle_ready_scheduler()
     scheduler._is_hybrid = False  # queue can never be consumed

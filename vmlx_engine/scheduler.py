@@ -2479,10 +2479,11 @@ class Scheduler:
 
         Args:
             prompt_tokens: Token IDs to prefill (typically prompt[:-1])
-            should_stop: Optional poll evaluated between prefill chunks. When
-                it returns True the partial prefill is abandoned and None is
-                returned, bounding the unpreemptable GPU window to one chunk
-                so idle maintenance yields to foreground requests (vmlx#245).
+            should_stop: Optional poll evaluated before and between prefill
+                chunks. When it returns True the partial prefill is abandoned
+                and None is returned, so idle maintenance yields before
+                submitting stale work after a foreground request arrives
+                (vmlx#245).
 
         Returns:
             List of cache objects with state for exactly the given tokens,
@@ -2550,7 +2551,7 @@ class Scheduler:
             else:
                 chunk_size = 2048
             for start in range(0, len(prompt_tokens), chunk_size):
-                if start > 0 and should_stop is not None and should_stop():
+                if should_stop is not None and should_stop():
                     del fresh_cache
                     clear_mlx_memory_cache(log=logger)
                     return None

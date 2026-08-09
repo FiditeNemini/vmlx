@@ -592,6 +592,7 @@ def decode_tq_entries(
     entries: List[Tuple[Any, ...]],
     *,
     max_run_entries: Optional[int] = None,
+    _stats: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[Any, Any]]:
     """Decode independent TQ entries while preserving every entry boundary.
 
@@ -603,6 +604,8 @@ def decode_tq_entries(
     if not entries:
         raise ValueError("cannot decode an empty TQ block sequence")
     if len(entries) == 1:
+        if _stats is not None:
+            _stats["scalar_entries"] = _stats.get("scalar_entries", 0) + 1
         return [decode_tq_block(entries[0])]
 
     decoded = []
@@ -620,8 +623,17 @@ def decode_tq_entries(
         run = entries[start:end]
         stacked = _stack_tq_block_entries(run) if len(run) > 1 else None
         if stacked is None:
+            if _stats is not None:
+                _stats["scalar_entries"] = (
+                    _stats.get("scalar_entries", 0) + len(run)
+                )
             decoded.extend(decode_tq_block(entry) for entry in run)
         else:
+            if _stats is not None:
+                _stats["batched_runs"] = _stats.get("batched_runs", 0) + 1
+                _stats["batched_entries"] = (
+                    _stats.get("batched_entries", 0) + len(run)
+                )
             keys, values = decode_tq_block(stacked)
             decoded.extend(
                 (keys[index], values[index]) for index in range(len(run))
@@ -631,14 +643,40 @@ def decode_tq_entries(
     return decoded
 
 
+def _tq_decode_timing_enabled() -> bool:
+    import os
+
+    return os.environ.get("VMLX_TQ_DECODE_TIMING", "").strip() == "1"
+
+
 def decode_tq_blocks(entries: List[Tuple[Any, ...]]) -> Tuple[Any, Any]:
     """Decode paged TQ entries and join the independent pages by token axis."""
-    decoded = decode_tq_entries(entries)
+    timing = _tq_decode_timing_enabled()
+    stats: Dict[str, int] = {}
+    if timing:
+        import time as _time
 
-    return (
-        mx.concatenate([keys for keys, _ in decoded], axis=2),
-        mx.concatenate([values for _, values in decoded], axis=2),
-    )
+        t0 = _time.perf_counter()
+    decoded = decode_tq_entries(entries, _stats=stats)
+    keys = mx.concatenate([k for k, _ in decoded], axis=2)
+    values = mx.concatenate([v for _, v in decoded], axis=2)
+    if timing:
+        # Diagnostic mode only: forcing eval here moves the lazy codec work
+        # into this call so the wall time is attributable. The default path
+        # stays fully lazy.
+        mx.eval(keys, values)
+        elapsed = _time.perf_counter() - t0
+        logger.info(
+            "TQ block decode timing: entries=%d batched_runs=%d "
+            "batched_entries=%d scalar_entries=%d tokens=%d wall=%.4fs",
+            len(entries),
+            stats.get("batched_runs", 0),
+            stats.get("batched_entries", 0),
+            stats.get("scalar_entries", 0),
+            int(keys.shape[2]) if getattr(keys, "ndim", 0) >= 3 else -1,
+            elapsed,
+        )
+    return keys, values
 
 
 def is_tq_compressed_cache(cache: List[Any]) -> bool:

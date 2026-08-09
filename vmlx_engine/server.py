@@ -7114,7 +7114,8 @@ def _suppressed_tool_display_delta(
 ) -> str | None:
     """Return the next visible delta while hiding suppressed native tool markup."""
     cleaned = _clean_suppressed_tool_markup_for_display(accumulated_text, request)
-    if cleaned == accumulated_text:
+    markup_identified = cleaned != accumulated_text
+    if not markup_identified:
         marker_positions = [
             pos
             for marker in _TOOL_CALL_MARKERS
@@ -7122,6 +7123,7 @@ def _suppressed_tool_display_delta(
         ]
         if marker_positions:
             cleaned = accumulated_text[: min(marker_positions)].rstrip()
+            markup_identified = True
         else:
             # Avoid streaming a partial marker split across token boundaries.
             partial_len = 0
@@ -7132,7 +7134,12 @@ def _suppressed_tool_display_delta(
                         partial_len = max(partial_len, n)
                         break
             cleaned = accumulated_text[:-partial_len] if partial_len else accumulated_text
-    cleaned = _strip_tool_markup_residue_for_display(cleaned)
+    if markup_identified:
+        # Tidy only the hole left by removed tool markup. Plain no-tools prose
+        # must stay byte-identical: the residue helper's blank-line collapse +
+        # strip() would otherwise eat every paragraph separator (and KaTeX
+        # display-block spacing) from each recomputed suppressed-display delta.
+        cleaned = _strip_tool_markup_residue_for_display(cleaned)
     if not cleaned:
         return None
     if streamed_display_text and cleaned.startswith(streamed_display_text):

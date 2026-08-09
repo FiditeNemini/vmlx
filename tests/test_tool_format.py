@@ -3523,6 +3523,72 @@ class TestFallbackToolPromptFormat:
         ordinary = "The value 3 < 5 is ordinary visible prose."
         assert server._clean_suppressed_tool_markup_for_display(ordinary, req) == ordinary
 
+    def test_residue_strip_only_applies_on_identified_markup_paths(self):
+        """Plain prose must bypass the residue collapse; markup holes still tidy."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        with_residue = "Before.\n\n<｜DSML｜tool\n\nAfter."
+        cleaned = server._strip_tool_markup_residue_for_display(with_residue)
+        assert "DSML" not in cleaned
+        assert cleaned == "Before.\n\nAfter."
+
+        # The delta path must NOT route ordinary prose through that collapse.
+        req = ResponsesRequest(model="m", input="x", tool_choice="none")
+        prose = (
+            "The cache stores data.\n\nA cache is fast.\n\n"
+            "\\[\nx = 1\n\\]\n\nCaching stores data."
+        )
+        assert server._suppressed_tool_display_delta(prose, "", req) == prose
+
+    def test_server_suppressed_stream_preserves_paragraph_breaks_no_tools(
+        self, monkeypatch
+    ):
+        """DSV4 no-tools stream: suppressed-display deltas must keep \\n\\n intact.
+
+        A server started with --tool-call-parser dsml suppresses tool parsing on
+        plain no-tools turns; every content delta is routed through
+        _suppressed_tool_display_delta. The recompute-and-subtract cursor must
+        deliver deltas whose concatenation is byte-identical to the raw prose --
+        paragraph separators and KaTeX display blocks included.
+        """
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+
+        monkeypatch.setattr(server, "_tool_call_parser", "dsml")
+        req = ResponsesRequest(model="m", input="x", tool_choice="none")
+
+        full = (
+            "The cache stores data.\n\nA cache is fast.\n\n"
+            "\\[\nx = 1\n\\]\n\nCaching stores data."
+        )
+        # DSV4's tokenizer glues paragraph breaks onto the preceding token
+        # (e.g. '.\n\n', '\\]\n\n'), so boundaries land mid-break.
+        raw_deltas = [
+            "The cache stores data.",
+            "\n\n",
+            "A cache is fast.\n\n",
+            "\\[\n",
+            "x = 1\n",
+            "\\]\n\n",
+            "Caching stores data.",
+        ]
+        assert "".join(raw_deltas) == full
+
+        accumulated = ""
+        streamed = ""
+        emitted: list[str] = []
+        for raw in raw_deltas:
+            accumulated += raw
+            delta = server._suppressed_tool_display_delta(accumulated, streamed, req)
+            if delta:
+                streamed += delta
+                emitted.append(delta)
+
+        joined = "".join(emitted)
+        assert joined == full
+        assert joined.count("\n\n") == 3
+
     def test_server_suppressed_delta_never_reemits_nonmonotonic_accumulator(
         self, monkeypatch
     ):

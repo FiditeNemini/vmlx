@@ -9344,12 +9344,22 @@ class Scheduler:
                                     tokens=len(store_tokens),
                                     layers=len(cache_data or []),
                                 )
+                                if cache_key_override is not None:
+                                    _coverage_note = (
+                                        f"key-aligned cache coverage "
+                                        f"{len(store_tokens)} tokens"
+                                    )
+                                else:
+                                    _coverage_note = (
+                                        f"cache truncated to "
+                                        f"{max(len(prompt_tokens) - 1, 0)} tokens"
+                                    )
                                 logger.info(
                                     f"Stored paged cache for request {request_id} "
                                     f"({len(store_tokens)} cache-key tokens from "
                                     f"{len(prompt_tokens)} prompt tokens, "
                                     f"{len(request._extracted_cache)} layers, "
-                                    f"cache truncated to {max(len(prompt_tokens) - 1, 0)} tokens)"
+                                    f"{_coverage_note})"
                                 )
                         except Exception as e:
                             logger.warning(

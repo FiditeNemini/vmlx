@@ -1121,3 +1121,52 @@ def test_disk_store_restore_quarantine_preserves_writes(monkeypatch, tmp_path):
     assert stats["restore_enabled"] is False
     assert stats["restore_suppressed"] == 1
     assert disk.shutdown()
+
+
+# ----------------------------------------------------------------------
+# has_complete — redundant re-derive skip probe (post-hit TTFT stall fix)
+# ----------------------------------------------------------------------
+
+
+def test_has_complete_true_only_for_exact_complete_entry():
+    cache = SSMCompanionCache()
+    tokens = [1, 2, 3, 4, 5]
+    cache.store(tokens, 5, [_FakeSSMLayer(1.0)], is_complete=True)
+    assert cache.has_complete(tokens, 5) is True
+    # Different boundary → different key.
+    assert cache.has_complete(tokens, 4) is False
+    # Different extra keys partition the namespace.
+    assert cache.has_complete(tokens, 5, cache_extra_keys=("img", "a")) is False
+    # Empty/invalid boundary never matches.
+    assert cache.has_complete(tokens, 0) is False
+
+
+def test_has_complete_false_for_incomplete_entry():
+    cache = SSMCompanionCache()
+    tokens = [7, 8, 9]
+    cache.store(tokens, 3, [_FakeSSMLayer(2.0)], is_complete=False)
+    assert cache.has_complete(tokens, 3) is False
+    # Upgrading the entry to complete flips the probe.
+    cache.store(tokens, 3, [_FakeSSMLayer(2.0)], is_complete=True)
+    assert cache.has_complete(tokens, 3) is True
+
+
+def test_has_complete_does_not_disturb_lru_order():
+    cache = SSMCompanionCache(max_entries=2)
+    a, b = [1, 1, 1], [2, 2, 2]
+    cache.store(a, 3, [_FakeSSMLayer(1.0)])
+    cache.store(b, 3, [_FakeSSMLayer(2.0)])
+    # Probing `a` must NOT refresh it: the next store evicts `a` (oldest).
+    assert cache.has_complete(a, 3) is True
+    cache.store([3, 3, 3], 3, [_FakeSSMLayer(3.0)])
+    assert cache.has_complete(a, 3) is False
+    assert cache.has_complete(b, 3) is True
+
+
+def test_has_complete_respects_extra_key_partitions():
+    cache = SSMCompanionCache()
+    tokens = [4, 4, 4, 4]
+    cache.store(tokens, 4, [_FakeSSMLayer(1.0)], cache_extra_keys=("vid", "x"))
+    assert cache.has_complete(tokens, 4, cache_extra_keys=("vid", "x")) is True
+    assert cache.has_complete(tokens, 4) is False
+    assert cache.has_complete(tokens, 4, cache_extra_keys=("vid", "y")) is False

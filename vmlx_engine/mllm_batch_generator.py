@@ -7790,17 +7790,37 @@ class MLLMBatchGenerator:
                                     # top of an already-advanced SSM state,
                                     # causing infinite generation loops
                                     # (v1.3.77 regression, v1.3.78 fix).
-                                    _rq = self._ssm_rederive_queue
-                                    if len(_rq) >= self._ssm_rederive_queue_max:
-                                        _rq.pop(0)
-                                    _rq.append(
-                                        (
-                                            list(all_tokens[:prompt_len]),
-                                            prompt_len,
+                                    if self._ssm_state_cache is not None and self._ssm_state_cache.has_complete(
+                                        all_tokens,
+                                        prompt_len,
+                                        cache_extra_keys=_ssm_extra_keys,
+                                    ):
+                                        # A complete companion already sits at
+                                        # this exact key (typical after a cache
+                                        # HIT, which restored from it). The
+                                        # deferred clean prefill would recompute
+                                        # byte-identical state — and its full
+                                        # prompt-length prefill starves the next
+                                        # request's TTFT.
+                                        logger.info(
+                                            "MLLM SSM re-derive skipped for %s: "
+                                            "complete companion already stored "
+                                            "at %d-token key",
                                             req.request_id,
-                                            _ssm_extra_keys,
+                                            prompt_len,
                                         )
-                                    )
+                                    else:
+                                        _rq = self._ssm_rederive_queue
+                                        if len(_rq) >= self._ssm_rederive_queue_max:
+                                            _rq.pop(0)
+                                        _rq.append(
+                                            (
+                                                list(all_tokens[:prompt_len]),
+                                                prompt_len,
+                                                req.request_id,
+                                                _ssm_extra_keys,
+                                            )
+                                        )
                                 logger.info(
                                     f"Captured SSM state for "
                                     f"{req.request_id}: {len(ssm_layers)} layers, "
@@ -9500,6 +9520,18 @@ class MLLMBatchGenerator:
         else:
             tokens, prompt_len, orig_rid = item
             cache_extra_keys = None
+        if self._ssm_state_cache.has_complete(
+            tokens, prompt_len, cache_extra_keys=cache_extra_keys
+        ):
+            # Stored between enqueue and this idle tick (e.g. an identical
+            # request completed first). Skip the redundant clean prefill.
+            logger.info(
+                "MLLM SSM re-derive skipped at idle for %s: complete "
+                "companion already stored at %d-token key",
+                orig_rid,
+                prompt_len,
+            )
+            return True
         logger.info(
             f"MLLM SSM re-derive: clean prefill for {orig_rid} "
             f"({prompt_len} prompt tokens, {len(self._ssm_rederive_queue)} remaining)"

@@ -583,6 +583,26 @@ class SSMCompanionCache:
             except Exception as e:
                 logger.debug("SSM disk write-through failed: %s", e)
 
+    def has_complete(
+        self,
+        token_ids: List[int],
+        num_tokens: int,
+        cache_extra_keys: Optional[Any] = None,
+    ) -> bool:
+        """True when a complete entry already exists at this exact key.
+
+        Pure existence probe: does not touch LRU order, does not clone
+        states, does not consult the disk tier. Used to skip redundant
+        deferred re-derive prefills whose output would land on a key that
+        already holds a complete companion (a cache HIT restores from that
+        very entry, so re-deriving it again is a full wasted prefill).
+        """
+        if num_tokens <= 0:
+            return False
+        key = self._key(token_ids, num_tokens, cache_extra_keys=cache_extra_keys)
+        entry = self._store.get(key)
+        return entry is not None and bool(entry[1])
+
     def _clone_states(self, states: List[Any], *, key_hint: str) -> Optional[List[Any]]:
         """Detach SSM state objects from caller-owned/live cache buffers.
 

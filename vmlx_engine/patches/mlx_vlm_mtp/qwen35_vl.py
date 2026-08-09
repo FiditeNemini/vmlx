@@ -241,9 +241,17 @@ def _patch_attention_text_rope(qlang: Any) -> None:
         mask=None,
         cache=None,
         position_ids=None,
+        position_embeddings=None,
     ):
         if position_ids is not None and getattr(position_ids, "ndim", 0) != 2:
-            return original_call(self, x, mask, cache, position_ids)
+            return original_call(
+                self,
+                x,
+                mask,
+                cache,
+                position_ids,
+                position_embeddings=position_embeddings,
+            )
 
         batch_size, seq_len, _ = x.shape
 
@@ -284,7 +292,10 @@ def _patch_attention_text_rope(qlang: Any) -> None:
             queries = rope(queries, offset=offset)
             keys = rope(keys, offset=offset)
         else:
-            cos, sin = self.rotary_emb(values, position_ids)
+            if position_embeddings is not None:
+                cos, sin = position_embeddings
+            else:
+                cos, sin = self.rotary_emb(values, position_ids)
             queries, keys = qlang.apply_multimodal_rotary_pos_emb(
                 queries, keys, cos, sin
             )
@@ -520,11 +531,19 @@ def _patch_decoder_layer(qlang: Any) -> None:
         mask=None,
         cache=None,
         position_ids=None,
+        position_embeddings=None,
         gdn_sink: Optional[list] = None,
         n_confirmed: int = 0,
     ):
         if n_confirmed == 0 and gdn_sink is None:
-            return original_call(self, x, mask, cache, position_ids)
+            return original_call(
+                self,
+                x,
+                mask,
+                cache,
+                position_ids,
+                position_embeddings=position_embeddings,
+            )
 
         if self.is_linear:
             r = self.linear_attn(
@@ -535,7 +554,13 @@ def _patch_decoder_layer(qlang: Any) -> None:
                 n_confirmed=n_confirmed,
             )
         else:
-            r = self.self_attn(self.input_layernorm(x), mask, cache, position_ids)
+            r = self.self_attn(
+                self.input_layernorm(x),
+                mask,
+                cache,
+                position_ids,
+                position_embeddings=position_embeddings,
+            )
         h = x + r
         return h + self.mlp(self.post_attention_layernorm(h))
 
@@ -556,11 +581,19 @@ def _patch_moe_decoder_layer(qmoe_lang: Any) -> None:
         mask=None,
         cache=None,
         position_ids=None,
+        position_embeddings=None,
         gdn_sink: Optional[list] = None,
         n_confirmed: int = 0,
     ):
         if n_confirmed == 0 and gdn_sink is None:
-            return original_call(self, x, mask, cache, position_ids)
+            return original_call(
+                self,
+                x,
+                mask,
+                cache,
+                position_ids,
+                position_embeddings=position_embeddings,
+            )
 
         if self.is_linear:
             r = self.linear_attn(
@@ -571,7 +604,13 @@ def _patch_moe_decoder_layer(qmoe_lang: Any) -> None:
                 n_confirmed=n_confirmed,
             )
         else:
-            r = self.self_attn(self.input_layernorm(x), mask, cache, position_ids)
+            r = self.self_attn(
+                self.input_layernorm(x),
+                mask,
+                cache,
+                position_ids,
+                position_embeddings=position_embeddings,
+            )
         h = x + r
         return h + self.mlp(self.post_attention_layernorm(h))
 
@@ -615,6 +654,16 @@ def _patch_qwen_model(qlang: Any) -> None:
         fa_mask = qlang.create_attention_mask(h, cache[self.fa_idx])
         ssm_mask = qlang.create_ssm_mask(h, cache[self.ssm_idx])
 
+        # M-RoPE cos/sin are identical for every full-attention layer; media
+        # rows (3D position_ids) hoist them once per forward. VL prefill
+        # chunks run through THIS branch (return_unnormed=True when
+        # return_logits is False), so the hoist must live here too, not just
+        # in the vendored Qwen3_5Model.__call__.
+        position_embeddings = None
+        if position_ids is not None and getattr(position_ids, "ndim", 0) == 3:
+            fa_layer = self.layers[self.fa_idx]
+            position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
+
         for layer, layer_cache in zip(self.layers, cache):
             layer_mask = ssm_mask if layer.is_linear else fa_mask
             h = layer(
@@ -622,6 +671,7 @@ def _patch_qwen_model(qlang: Any) -> None:
                 layer_mask,
                 layer_cache,
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
                 gdn_sink=gdn_sink,
                 n_confirmed=n_confirmed,
             )

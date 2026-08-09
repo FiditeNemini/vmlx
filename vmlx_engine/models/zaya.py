@@ -127,6 +127,18 @@ class ZayaPartialRoPE(nn.Module):
     def __call__(self, x: mx.array, offset: int = 0) -> mx.array:
         if self.rotary_dim <= 0:
             return x
+        if not isinstance(offset, mx.array):
+            # NeoX split-half partial rotary == mx.fast.rope(traditional=False);
+            # one fused kernel replaces ~16 tape ops per call (80 calls/token
+            # across the CCA layers). Array offsets fall back to manual math.
+            return mx.fast.rope(
+                x,
+                self.rotary_dim,
+                traditional=False,
+                base=self.base,
+                scale=1.0,
+                offset=int(offset),
+            )
         L = x.shape[-2]
         inv_freq = 1.0 / (
             self.base

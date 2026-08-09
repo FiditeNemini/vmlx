@@ -250,6 +250,9 @@ def _rotate_half(x: mx.array) -> mx.array:
     return mx.reshape(mx.stack([-x2, x1], axis=-1), (*x.shape[:-2], -1))
 
 
+_ENCODER_ROPE_COS_SIN: dict[tuple, tuple[mx.array, mx.array]] = {}
+
+
 def _vision_activation(name: str):
     if name in {"gelu", "gelu_pytorch_tanh"}:
         return nn.gelu
@@ -313,10 +316,20 @@ class EncoderRope2D(nn.Module):
         k: mx.array,
         grid_hw: tuple[int, int],
     ) -> tuple[mx.array, mx.array]:
-        freqs = self._freqs_for_grid(grid_hw)
+        # cos/sin depend only on grid + rope params; every encoder layer (and
+        # every video frame of the same size) reuses them instead of rebuilding.
+        key = (self.dim, self.use_cls_token, self.theta, int(grid_hw[0]), int(grid_hw[1]))
+        cached = _ENCODER_ROPE_COS_SIN.get(key)
+        if cached is None:
+            freqs = self._freqs_for_grid(grid_hw)
+            cached = (mx.cos(freqs), mx.sin(freqs))
+            if len(_ENCODER_ROPE_COS_SIN) >= 16:
+                _ENCODER_ROPE_COS_SIN.clear()
+            _ENCODER_ROPE_COS_SIN[key] = cached
+        cos, sin = cached
         q_dtype = q.dtype
         k_dtype = k.dtype
-        rot_dim = freqs.shape[-1]
+        rot_dim = cos.shape[-1]
         if rot_dim > q.shape[-1]:
             raise ValueError(
                 "Step3.7 vision RoPE dimension exceeds attention head dim: "
@@ -324,8 +337,6 @@ class EncoderRope2D(nn.Module):
             )
         q_left, q_mid, q_right = q[..., :0], q[..., :rot_dim], q[..., rot_dim:]
         k_left, k_mid, k_right = k[..., :0], k[..., :rot_dim], k[..., rot_dim:]
-        cos = mx.cos(freqs)
-        sin = mx.sin(freqs)
         q_mid = q_mid * cos + _rotate_half(q_mid) * sin
         k_mid = k_mid * cos + _rotate_half(k_mid) * sin
         q = mx.concatenate([q_left, q_mid, q_right], axis=-1).astype(q_dtype)

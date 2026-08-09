@@ -147,6 +147,7 @@ class Qwen3_5Attention(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
         position_ids: Optional[mx.array] = None,
+        position_embeddings: Optional[tuple] = None,
     ) -> mx.array:
         B, L, D = x.shape
 
@@ -170,13 +171,17 @@ class Qwen3_5Attention(nn.Module):
 
         if position_ids is None:
             kv_seq_len += cache.offset + 1
-            position_ids = mx.arange(cache.offset, cache.offset + L)
-            position_ids = mx.expand_dims(position_ids, axis=0)
-            position_ids = mx.tile(position_ids, (3, 1, 1))
+            if position_embeddings is None:
+                position_ids = mx.arange(cache.offset, cache.offset + L)
+                position_ids = mx.expand_dims(position_ids, axis=0)
+                position_ids = mx.tile(position_ids, (3, 1, 1))
         else:
             kv_seq_len += cache.offset + 1 if cache is not None else 0
 
-        cos, sin = self.rotary_emb(values, position_ids)
+        if position_embeddings is None:
+            cos, sin = self.rotary_emb(values, position_ids)
+        else:
+            cos, sin = position_embeddings
 
         if mask is not None and isinstance(mask, mx.array):
             if isinstance(kv_seq_len, mx.array):
@@ -347,11 +352,18 @@ class Qwen3_5DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
         position_ids: Optional[mx.array] = None,
+        position_embeddings: Optional[tuple] = None,
     ) -> mx.array:
         if self.is_linear:
             r = self.linear_attn(self.input_layernorm(x), mask, cache)
         else:
-            r = self.self_attn(self.input_layernorm(x), mask, cache, position_ids)
+            r = self.self_attn(
+                self.input_layernorm(x),
+                mask,
+                cache,
+                position_ids,
+                position_embeddings=position_embeddings,
+            )
         h = x + r
         out = h + self.mlp(self.post_attention_layernorm(h))
         return out
@@ -389,9 +401,21 @@ class Qwen3_5Model(nn.Module):
         fa_mask = create_attention_mask(h, cache[self.fa_idx])
         ssm_mask = create_ssm_mask(h, cache[self.ssm_idx])
 
+        # M-RoPE cos/sin are identical for every full-attention layer; for
+        # media rows (3D position_ids) compute them once per forward instead
+        # of once per layer. Text rows skip the hoist: the serve-path MTP
+        # adapter routes them through a fused RoPE kernel that never reads
+        # cos/sin, so hoisting there would be pure waste.
+        position_embeddings = None
+        if position_ids is not None and getattr(position_ids, "ndim", 0) == 3:
+            fa_layer = self.layers[self.fa_idx]
+            position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
+
         for layer, c in zip(self.layers, cache):
             mask = ssm_mask if layer.is_linear else fa_mask
-            h = layer(h, mask, c, position_ids)
+            h = layer(
+                h, mask, c, position_ids, position_embeddings=position_embeddings
+            )
 
         return self.norm(h)
 

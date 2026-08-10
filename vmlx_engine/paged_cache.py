@@ -1065,13 +1065,20 @@ class PagedCacheManager:
             return False
         return True
 
-    def _maybe_evict_cached_block(self, block: CacheBlock) -> bool:
+    def _maybe_evict_cached_block(
+        self, block: CacheBlock, *, force: bool = False
+    ) -> bool:
         """
         Evict a block from the hash cache if present.
         If a disk store is configured, persist the block before freeing RAM.
 
         Args:
             block: Block to evict
+            force: Drop the RAM payload even when the durability fence refuses.
+                Persistence is still attempted first, so an L2 copy is written
+                whenever the store accepts one. Reserved for the byte budget's
+                last-resort pass: losing a cached block only costs a re-prefill,
+                while retaining it without a drain path grows RAM without bound.
 
         Returns:
             True if block was evicted from cache
@@ -1079,7 +1086,7 @@ class PagedCacheManager:
         if block.block_hash is None:
             return False
         block_hash = block.block_hash
-        if not self._persist_before_cached_block_eviction(block):
+        if not self._persist_before_cached_block_eviction(block) and not force:
             return False
 
         # Remove the L1 mapping only after persistence is either already
@@ -1289,6 +1296,13 @@ class PagedCacheManager:
                     break
                 if self._maybe_evict_cached_block(block):
                     evicted += 1
+
+            forced = 0
+            if self.resident_bytes > target_resident_bytes:
+                forced = self._force_drop_undrainable_locked(
+                    target_resident_bytes
+                )
+                evicted += forced
         if evicted and pressure_overage > 0:
             logger.info(
                 "Paged L1 Metal-pressure eviction: evicted %d block(s) "
@@ -1298,6 +1312,76 @@ class PagedCacheManager:
                 pressure_overage / 1024**3,
             )
         return evicted
+
+    def _force_drop_undrainable_locked(self, target_resident_bytes: int) -> int:
+        """Shed ``keep_resident`` payloads that can never reach L2. Lock held.
+
+        A native composite payload is pinned resident so its RAM mirror outlives
+        the async L2 write. When that write can never land — no disk store is
+        configured, or the store rejected it and the retry deadline has passed —
+        the pin is permanent, the block is excluded from every ordinary
+        candidate list, and the byte ceiling becomes unenforceable. Production
+        reaches this state (``prefix_cache`` pins native state even with no disk
+        store, and re-pins it after a write failure), and the pool then grows
+        until the process is killed.
+
+        Dropping an unreferenced block costs a re-prefill, never correctness, so
+        it is strictly better than that. Two guards keep it safe: blocks whose
+        write is still legitimately in flight are left alone, and only leaves are
+        dropped — peeling one layer at a time — so a parent is never removed out
+        from under a cached delta-chain descendant.
+        """
+        now = time.monotonic()
+
+        def drainable_soon(block: CacheBlock) -> bool:
+            if self._disk_store is None:
+                return False
+            return bool(block.durability_write_pending) and now < (
+                block.durability_retry_after or 0.0
+            )
+
+        dropped = 0
+        while self.resident_bytes > target_resident_bytes:
+            live_parents = {
+                b.parent_hash
+                for b in self.blocks
+                if b.cache_data is not None and b.parent_hash is not None
+            }
+            leaves = [
+                b
+                for b in self.blocks
+                if b.ref_count == 0
+                and not b.is_null
+                and b.cache_data is not None
+                and b.block_hash is not None
+                and b.keep_resident
+                and b.block_hash not in live_parents
+                and not drainable_soon(b)
+            ]
+            if not leaves:
+                break
+            leaves.sort(key=lambda b: b.last_access)
+            progressed = False
+            for block in leaves:
+                if self.resident_bytes <= target_resident_bytes:
+                    break
+                if self._maybe_evict_cached_block(block, force=True):
+                    dropped += 1
+                    progressed = True
+            if not progressed:
+                break
+
+        if dropped:
+            logger.warning(
+                "Paged L1 byte budget: dropped %d pinned block(s) with no "
+                "reachable L2 destination to honor the resident ceiling (%s); "
+                "those prefixes re-prefill on next use",
+                dropped,
+                "no disk cache configured"
+                if self._disk_store is None
+                else "L2 writes are failing",
+            )
+        return dropped
 
     def _metal_pressure_overage_bytes(self) -> int:
         """Query Metal and return the current pressure overage in bytes.

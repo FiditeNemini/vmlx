@@ -242,22 +242,66 @@ def test_disk_promotion_evicts_free_lru_mirror_to_make_room():
     assert mgr.stats.evictions == 1
 
 
-def test_enforce_skips_keep_resident_native_state():
-    """DSV4/ZAYA/rotating-SWA composite blocks are flagged keep_resident and must
-    survive the byte ceiling — their RAM mirror has to outlive the async L2 write
-    so an immediate same-process repeat can reconstruct without corruption."""
+def test_enforce_prefers_plain_blocks_over_keep_resident_native_state():
+    """DSV4/ZAYA/rotating-SWA composite blocks are flagged keep_resident so the
+    byte ceiling drains ordinary payloads first — their RAM mirror has to
+    outlive the async L2 write so an immediate same-process repeat can
+    reconstruct without corruption."""
     mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=500)
     # Oldest is the protected composite block; the plain block is newer.
-    _cache_a_block(mgr, mgr.blocks[1], 111, 600, last_access=1.0)  # LRU, protected
+    _cache_a_block(mgr, mgr.blocks[1], 111, 400, last_access=1.0)  # LRU, protected
     mgr.blocks[1].keep_resident = True
     _cache_a_block(mgr, mgr.blocks[2], 222, 400, last_access=2.0)  # plain
-    assert mgr.resident_bytes == 1000
+    assert mgr.resident_bytes == 800
     evicted = mgr.enforce_byte_budget()
-    # Only the plain block is eligible even though the protected one is LRU+biggest.
+    # The plain block is taken even though the protected one is older, and the
+    # ceiling is satisfied without touching the composite payload.
     assert mgr.blocks[1].cache_data is not None  # keep_resident preserved
     assert mgr.blocks[2].cache_data is None
     assert evicted == 1
+    assert mgr.resident_bytes == 400
+
+
+def test_keep_resident_state_is_protected_while_its_l2_write_is_in_flight():
+    """A pin whose async L2 write can still land must survive the ceiling."""
+    import time as _time
+    from types import SimpleNamespace
+
+    store = SimpleNamespace(
+        max_size_bytes=1 << 20,
+        has_block=lambda _h: False,
+        write_block_async=lambda *a, **k: True,
+    )
+    mgr = PagedCacheManager(
+        block_size=4, max_blocks=10, max_resident_bytes=100, disk_store=store
+    )
+    _cache_a_block(mgr, mgr.blocks[1], 111, 600, last_access=1.0)
+    mgr.blocks[1].keep_resident = True
+    mgr.blocks[1].durability_write_pending = True
+    mgr.blocks[1].durability_retry_after = _time.monotonic() + 300.0
+
+    mgr.enforce_byte_budget()
+
+    assert mgr.blocks[1].cache_data is not None, "dropped an in-flight L2 write"
+
+
+def test_undrainable_keep_resident_state_cannot_stall_the_ceiling():
+    """With no disk store the pin can never be satisfied, so the ceiling wins.
+
+    Previously the pool reported zero evictions and stayed over budget forever;
+    production reaches this state (native pins are set even with no L2), and RAM
+    then grew until the process died.
+    """
+    mgr = PagedCacheManager(block_size=4, max_blocks=10, max_resident_bytes=500)
+    _cache_a_block(mgr, mgr.blocks[1], 111, 600, last_access=1.0)
+    mgr.blocks[1].keep_resident = True
     assert mgr.resident_bytes == 600
+
+    evicted = mgr.enforce_byte_budget()
+
+    assert evicted == 1
+    assert mgr.resident_bytes == 0
+    assert mgr.blocks[1].cache_data is None
 
 
 def test_clear_resets_resident_accounting():

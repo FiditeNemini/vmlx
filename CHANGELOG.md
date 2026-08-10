@@ -26,7 +26,22 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.25] - unreleased (in-development rollup)
+## [1.6.26] - unreleased (in-development rollup)
+
+### Fixed
+
+- Decode no longer stalls while the app polls engine health. During generation
+  `/health` now serves the last idle snapshot with live queue/status overlays
+  instead of rebuilding its full diagnostics on every poll, removing a
+  330–410 ms inter-token hitch per 5 s poll on every model.
+- DeepSeek V4 Flash long-output decode is smooth. The extended-store delta
+  chain now batches its per-256-token snapshot into one async materialization
+  instead of a few hundred blocking evals on the decode thread, so sustained
+  generations hold their rate (long-context long-output measured stall-free).
+
+Rolling summary above. Per-commit detail: `git log v1.6.24..HEAD`.
+
+## [1.6.25] - superseded by 1.6.26 (in-development rollup)
 
 Rolling summary above. Per-commit detail: `git log v1.6.24..HEAD`.
 

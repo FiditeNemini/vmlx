@@ -46,7 +46,6 @@ interface ImageTopBarProps {
 }
 
 export function ImageTopBar({
-  const { t } = useTranslation()
   model,
   displayModelName,
   quantize,
@@ -62,6 +61,7 @@ export function ImageTopBar({
   sidebarCollapsed,
   onToggleSidebar
 }: ImageTopBarProps) {
+  const { t } = useTranslation()
   const quantizeLabel = quantize === 0 ? 'Full' : `${quantize}-bit`
   const [showPicker, setShowPicker] = useState(false)
   const [loadingElapsed, setLoadingElapsed] = useState(0)

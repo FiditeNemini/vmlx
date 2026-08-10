@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Zap, Sparkles, Gauge, FolderOpen, Play, Download, AlertCircle, CheckCircle, Loader2, Pencil } from 'lucide-react'
 import { IMAGE_MODELS } from '../../../../shared/imageModels'
-import {
 import { useTranslation } from '../../i18n'
+import {
   isImageDownloadEventForActive,
   type ActiveImageDownload,
   type ImageDownloadState,

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
-import {
 import { useTranslation } from '../../i18n'
+import {
   describeDsv4ActivationQat,
   type Dsv4ActivationQatStatus,
 } from './dsv4QatStatus'

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Download, Loader2, X, CheckCircle, AlertCircle, Pause, Play } from 'lucide-react'
-import { useTranslation } from '../../i18n'
+import { useTranslation } from '../i18n'
 
 interface DownloadProgress {
   percent: number

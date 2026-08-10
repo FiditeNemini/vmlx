@@ -685,6 +685,26 @@ def serve_command(args):
                 args.kv_cache_quantization = "none"
                 args.kv_cache_quantization_explicit = False
                 args._m3_force_no_kv_cache_quantization = True
+                # The paged tier (paged_cache.py) has NO MiniMax-M3 sparse-MSA
+                # handling — the dedicated idx_keys serialize/restore lives only in
+                # the prefix/block-disk path (prefix_cache.py). Reusing a partial
+                # prefix through the paged tier corrupts M3 output (live-proven
+                # 2026-08-10: partial-prefix reuse != from-scratch; full reuse is
+                # exact). Enforce the paged-incompatible policy as a HARD override,
+                # not just a default, so an explicit --use-paged-cache (e.g. from the
+                # app registry) cannot silently corrupt M3. M3 keeps its native MSA
+                # cache plus the M3-aware prefix/block-disk L2 tier. Escape hatch for
+                # experiments only: VMLX_M3_ALLOW_PAGED=1.
+                if getattr(args, "use_paged_cache", False) and not _m3_os.environ.get(
+                    "VMLX_M3_ALLOW_PAGED"
+                ):
+                    args.use_paged_cache = False
+                    logger.warning(
+                        "MiniMax-M3: forcing paged cache OFF. The paged tier has no "
+                        "M3 sparse-MSA handling and corrupts partial-prefix reuse; M3 "
+                        "uses its native MSA cache plus the M3-aware prefix/block-disk "
+                        "L2 tier. Set VMLX_M3_ALLOW_PAGED=1 to override (experiments)."
+                    )
                 logger.info(
                     "MiniMax-M3 AUTODETECTED (model_type=%s) -> auto-settings: "
                     "paged_cache=%s, tq_kv=SKIP(native MSA), vl_route=%s, "

@@ -242,7 +242,7 @@ registerFamily('minimax', { cacheType: 'kv', toolParser: 'minimax', reasoningPar
 // The engine's typed paged serializer preserves K/V/idx_keys and absolute offsets,
 // so M3 uses the paged L1 + block-disk L2 path by default. Generic KV q4/q8 stays
 // disabled because only the native M3 codec understands the full sparse state.
-registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
+registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reasoningParser: 'minimax_m3', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'MiniMax-M3 (sparse MSA + Lightning-Indexer, VL)', priority: 5 })
 
 // openPangu-2.0-Flash: 92B MoE (6B active) MLA + DSA/SWA hybrid + 3 stateful
 // causal convs + mHC hyper-connections. Mirrors the engine registry entry
@@ -1199,10 +1199,14 @@ function applyConfigMetadataOverrides(
   // REQUIRE paged (Qwen3.5 linear-attn, zaya1-vl) keep their cacheType-driven paged;
   // step-3.7's typed full+sliding KV keeps its explicit paged. Only clear the
   // default-on for non-paged-required KV cache types.
+  // MiniMax-M3 is NOT excluded here: the paged tier (paged_cache.py) has no M3
+  // sparse-MSA handling and corrupts partial-prefix reuse (live-proven 2026-08-10),
+  // so M3 flows through the normal multimodal paged-off path and relies on its
+  // native MSA cache + the M3-aware prefix/block-disk L2 tier. gemma4 stays
+  // excluded (its typed mixed-SWA paged lane is proven).
   if (
     next.isMultimodal === true &&
     !next.forceTextOnly &&
-    next.family !== 'minimax_m3' &&
     next.family !== 'gemma4' &&
     (next.cacheType === 'kv' || next.cacheType === 'rotating_kv') &&
     next.cacheSubtype !== 'step3p7_full_sliding_kv'
@@ -1235,7 +1239,8 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     cacheSubtype: config.cacheSubtype,
     architectureHints: config.architectureHints,
     // 2026-07-12 (paged default ON, UI<->engine parity): families that declare
-    // usePagedCache keep their value (hybrid/SSM/M3/Gemma4 = true, openPangu = false).
+    // usePagedCache keep their value (hybrid/SSM/Gemma4 = true, M3/openPangu = false;
+    // M3 flipped off 2026-08-10 — paged tier corrupts M3 partial-prefix reuse).
     // Undeclared families default ON for TEXT and OFF for multimodal/VL — VL
     // stays on the memory-aware path until the MLLM paged byte-ceiling (#98)
     // lands. Gemma4's typed mixed-SWA path is explicitly paged-ON.

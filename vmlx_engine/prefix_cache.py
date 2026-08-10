@@ -1212,6 +1212,24 @@ def _dsv4_delta_anchor_is_append_safe(entry) -> bool:
     )
 
 
+def _dsv4_terminal_anchor_tail_budget() -> int:
+    """How many trailing tokens may follow a restored DSV4 terminal anchor.
+
+    0 or unset preserves the historical behaviour of admitting a terminal
+    anchor only for a single N-1 kickoff token. Raising it to the length of the
+    family's generation rail lets the visible-answer pass restore the anchor its
+    own first pass just stored, instead of re-prefilling the whole tail to
+    change the one rail token that differs.
+    """
+    raw = os.environ.get("VMLX_DSV4_TERMINAL_ANCHOR_TAIL", "").strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _block_has_complete_dsv4_delta_anchor(
     cache_data, *, expected_layers: Optional[int] = None, periodic_only: bool = False
 ) -> bool:
@@ -3002,7 +3020,22 @@ class BlockAwarePrefixCache:
             return None
 
         matched = max(0, min(int(matched_tokens), len(request_tokens)))
-        allow_terminal = len(request_tokens) - matched <= 1
+        # A terminal anchor is the exact state after `matched` tokens, and the
+        # chain hash already proves those tokens are a prefix of this request,
+        # so appending the remainder is sound for any suffix length. The <= 1
+        # bound was sized for a single N-1 kickoff token and silently excludes
+        # DSV4's real generation rail, which is 3 tokens.
+        #
+        # Measured cost of that exclusion at 127k: the answer pass matches
+        # 127,444 but falls back to the block-aligned 127,232 checkpoint and
+        # re-prefills 215 tokens for 5.8s — 53% of the whole decode span — to
+        # change ONE token (<think> -> </think>). Both passes pay it.
+        #
+        # Gated because DSV4 records are path-dependent and this widens which
+        # anchors may be restored. VMLX_DSV4_TERMINAL_ANCHOR_TAIL sets the
+        # permitted suffix length; 0 or unset keeps the historical <= 1.
+        _terminal_tail_budget = _dsv4_terminal_anchor_tail_budget()
+        allow_terminal = len(request_tokens) - matched <= max(1, _terminal_tail_budget)
         selected: Optional[Tuple[int, int, bool, bool, bool]] = None
         for boundary in boundaries:
             _, boundary_tokens, periodic, terminal, append_safe = boundary

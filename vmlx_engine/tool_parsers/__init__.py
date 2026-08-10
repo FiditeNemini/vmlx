@@ -24,6 +24,7 @@ Available parsers:
 - openpangu/openpangu_v2: openPangu-2.0 (<|tool_call_start|> JSON-list format)
 - xml_function: Generic <tool_call><function=...><parameter=...> format
 - lfm2/liquid: Liquid LFM2 Python-call-list format
+- atem/muse_glimmer/muse: Muse Glimmer <atem:invoke>/<atem:parameter> format
 
 Usage:
     from vmlx_engine.tool_parsers import ToolParserManager
@@ -49,6 +50,7 @@ from .abstract_tool_parser import (
 )
 
 # Import parsers to register them
+from .atem_tool_parser import AtemToolParser  # Muse Glimmer ATEM format
 from .auto_tool_parser import AutoToolParser
 from .deepseek_tool_parser import DeepSeekToolParser
 from .dsml_tool_parser import DSMLToolParser  # DeepSeek V4 DSML format
@@ -93,6 +95,7 @@ __all__ = [
     "FunctionaryToolParser",
     "Glm47ToolParser",
     "Step3p5ToolParser",
+    "AtemToolParser",
     "MiniMaxToolParser",
     "MiniMaxM3ToolParser",
     "OpenPanguToolParser",

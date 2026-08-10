@@ -827,7 +827,7 @@
       "loading": "ヘルスデータを読み込み中..."
     },
     "download": {
-      "downloadTo": "ダウンロード先:",
+      "downloadTo": "保存先:",
       "hfToken": "HF トークン:",
       "hfTokenPlaceholder": "hf_...",
       "hfMirror": "HF ミラー:",
@@ -857,7 +857,14 @@
         "tokenSaveFailed": "トークンの保存に失敗しました",
         "mirrorInvalid": "無効なミラー URL",
         "mirrorSaveFailed": "ミラーエンドポイントの保存に失敗しました"
-      }
+      },
+      "viewDownloads": "ダウンロードを表示",
+      "getYourToken": "トークンを取得",
+      "useHfMirror": "hf-mirror を使用",
+      "recentlyUpdated": "最近更新",
+      "modelSize": "モデルサイズ",
+      "jangModels": "JANG モデル",
+      "clickModelForReadme": "モデルをクリックすると README を表示します"
     },
     "directories": {
       "title": "モデルスキャンディレクトリ",
@@ -1133,12 +1140,18 @@
       "convertHint": "HF から量子化 MLX へ",
       "diagnoseModel": "モデルを診断",
       "diagnoseHint": "ヘルスチェックを実行",
-      "inspectModel": "モデルを調査",
+      "inspectModel": "モデルを検査",
       "inspectHint": "メタデータを表示",
       "inspectTitle": "調査",
       "diagnoseTitle": "診断",
       "convertTitle": "変換",
-      "serveTitle": "サーブ"
+      "serveTitle": "サーブ",
+      "developerTools": "開発者ツール",
+      "inspectDiagnoseConvert": "モデルの検査・診断・変換",
+      "hfToQuantizedMlx": "HF から量子化 MLX へ",
+      "runHealthChecks": "ヘルスチェックを実行",
+      "viewMetadata": "メタデータを表示",
+      "scanningForModels": "モデルを検索中..."
     },
     "converter": {
       "title": "モデルコンバーター",

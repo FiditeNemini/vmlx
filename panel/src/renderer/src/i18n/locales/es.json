@@ -830,7 +830,7 @@
       "downloadTo": "Descargar en:",
       "hfToken": "Token de HF:",
       "hfTokenPlaceholder": "hf_...",
-      "hfMirror": "Mirror de HF:",
+      "hfMirror": "Espejo de HF:",
       "hfMirrorPlaceholder": "https://huggingface.co (predeterminado) — p. ej., https://hf-mirror.com",
       "mirrorPresetChinaTitle": "Preajuste de un clic para usuarios en China continental",
       "sortTitle": "Ordenar resultados por",
@@ -857,7 +857,14 @@
         "tokenSaveFailed": "No se pudo guardar el token",
         "mirrorInvalid": "URL de mirror inválida",
         "mirrorSaveFailed": "No se pudo guardar el endpoint del mirror"
-      }
+      },
+      "viewDownloads": "Ver descargas",
+      "getYourToken": "Obtén tu token",
+      "useHfMirror": "Usar hf-mirror",
+      "recentlyUpdated": "Actualizados recientemente",
+      "modelSize": "Tamaño del modelo",
+      "jangModels": "Modelos JANG",
+      "clickModelForReadme": "Haz clic en un modelo para ver su README"
     },
     "directories": {
       "title": "Directorios de escaneo de modelos",
@@ -1138,7 +1145,13 @@
       "inspectTitle": "Inspeccionar",
       "diagnoseTitle": "Diagnosticar",
       "convertTitle": "Convertir",
-      "serveTitle": "Servir"
+      "serveTitle": "Servir",
+      "developerTools": "Herramientas de desarrollo",
+      "inspectDiagnoseConvert": "Inspecciona, diagnostica y convierte modelos",
+      "hfToQuantizedMlx": "De HF a MLX cuantizado",
+      "runHealthChecks": "Ejecutar comprobaciones de estado",
+      "viewMetadata": "Ver metadatos",
+      "scanningForModels": "Buscando modelos..."
     },
     "converter": {
       "title": "Conversor de modelos",

@@ -827,7 +827,7 @@
       "loading": "상태 데이터를 불러오는 중..."
     },
     "download": {
-      "downloadTo": "다운로드 위치:",
+      "downloadTo": "저장 위치:",
       "hfToken": "HF 토큰:",
       "hfTokenPlaceholder": "hf_...",
       "hfMirror": "HF 미러:",
@@ -843,7 +843,7 @@
       "searching": "검색 중...",
       "searchResults": "검색 결과",
       "loadingModels": "모델을 불러오는 중...",
-      "loadingReadme": "README 불러오는 중...",
+      "loadingReadme": "README를 불러오는 중...",
       "modelSizeTitle": "모델 크기 (safetensors)",
       "downloadsLabel": "{n}회 다운로드",
       "likesLabel": "좋아요 {n}개",
@@ -857,7 +857,14 @@
         "tokenSaveFailed": "토큰 저장 실패",
         "mirrorInvalid": "유효하지 않은 미러 URL",
         "mirrorSaveFailed": "미러 엔드포인트 저장 실패"
-      }
+      },
+      "viewDownloads": "다운로드 보기",
+      "getYourToken": "토큰 발급받기",
+      "useHfMirror": "hf-mirror 사용",
+      "recentlyUpdated": "최근 업데이트",
+      "modelSize": "모델 크기",
+      "jangModels": "JANG 모델",
+      "clickModelForReadme": "모델을 클릭하면 README를 볼 수 있습니다"
     },
     "directories": {
       "title": "모델 스캔 디렉토리",
@@ -1138,7 +1145,13 @@
       "inspectTitle": "검사",
       "diagnoseTitle": "진단",
       "convertTitle": "변환",
-      "serveTitle": "제공"
+      "serveTitle": "제공",
+      "developerTools": "개발자 도구",
+      "inspectDiagnoseConvert": "모델 검사, 진단 및 변환",
+      "hfToQuantizedMlx": "HF에서 양자화 MLX로",
+      "runHealthChecks": "상태 점검 실행",
+      "viewMetadata": "메타데이터 보기",
+      "scanningForModels": "모델을 검색하는 중..."
     },
     "converter": {
       "title": "모델 변환기",

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useToast } from '../Toast'
 import { normalizeHfEndpointSetting } from '../../../../shared/hfSettings'
+import { useTranslation } from '../../i18n'
 
 interface HFModel {
   id: string
@@ -43,6 +44,7 @@ const COLLECTION_SLUGS = {
 type CollectionTab = keyof typeof COLLECTION_SLUGS
 
 export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
+  const { t } = useTranslation()
   const { showToast } = useToast()
   const [searchQuery, setSearchQuery] = useState('')
   const [modelType, setModelType] = useState<'text' | 'image'>('text')
@@ -391,13 +393,13 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
           onClick={() => window.dispatchEvent(new Event('open-download-popup'))}
           className="text-xs px-2 py-1 border border-border rounded hover:bg-accent text-muted-foreground hover:text-foreground flex-shrink-0"
         >
-          View Downloads
+          {t('sessions.download.viewDownloads')}
         </button>
       </div>
 
       {/* Download Directory */}
       <div className="flex items-center gap-2">
-        <span className="text-xs text-muted-foreground whitespace-nowrap">Download to:</span>
+        <span className="text-xs text-muted-foreground whitespace-nowrap">{t('sessions.download.downloadTo')}</span>
         <span className="text-xs font-mono truncate flex-1 text-foreground" title={downloadDir}>
           {downloadDir}
         </span>
@@ -412,7 +414,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
       {/* HuggingFace Token */}
       <div className="space-y-1.5">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground whitespace-nowrap">HF Token:</span>
+          <span className="text-xs text-muted-foreground whitespace-nowrap">{t('sessions.download.hfToken')}</span>
           <div className="flex-1 relative">
             <input
                 type={showHfToken ? 'text' : 'password'}
@@ -447,7 +449,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             rel="noopener noreferrer"
             className="text-primary hover:underline"
           >
-            Get your token
+            {t('sessions.download.getYourToken')}
           </a>
         </p>
       </div>
@@ -459,7 +461,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
           the same base URL. */}
       <div className="space-y-1.5">
         <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground whitespace-nowrap">HF Mirror:</span>
+          <span className="text-xs text-muted-foreground whitespace-nowrap">{t('sessions.download.hfMirror')}</span>
           <div className="flex-1 relative">
             <input
               type="text"
@@ -482,7 +484,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             className="px-2 py-1 text-xs border border-border rounded hover:bg-accent whitespace-nowrap disabled:opacity-40"
             title="One-click preset for users in mainland China"
           >
-            Use hf-mirror
+            {t('sessions.download.useHfMirror')}
           </button>
         </div>
         <p className="text-[10px] text-muted-foreground ml-16">
@@ -526,10 +528,10 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             >
               <option value="downloads">Downloads</option>
               <option value="relevance">Relevance</option>
-              <option value="lastModified">Recently Updated</option>
+              <option value="lastModified">{t('sessions.download.recentlyUpdated')}</option>
               <option value="trending">Trending</option>
               <option value="likes">Likes</option>
-              <option value="size">Model Size</option>
+              <option value="size">{t('sessions.download.modelSize')}</option>
             </select>
             {sortBy !== 'relevance' && (
               <button
@@ -562,14 +564,14 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
         {/* Left: Model List */}
         <div className="w-1/2 flex flex-col min-w-0">
           {searchQuery.trim() ? (
-            <span className="text-xs text-muted-foreground uppercase tracking-wider mb-2">Search Results</span>
+            <span className="text-xs text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.download.searchResults')}</span>
           ) : (
             <div className="flex items-center gap-1 mb-2">
               <button
                 onClick={() => handleCollectionTabChange('jang')}
                 className={`px-2.5 py-1 text-xs rounded transition-colors ${collectionTab === 'jang' ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground hover:bg-accent'}`}
               >
-                JANG Models
+                {t('sessions.download.jangModels')}
               </button>
               <button
                 onClick={() => handleCollectionTabChange('uncensored')}
@@ -581,7 +583,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
           )}
           <div className="flex-1 overflow-y-auto space-y-1 pr-1">
             {isCollectionLoading ? (
-              <p className="text-sm text-muted-foreground py-4 text-center">Loading models...</p>
+              <p className="text-sm text-muted-foreground py-4 text-center">{t('sessions.download.loadingModels')}</p>
             ) : !searchQuery.trim() && collectionErrors[collectionTab] ? (
               // ms#68: fetch failure — distinct from empty collection. Show
               // the actual error + a retry button so the user isn't stuck
@@ -640,7 +642,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
               </div>
               <div className="flex-1 overflow-y-auto">
                 {loadingReadme ? (
-                  <p className="text-xs text-muted-foreground py-4">Loading README...</p>
+                  <p className="text-xs text-muted-foreground py-4">{t('sessions.download.loadingReadme')}</p>
                 ) : (
                   <ReadmeContent markdown={selectedReadme || ''} />
                 )}
@@ -648,7 +650,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             </>
           ) : (
             <div className="flex items-center justify-center h-full text-muted-foreground text-sm">
-              Click a model to view its README
+              {t('sessions.download.clickModelForReadme')}
             </div>
           )}
         </div>

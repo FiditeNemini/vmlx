@@ -857,7 +857,14 @@
         "tokenSaveFailed": "Failed to save token",
         "mirrorInvalid": "Invalid mirror URL",
         "mirrorSaveFailed": "Failed to save mirror endpoint"
-      }
+      },
+      "viewDownloads": "View Downloads",
+      "getYourToken": "Get your token",
+      "useHfMirror": "Use hf-mirror",
+      "recentlyUpdated": "Recently Updated",
+      "modelSize": "Model Size",
+      "jangModels": "JANG Models",
+      "clickModelForReadme": "Click a model to view its README"
     },
     "directories": {
       "title": "Model Scan Directories",
@@ -1138,7 +1145,13 @@
       "inspectTitle": "Inspect",
       "diagnoseTitle": "Diagnose",
       "convertTitle": "Convert",
-      "serveTitle": "Serve"
+      "serveTitle": "Serve",
+      "developerTools": "Developer Tools",
+      "inspectDiagnoseConvert": "Inspect, diagnose, and convert models",
+      "hfToQuantizedMlx": "HF to quantized MLX",
+      "runHealthChecks": "Run health checks",
+      "viewMetadata": "View metadata",
+      "scanningForModels": "Scanning for models..."
     },
     "converter": {
       "title": "Model Converter",

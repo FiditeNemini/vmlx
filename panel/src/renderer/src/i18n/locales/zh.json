@@ -827,10 +827,10 @@
       "loading": "加载健康数据中..."
     },
     "download": {
-      "downloadTo": "下载至:",
-      "hfToken": "HF Token:",
+      "downloadTo": "下载到：",
+      "hfToken": "HF 令牌：",
       "hfTokenPlaceholder": "hf_...",
-      "hfMirror": "HF 镜像:",
+      "hfMirror": "HF 镜像：",
       "hfMirrorPlaceholder": "https://huggingface.co (默认) — 例如 https://hf-mirror.com",
       "mirrorPresetChinaTitle": "为中国大陆用户提供的一键预设",
       "sortTitle": "排序方式",
@@ -842,8 +842,8 @@
       "sortSize": "模型大小",
       "searching": "搜索中...",
       "searchResults": "搜索结果",
-      "loadingModels": "加载模型中...",
-      "loadingReadme": "加载 README 中...",
+      "loadingModels": "正在加载模型...",
+      "loadingReadme": "正在加载 README...",
       "modelSizeTitle": "模型大小 (safetensors)",
       "downloadsLabel": "{n} 次下载",
       "likesLabel": "{n} 个点赞",
@@ -857,7 +857,14 @@
         "tokenSaveFailed": "保存 token 失败",
         "mirrorInvalid": "镜像 URL 无效",
         "mirrorSaveFailed": "保存镜像端点失败"
-      }
+      },
+      "viewDownloads": "查看下载",
+      "getYourToken": "获取令牌",
+      "useHfMirror": "使用 hf-mirror",
+      "recentlyUpdated": "最近更新",
+      "modelSize": "模型大小",
+      "jangModels": "JANG 模型",
+      "clickModelForReadme": "点击模型以查看其 README"
     },
     "directories": {
       "title": "模型扫描目录",
@@ -1133,12 +1140,18 @@
       "convertHint": "HF 转量化 MLX",
       "diagnoseModel": "诊断模型",
       "diagnoseHint": "运行健康检查",
-      "inspectModel": "查看模型",
+      "inspectModel": "检查模型",
       "inspectHint": "查看元数据",
       "inspectTitle": "查看",
       "diagnoseTitle": "诊断",
       "convertTitle": "转换",
-      "serveTitle": "启动服务"
+      "serveTitle": "启动服务",
+      "developerTools": "开发者工具",
+      "inspectDiagnoseConvert": "检查、诊断和转换模型",
+      "hfToQuantizedMlx": "从 HF 转为量化 MLX",
+      "runHealthChecks": "运行健康检查",
+      "viewMetadata": "查看元数据",
+      "scanningForModels": "正在扫描模型..."
     },
     "converter": {
       "title": "模型转换器",

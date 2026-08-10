@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Search, Stethoscope, ArrowRightLeft, Eye, Play, HardDrive, RefreshCw } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface LocalModel {
   id: string
@@ -18,6 +19,7 @@ interface ToolsDashboardProps {
 }
 
 export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: ToolsDashboardProps) {
+  const { t } = useTranslation()
   const [models, setModels] = useState<LocalModel[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('')
@@ -55,9 +57,9 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-2xl font-bold">Developer Tools</h2>
+            <h2 className="text-2xl font-bold">{t('tools.dashboard.developerTools')}</h2>
             <p className="text-sm text-muted-foreground mt-1">
-              Inspect, diagnose, and convert models
+              {t('tools.dashboard.inspectDiagnoseConvert')}
             </p>
           </div>
           <button
@@ -91,8 +93,8 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
               <ArrowRightLeft className="h-4 w-4 text-blue-500" />
             </div>
             <div>
-              <p className="text-sm font-medium">Convert Model</p>
-              <p className="text-xs text-muted-foreground">HF to quantized MLX</p>
+              <p className="text-sm font-medium">{t('tools.dashboard.convertModel')}</p>
+              <p className="text-xs text-muted-foreground">{t('tools.dashboard.hfToQuantizedMlx')}</p>
             </div>
           </button>
           <button
@@ -103,8 +105,8 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
               <Stethoscope className="h-4 w-4 text-green-500" />
             </div>
             <div>
-              <p className="text-sm font-medium">Diagnose Model</p>
-              <p className="text-xs text-muted-foreground">Run health checks</p>
+              <p className="text-sm font-medium">{t('tools.dashboard.diagnoseModel')}</p>
+              <p className="text-xs text-muted-foreground">{t('tools.dashboard.runHealthChecks')}</p>
             </div>
           </button>
           <button
@@ -115,8 +117,8 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
               <Eye className="h-4 w-4 text-purple-500" />
             </div>
             <div>
-              <p className="text-sm font-medium">Inspect Model</p>
-              <p className="text-xs text-muted-foreground">View metadata</p>
+              <p className="text-sm font-medium">{t('tools.dashboard.inspectModel')}</p>
+              <p className="text-xs text-muted-foreground">{t('tools.dashboard.viewMetadata')}</p>
             </div>
           </button>
         </div>
@@ -124,7 +126,7 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
         {/* Loading */}
         {loading && (
           <div className="text-center py-12 text-muted-foreground text-sm">
-            Scanning for models...
+            {t('tools.dashboard.scanningForModels')}
           </div>
         )}
 

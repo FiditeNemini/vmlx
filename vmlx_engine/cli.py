@@ -121,6 +121,26 @@ def _bundle_declares_mxtq_jangtq(model_path: str | None) -> bool:
     return any(_declares_mxtq(config) for config in configs)
 
 
+def _bundle_is_jang_affine(model_path: str | None) -> bool:
+    """Return true for JANG-affine bundles (jang_config format in the affine
+    family: affine/jang/jjqf/mxq). These load to MLX-native QuantizedLinear and
+    carry aggressively quantized weights, so they share the JANGTQ q8-KV policy.
+    """
+    if not model_path:
+        return False
+    try:
+        import json
+        from pathlib import Path
+
+        cfg_path = Path(model_path).expanduser() / "jang_config.json"
+        if not cfg_path.is_file():
+            return False
+        fmt = str(json.loads(cfg_path.read_text()).get("format", "")).lower()
+        return fmt in {"affine", "jang", "jjqf", "mxq"}
+    except Exception:
+        return False
+
+
 def _speculative_incompatibility_reason(args) -> str | None:
     if not getattr(args, "speculative_model", None):
         return None
@@ -789,20 +809,38 @@ def serve_command(args):
             "keys/values/idx_keys remain first-class."
         )
     elif not _kv_quant_explicit:
-        _default_kvq = os.environ.get("VMLX_DEFAULT_KV_CACHE_QUANTIZATION", "q4")
+        # JANGTQ / JANG-affine bundles carry aggressively quantized (often q2
+        # mixed) weights. q4 KV quantization compounds that error on prefix-cache
+        # REUSE: the stored q4 KV, once dequantized, drifts from the fresh fp16
+        # path, so warm reuse diverges from cold (live-proven on MiniMax-M2.7
+        # JANGTQ 2026-08-10 — q4 warm reuse diverged from cold; q8/fp16 stayed
+        # answer-stable). Default these bundles to q8 so reuse fidelity holds;
+        # other families keep q4. Explicit env override still wins.
+        _model_path = getattr(args, "model", None)
+        _jang_hi_fidelity = _bundle_declares_mxtq_jangtq(
+            _model_path
+        ) or _bundle_is_jang_affine(_model_path)
+        _fallback_kvq = "q8" if _jang_hi_fidelity else "q4"
+        _default_kvq = os.environ.get(
+            "VMLX_DEFAULT_KV_CACHE_QUANTIZATION", _fallback_kvq
+        )
         if _default_kvq not in ("none", "q4", "q8"):
             logger.warning(
-                "Invalid VMLX_DEFAULT_KV_CACHE_QUANTIZATION=%r; using q4",
+                "Invalid VMLX_DEFAULT_KV_CACHE_QUANTIZATION=%r; using %s",
                 _default_kvq,
+                _fallback_kvq,
             )
-            _default_kvq = "q4"
+            _default_kvq = _fallback_kvq
         args.kv_cache_quantization = _default_kvq
         args.kv_cache_quantization_explicit = False
         os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
         logger.info(
             "KV cache auto mode: TurboQuant enabled for compatible models; "
-            "stored prefix cache quantization=%s",
+            "stored prefix cache quantization=%s%s",
             args.kv_cache_quantization,
+            " (JANGTQ/JANG-affine high-fidelity default)"
+            if _jang_hi_fidelity
+            else "",
         )
     elif _kv_quant_explicit:
         args.kv_cache_quantization_explicit = True

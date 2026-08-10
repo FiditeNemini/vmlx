@@ -645,6 +645,23 @@ def _argv_has_option(argv: list[str], option: str) -> bool:
     return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
+def _os_available_memory_bytes() -> int:
+    """Bytes the OS reports as actually available, or 0 when unknown.
+
+    Ground truth for capacity projection. Unlike ``max_ws - active`` it nets
+    out the wiring MLX does not track, plus other processes and file cache —
+    the gap that let the engine advertise ~69,690 tokens for a model measured
+    to die at ~29k. Returns 0 rather than a guess when psutil is unavailable,
+    so the caller simply keeps its previous bound.
+    """
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().available)
+    except Exception:
+        return 0
+
+
 def _estimate_max_prompt_tokens() -> int:
     """Estimate max safe prompt length based on available GPU memory.
 
@@ -668,6 +685,21 @@ def _estimate_max_prompt_tokens() -> int:
 
         active, max_ws = _metal_projection_stats()
         free = max_ws - active
+        # MLX's `active` undercounts what is actually WIRED, so `max_ws -
+        # active` overstates what a prompt can really use. Measured on
+        # MiniMax-M2.7-JANG_K (86GB weights, 128GB box) at the moment its
+        # reconstruct aborted the process: MLX reported active=82.52GB and
+        # 25GB free while the OS showed 97GB wired and free collapsing to
+        # 0-13GB — roughly 14.5GB of wiring MLX never counts. That gap is why
+        # startup advertised ~69,690 tokens for a model that dies at ~29k and
+        # sustains only ~20-25k.
+        #
+        # The OS figure is ground truth and already nets out untracked wiring,
+        # other processes and file cache, so take whichever bound is tighter
+        # rather than modelling the overhead with another constant.
+        os_available = _os_available_memory_bytes()
+        if os_available > 0:
+            free = min(free, os_available)
         # Allow live KV cache to use at most 60% of free memory
         kv_budget = int(free * 0.6)
         config = _loaded_model_config_for_memory_projection()

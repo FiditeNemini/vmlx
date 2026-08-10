@@ -1615,6 +1615,34 @@ def _responses_messages_have_tool_result_after_latest_user(messages: list[dict])
     return False
 
 
+def _answer_pass_trace(event: str, start: float, **fields: Any) -> None:
+    """Stamp one span of answer-pass orchestration.
+
+    The engine's own spans account for only ~250ms of a ~1.1s
+    reasoning-to-content flip, so the remainder lives in this layer (message
+    rebuild, chat-template re-render, re-tokenize, admission). Shares the
+    engine's VMLINUX_DSV4_TRACE_TIMINGS gate and costs nothing when it is off.
+    """
+    if os.environ.get("VMLINUX_DSV4_TRACE_TIMINGS", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return
+    try:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        extra = " ".join(f"{k}={v}" for k, v in fields.items())
+        logger.info(
+            "DSV4 timing: component=server event=%s elapsed_ms=%.3f %s",
+            event,
+            elapsed_ms,
+            extra,
+        )
+    except Exception:
+        pass
+
+
 def _answer_pass_visible_delta(
     raw_text: str,
     already_sent: str,
@@ -23248,6 +23276,7 @@ async def stream_chat_completion(
             len(accumulated_reasoning),
             _answer_budget,
         )
+        _ap_prep_start = time.perf_counter()
         answer_messages = _answer_pass_messages(
             messages, _family_name, accumulated_reasoning
         )
@@ -23318,6 +23347,14 @@ async def stream_chat_completion(
             _ans_last_out = None
             _ans_disconnected = False
             _ans_tool_calls = None
+            _answer_pass_trace(
+                "answer_pass_prep",
+                _ap_prep_start,
+                family=_family_name,
+                budget=_ans_budget_cap,
+            )
+            _ap_stream_start = time.perf_counter()
+            _ap_first_seen = False
             async for answer_output in _stream_with_keepalive(
                 engine.stream_chat(messages=answer_messages, **answer_kwargs),
                 total_timeout=_stream_timeout,
@@ -23342,6 +23379,11 @@ async def stream_chat_completion(
                         await engine.abort_request(f"{response_id}:visible-answer")
                     _ans_disconnected = True
                     break
+                if not _ap_first_seen:
+                    _ap_first_seen = True
+                    _answer_pass_trace(
+                        "answer_pass_to_first_output", _ap_stream_start
+                    )
                 _ans_last_out = answer_output
                 # Keep the decode-window timestamps live through the answer
                 # pass; otherwise the final decode tok/s line divides BOTH

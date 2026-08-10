@@ -9030,6 +9030,12 @@ class Scheduler:
 
     def _cleanup_finished(self, finished_ids: Set[str]) -> None:
         """Clean up finished requests and store caches for reuse."""
+        # This runs on the worker thread and gates the next admission (the
+        # engine only clears _terminal_cleanup_complete once it finishes), so
+        # its total is on the critical path between two back-to-back requests
+        # — e.g. the DSV4 answer-pass flip. Timed so that path can be
+        # attributed instead of guessed at.
+        _cleanup_start = time.perf_counter()
         # H1 parity: Snapshot stop tokens from requests that will SURVIVE this cleanup.
         # This prevents removing tokens still needed by other running requests.
         _surviving_stops = set()
@@ -10150,7 +10156,15 @@ class Scheduler:
         # running. Calling Metal cache cleanup during an active prefill
         # can interfere with in-flight GPU operations and cause crashes.
         if finished_ids and not self.running:
+            _clear_start = time.perf_counter()
             clear_mlx_memory_cache(log=logger)
+            self._dsv4_trace_timing("clear_mlx_memory_cache", _clear_start)
+        self._dsv4_trace_timing(
+            "cleanup_finished_total",
+            _cleanup_start,
+            next(iter(finished_ids)) if finished_ids else None,
+            count=len(finished_ids),
+        )
 
     def _is_cache_corruption_error(self, error: Exception) -> bool:
         """Check if an error indicates cache corruption."""

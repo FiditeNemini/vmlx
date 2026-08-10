@@ -942,9 +942,20 @@
       "incompleteDownload": "Descarga incompleta",
       "quantization": "Cuantización",
       "serverSettings": "Configuración del servidor",
-      "portAuto": "Puerto (0=auto)",
+      "portAuto": "Puerto (0=automático)",
       "apiKeyPlaceholder": "Opcional",
-      "fluxLicense": "Licencia de Flux"
+      "fluxLicense": "Licencia de Flux",
+      "startImageServer": "Iniciar servidor de imágenes",
+      "noHfTokenWarning": "No has configurado un token de HF: algunos modelos pueden requerir autenticación.",
+      "useCustomModel": "Usar modelo personalizado (ID de HuggingFace o ruta local)",
+      "downloadingModel": "Descargando modelo...",
+      "addHfToken": "Añade tu token de HuggingFace en",
+      "getTokenHere": "Consigue un token aquí",
+      "missingComponents": "Este modelo tiene pesos pero le faltan componentes necesarios:",
+      "apiKey": "Clave de API",
+      "logLevel": "Nivel de registro",
+      "startServer": "Iniciar servidor",
+      "viewDownloads": "Ver descargas"
     },
     "prompt": {
       "variationLabel": "Variación",

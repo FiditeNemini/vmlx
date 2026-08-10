@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Zap, Sparkles, Gauge, FolderOpen, Play, Download, AlertCircle, CheckCircle, Loader2, Pencil } from 'lucide-react'
 import { IMAGE_MODELS } from '../../../../shared/imageModels'
 import {
+import { useTranslation } from '../../i18n'
   isImageDownloadEventForActive,
   type ActiveImageDownload,
   type ImageDownloadState,
@@ -40,6 +41,7 @@ interface ImageModelPickerProps {
 }
 
 export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
+  const { t } = useTranslation()
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedQuantize, setSelectedQuantize] = useState<number>(4)
   const [customPath, setCustomPath] = useState('')
@@ -242,11 +244,11 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
       <div className="max-w-3xl w-full space-y-6">
         {/* Header */}
         <div className="text-center">
-          <h2 className="text-2xl font-bold mb-2">Start Image Server</h2>
+          <h2 className="text-2xl font-bold mb-2">{t('image.picker.startImageServer')}</h2>
           <p className="text-sm text-muted-foreground">
             Choose a model below or browse for a local model.
             {!hasHfToken && (
-              <span className="text-warning"> You haven't set an HF token — some models may require authentication.</span>
+              <span className="text-warning"> {t('image.picker.noHfTokenWarning')}</span>
             )}
           </p>
           <p className="text-xs text-muted-foreground mt-2">
@@ -362,7 +364,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
             }`}
           >
             <FolderOpen className="h-4 w-4" />
-            Use custom model (HuggingFace ID or local path)
+            {t('image.picker.useCustomModel')}
           </button>
           {showCustom && (
             <div className="mt-3 space-y-2">
@@ -422,7 +424,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
           <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg">
             <div className="flex items-center gap-2 text-sm">
               <Loader2 className="h-4 w-4 animate-spin text-primary" />
-              <span className="font-medium">Downloading model...</span>
+              <span className="font-medium">{t('image.picker.downloadingModel')}</span>
               {downloadProgress.percent != null && (
                 <span className="text-muted-foreground">{downloadProgress.percent}%</span>
               )}
@@ -450,7 +452,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
         {downloadState === 'downloading' && !downloadProgress && (
           <div className="p-3 bg-primary/5 border border-primary/20 rounded-lg flex items-center gap-2 text-sm">
             <Loader2 className="h-4 w-4 animate-spin text-primary" />
-            <span>Starting download...</span>
+            <span>{t('image.picker.startingDownload')}</span>
           </div>
         )}
 
@@ -459,18 +461,18 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
             <div className="flex items-start gap-2 text-sm text-destructive">
               <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
               <div>
-                <p className="font-medium">Download failed</p>
+                <p className="font-medium">{t('image.picker.downloadFailed')}</p>
                 <p className="text-xs mt-1">{downloadError}</p>
                 {!hasHfToken && (
                   <p className="text-xs mt-2">
-                    Add your HuggingFace token in the <strong>Server tab &gt; Download</strong> section.{' '}
+                    {t('image.picker.addHfToken')} <strong>Server tab &gt; Download</strong> section.{' '}
                     <a
                       href="https://huggingface.co/settings/tokens"
                       target="_blank"
                       rel="noopener noreferrer"
                       className="underline"
                     >
-                      Get a token here
+                      {t('image.picker.getTokenHere')}
                     </a>
                   </p>
                 )}
@@ -485,9 +487,9 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
             <div className="flex items-start gap-2 text-sm text-yellow-600 dark:text-yellow-400">
               <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
               <div>
-                <p className="font-medium">Incomplete download</p>
+                <p className="font-medium">{t('image.picker.incompleteDownload')}</p>
                 <p className="text-xs mt-1">
-                  This model has weights but is missing required components: <strong>{missingComponents.join(', ')}</strong>.
+                  {t('image.picker.missingComponents')} <strong>{missingComponents.join(', ')}</strong>.
                   Re-download the model to get all files, or the server will hang trying to fetch them.
                 </p>
               </div>
@@ -520,7 +522,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
 
             {/* Server Settings */}
             <div className="flex-1 min-w-[200px]">
-              <label className="text-xs text-muted-foreground block mb-1.5">Server Settings</label>
+              <label className="text-xs text-muted-foreground block mb-1.5">{t('image.picker.serverSettings')}</label>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-[10px] text-muted-foreground">Host</label>
@@ -528,17 +530,17 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                     className="w-full px-2 py-1 bg-muted border border-input rounded text-xs" />
                 </div>
                 <div>
-                  <label className="text-[10px] text-muted-foreground">Port (0=auto)</label>
+                  <label className="text-[10px] text-muted-foreground">{t('image.picker.portAuto')}</label>
                   <input type="number" value={serverPort} onChange={e => setServerPort(parseInt(e.target.value) || 0)}
                     className="w-full px-2 py-1 bg-muted border border-input rounded text-xs" min={0} max={65535} />
                 </div>
                 <div>
-                  <label className="text-[10px] text-muted-foreground">API Key</label>
+                  <label className="text-[10px] text-muted-foreground">{t('image.picker.apiKey')}</label>
                   <input type="password" value={serverApiKey} onChange={e => setServerApiKey(e.target.value)}
                     placeholder="Optional" className="w-full px-2 py-1 bg-muted border border-input rounded text-xs" />
                 </div>
                 <div>
-                  <label className="text-[10px] text-muted-foreground">Log Level</label>
+                  <label className="text-[10px] text-muted-foreground">{t('image.picker.logLevel')}</label>
                   <select value={serverLogLevel} onChange={e => setServerLogLevel(e.target.value)}
                     className="w-full px-2 py-1 bg-muted border border-input rounded text-xs">
                     <option value="DEBUG">DEBUG</option>
@@ -557,7 +559,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 className="px-6 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 flex items-center gap-2 font-medium text-sm"
               >
                 <Play className="h-4 w-4" />
-                Start Server
+                {t('image.picker.startServer')}
               </button>
             ) : isModelAvailable || downloadState === 'ready' ? (
               <button
@@ -565,7 +567,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 className="px-6 py-3 bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 flex items-center gap-2 font-medium text-sm"
               >
                 <Play className="h-4 w-4" />
-                Start Server
+                {t('image.picker.startServer')}
               </button>
             ) : downloadState === 'downloading' ? (
               <button
@@ -601,7 +603,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
             onClick={() => window.dispatchEvent(new Event('open-download-popup'))}
             className="text-[11px] px-2 py-1 border border-border rounded hover:bg-accent text-muted-foreground hover:text-foreground"
           >
-            View Downloads
+            {t('image.picker.viewDownloads')}
           </button>
         </div>
         <p className="text-[11px] text-muted-foreground text-center">
@@ -609,7 +611,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
           {!hasHfToken && (
             <span>
               {' '}You may need to <a href="https://huggingface.co/settings/tokens" className="underline" target="_blank" rel="noopener">set an HF token</a> and accept the{' '}
-              <a href="https://huggingface.co/black-forest-labs/FLUX.1-schnell" className="underline" target="_blank" rel="noopener">Flux license</a>.
+              <a href="https://huggingface.co/black-forest-labs/FLUX.1-schnell" className="underline" target="_blank" rel="noopener">{t('image.picker.fluxLicense')}</a>.
             </span>
           )}
         </p>

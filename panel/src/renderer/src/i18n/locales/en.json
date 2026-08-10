@@ -944,7 +944,18 @@
       "serverSettings": "Server Settings",
       "portAuto": "Port (0=auto)",
       "apiKeyPlaceholder": "Optional",
-      "fluxLicense": "Flux license"
+      "fluxLicense": "Flux license",
+      "startImageServer": "Start Image Server",
+      "noHfTokenWarning": "You haven't set an HF token — some models may require authentication.",
+      "useCustomModel": "Use custom model (HuggingFace ID or local path)",
+      "downloadingModel": "Downloading model...",
+      "addHfToken": "Add your HuggingFace token in the",
+      "getTokenHere": "Get a token here",
+      "missingComponents": "This model has weights but is missing required components:",
+      "apiKey": "API Key",
+      "logLevel": "Log Level",
+      "startServer": "Start Server",
+      "viewDownloads": "View Downloads"
     },
     "prompt": {
       "variationLabel": "Variation",

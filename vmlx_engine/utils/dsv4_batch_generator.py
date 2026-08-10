@@ -1112,6 +1112,7 @@ class DSV4BatchGenerator:
         force_anchor: bool = False,
         append_safe: bool = False,
         replace_last: bool = False,
+        _eval_collector: Optional[List[Any]] = None,
     ) -> None:
         start = int(start_token)
         end = int(end_token)
@@ -1135,13 +1136,25 @@ class DSV4BatchGenerator:
                     raise ValueError(
                         "installed jang-tools lacks DSV4 native block-delta export"
                     )
-                record = export(
-                    start,
-                    end,
-                    block_size=DSV4_NATIVE_BLOCK_SIZE,
-                    anchor_interval_blocks=DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS,
-                    force_anchor=force_anchor,
-                )
+                try:
+                    record = export(
+                        start,
+                        end,
+                        block_size=DSV4_NATIVE_BLOCK_SIZE,
+                        anchor_interval_blocks=DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS,
+                        force_anchor=force_anchor,
+                        _eval_collector=_eval_collector,
+                    )
+                except TypeError:
+                    # Older jang-tools without batched snapshot materialization:
+                    # fall back to the per-leaf eval path (correct, just slower).
+                    record = export(
+                        start,
+                        end,
+                        block_size=DSV4_NATIVE_BLOCK_SIZE,
+                        anchor_interval_blocks=DSV4_NATIVE_ANCHOR_INTERVAL_BLOCKS,
+                        force_anchor=force_anchor,
+                    )
             else:
                 record = cls._rotating_block_record(
                     cache,
@@ -1452,6 +1465,14 @@ class DSV4BatchGenerator:
         prompt-boundary snapshot store remains intact.
         """
         boundary = int(r.extended_next_boundary)
+        # Batch every per-layer snapshot leaf produced at this 256-token
+        # boundary into ONE async materialization instead of a blocking
+        # mx.eval per leaf. Forced-anchor boundaries copy ~7 leaves across ~40
+        # composite layers; serialized that is a few hundred GPU round-trips on
+        # the decode thread — the DSV4 long-output per-256-token stall. The
+        # copies still snapshot pre-mutation state (submitted here, before the
+        # next decode step's in-place writes; same-stream ordering holds).
+        eval_collector: List[Any] = []
         try:
             chain_next = int(
                 getattr(r.cache[0], "_vmlx_dsv4_delta_next_token", 0) or 0
@@ -1473,6 +1494,7 @@ class DSV4BatchGenerator:
                     force_anchor=True,
                     append_safe=True,
                     replace_last=True,
+                    _eval_collector=eval_collector,
                 )
             else:
                 if boundary != chain_next + DSV4_NATIVE_BLOCK_SIZE:
@@ -1496,6 +1518,7 @@ class DSV4BatchGenerator:
                         chain_next - DSV4_NATIVE_BLOCK_SIZE,
                         chain_next,
                         replace_last=True,
+                        _eval_collector=eval_collector,
                     )
                 self._capture_dsv4_block_record(
                     r.cache,
@@ -1503,7 +1526,17 @@ class DSV4BatchGenerator:
                     boundary,
                     force_anchor=True,
                     append_safe=True,
+                    _eval_collector=eval_collector,
                 )
+            if eval_collector:
+                # Non-blocking: overlaps the snapshot materialization with the
+                # next decode tokens. mx.eval fallback keeps correctness if
+                # async_eval is unavailable.
+                _async_eval = getattr(mx, "async_eval", None)
+                if callable(_async_eval):
+                    _async_eval(*eval_collector)
+                else:
+                    mx.eval(*eval_collector)
             r.extended_last_stamped = boundary
             r.extended_next_boundary = boundary + DSV4_NATIVE_BLOCK_SIZE
         except Exception as exc:

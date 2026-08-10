@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { Pencil, Trash2, Folder, X, MessageSquare, Search, Upload, Eraser } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface Chat {
   id: string
@@ -25,6 +26,7 @@ interface ChatListProps {
 }
 
 export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: ChatListProps) {
+  const { t } = useTranslation()
   const [chats, setChats] = useState<Chat[]>([])
   const [folders, setFolders] = useState<Folder[]>([])
   const [loading, setLoading] = useState(true)
@@ -380,12 +382,12 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
             {searchResults !== null ? (
               <>
                 <Search className="h-5 w-5 text-muted-foreground/40 mb-2" />
-                <span className="text-sm text-muted-foreground">No results</span>
+                <span className="text-sm text-muted-foreground">{t('chat.list.noResults')}</span>
               </>
             ) : (
               <>
                 <MessageSquare className="h-5 w-5 text-muted-foreground/40 mb-2" />
-                <span className="text-sm text-muted-foreground">No chats yet</span>
+                <span className="text-sm text-muted-foreground">{t('chat.list.noChatsYet')}</span>
               </>
             )}
           </div>

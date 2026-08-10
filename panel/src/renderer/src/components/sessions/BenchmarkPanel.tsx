@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useTranslation } from '../../i18n'
 
 interface BenchmarkPanelProps {
   sessionId: string
@@ -28,6 +29,7 @@ interface BenchmarkRun {
 }
 
 export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sessionStatus }: BenchmarkPanelProps) {
+  const { t } = useTranslation()
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(null)
   const [currentResults, setCurrentResults] = useState<PromptResult[] | null>(null)
@@ -84,7 +86,7 @@ export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sess
   if (sessionStatus !== 'running') {
     return (
       <div className="text-sm text-muted-foreground p-4">
-        Session must be running to benchmark.
+        {t('sessions.benchmark.sessionMustBeRunning')}
       </div>
     )
   }
@@ -124,7 +126,7 @@ export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sess
               onChange={e => setFlushCache(e.target.checked)}
               className="rounded border-border"
             />
-            Flush cache first
+            {t('sessions.benchmark.flushCacheFirst')}
           </label>
         </div>
         {progress && (

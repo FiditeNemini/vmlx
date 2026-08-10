@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, KeyboardEvent, DragEvent, ClipboardEvent } from 'react'
 import { Send, ImagePlus, X, Pencil, RefreshCw, HelpCircle, Paintbrush } from 'lucide-react'
 import { MaskPainter } from './MaskPainter'
+import { useTranslation } from '../../i18n'
 
 /** Inline help icon with tooltip */
 function Help({ tip }: { tip: string }) {
@@ -51,6 +52,7 @@ interface ImagePromptBarProps {
 }
 
 export function ImagePromptBar({ onGenerate, disabled, generating, settings, onSettingsChange, mode, modelName, sourceImage, onSourceImageChange, maskBase64, onMaskChange, iteratePrompt, iterateCounter, onClearIterate }: ImagePromptBarProps) {
+  const { t } = useTranslation()
   const [prompt, setPrompt] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [showMaskPainter, setShowMaskPainter] = useState(false)
@@ -215,7 +217,7 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
                 dragOver ? 'border-violet-500 bg-violet-500/5' : 'border-border hover:border-violet-500/40'
               }`}>
               <ImagePlus className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs text-muted-foreground">Upload source image to edit (required)</span>
+              <span className="text-xs text-muted-foreground">{t('image.promptBar.uploadSourceImage')}</span>
             </div>
           )}
         </div>
@@ -305,7 +307,7 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
         <p className="mt-1.5 text-[10px] text-muted-foreground truncate">
           {prompt.trim()
             ? <>Prompt: <span className="text-foreground/70">{iteratePrompt}, {prompt.trim()}</span></>
-            : <>Variation of: <span className="text-foreground/70">{iteratePrompt}</span> (new seed)</>
+            : <>{t('image.promptBar.variationOf')} <span className="text-foreground/70">{iteratePrompt}</span> (new seed)</>
           }
         </p>
       )}

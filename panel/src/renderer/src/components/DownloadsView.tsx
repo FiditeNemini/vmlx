@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Download, Loader2, X, CheckCircle, AlertCircle, Pause, Play } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface DownloadProgress {
   percent: number
@@ -27,6 +28,7 @@ interface CompletedDownload {
 }
 
 export function DownloadsView() {
+  const { t } = useTranslation()
   const [activeDownloads, setActiveDownloads] = useState<ActiveDownload[]>([])
   const [queue, setQueue] = useState<Array<{ jobId: string; repoId: string }>>([])
   const [paused, setPaused] = useState<Array<{ jobId: string; repoId: string; progress?: DownloadProgress }>>([])
@@ -205,7 +207,7 @@ export function DownloadsView() {
               {!p && !dl.error && (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3 w-3 animate-spin" />
-                  <span>Preparing download...</span>
+                  <span>{t('downloads.preparingDownload')}</span>
                 </div>
               )}
             </div>
@@ -299,8 +301,8 @@ export function DownloadsView() {
         {activeDownloads.length === 0 && queue.length === 0 && completed.length === 0 && (
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
             <Download className="h-10 w-10 mb-3 opacity-30" />
-            <p className="text-sm">No active downloads</p>
-            <p className="text-xs mt-1">Downloads from the Image or Server tab appear here</p>
+            <p className="text-sm">{t('downloads.noActiveDownloads')}</p>
+            <p className="text-xs mt-1">{t('downloads.downloadsAppearHere')}</p>
           </div>
         )}
       </div>

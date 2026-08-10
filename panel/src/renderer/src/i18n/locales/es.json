@@ -318,7 +318,8 @@
       "loading": "Cargando...",
       "today": "Hoy",
       "yesterday": "Ayer",
-      "daysAgo": "hace {n}d"
+      "daysAgo": "hace {n}d",
+      "noChatsYet": "Aún no hay chats"
     },
     "settings": {
       "header": "Configuración del chat",
@@ -807,7 +808,9 @@
       "headerTTFT": "TTFT",
       "headerPPts": "PP t/s",
       "headerTime": "Tiempo",
-      "rowAverage": "Promedio"
+      "rowAverage": "Promedio",
+      "sessionMustBeRunning": "La sesión debe estar en ejecución para hacer benchmarks.",
+      "flushCacheFirst": "Vaciar la caché primero"
     },
     "cache": {
       "prefixCache": "Caché de prefijos",
@@ -909,6 +912,12 @@
       "textA": "Texto A",
       "cosineSimilarity": "Similitud del coseno",
       "embeddingPreview": "Vista previa de la incrustación"
+    },
+    "performance": {
+      "sessionMustBeRunning": "La sesión debe estar en ejecución para supervisar el rendimiento.",
+      "gpuMemoryMetal": "Memoria de GPU (Metal)",
+      "memoryOverTime": "Memoria a lo largo del tiempo",
+      "loadingHealthData": "Cargando datos de estado..."
     }
   },
   "image": {
@@ -1046,6 +1055,10 @@
       "browseCustomModel": "Buscar modelo personalizado...",
       "imageEdit": "Editar imagen",
       "imageGen": "Generar imagen"
+    },
+    "promptBar": {
+      "uploadSourceImage": "Sube la imagen de origen para editar (obligatorio)",
+      "variationOf": "Variación de:"
     }
   },
   "downloads": {
@@ -1062,7 +1075,10 @@
     "bar": {
       "starting": "Iniciando...",
       "openTitle": "Abrir la ventana de Descargas"
-    }
+    },
+    "preparingDownload": "Preparando la descarga...",
+    "noActiveDownloads": "No hay descargas activas",
+    "downloadsAppearHere": "Las descargas de las pestañas Imagen o Servidor aparecen aquí"
   },
   "update": {
     "banner": {

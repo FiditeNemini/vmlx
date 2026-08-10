@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import {
+import { useTranslation } from '../../i18n'
   describeDsv4ActivationQat,
   type Dsv4ActivationQatStatus,
 } from './dsv4QatStatus'
@@ -279,6 +280,7 @@ type NativeStorageQuantization = {
 }
 
 export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelProps) {
+  const { t } = useTranslation()
   const [health, setHealth] = useState<HealthData | null>(null)
   const [history, setHistory] = useState<Array<{ time: number; active: number; peak: number }>>([])
   const [error, setError] = useState<string | null>(null)
@@ -335,7 +337,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
   if (sessionStatus !== 'running') {
     return (
       <div className="text-sm text-muted-foreground p-4">
-        Session must be running to monitor performance.
+        {t('sessions.performance.sessionMustBeRunning')}
       </div>
     )
   }
@@ -779,7 +781,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
       {/* Memory */}
       {health?.memory && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">GPU Memory (Metal)</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.performance.gpuMemoryMetal')}</h4>
           <div className="grid grid-cols-3 gap-2">
             <MemoryCard label="Active" value={health.memory.active_mb} />
             <MemoryCard label="Peak" value={health.memory.peak_mb} />
@@ -789,7 +791,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
           {/* Memory Graph */}
           {history.length > 1 && (
             <div className="mt-3">
-              <div className="text-xs text-muted-foreground mb-1">Memory over time</div>
+              <div className="text-xs text-muted-foreground mb-1">{t('sessions.performance.memoryOverTime')}</div>
               <MiniGraph data={history} />
             </div>
           )}
@@ -797,7 +799,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
       )}
 
       {!health && !error && (
-        <div className="text-sm text-muted-foreground">Loading health data...</div>
+        <div className="text-sm text-muted-foreground">{t('sessions.performance.loadingHealthData')}</div>
       )}
     </div>
   )

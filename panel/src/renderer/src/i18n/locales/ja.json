@@ -313,12 +313,13 @@
       "moveToFolderTitle": "フォルダへ移動",
       "deleteTitle": "削除",
       "deleteFolderTitle": "フォルダを削除",
-      "noResults": "結果なし",
+      "noResults": "結果がありません",
       "noChats": "チャットがありません",
       "loading": "読み込み中...",
       "today": "今日",
       "yesterday": "昨日",
-      "daysAgo": "{n}日前"
+      "daysAgo": "{n}日前",
+      "noChatsYet": "チャットはまだありません"
     },
     "settings": {
       "header": "チャット設定",
@@ -807,7 +808,9 @@
       "headerTTFT": "TTFT",
       "headerPPts": "PP t/s",
       "headerTime": "時間",
-      "rowAverage": "平均"
+      "rowAverage": "平均",
+      "sessionMustBeRunning": "ベンチマークを実行するにはセッションが実行中である必要があります。",
+      "flushCacheFirst": "先にキャッシュをフラッシュ"
     },
     "cache": {
       "prefixCache": "プレフィックスキャッシュ",
@@ -909,6 +912,12 @@
       "textA": "テキスト A",
       "cosineSimilarity": "コサイン類似度",
       "embeddingPreview": "埋め込みプレビュー"
+    },
+    "performance": {
+      "sessionMustBeRunning": "パフォーマンスを監視するにはセッションが実行中である必要があります。",
+      "gpuMemoryMetal": "GPU メモリ (Metal)",
+      "memoryOverTime": "メモリ推移",
+      "loadingHealthData": "ヘルスデータを読み込み中..."
     }
   },
   "image": {
@@ -1046,6 +1055,10 @@
       "browseCustomModel": "カスタムモデルを参照...",
       "imageEdit": "画像編集",
       "imageGen": "画像生成"
+    },
+    "promptBar": {
+      "uploadSourceImage": "編集する元画像をアップロード (必須)",
+      "variationOf": "元画像:"
     }
   },
   "downloads": {
@@ -1062,7 +1075,10 @@
     "bar": {
       "starting": "開始中...",
       "openTitle": "ダウンロードウィンドウを開く"
-    }
+    },
+    "preparingDownload": "ダウンロードを準備中...",
+    "noActiveDownloads": "アクティブなダウンロードはありません",
+    "downloadsAppearHere": "画像タブまたはサーバータブからのダウンロードがここに表示されます"
   },
   "update": {
     "banner": {

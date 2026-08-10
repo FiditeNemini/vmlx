@@ -318,7 +318,8 @@
       "loading": "加载中...",
       "today": "今天",
       "yesterday": "昨天",
-      "daysAgo": "{n}天前"
+      "daysAgo": "{n}天前",
+      "noChatsYet": "还没有聊天"
     },
     "settings": {
       "header": "聊天设置",
@@ -807,7 +808,9 @@
       "headerTTFT": "TTFT",
       "headerPPts": "PP t/s",
       "headerTime": "时间",
-      "rowAverage": "平均"
+      "rowAverage": "平均",
+      "sessionMustBeRunning": "会话必须正在运行才能进行基准测试。",
+      "flushCacheFirst": "先清空缓存"
     },
     "cache": {
       "prefixCache": "前缀缓存",
@@ -909,6 +912,12 @@
       "textA": "文本 A",
       "cosineSimilarity": "余弦相似度",
       "embeddingPreview": "嵌入预览"
+    },
+    "performance": {
+      "sessionMustBeRunning": "会话必须正在运行才能监控性能。",
+      "gpuMemoryMetal": "GPU 内存 (Metal)",
+      "memoryOverTime": "内存随时间变化",
+      "loadingHealthData": "正在加载健康数据..."
     }
   },
   "image": {
@@ -1046,6 +1055,10 @@
       "browseCustomModel": "浏览自定义模型...",
       "imageEdit": "图像编辑",
       "imageGen": "图像生成"
+    },
+    "promptBar": {
+      "uploadSourceImage": "上传要编辑的源图像（必填）",
+      "variationOf": "变体来源："
     }
   },
   "downloads": {
@@ -1062,7 +1075,10 @@
     "bar": {
       "starting": "启动中...",
       "openTitle": "打开下载窗口"
-    }
+    },
+    "preparingDownload": "正在准备下载...",
+    "noActiveDownloads": "没有进行中的下载",
+    "downloadsAppearHere": "来自图像或服务器标签页的下载会显示在这里"
   },
   "update": {
     "banner": {

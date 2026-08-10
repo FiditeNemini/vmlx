@@ -318,7 +318,8 @@
       "loading": "Loading...",
       "today": "Today",
       "yesterday": "Yesterday",
-      "daysAgo": "{n}d ago"
+      "daysAgo": "{n}d ago",
+      "noChatsYet": "No chats yet"
     },
     "settings": {
       "header": "Chat Settings",
@@ -807,7 +808,9 @@
       "headerTTFT": "TTFT",
       "headerPPts": "PP t/s",
       "headerTime": "Time",
-      "rowAverage": "Average"
+      "rowAverage": "Average",
+      "sessionMustBeRunning": "Session must be running to benchmark.",
+      "flushCacheFirst": "Flush cache first"
     },
     "cache": {
       "prefixCache": "Prefix Cache",
@@ -909,6 +912,12 @@
       "textA": "Text A",
       "cosineSimilarity": "Cosine Similarity",
       "embeddingPreview": "Embedding Preview"
+    },
+    "performance": {
+      "sessionMustBeRunning": "Session must be running to monitor performance.",
+      "gpuMemoryMetal": "GPU Memory (Metal)",
+      "memoryOverTime": "Memory over time",
+      "loadingHealthData": "Loading health data..."
     }
   },
   "image": {
@@ -1046,6 +1055,10 @@
       "browseCustomModel": "Browse custom model...",
       "imageEdit": "Image Edit",
       "imageGen": "Image Gen"
+    },
+    "promptBar": {
+      "uploadSourceImage": "Upload source image to edit (required)",
+      "variationOf": "Variation of:"
     }
   },
   "downloads": {
@@ -1062,7 +1075,10 @@
     "bar": {
       "starting": "Starting...",
       "openTitle": "Open Downloads window"
-    }
+    },
+    "preparingDownload": "Preparing download...",
+    "noActiveDownloads": "No active downloads",
+    "downloadsAppearHere": "Downloads from the Image or Server tab appear here"
   },
   "update": {
     "banner": {

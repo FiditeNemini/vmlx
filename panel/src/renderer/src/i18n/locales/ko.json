@@ -318,7 +318,8 @@
       "loading": "로드 중...",
       "today": "오늘",
       "yesterday": "어제",
-      "daysAgo": "{n}일 전"
+      "daysAgo": "{n}일 전",
+      "noChatsYet": "아직 채팅이 없습니다"
     },
     "settings": {
       "header": "채팅 설정",
@@ -807,7 +808,9 @@
       "headerTTFT": "TTFT",
       "headerPPts": "PP t/s",
       "headerTime": "시간",
-      "rowAverage": "평균"
+      "rowAverage": "평균",
+      "sessionMustBeRunning": "벤치마크를 실행하려면 세션이 실행 중이어야 합니다.",
+      "flushCacheFirst": "먼저 캐시 비우기"
     },
     "cache": {
       "prefixCache": "프리픽스 캐시",
@@ -909,6 +912,12 @@
       "textA": "텍스트 A",
       "cosineSimilarity": "코사인 유사도",
       "embeddingPreview": "임베딩 미리보기"
+    },
+    "performance": {
+      "sessionMustBeRunning": "성능을 모니터링하려면 세션이 실행 중이어야 합니다.",
+      "gpuMemoryMetal": "GPU 메모리 (Metal)",
+      "memoryOverTime": "시간에 따른 메모리",
+      "loadingHealthData": "상태 데이터를 불러오는 중..."
     }
   },
   "image": {
@@ -1046,6 +1055,10 @@
       "browseCustomModel": "사용자 지정 모델 찾아보기...",
       "imageEdit": "이미지 편집",
       "imageGen": "이미지 생성"
+    },
+    "promptBar": {
+      "uploadSourceImage": "편집할 원본 이미지를 업로드하세요 (필수)",
+      "variationOf": "변형 대상:"
     }
   },
   "downloads": {
@@ -1062,7 +1075,10 @@
     "bar": {
       "starting": "시작 중...",
       "openTitle": "다운로드 창 열기"
-    }
+    },
+    "preparingDownload": "다운로드 준비 중...",
+    "noActiveDownloads": "활성 다운로드 없음",
+    "downloadsAppearHere": "이미지 또는 서버 탭의 다운로드가 여기에 표시됩니다"
   },
   "update": {
     "banner": {

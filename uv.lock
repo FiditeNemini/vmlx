@@ -8266,7 +8266,7 @@ wheels = [
 
 [[package]]
 name = "vmlx"
-version = "1.6.25"
+version = "1.6.26"
 source = { editable = "." }
 dependencies = [
     { name = "einops" },

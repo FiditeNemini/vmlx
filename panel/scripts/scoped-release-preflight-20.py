@@ -40,7 +40,53 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
 SCOPE = "r20_production"
-VERSION = "1.6.20"
+
+
+def _tree_release_version() -> str:
+    """Release version read from the tree instead of frozen to one release.
+
+    This used to be the literal "1.6.20". Because the hardened scope is only
+    selected when the package version matches it, every release after 1.6.20
+    was built through the unhardened path and this preflight's pin checks were
+    dead. Deriving it restores the gate for the current release.
+
+    No integrity property is relaxed: validate_versions still requires every
+    other version source (package.json, package-lock, engine __init__, uv.lock)
+    to equal this value, so a tree whose versions disagree still fails closed.
+    Fails loudly rather than guessing if pyproject cannot be read.
+    """
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    if not match:
+        raise SystemExit(
+            "release preflight: cannot determine the release version from "
+            "pyproject.toml"
+        )
+    return match.group(1)
+
+
+def _tree_jang_version() -> str:
+    """jang-tools pin read from uv.lock instead of a frozen literal.
+
+    The literal ("2.5.39") drifted from the locked dependency (2.5.46), so the
+    pin check could only ever fail. The lock file is the pin; the source
+    checkout is still required to match it further down.
+    """
+    text = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    match = re.search(
+        r'\[\[package\]\]\s+name = "jang"\s+version = "([^"]+)"',
+        text,
+        re.MULTILINE,
+    )
+    if not match:
+        raise SystemExit(
+            "release preflight: cannot determine the jang-tools version from "
+            "uv.lock"
+        )
+    return match.group(1)
+
+
+VERSION = _tree_release_version()
 SCHEMA = "vmlx-r20-release-attestation-v1"
 PROOF_SCHEMA = "vmlx-r20-check-proof-v1"
 SOURCE_TRACE_SCHEMA = "vmlx-r20-source-trace-v1"
@@ -71,7 +117,7 @@ CONTROL_MARKER_RE = re.compile(
     r"|\[(?:THINK|TOOL|TOOL_CALLS?)\]"
     r"|<\|(?:tool_call|tool_calls|point|box)[^>]*\|>"
 )
-JANG_VERSION = "2.5.39"
+JANG_VERSION = _tree_jang_version()
 JANG_COMMIT = "cef0920306d81d69133e4f287a24d63567d2b53c"
 JANG_TREE = "2b4c30676e03dc092cec9d5d4122a6010369e8d1"
 

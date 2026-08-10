@@ -197,8 +197,8 @@ require_r20_release_context() {
     echo "ERROR: r20 verification output is fixed at $PANEL_DIR/release; overrides are forbidden" >&2
     exit 1
   fi
-  if [[ "$VERSION" != "1.6.20" ]]; then
-    echo "ERROR: the r20 artifact-chain verifier requires package version 1.6.20, found $VERSION" >&2
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: the r20 artifact-chain verifier requires a release version like 1.2.3, found $VERSION" >&2
     exit 1
   fi
   if [[ "$RELEASE_SCOPE" != "r20_production" ]]; then

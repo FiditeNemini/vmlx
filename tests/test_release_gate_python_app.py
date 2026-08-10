@@ -1356,7 +1356,11 @@ def test_r20_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     assert "requires Developer ID Application: ShieldStack LLC" in wrong_team.stderr
 
     package = json.loads((panel / "package.json").read_text(encoding="utf-8"))
-    package["version"] = "1.6.17"
+    # De-frozen gate: any well-formed release version may use the hardened
+    # scope (pinning it to one literal left later releases building
+    # unhardened). Cross-source version agreement is enforced by the
+    # Python preflight; what the shell still rejects is a malformed version.
+    package["version"] = "1.6"
     (panel / "package.json").write_text(json.dumps(package), encoding="utf-8")
     wrong_version = subprocess.run(
         [str(builder), "all"],
@@ -1368,7 +1372,7 @@ def test_r20_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     )
     assert wrong_version.returncode == 1
     assert (
-        "VMLX_RELEASE_SCOPE=r20_production requires package version 1.6.20"
+        "requires a release version like 1.2.3"
         in wrong_version.stderr
     )
     generic_wrong_version = subprocess.run(
@@ -1381,7 +1385,7 @@ def test_r20_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     )
     assert generic_wrong_version.returncode == 1
     assert (
-        "public production packaging is not implemented for package version 1.6.17"
+        "public production packaging requires a release version like 1.2.3"
         in generic_wrong_version.stderr
     )
 

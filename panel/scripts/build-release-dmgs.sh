@@ -89,24 +89,24 @@ fi
 
 VERSION="$("$NODE_BIN" -p "require('./package.json').version")"
 if [[ "$REQUESTED_RELEASE_SCOPE" == "production" ]]; then
-  case "$VERSION" in
-    1.6.20)
-      RELEASE_SCOPE="r20_production"
-      ;;
-    *)
-      echo "ERROR: public production packaging is not implemented for package version $VERSION" >&2
-      exit 1
-      ;;
-  esac
+  # Accept any well-formed release version. Pinning this to a single literal
+  # meant every release after that one silently built through the unhardened
+  # scope. Tree-wide version agreement is enforced by the Python preflight.
+  if [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    RELEASE_SCOPE="r20_production"
+  else
+    echo "ERROR: public production packaging requires a release version like 1.2.3, got $VERSION" >&2
+    exit 1
+  fi
 fi
 
 if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
   if [[ "$REQUESTED_FLAVOR" != "all" ]]; then
-    echo "ERROR: vMLX 1.6.20 production packaging must build both Sequoia and Tahoe via flavor=all" >&2
+    echo "ERROR: vMLX production packaging must build both Sequoia and Tahoe via flavor=all" >&2
     exit 1
   fi
   if [[ -n "${VMLX_RELEASE_OUTPUT_DIR:-}" || -n "${VMLINUX_RELEASE_OUTPUT_DIR:-}" ]]; then
-    echo "ERROR: vMLX 1.6.20 production output is fixed at $PANEL_DIR/release; release output overrides are forbidden" >&2
+    echo "ERROR: vMLX production output is fixed at $PANEL_DIR/release; release output overrides are forbidden" >&2
     exit 1
   fi
   DIST_DIR="$PANEL_DIR/release"
@@ -182,32 +182,32 @@ fi
 export VMLX_RELEASE_SCOPE="$RELEASE_SCOPE"
 
 if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
-  if [[ "$VERSION" != "1.6.20" ]]; then
-    echo "ERROR: VMLX_RELEASE_SCOPE=r20_production requires package version 1.6.20, found $VERSION" >&2
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: VMLX_RELEASE_SCOPE=r20_production requires a release version like 1.2.3, found $VERSION" >&2
     exit 1
   fi
   if [[ -n "${PYTHON:-}" || -n "${PYTHONHOME:-}" || -n "${PYTHONPATH:-}" ]]; then
-    echo "ERROR: vMLX 1.6.20 release Python cannot be overridden by PYTHON, PYTHONHOME, or PYTHONPATH" >&2
+    echo "ERROR: vMLX release Python cannot be overridden by PYTHON, PYTHONHOME, or PYTHONPATH" >&2
     exit 1
   fi
   if [[ -n "${VIRTUAL_ENV:-}" && "$VIRTUAL_ENV" != "$ROOT_DIR/.venv" ]]; then
-    echo "ERROR: vMLX 1.6.20 release VIRTUAL_ENV is not the authoritative repository venv" >&2
+    echo "ERROR: vMLX release VIRTUAL_ENV is not the authoritative repository venv" >&2
     exit 1
   fi
   if [[ ! -x "$AUTHORITATIVE_PYTHON" ]]; then
-    echo "ERROR: missing authoritative vMLX 1.6.20 release Python: $AUTHORITATIVE_PYTHON" >&2
+    echo "ERROR: missing authoritative vMLX release Python: $AUTHORITATIVE_PYTHON" >&2
     exit 1
   fi
   PYTHON_BIN="$AUTHORITATIVE_PYTHON"
   if [[ "$RELEASE_CODESIGN_IDENTITY" != "$EXPECTED_CODESIGN_IDENTITY" ]]; then
-    echo "ERROR: vMLX 1.6.20 production packaging requires $EXPECTED_CODESIGN_IDENTITY" >&2
+    echo "ERROR: vMLX production packaging requires $EXPECTED_CODESIGN_IDENTITY" >&2
     exit 1
   fi
   CONFIGURED_APPLE_TEAM_ID="$(
     "$NODE_BIN" -p "require('./package.json').build.mac.notarize.teamId"
   )"
   if [[ "$CONFIGURED_APPLE_TEAM_ID" != "$EXPECTED_APPLE_TEAM_ID" ]]; then
-    echo "ERROR: vMLX 1.6.20 package notarization team must be $EXPECTED_APPLE_TEAM_ID" >&2
+    echo "ERROR: vMLX package notarization team must be $EXPECTED_APPLE_TEAM_ID" >&2
     exit 1
   fi
   # electron-builder treats CSC_NAME as a certificate selector and rejects the
@@ -494,7 +494,7 @@ print(hashlib.sha256(encoded).hexdigest())
 PY
   )"
   if [[ ! "$R20_TOOLCHAIN_PLAN_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: vMLX 1.6.20 toolchain plan hash is invalid" >&2
+    echo "ERROR: vMLX toolchain plan hash is invalid" >&2
     exit 1
   fi
 }
@@ -602,7 +602,7 @@ run_driver_plan_action() {
   local action="$1"
   shift
   if [[ -n "${USE_SYSTEM_APP_BUILDER:-}" ]]; then
-    echo "ERROR: vMLX 1.6.20 production packaging forbids USE_SYSTEM_APP_BUILDER" >&2
+    echo "ERROR: vMLX production packaging forbids USE_SYSTEM_APP_BUILDER" >&2
     exit 1
   fi
   run_bound_release_action \
@@ -724,7 +724,7 @@ PY
     || [[ ! "$VMLX_R20_RELEASE_PYTHON_SERVER_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || [[ ! "$VMLX_R20_RELEASE_PYTHON_EXECUTABLE_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || [[ ! "$VMLX_R20_RELEASE_PYTHON_PYVENV_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: vMLX 1.6.20 release Python provenance hashes are invalid" >&2
+    echo "ERROR: vMLX release Python provenance hashes are invalid" >&2
     exit 1
   fi
   export VMLX_R20_RELEASE_PYTHON="$AUTHORITATIVE_PYTHON"
@@ -835,7 +835,7 @@ case "$RELEASE_SCOPE" in
     ;;
   *)
     echo "ERROR: unsupported release scope: $RELEASE_SCOPE" >&2
-    echo "Set VMLX_RELEASE_SCOPE=r20_production for the 1.6.20 production checkpoint," >&2
+    echo "Set VMLX_RELEASE_SCOPE=r20_production for the production checkpoint," >&2
     echo "or VMLX_RELEASE_SCOPE=r17_consolidation for the 1.6.17 usable checkpoint," >&2
     echo "or VMLX_RELEASE_SCOPE=r16_parser_cache for the 1.6.16 emergency parser/cache scope," >&2
     echo "or VMLX_RELEASE_SCOPE=mm3_gemma_vl (or VMLINUX_RELEASE_SCOPE=mm3_gemma_vl)," >&2
@@ -876,17 +876,17 @@ manifest_path = Path(sys.argv[1])
 dotted_path = sys.argv[2]
 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if manifest.get("status") != "pass":
-    raise SystemExit("ERROR: vMLX 1.6.20 preflight manifest status is not pass")
+    raise SystemExit("ERROR: vMLX preflight manifest status is not pass")
 value = manifest
 for component in dotted_path.split("."):
     if not isinstance(value, dict) or component not in value:
         raise SystemExit(
-            f"ERROR: vMLX 1.6.20 preflight manifest is missing {dotted_path}"
+            f"ERROR: vMLX preflight manifest is missing {dotted_path}"
         )
     value = value[component]
 if not isinstance(value, str) or not value.strip():
     raise SystemExit(
-        f"ERROR: vMLX 1.6.20 preflight manifest has invalid {dotted_path}"
+        f"ERROR: vMLX preflight manifest has invalid {dotted_path}"
     )
 print(value)
 PY
@@ -982,12 +982,12 @@ if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
     read_r20_manifest_value jang.remote_identity
   )"
   if [[ "$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")" != "$R20_PREFLIGHT_MANIFEST_SHA256" ]]; then
-    echo "ERROR: vMLX 1.6.20 preflight manifest changed while its identity was read" >&2
+    echo "ERROR: vMLX preflight manifest changed while its identity was read" >&2
     exit 1
   fi
   if [[ "$R20_EXPECTED_VMLX_REMOTE_IDENTITY" != "jjang-ai/vmlx" ]] \
     || [[ "$R20_EXPECTED_JANG_REMOTE_IDENTITY" != "jjang-ai/jangq" ]]; then
-    echo "ERROR: vMLX 1.6.20 preflight manifest does not attest canonical release repositories" >&2
+    echo "ERROR: vMLX preflight manifest does not attest canonical release repositories" >&2
     exit 1
   fi
   if [[ -z "$R20_PRE_NOTARY_MANIFEST_OUT" ]]; then
@@ -1144,7 +1144,7 @@ print(hashlib.sha256(encoded).hexdigest())
 PY
   )"
   if [[ ! "$plan_hash" =~ ^[0-9a-f]{64}$ ]]; then
-    echo "ERROR: vMLX 1.6.20 release driver plan hash is invalid" >&2
+    echo "ERROR: vMLX release driver plan hash is invalid" >&2
     exit 1
   fi
   export VMLX_R20_RELEASE_PLAN="$R20_BUILD_PLAN_PATH"
@@ -1170,7 +1170,7 @@ assert_r20_source_identity() {
     return 0
   fi
   if [[ "$(toolchain_sha256 "$PREPACKAGE_READY_MANIFEST_OUT")" != "$R20_PREFLIGHT_MANIFEST_SHA256" ]]; then
-    echo "ERROR: vMLX 1.6.20 preflight manifest changed ${phase}" >&2
+    echo "ERROR: vMLX preflight manifest changed ${phase}" >&2
     exit 1
   fi
   if [[ "$(capture_toolchain_action git -C "$ROOT_DIR" rev-parse HEAD)" != "$R20_EXPECTED_VMLX_COMMIT" ]] \
@@ -1650,7 +1650,7 @@ if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
   expected_sequoia="$DIST_DIR/vMLX-${VERSION}-sequoia-arm64.dmg"
   expected_tahoe="$DIST_DIR/vMLX-${VERSION}-tahoe-arm64.dmg"
   if [[ ! -s "$expected_sequoia" || ! -s "$expected_tahoe" ]]; then
-    echo "ERROR: vMLX 1.6.20 production packaging did not produce both required DMGs" >&2
+    echo "ERROR: vMLX production packaging did not produce both required DMGs" >&2
     exit 1
   fi
   run_driver_plan_action node - "$DIST_DIR" "$expected_sequoia" "$expected_tahoe" <<'NODE'
@@ -1662,7 +1662,7 @@ const [distDirRaw, ...expected] = process.argv.slice(2);
 verifyExactDmgDirectory(
   distDirRaw,
   expected,
-  "vMLX 1.6.20 production packaging produced an unexpected DMG set",
+  "vMLX production packaging produced an unexpected DMG set",
 );
 NODE
   # Re-run exact-one staged-app and full source/runtime/renderer parity after

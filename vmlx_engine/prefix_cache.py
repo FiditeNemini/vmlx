@@ -5474,8 +5474,17 @@ class BlockAwarePrefixCache:
         """Ask the next reconstruction to retain a pristine copy for reuse.
 
         Set by the scheduler when the request it is admitting will be followed
-        immediately by a second pass over the same prompt.
+        immediately by a second pass over the same prompt. Kill switch:
+        VMLX_DSV4_RECONSTRUCT_MEMO=0 restores the plain double replay.
         """
+        if os.environ.get("VMLX_DSV4_RECONSTRUCT_MEMO", "1").strip().lower() in {
+            "0",
+            "off",
+            "false",
+            "no",
+        }:
+            self._reconstruct_memo_arm = False
+            return
         self._reconstruct_memo_arm = bool(enabled)
 
     def reconstruct_cache(

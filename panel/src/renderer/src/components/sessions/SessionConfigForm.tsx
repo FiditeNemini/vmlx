@@ -985,45 +985,45 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               <Modal title="Caching & Compatibility Engine" onClose={() => setShowCachingHelp(false)} className="max-w-2xl max-h-[85vh] overflow-y-auto">
                 <div className="space-y-6 text-sm">
                   <div>
-                    <h3 className="text-base font-semibold text-foreground mb-2">The Continuous Batching Engine</h3>
+                    <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.continuousBatchingEngine')}</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      <strong>Continuous Batching</strong> is the heart of vMLX's server performance. Unlike simple mode (which processes exactly one request at a time), continuous batching allows multiple requests to be processed simultaneously. More importantly, <strong>it is required to enable all advanced caching features</strong> (Prefix Cache, In-Memory Paged Cache, KV Quantization, and Disk Cache).
+                      <strong>{t('sessions.config.continuousBatching')}</strong> is the heart of vMLX's server performance. Unlike simple mode (which processes exactly one request at a time), continuous batching allows multiple requests to be processed simultaneously. More importantly, <strong>it is required to enable all advanced caching features</strong> (Prefix Cache, In-Memory Paged Cache, KV Quantization, and Disk Cache).
                     </p>
                   </div>
 
                   <div>
-                    <h3 className="text-base font-semibold text-foreground mb-2">Prefix Caching (Memory-Aware vs Legacy)</h3>
+                    <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.prefixCachingModes')}</h3>
                     <p className="text-muted-foreground leading-relaxed mb-2">
                       Prefix caching drastically speeds up interactions by remembering previous prompts (like a system prompt or a long document), skipping the expensive prefill phase.
                     </p>
                     <ul className="list-disc pl-5 space-y-2 text-muted-foreground">
-                      <li><strong>Memory-Aware (Default):</strong> Intelligently manages the cache based on explicit memory boundaries (MB) or a percentage of total system RAM. It automatically evicts the oldest items when crossing these limits.</li>
-                      <li><strong>Legacy Entry-Count:</strong> A simpler system that just stores a fixed number of complete prompt states regardless of their size. Useful if you want strict deterministic eviction.</li>
+                      <li><strong>{t('sessions.config.memoryAwareDefault')}</strong> Intelligently manages the cache based on explicit memory boundaries (MB) or a percentage of total system RAM. It automatically evicts the oldest items when crossing these limits.</li>
+                      <li><strong>{t('sessions.config.legacyEntryCount')}</strong> A simpler system that just stores a fixed number of complete prompt states regardless of their size. Useful if you want strict deterministic eviction.</li>
                     </ul>
                   </div>
 
                   <div>
-                    <h3 className="text-base font-semibold text-foreground mb-2">Mamba & Hybrid Compatibility</h3>
+                    <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.mambaHybridCompat')}</h3>
                     <p className="text-muted-foreground leading-relaxed mb-2">
                       Newer models like Qwen 2.5/3, Falcon Mamba, and Jamba mix standard Attention (KV cache) with SSM blocks (Mamba/Arrays cache).
                     </p>
                     <ul className="list-disc pl-5 space-y-2 text-muted-foreground">
-                      <li><strong>KV Quantization:</strong> vMLX securely isolates Mamba layers. If you turn on KV Quantization (e.g. q8), it will safely compress the Attention layers while leaving the internal Mamba/SSM memory at full precision, ensuring no corruption or quality loss.</li>
-                      <li><strong>In-Memory Paged Cache:</strong> Some models use this RAM tier when Prefix Cache is enabled so attention KV blocks and path-dependent state share one cache contract. Supported models can instead use Block Disk Cache as an SSD-only tier.</li>
+                      <li><strong>{t('sessions.config.kvQuantizationLabel')}</strong> vMLX securely isolates Mamba layers. If you turn on KV Quantization (e.g. q8), it will safely compress the Attention layers while leaving the internal Mamba/SSM memory at full precision, ensuring no corruption or quality loss.</li>
+                      <li><strong>{t('sessions.config.inMemoryPagedCache')}</strong> Some models use this RAM tier when Prefix Cache is enabled so attention KV blocks and path-dependent state share one cache contract. Supported models can instead use Block Disk Cache as an SSD-only tier.</li>
                     </ul>
                   </div>
 
                   <div>
-                    <h3 className="text-base font-semibold text-foreground mb-2">KV Cache Quantization</h3>
+                    <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.kvCacheQuantization')}</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      By converting stored prompts to q8 or q4 precision, you can reduce the cache's RAM footprint by 2-4x. <strong>This only safely compresses saved prefixes</strong>. The actual text generation continues to run at standard full precision natively in MLX.
+                      By converting stored prompts to q8 or q4 precision, you can reduce the cache's RAM footprint by 2-4x. <strong>{t('sessions.config.onlyCompressesSavedPrefixes')}</strong>. The actual text generation continues to run at standard full precision natively in MLX.
                     </p>
                   </div>
 
                   <div>
-                    <h3 className="text-base font-semibold tracking-tight text-foreground mb-2">Vision-Language (VL) Models</h3>
+                    <h3 className="text-base font-semibold tracking-tight text-foreground mb-2">{t('sessions.config.visionLanguageModels')}</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      The core engine handles Vision models automatically. <strong>Prefix caching works for images too!</strong> If you repeatedly ask questions about the exact same image (like in a tool-calling flow analyzing a dashboard), the massive vision embedding prefill is cached and reused instantly.
+                      {t('sessions.config.coreEngineHandlesVision')} <strong>{t('sessions.config.prefixCachingWorksForImages')}</strong> If you repeatedly ask questions about the exact same image (like in a tool-calling flow analyzing a dashboard), the massive vision embedding prefill is cached and reused instantly.
                     </p>
                   </div>
                 </div>
@@ -1115,7 +1115,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             />
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
-                Block Cache Directory
+                {t('sessions.config.blockCacheDirectory')}
                 <Tooltip text="Managed root for block-level disk cache files. A model/config-specific subdirectory is created automatically, and the size limit applies across all managed subdirectories and typed companions in this root. Leave empty for ~/.cache/vmlx-engine/block-cache/." />
               </span>
               <input
@@ -1150,7 +1150,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {/* Live/native cache codec — automatic per architecture. */}
         <div className="block">
           <span className="text-xs font-medium text-muted-foreground">
-            Live Cache Codec
+            {t('sessions.config.liveCacheCodec')}
             <Tooltip text="Auto mode leaves the CLI flag unset so the engine can choose per architecture: calibrated TurboQuant for compatible plain KV/JANGTQ caches, native composite or typed caches for DSV4/ZAYA/hybrid SSM, and stored-prefix fallback only where that codec is valid." />
           </span>
           <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
@@ -1164,11 +1164,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           <>
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
-                Native CSA/HCA Pool Codec
+                {t('sessions.config.nativePoolCodec')}
                 <Tooltip text="This is DSV4's architecture-native compressed-pool codec, not generic TurboQuant KV. The value is detected from the loaded bundle and is not user-overridable from this generic cache panel." />
               </span>
               <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
-                <span>DSV4 pool quantization</span>
+                <span>{t('sessions.config.dsv4PoolQuantization')}</span>
                 <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>
                   {config.dsv4PoolQuant === true
                     ? 'ON (BUNDLE)'
@@ -1191,7 +1191,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {/* Stored prefix-cache compression — orthogonal to TurboQuant. */}
         <div className="block">
           <span className="text-xs font-medium text-muted-foreground">
-            Stored Cache Quantization
+            {t('sessions.config.storedCacheQuantization')}
             <Tooltip text="Controls how completed prompt states are stored in the prefix cache. Auto keeps the engine's production codec choice. None explicitly disables stored-cache quantization. q8/q4 force the generic stored-cache codec and also disable calibrated live TurboQuant so the explicit choice is honored." />
           </span>
           <select value={effectiveStoredCacheQuantization} onChange={e => onChange('kvCacheQuantization', e.target.value)} className="cfg-input" disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}>
@@ -1252,7 +1252,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             />
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
-                Cache Directory
+                {t('sessions.config.cacheDirectory')}
                 <Tooltip text="Base directory for disk cache files (.safetensors). A model-specific subdirectory is created automatically. Leave empty for the default location (~/.cache/vmlx-engine/prompt-cache/<model>/). Set a custom path if you want to use a specific drive." />
               </span>
               <input
@@ -1279,7 +1279,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               className="rounded border-input"
             />
             <span className="text-xs text-muted-foreground">
-              Put model to sleep when idle (frees GPU memory)
+              {t('sessions.config.sleepWhenIdle')}
             </span>
           </label>
         </Field>
@@ -1329,7 +1329,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               className="rounded border-input"
             />
             <span className="text-xs text-muted-foreground">
-              Fuse Metal operations for faster inference (experimental)
+              {t('sessions.config.fuseMetalOps')}
             </span>
           </label>
         </Field>
@@ -1443,7 +1443,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {sessionId && (
           <div className="rounded border border-border bg-background/60 p-2 space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-medium text-muted-foreground">Live MCP Status</span>
+              <span className="text-xs font-medium text-muted-foreground">{t('sessions.config.liveMcpStatus')}</span>
               <button type="button" onClick={refreshMcpStatus} className="text-xs px-2 py-1 rounded border border-border hover:bg-accent" disabled={mcpStatusLoading}>
                 {mcpStatusLoading ? 'Refreshing' : 'Refresh'}
               </button>
@@ -1712,7 +1712,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               no version handshake; tensor parallelism is stubbed.
             </p>
             <p>
-              Recommended usage today: run one <code>vmlx-worker</code> on
+              {t('sessions.config.recommendedUsageToday')} <code>vmlx-worker</code> on
               the same Mac you're running the coordinator on (different port),
               bound to <code>127.0.0.1</code>, as a smoke test. Real multi-Mac
               deployment is blocked behind Phase 2 hardening. See
@@ -1763,9 +1763,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <InfoNote text="Worker nodes: Install vMLX on each Mac and run 'vmlx-worker --secret YOUR_SECRET' from Terminal. Workers auto-advertise via Bonjour — the coordinator discovers them automatically." />
             <DistributedNodeList enabled={!!config.distributedEnabled} sessionId={sessionId} />
             <div className="px-4 py-3 space-y-2">
-              <div className="text-xs font-medium text-foreground">Setup Guide</div>
+              <div className="text-xs font-medium text-foreground">{t('sessions.config.setupGuide')}</div>
               <div className="text-xs text-muted-foreground space-y-1">
-                <p>1. Connect Macs via <strong>Thunderbolt 5 cable</strong> (fastest) or Ethernet/WiFi</p>
+                <p>1. Connect Macs via <strong>{t('sessions.config.thunderboltCable')}</strong> (fastest) or Ethernet/WiFi</p>
                 <p>2. On each worker Mac: <code className="bg-muted px-1 rounded">pip install vmlx && vmlx-worker --secret YOUR_SECRET</code></p>
                 <p>3. Workers appear automatically above via Bonjour discovery</p>
                 <p>4. Or click "Add Manual" to add by IP if discovery doesn't find them</p>
@@ -1799,7 +1799,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             onClick={onReset}
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
-            Reset all parameters to defaults
+            {t('sessions.config.resetAllParameters')}
           </button>
         </div>
       )}

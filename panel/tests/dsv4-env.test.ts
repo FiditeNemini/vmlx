@@ -298,7 +298,10 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
     expect(source).toContain('require fixed 256-token blocks')
     expect(source).toContain('disabled={dsv4Active}')
     expect(source).toContain('Native typed codec (bundle-derived)')
-    expect(source).toContain('Native CSA/HCA Pool Codec')
+    // copy lives in the locale catalog now that the form is translated
+    expect(
+      fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8'),
+    ).toContain('Native CSA/HCA Pool Codec')
     expect(source).toContain("config.dsv4PoolQuant === true")
     expect(source).toContain("'ON (BUNDLE)'")
     expect(source).toContain("'OFF (BUNDLE)'")

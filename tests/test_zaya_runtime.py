@@ -1802,7 +1802,7 @@ def test_zaya_mllm_paged_store_rederives_clean_prompt_boundary():
             self.stop_tokens = set()
             self.prefilled = []
 
-        def _prefill_for_clean_path_dependent_cache(self, token_ids):
+        def _prefill_for_clean_path_dependent_cache(self, token_ids, base_cache=None, base_token_count=0):
             self.prefilled.append(list(token_ids))
             return ["clean-zaya-cache"]
 
@@ -1905,7 +1905,7 @@ def test_zaya_mllm_media_paged_store_skips_prefix_cache():
             self.stop_tokens = set()
             self.prefilled = []
 
-        def _prefill_for_clean_path_dependent_cache(self, token_ids):
+        def _prefill_for_clean_path_dependent_cache(self, token_ids, base_cache=None, base_token_count=0):
             self.prefilled.append(list(token_ids))
             return ["clean-zaya-media-cache"]
 

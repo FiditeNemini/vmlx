@@ -2752,8 +2752,10 @@ class TestMLLMMixedSWACleanStorePolicy:
 
         scheduler._cleanup_finished({"mimo-clean"})
 
+        # Third/fourth args are the incremental-store base: None/0 here because
+        # this fixture's block cache has no prior chain to extend.
         scheduler.batch_generator._prefill_for_clean_path_dependent_cache.assert_called_once_with(
-            [10, 11, 12]
+            [10, 11, 12], None, 0
         )
         assert scheduler.block_aware_cache.stores == [
             ("mimo-clean", [10, 11, 12], [{"class_name": "RotatingKVCache"}], None)
@@ -2880,8 +2882,10 @@ class TestMLLMMixedSWACleanStorePolicy:
 
         scheduler._cleanup_finished({"mimo-clean"})
 
+        # Third/fourth args are the incremental-store base: None/0 here because
+        # this fixture's block cache has no prior chain to extend.
         scheduler.batch_generator._prefill_for_clean_path_dependent_cache.assert_called_once_with(
-            [10, 11, 12]
+            [10, 11, 12], None, 0
         )
 
 
@@ -3025,3 +3029,149 @@ class TestMllmIndexCapacityParity:
         assert resolve_mllm_index_blocks(-8, DEFAULT_MAX_CACHE_BLOCKS) == (
             DEFAULT_MAX_CACHE_BLOCKS
         )
+
+
+class TestCleanStoreExtendsStoredChain:
+    """The clean re-derive used to re-prefill the ENTIRE N-1 prompt each turn.
+
+    Measured on Gemma 4 (box, engine 55b496bdb): TTFT 51-92s at 86k-123k even
+    though only ~12k tokens were fresh, because turn N inherited turn N-1's
+    ~30s store. Reconstructing the stored chain costs far less than recomputing
+    it (0.98s at 28k, 5.25s at 77k vs ~30s), so the store should forward only
+    the delta.
+    """
+
+    @staticmethod
+    def _gen(cache_slots, prefill_step_size=1024):
+        from unittest.mock import MagicMock
+
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen.prefill_step_size = prefill_step_size
+        gen._cache_model = MagicMock(make_cache=lambda: list(cache_slots))
+        gen.calls = []
+        gen.language_model = MagicMock(
+            side_effect=lambda input_ids, cache=None: gen.calls.append(
+                int(input_ids.shape[1])
+            )
+        )
+        return gen
+
+    def test_only_the_delta_is_forwarded(self):
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        gen = self._gen([RotatingKVCache(max_size=512), KVCache()])
+        base = [RotatingKVCache(max_size=512), KVCache()]
+
+        result = gen._prefill_for_clean_path_dependent_cache(
+            list(range(20_000)), base, 16_000
+        )
+
+        assert result is base, "should extend the supplied base in place"
+        assert sum(gen.calls) == 4000, (
+            f"forwarded {sum(gen.calls)} tokens, expected only the 4000-token delta"
+        )
+        assert max(gen.calls) <= 1024
+
+    def test_no_base_still_prefills_everything(self):
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        gen = self._gen([RotatingKVCache(max_size=512), KVCache()])
+        gen._prefill_for_clean_path_dependent_cache(list(range(5000)))
+        assert sum(gen.calls) == 5000
+
+    def test_recurrent_base_is_refused(self):
+        """Resuming mid-sequence is a chunk boundary; SSM state cannot take one."""
+        from mlx_lm.models.cache import ArraysCache, KVCache, RotatingKVCache
+
+        gen = self._gen([RotatingKVCache(max_size=512), KVCache()])
+        recurrent_base = [KVCache(), ArraysCache(4)]
+
+        gen._prefill_for_clean_path_dependent_cache(
+            list(range(20_000)), recurrent_base, 16_000
+        )
+
+        assert sum(gen.calls) == 20_000, "recurrent base must not be resumed from"
+
+    def test_degenerate_coverage_falls_back_to_full_prefill(self):
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        for covered in (0, -5, 20_000, 25_000):
+            gen = self._gen([RotatingKVCache(max_size=512), KVCache()])
+            base = [RotatingKVCache(max_size=512), KVCache()]
+            gen._prefill_for_clean_path_dependent_cache(
+                list(range(20_000)), base, covered
+            )
+            assert sum(gen.calls) == 20_000, f"covered={covered} mishandled"
+
+
+class TestCleanStoreBaseLookup:
+    """The scheduler-side half: find and release the stored chain safely."""
+
+    @staticmethod
+    def _scheduler(block_table, reconstructed):
+        from unittest.mock import MagicMock
+
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        sched = MLLMScheduler.__new__(MLLMScheduler)
+        sched.block_aware_cache = MagicMock()
+        sched.block_aware_cache.fetch_cache.return_value = (block_table, [])
+        sched.block_aware_cache.reconstruct_cache.return_value = reconstructed
+        return sched
+
+    def test_returns_base_and_releases_refs(self):
+        from unittest.mock import MagicMock
+
+        table = MagicMock(num_tokens=16_000)
+        sentinel = ["cache"]
+        sched = self._scheduler(table, sentinel)
+
+        base, covered = sched._clean_store_base_from_stored_chain(
+            "req-1", list(range(20_000)), None
+        )
+
+        assert base is sentinel
+        assert covered == 16_000
+        sched.block_aware_cache.release_cache.assert_called_once()
+
+    def test_full_coverage_returns_no_base(self):
+        """Nothing left to forward — the caller's own skip path handles it."""
+        from unittest.mock import MagicMock
+
+        sched = self._scheduler(MagicMock(num_tokens=20_000), ["cache"])
+        assert sched._clean_store_base_from_stored_chain(
+            "req-1", list(range(20_000)), None
+        ) == (None, 0)
+
+    def test_short_chain_is_not_worth_reconstructing(self):
+        from unittest.mock import MagicMock
+
+        sched = self._scheduler(MagicMock(num_tokens=3_000), ["cache"])
+        assert sched._clean_store_base_from_stored_chain(
+            "req-1", list(range(20_000)), None
+        ) == (None, 0)
+
+    def test_lookup_failure_falls_back_and_still_releases(self):
+        from unittest.mock import MagicMock
+
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        sched = MLLMScheduler.__new__(MLLMScheduler)
+        sched.block_aware_cache = MagicMock()
+        sched.block_aware_cache.fetch_cache.side_effect = RuntimeError("boom")
+
+        assert sched._clean_store_base_from_stored_chain(
+            "req-1", list(range(20_000)), None
+        ) == (None, 0)
+        sched.block_aware_cache.release_cache.assert_called_once()
+
+    def test_missing_cache_is_handled(self):
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        sched = MLLMScheduler.__new__(MLLMScheduler)
+        sched.block_aware_cache = None
+        assert sched._clean_store_base_from_stored_chain(
+            "req-1", [1, 2, 3], None
+        ) == (None, 0)

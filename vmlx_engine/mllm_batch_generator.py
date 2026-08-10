@@ -9344,9 +9344,20 @@ class MLLMBatchGenerator:
         return bool(self.unprocessed_requests or self.active_batch)
 
     def _prefill_for_clean_path_dependent_cache(
-        self, tokens: List[int]
+        self,
+        tokens: List[int],
+        base_cache: Optional[List[Any]] = None,
+        base_token_count: int = 0,
     ) -> Optional[List[Any]]:
         """Run a clean prompt-only prefill matching a path-dependent cache key.
+
+        ``base_cache``/``base_token_count`` let the caller hand in a cache that
+        already covers ``tokens[:base_token_count]`` (typically reconstructed
+        from the previously stored chain), so only the delta is forwarded. That
+        turns the store from O(context) into O(new tokens). Ignored for caches
+        that require a single contiguous pass, and ignored unless the base is
+        itself chunk-safe, since resuming mid-sequence is the same operation a
+        chunk boundary performs.
 
         Mirrors Scheduler._prefill_for_prompt_only_cache for the MLLM path.
         Returned cache covers exactly `tokens` worth of processing — no
@@ -9379,11 +9390,26 @@ class MLLMBatchGenerator:
             return None
         seq_len = len(tokens)
         try:
-            cache_model = getattr(self, "_cache_model", None)
-            fresh_cache = cache_model.make_cache() if cache_model is not None else None
+            resume_at = 0
+            fresh_cache = None
+            if (
+                base_cache is not None
+                and 0 < int(base_token_count) < seq_len
+                and not _cache_requires_one_shot_rederive(base_cache)
+            ):
+                fresh_cache = base_cache
+                resume_at = int(base_token_count)
+
             if fresh_cache is None:
-                from mlx_lm.models.cache import KVCache
-                fresh_cache = [KVCache() for _ in range(len(self.language_model.layers))]
+                cache_model = getattr(self, "_cache_model", None)
+                fresh_cache = (
+                    cache_model.make_cache() if cache_model is not None else None
+                )
+                if fresh_cache is None:
+                    from mlx_lm.models.cache import KVCache
+                    fresh_cache = [
+                        KVCache() for _ in range(len(self.language_model.layers))
+                    ]
 
             if _cache_requires_one_shot_rederive(fresh_cache):
                 _OOM_GUARD_BYTES = 8 * 1024 * 1024 * 1024
@@ -9440,7 +9466,9 @@ class MLLMBatchGenerator:
             # single contiguous pass those caches require); prefill_step_size
             # chunks for attention-only stacks, materializing after each so the
             # lazy graph — and peak Metal working set — stay bounded.
-            for _start in range(0, seq_len, chunk_size):
+            # resume_at is non-zero only when a caller-supplied base already
+            # covers that prefix, so those tokens are never re-forwarded.
+            for _start in range(resume_at, seq_len, chunk_size):
                 _ = self.language_model(
                     mx.array([tokens[_start:_start + chunk_size]]),
                     cache=fresh_cache,
@@ -9467,9 +9495,16 @@ class MLLMBatchGenerator:
                 except Exception:
                     pass
 
-    def _prefill_for_clean_ssm(self, tokens: List[int]) -> Optional[List[Any]]:
+    def _prefill_for_clean_ssm(
+        self,
+        tokens: List[int],
+        base_cache: Optional[List[Any]] = None,
+        base_token_count: int = 0,
+    ) -> Optional[List[Any]]:
         """Compatibility alias for hybrid SSM callers."""
-        return self._prefill_for_clean_path_dependent_cache(tokens)
+        return self._prefill_for_clean_path_dependent_cache(
+            tokens, base_cache, base_token_count
+        )
 
     def _prefill_for_clean_media_prefix_cache(
         self,

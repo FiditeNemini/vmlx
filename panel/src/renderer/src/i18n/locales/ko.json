@@ -498,7 +498,11 @@
       "phaseFailed": "실패",
       "argsLabel": "인수",
       "resultLabel": "결과",
-      "errorLabel": "오류"
+      "errorLabel": "오류",
+      "generatingToolCall": "도구 호출 생성 중...",
+      "toolCallGenerated": "도구 호출 생성됨",
+      "processingToolResults": "도구 결과 처리 중...",
+      "toolResultsProcessed": "도구 결과 처리됨"
     },
     "inlineTool": {
       "phaseInterrupted": "중단됨",
@@ -1232,13 +1236,22 @@
     "doctor": {
       "title": "모델 Doctor",
       "pathLabel": "모델 경로 또는 HuggingFace ID",
-      "pathPlaceholder": "/path/to/model 또는 org/model-name"
+      "pathPlaceholder": "/path/to/model 또는 org/model-name",
+      "modelDoctor": "모델 닥터",
+      "runDiagnosticsDesc": "모델 설정, 가중치, 아키텍처 및 추론을 진단합니다",
+      "modelPathOrId": "모델 경로 또는 HuggingFace ID",
+      "runDiagnostics": "진단 실행",
+      "includeInferenceTest": "추론 테스트 포함"
     },
     "inspector": {
       "title": "모델 Inspector",
       "pathLabel": "모델 경로 또는 HuggingFace ID",
       "pathPlaceholder": "/path/to/model 또는 org/model-name",
-      "modelInfo": "모델 정보"
+      "modelInfo": "모델 정보",
+      "modelInspector": "모델 인스펙터",
+      "viewMetadataDesc": "config.json에서 상세 모델 메타데이터 보기",
+      "modelPathOrId": "모델 경로 또는 HuggingFace ID",
+      "modelInformation": "모델 정보"
     }
   },
   "convert": {

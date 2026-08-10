@@ -498,7 +498,11 @@
       "phaseFailed": "failed",
       "argsLabel": "args",
       "resultLabel": "result",
-      "errorLabel": "error"
+      "errorLabel": "error",
+      "generatingToolCall": "Generating tool call...",
+      "toolCallGenerated": "Tool call generated",
+      "processingToolResults": "Processing tool results...",
+      "toolResultsProcessed": "Tool results processed"
     },
     "inlineTool": {
       "phaseInterrupted": "interrupted",
@@ -1232,13 +1236,22 @@
     "doctor": {
       "title": "Model Doctor",
       "pathLabel": "Model Path or HuggingFace ID",
-      "pathPlaceholder": "/path/to/model or org/model-name"
+      "pathPlaceholder": "/path/to/model or org/model-name",
+      "modelDoctor": "Model Doctor",
+      "runDiagnosticsDesc": "Run diagnostics on model config, weights, architecture, and inference",
+      "modelPathOrId": "Model Path or HuggingFace ID",
+      "runDiagnostics": "Run Diagnostics",
+      "includeInferenceTest": "Include inference test"
     },
     "inspector": {
       "title": "Model Inspector",
       "pathLabel": "Model Path or HuggingFace ID",
       "pathPlaceholder": "/path/to/model or org/model-name",
-      "modelInfo": "Model Information"
+      "modelInfo": "Model Information",
+      "modelInspector": "Model Inspector",
+      "viewMetadataDesc": "View detailed model metadata from config.json",
+      "modelPathOrId": "Model Path or HuggingFace ID",
+      "modelInformation": "Model Information"
     }
   },
   "convert": {

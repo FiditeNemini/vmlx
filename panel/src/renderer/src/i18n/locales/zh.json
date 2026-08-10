@@ -498,7 +498,11 @@
       "phaseFailed": "失败",
       "argsLabel": "参数",
       "resultLabel": "结果",
-      "errorLabel": "错误"
+      "errorLabel": "错误",
+      "generatingToolCall": "正在生成工具调用...",
+      "toolCallGenerated": "工具调用已生成",
+      "processingToolResults": "正在处理工具结果...",
+      "toolResultsProcessed": "工具结果已处理"
     },
     "inlineTool": {
       "phaseInterrupted": "已中断",
@@ -1232,13 +1236,22 @@
     "doctor": {
       "title": "模型诊断",
       "pathLabel": "模型路径或 HuggingFace ID",
-      "pathPlaceholder": "/path/to/model 或 org/model-name"
+      "pathPlaceholder": "/path/to/model 或 org/model-name",
+      "modelDoctor": "模型诊断器",
+      "runDiagnosticsDesc": "对模型配置、权重、架构和推理运行诊断",
+      "modelPathOrId": "模型路径或 HuggingFace ID",
+      "runDiagnostics": "运行诊断",
+      "includeInferenceTest": "包含推理测试"
     },
     "inspector": {
       "title": "模型查看器",
       "pathLabel": "模型路径或 HuggingFace ID",
       "pathPlaceholder": "/path/to/model 或 org/model-name",
-      "modelInfo": "模型信息"
+      "modelInfo": "模型信息",
+      "modelInspector": "模型检查器",
+      "viewMetadataDesc": "从 config.json 查看详细的模型元数据",
+      "modelPathOrId": "模型路径或 HuggingFace ID",
+      "modelInformation": "模型信息"
     }
   },
   "convert": {

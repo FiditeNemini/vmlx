@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ArrowLeft, Search, Loader2 } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface ModelInspectorProps {
   initialModelPath?: string | null
@@ -8,6 +9,7 @@ interface ModelInspectorProps {
 }
 
 export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelInspectorProps) {
+  const { t } = useTranslation()
   const [modelPath, setModelPath] = useState(initialModelPath || '')
   const [output, setOutput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -63,14 +65,14 @@ export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelI
           Back
         </button>
 
-        <h2 className="text-2xl font-bold">Model Inspector</h2>
+        <h2 className="text-2xl font-bold">{t('tools.inspector.modelInspector')}</h2>
         <p className="text-sm text-muted-foreground">
-          View detailed model metadata from config.json
+          {t('tools.inspector.viewMetadataDesc')}
         </p>
 
         {/* Model input */}
         <div className="space-y-2">
-          <label className="text-sm font-medium">Model Path or HuggingFace ID</label>
+          <label className="text-sm font-medium">{t('tools.inspector.modelPathOrId')}</label>
           <div className="flex gap-2">
             <div className="flex-1 relative">
               <input
@@ -111,7 +113,7 @@ export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelI
         {output && (
           <div className="border border-border rounded-lg overflow-hidden">
             <div className="bg-muted px-4 py-2 border-b border-border">
-              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Model Information</p>
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('tools.inspector.modelInformation')}</p>
             </div>
             <pre className="p-4 text-sm font-mono whitespace-pre-wrap overflow-auto max-h-[60vh] bg-background">
               {output}

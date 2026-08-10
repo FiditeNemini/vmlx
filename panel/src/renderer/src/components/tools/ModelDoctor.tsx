@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { ArrowLeft, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react'
 import { useStreamingOperation } from './useStreamingOperation'
 import { LogViewer } from './LogViewer'
+import { useTranslation } from '../../i18n'
 
 type CheckStatus = 'pass' | 'fail' | 'warn' | 'pending' | 'running'
 
@@ -93,6 +94,7 @@ function parseOutput(lines: string[]): CheckResult[] {
 }
 
 export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoctorProps) {
+  const { t } = useTranslation()
   const [modelPath, setModelPath] = useState(initialModelPath || '')
   const [noInference, setNoInference] = useState(true)
   const [checks, setChecks] = useState<CheckResult[]>([])
@@ -142,15 +144,15 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
           Back
         </button>
 
-        <h2 className="text-2xl font-bold">Model Doctor</h2>
+        <h2 className="text-2xl font-bold">{t('tools.doctor.modelDoctor')}</h2>
         <p className="text-sm text-muted-foreground">
-          Run diagnostics on model config, weights, architecture, and inference
+          {t('tools.doctor.runDiagnosticsDesc')}
         </p>
 
         {/* Model input */}
         <div className="space-y-3">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Model Path or HuggingFace ID</label>
+            <label className="text-sm font-medium">{t('tools.doctor.modelPathOrId')}</label>
             <div className="flex gap-2">
               <input
                 type="text"
@@ -180,7 +182,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
                   disabled={!modelPath.trim()}
                   className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 flex items-center gap-2"
                 >
-                  Run Diagnostics
+                  {t('tools.doctor.runDiagnostics')}
                 </button>
               )}
             </div>
@@ -195,7 +197,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
               className="rounded border-input"
             />
             <span className="text-muted-foreground">
-              Include inference test
+              {t('tools.doctor.includeInferenceTest')}
               <span className="text-xs ml-1">(loads full model, uses significant memory)</span>
             </span>
           </label>

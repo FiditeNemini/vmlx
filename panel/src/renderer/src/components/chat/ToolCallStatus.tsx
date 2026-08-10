@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Check, X, ChevronRight, AlertTriangle, Loader2, StopCircle } from 'lucide-react'
 import { formatJson } from './chat-utils'
+import { useTranslation } from '../../i18n'
 
 export interface ToolStatus {
   phase: 'calling' | 'executing' | 'result' | 'error' | 'processing' | 'done' | 'generating' | 'asking'
@@ -17,6 +18,7 @@ interface ToolCallStatusProps {
 }
 
 export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
+  const { t } = useTranslation()
   const [expanded, setExpanded] = useState<Record<number, boolean>>({})
   const [sectionOpen, setSectionOpen] = useState(false)
 
@@ -166,12 +168,12 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
                   {isActive && lastStatus.phase === 'generating' ? (
                     <>
                       <Loader2 className="h-3 w-3 text-primary animate-spin" />
-                      <span>Generating tool call...</span>
+                      <span>{t('chat.toolStatus.generatingToolCall')}</span>
                     </>
                   ) : (
                     <>
                       <Check className="h-3 w-3 text-primary" />
-                      <span>Tool call generated</span>
+                      <span>{t('chat.toolStatus.toolCallGenerated')}</span>
                     </>
                   )}
                 </div>
@@ -184,12 +186,12 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
                   {isActive && lastStatus.phase === 'processing' ? (
                     <>
                       <Loader2 className="h-3 w-3 text-warning animate-spin" />
-                      <span>Processing tool results...</span>
+                      <span>{t('chat.toolStatus.processingToolResults')}</span>
                     </>
                   ) : (
                     <>
                       <Check className="h-3 w-3 text-primary" />
-                      <span>Tool results processed</span>
+                      <span>{t('chat.toolStatus.toolResultsProcessed')}</span>
                     </>
                   )}
                 </div>

@@ -498,7 +498,11 @@
       "phaseFailed": "失敗",
       "argsLabel": "引数",
       "resultLabel": "結果",
-      "errorLabel": "エラー"
+      "errorLabel": "エラー",
+      "generatingToolCall": "ツール呼び出しを生成中...",
+      "toolCallGenerated": "ツール呼び出しを生成しました",
+      "processingToolResults": "ツール結果を処理中...",
+      "toolResultsProcessed": "ツール結果を処理しました"
     },
     "inlineTool": {
       "phaseInterrupted": "中断",
@@ -1232,13 +1236,22 @@
     "doctor": {
       "title": "モデルドクター",
       "pathLabel": "モデルパスまたは HuggingFace ID",
-      "pathPlaceholder": "/path/to/model または org/model-name"
+      "pathPlaceholder": "/path/to/model または org/model-name",
+      "modelDoctor": "モデルドクター",
+      "runDiagnosticsDesc": "モデルの設定・重み・アーキテクチャ・推論を診断します",
+      "modelPathOrId": "モデルパスまたは HuggingFace ID",
+      "runDiagnostics": "診断を実行",
+      "includeInferenceTest": "推論テストを含める"
     },
     "inspector": {
       "title": "モデルインスペクタ",
       "pathLabel": "モデルパスまたは HuggingFace ID",
       "pathPlaceholder": "/path/to/model または org/model-name",
-      "modelInfo": "モデル情報"
+      "modelInfo": "モデル情報",
+      "modelInspector": "モデルインスペクタ",
+      "viewMetadataDesc": "config.json からモデルの詳細メタデータを表示",
+      "modelPathOrId": "モデルパスまたは HuggingFace ID",
+      "modelInformation": "モデル情報"
     }
   },
   "convert": {

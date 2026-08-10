@@ -498,7 +498,11 @@
       "phaseFailed": "con error",
       "argsLabel": "args",
       "resultLabel": "resultado",
-      "errorLabel": "error"
+      "errorLabel": "error",
+      "generatingToolCall": "Generando llamada a herramienta...",
+      "toolCallGenerated": "Llamada a herramienta generada",
+      "processingToolResults": "Procesando resultados de la herramienta...",
+      "toolResultsProcessed": "Resultados de la herramienta procesados"
     },
     "inlineTool": {
       "phaseInterrupted": "interrumpida",
@@ -1232,13 +1236,22 @@
     "doctor": {
       "title": "Doctor de modelos",
       "pathLabel": "Ruta del modelo o ID de HuggingFace",
-      "pathPlaceholder": "/ruta/al/modelo o org/nombre-modelo"
+      "pathPlaceholder": "/ruta/al/modelo o org/nombre-modelo",
+      "modelDoctor": "Doctor de modelos",
+      "runDiagnosticsDesc": "Ejecuta diagnósticos sobre la configuración, los pesos, la arquitectura y la inferencia del modelo",
+      "modelPathOrId": "Ruta del modelo o ID de HuggingFace",
+      "runDiagnostics": "Ejecutar diagnósticos",
+      "includeInferenceTest": "Incluir prueba de inferencia"
     },
     "inspector": {
       "title": "Inspector de modelos",
       "pathLabel": "Ruta del modelo o ID de HuggingFace",
       "pathPlaceholder": "/ruta/al/modelo o org/nombre-modelo",
-      "modelInfo": "Información del modelo"
+      "modelInfo": "Información del modelo",
+      "modelInspector": "Inspector de modelos",
+      "viewMetadataDesc": "Ver metadatos detallados del modelo desde config.json",
+      "modelPathOrId": "Ruta del modelo o ID de HuggingFace",
+      "modelInformation": "Información del modelo"
     }
   },
   "convert": {

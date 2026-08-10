@@ -915,7 +915,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.isMultimodal).toBe(false)
   })
 
-  it('autodetects MiniMax-M3 (minimax_m3_vl) with typed paged/block-L2 support', () => {
+  it('autodetects MiniMax-M3 (minimax_m3_vl) with paged OFF (typed serializer is prefix/block-L2 only)', () => {
     const dir = makeModelDir(
       { model_type: 'minimax_m3_vl', text_config: { model_type: 'minimax_m3' }, vision_config: { hidden_size: 1024 } },
       {
@@ -937,9 +937,11 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('minimax_m3')
     expect(detected.toolParser).toBe('minimax_m3')
     expect(detected.isMultimodal).toBe(true)
-    // The typed M3 serializer preserves keys/values/idx_keys through paged L1
-    // and block-disk L2; generic stored-KV quantization remains a separate opt-out.
-    expect(detected.usePagedCache).toBe(true)
+    // The typed M3 serializer (keys/values/idx_keys) lives only in the
+    // prefix/block-disk path; the generic paged tier has no M3 sparse-MSA
+    // handling and corrupts partial-prefix reuse (live-proven 2026-08-10), so
+    // M3 must detect with paged OFF. The engine also hard-forces this off.
+    expect(detected.usePagedCache).toBe(false)
   })
 
   it('autodetects openPangu-2.0-Flash (openpangu_v2) with openpangu tool parser and kv/composite cache despite the stamped hybrid/qwen sidecar', () => {

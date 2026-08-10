@@ -1973,6 +1973,9 @@ class TestModelConfigComprehensiveChecks:
         # so without the row native tool XML leaked into visible content.
         "minimax_m3",
         "think_xml",
+        # Muse Glimmer routes reasoning by RECIPIENT (to=self / to=user) rather
+        # than an inline think pair — registered in reasoning/__init__.py.
+        "muse_glimmer",
     }
     VALID_TOOL_PARSERS = {
         None, "qwen", "llama", "mistral", "deepseek", "hermes",
@@ -1982,6 +1985,11 @@ class TestModelConfigComprehensiveChecks:
         # vmlx_engine/tool_parsers/minimax_m3_tool_parser.py:130.
         "minimax_m3",
         "dsml", "zaya_xml", "xml_function",
+        # Muse Glimmer ATEM: <atem:function_calls><atem:invoke name=...>
+        # <atem:parameter name=...>. Regex-based because the bundle's own
+        # template states the output "is not expected to be valid XML".
+        # vmlx_engine/tool_parsers/atem_tool_parser.py.
+        "atem",
         # Gemma family: commit 3294a2da added `gemma3` for Google's
         # documented ``` ```tool_code\\nname(k=v)\\n``` ``` format, and
         # `gemma3n` for Gemma 3n (same parser, separate registry entry).

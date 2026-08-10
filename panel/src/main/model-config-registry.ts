@@ -197,6 +197,12 @@ registerFamily('medgemma', { cacheType: 'kv', isMultimodal: true, description: '
 registerFamily('paligemma', { cacheType: 'kv', isMultimodal: true, description: 'Google PaliGemma', priority: 5 })
 registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Gemma 4 (multimodal)', priority: 5 })
 registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinkingBudget: true, enableAutoToolChoice: true, usePagedCache: true, description: 'Gemma 4 (text-only)', priority: 4 })
+// Muse Glimmer: Gemma-shaped text backbone (sliding/full 3:1) + windowed ViT,
+// vision AND video. Reasoning is routed by recipient (to=self / to=user), not an
+// inline think pair, and its only live control is the reasoning_strength template
+// kwarg — enable_thinking and reasoning_effort are both ignored by its template.
+// Same mixed-SWA cache shape as gemma4, so it takes paged like gemma4 does.
+registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })
@@ -411,6 +417,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'gemma4_text': 'gemma4-text',
   'gemma4_unified': 'gemma4',
   'gemma4_unified_text': 'gemma4-text',
+  'muse_glimmer': 'muse-glimmer',
   // ── Phi family ──
   'phi3': 'phi3',
   'phi3v': 'phi3-vision',

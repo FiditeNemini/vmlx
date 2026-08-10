@@ -3145,6 +3145,8 @@ Examples:
             "hunyuan",
             # openPangu-2.0 JSON-list-in-special-token format.
             "openpangu",
+            # Muse Glimmer ATEM (<atem:invoke name=…><atem:parameter name=…>).
+            "atem",
             # Aliases (map to same parsers)
             "generic",
             "qwen3",

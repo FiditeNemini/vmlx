@@ -959,6 +959,40 @@ def register_all(registry=None):
         )
     )
 
+    # Muse Glimmer — vision+video model whose text backbone is Gemma-shaped
+    # (final_logit_softcapping 20.0, sliding/full attention 3:1, sliding_window
+    # 2048) paired with a Qwen-VL-style windowed ViT. Reasoning is routed by
+    # RECIPIENT rather than an inline think pair: "to=self" carries reasoning,
+    # "to=user" (or no recipient) the answer, and a tool recipient carries an
+    # ATEM call. Its only live reasoning control is the `reasoning_strength`
+    # template kwarg (low/medium/high/xhigh, defaulting to high) — the bundle's
+    # template never reads enable_thinking or reasoning_effort, so neither has
+    # any effect here.
+    _register(
+        ModelConfig(
+            family_name="muse_glimmer",
+            model_types=["muse_glimmer"],
+            cache_type="kv",
+            tool_parser="atem",
+            reasoning_parser="muse_glimmer",
+            supports_thinking=True,
+            eos_tokens=["<|end_of_text|>", "<|eot|>"],
+            # <|eom|> ends one message with more to follow, so it must NOT be
+            # an eos token; it is cleaned from surfaced text instead.
+            special_tokens_to_clean=[
+                "<|start|>",
+                "<|message|>",
+                "<|eom|>",
+                "<|eot|>",
+                "<|patch|>",
+                "<|video|>",
+            ],
+            is_mllm=True,
+            architecture_hints={"inject_pixel_values": True},
+            priority=5,
+        )
+    )
+
     # Gemma 3 / Gemma 3n — Google's documented function-calling format is
     # a `tool_code` Python-code-block, NOT hermes JSON. Was previously
     # misconfigured with tool_parser="hermes" which silently failed to

@@ -1,0 +1,30 @@
+{
+ "model_type": "muse_glimmer",
+ "architectures": [
+  "MuseGlimmerForConditionalGeneration"
+ ],
+ "has_vision": true,
+ "has_video": true,
+ "has_audio": false,
+ "image_token_id": 200092,
+ "video_token_id": 200091,
+ "modalities": {
+  "text": true,
+  "vision": true,
+  "audio": false,
+  "video": true
+ },
+ "text_config": {
+  "num_hidden_layers": 52,
+  "hidden_size": 6656,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 2,
+  "head_dim": 128,
+  "sliding_window": 2048,
+  "final_logit_softcapping": 20.0
+ },
+ "vision_config": {
+  "hidden_size": 1536,
+  "intermediate_size": 8960
+ }
+}

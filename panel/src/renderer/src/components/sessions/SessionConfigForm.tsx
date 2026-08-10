@@ -2033,6 +2033,11 @@ const TOOL_PARSER_OPTIONS: ParserOption[] = [
     ]
   },
   {
+    value: 'atem', label: 'Muse Glimmer — ATEM', format: '<atem:function_calls><atem:invoke name="fn"><atem:parameter name="arg">val</atem:parameter></atem:invoke></atem:function_calls>', models: [
+      'Muse Glimmer 30B (text+vision+video)',
+    ]
+  },
+  {
     value: 'minimax_m3', label: 'MiniMax M3 — MiniMax-M3 (sparse MSA + Lightning-Indexer)', format: 'native tool_call (MiniMax M3 parser)', models: [
       'MiniMax-M3 (REAP22 / JANG_2L)',
       'Auto-detected for minimax_m3 / minimax_m3_vl bundles.',
@@ -2089,6 +2094,11 @@ const REASONING_PARSER_OPTIONS: ParserOption[] = [
       'Gemma 4 27B-A4B (text+vision, MoE)',
       'Gemma 4 31B (text+vision, dense)',
       'Any Gemma 4 model with <|channel>thought protocol',
+    ]
+  },
+  {
+    value: 'muse_glimmer', label: 'Muse Glimmer — recipient channels', format: '<|start|>assistant to=self<|message|>reasoning<|eom|> then to=user<|message|>answer<|eot|>', models: [
+      'Muse Glimmer 30B (reasoning_strength: low/medium/high/xhigh)',
     ]
   },
   {

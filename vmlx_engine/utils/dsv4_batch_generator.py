@@ -1194,9 +1194,33 @@ class DSV4BatchGenerator:
                 records.append(record)
             cache._vmlx_dsv4_delta_next_token = end
 
+    @staticmethod
+    def _settle_snapshot_evals(eval_collector: List[Any]) -> None:
+        """Submit one capture group's snapshot leaves in a single batched eval.
+
+        Mirrors the decode-boundary fix: without a collector each detached leaf
+        is pinned by its own blocking ``mx.eval``, so a forced anchor over ~43
+        composite layers x ~8 leaves serializes a few hundred GPU round-trips
+        onto the worker thread. Must run before the next model forward is
+        submitted so the copies still read pre-mutation state (same-stream
+        ordering).
+        """
+        if not eval_collector:
+            return
+        async_eval = getattr(mx, "async_eval", None)
+        if callable(async_eval):
+            async_eval(*eval_collector)
+        else:
+            mx.eval(*eval_collector)
+        eval_collector.clear()
+
     @classmethod
     def _capture_dsv4_completed_blocks(
-        cls, cache_list: List[Any], target_token: int
+        cls,
+        cache_list: List[Any],
+        target_token: int,
+        *,
+        _eval_collector: Optional[List[Any]] = None,
     ) -> None:
         if not cache_list:
             return
@@ -1209,12 +1233,17 @@ class DSV4BatchGenerator:
                 cache_list,
                 next_token,
                 next_token + DSV4_NATIVE_BLOCK_SIZE,
+                _eval_collector=_eval_collector,
             )
             next_token += DSV4_NATIVE_BLOCK_SIZE
 
     @classmethod
     def _capture_dsv4_append_safe_checkpoint(
-        cls, cache_list: List[Any], target_token: int
+        cls,
+        cache_list: List[Any],
+        target_token: int,
+        *,
+        _eval_collector: Optional[List[Any]] = None,
     ) -> None:
         """Promote the just-completed full block while live state is aligned."""
         if not cache_list:
@@ -1239,11 +1268,16 @@ class DSV4BatchGenerator:
             force_anchor=True,
             append_safe=True,
             replace_last=True,
+            _eval_collector=_eval_collector,
         )
 
     @classmethod
     def _capture_dsv4_terminal_anchor(
-        cls, cache_list: List[Any], target_token: int
+        cls,
+        cache_list: List[Any],
+        target_token: int,
+        *,
+        _eval_collector: Optional[List[Any]] = None,
     ) -> None:
         if not cache_list:
             return
@@ -1257,6 +1291,7 @@ class DSV4BatchGenerator:
                 next_token,
                 target,
                 force_anchor=True,
+                _eval_collector=_eval_collector,
             )
             return
         if next_token != target:
@@ -1268,7 +1303,9 @@ class DSV4BatchGenerator:
             records = getattr(cache, "_vmlx_dsv4_block_records", None)
             if not records:
                 raise ValueError("DSV4 terminal anchor has no block record")
-        cls._capture_dsv4_append_safe_checkpoint(cache_list, target)
+        cls._capture_dsv4_append_safe_checkpoint(
+            cache_list, target, _eval_collector=_eval_collector
+        )
 
     @classmethod
     def _dsv4_delta_transport(cls, cache_list: List[Any]) -> Optional[List[Any]]:
@@ -1963,7 +2000,12 @@ class DSV4BatchGenerator:
                 mx.clear_cache()
             off = end_off
             if capture_block_deltas:
-                self._capture_dsv4_completed_blocks(cache, cached_tokens + off)
+                chunk_evals: List[Any] = []
+                self._capture_dsv4_completed_blocks(
+                    cache,
+                    cached_tokens + off,
+                    _eval_collector=chunk_evals,
+                )
                 if cached_tokens + off == append_safe_boundary:
                     # Capture while every native layer is exactly at this block
                     # boundary. Re-exporting it after the partial tail would ask
@@ -1971,9 +2013,19 @@ class DSV4BatchGenerator:
                     self._capture_dsv4_append_safe_checkpoint(
                         cache,
                         append_safe_boundary,
+                        _eval_collector=chunk_evals,
                     )
+                # Settle per chunk: the next chunk's forward mutates pool rows
+                # in place, so this chunk's copies must be submitted first.
+                self._settle_snapshot_evals(chunk_evals)
         if capture_block_deltas and force_terminal_anchor:
-            self._capture_dsv4_terminal_anchor(cache, cached_tokens + total)
+            anchor_evals: List[Any] = []
+            self._capture_dsv4_terminal_anchor(
+                cache,
+                cached_tokens + total,
+                _eval_collector=anchor_evals,
+            )
+            self._settle_snapshot_evals(anchor_evals)
         return last_logits
 
     # ---------- BatchGenerator API ----------

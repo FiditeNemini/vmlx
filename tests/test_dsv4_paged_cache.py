@@ -3007,7 +3007,7 @@ def test_dsv4_generator_snapshot_excludes_generation_rail_tokens(monkeypatch):
     monkeypatch.setattr(
         DSV4BatchGenerator,
         "_capture_dsv4_append_safe_checkpoint",
-        classmethod(lambda cls, cache, target: None),
+        classmethod(lambda cls, cache, target, **_kw: None),
     )
     gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
     gen._warmed_up = True
@@ -3250,7 +3250,7 @@ def test_dsv4_cache_hit_extends_clean_snapshot_from_uncached_tail(monkeypatch):
     monkeypatch.setattr(
         DSV4BatchGenerator,
         "_capture_dsv4_terminal_anchor",
-        classmethod(lambda cls, cache, target_token: None),
+        classmethod(lambda cls, cache, target_token, **_kw: None),
     )
     restored_cache = [SimpleNamespace()]
     gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)
@@ -3294,7 +3294,7 @@ def test_dsv4_cache_hit_extension_excludes_generation_rail_tokens(monkeypatch):
     monkeypatch.setattr(
         DSV4BatchGenerator,
         "_capture_dsv4_terminal_anchor",
-        classmethod(lambda cls, cache, target_token: None),
+        classmethod(lambda cls, cache, target_token, **_kw: None),
     )
     restored_cache = [SimpleNamespace()]
     gen = DSV4BatchGenerator(_Model(), capture_prompt_snapshot=True)

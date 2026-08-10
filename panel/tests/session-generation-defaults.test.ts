@@ -215,3 +215,28 @@ describe('session generation-default hydration', () => {
     }
   })
 })
+
+describe('generic prefix-cache index capacity', () => {
+  const source = readFileSync('src/main/sessions.ts', 'utf8')
+
+  it('sizes the generic default by target tokens, not a flat block count', () => {
+    // --max-cache-blocks counts BLOCKS. DSV4 was given an explicit 1M-token
+    // index (4097 x 256) while every other family was left at a flat 1000,
+    // which at the generic 64-token block indexes only 63,936 tokens. Measured
+    // on the box: a 77k Gemma prompt reported 0 cached tokens on an EXACT
+    // repeat and ran slower than a cold prefill (82.5s vs 55.7s); the same
+    // probe at 28k reused 28,199 tokens and cut TTFT 9.10s -> 0.98s.
+    expect(source).toContain('GENERIC_INDEX_TARGET_TOKENS')
+    expect(source).toContain('function indexBlocksForCapacity(')
+    expect(source).toContain('indexBlocksForCapacity(mutable.pagedCacheBlockSize)')
+  })
+
+  it('keeps DSV4 on its own explicit 1M-token sizing', () => {
+    expect(source).toContain('const DSV4_MAX_CACHE_BLOCKS = 4097')
+    expect(source).toContain('dsv4Active\n          ? DSV4_MAX_CACHE_BLOCKS')
+  })
+
+  it('bounds the index only — RAM stays governed by the byte ceiling', () => {
+    expect(source).toContain('resident RAM stays governed by')
+  })
+})

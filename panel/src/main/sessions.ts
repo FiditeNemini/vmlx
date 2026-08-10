@@ -195,6 +195,27 @@ function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
 
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 const DSV4_MAX_CACHE_BLOCKS = 4097 // 4096 data blocks + reserved null block = 1,048,576 tokens
+
+// --max-cache-blocks counts BLOCKS, so one number means very different token
+// capacity at different block sizes. DSV4 was given an explicit 1M-token index
+// above; every other family was left at a flat 1000, which at the generic
+// 64-token block indexes only 63,936 tokens — far below the context window of
+// models like Gemma 4. Measured on the box: a 77k-token Gemma prompt reported 0
+// cached tokens on an EXACT repeat and ran slower than a cold prefill (82.5s vs
+// 55.7s), while the same probe at 28k reused 28,199 tokens and cut TTFT from
+// 9.10s to 0.98s. Size the generic default by target TOKENS instead.
+// This bounds the index only; resident RAM stays governed by
+// --cache-memory-mb/--cache-memory-percent.
+const GENERIC_INDEX_TARGET_TOKENS = 262144
+
+function indexBlocksForCapacity(
+  blockSize: number | undefined,
+  targetTokens: number = GENERIC_INDEX_TARGET_TOKENS,
+): number {
+  const size = Number.isFinite(Number(blockSize)) && Number(blockSize) > 0 ? Math.floor(Number(blockSize)) : 64
+  // +1 for the reserved null block, matching DSV4_MAX_CACHE_BLOCKS' accounting.
+  return Math.ceil(targetTokens / size) + 1
+}
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
 const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900
@@ -826,7 +847,11 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     changed = setConfigValue(
       mutable,
       'maxCacheBlocks',
-      staleV11Dsv4FailClosedCandidate ? 1000 : dsv4Active ? DSV4_MAX_CACHE_BLOCKS : 1000,
+      staleV11Dsv4FailClosedCandidate
+        ? 1000
+        : dsv4Active
+          ? DSV4_MAX_CACHE_BLOCKS
+          : indexBlocksForCapacity(mutable.pagedCacheBlockSize),
     ) || changed
   }
   if (mutable.enableBlockDiskCache === undefined) changed = setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache) || changed

@@ -2718,7 +2718,7 @@ describe('Default IP and New Settings', () => {
     it('session manager migrates the exact stale continuous-cache default tuple', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         expect(source).toContain('function applyCacheStackStartupDefaultMigration')
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13')
+        expect(source).toMatch(/const CACHE_STACK_STARTUP_DEFAULTS_VERSION = \d+/)
         expect(source).toContain('function markCacheStackStartupDefaultsCurrent')
         expect(source).toContain('config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION')
         expect(source).toContain('config.continuousBatching === true')
@@ -2906,7 +2906,7 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('// v8 (2026-07-12)', start)
         const block = source.slice(start, end)
 
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13')
+        expect(source).toMatch(/const CACHE_STACK_STARTUP_DEFAULTS_VERSION = \d+/)
         expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) < 9')
         expect(block).toContain('migrationDetectedUsePaged === true')
         expect(block).toContain('config.usePagedCache === true')
@@ -2923,7 +2923,7 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('// v8 (2026-07-12)', start)
         const block = source.slice(start, end)
 
-        expect(source).toContain('const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13')
+        expect(source).toMatch(/const CACHE_STACK_STARTUP_DEFAULTS_VERSION = \d+/)
         expect(block).toContain("migrationDetectedFamily === 'minimax_m3'")
         expect(block).toContain('Number(config.cacheStackStartupDefaultsVersion || 0) === 9')
         expect(block).toContain('config.usePagedCache === false')

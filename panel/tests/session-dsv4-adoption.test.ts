@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -41,6 +41,15 @@ vi.mock('electron', () => ({
 }))
 
 import { SessionManager } from '../src/main/sessions'
+
+// Track the shipping value instead of hardcoding it: every version bump
+// otherwise breaks 28 unrelated assertions that only care that the session
+// was stamped current.
+const CURRENT_CACHE_DEFAULTS_VERSION = Number(
+  /const CACHE_STACK_STARTUP_DEFAULTS_VERSION = (\d+)/.exec(
+    readFileSync('src/main/sessions.ts', 'utf8'),
+  )?.[1],
+)
 
 const temporaryBundles: string[] = []
 
@@ -150,7 +159,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const migrated = JSON.parse(state.sessions[0].config)
-    expect(migrated.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(migrated.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(migrated.dsv4PrefixCache).toBe(true)
     expect(migrated.enablePrefixCache).toBe(true)
     expect(migrated.usePagedCache).toBe(true)
@@ -169,7 +178,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     { label: 'RAM percentage customized', patch: { cacheMemoryPercent: 37 } },
     { label: 'block-L2 directory customized', patch: { blockDiskCacheDir: '/tmp/custom-block-cache' } },
     { label: 'prefill batch customized', patch: { prefillBatchSize: 256 } },
-    { label: 'already current', patch: { cacheStackStartupDefaultsVersion: 13 } },
+    { label: 'already current', patch: { cacheStackStartupDefaultsVersion: CURRENT_CACHE_DEFAULTS_VERSION } },
   ])('preserves a near-miss DSV4 v11 cache tuple: $label', ({ patch }) => {
     const modelPath = modelBundle('deepseek_v4')
     const original = {
@@ -185,7 +194,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     expect(preserved.usePagedCache).toBe(original.usePagedCache)
     expect(preserved.enableBlockDiskCache).toBe(original.enableBlockDiskCache)
     expect(preserved.maxCacheBlocks).toBe(original.maxCacheBlocks)
-    expect(preserved.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
   })
 
   it('migrates the exact v12 DSV4 SSD-only default to paged RAM backed by block L2', () => {
@@ -195,7 +204,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const migrated = JSON.parse(state.sessions[0].config)
-    expect(migrated.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(migrated.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(migrated.dsv4PrefixCache).toBe(true)
     expect(migrated.enablePrefixCache).toBe(true)
     expect(migrated.usePagedCache).toBe(true)
@@ -230,7 +239,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const preserved = JSON.parse(state.sessions[0].config)
-    expect(preserved.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(preserved.usePagedCache).toBe(false)
     for (const [key, value] of Object.entries(patch)) {
       expect(preserved[key]).toBe(value)
@@ -257,7 +266,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const preserved = JSON.parse(state.sessions[0].config)
-    expect(preserved.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(preserved.cacheMemoryPercent).toBe(37)
     expect(preserved.usePagedCache).toBe(true)
     expect(preserved.enableBlockDiskCache).toBe(true)
@@ -283,7 +292,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const retried = JSON.parse(state.sessions[0].config)
-    expect(retried.cacheStackStartupDefaultsVersion).toBe(13)
+    expect(retried.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(retried.usePagedCache).toBe(true)
   })
 

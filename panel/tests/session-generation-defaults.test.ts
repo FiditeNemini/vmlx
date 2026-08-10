@@ -240,3 +240,27 @@ describe('generic prefix-cache index capacity', () => {
     expect(source).toContain('resident RAM stays governed by')
   })
 })
+
+describe('v14 lifts existing sessions off the stale cache index', () => {
+  const source = readFileSync('src/main/sessions.ts', 'utf8')
+
+  it('bumped the cache-defaults version so stored sessions re-migrate', () => {
+    const version = Number(
+      /const CACHE_STACK_STARTUP_DEFAULTS_VERSION = (\d+)/.exec(source)?.[1],
+    )
+    expect(version).toBeGreaterThanOrEqual(14)
+  })
+
+  it('lifts only the exact stale 1000, never a value the user chose', () => {
+    // A flat 1000 at the generic 64-token block indexes just 63,936 tokens.
+    // Measured on Gemma 4: a 77k prompt reported 0 cached tokens on an EXACT
+    // repeat and ran slower than a cold prefill.
+    expect(source).toContain('Number(config.maxCacheBlocks) === 1000')
+    expect(source).toContain('indexBlocksForCapacity(config.pagedCacheBlockSize)')
+  })
+
+  it('does not blanket-overwrite maxCacheBlocks in the generic branch', () => {
+    // The old unconditional `?? 1000` would have stranded every session.
+    expect(source).not.toContain('config.maxCacheBlocks = config.maxCacheBlocks ?? 1000')
+  })
+})

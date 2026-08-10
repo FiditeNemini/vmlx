@@ -747,7 +747,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 13
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 14
 
 function markCacheStackStartupDefaultsCurrent(
   config: Partial<ServerConfig>,
@@ -1194,7 +1194,15 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     // sessions inherit the detected paged default while block-disk L2 stays on.
     const migratedGenericPaged = migrationDetectedUsePaged ?? false
     config.usePagedCache = migratedGenericPaged
-    config.maxCacheBlocks = config.maxCacheBlocks ?? 1000
+    // v14: the old flat 1000 indexes only 63,936 tokens at the generic
+    // 64-token block, silently capping prefix reuse far below the model's
+    // context window. Measured on Gemma 4: a 77k prompt reported 0 cached
+    // tokens on an exact repeat and ran SLOWER than a cold prefill. Lift only
+    // that exact stale value so a number the user chose is never overwritten.
+    config.maxCacheBlocks =
+      config.maxCacheBlocks === undefined || Number(config.maxCacheBlocks) === 1000
+        ? indexBlocksForCapacity(config.pagedCacheBlockSize)
+        : config.maxCacheBlocks
     config.enableDiskCache = false
     config.enableBlockDiskCache = true
     config.blockDiskCacheMaxGb = config.blockDiskCacheMaxGb ?? 10

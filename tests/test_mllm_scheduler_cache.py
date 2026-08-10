@@ -2969,3 +2969,59 @@ class TestCleanRederiveChunking:
         assert len(calls) == 12, f"expected 12 chunks of 1024, got {calls[:3]}..."
         assert sum(calls) == len(tokens)
         assert max(calls) <= 1024
+
+
+class TestMllmIndexCapacityParity:
+    """--max-cache-blocks counts BLOCKS, and MLLM blocks are 4x smaller.
+
+    The shared default of 1000 indexes 256k tokens on the text path's 256-token
+    block but only 64k on the MLLM path's 64-token block, silently capping
+    reuse far below Gemma 4's context window. Measured on the box: a 77k Gemma
+    prompt reported 0 cached tokens on an exact repeat and ran SLOWER than a
+    cold prefill (82.5s vs 55.7s), while the same probe at 28k reused 28,199
+    tokens and cut TTFT 9.10s -> 0.98s.
+    """
+
+    def test_default_matches_text_path_token_capacity(self):
+        from vmlx_engine.mllm_scheduler import (
+            DEFAULT_MAX_CACHE_BLOCKS,
+            TEXT_REFERENCE_BLOCK_SIZE,
+            resolve_mllm_index_blocks,
+        )
+
+        text_tokens = DEFAULT_MAX_CACHE_BLOCKS * TEXT_REFERENCE_BLOCK_SIZE
+        for block_size in (64, 128, 256):
+            blocks = resolve_mllm_index_blocks(block_size, DEFAULT_MAX_CACHE_BLOCKS)
+            assert blocks * block_size == text_tokens, (
+                f"block_size={block_size} indexes {blocks * block_size} tokens, "
+                f"text path indexes {text_tokens}"
+            )
+
+    def test_explicit_operator_value_is_never_rescaled(self):
+        from vmlx_engine.mllm_scheduler import resolve_mllm_index_blocks
+
+        assert resolve_mllm_index_blocks(64, 4097) == 4097
+        assert resolve_mllm_index_blocks(64, 100) == 100
+
+    def test_larger_than_reference_block_is_left_alone(self):
+        from vmlx_engine.mllm_scheduler import (
+            DEFAULT_MAX_CACHE_BLOCKS,
+            resolve_mllm_index_blocks,
+        )
+
+        assert resolve_mllm_index_blocks(512, DEFAULT_MAX_CACHE_BLOCKS) == (
+            DEFAULT_MAX_CACHE_BLOCKS
+        )
+
+    def test_degenerate_block_size_does_not_explode(self):
+        from vmlx_engine.mllm_scheduler import (
+            DEFAULT_MAX_CACHE_BLOCKS,
+            resolve_mllm_index_blocks,
+        )
+
+        assert resolve_mllm_index_blocks(0, DEFAULT_MAX_CACHE_BLOCKS) == (
+            DEFAULT_MAX_CACHE_BLOCKS
+        )
+        assert resolve_mllm_index_blocks(-8, DEFAULT_MAX_CACHE_BLOCKS) == (
+            DEFAULT_MAX_CACHE_BLOCKS
+        )

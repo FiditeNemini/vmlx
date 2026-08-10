@@ -190,6 +190,40 @@ def _mllm_scheduler_trace_enabled() -> bool:
     }
 
 
+# Shared with the text scheduler's SchedulerConfig / the --max-cache-blocks CLI
+# default. The text path pairs it with a 256-token block; the MLLM path uses 64.
+DEFAULT_MAX_CACHE_BLOCKS = 1000
+TEXT_REFERENCE_BLOCK_SIZE = 256
+
+
+def resolve_mllm_index_blocks(
+    block_size: int,
+    max_cache_blocks: int,
+    *,
+    default_max_blocks: int = DEFAULT_MAX_CACHE_BLOCKS,
+    reference_block_size: int = TEXT_REFERENCE_BLOCK_SIZE,
+) -> int:
+    """Give the MLLM block index the same TOKEN capacity as the text default.
+
+    ``--max-cache-blocks`` counts BLOCKS, and the MLLM path uses a 64-token
+    block where the text path uses 256. The shared default of 1000 therefore
+    indexes 256k tokens for text but only 64k for MLLM, silently capping reuse
+    far below the context window of models like Gemma 4. Measured: a 77k-token
+    Gemma prompt reported 0 cached tokens on an exact repeat and ran SLOWER
+    than a cold prefill, while the same probe at 28k reused 28,199 tokens and
+    cut TTFT from 9.10s to 0.98s.
+
+    Only the untouched default is rescaled — an operator who passed an explicit
+    ``--max-cache-blocks`` keeps exactly what they asked for. This bounds the
+    INDEX only; resident RAM stays governed by ``max_resident_bytes``.
+    """
+    if max_cache_blocks != default_max_blocks:
+        return max_cache_blocks
+    if block_size <= 0 or block_size >= reference_block_size:
+        return max_cache_blocks
+    return max_cache_blocks * (reference_block_size // block_size)
+
+
 @dataclass
 class MLLMSchedulerConfig:
     """Configuration for MLLM scheduler.
@@ -232,7 +266,7 @@ class MLLMSchedulerConfig:
     # on the current native memory-aware/prompt-L2 path.
     use_paged_cache: bool = False
     paged_cache_block_size: int = 64
-    max_cache_blocks: int = 1000
+    max_cache_blocks: int = DEFAULT_MAX_CACHE_BLOCKS
 
     # KV cache quantization for prefix cache storage
     kv_cache_quantization: str = "none"  # "none", "q4", "q8"
@@ -675,9 +709,23 @@ class MLLMScheduler:
                             max_memory_percent=self.config.cache_memory_percent,
                         ).compute_memory_limit()
                     )
+                    _mllm_index_blocks = resolve_mllm_index_blocks(
+                        self.config.paged_cache_block_size,
+                        self.config.max_cache_blocks,
+                    )
+                    if _mllm_index_blocks != self.config.max_cache_blocks:
+                        logger.info(
+                            "MLLM block index scaled %d -> %d blocks so the default "
+                            "indexes the same %d tokens the text path does at its "
+                            "256-token block size (this bounds the index only; "
+                            "resident RAM stays under the byte ceiling)",
+                            self.config.max_cache_blocks,
+                            _mllm_index_blocks,
+                            _mllm_index_blocks * self.config.paged_cache_block_size,
+                        )
                     self.paged_cache_manager = PagedCacheManager(
                         block_size=self.config.paged_cache_block_size,
-                        max_blocks=self.config.max_cache_blocks,
+                        max_blocks=_mllm_index_blocks,
                         disk_store=block_disk_store,
                         max_resident_bytes=_mllm_paged_resident_budget,
                         disk_only=block_disk_only,
@@ -686,7 +734,7 @@ class MLLMScheduler:
                         logger.info(
                             "MLLM block disk-only prefix backend: paged RAM disabled, "
                             "max_index_blocks=%d; payloads restore transiently from SSD",
-                            self.config.max_cache_blocks,
+                            _mllm_index_blocks,
                         )
                     else:
                         logger.info(
@@ -694,7 +742,7 @@ class MLLMScheduler:
                             "block pool max_blocks=%d",
                             _mllm_paged_resident_budget / (1024 * 1024),
                             self.config.cache_memory_percent * 100,
-                            self.config.max_cache_blocks,
+                            _mllm_index_blocks,
                         )
                     self.block_aware_cache = BlockAwarePrefixCache(
                         model=lang_model,

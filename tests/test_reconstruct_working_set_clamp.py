@@ -47,6 +47,7 @@ def _cache(per_block_bytes, *, bits=0, n_blocks=100, block_size=64):
     obj.paged_cache = paged
     obj.block_size = block_size
     obj.kv_quant_bits = bits
+    obj.model = SimpleNamespace()  # no config -> exercises the sampling fallback
     return obj, paged
 
 
@@ -125,7 +126,36 @@ def test_always_keeps_at_least_one_block(big_free):
     assert paged.released == [list(range(1, 10))]
 
 
-def test_no_resident_blocks_means_no_guessing(big_free):
+def test_geometry_is_used_when_available_even_with_nothing_resident(monkeypatch, big_free):
+    """The OOM case is a DISK-backed chain, where no block is resident yet.
+
+    An earlier version of this guard sampled only resident payloads and so
+    declined on exactly the restores it was meant to protect - MM2.7 died at
+    turn 3 with the clamp never firing. Model geometry is exact and available
+    regardless of residency.
+    """
+    big_free(1.0)
+    cache, paged = _cache(0)
+    for block in cache.paged_cache.allocated_blocks.values():
+        block.cache_data = None
+    cache.model = SimpleNamespace(config=SimpleNamespace(_marker=True))
+
+    import vmlx_engine.utils.memory_limits as ml
+
+    monkeypatch.setattr(
+        ml, "estimate_kv_bytes_per_token_from_config",
+        lambda cfg: 2 * 1024 * 1024,  # 2MB/token -> 128MB per 64-token block
+    )
+    table = _table(100)
+
+    dropped = cache.clamp_block_table_to_working_set(table)
+
+    assert dropped > 0, "geometry-based projection did not fire on a disk-backed chain"
+    assert len(table.block_ids) < 100
+    assert paged.released == [list(range(len(table.block_ids), 100))]
+
+
+def test_no_resident_blocks_and_no_geometry_means_no_guessing(big_free):
     big_free(1.0)
     cache, paged = _cache(100 * 1024**2)
     for block in cache.paged_cache.allocated_blocks.values():

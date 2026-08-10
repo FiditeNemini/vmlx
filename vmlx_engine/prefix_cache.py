@@ -6889,26 +6889,51 @@ class BlockAwarePrefixCache:
         if free_bytes <= 0 or max_ws <= 0:
             return 0
 
-        # Average resident payload per block, measured from the blocks we hold.
-        sampled = 0
-        sampled_bytes = 0
-        for block_id in block_ids:
-            block = paged.allocated_blocks.get(block_id)
-            data = getattr(block, "cache_data", None) if block is not None else None
-            if data is None:
-                continue
-            sampled_bytes += int(paged.estimate_block_nbytes(data) or 0)
-            sampled += 1
-        if sampled == 0 or sampled_bytes <= 0:
-            # Nothing resident to measure from; do not guess.
-            return 0
-        per_block_stored = sampled_bytes / sampled
+        # Per-block MATERIALISED bytes. Model geometry is the primary source
+        # because it is exact and, crucially, available for blocks that are
+        # still on disk — which is precisely the case that OOMs, since a
+        # disk-backed chain materialises everything at once. An earlier version
+        # of this guard measured only resident payloads and therefore declined
+        # on exactly the restores it was meant to protect.
+        per_block_materialised = 0.0
+        try:
+            from .utils.memory_limits import (
+                estimate_kv_bytes_per_token_from_config,
+            )
 
-        # Stored KV may be quantised; reconstruction expands it to the compute
-        # dtype. Derive the factor from the codec width instead of assuming one.
-        bits = int(getattr(self, "kv_quant_bits", 0) or 0)
-        expansion = (16.0 / bits) if 0 < bits < 16 else 1.0
-        per_block_materialised = per_block_stored * expansion
+            config = getattr(self.model, "config", None) or getattr(
+                self.model, "args", None
+            )
+            if config is not None:
+                per_token = int(
+                    estimate_kv_bytes_per_token_from_config(config) or 0
+                )
+                if per_token > 0:
+                    per_block_materialised = float(per_token) * float(self.block_size)
+        except Exception:
+            per_block_materialised = 0.0
+
+        if per_block_materialised <= 0:
+            # Fall back to resident payloads, expanded by the stored codec's
+            # width, when the geometry is unavailable.
+            sampled = 0
+            sampled_bytes = 0
+            for block_id in block_ids:
+                block = paged.allocated_blocks.get(block_id)
+                data = (
+                    getattr(block, "cache_data", None) if block is not None else None
+                )
+                if data is None:
+                    continue
+                sampled_bytes += int(paged.estimate_block_nbytes(data) or 0)
+                sampled += 1
+            if sampled == 0 or sampled_bytes <= 0:
+                # Nothing to measure and no geometry; do not guess.
+                return 0
+            bits = int(getattr(self, "kv_quant_bits", 0) or 0)
+            expansion = (16.0 / bits) if 0 < bits < 16 else 1.0
+            per_block_materialised = (sampled_bytes / sampled) * expansion
+
         if per_block_materialised <= 0:
             return 0
 

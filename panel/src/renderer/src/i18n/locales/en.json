@@ -898,6 +898,13 @@
       "clearRam": "Clear RAM",
       "clearPrefixL2": "Clear Prefix + L2",
       "clearAll": "Clear All"
+    },
+    "embeddings": {
+      "sessionMustBeRunning": "Session must be running to generate embeddings.",
+      "embeddingModel": "Embedding Model",
+      "textA": "Text A",
+      "cosineSimilarity": "Cosine Similarity",
+      "embeddingPreview": "Embedding Preview"
     }
   },
   "image": {
@@ -971,7 +978,10 @@
       "widthCustom": "Width (custom)",
       "heightCustom": "Height (custom)",
       "hostLabel": "Host: 127.0.0.1 (localhost)",
-      "portLabel": "Port: auto-assigned"
+      "portLabel": "Port: auto-assigned",
+      "hostLocalhost": "Host: 127.0.0.1 (localhost)",
+      "portAutoAssigned": "Port: auto-assigned",
+      "serverManagedAutomatically": "Server settings are managed automatically for image models."
     },
     "topbar": {
       "historyTitle": "Show history",
@@ -1014,6 +1024,13 @@
       "applyTitle": "Apply mask and edit",
       "cancelTitle": "Cancel mask painting",
       "emptyError": "Paint or draw a mask area before applying."
+    },
+    "topBar": {
+      "imageGeneration": "Image Generation",
+      "imageEditing": "Image Editing",
+      "browseCustomModel": "Browse custom model...",
+      "imageEdit": "Image Edit",
+      "imageGen": "Image Gen"
     }
   },
   "downloads": {

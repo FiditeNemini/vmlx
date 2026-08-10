@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronRight, HelpCircle } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface ImageSettingsData {
   steps: number
@@ -30,6 +31,7 @@ const SIZE_PRESETS = [
 ]
 
 export function ImageSettings({ settings, onChange, model, mode }: ImageSettingsProps) {
+  const { t } = useTranslation()
   const isEdit = mode === 'edit'
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showServer, setShowServer] = useState(false)
@@ -151,7 +153,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
       {/* Negative Prompt */}
       <div className="mb-3">
         <div className="flex items-center gap-1 mb-1">
-          <label className="text-xs text-muted-foreground">Negative Prompt</label>
+          <label className="text-xs text-muted-foreground">{t('image.settings.negativePrompt')}</label>
           <button
             type="button"
             onClick={() => setShowNegativeHelp(p => !p)}
@@ -186,7 +188,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
       {showAdvanced && (
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3 pl-4 border-l border-border">
           <div>
-            <label className="text-xs text-muted-foreground block mb-1">Width (custom)</label>
+            <label className="text-xs text-muted-foreground block mb-1">{t('image.settings.widthCustom')}</label>
             <input
               type="number"
               value={settings.width}
@@ -198,7 +200,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
             />
           </div>
           <div>
-            <label className="text-xs text-muted-foreground block mb-1">Height (custom)</label>
+            <label className="text-xs text-muted-foreground block mb-1">{t('image.settings.heightCustom')}</label>
             <input
               type="number"
               value={settings.height}
@@ -222,11 +224,11 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
       </button>
       {showServer && (
         <div className="pl-4 border-l border-border text-xs text-muted-foreground space-y-1">
-          <p>Host: 127.0.0.1 (localhost)</p>
-          <p>Port: auto-assigned</p>
+          <p>{t('image.settings.hostLocalhost')}</p>
+          <p>{t('image.settings.portAutoAssigned')}</p>
           <p>Model: {model || 'none'}</p>
           <p className="text-[10px] mt-2 opacity-70">
-            Server settings are managed automatically for image models.
+            {t('image.settings.serverManagedAutomatically')}
           </p>
         </div>
       )}

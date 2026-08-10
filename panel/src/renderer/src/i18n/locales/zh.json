@@ -898,6 +898,13 @@
       "clearRam": "清除内存",
       "clearPrefixL2": "清除前缀 + L2",
       "clearAll": "全部清除"
+    },
+    "embeddings": {
+      "sessionMustBeRunning": "会话必须正在运行才能生成嵌入。",
+      "embeddingModel": "嵌入模型",
+      "textA": "文本 A",
+      "cosineSimilarity": "余弦相似度",
+      "embeddingPreview": "嵌入预览"
     }
   },
   "image": {
@@ -968,10 +975,13 @@
       "quantizeTitle": "模型精度。仅可在启动服务器时设置,运行中无法修改。",
       "negativePrompt": "负面提示词",
       "negativePlaceholder": "不希望出现在图像中的内容...",
-      "widthCustom": "宽度 (自定义)",
-      "heightCustom": "高度 (自定义)",
+      "widthCustom": "宽度（自定义）",
+      "heightCustom": "高度（自定义）",
       "hostLabel": "主机: 127.0.0.1 (localhost)",
-      "portLabel": "端口: 自动分配"
+      "portLabel": "端口: 自动分配",
+      "hostLocalhost": "主机：127.0.0.1 (localhost)",
+      "portAutoAssigned": "端口：自动分配",
+      "serverManagedAutomatically": "图像模型的服务器设置由系统自动管理。"
     },
     "topbar": {
       "historyTitle": "显示历史",
@@ -1014,6 +1024,13 @@
       "applyTitle": "应用蒙版并编辑",
       "cancelTitle": "取消蒙版绘制",
       "emptyError": "请先绘制或框选蒙版区域，然后再应用。"
+    },
+    "topBar": {
+      "imageGeneration": "图像生成",
+      "imageEditing": "图像编辑",
+      "browseCustomModel": "浏览自定义模型...",
+      "imageEdit": "图像编辑",
+      "imageGen": "图像生成"
     }
   },
   "downloads": {

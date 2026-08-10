@@ -898,6 +898,13 @@
       "clearRam": "Vaciar RAM",
       "clearPrefixL2": "Vaciar prefijos + L2",
       "clearAll": "Vaciar todo"
+    },
+    "embeddings": {
+      "sessionMustBeRunning": "La sesión debe estar en ejecución para generar incrustaciones.",
+      "embeddingModel": "Modelo de incrustaciones",
+      "textA": "Texto A",
+      "cosineSimilarity": "Similitud del coseno",
+      "embeddingPreview": "Vista previa de la incrustación"
     }
   },
   "image": {
@@ -971,7 +978,10 @@
       "widthCustom": "Ancho (personalizado)",
       "heightCustom": "Alto (personalizado)",
       "hostLabel": "Host: 127.0.0.1 (localhost)",
-      "portLabel": "Puerto: asignado automáticamente"
+      "portLabel": "Puerto: asignado automáticamente",
+      "hostLocalhost": "Host: 127.0.0.1 (localhost)",
+      "portAutoAssigned": "Puerto: asignado automáticamente",
+      "serverManagedAutomatically": "La configuración del servidor se gestiona automáticamente para los modelos de imagen."
     },
     "topbar": {
       "historyTitle": "Mostrar historial",
@@ -1014,6 +1024,13 @@
       "applyTitle": "Aplicar máscara y editar",
       "cancelTitle": "Cancelar el pintado de la máscara",
       "emptyError": "Pinte o dibuje un área de máscara antes de aplicar."
+    },
+    "topBar": {
+      "imageGeneration": "Generación de imágenes",
+      "imageEditing": "Edición de imágenes",
+      "browseCustomModel": "Buscar modelo personalizado...",
+      "imageEdit": "Editar imagen",
+      "imageGen": "Generar imagen"
     }
   },
   "downloads": {

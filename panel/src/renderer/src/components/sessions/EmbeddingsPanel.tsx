@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from '../../i18n'
 
 interface EmbeddingsPanelProps {
   endpoint: { host: string; port: number }
@@ -13,6 +14,7 @@ const MODELS = [
 ]
 
 export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: EmbeddingsPanelProps) {
+  const { t } = useTranslation()
   const [model, setModel] = useState(MODELS[0])
   const [textA, setTextA] = useState('')
   const [textB, setTextB] = useState('')
@@ -28,7 +30,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
   if (sessionStatus !== 'running') {
     return (
       <div className="text-sm text-muted-foreground p-4">
-        Session must be running to generate embeddings.
+        {t('sessions.embeddings.sessionMustBeRunning')}
       </div>
     )
   }
@@ -65,7 +67,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
     <div className="space-y-4">
       {/* Model Selector */}
       <div>
-        <label className="text-xs text-muted-foreground block mb-1">Embedding Model</label>
+        <label className="text-xs text-muted-foreground block mb-1">{t('sessions.embeddings.embeddingModel')}</label>
         <select
           value={model}
           onChange={e => setModel(e.target.value)}
@@ -79,7 +81,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
 
       {/* Text A */}
       <div>
-        <label className="text-xs text-muted-foreground block mb-1">Text A</label>
+        <label className="text-xs text-muted-foreground block mb-1">{t('sessions.embeddings.textA')}</label>
         <textarea
           value={textA}
           onChange={e => setTextA(e.target.value)}
@@ -131,7 +133,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
 
           {result.similarity != null && (
             <div className="bg-background px-3 py-2 rounded border border-border">
-              <div className="text-xs text-muted-foreground">Cosine Similarity</div>
+              <div className="text-xs text-muted-foreground">{t('sessions.embeddings.cosineSimilarity')}</div>
               <div className="font-mono text-lg font-bold">
                 {result.similarity.toFixed(4)}
                 <span className="text-xs text-muted-foreground ml-2">
@@ -152,7 +154,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
           )}
 
           <div className="bg-background px-3 py-2 rounded border border-border">
-            <div className="text-xs text-muted-foreground">Embedding Preview</div>
+            <div className="text-xs text-muted-foreground">{t('sessions.embeddings.embeddingPreview')}</div>
             <div className="font-mono text-xs break-all">{result.preview}</div>
           </div>
         </div>

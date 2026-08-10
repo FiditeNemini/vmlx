@@ -898,6 +898,13 @@
       "clearRam": "RAM 지우기",
       "clearPrefixL2": "프리픽스 + L2 지우기",
       "clearAll": "모두 지우기"
+    },
+    "embeddings": {
+      "sessionMustBeRunning": "임베딩을 생성하려면 세션이 실행 중이어야 합니다.",
+      "embeddingModel": "임베딩 모델",
+      "textA": "텍스트 A",
+      "cosineSimilarity": "코사인 유사도",
+      "embeddingPreview": "임베딩 미리보기"
     }
   },
   "image": {
@@ -968,10 +975,13 @@
       "quantizeTitle": "모델 정밀도. 서버 시작 시 설정되며 실행 중에는 변경할 수 없습니다.",
       "negativePrompt": "네거티브 프롬프트",
       "negativePlaceholder": "이미지에서 피할 것들...",
-      "widthCustom": "너비 (사용자 정의)",
-      "heightCustom": "높이 (사용자 정의)",
+      "widthCustom": "너비 (사용자 지정)",
+      "heightCustom": "높이 (사용자 지정)",
       "hostLabel": "호스트: 127.0.0.1 (localhost)",
-      "portLabel": "포트: 자동 할당됨"
+      "portLabel": "포트: 자동 할당됨",
+      "hostLocalhost": "호스트: 127.0.0.1 (localhost)",
+      "portAutoAssigned": "포트: 자동 할당",
+      "serverManagedAutomatically": "이미지 모델은 서버 설정이 자동으로 관리됩니다."
     },
     "topbar": {
       "historyTitle": "기록 표시",
@@ -1014,6 +1024,13 @@
       "applyTitle": "마스크 적용 및 편집",
       "cancelTitle": "마스크 칠하기 취소",
       "emptyError": "적용하기 전에 마스크 영역을 칠하거나 그려 주세요."
+    },
+    "topBar": {
+      "imageGeneration": "이미지 생성",
+      "imageEditing": "이미지 편집",
+      "browseCustomModel": "사용자 지정 모델 찾아보기...",
+      "imageEdit": "이미지 편집",
+      "imageGen": "이미지 생성"
     }
   },
   "downloads": {

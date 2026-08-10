@@ -9,6 +9,7 @@ function formatElapsed(secs: number): string {
 }
 
 import { IMAGE_MODELS } from '../../../../shared/imageModels'
+import { useTranslation } from '../../i18n'
 
 type ServerStatus = 'stopped' | 'starting' | 'running' | 'error'
 
@@ -45,6 +46,7 @@ interface ImageTopBarProps {
 }
 
 export function ImageTopBar({
+  const { t } = useTranslation()
   model,
   displayModelName,
   quantize,
@@ -153,7 +155,7 @@ export function ImageTopBar({
             <div className="absolute top-full left-0 mt-1 w-72 bg-card border border-border rounded-lg shadow-lg z-50 py-1 max-h-96 overflow-auto">
               {/* Generation models */}
               <div className="px-3 py-1.5">
-                <span className="text-[10px] font-semibold text-blue-400 uppercase tracking-wider">Image Generation</span>
+                <span className="text-[10px] font-semibold text-blue-400 uppercase tracking-wider">{t('image.topBar.imageGeneration')}</span>
               </div>
               {genModels.map(m => (
                 <ModelRow
@@ -171,7 +173,7 @@ export function ImageTopBar({
 
               {/* Edit models */}
               <div className="px-3 py-1.5">
-                <span className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider">Image Editing</span>
+                <span className="text-[10px] font-semibold text-violet-400 uppercase tracking-wider">{t('image.topBar.imageEditing')}</span>
               </div>
               {editModels.map(m => (
                 <ModelRow
@@ -192,7 +194,7 @@ export function ImageTopBar({
                 onClick={() => { setShowPicker(false); onChangeModel() }}
                 className="w-full text-left px-3 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
               >
-                Browse custom model...
+                {t('image.topBar.browseCustomModel')}
               </button>
             </div>
           )}
@@ -200,10 +202,10 @@ export function ImageTopBar({
 
         {/* Mode badge */}
         {model && mode === 'edit' && (
-          <span className="text-[10px] px-1.5 py-0.5 bg-violet-500/15 text-violet-400 rounded-full font-medium">Image Edit</span>
+          <span className="text-[10px] px-1.5 py-0.5 bg-violet-500/15 text-violet-400 rounded-full font-medium">{t('image.topBar.imageEdit')}</span>
         )}
         {model && mode === 'generate' && (
-          <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/15 text-blue-400 rounded-full font-medium">Image Gen</span>
+          <span className="text-[10px] px-1.5 py-0.5 bg-blue-500/15 text-blue-400 rounded-full font-medium">{t('image.topBar.imageGen')}</span>
         )}
         {model && (
           <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded-full text-muted-foreground">

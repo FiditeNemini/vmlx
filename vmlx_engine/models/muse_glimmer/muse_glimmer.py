@@ -1,0 +1,138 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Muse Glimmer top-level VLM.
+
+Module names mirror the checkpoint prefixes exactly, so weights load without a
+remap:
+
+    language_model.model.*            -> self.language_model.model.*
+    language_model.lm_head            -> self.language_model.lm_head
+    model.vision_tower.*              -> self.vision_tower.*
+    model.vision_adapter.fc1 / fc2    -> self.vision_adapter.fc1 / fc2
+    model.vision_projection           -> self.vision_projection
+
+The leading ``model.`` on the vision keys is stripped in ``sanitize`` rather
+than by nesting an extra module, which would also have shifted the
+language_model keys.
+"""
+
+from typing import Any, Dict, List, Optional
+
+import mlx.core as mx
+import mlx.nn as nn
+
+from .config import ModelConfig
+from .language import LanguageModel
+from .vision import MuseVisionAdapter, VisionModel
+
+
+class Model(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+        self.model_type = config.model_type
+        self.language_model = LanguageModel(config.text_config)
+        self.vocab_size = config.text_config.vocab_size
+
+        if config.vision_config is not None:
+            self.vision_tower = VisionModel(config.vision_config)
+            self.vision_adapter = MuseVisionAdapter(config)
+            self.vision_projection = nn.Linear(
+                int(config.projector_hidden_size),
+                config.text_config.hidden_size,
+                bias=False,
+            )
+        else:
+            self.vision_tower = None
+            self.vision_adapter = None
+            self.vision_projection = None
+
+    # ---- media -----------------------------------------------------------
+
+    def get_input_embeddings(
+        self,
+        input_ids: Optional[mx.array] = None,
+        pixel_values: Optional[mx.array] = None,
+        position_ids: Optional[mx.array] = None,
+        **kwargs,
+    ) -> mx.array:
+        embeds = self.language_model.model.embed_tokens(input_ids)
+        if pixel_values is None or self.vision_tower is None:
+            return embeds
+
+        features = self.vision_tower(pixel_values, position_ids=position_ids)
+        features = self.vision_projection(self.vision_adapter(features))
+        return self._scatter_media(input_ids, embeds, features)
+
+    def _scatter_media(
+        self,
+        input_ids: mx.array,
+        embeds: mx.array,
+        features: mx.array,
+    ) -> mx.array:
+        """Place projected media features at the image/video placeholders.
+
+        Both placeholders share one feature stream in prompt order, so they are
+        matched together rather than per-modality — a prompt that interleaves an
+        image and a video would otherwise mis-assign the second one.
+        """
+        image_id = int(self.config.image_token_id)
+        video_id = int(self.config.video_token_id)
+        is_media = (input_ids == image_id) | (input_ids == video_id)
+        count = int(mx.sum(is_media).item())
+        if count == 0:
+            return embeds
+
+        flat = features.reshape(-1, features.shape[-1])
+        if flat.shape[0] < count:
+            raise ValueError(
+                f"Muse Glimmer: {count} media placeholder(s) in the prompt but only "
+                f"{flat.shape[0]} projected feature row(s); the processor and the "
+                "prompt disagree about how many patches this media expands to."
+            )
+        mask = is_media[..., None]
+        scattered = mx.zeros_like(embeds)
+        idx = mx.cumsum(is_media.astype(mx.int32), axis=-1) - 1
+        gathered = flat[mx.clip(idx, 0, flat.shape[0] - 1)]
+        scattered = mx.where(mask, gathered, embeds)
+        return scattered
+
+    # ---- forward ---------------------------------------------------------
+
+    def __call__(
+        self,
+        input_ids: mx.array,
+        pixel_values: Optional[mx.array] = None,
+        mask: Optional[mx.array] = None,
+        cache: Optional[List[Any]] = None,
+        **kwargs,
+    ) -> mx.array:
+        inputs_embeds = self.get_input_embeddings(
+            input_ids=input_ids,
+            pixel_values=pixel_values,
+            position_ids=kwargs.get("vision_position_ids"),
+        )
+        return self.language_model(
+            inputs=None, inputs_embeds=inputs_embeds, mask=mask, cache=cache
+        )
+
+    # ---- weights ---------------------------------------------------------
+
+    def sanitize(self, weights: Dict[str, Any]) -> Dict[str, Any]:
+        """Strip the checkpoint's leading ``model.`` from vision keys.
+
+        Only the vision side carries it; ``language_model.*`` is already at the
+        right depth, so a blanket strip would break the text stack.
+        """
+        out: Dict[str, Any] = {}
+        for key, value in weights.items():
+            if key.startswith("model.vision_tower.") or key.startswith(
+                "model.vision_adapter."
+            ) or key.startswith("model.vision_projection"):
+                out[key[len("model.") :]] = value
+            else:
+                out[key] = value
+        return out
+
+    @property
+    def layers(self):
+        return self.language_model.model.layers

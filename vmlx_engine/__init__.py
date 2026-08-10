@@ -121,6 +121,14 @@ def _install_mlx_vlm_registry_patches() -> None:
     except Exception:
         pass
     try:
+        from vmlx_engine.models.muse_glimmer_register import (
+            register_muse_glimmer_runtime as _register_muse_glimmer_runtime,
+        )
+
+        _register_muse_glimmer_runtime()
+    except Exception:
+        pass
+    try:
         from mlx_vlm.prompt_utils import (
             MODEL_CONFIG as _VLM_MODEL_CONFIG,
             MessageFormat as _VLMMF,

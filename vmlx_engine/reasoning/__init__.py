@@ -83,6 +83,7 @@ def _register_builtin_parsers():
     from .qwen3_parser import Qwen3ReasoningParser
     from .think_xml_parser import ThinkXmlReasoningParser
     from .minimax_m3_parser import MiniMaxM3ReasoningParser
+    from .muse_glimmer_parser import MuseGlimmerReasoningParser
 
     register_parser("qwen3", Qwen3ReasoningParser)
     register_parser("deepseek_r1", DeepSeekR1ReasoningParser)
@@ -103,6 +104,11 @@ def _register_builtin_parsers():
     register_parser("gemma4", Gemma4ReasoningParser)
     # MiniMax-M3 uses <mm:think>...</mm:think> plain-XML think blocks
     register_parser("minimax_m3", MiniMaxM3ReasoningParser)
+    # Muse Glimmer routes by RECIPIENT, not by an inline think pair or a
+    # named channel: "<|start|>assistant to=self<|message|>" is the reasoning
+    # rail and "to=user" (or no recipient) is the visible answer.
+    register_parser("muse_glimmer", MuseGlimmerReasoningParser)
+    register_parser("muse", MuseGlimmerReasoningParser)
 
 
 # Register built-in parsers on module load

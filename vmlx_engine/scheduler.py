@@ -5490,6 +5490,22 @@ class Scheduler:
                 )
             except Exception:
                 request._paged_disk_hit = False
+            # A chain long enough to blow the Metal working set when it is
+            # materialised must be shortened here, while remaining can still be
+            # recomputed to match. Reconstruct OOM is not catchable: it comes
+            # from Metal's command-buffer completion handler, off this thread,
+            # and terminates the process.
+            _clamped_blocks = 0
+            try:
+                _clamped_blocks = (
+                    self.block_aware_cache.clamp_block_table_to_working_set(
+                        block_table
+                    )
+                )
+            except Exception:
+                _clamped_blocks = 0
+            if _clamped_blocks:
+                remaining = list(_fetch_tokens[int(block_table.num_tokens or 0):])
             # Re-append gpl suffix to remaining so model sees template trailer.
             if _gpl_suffix_tokens:
                 remaining = list(remaining or []) + list(_gpl_suffix_tokens)

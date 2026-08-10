@@ -2176,6 +2176,9 @@ class BlockAwarePrefixCache:
         )
         self.paged_cache = paged_cache_manager
         self.block_size = paged_cache_manager.block_size
+        # Retained so the reconstruct-budget projection can derive the
+        # dequantisation expansion from the real codec width.
+        self.kv_quant_bits = int(kv_quant_bits or 0)
         self._strict_block_disk_write_fence = os.environ.get(
             "VMLX_STRICT_BLOCK_DISK_WRITE_FENCE",
             "",
@@ -6839,6 +6842,122 @@ class BlockAwarePrefixCache:
                         # Disk-only and explicit generic frugal mode use the
                         # payload only as a transient reconstruction buffer.
                         self.paged_cache.release_resident_payload(block)
+
+    def clamp_block_table_to_working_set(
+        self,
+        block_table: Optional[BlockTable],
+        *,
+        safety_fraction: float = 0.6,
+    ) -> int:
+        """Drop trailing blocks whose reconstruction would not fit in memory.
+
+        Reconstructing a long chain materialises every block's KV at once and
+        dequantises it, which is a single allocation burst. On a weight-heavy
+        box that burst can exceed the free Metal working set, and the resulting
+        failure is NOT catchable: it surfaces from Metal's command-buffer
+        completion handler, off the Python thread, so it reaches
+        ``std::terminate`` instead of raising. Measured on MiniMax-M2.7-JANG_K
+        (80GB weights, 128GB box): a 451-block / ~28.9k-token / 62-layer
+        reconstruct aborted the process with
+        ``kIOGPUCommandBufferCallbackErrorOutOfMemory`` every time.
+
+        The prefix cache is an optimisation, so the correct behaviour is to
+        restore a SHORTER prefix and re-prefill the rest. A partial hit is
+        strictly better than a dead session.
+
+        The projection is measured, not guessed: resident blocks report their
+        real payload bytes, that average covers blocks still on disk, and the
+        dequantisation expansion comes from the stored codec's bit width rather
+        than a magic multiplier. Returns the number of blocks dropped.
+        """
+        if block_table is None:
+            return 0
+        block_ids = list(block_table.block_ids or ())
+        if len(block_ids) <= 1:
+            return 0
+
+        paged = self.paged_cache
+        try:
+            from .utils.memory_limits import get_effective_metal_working_set_bytes
+
+            import mlx.core as mx
+
+            active, max_ws = get_effective_metal_working_set_bytes(mx)
+        except Exception:
+            return 0
+        free_bytes = int(max_ws) - int(active)
+        if free_bytes <= 0 or max_ws <= 0:
+            return 0
+
+        # Average resident payload per block, measured from the blocks we hold.
+        sampled = 0
+        sampled_bytes = 0
+        for block_id in block_ids:
+            block = paged.allocated_blocks.get(block_id)
+            data = getattr(block, "cache_data", None) if block is not None else None
+            if data is None:
+                continue
+            sampled_bytes += int(paged.estimate_block_nbytes(data) or 0)
+            sampled += 1
+        if sampled == 0 or sampled_bytes <= 0:
+            # Nothing resident to measure from; do not guess.
+            return 0
+        per_block_stored = sampled_bytes / sampled
+
+        # Stored KV may be quantised; reconstruction expands it to the compute
+        # dtype. Derive the factor from the codec width instead of assuming one.
+        bits = int(getattr(self, "kv_quant_bits", 0) or 0)
+        expansion = (16.0 / bits) if 0 < bits < 16 else 1.0
+        per_block_materialised = per_block_stored * expansion
+        if per_block_materialised <= 0:
+            return 0
+
+        budget = free_bytes * max(0.05, min(1.0, float(safety_fraction)))
+        affordable = int(budget // per_block_materialised)
+        if affordable >= len(block_ids):
+            return 0
+        # Always keep at least one block so a hit never degrades to a bare miss
+        # with the ref bookkeeping half-applied.
+        affordable = max(1, affordable)
+
+        dropped_ids = block_ids[affordable:]
+        try:
+            paged.release_request_refs(
+                BlockTable(
+                    request_id=block_table.request_id,
+                    block_ids=list(dropped_ids),
+                    num_tokens=len(dropped_ids) * int(self.block_size),
+                )
+            )
+        except Exception:
+            # Refs must not be double-released; abandoning the clamp is safer
+            # than leaving the table inconsistent with the ref counts.
+            return 0
+
+        block_table.block_ids = block_ids[:affordable]
+        kept_tokens = affordable * int(self.block_size)
+        block_table.num_tokens = min(int(block_table.num_tokens or 0), kept_tokens)
+        if block_table.matched_tokens is not None:
+            block_table.matched_tokens = min(
+                int(block_table.matched_tokens), block_table.num_tokens
+            )
+        if block_table.checkpoint_tokens is not None:
+            block_table.checkpoint_tokens = min(
+                int(block_table.checkpoint_tokens), block_table.num_tokens
+            )
+
+        logger.warning(
+            "Clamped paged prefix for %s: %d -> %d blocks (%.1fGB projected "
+            "reconstruct vs %.1fGB free working set). Restoring a shorter "
+            "prefix and re-prefilling the rest; a full restore would have "
+            "exceeded the Metal working set.",
+            block_table.request_id,
+            len(block_ids),
+            affordable,
+            (per_block_materialised * len(block_ids)) / (1024**3),
+            free_bytes / (1024**3),
+        )
+        return len(dropped_ids)
 
     def _find_best_prefix_match(
         self,

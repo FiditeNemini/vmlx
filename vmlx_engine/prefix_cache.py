@@ -5620,6 +5620,41 @@ class BlockAwarePrefixCache:
             if not all_block_data:
                 return None
 
+            # Diagnostic only, off by default. Reconstructing a long chain has
+            # aborted the PROCESS on weight-heavy boxes with an uncatchable
+            # Metal command-buffer OOM (MiniMax-M2.7-JANG_K, 451 blocks). The
+            # finished KV demonstrably fits — 253,952 B/token x 28,864 tokens =
+            # 7.33GB against 27.5GB free — so the peak lives somewhere in the
+            # staging above, and the failure kills the process before any
+            # Python-side accounting can report it. Set
+            # VMLX_TRACE_RECONSTRUCT_MEMORY=1 to have each phase print active
+            # Metal memory, which is the only way to see the spike at all.
+            _trace_memory = os.environ.get(
+                "VMLX_TRACE_RECONSTRUCT_MEMORY", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+
+            def _memory_probe(phase: str) -> None:
+                if not _trace_memory:
+                    return
+                try:
+                    from .utils.memory_limits import (
+                        get_effective_metal_working_set_bytes,
+                    )
+
+                    active, max_ws = get_effective_metal_working_set_bytes(mx)
+                    logger.info(
+                        "reconstruct-memory[%s]: active=%.2fGB free=%.2fGB "
+                        "blocks=%d",
+                        phase,
+                        active / (1024**3),
+                        (max_ws - active) / (1024**3),
+                        len(all_block_data),
+                    )
+                except Exception:
+                    pass
+
+            _memory_probe("blocks_staged")
+
             # Get number of layers from first block
             num_layers = len(all_block_data[0])
             if num_layers == 0:
@@ -5724,6 +5759,8 @@ class BlockAwarePrefixCache:
                 tq_predecoded = decode_tq_layer_groups(tq_group_candidates)
 
             for layer_idx in range(num_layers):
+                if _trace_memory and layer_idx % 8 == 0:
+                    _memory_probe(f"layer_{layer_idx}/{num_layers}")
                 # Collect this layer's data from all blocks
                 layer_entries = []
                 for block_data in all_block_data:

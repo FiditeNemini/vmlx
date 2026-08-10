@@ -524,6 +524,14 @@ export async function hasUsableChatTemplate(modelPath: string): Promise<boolean>
       modelPath,
       join("encoding", "encoding_dsv4.py"),
     );
+    // A bundle that ships no encoder is still fully usable: the engine's
+    // loader falls back to jang_tools' bundled encoding adapter and injects a
+    // DSV4 chat template (with the reasoning rail) when the bundle has none.
+    // Shipping bundles do exactly this, so requiring the file produced a
+    // "chat template missing" warning on models whose chat, reasoning and
+    // tool use all work. Keep the fail-closed check for the case it was
+    // written for — a bundle that ships a truncated or placeholder encoder.
+    if (!nativeEncoder.trim()) return true;
     return (
       nativeEncoder.includes("def encode_messages") &&
       nativeEncoder.includes("def parse_message_from_completion_text")

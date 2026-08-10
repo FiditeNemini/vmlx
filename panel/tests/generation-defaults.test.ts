@@ -54,11 +54,30 @@ describe('hasUsableChatTemplate', () => {
     await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
   })
 
-  it('rejects DeepSeek-V4 when its native encoder contract is absent', async () => {
+  it('accepts DeepSeek-V4 with no bundled encoder (engine supplies one)', async () => {
+    // Shipping DSV4 bundles ship no encoding/ dir at all. The engine falls back
+    // to jang_tools' bundled encoding adapter and injects a DSV4 chat template,
+    // so chat, reasoning and tool use all work — warning here was a false alarm.
     const dir = makeModelDir({
       'config.json': { model_type: 'deepseek_v4' },
       'tokenizer_config.json': {},
     }, 'vmlx-chat-template-dsv4-missing-native-')
+
+    await expect(hasUsableChatTemplate(dir)).resolves.toBe(true)
+  })
+
+  it('rejects DeepSeek-V4 when a bundled encoder is present but incomplete', async () => {
+    // The fail-closed case the check was written for: a truncated or
+    // placeholder encoder that would be picked up ahead of the fallback.
+    const dir = makeModelDir({
+      'config.json': { model_type: 'deepseek_v4' },
+      'tokenizer_config.json': {},
+    }, 'vmlx-chat-template-dsv4-broken-native-')
+    mkdirSync(join(dir, 'encoding'))
+    writeFileSync(
+      join(dir, 'encoding', 'encoding_dsv4.py'),
+      '# TODO: fill in the real encoder\n',
+    )
 
     await expect(hasUsableChatTemplate(dir)).resolves.toBe(false)
   })

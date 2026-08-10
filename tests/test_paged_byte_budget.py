@@ -554,3 +554,68 @@ def test_metal_pressure_overage_uses_ws_guard_threshold(monkeypatch):
         pc.paged_metal_pressure_margin_bytes(),
     )
     assert overage == expected > 0
+
+
+def _disk_only_manager(**kw):
+    """A disk-only manager: zero static ceiling, transient payloads only."""
+    from types import SimpleNamespace
+
+    store = SimpleNamespace(
+        max_size_bytes=1 << 20,
+        has_block=lambda _h: True,
+        write_block_async=lambda *a, **k: True,
+    )
+    return PagedCacheManager(
+        block_size=4,
+        max_blocks=10,
+        max_resident_bytes=0,
+        disk_store=store,
+        disk_only=True,
+        **kw,
+    )
+
+
+def test_disk_only_does_not_enforce_its_zero_static_ceiling():
+    """Disk-only's ceiling is 0 by construction, not a budget to enforce.
+
+    Enforcing it literally would evict the transient buffers an in-flight
+    reconstruction is reading. The prefix cache releases those itself once
+    reconstruction completes.
+    """
+    mgr = _disk_only_manager()
+    mgr._metal_pressure_overage_bytes = lambda: 0
+    _cache_a_block(mgr, mgr.blocks[1], 111, 600, last_access=1.0)
+    assert mgr.resident_bytes == 600
+
+    assert mgr.enforce_byte_budget() == 0
+    assert mgr.blocks[1].cache_data is not None
+    assert mgr.resident_bytes == 600
+
+
+def test_disk_only_still_sheds_metal_working_set_pressure():
+    """Disk-only used to get no pressure relief at all: the ``max_resident_bytes
+    <= 0`` early return skipped the Metal guard along with the static ceiling,
+    so a reconstruction that transiently promotes many blocks had nothing
+    holding the working set down."""
+    mgr = _disk_only_manager()
+    _cache_a_block(mgr, mgr.blocks[1], 111, 600, last_access=1.0)
+    _cache_a_block(mgr, mgr.blocks[2], 222, 600, last_access=2.0)
+    mgr._metal_pressure_overage_bytes = lambda: 600
+
+    evicted = mgr.enforce_byte_budget()
+
+    assert evicted == 1, "expected the overage to be shed, not the whole pool"
+    assert mgr.resident_bytes == 600
+    assert mgr.blocks[1].cache_data is None, "LRU victim should go first"
+    assert mgr.blocks[2].cache_data is not None
+
+
+def test_disk_only_pressure_never_evicts_an_active_reconstruction_buffer():
+    """Referenced/pinned transient buffers stay put even under pressure."""
+    mgr = _disk_only_manager()
+    _cache_a_block(mgr, mgr.blocks[1], 111, 600, ref_count=1, last_access=1.0)
+    mgr._metal_pressure_overage_bytes = lambda: 10_000
+
+    mgr.enforce_byte_budget()
+
+    assert mgr.blocks[1].cache_data is not None

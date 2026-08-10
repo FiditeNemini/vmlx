@@ -12899,6 +12899,23 @@ class TestTurboQuantKVTelemetry:
             "paged+zaya_cca+disk"
         )
 
+    def test_llm_typed_cache_detail_does_not_claim_paged_when_disk_only(self):
+        """SSD-only sessions reported "paged+dsv4+disk" with paged RAM off.
+
+        Measured live on the box: a disk-only DSV4 serve logged the correct
+        "Block disk-only prefix backend" banner while every request's usage
+        payload still credited a paged RAM tier that did not exist.
+        """
+        from vmlx_engine.scheduler import _typed_paged_cache_detail
+
+        for disk_hit in (False, True):
+            assert _typed_paged_cache_detail(
+                "dsv4", disk_hit=disk_hit, disk_only=True
+            ) == "block-disk+dsv4"
+            assert _typed_paged_cache_detail(
+                "zaya_cca", disk_hit=disk_hit, disk_only=True
+            ) == "block-disk+zaya_cca"
+
     def test_llm_hybrid_cache_detail_marks_ssm_disk_source(self, monkeypatch):
         import vmlx_engine.scheduler as scheduler_mod
 

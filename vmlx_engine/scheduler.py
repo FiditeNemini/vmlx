@@ -84,8 +84,18 @@ def _append_looped_cache_identity_scope(scope: str, model: Any) -> str:
     return f"{scope}:{looped_scope}" if looped_scope else scope
 
 
-def _typed_paged_cache_detail(cache_type: str, *, disk_hit: bool) -> str:
-    """Describe a typed paged hit without losing its L2 promotion source."""
+def _typed_paged_cache_detail(
+    cache_type: str, *, disk_hit: bool, disk_only: bool = False
+) -> str:
+    """Describe a typed hit without losing its L2 promotion source.
+
+    Mirrors ``_block_cache_detail``'s disk-only handling: with paged RAM
+    disabled there is no paged tier to credit, and every hit is by definition
+    an SSD restore, so the ``paged+``/``+disk`` decorations would misreport the
+    backend on /health, the cache pill, and the logs.
+    """
+    if disk_only:
+        return f"block-disk+{cache_type}"
     base = f"paged+{cache_type}"
     return f"{base}+disk" if disk_hit else base
 
@@ -5600,15 +5610,20 @@ class Scheduler:
                         request._hybrid_ssm_fetch_tokens = list(_fetch_tokens)
                     if getattr(self, "_kv_cache_bits", 0):
                         request._prompt_cache_needs_worker_dequant = True
+                    _typed_disk_only = bool(
+                        getattr(self.paged_cache_manager, "disk_only", False)
+                    )
                     if self._uses_dsv4_cache:
                         request._cache_detail = _typed_paged_cache_detail(
                             "dsv4",
                             disk_hit=bool(getattr(request, "_paged_disk_hit", False)),
+                            disk_only=_typed_disk_only,
                         )
                     elif self._uses_zaya_cache:
                         request._cache_detail = _typed_paged_cache_detail(
                             "zaya_cca",
                             disk_hit=bool(getattr(request, "_paged_disk_hit", False)),
+                            disk_only=_typed_disk_only,
                         )
                     else:
                         request._cache_detail = _block_cache_detail(
@@ -7254,9 +7269,13 @@ class Scheduler:
                             disk_hit=True,
                         )
                     )
-                    if "+disk" not in _worker_detail:
-                        if _worker_detail != "block-disk":
-                            _worker_detail += "+disk"
+                    # Disk-only labels ("block-disk", "block-disk+dsv4") already
+                    # say every hit came from SSD; decorating them again yields
+                    # nonsense like "block-disk+dsv4+disk".
+                    if not bool(
+                        getattr(self.paged_cache_manager, "disk_only", False)
+                    ) and "+disk" not in _worker_detail:
+                        _worker_detail += "+disk"
                     request._cache_detail = _worker_detail
                     if cache_execution is not None:
                         cache_execution["cache_detail"] = _worker_detail

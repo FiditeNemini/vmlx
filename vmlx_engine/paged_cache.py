@@ -1246,7 +1246,9 @@ class PagedCacheManager:
         becomes active. Evicts least-recently-used first and returns the number
         of blocks evicted. No-op when the ceiling is disabled
         (``max_resident_bytes <= 0`` — resident accounting is off in that
-        mode, so neither target can be measured).
+        mode, so neither target can be measured), except in disk-only mode,
+        which keeps accounting on (see ``_note_resident``) and is handled
+        below.
 
         Beyond the static RAM ceiling, this also enforces Metal working-set
         pressure: when active Metal memory plus a transient margin exceeds the
@@ -1256,8 +1258,15 @@ class PagedCacheManager:
         much unified memory the lazily-faulted weights occupy, so on
         weight-heavy machines it never fires (measured: 0 evictions while L1
         growth OOM'd the process at ~430k tokens).
+
+        Disk-only mode gets the pressure guard but never the static ceiling.
+        Its ceiling is zero by construction ("no persistent payloads"), so
+        enforcing it literally would try to evict the transient buffers a
+        reconstruction is actively reading. Those buffers are released by the
+        prefix cache once reconstruction finishes; only genuine Metal pressure
+        justifies shedding them early.
         """
-        if self.max_resident_bytes <= 0:
+        if self.max_resident_bytes <= 0 and not self.disk_only:
             return 0
         required_bytes = max(0, int(required_bytes or 0))
         # Metal query stays outside the lock: cheap allocator-counter reads,
@@ -1265,9 +1274,10 @@ class PagedCacheManager:
         pressure_overage = self._metal_pressure_overage_bytes()
         evicted = 0
         with self._lock:
-            target_resident_bytes = max(
-                0,
-                self.max_resident_bytes - required_bytes,
+            target_resident_bytes = (
+                self.resident_bytes
+                if self.disk_only
+                else max(0, self.max_resident_bytes - required_bytes)
             )
             if pressure_overage > 0:
                 pressure_target = max(

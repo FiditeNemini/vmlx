@@ -3,6 +3,7 @@ import { ArrowLeft, CheckCircle2, XCircle, Play, Settings2, FolderOpen, AlertTri
 import { useStreamingOperation } from './useStreamingOperation'
 import { LogViewer } from './LogViewer'
 import { getJangCompatWarning } from '../../lib/jangCompat'
+import { useTranslation } from '../../i18n'
 
 type QuantMode = 'mlx' | 'jang'
 type Preset = 'balanced' | 'quality' | 'compact' | 'custom' | string
@@ -39,6 +40,7 @@ interface ModelConverterProps {
 }
 
 export function ModelConverter({ initialModelPath, onBack, onServe, models = [] }: ModelConverterProps) {
+  const { t } = useTranslation()
   const [modelPath, setModelPath] = useState(initialModelPath || '')
   const [quantMode, setQuantMode] = useState<QuantMode>('jang')
   const [preset, setPreset] = useState<Preset>('jang_3m')
@@ -246,9 +248,9 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
           Back
         </button>
 
-        <h2 className="text-2xl font-bold">Model Converter</h2>
+        <h2 className="text-2xl font-bold">{t('tools.converter.modelConverter')}</h2>
         <p className="text-sm text-muted-foreground">
-          Convert HuggingFace models to quantized format for Apple Silicon
+          {t('tools.converter.convertHfDesc')}
         </p>
 
         {/* Quantization Mode Toggle */}
@@ -265,7 +267,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               }`}
             >
               <span className="font-medium">JANG</span>
-              <span className="text-xs block mt-0.5 opacity-75">Mixed-precision adaptive — best quality/size</span>
+              <span className="text-xs block mt-0.5 opacity-75">{t('tools.converter.mixedAdaptive')}</span>
             </button>
             <button
               onClick={() => { setQuantMode('mlx'); setPreset('balanced') }}
@@ -276,17 +278,17 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                   : 'border-border hover:bg-accent text-muted-foreground'
               }`}
             >
-              <span className="font-medium">MLX Uniform</span>
-              <span className="text-xs block mt-0.5 opacity-75">Standard uniform bit-width quantization</span>
+              <span className="font-medium">{t('tools.converter.mlxUniform')}</span>
+              <span className="text-xs block mt-0.5 opacity-75">{t('tools.converter.standardUniform')}</span>
             </button>
           </div>
         </div>
 
         {/* Model input */}
         <div className="space-y-2">
-          <label className="text-sm font-medium">Source Model</label>
+          <label className="text-sm font-medium">{t('tools.converter.sourceModel')}</label>
           <p className="text-xs text-muted-foreground">
-            Local path or HuggingFace repo ID (e.g., nvidia/Nemotron-H-47B-BF16)
+            {t('tools.converter.localPathOrRepo')}
           </p>
           <input
             type="text"
@@ -348,7 +350,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                 })}
                 {/* Custom mix option */}
                 <div className="col-span-2">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Custom Mix</p>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">{t('tools.converter.customMix')}</p>
                   <button
                     onClick={() => setPreset('jang_custom')}
                     disabled={running}
@@ -358,25 +360,25 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                         : 'border-border hover:bg-accent'
                     }`}
                   >
-                    <p className="text-xs font-medium">Custom — Choose your own bit widths</p>
+                    <p className="text-xs font-medium">{t('tools.converter.customChooseBits')}</p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">Set Critical (attention), Important (embeddings), Compress (MLP) bits independently</p>
                   </button>
                   {preset === 'jang_custom' && (
                     <div className="grid grid-cols-3 gap-2 mt-2">
                       <div>
-                        <label className="text-[10px] text-muted-foreground">Critical (attention)</label>
+                        <label className="text-[10px] text-muted-foreground">{t('tools.converter.criticalAttention')}</label>
                         <select value={customCritical} onChange={e => setCustomCritical(Number(e.target.value))} disabled={running} className="w-full px-2 py-1 bg-background border border-input rounded text-xs">
                           {[2,3,4,5,6,8].map(b => <option key={b} value={b}>{b}-bit</option>)}
                         </select>
                       </div>
                       <div>
-                        <label className="text-[10px] text-muted-foreground">Important (embeddings)</label>
+                        <label className="text-[10px] text-muted-foreground">{t('tools.converter.importantEmbeddings')}</label>
                         <select value={customImportant} onChange={e => setCustomImportant(Number(e.target.value))} disabled={running} className="w-full px-2 py-1 bg-background border border-input rounded text-xs">
                           {[2,3,4,5,6,8].map(b => <option key={b} value={b}>{b}-bit</option>)}
                         </select>
                       </div>
                       <div>
-                        <label className="text-[10px] text-muted-foreground">Compress (MLP/FFN)</label>
+                        <label className="text-[10px] text-muted-foreground">{t('tools.converter.compressMlpFfn')}</label>
                         <select value={customCompress} onChange={e => setCustomCompress(Number(e.target.value))} disabled={running} className="w-full px-2 py-1 bg-background border border-input rounded text-xs">
                           {[2,3,4,5,6,8].map(b => <option key={b} value={b}>{b}-bit</option>)}
                         </select>
@@ -415,7 +417,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                     <Settings2 className="h-3.5 w-3.5" />
                     <p className="text-sm font-medium">Custom</p>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">Full control over all settings</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">{t('tools.converter.fullControl')}</p>
                 </button>
               </>
             )}
@@ -425,16 +427,16 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
         {/* JANG method selector */}
         {quantMode === 'jang' && (
           <div className="space-y-2">
-            <label className="text-sm font-medium">Quantization Method</label>
+            <label className="text-sm font-medium">{t('tools.converter.quantizationMethod')}</label>
             <select
               value={jangMethod}
               onChange={e => setJangMethod(e.target.value)}
               disabled={running}
               className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
             >
-              <option value="mse">MSE-optimal (recommended — best quality)</option>
-              <option value="rtn">RTN (fast — lower quality)</option>
-              <option value="mse-all">MSE everywhere (slow — maximum quality)</option>
+              <option value="mse">{t('tools.converter.mseOptimal')}</option>
+              <option value="rtn">{t('tools.converter.rtnFast')}</option>
+              <option value="mse-all">{t('tools.converter.mseEverywhere')}</option>
             </select>
           </div>
         )}
@@ -457,7 +459,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
         {/* Advanced options (MLX custom preset only) */}
         {quantMode === 'mlx' && preset === 'custom' && (
           <div className="space-y-4 p-4 border border-border rounded-lg">
-            <h3 className="text-sm font-medium">Advanced Settings</h3>
+            <h3 className="text-sm font-medium">{t('tools.converter.advancedSettings')}</h3>
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
@@ -475,7 +477,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium">Group Size</label>
+                <label className="text-xs font-medium">{t('tools.converter.groupSize')}</label>
                 <select
                   value={groupSize}
                   onChange={e => setGroupSize(Number(e.target.value))}
@@ -502,7 +504,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium">Non-quantized dtype</label>
+                <label className="text-xs font-medium">{t('tools.converter.nonQuantizedDtype')}</label>
                 <select
                   value={dtype}
                   onChange={e => setDtype(e.target.value)}
@@ -523,24 +525,24 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
         <div className="space-y-2">
           <label className="flex items-center gap-2 text-xs">
             <input type="checkbox" checked={force} onChange={e => setForce(e.target.checked)} disabled={running} className="rounded border-input" />
-            <span className="text-muted-foreground">Force overwrite if output exists</span>
+            <span className="text-muted-foreground">{t('tools.converter.forceOverwrite')}</span>
           </label>
           {quantMode === 'mlx' && (
             <label className="flex items-center gap-2 text-xs">
               <input type="checkbox" checked={skipVerify} onChange={e => setSkipVerify(e.target.checked)} disabled={running} className="rounded border-input" />
-              <span className="text-muted-foreground">Skip post-conversion verification</span>
+              <span className="text-muted-foreground">{t('tools.converter.skipVerification')}</span>
             </label>
           )}
           <label className="flex items-center gap-2 text-xs">
             <input type="checkbox" checked={trustRemoteCode} onChange={e => setTrustRemoteCode(e.target.checked)} disabled={running} className="rounded border-input" />
-            <span className="text-muted-foreground">Trust remote code from HuggingFace</span>
+            <span className="text-muted-foreground">{t('tools.converter.trustRemoteCode')}</span>
           </label>
         </div>
 
         {/* Output directory */}
         <div className="space-y-2">
-          <label className="text-sm font-medium">Output Directory</label>
-          <p className="text-xs text-muted-foreground">Leave empty for auto-generated name</p>
+          <label className="text-sm font-medium">{t('tools.converter.outputDirectory')}</label>
+          <p className="text-xs text-muted-foreground">{t('tools.converter.leaveEmptyAutoName')}</p>
           <div className="flex gap-2">
             <input
               type="text"
@@ -588,7 +590,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               onClick={cancel}
               className="px-6 py-2.5 text-sm bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 flex items-center gap-2"
             >
-              Cancel Conversion
+              {t('tools.converter.cancelConversion')}
             </button>
           ) : (
             <button
@@ -611,7 +613,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               <>
                 <CheckCircle2 className="h-5 w-5 text-green-500" />
                 <div className="flex-1">
-                  <p className="text-sm font-medium">Conversion complete</p>
+                  <p className="text-sm font-medium">{t('tools.converter.conversionComplete')}</p>
                   {outputPath && <p className="text-xs text-muted-foreground mt-0.5">{outputPath}</p>}
                 </div>
                 {outputPath && onServe && (
@@ -620,7 +622,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                     className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 flex items-center gap-1.5"
                   >
                     <Play className="h-3 w-3" />
-                    Serve Model
+                    {t('tools.converter.serveModel')}
                   </button>
                 )}
               </>

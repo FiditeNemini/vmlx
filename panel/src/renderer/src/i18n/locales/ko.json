@@ -852,6 +852,21 @@
       "tokens": "토큰",
       "cosineSimilarity": "코사인 유사도",
       "preview": "임베딩 미리보기"
+    },
+    "cachePanel": {
+      "sessionNotRunning": "캐시 통계를 보려면 세션이 실행 중이어야 합니다.",
+      "cacheTotals": "캐시 합계",
+      "prefixCache": "프리픽스 캐시",
+      "ssmCompanion": "SSM 컴패니언",
+      "hitTokensByDetail": "세부 항목별 히트 토큰",
+      "lastCacheExecution": "마지막 캐시 실행",
+      "cacheContract": "캐시 계약",
+      "diskCacheL2": "디스크 캐시 (L2)",
+      "blockDiskCache": "블록 디스크 캐시 (SSD / L2)",
+      "loading": "캐시 통계를 불러오는 중...",
+      "clearRam": "RAM 지우기",
+      "clearPrefixL2": "프리픽스 + L2 지우기",
+      "clearAll": "모두 지우기"
     }
   },
   "image": {

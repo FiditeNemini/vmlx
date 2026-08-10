@@ -26,7 +26,12 @@ describe('CachePanel last-request truthfulness', () => {
   it('reads cache execution telemetry from scheduler and batch-generator shapes', () => {
     expect(source).toContain('schedulerStats?.last_cache_execution')
     expect(source).toContain('schedulerStats?.batch_generator?.last_cache_execution')
-    expect(source).toContain('Last Cache Execution')
+    const cachePanelCopy = readFileSync(
+        'src/renderer/src/i18n/locales/en.json',
+        'utf-8',
+    )
+    // copy lives in the locale catalog now that the panel is translated
+    expect(cachePanelCopy).toContain('Last Cache Execution')
   })
 
   it('renders prompt, cached, uncached, prefill, block, timing, and fallback fields', () => {

@@ -852,6 +852,21 @@
       "tokens": "Token",
       "cosineSimilarity": "余弦相似度",
       "preview": "嵌入预览"
+    },
+    "cachePanel": {
+      "sessionNotRunning": "会话必须正在运行才能查看缓存统计信息。",
+      "cacheTotals": "缓存总计",
+      "prefixCache": "前缀缓存",
+      "ssmCompanion": "SSM 配套缓存",
+      "hitTokensByDetail": "按类型统计的命中词元",
+      "lastCacheExecution": "最近一次缓存执行",
+      "cacheContract": "缓存约定",
+      "diskCacheL2": "磁盘缓存 (L2)",
+      "blockDiskCache": "块磁盘缓存 (SSD / L2)",
+      "loading": "正在加载缓存统计信息...",
+      "clearRam": "清除内存",
+      "clearPrefixL2": "清除前缀 + L2",
+      "clearAll": "全部清除"
     }
   },
   "image": {

@@ -3882,9 +3882,14 @@ describe("Phase 6: Cache API Data Flow", () => {
       );
 
       expect(source).toContain("handleClear('ram')");
-      expect(source).toContain("Clear RAM");
+      const cachePanelCopy = fs.readFileSync(
+        'src/renderer/src/i18n/locales/en.json',
+        'utf-8',
+      );
+      // copy lives in the locale catalog now that the panel is translated
+      expect(cachePanelCopy).toContain("Clear RAM");
       expect(source).toContain("handleClear('prefix')");
-      expect(source).toContain("Clear Prefix + L2");
+      expect(cachePanelCopy).toContain("Clear Prefix + L2");
       expect(source).toContain("preserving disk-backed L2");
     });
   });

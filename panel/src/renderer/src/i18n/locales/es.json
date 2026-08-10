@@ -852,6 +852,21 @@
       "tokens": "Tokens",
       "cosineSimilarity": "Similitud coseno",
       "preview": "Vista previa del embedding"
+    },
+    "cachePanel": {
+      "sessionNotRunning": "La sesión debe estar en ejecución para ver las estadísticas de caché.",
+      "cacheTotals": "Totales de caché",
+      "prefixCache": "Caché de prefijos",
+      "ssmCompanion": "Complemento SSM",
+      "hitTokensByDetail": "Tokens acertados por detalle",
+      "lastCacheExecution": "Última ejecución de caché",
+      "cacheContract": "Contrato de caché",
+      "diskCacheL2": "Caché en disco (L2)",
+      "blockDiskCache": "Caché de bloques en disco (SSD / L2)",
+      "loading": "Cargando estadísticas de caché...",
+      "clearRam": "Vaciar RAM",
+      "clearPrefixL2": "Vaciar prefijos + L2",
+      "clearAll": "Vaciar todo"
     }
   },
   "image": {

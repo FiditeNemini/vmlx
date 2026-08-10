@@ -852,6 +852,21 @@
       "tokens": "Tokens",
       "cosineSimilarity": "Cosine Similarity",
       "preview": "Embedding Preview"
+    },
+    "cachePanel": {
+      "sessionNotRunning": "Session must be running to view cache stats.",
+      "cacheTotals": "Cache Totals",
+      "prefixCache": "Prefix Cache",
+      "ssmCompanion": "SSM Companion",
+      "hitTokensByDetail": "Hit Tokens by Detail",
+      "lastCacheExecution": "Last Cache Execution",
+      "cacheContract": "Cache Contract",
+      "diskCacheL2": "Disk Cache (L2)",
+      "blockDiskCache": "Block Disk Cache (SSD / L2)",
+      "loading": "Loading cache stats...",
+      "clearRam": "Clear RAM",
+      "clearPrefixL2": "Clear Prefix + L2",
+      "clearAll": "Clear All"
     }
   },
   "image": {

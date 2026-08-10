@@ -852,6 +852,21 @@
       "tokens": "トークン",
       "cosineSimilarity": "コサイン類似度",
       "preview": "エンベディングプレビュー"
+    },
+    "cachePanel": {
+      "sessionNotRunning": "キャッシュ統計を表示するにはセッションが実行中である必要があります。",
+      "cacheTotals": "キャッシュ合計",
+      "prefixCache": "プレフィックスキャッシュ",
+      "ssmCompanion": "SSM コンパニオン",
+      "hitTokensByDetail": "詳細別ヒットトークン",
+      "lastCacheExecution": "最後のキャッシュ実行",
+      "cacheContract": "キャッシュコントラクト",
+      "diskCacheL2": "ディスクキャッシュ (L2)",
+      "blockDiskCache": "ブロックディスクキャッシュ (SSD / L2)",
+      "loading": "キャッシュ統計を読み込み中...",
+      "clearRam": "RAM をクリア",
+      "clearPrefixL2": "プレフィックス + L2 をクリア",
+      "clearAll": "すべてクリア"
     }
   },
   "image": {

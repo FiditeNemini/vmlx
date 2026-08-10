@@ -3733,7 +3733,12 @@ describe('JIT Toggle', () => {
             'utf-8',
         )
 
-        expect(cachePanel).toContain('Block Disk Cache (SSD / L2)')
+        const cachePanelCopy = readFileSync(
+            'src/renderer/src/i18n/locales/en.json',
+            'utf-8',
+        )
+        // copy lives in the locale catalog now that the panel is translated
+        expect(cachePanelCopy).toContain('Block Disk Cache (SSD / L2)')
         expect(cachePanel).toContain('Managed Root Size')
         expect(cachePanel).toContain('Managed Root Limit')
         expect(cachePanel).toContain('Namespace Size')

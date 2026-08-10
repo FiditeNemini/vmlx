@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { describeDsv4ActivationQat } from './dsv4QatStatus'
+import { useTranslation } from '../../i18n'
 
 export interface CachePanelRequestToken {
   identityGeneration: number
@@ -93,6 +94,7 @@ interface CachePanelProps {
 }
 
 export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelProps) {
+  const { t } = useTranslation()
   const [stats, setStats] = useState<any>(null)
   const [entries, setEntries] = useState<any>(null)
   const [loading, setLoading] = useState(false)
@@ -241,7 +243,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   if (sessionStatus !== 'running') {
     return (
       <div className="text-sm text-muted-foreground p-4">
-        Session must be running to view cache stats.
+        {t('sessions.cachePanel.sessionNotRunning')}
       </div>
     )
   }
@@ -285,7 +287,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
 
       {cacheTotals && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cache Totals</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.cacheTotals')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {cacheTotals.ram_tokens_cached != null && (
               <StatCard label="RAM Resident Tokens" value={(cacheTotals.ram_tokens_cached || 0).toLocaleString()} />
@@ -324,7 +326,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {/* Cache Stats Overview */}
       {schedulerCache && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Prefix Cache</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.prefixCache')}</h4>
           <p className="mb-2 text-xs text-muted-foreground">
             Reuse matches the longest continuous causal token prefix from token 0.
             Only the unmatched tail is sent through prefill; arbitrary suffix or
@@ -420,7 +422,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
            `schedulerCache.ssm_companion_cache` shape (preferred). */}
       {(stats?.ssm_companion || (schedulerCache as any)?.ssm_companion_cache) && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">SSM Companion</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.ssmCompanion')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {(() => {
               const ssm =
@@ -518,7 +520,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           )}
           {schedulerStats.cache_hit_tokens_by_detail && Object.keys(schedulerStats.cache_hit_tokens_by_detail).length > 0 && (
             <div className="mt-2">
-              <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">Hit Tokens by Detail</div>
+              <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">{t('sessions.cachePanel.hitTokensByDetail')}</div>
               <div className="grid grid-cols-2 gap-2 text-xs">
                 {Object.entries(schedulerStats.cache_hit_tokens_by_detail).map(([detail, tokens]: [string, any]) => (
                   <StatCard key={detail} label={detail} value={(Number(tokens) || 0).toLocaleString()} />
@@ -559,7 +561,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {lastCacheExecution && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-            Last Cache Execution
+            {t('sessions.cachePanel.lastCacheExecution')}
           </h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {lastCacheExecution.cache_detail && (
@@ -658,7 +660,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {/* KV Quantization Info */}
       {(kvQuant || turboQuantKv || nativeCache) && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cache Contract</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.cacheContract')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {nativeCache?.cache_type && (
               <StatCard label="Native Cache" value={nativeCache.cache_type} />
@@ -745,7 +747,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {/* Disk Cache (L2 prompt-level) */}
       {diskCache && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Disk Cache (L2)</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.diskCacheL2')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {diskCache.entries != null && <StatCard label="Entries" value={String(diskCache.entries)} />}
             {(diskCache.total_size_mb ?? diskCache.size_mb) != null && <StatCard label="Size" value={`${(diskCache.total_size_mb ?? diskCache.size_mb ?? 0).toFixed(1)} MB`} />}
@@ -763,7 +765,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {/* Block Disk Cache (SSD / L2 content-addressed blocks) */}
       {blockDiskCache && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Block Disk Cache (SSD / L2)</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.blockDiskCache')}</h4>
           <p className="mb-2 text-xs text-muted-foreground">
             Namespace values describe this model/configuration. Managed-root
             values include every block-cache namespace and typed companion under
@@ -833,7 +835,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       )}
 
       {!schedulerCache && !schedulerStats && !stats?.error && (
-        <div className="text-sm text-muted-foreground">Loading cache stats...</div>
+        <div className="text-sm text-muted-foreground">{t('sessions.cachePanel.loading')}</div>
       )}
 
       {stats?.error && (
@@ -910,7 +912,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           title="Clear resident/indexed cache state while preserving disk-backed L2"
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
-          Clear RAM
+          {t('sessions.cachePanel.clearRam')}
         </button>
         <button
           onClick={() => handleClear('prefix')}
@@ -918,14 +920,14 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           title="Clear prefix cache from RAM and disk-backed L2"
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
-          Clear Prefix + L2
+          {t('sessions.cachePanel.clearPrefixL2')}
         </button>
         <button
           onClick={() => handleClear('all')}
           disabled={actionBusy}
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
-          Clear All
+          {t('sessions.cachePanel.clearAll')}
         </button>
       </div>
     </div>

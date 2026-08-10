@@ -4759,6 +4759,18 @@ class MLLMScheduler:
                 "cache_hit_requests": self._cache_hit_requests,
                 "cache_hit_tokens": self._cache_hit_tokens,
                 "cache_hit_tokens_by_detail": dict(self._cache_hit_tokens_by_detail),
+                # Schema parity with the text scheduler: the reuse-skip / partial-
+                # downgrade / last-selection telemetry is not tracked on the MLLM
+                # path yet, so these report as 0/None. Exposing them here keeps the
+                # /health, /v1/cache/stats, Perf-panel and Cache-panel shapes
+                # identical across text and VLM/MLLM sessions.
+                "cache_reuse_skips": 0,
+                "cache_reuse_skip_tokens": 0,
+                "last_cache_reuse_skip": None,
+                "cache_reuse_partial_downgrades": 0,
+                "cache_reuse_partial_tokens": 0,
+                "last_cache_reuse_partial": None,
+                "last_cache_selection": None,
                 "tq_decoder_warmup": self._tq_decoder_warmup_stats,
             }
 

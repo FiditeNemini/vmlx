@@ -472,7 +472,12 @@ class PromptTokensDetails(BaseModel):
     """Breakdown of prompt token usage."""
 
     cached_tokens: int = 0
-    cache_detail: str | None = None  # e.g. "paged", "paged+ssm", "paged+disk", "disk"
+    # Tier/composition of the reused cache. Base values: "memory", "prefix",
+    # "disk", "paged", "block-disk". Composite suffixes encode which extra state
+    # was restored: "+ssm" (SSM companion), "+disk"/"+ssm+disk" (L2 spill),
+    # "+mixed_swa", "+zaya_cca", "+tq-native", "+tq" (TurboQuant). DeepSeek V4
+    # reports its native delta match as "paged"/"paged+disk".
+    cache_detail: str | None = None
 
 
 class Usage(BaseModel):

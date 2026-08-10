@@ -7196,6 +7196,17 @@ class Scheduler:
 
             if getattr(request, "_paged_block_table_needs_worker_reconstruct", False):
                 block_table = getattr(request, "block_table", None)
+                # A soft cap means this family cannot close its think rail, so
+                # the server will immediately re-issue the same prompt as a
+                # visible-answer pass over the identical block table. Retain a
+                # pristine copy now so that pass skips the replay, which is the
+                # dominant cost of the reasoning-to-content stall at depth.
+                if self.block_aware_cache is not None:
+                    arm_memo = getattr(self.block_aware_cache, "arm_reconstruct_memo", None)
+                    if callable(arm_memo):
+                        arm_memo(
+                            bool(getattr(request, "_dsv4_thinking_soft_cap", None))
+                        )
                 _t_reconstruct = time.perf_counter()
                 cache_to_use = (
                     self.block_aware_cache.reconstruct_cache(block_table)
@@ -7209,6 +7220,9 @@ class Scheduler:
                     cached_tokens=getattr(block_table, "num_tokens", 0) if block_table else 0,
                     blocks=len(getattr(block_table, "block_ids", []) or []) if block_table else 0,
                     ok=cache_to_use is not None,
+                    memo_hit=bool(
+                        getattr(self.block_aware_cache, "_last_reconstruct_memo_hit", False)
+                    ) if self.block_aware_cache is not None else False,
                 )
                 if cache_execution is not None:
                     cache_execution["reconstruction_seconds"] = round(

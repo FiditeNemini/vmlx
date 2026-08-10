@@ -5459,6 +5459,25 @@ class BlockAwarePrefixCache:
 
         return forked_table
 
+    @staticmethod
+    def _reconstruct_memo_signature(block_table: Any) -> Optional[tuple]:
+        """Identity of a reconstruction: same blocks and length, same state."""
+        try:
+            ids = tuple(int(b) for b in (block_table.block_ids or ()))
+        except Exception:
+            return None
+        if not ids:
+            return None
+        return (ids, int(getattr(block_table, "num_tokens", 0) or 0))
+
+    def arm_reconstruct_memo(self, enabled: bool = True) -> None:
+        """Ask the next reconstruction to retain a pristine copy for reuse.
+
+        Set by the scheduler when the request it is admitting will be followed
+        immediately by a second pass over the same prompt.
+        """
+        self._reconstruct_memo_arm = bool(enabled)
+
     def reconstruct_cache(
         self,
         block_table: BlockTable,
@@ -5484,6 +5503,24 @@ class BlockAwarePrefixCache:
         self._last_reconstruct_tq_blocks = 0
         if not block_table or not block_table.block_ids:
             return None
+
+        # Reasoning families that never close their think rail run every reply
+        # as two requests over the SAME prompt, so this replay used to run twice
+        # back to back on an identical block table — measured at ~4.2ms per
+        # block with no disk tier at all (it is delta-replay compute, not I/O),
+        # which is ~3s per turn at 100k and the dominant term of the
+        # reasoning-to-content stall. When the caller knows a second pass is
+        # imminent it asks us to keep a pristine copy, and that pass returns it
+        # instead of replaying. Single use, and any non-matching reconstruct
+        # drops it so a stale composite is never held.
+        memo_signature = self._reconstruct_memo_signature(block_table)
+        memo = getattr(self, "_reconstruct_memo", None)
+        if memo is not None:
+            self._reconstruct_memo = None
+            if memo_signature is not None and memo[0] == memo_signature:
+                self._last_reconstruct_memo_hit = True
+                return memo[1]
+        self._last_reconstruct_memo_hit = False
 
         if not HAS_MLX:
             logger.warning("Cannot reconstruct cache: MLX not available")
@@ -6737,6 +6774,22 @@ class BlockAwarePrefixCache:
             self._last_reconstruct_disk_blocks = len(disk_backed_block_ids)
             self._last_reconstruct_tq_blocks = tq_native_entry_count
             reconstruction_succeeded = True
+            if getattr(self, "_reconstruct_memo_arm", False) and memo_signature:
+                self._reconstruct_memo_arm = False
+                try:
+                    # Copy before the caller decodes into this state, so the
+                    # retained composite is the prompt-boundary one the second
+                    # pass needs.
+                    self._reconstruct_memo = (
+                        memo_signature,
+                        copy.deepcopy(reconstructed_caches),
+                    )
+                except Exception as memo_err:
+                    self._reconstruct_memo = None
+                    logger.debug(
+                        "reconstruct memo skipped (%s); second pass will replay",
+                        memo_err,
+                    )
             return reconstructed_caches
 
         except Exception as e:

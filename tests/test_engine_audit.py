@@ -32,6 +32,40 @@ import pytest
 # ===========================================================================
 
 
+
+def _panel_label_is_rendered(panel_source: str, english: str) -> bool:
+    """Is `english` still shown by this panel, literally or via i18n?
+
+    The i18n sweep moved user-facing labels out of the components and into the
+    locale catalogs, so a raw substring check on the .tsx no longer proves the
+    label is displayed. Accept either form: a literal in the source, or a
+    catalog entry whose key the component actually references.
+    """
+    import json
+    from pathlib import Path as _Path
+
+    if english in panel_source:
+        return True
+    catalog = json.loads(
+        _Path("./panel/src/renderer/src/i18n/locales/en.json").read_text()
+    )
+    flat: dict[str, str] = {}
+
+    def _walk(node, prefix=""):
+        for key, value in node.items():
+            dotted = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                _walk(value, dotted)
+            else:
+                flat[dotted] = value
+
+    _walk(catalog)
+    return any(
+        value == english and (dotted in panel_source or dotted.split(".")[-1] in panel_source)
+        for dotted, value in flat.items()
+    )
+
+
 class TestGptOssReasoningParser:
     """Tests for the GPT-OSS / Harmony protocol reasoning parser."""
 
@@ -13858,7 +13892,7 @@ class TestTurboQuantKVTelemetry:
         assert '"budget_mb"' in scheduler_source
         assert "Cache Reuse Skips" in cache_panel_source
         assert "Cache Hit Tokens" in cache_panel_source
-        assert "Hit Tokens by Detail" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Hit Tokens by Detail")
         assert "hybrid_kv_without_ssm" in Path("./vmlx_engine/server.py").read_text()
         assert "ssm_prefix_lookup" in Path("./vmlx_engine/mllm_batch_generator.py").read_text()
         assert "Hybrid KV-Only Misses" in cache_panel_source
@@ -13900,7 +13934,7 @@ class TestTurboQuantKVTelemetry:
         ).read_text()
 
         assert "Tokens on Disk" in cache_panel_source
-        assert "Cache Totals" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Cache Totals")
         assert "RAM Resident Tokens" in cache_panel_source
         assert "L1 Indexed Tokens" in cache_panel_source
         assert "L1 Resident Memory" in cache_panel_source

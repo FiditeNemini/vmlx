@@ -776,7 +776,9 @@ class MLLMScheduler:
                     logger.info(
                         f"VLM {'block disk-only' if block_disk_only else 'paged'} cache enabled: "
                         f"block_size={self.config.paged_cache_block_size}, "
-                        f"max_blocks={self.config.max_cache_blocks}"
+                        f"max_blocks={_mllm_index_blocks}, "
+                        f"capacity="
+                        f"{_mllm_index_blocks * self.config.paged_cache_block_size} tokens"
                     )
                 except Exception as e:
                     self._cleanup_failed_block_cache_initialization(

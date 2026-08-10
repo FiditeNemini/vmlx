@@ -459,8 +459,32 @@ def _apply_dsv4_runtime_policy(args, logger, *, clamp_max_num_seqs: bool = False
     return True, tuple(changes)
 
 
-def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
-    """Return user-facing cache startup summary lines for the active runtime."""
+def _runtime_is_mllm(args) -> bool:
+    """Best-effort MLLM detection for user-facing summaries (never raises)."""
+    try:
+        from .api.utils import is_mllm_model
+
+        return bool(
+            is_mllm_model(
+                args.model,
+                force_mllm=getattr(args, "is_mllm", False),
+                force_text_only=getattr(args, "force_text_only", False),
+            )
+        )
+    except Exception:
+        return False
+
+
+def _cache_stack_summary_lines(
+    args, *, dsv4_model: bool = False, mllm_model: bool = False
+) -> list[str]:
+    """Return user-facing cache startup summary lines for the active runtime.
+
+    ``mllm_model`` mirrors the MLLM scheduler's index rescale so the printed
+    capacity is the one the runtime actually builds. Without it the summary
+    quoted the raw ``--max-cache-blocks`` and told Gemma 4 users they had
+    63,936 tokens of cache when the pool holds 255,936.
+    """
 
     if not getattr(args, "use_paged_cache", False) and not getattr(
         args, "enable_block_disk_cache", False
@@ -468,6 +492,12 @@ def _cache_stack_summary_lines(args, *, dsv4_model: bool = False) -> list[str]:
         return []
 
     configured_blocks = int(args.max_cache_blocks)
+    if mllm_model:
+        from .mllm_scheduler import resolve_mllm_index_blocks
+
+        configured_blocks = resolve_mllm_index_blocks(
+            int(args.paged_cache_block_size), configured_blocks
+        )
     usable_blocks = max(0, configured_blocks - 1)
     capacity = int(args.paged_cache_block_size) * usable_blocks
 
@@ -1791,6 +1821,7 @@ def serve_command(args):
         cache_summary_lines = _cache_stack_summary_lines(
             args,
             dsv4_model=_is_dsv4_model,
+            mllm_model=_runtime_is_mllm(args),
         )
         if cache_summary_lines:
             for line in cache_summary_lines:
@@ -2167,7 +2198,9 @@ def bench_command(args):
             scheduler_config=scheduler_config,
         )
 
-        for line in _cache_stack_summary_lines(args, dsv4_model=_is_dsv4_model):
+        for line in _cache_stack_summary_lines(
+            args, dsv4_model=_is_dsv4_model, mllm_model=_runtime_is_mllm(args)
+        ):
             print(line)
 
         # Generate prompts

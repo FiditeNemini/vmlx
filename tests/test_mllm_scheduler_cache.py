@@ -2883,3 +2883,89 @@ class TestMLLMMixedSWACleanStorePolicy:
         scheduler.batch_generator._prefill_for_clean_path_dependent_cache.assert_called_once_with(
             [10, 11, 12]
         )
+
+
+class TestCleanRederiveChunking:
+    """Gemma 4 mixed-SWA lost prefix caching entirely to an SSM-only guard.
+
+    ``_prefill_for_clean_path_dependent_cache`` is the ONLY way the mixed-SWA
+    VLM path produces a storable cache — a None return means "skip the store".
+    It applied an O(seq_len^2) dense-attention estimate written for recurrent
+    one-shot re-derives to attention-only stacks too, predicting 8.9 GB at just
+    ~12k tokens on a 30-head backbone. Live on the box: 0 cached tokens on every
+    turn of a 6-turn 74k conversation, TTFT climbing 3.1s -> 54.8s.
+    """
+
+    def test_mixed_swa_attention_stack_is_chunk_safe(self):
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        from vmlx_engine.mllm_batch_generator import (
+            _cache_requires_one_shot_rederive,
+        )
+
+        gemma_like = [RotatingKVCache(max_size=512), KVCache()] * 4
+        assert _cache_requires_one_shot_rederive(gemma_like) is False
+
+    def test_recurrent_slot_still_forces_one_shot(self):
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from vmlx_engine.mllm_batch_generator import (
+            _cache_requires_one_shot_rederive,
+        )
+
+        assert _cache_requires_one_shot_rederive([KVCache(), ArraysCache(4)]) is True
+
+    def test_unclassifiable_slot_fails_closed_to_one_shot(self):
+        """Chunking state we cannot classify could store silently wrong data."""
+        from vmlx_engine.mllm_batch_generator import (
+            _cache_requires_one_shot_rederive,
+        )
+
+        assert _cache_requires_one_shot_rederive([object()]) is True
+
+    def test_nested_cache_lists_are_inspected(self):
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        from vmlx_engine.mllm_batch_generator import (
+            _cache_requires_one_shot_rederive,
+        )
+
+        class _Wrapper:
+            def __init__(self, caches):
+                self.caches = caches
+
+        assert _cache_requires_one_shot_rederive(
+            [_Wrapper([KVCache(), KVCache()])]
+        ) is False
+        assert _cache_requires_one_shot_rederive(
+            [_Wrapper([KVCache(), ArraysCache(4)])]
+        ) is True
+
+    def test_attention_stack_is_prefilled_in_prefill_step_chunks(self):
+        """The whole point: a long attention-only prompt must NOT be rejected."""
+        from unittest.mock import MagicMock
+
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen.prefill_step_size = 1024
+        gen._cache_model = MagicMock(
+            make_cache=lambda: [RotatingKVCache(max_size=512), KVCache()]
+        )
+        calls = []
+
+        def _forward(input_ids, cache=None):
+            calls.append(int(input_ids.shape[1]))
+            return None
+
+        gen.language_model = MagicMock(side_effect=_forward)
+
+        tokens = list(range(12224))  # the length that used to predict 8.9 GB
+        result = gen._prefill_for_clean_path_dependent_cache(tokens)
+
+        assert result is not None, "long attention-only prompt was rejected"
+        assert len(calls) == 12, f"expected 12 chunks of 1024, got {calls[:3]}..."
+        assert sum(calls) == len(tokens)
+        assert max(calls) <= 1024

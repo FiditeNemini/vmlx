@@ -1483,30 +1483,57 @@ class TestIssueGuards:
         contiguous prefill) and skips gracefully when the prompt would exceed
         the Metal single-buffer cap — the live prefill's (contaminated for
         thinking models) SSM stash still serves as the companion.
+
+        Asserted behaviourally rather than by source text, because the
+        attention-only branch added later (Gemma 4 mixed-SWA, which IS
+        chunk-safe and lost prefix caching entirely to this guard) legitimately
+        chunks. What must never regress is that a RECURRENT cache is still
+        prefilled in exactly one contiguous pass, and still declines rather
+        than chunking when the prompt would blow the single-buffer cap.
         """
         import inspect
+        from unittest.mock import MagicMock
+
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
         import vmlx_engine.mllm_batch_generator as _m
+
         src = inspect.getsource(
             _m.MLLMBatchGenerator._prefill_for_clean_path_dependent_cache
         )
-
-        # No fixed-chunk loop remains.
-        assert "chunk_size = 2048" not in src, (
-            "v1.3.84 regression: chunked prefill removed from "
-            "_prefill_for_clean_path_dependent_cache — broadcast_shapes bug returns."
-        )
-        assert "for start in range(0, len(tokens), chunk_size)" not in src
-        # OOM-skip path and one-shot call must both be present.
         assert "_OOM_GUARD_BYTES" in src
         assert "skipping clean prefill" in src, (
-            "v1.3.84 regression: long prompts must log INFO + skip, not chunk."
-        )
-        assert "mx.array([tokens])" in src, (
-            "v1.3.84 regression: clean path-dependent cache rederive must do one-shot "
-            "forward over the full prompt."
+            "v1.3.84 regression: long recurrent prompts must log INFO + skip."
         )
         # Non-fatal: still catches + logs at WARNING level.
         assert "non-fatal" in src
+
+        def _gen(cache_slots):
+            g = _m.MLLMBatchGenerator.__new__(_m.MLLMBatchGenerator)
+            g.prefill_step_size = 1024
+            g._cache_model = MagicMock(make_cache=lambda: list(cache_slots))
+            g.calls = []
+            g.language_model = MagicMock(
+                side_effect=lambda input_ids, cache=None: g.calls.append(
+                    int(input_ids.shape[1])
+                )
+            )
+            return g
+
+        # Short recurrent prompt: exactly ONE contiguous forward pass.
+        short = _gen([KVCache(), ArraysCache(4)])
+        assert short._prefill_for_clean_path_dependent_cache(list(range(64))) is not None
+        assert short.calls == [64], (
+            "v1.3.84 regression: recurrent re-derive was chunked — the "
+            "broadcast_shapes bug returns."
+        )
+
+        # Long recurrent prompt: declines outright, never chunks.
+        long_ = _gen([KVCache(), ArraysCache(4)])
+        assert long_._prefill_for_clean_path_dependent_cache(list(range(120_000))) is None
+        assert long_.calls == [], (
+            "v1.3.84 regression: an over-cap recurrent prompt must skip, not chunk."
+        )
 
     def test_clean_ssm_rederive_resets_qwen_sticky_rope_state(self):
         """Hybrid Qwen clean SSM re-derive must be a fresh prompt-only pass.

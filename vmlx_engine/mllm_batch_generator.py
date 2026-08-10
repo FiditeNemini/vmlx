@@ -1635,6 +1635,34 @@ def _is_attention_cache_slot(cache: Any) -> bool:
     return _is_kv_like(cache) or type(cache).__name__ in _ATTENTION_CACHE_CLASS_NAMES
 
 
+def _cache_requires_one_shot_rederive(cache_slots: Any) -> bool:
+    """Does re-deriving this cache need one contiguous forward pass?
+
+    Only recurrent slots (Mamba/ArraysCache-style SSM state) do: their
+    offset/mask bookkeeping is populated by the ``BatchKVCache`` wrappers the
+    re-derive path does not use, so a second chunk reads uninitialised state.
+    Attention slots — including Gemma 4's mixed RotatingKVCache/KVCache stack —
+    are chunk-safe, because the live prefill already advances them chunk by
+    chunk via ``prefill_step_size``.
+
+    Unknown/unrecognised slots count as recurrent: treating a slot we cannot
+    classify as chunk-safe would risk storing silently wrong state, whereas the
+    one-shot path merely costs memory and can decline.
+    """
+    slots = cache_slots if isinstance(cache_slots, (list, tuple)) else [cache_slots]
+    for slot in slots:
+        if slot is None:
+            continue
+        nested = getattr(slot, "caches", None)
+        if isinstance(nested, (list, tuple)):
+            if _cache_requires_one_shot_rederive(nested):
+                return True
+            continue
+        if not _is_attention_cache_slot(slot):
+            return True
+    return False
+
+
 _CACHE_OWNER_WRAPPER_ATTRS = (
     "language_model",
     "model",
@@ -9325,39 +9353,59 @@ class MLLMBatchGenerator:
         gen_prompt_len suffix, no generation output. Safe to store with
         is_complete=True.
 
-        SSM re-derive requires contiguous state math across the full prompt.
-        Chunking the forward pass broke on the 2nd chunk for fresh
-        ``make_cache()`` output because ArraysCache's offset/mask machinery
-        (``lengths``/``left_padding``) is only populated when the cache goes
-        through ``BatchKVCache`` wrappers. Prefer one-shot when the attention
-        buffer fits under the Metal single-buffer cap; skip gracefully
-        otherwise (the live prefill's SSM stash still serves as a
+        Only genuine recurrent state forces a one-shot pass. SSM re-derive
+        requires contiguous state math across the full prompt: chunking the
+        forward pass broke on the 2nd chunk for fresh ``make_cache()`` output
+        because ArraysCache's offset/mask machinery (``lengths``/
+        ``left_padding``) is only populated when the cache goes through
+        ``BatchKVCache`` wrappers. For those models we one-shot when the
+        attention buffer fits under the Metal single-buffer cap and skip
+        gracefully otherwise (the live prefill's SSM stash still serves as a
         possibly-contaminated companion for thinking-model prompts).
+
+        Attention-only mixed-SWA stacks (Gemma 4: RotatingKVCache for sliding
+        layers + KVCache for full-attention layers) have no such constraint —
+        the live prefill already builds them chunk by chunk via
+        ``prefill_step_size``, so a chunked re-derive is the identical math.
+        They previously shared the recurrent one-shot path and its O(seq_len^2)
+        dense-attention estimate, which predicts 8.9 GB at only ~12k tokens on
+        a 30-head backbone. The guard therefore rejected every Gemma 4
+        conversation past ~11.5k tokens, and because a rejected clean prefill
+        means "skip the store entirely", prefix caching was silently dead:
+        measured 0 cached tokens on every turn of a 6-turn 74k conversation,
+        with TTFT growing 3.1s -> 54.8s as each turn re-prefilled from scratch.
         """
         if not tokens or self.language_model is None:
             return None
         seq_len = len(tokens)
-        _OOM_GUARD_BYTES = 8 * 1024 * 1024 * 1024
-        _n_heads_guess = _infer_attention_heads_for_hybrid_oom_guard(
-            self.language_model
-        )
-        _predicted_attn_bytes = _n_heads_guess * seq_len * seq_len * 2
-        if _predicted_attn_bytes > _OOM_GUARD_BYTES:
-            logger.info(
-                "MLLM SSM re-derive: skipping clean prefill for %d-token prompt "
-                "(predicted attention buffer %.1f GB exceeds Metal single-buffer "
-                "limit; re-derive requires contiguous state math that chunking "
-                "breaks). Live prefill's SSM stash will be used as the companion.",
-                seq_len, _predicted_attn_bytes / (1024**3),
-            )
-            return None
         try:
             cache_model = getattr(self, "_cache_model", None)
             fresh_cache = cache_model.make_cache() if cache_model is not None else None
             if fresh_cache is None:
                 from mlx_lm.models.cache import KVCache
                 fresh_cache = [KVCache() for _ in range(len(self.language_model.layers))]
-            input_ids = mx.array([tokens])
+
+            if _cache_requires_one_shot_rederive(fresh_cache):
+                _OOM_GUARD_BYTES = 8 * 1024 * 1024 * 1024
+                _n_heads_guess = _infer_attention_heads_for_hybrid_oom_guard(
+                    self.language_model
+                )
+                _predicted_attn_bytes = _n_heads_guess * seq_len * seq_len * 2
+                if _predicted_attn_bytes > _OOM_GUARD_BYTES:
+                    logger.info(
+                        "MLLM SSM re-derive: skipping clean prefill for %d-token "
+                        "prompt (predicted attention buffer %.1f GB exceeds Metal "
+                        "single-buffer limit; re-derive requires contiguous state "
+                        "math that chunking breaks). Live prefill's SSM stash "
+                        "will be used as the companion.",
+                        seq_len, _predicted_attn_bytes / (1024**3),
+                    )
+                    del fresh_cache
+                    return None
+                chunk_size = seq_len
+            else:
+                chunk_size = max(1, int(getattr(self, "prefill_step_size", 1024) or 1024))
+
             # Qwen3.5/3.6 hybrid language models keep mRoPE bookkeeping on the
             # module object. A clean prompt-only SSM re-derive must behave like a
             # new request, otherwise a prior cache-hit tail can leave an
@@ -9370,7 +9418,6 @@ class MLLMBatchGenerator:
                 if hasattr(self.language_model, _attr):
                     _saved_pos_state[_attr] = getattr(self.language_model, _attr)
                     setattr(self.language_model, _attr, None)
-            _ = self.language_model(input_ids, cache=fresh_cache)
             materialize: List[Any] = []
             def _collect_cache_arrays(cache_obj: Any) -> None:
                 if hasattr(cache_obj, "keys") and cache_obj.keys is not None:
@@ -9389,16 +9436,26 @@ class MLLMBatchGenerator:
                         if hasattr(arr, "shape"):
                             materialize.append(arr)
 
-            for c in fresh_cache:
-                _collect_cache_arrays(c)
-            if materialize:
-                try:
-                    mx.eval(materialize)
-                except RuntimeError as _eval_err:
-                    if "Stream" in str(_eval_err):
-                        mx.synchronize()
-                    else:
-                        raise
+            # One chunk for the recurrent path (chunk_size == seq_len keeps the
+            # single contiguous pass those caches require); prefill_step_size
+            # chunks for attention-only stacks, materializing after each so the
+            # lazy graph — and peak Metal working set — stay bounded.
+            for _start in range(0, seq_len, chunk_size):
+                _ = self.language_model(
+                    mx.array([tokens[_start:_start + chunk_size]]),
+                    cache=fresh_cache,
+                )
+                materialize.clear()
+                for c in fresh_cache:
+                    _collect_cache_arrays(c)
+                if materialize:
+                    try:
+                        mx.eval(materialize)
+                    except RuntimeError as _eval_err:
+                        if "Stream" in str(_eval_err):
+                            mx.synchronize()
+                        else:
+                            raise
             return fresh_cache
         except Exception as ex:
             logger.warning(f"MLLM clean SSM prefill failed (non-fatal): {ex}")

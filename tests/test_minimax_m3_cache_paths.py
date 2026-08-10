@@ -1351,6 +1351,7 @@ def test_scheduler_uses_minimax_m3_logits_sampler_for_msa_cache(monkeypatch):
     # explicitly instead of relying on missing attributes.
     scheduler.memory_aware_cache = None
     scheduler.disk_cache = None
+    scheduler.block_aware_cache = None
     scheduler._long_repetition_context = False
     scheduler._uses_m3_msa_cache = True
     monkeypatch.setattr(Scheduler, "_get_stop_tokens", lambda _self: set())

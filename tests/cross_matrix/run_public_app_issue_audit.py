@@ -285,6 +285,10 @@ def _issue169_checks(root: Path) -> dict[str, bool]:
             in engine_tests
             and "Failed to load the default metallib" in engine_tests
         ),
+        # The compat flavor supports Sonoma/Sequoia (14.5.0); the native flavor
+        # is Tahoe-only and correctly declares LSMinimumSystemVersion 26.0.0.
+        # Each probe pairs the flavor's wheel tags with ITS minimum, not a
+        # shared one.
         "installed_app_supported_runtime_flavor": (
             _app_runtime_flavor_matches(
                 INSTALLED_APP,
@@ -294,7 +298,7 @@ def _issue169_checks(root: Path) -> dict[str, bool]:
             )
             or _app_runtime_flavor_matches(
                 INSTALLED_APP,
-                minimum_system_version="14.5.0",
+                minimum_system_version="26.0.0",
                 mlx_tag="cp312-cp312-macosx_26_0_arm64",
                 mlx_metal_tag="py3-none-macosx_26_0_arm64",
             )
@@ -307,7 +311,7 @@ def _issue169_checks(root: Path) -> dict[str, bool]:
         ),
         "staged_tahoe_app_native_runtime_flavor": _app_runtime_flavor_matches(
             root / STAGED_TAHOE_APP,
-            minimum_system_version="14.5.0",
+            minimum_system_version="26.0.0",
             mlx_tag="cp312-cp312-macosx_26_0_arm64",
             mlx_metal_tag="py3-none-macosx_26_0_arm64",
         ),

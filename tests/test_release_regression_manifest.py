@@ -4715,7 +4715,11 @@ def test_release_regression_manifest_chat_ipc_rolls_back_failed_media_turns():
     assert "rolled_back_empty_warning_media_user_message" in source
     assert "VLM image prefill guard" in source
     assert "db.deleteMessage(userMessage.id)" in source
-    assert "hasMediaAttachments && !hadVisibleActivity && !wasAborted" in source
+    # #253 extended the rollback guard: a turn whose only visible activity is
+    # the graceful prompt_too_long bubble still rolls back the media message.
+    assert "hasMediaAttachments &&" in source
+    assert "(!hadVisibleActivity || promptTooLongOnlyBubble) &&" in source
+    assert "!wasAborted" in source
     assert "mediaWarningWithoutVisibleActivity" in source
 
 

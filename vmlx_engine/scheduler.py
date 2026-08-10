@@ -8383,9 +8383,32 @@ class Scheduler:
                                                 )
                                             except Exception:
                                                 dsv4_prompt_snapshot_min_tokens = 256
+                                            # The threshold exists because short
+                                            # prompts are normally cheap to re-prefill
+                                            # on a later request. That premise is false
+                                            # when a thinking soft cap is armed: DSV4
+                                            # never emits </think>, so the server
+                                            # re-issues this exact prompt immediately as
+                                            # a ":visible-answer" pass. Skipping the
+                                            # snapshot forces that pass to re-prefill
+                                            # the whole prompt — measured at 687ms for
+                                            # 204 tokens, paid on every response, and
+                                            # the dominant term of the ~900ms
+                                            # reasoning-to-content flip. N-1 keying
+                                            # gives both think rails the same cache key,
+                                            # so this snapshot is exactly what the
+                                            # answer pass needs.
+                                            answer_pass_imminent = bool(
+                                                getattr(
+                                                    request,
+                                                    "_dsv4_thinking_soft_cap",
+                                                    None,
+                                                )
+                                            )
                                             if (
                                                 len(dsv4_key_tokens)
                                                 < dsv4_prompt_snapshot_min_tokens
+                                                and not answer_pass_imminent
                                             ):
                                                 logger.info(
                                                     "DSV4 prefix cache store skipped "

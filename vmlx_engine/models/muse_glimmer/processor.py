@@ -127,7 +127,24 @@ class MuseGlimmerImageProcessor:
             return Image.open(text)
         if isinstance(image, (bytes, bytearray)):
             return Image.open(io.BytesIO(image))
-        return Image.fromarray(np.asarray(image))
+
+        # Arrays arrive in several shapes. The engine's video path in
+        # particular hands over frames still carrying leading singleton axes
+        # and float pixel data — "(1, 1, 448, 448), <f4" straight into
+        # Image.fromarray is the opaque failure that made video unusable.
+        array = np.asarray(image)
+        while array.ndim > 3 and array.shape[0] == 1:
+            array = array[0]
+        if array.ndim == 3 and array.shape[0] in (1, 3, 4) and array.shape[-1] not in (1, 3, 4):
+            array = np.transpose(array, (1, 2, 0))  # CHW -> HWC
+        if array.ndim == 3 and array.shape[-1] == 1:
+            array = array[..., 0]
+        if array.dtype != np.uint8:
+            peak = float(array.max()) if array.size else 0.0
+            if peak <= 1.0 + 1e-6:
+                array = array * 255.0
+            array = np.clip(array, 0, 255).astype(np.uint8)
+        return Image.fromarray(array)
 
     def _to_chw(self, image, size: Tuple[int, int]) -> np.ndarray:
         """RGB -> resize -> rescale -> normalize, as ``[3, H, W]`` float32."""

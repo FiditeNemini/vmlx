@@ -207,9 +207,31 @@ def test_qwen_full_kv_mixed_policy_builds_q4_bulk_and_q8_critical_slots():
     assert [layer.value_bits for layer in cache[-7:]] == [4, 8, 8, 8, 8, 8, 8]
 
 
-def test_uncalibrated_mixed_swa_auto_uses_q4_on_full_attention_only():
+def test_uncalibrated_mixed_swa_auto_keeps_storage_exact_by_default():
+    """Storage-only q4 with live encode OFF makes warm disagree with cold.
+
+    MEASURED on Muse Glimmer 30B at temperature 0 with warm reuse confirmed:
+    storage-tq4 gave cold 157 / warm 241 tokens with a different reasoning
+    trace, while both TQ-disabled and live-q8 were byte-identical. The policy is
+    engine-invented (it only runs for bundles with no calibrated turboquant
+    block), so it must not silently trade answer stability for L2 footprint.
+    """
     from vmlx_engine.utils.turboquant_config import apply_mixed_swa_auto_tq_policy
 
+    resolved = apply_mixed_swa_auto_tq_policy(
+        {"enabled": True, "default_key_bits": 8, "default_value_bits": 8},
+        ["sliding", "sliding", "attention", "sliding", "attention"],
+    )
+
+    assert resolved["enabled"] is False
+    assert resolved["auto_policy"] == "mixed_swa_exact_kv_storage"
+
+
+def test_uncalibrated_mixed_swa_auto_uses_q4_on_full_attention_only(monkeypatch):
+    """The old behaviour stays available behind an explicit opt-in."""
+    from vmlx_engine.utils.turboquant_config import apply_mixed_swa_auto_tq_policy
+
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
     resolved = apply_mixed_swa_auto_tq_policy(
         {"enabled": True, "default_key_bits": 8, "default_value_bits": 8},
         ["sliding", "sliding", "attention", "sliding", "attention"],
@@ -588,6 +610,9 @@ def test_jang_mixed_swa_auto_tq_patches_only_full_attention_slot(monkeypatch):
     monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
     monkeypatch.delenv("VMLX_SWA_TQ", raising=False)
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    # Storage-only q4 is opt-in now: with live encode off it makes a warm hit
+    # disagree with a cold recompute. This test covers the opted-in layout.
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
 
     _patch_turboquant_make_cache(model, {}, model_config)
 

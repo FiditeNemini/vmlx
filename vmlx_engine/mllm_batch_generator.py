@@ -6242,6 +6242,41 @@ class MLLMBatchGenerator:
                             ssm_captured_boundaries.add(processed)
                     if not _prefill_keep_alloc:
                         mx.clear_cache()
+                    if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
+                        # Attribute the growth to actual cache slots instead of
+                        # inferring it. The trace showed active memory reaching
+                        # 94.86GB at 73,728 tokens while a 16-layer KV cache
+                        # that size should be ~5GB, so ~90GB was unaccounted for
+                        # and every guess about WHERE was wrong.
+                        try:
+                            _by_kind: dict = {}
+                            for _slot in (cache or []):
+                                _kind = type(_slot).__name__
+                                _nb = int(getattr(_slot, "nbytes", 0) or 0)
+                                if not _nb:
+                                    for _attr in ("keys", "values"):
+                                        _arr = getattr(_slot, _attr, None)
+                                        if _arr is not None and hasattr(_arr, "nbytes"):
+                                            _nb += int(_arr.nbytes)
+                                    _inner = getattr(_slot, "cache", None)
+                                    if isinstance(_inner, list):
+                                        for _arr in _inner:
+                                            if _arr is not None and hasattr(_arr, "nbytes"):
+                                                _nb += int(_arr.nbytes)
+                                _agg = _by_kind.setdefault(_kind, [0, 0])
+                                _agg[0] += 1
+                                _agg[1] += _nb
+                            logger.info(
+                                "hybrid-prefill-slots chunk=%d processed=%d %s",
+                                chunk_num,
+                                processed,
+                                " ".join(
+                                    f"{k}x{v[0]}={v[1] / (1024**3):.2f}GB"
+                                    for k, v in sorted(_by_kind.items())
+                                ),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     if _HYBRID_PREFILL_MEM_TRACE:
                         # Per-chunk memory trace. The crash at 60-100k looked
                         # like per-iteration accumulation, but that was inferred

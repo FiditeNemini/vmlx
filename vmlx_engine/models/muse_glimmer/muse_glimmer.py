@@ -55,7 +55,10 @@ class Model(nn.Module):
         position_ids: Optional[mx.array] = None,
         **kwargs,
     ) -> mx.array:
-        embeds = self.language_model.model.embed_tokens(input_ids)
+        # Normed lookup (see MuseTextModel.embed). Media features are scattered
+        # in AFTER the norm and stay raw, matching the reference's
+        # masked_scatter over the normed embedding.
+        embeds = self.language_model.model.embed(input_ids)
         if pixel_values is None or self.vision_tower is None:
             return embeds
 
@@ -117,11 +120,40 @@ class Model(nn.Module):
 
     # ---- weights ---------------------------------------------------------
 
-    def sanitize(self, weights: Dict[str, Any]) -> Dict[str, Any]:
-        """Strip the checkpoint's leading ``model.`` from vision keys.
+    # Zero-centered RMSNorm gains in the text tower, matched by suffix because
+    # the layer index varies. ALL FOUR of the decoder layer's norms are
+    # centered, plus the final norm. The vision tower's norm1/norm2 are ordinary
+    # LayerNorms and must NOT be shifted.
+    _CENTERED_NORM_SUFFIXES = (
+        "input_layernorm.weight",
+        "post_attention_layernorm.weight",
+        "pre_feedforward_layernorm.weight",
+        "post_feedforward_layernorm.weight",
+    )
 
-        Only the vision side carries it; ``language_model.*`` is already at the
-        right depth, so a blanket strip would break the text stack.
+    @classmethod
+    def _is_centered_norm_weight(cls, key: str) -> bool:
+        if not key.startswith("language_model."):
+            return False
+        return key.endswith(cls._CENTERED_NORM_SUFFIXES) or key.endswith(
+            "model.norm.weight"
+        )
+
+    def sanitize(self, weights: Dict[str, Any]) -> Dict[str, Any]:
+        """Re-root the vision keys and fold the centered-norm ``+1`` in once.
+
+        Two things happen here:
+
+        * Only the vision side carries a leading ``model.``; ``language_model.*``
+          is already at the right depth, so a blanket strip would break the text
+          stack.
+        * Every text-tower RMSNorm gain is stored ZERO-CENTERED, so the
+          mathematical weight is ``1 + w``. Folding the ``+1`` in at load costs
+          nothing per token; skipping it runs all 209 norms at gain ~0 instead of
+          ~1, which crushes every sublayer's contribution to the residual stream.
+          The model still loads and still emits text, which makes this the
+          hardest class of port bug to spot -- it presents as degenerate
+          repetition, not as a crash.
         """
         out: Dict[str, Any] = {}
         for key, value in weights.items():
@@ -131,6 +163,10 @@ class Model(nn.Module):
                 out[key[len("model.") :]] = value
             else:
                 out[key] = value
+
+        for key, value in out.items():
+            if self._is_centered_norm_weight(key):
+                out[key] = value + 1
         return out
 
     @property

@@ -10,41 +10,44 @@ That four-norm sandwich is Gemma's. Everything else is not:
 
 * ``self_attn.gate_proj`` (heads*head_dim, hidden) gates the attention output
   elementwise before ``o_proj``. Gemma has no such projection.
-* There is no ``q_norm``/``k_norm`` anywhere in the checkpoint, unlike Gemma 3/4.
-* Attention logits use the bundle's ``qk_scale_factor`` (3.87), NOT
-  ``1/sqrt(head_dim)`` (0.0884 at head_dim 128).
+* Q and K pass through a *weightless* RMSNorm over ``head_dim`` before attention,
+  and ``qk_scale_factor`` (3.87) then multiplies Q ONLY. The checkpoint carries no
+  ``q_norm``/``k_norm`` tensors because that norm has no learned gain -- the
+  absent tensor does not mean the absent operation. SDPA still runs at the
+  conventional ``head_dim ** -0.5``.
+* Every RMSNorm gain in the text tower is stored ZERO-CENTERED: the mathematical
+  weight is ``1 + w``. The ``+1`` is folded in once at load (``Model.sanitize``).
+* The embedding lookup is itself RMSNormed (weightless). This stands in place of
+  Gemma's ``sqrt(hidden_size)`` scale -- Muse has no such scale.
 * Full-attention layers declare ``layer_rope_theta = 0`` and take NO rotary
   embedding; only the sliding layers are position-encoded.
-* The hidden state is multiplied by ``output_multiplier`` before the LM head,
-  and the logits are then tanh-softcapped at 20.0.
+* Logits are multiplied by ``output_multiplier`` and then tanh-softcapped at 20.0.
+
+Ground truth for every one of the above is the working Swift port,
+``vmlx-swift/Libraries/MLXLLM/Models/MuseGlimmerText.swift``.
 """
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx_lm.models.base import create_attention_mask
+
+# One unit-gain vector per (dim, dtype). Q/K norm runs 2x per layer across 52
+# layers on every token; rebuilding the ones tensor there would add ~104
+# allocations per decode step for a value that never changes.
+_UNIT_GAIN: Dict[tuple, mx.array] = {}
 
 
-def _resolve_qk_scale(config) -> float:
-    """Attention scale for Muse.
-
-    VMLX_MUSE_QK_SCALE_MODE selects the interpretation while the correct one is
-    being established against real output:
-      inv_sqrt_head (default) -- conventional 1/sqrt(head_dim)
-      pre_attn_scalar         -- qk_scale_factor**-0.5, the Gemma convention
-      raw                     -- qk_scale_factor used directly (produces
-                                 degenerate repetition; kept only for A/B)
-    """
-    import os
-
-    head_dim = int(config.head_dim)
-    factor = float(getattr(config, "qk_scale_factor", 0.0) or 0.0)
-    mode = os.environ.get("VMLX_MUSE_QK_SCALE_MODE", "inv_sqrt_head").strip().lower()
-    if mode == "raw" and factor > 0:
-        return factor
-    if mode == "pre_attn_scalar" and factor > 0:
-        return factor ** -0.5
-    return head_dim ** -0.5
+def _scaleless_rms_norm(x: mx.array, eps: float) -> mx.array:
+    """RMSNorm with no learned gain, over the last axis."""
+    dim = x.shape[-1]
+    key = (dim, x.dtype)
+    gain = _UNIT_GAIN.get(key)
+    if gain is None:
+        gain = mx.ones((dim,), dtype=x.dtype)
+        _UNIT_GAIN[key] = gain
+    return mx.fast.rms_norm(x, gain, eps)
 
 
 class MuseAttention(nn.Module):
@@ -54,12 +57,13 @@ class MuseAttention(nn.Module):
         self.n_heads = config.num_attention_heads
         self.n_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        # qk_scale_factor is NOT the attention scale itself. Using 3.87
-        # directly (vs 1/sqrt(128) = 0.0884, a 44x difference) saturates
-        # softmax and the model emits degenerate repetition -- observed live as
-        # "the the the the S D D D D...". Treat it the way Gemma treats
-        # query_pre_attn_scalar: an inverse-sqrt pre-attention scalar.
-        self.scale = _resolve_qk_scale(config)
+        # The conventional scale goes to SDPA; qk_scale_factor rides on top of
+        # it, on Q only, after the weightless QK-norm. No single scalar can
+        # reproduce normalize-then-scale, which is why substituting 3.87,
+        # 3.87**-0.5 and 1/sqrt(128) into SDPA all produced identical garbage.
+        self.scale = float(config.head_dim) ** -0.5
+        self.qk_scale_factor = float(getattr(config, "qk_scale_factor", 1.0) or 1.0)
+        self.rms_norm_eps = float(config.rms_norm_eps)
         self.is_sliding = config.layer_is_sliding(layer_idx)
         self.sliding_window = int(config.sliding_window or 0)
 
@@ -93,6 +97,11 @@ class MuseAttention(nn.Module):
         queries = self.q_proj(x).reshape(B, L, self.n_heads, -1).transpose(0, 2, 1, 3)
         keys = self.k_proj(x).reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
         values = self.v_proj(x).reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+
+        # Weightless per-head QK-norm, then the asymmetric factor on Q alone.
+        # Both must precede RoPE.
+        queries = _scaleless_rms_norm(queries, self.rms_norm_eps) * self.qk_scale_factor
+        keys = _scaleless_rms_norm(keys, self.rms_norm_eps)
 
         if self.rope is not None:
             offset = cache.offset if cache is not None else 0
@@ -161,6 +170,38 @@ class MuseTextModel(nn.Module):
         ]
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def embed(self, inputs: mx.array) -> mx.array:
+        """Normed embedding: a weightless RMSNorm over the raw table lookup.
+
+        Muse has no ``sqrt(hidden_size)`` embedding scale -- this norm is what
+        stands in its place, and it is deliberately kept outside the weight
+        matrix so it can never be folded in. Feeding layer 0 the raw lookup
+        leaves the residual stream at the wrong magnitude and the model emits
+        fluent-looking token soup.
+        """
+        return _scaleless_rms_norm(
+            self.embed_tokens(inputs), float(self.config.rms_norm_eps)
+        )
+
+    def _make_masks(self, h: mx.array, cache: List[Any]) -> List[Any]:
+        """One mask per attention kind, mapped onto the layers that use it.
+
+        Sliding and full layers cannot share a mask: reusing the full-attention
+        mask on the 39 sliding layers lets them attend past the 2048-token
+        window, which only diverges once the context outgrows that window.
+        """
+        window = int(getattr(self.config, "sliding_window", 0) or 0)
+        built: Dict[bool, Any] = {}
+        masks = []
+        for index, layer_cache in zip(range(len(self.layers)), cache):
+            sliding = window > 0 and self.config.layer_is_sliding(index)
+            if sliding not in built:
+                built[sliding] = create_attention_mask(
+                    h, layer_cache, window_size=window if sliding else None
+                )
+            masks.append(built[sliding])
+        return masks
+
     def __call__(
         self,
         inputs: Optional[mx.array] = None,
@@ -168,11 +209,19 @@ class MuseTextModel(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[List[Any]] = None,
     ) -> mx.array:
-        h = self.embed_tokens(inputs) if inputs_embeds is None else inputs_embeds
+        # Callers that pass inputs_embeds have already applied the embed norm
+        # (see Model.get_input_embeddings); media features scattered into that
+        # stream stay raw and must not be normed a second time.
+        h = self.embed(inputs) if inputs_embeds is None else inputs_embeds
         if cache is None:
             cache = [None] * len(self.layers)
-        for layer, layer_cache in zip(self.layers, cache):
-            h = layer(h, mask=mask, cache=layer_cache)
+        layer_masks = self._make_masks(h, cache) if mask is None else None
+        for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
+            h = layer(
+                h,
+                mask=mask if layer_masks is None else layer_masks[index],
+                cache=layer_cache,
+            )
         return self.norm(h)
 
 
@@ -194,8 +243,10 @@ class LanguageModel(nn.Module):
         cache: Optional[List[Any]] = None,
     ) -> mx.array:
         h = self.model(inputs, inputs_embeds=inputs_embeds, mask=mask, cache=cache)
-        h = h * self.config.output_multiplier
-        logits = self.lm_head(h)
+        # Multiplier lands on the logits, not the hidden state. The scalar
+        # commutes through a bias-free lm_head, but the head is quantized here
+        # so scaling after it keeps the reference's rounding.
+        logits = self.lm_head(h) * self.config.output_multiplier
         cap = float(self.config.final_logit_softcapping or 0.0)
         if cap > 0:
             logits = mx.tanh(logits / cap) * cap
@@ -217,7 +268,15 @@ class LanguageModel(nn.Module):
         caches = []
         for index in range(self.config.num_hidden_layers):
             if window > 0 and self.config.layer_is_sliding(index):
-                caches.append(RotatingKVCache(max_size=window, keep=0))
+                # step sizes the block RotatingKVCache allocates at a time, and
+                # the update writes the whole incoming chunk into it. A prefill
+                # chunk larger than step runs off the end of the freshly
+                # allocated region and trips a scatter precondition; sizing step
+                # to the window means any chunk the prefill loop can produce
+                # always fits. It is a class attribute here, not a ctor kwarg.
+                slot = RotatingKVCache(max_size=window, keep=0)
+                slot.step = window
+                caches.append(slot)
             else:
                 caches.append(KVCache())
         return caches

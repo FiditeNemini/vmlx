@@ -417,7 +417,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'gemma4_text': 'gemma4-text',
   'gemma4_unified': 'gemma4',
   'gemma4_unified_text': 'gemma4-text',
-  'muse_glimmer': 'muse-glimmer',
+  // 'muse_glimmer': 'muse-glimmer',  // re-enable with the family above
   // ── Phi family ──
   'phi3': 'phi3',
   'phi3v': 'phi3-vision',

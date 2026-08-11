@@ -747,7 +747,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 15
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 16
 
 function markCacheStackStartupDefaultsCurrent(
   config: Partial<ServerConfig>,
@@ -982,7 +982,7 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath)
     return true
   }
-  // v15: a v13/v14 session sitting at paged-OFF only because the multimodal
+  // v16: a v13/v14/v15 session sitting at paged-OFF only because the multimodal
   // paged-off override used to clear it, while detection now resolves the same
   // bundle to paged-ON (muse-glimmer joined gemma4 on the typed mixed-SWA paged
   // lane). Must be evaluated BEFORE the v12 cutoff below, which exists to stop

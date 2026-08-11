@@ -15216,6 +15216,23 @@ async def ollama_chat(fastapi_request: Request):
     if _explicit_thinking_off and messages:
         messages = _strip_prior_reasoning_for_thinking_off(messages)
 
+    # Ollama's `format` (JSON mode). The adapter already mapped it onto
+    # response_format, but THIS streaming branch builds its own chat_kwargs
+    # instead of delegating to create_chat_completion, so without these two
+    # steps the field was accepted and then dropped on the floor. Streaming is
+    # Ollama's DEFAULT, so JSON mode silently did nothing for most clients
+    # while working under `stream: false` — which reads as flaky, not broken.
+    _ollama_response_format = getattr(chat_req, "response_format", None)
+    if _ollama_response_format:
+        _json_instruction = build_json_system_prompt(_ollama_response_format)
+        if _json_instruction:
+            messages = _inject_json_instruction(messages, _json_instruction)
+        chat_kwargs["_vmlx_response_format"] = (
+            _ollama_response_format.model_dump(exclude_none=True, by_alias=True)
+            if hasattr(_ollama_response_format, "model_dump")
+            else _ollama_response_format
+        )
+
     # mlxstudio#72: stateful Ollama NDJSON translation. vMLX's
     # stream_chat_completion emits tool calls across two SSE chunks:
     #   (1) delta with complete tool_calls + finish_reason=null

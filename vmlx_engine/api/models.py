@@ -214,6 +214,12 @@ class ChatCompletionRequest(BaseModel):
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None
+    # OpenAI deprecated `max_tokens` for chat in favour of this, so current
+    # SDKs send it and nothing else. The model ignores unknown fields, so
+    # before it was declared here a client that set only
+    # `max_completion_tokens` silently got the default output cap — a
+    # truncated or runaway generation with no error anywhere.
+    max_completion_tokens: int | None = None
     stream: bool = False
     stream_options: StreamOptions | None = (
         None  # Streaming options (include_usage, etc.)
@@ -377,12 +383,33 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("top_p must be between 0 (exclusive) and 1")
         return v
 
-    @field_validator("max_tokens")
+    @field_validator("max_tokens", "max_completion_tokens")
     @classmethod
     def validate_max_tokens(cls, v):
         if v is not None and v < 1:
             raise ValueError("max_tokens must be at least 1")
         return v
+
+    @model_validator(mode="after")
+    def fold_max_completion_tokens(self):
+        """Collapse OpenAI's newer spelling onto ``max_tokens``.
+
+        Everything downstream reads ``max_tokens``; folding here means the
+        output cap, the projected-output guard and the reasoning-aware
+        fallback all see the value without each having to know both spellings.
+        Sending both with DIFFERENT values is a client bug worth surfacing
+        rather than silently picking one.
+        """
+        if self.max_completion_tokens is None:
+            return self
+        if self.max_tokens is None:
+            self.max_tokens = self.max_completion_tokens
+        elif self.max_tokens != self.max_completion_tokens:
+            raise ValueError(
+                "max_tokens and max_completion_tokens both set and disagree "
+                f"({self.max_tokens} vs {self.max_completion_tokens}); send one."
+            )
+        return self
 
     @field_validator("max_thinking_tokens")
     @classmethod

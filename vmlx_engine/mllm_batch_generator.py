@@ -6207,6 +6207,7 @@ class MLLMBatchGenerator:
                 # process still aborted. DSV4's valve solves this by adapting
                 # from OBSERVED peaks instead of predicting them; same idea here.
                 _observed_chunk_transient = 0
+                _max_active_seen = 0
                 _adaptive_chunk_cap = _tight_text_prefill_step_size
                 _prefill_keep_alloc = os.environ.get(
                     "VMLX_PREFILL_KEEP_ALLOC", ""
@@ -6304,10 +6305,16 @@ class MLLMBatchGenerator:
                             _transient = max(0, _peak - _active_before_chunk)
                             if _transient > _observed_chunk_transient:
                                 _observed_chunk_transient = _transient
+                            # Baseline must be PEAK-AWARE, not a single sample.
+                            # Active swings 26 -> 75GB inside this loop, so a
+                            # lone get_active_memory() reading is wrong by up to
+                            # 3x depending on where in the swing it lands — which
+                            # is why the first version of this still let the
+                            # process abort. Use the highest active seen so far.
                             _active_now = int(mx.get_active_memory())
-                            # Headroom for the NEXT chunk, with the same 1.25x
-                            # safety factor the DSV4 valve uses.
-                            _headroom = _limit - _active_now
+                            if _active_now > _max_active_seen:
+                                _max_active_seen = _active_now
+                            _headroom = _limit - _max_active_seen
                             if _limit > 0 and _transient > 0 and chunk_size > 0:
                                 _per_token = max(1, _transient // max(1, chunk_size))
                                 _fit = int(_headroom / 1.25) // _per_token

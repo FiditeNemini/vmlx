@@ -203,7 +203,7 @@ productionapp/vMLX.app
 productionapp/*.dmg
 /build/
 
-# Claude Code
+# Local editor/agent tooling
 .claude/
 
 # Old development artifacts (removed from main)

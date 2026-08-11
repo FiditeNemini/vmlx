@@ -791,3 +791,36 @@ def test_ollama_raw_generate_stream_maps_upstream_error_to_native_error_row():
     assert json.loads(openai_completion_chunk_to_ollama_ndjson(line, "probe")) == {
         "error": "RAW FAILURE"
     }
+
+
+def test_ollama_think_string_levels_enable_and_select_effort():
+    """Modern Ollama passes an effort *level* through `think` ("low"/"high").
+    A level must both enable thinking and select the reasoning effort, forwarded
+    through the shared reasoning_effort passthrough. Previously a level string
+    normalized to None and was silently dropped — thinking never even engaged."""
+    from vmlx_engine.api.ollama_adapter import (
+        _apply_ollama_thinking,
+        _should_forward_reasoning_effort,
+    )
+
+    for level in ("minimal", "low", "medium", "high", "xhigh", "max"):
+        body = {"think": level}
+        req: dict = {}
+        _apply_ollama_thinking(body, req)
+        if _should_forward_reasoning_effort(body, req):
+            req["reasoning_effort"] = body["reasoning_effort"]
+        assert req.get("enable_thinking") is True, level
+        assert req.get("reasoning_effort") == level, level
+
+    # Booleans still behave exactly as before.
+    for raw, expected in ((True, True), (False, False), ("none", False), ("off", False)):
+        body = {"think": raw}
+        req = {}
+        _apply_ollama_thinking(body, req)
+        assert req.get("enable_thinking") is expected, raw
+
+    # An explicit body-level reasoning_effort is not clobbered by the level.
+    body = {"think": "high", "reasoning_effort": "low"}
+    req = {}
+    _apply_ollama_thinking(body, req)
+    assert body["reasoning_effort"] == "low"

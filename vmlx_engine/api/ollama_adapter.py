@@ -47,17 +47,35 @@ def _normalize_ollama_bool(value: Any) -> bool | None:
     return None
 
 
+# Recent Ollama clients pass an effort *level* through the same ``think`` field
+# instead of a bare boolean. A level both turns thinking on and selects the
+# effort; ``none`` is an explicit opt-out. Unknown strings fall through and are
+# ignored, exactly as before.
+_OLLAMA_THINK_EFFORT_LEVELS = {"minimal", "low", "medium", "high", "xhigh", "max"}
+_OLLAMA_THINK_OFF_LEVELS = {"none", "off"}
+
+
 def _apply_ollama_thinking(body: dict, req: dict[str, Any]) -> None:
     """Normalize Ollama thinking controls into vMLX's canonical field.
 
     Omitted thinking controls stay omitted so the model's native
     tokenizer/template/runtime default decides. Native Ollama ``think:false``
-    is an explicit opt-out and must not be overwritten.
+    is an explicit opt-out and must not be overwritten. A string effort level
+    (``think:"high"``) enables thinking and selects the effort, forwarded via
+    the shared ``reasoning_effort`` passthrough below.
     """
-    think = _normalize_ollama_bool(body.get("think"))
+    raw_think = body.get("think")
+    think = _normalize_ollama_bool(raw_think)
     enable_thinking = _normalize_ollama_bool(body.get("enable_thinking"))
+    think_level = raw_think.strip().lower() if isinstance(raw_think, str) else None
     if think is not None:
         req["enable_thinking"] = think
+    elif think_level in _OLLAMA_THINK_EFFORT_LEVELS:
+        req["enable_thinking"] = True
+        # Don't clobber an explicit body-level reasoning_effort.
+        body.setdefault("reasoning_effort", think_level)
+    elif think_level in _OLLAMA_THINK_OFF_LEVELS:
+        req["enable_thinking"] = False
     elif enable_thinking is not None:
         req["enable_thinking"] = enable_thinking
     elif isinstance(body.get("chat_template_kwargs"), dict) and (

@@ -1175,3 +1175,43 @@ def test_anthropic_usage_omits_cache_fields_when_nothing_was_reused():
     usage = response["usage"]
     assert "cache_read_input_tokens" not in usage
     assert "cache_creation_input_tokens" not in usage
+
+
+def test_anthropic_budget_tokens_arms_max_thinking_tokens():
+    """`thinking.budget_tokens` must arm the real reasoning cap, not just a
+    dead template kwarg. The OpenAI Responses path maps `reasoning.budget_tokens`
+    to `max_thinking_tokens`; the Anthropic path must match, or the budget caps
+    nothing."""
+    from vmlx_engine.api.anthropic_adapter import to_chat_completion, AnthropicRequest
+
+    req = AnthropicRequest(
+        model="m",
+        max_tokens=100,
+        messages=[{"role": "user", "content": "hi"}],
+        thinking={"type": "enabled", "budget_tokens": 4096},
+    )
+    cc = to_chat_completion(req)
+    assert cc.max_thinking_tokens == 4096
+    assert cc.enable_thinking is True
+
+    # A >=32k budget also selects the discrete "max" tier for DSV4.
+    big = AnthropicRequest(
+        model="m",
+        max_tokens=100,
+        messages=[{"role": "user", "content": "hi"}],
+        thinking={"type": "enabled", "budget_tokens": 40000},
+    )
+    cc_big = to_chat_completion(big)
+    assert cc_big.max_thinking_tokens == 40000
+    assert cc_big.reasoning_effort == "max"
+
+    # Thinking disabled arms no cap.
+    off = AnthropicRequest(
+        model="m",
+        max_tokens=100,
+        messages=[{"role": "user", "content": "hi"}],
+        thinking={"type": "disabled"},
+    )
+    cc_off = to_chat_completion(off)
+    assert cc_off.max_thinking_tokens is None
+    assert cc_off.enable_thinking is False

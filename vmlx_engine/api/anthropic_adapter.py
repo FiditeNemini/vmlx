@@ -185,6 +185,7 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
     # default decides; explicit Anthropic/vMLX controls still opt in/out.
     enable_thinking: bool | None = None
     chat_template_kwargs = None
+    max_thinking_tokens: int | None = None
     _thinking_source_seen = False
     # Start with the client's chat_template_kwargs passthrough (lowest prio)
     if req.chat_template_kwargs:
@@ -211,6 +212,13 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
                 if chat_template_kwargs is None:
                     chat_template_kwargs = {}
                 chat_template_kwargs["thinking_budget"] = thinking["budget_tokens"]
+                # Arm the actual reasoning cap. The template kwarg above only
+                # informs models that read `thinking_budget`; the runtime clamp
+                # lives on `max_thinking_tokens`, exactly as the OpenAI Responses
+                # path maps `reasoning.budget_tokens` (models.py). Without this
+                # the Anthropic budget capped nothing.
+                if isinstance(thinking["budget_tokens"], int):
+                    max_thinking_tokens = thinking["budget_tokens"]
                 if thinking["budget_tokens"] >= 32768:
                     chat_template_kwargs.setdefault("reasoning_effort", "max")
         elif thinking.get("type") == "disabled":
@@ -251,6 +259,7 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
         tools=tools,
         tool_choice=tool_choice,
         enable_thinking=enable_thinking,
+        max_thinking_tokens=max_thinking_tokens,
         seed=req.seed,
         chat_template_kwargs=chat_template_kwargs,
         # Forward reasoning_effort if the ct_kwargs carry it (DSV4 "max"

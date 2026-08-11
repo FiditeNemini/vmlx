@@ -47,6 +47,31 @@ _HEADER_RE = re.compile(
 
 _ALL_MARKERS = (_START_TAG, _MESSAGE_TAG, _EOM_TAG, _EOT_TAG)
 
+# A bracketed control token, wherever it lands in visible answer text. These
+# are single vocabulary tokens — they NEVER occur in natural answer prose, so
+# scrubbing them from the visible rail has no false positives. (A recipient
+# header like ``to=self`` is deliberately NOT scrubbed here: ``to=`` is ordinary
+# prose — "reply to=me" — and a frontier ``to=`` that later resolves to a real
+# header is already held back by ``_stable_length``'s boundary grammar.)
+_MARKER_TOKEN_RE = re.compile(
+    r"<\|start\|>|<\|message\|>|<\|eom\|>|<\|eot\|>",
+)
+
+
+def _strip_answer_markers(body: str) -> str:
+    """Scrub bracketed Muse control tokens from ANSWER (``to=user``) text only.
+
+    On well-formed output the segmenter has already consumed every marker, so
+    this is a no-op. It is a backstop for the malformed / max-tokens-cut case the
+    monotonic streaming counters cannot walk back: a stray ``<|message|>`` /
+    ``<|eom|>`` that reached the stable prefix before it could be classified.
+    Applied only to the user rail — reasoning keeps its text and, crucially,
+    tool-recipient bodies stay byte-for-byte so the ATEM parser sees them
+    verbatim.
+    """
+    return _MARKER_TOKEN_RE.sub("", body)
+
+
 def _is_prefix_of(text: str, target: str) -> bool:
     return target.startswith(text)
 
@@ -225,6 +250,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         for recipient, body in _segments(model_output):
             if recipient == _SELF_RECIPIENT:
                 reasoning_parts.append(body)
+            elif recipient == _USER_RECIPIENT:
+                # The visible answer rail. Scrub any control markup that reached
+                # the stable prefix before it could be classified so a recipient
+                # header never renders in chat (streaming counters are monotonic
+                # and cannot retract an already-emitted leak).
+                content_parts.append(_strip_answer_markers(body))
             else:
                 # Tool-recipient bodies stay in content; the ATEM tool parser
                 # owns them and must see the markup verbatim.

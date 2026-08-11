@@ -26,18 +26,37 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.27] - unreleased (in-development rollup)
+## [1.6.27] - 2026-08-11
 
 ### Added
 
-- Muse Glimmer 30B runs. Its text tower, recipient-routed reasoning rail
-  (`to=self` / `to=user`) and ATEM tool dialect are live and verified on all
-  three bundles (JANG_2D / 4M / 6M). Reasoning depth is controlled by the
-  `reasoning_strength` template kwarg (low/medium/high/xhigh); this family
-  ignores `enable_thinking` and `reasoning_effort` entirely. Registered as
-  TEXT-ONLY for now — the image path is not wired yet.
+- Muse Glimmer 30B runs, with vision and video. Its text tower, windowed
+  vision tower, recipient-routed reasoning rail (`to=self` / `to=user`) and
+  ATEM tool dialect are live and verified on all three bundles
+  (JANG_2D / 4M / 6M). Single- and multi-image prompts and video clips are
+  described correctly, including temporal order. Reasoning depth is controlled
+  by the `reasoning_strength` template kwarg (low/medium/high/xhigh); this
+  family ignores `enable_thinking` and `reasoning_effort` entirely.
 
 ### Fixed
+
+- Muse video requests failed outright — the engine handed the image processor
+  a 4-D float frame array PIL cannot construct from, so every clip died with
+  "Cannot handle this data type". The processor now normalizes array frames
+  (squeeze, CHW→HWC, float→uint8) and no longer treats images and videos as
+  mutually exclusive.
+- Muse recipient markers could reach the visible answer. A bracketed control
+  token (`<|message|>`, `<|eom|>`, `<|eot|>`, `<|start|>`) that slipped into
+  the answer rail on a malformed or max-tokens-cut stream is now scrubbed from
+  visible content — a no-op on well-formed output, and never applied to
+  reasoning or to tool bodies (which the ATEM parser needs verbatim).
+- The Anthropic `thinking.budget_tokens` control armed nothing. It now maps to
+  `max_thinking_tokens` (the runtime reasoning clamp), matching the OpenAI
+  Responses `reasoning.budget_tokens` behavior, instead of only setting a
+  template kwarg no runtime reads.
+- Ollama `think` string levels (`"low"` / `"medium"` / `"high"`) were silently
+  dropped — they normalized to neither true nor false, so thinking never even
+  engaged. A level now enables thinking and selects the reasoning effort.
 
 - Muse Glimmer produced fluent nonsense. Four divergences from Gemma were
   missing from the port: the checkpoint's zero-centered RMSNorm gains were

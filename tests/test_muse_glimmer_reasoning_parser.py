@@ -313,3 +313,39 @@ class TestStreamingNeverLeaksMarkers:
         parser.reset_state()
         reasoning, content = parser.extract_reasoning("to=self<|mess")
         assert not content and not reasoning
+
+    def test_stray_control_token_scrubbed_from_answer_rail(self):
+        """A bracketed control token that reaches the answer rail is scrubbed.
+
+        Backstop for the malformed / max-tokens-cut case: markers are single
+        vocabulary tokens that never occur in natural prose, so a residual
+        ``<|eom|>`` / ``<|message|>`` in ``to=user`` text is stripped rather than
+        rendered. Well-formed output never exercises this (the segmenter has
+        already consumed every marker), so it must not change those cases.
+        """
+        parser = get_parser("muse_glimmer")()
+        parser.reset_state()
+        _reasoning, content = parser.extract_reasoning(
+            "to=user<|message|>Answer<|eom|> stray tail<|eot|>"
+        )
+        assert content is not None
+        for marker in ("<|message|>", "<|eom|>", "<|eot|>", "<|start|>"):
+            assert marker not in content
+
+    def test_tool_recipient_body_keeps_markup_verbatim(self):
+        """The scrub is answer-rail only — ATEM tool bodies stay byte-for-byte."""
+        parser = get_parser("muse_glimmer")()
+        parser.reset_state()
+        raw = 'to=atem.get_weather<|message|><atem:invoke name="x"/><|eot|>'
+        _reasoning, content = parser.extract_reasoning(raw)
+        assert content == '<atem:invoke name="x"/>'
+
+    def test_legit_to_equals_prose_survives_streaming(self):
+        """`to=` is ordinary prose — it must never be stripped or duplicated."""
+        raw = "to=user<|message|>Send it to=you and cc to=me please.<|eot|>"
+        reasoning, content = self._stream(raw)
+        final = get_parser("muse_glimmer")()
+        final.reset_state()
+        fr, fc = final.extract_reasoning(raw)
+        assert content == (fc or "")
+        assert "to=you" in content and "to=me" in content

@@ -54,6 +54,36 @@ async function main() {
     })
     console.log(JSON.stringify(info, null, 2))
   }
+  if (cmd === 'mclick') {
+    // Real mouse-event dispatch. Some surfaces (the Sessions-manager detail
+    // view and its Cache/Bench/Perf tab strip) never open from a synthetic
+    // .click(): the row listens for pointer/mouse sequences, so a bare click
+    // silently does nothing and a live check reports "not found" for a control
+    // that exists. Matches by visible text, falls back to a CSS selector.
+    const target = await page.evaluateHandle((needle) => {
+      const vis = (el) => {
+        const r = el.getBoundingClientRect()
+        return r.width > 0 && r.height > 0
+      }
+      let el = null
+      try { el = document.querySelector(needle) } catch { el = null }
+      if (!el) {
+        el = [...document.querySelectorAll('*')].find(
+          (e) => vis(e) && e.children.length === 0 &&
+                 (e.innerText || '').trim().includes(needle),
+        ) || null
+      }
+      return el
+    }, a1)
+    const box = await target.asElement()?.boundingBox()
+    if (!box) { console.error('NO_TARGET', a1); process.exit(3) }
+    const x = box.x + box.width / 2
+    const y = box.y + box.height / 2
+    await page.mouse.move(x, y)
+    await page.mouse.down()
+    await page.mouse.up()
+    console.log('MCLICKED', a1)
+  }
   if (cmd === 'click') {
     const loc = page.getByText(a1, { exact: false }).first()
     await loc.click({ timeout: 5000 })

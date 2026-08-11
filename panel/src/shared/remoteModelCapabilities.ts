@@ -1,3 +1,4 @@
+import { REASONING_EFFORT_LEVELS } from './reasoningEffortPolicy'
 export interface RemoteModelConnection {
   remoteUrl?: string
   remoteApiKey?: string
@@ -52,7 +53,7 @@ export interface RemoteDetectedConfig {
 
 type JsonRecord = Record<string, unknown>
 
-const REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
+const REASONING_EFFORTS = new Set<string>(REASONING_EFFORT_LEVELS)
 const MEDIA_MODALITIES = new Set(['audio', 'image', 'omni', 'video', 'vision'])
 
 function record(value: unknown): JsonRecord | undefined {

@@ -27,8 +27,8 @@ declare global {
           reasoningParser?: string;
           supportsThinking?: boolean;
           supportsInstructMode?: boolean;
-          supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>;
-          defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max';
+          supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>;
+          defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
           supportsThinkingBudget?: boolean;
           thinkInTemplate?: boolean;
           dsv4PoolQuantDefault?: boolean;

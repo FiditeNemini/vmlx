@@ -754,11 +754,15 @@ function markCacheStackStartupDefaultsCurrent(
   modelPath?: string,
 ): boolean {
   if (config.cacheStackStartupDefaultsVersion === CACHE_STACK_STARTUP_DEFAULTS_VERSION) return false
-  // v13 is a DSV4-only default change. If a v12 session's bundle is currently
-  // unavailable, do not consume the migration version: retry after the model
-  // path is mounted again so an untouched DSV4 default cannot be stranded in
-  // SSD-only mode. Unknown detection is equally non-authoritative.
-  if (Number(config.cacheStackStartupDefaultsVersion || 0) === 12) {
+  // Every migration from v12 onward decides what to do by DETECTING the family
+  // from the bundle, so stamping the version while the bundle is unreachable
+  // consumes the migration without performing it — permanently, because the
+  // stamp then makes the session look already-migrated. Models live on an
+  // external drive here, so "unreachable at launch" is routine, not exotic.
+  // Retry instead: leave the version alone until the path is mounted again.
+  // (This covers v12's DSV4 SSD-only case and the v16 paged-parity flip alike.)
+  const pendingVersion = Number(config.cacheStackStartupDefaultsVersion || 0)
+  if (pendingVersion >= 12 && pendingVersion < CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
     const targetPath = modelPath || config.modelPath
     if (!targetPath) return false
     try {
@@ -774,6 +778,43 @@ function markCacheStackStartupDefaultsCurrent(
     }
   }
   config.cacheStackStartupDefaultsVersion = CACHE_STACK_STARTUP_DEFAULTS_VERSION
+  return true
+}
+
+function liftStaleFlatCacheIndex(
+  config: Partial<ServerConfig>,
+  modelPath?: string,
+): boolean {
+  // The flat 1000-block index addresses only 63,936 tokens at the 64-token
+  // generic block, silently capping prefix reuse below the model's context
+  // window (Gemma 4 at 77k reported ZERO reuse on an exact repeat and ran
+  // slower than cold). The v14+ migrations lift it for EXISTING sessions, but
+  // the Create Session form still ships 1000 in its DEFAULT_CONFIG and sends it
+  // explicitly, and buildArgs then emits --max-cache-blocks 1000, which wins
+  // over the engine's own default. A renderer-side default alone cannot be
+  // trusted here, so this main-process backstop runs on every session-create
+  // path: fresh, merged-over-existing, and adopted.
+  //
+  // DSV4 keeps its own 256-token block and 4097-block (1M token) contract, and
+  // ZAYA deliberately runs a 1000-block index, so neither is lifted. If the
+  // family cannot be resolved (bundle unreachable) we leave the value alone
+  // rather than guess.
+  if (Number(config.maxCacheBlocks) !== 1000) return false
+  const target = modelPath || config.modelPath
+  if (isZayaCacheStackMigrationTarget(target)) return false
+  let family: string | undefined
+  try {
+    family = normalizeDetectedFamilyName(
+      resolveEffectiveModelFamily(
+        config.modelFamily,
+        normalizeDetectedFamilyName(detectModelConfigFromDir(String(target || '')).family),
+      ),
+    )
+  } catch {
+    return false
+  }
+  if (!family || family === 'unknown' || family === 'deepseek-v4') return false
+  config.maxCacheBlocks = indexBlocksForCapacity(config.pagedCacheBlockSize)
   return true
 }
 
@@ -1721,6 +1762,7 @@ export class SessionManager extends EventEmitter {
     applyBundleStartupDefaults(config, modelPath)
     applyMissingCacheStackStartupDefaults(config, modelPath)
     applyFamilyStartupDefaults(config, modelPath)
+    liftStaleFlatCacheIndex(config, modelPath)
     normalizeCacheStackMutualExclusion(config)
     markCacheStackStartupDefaultsCurrent(config, modelPath)
 
@@ -1746,6 +1788,10 @@ export class SessionManager extends EventEmitter {
       applyBundleStartupDefaults(merged, modelPath)
       applyMissingCacheStackStartupDefaults(merged, modelPath)
       applyFamilyStartupDefaults(merged, modelPath)
+      // The spread above lets an incoming renderer config re-introduce the flat
+      // 1000 over a value the migration just lifted, so re-run the backstop on
+      // the merged result rather than only on the incoming config.
+      liftStaleFlatCacheIndex(merged, modelPath)
       normalizeCacheStackMutualExclusion(merged)
       markCacheStackStartupDefaultsCurrent(merged, modelPath)
       db.updateSession(existing.id, {

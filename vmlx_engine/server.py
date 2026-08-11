@@ -2646,7 +2646,7 @@ def _normalize_hy3_reasoning_effort(
             return "no_think"
         if raw in {"low", "high"}:
             return raw
-        if raw in {"medium", "max", "reasoning", "thinking", "on", "true"}:
+        if raw in {"medium", "xhigh", "max", "reasoning", "thinking", "on", "true"}:
             return "high"
 
     if enable_thinking is True:

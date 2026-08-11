@@ -349,3 +349,39 @@ class TestStreamingNeverLeaksMarkers:
         fr, fc = final.extract_reasoning(raw)
         assert content == (fc or "")
         assert "to=you" in content and "to=me" in content
+
+
+class TestAnswerScrubIsNotOverbroad:
+    """An adversarial audit refuted the first scrub's two absolutes.
+
+    It deleted a control token that a CORRECT answer legitimately spelled (when
+    the reply's subject is the template itself), and it reached inside an ATEM
+    call carried on the ``to=user`` rail — corrupting a tool body. The scrub now
+    matches header STRUCTURE, so both survive while the leak class still dies.
+    """
+
+    @staticmethod
+    def _content(raw):
+        parser = get_parser("muse_glimmer")()
+        parser.reset_state()
+        _reasoning, content = parser.extract_reasoning(raw)
+        return (content or "").strip()
+
+    def test_prose_that_spells_a_control_token_is_preserved(self):
+        raw = ("to=user<|message|>Muse frames turns with the <|start|> token, "
+               "then the body.<|eot|>")
+        assert self._content(raw) == (
+            "Muse frames turns with the <|start|> token, then the body."
+        )
+
+    def test_atem_body_on_the_user_rail_is_not_corrupted(self):
+        raw = ('to=user<|message|><atem:invoke name="s">'
+               '<atem:parameter name="q">use <|start|> here</atem:parameter>'
+               '</atem:invoke><|eot|>')
+        assert "<|start|>" in self._content(raw)
+
+    def test_leaked_message_header_is_still_removed(self):
+        raw = "to=user<|message|>Answer<|eom|>assistant to=user<|message|> more<|eot|>"
+        content = self._content(raw)
+        for residue in ("assistant to=user", "<|message|>", "<|eom|>"):
+            assert residue not in content

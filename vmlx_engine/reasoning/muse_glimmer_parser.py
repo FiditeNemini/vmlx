@@ -47,29 +47,48 @@ _HEADER_RE = re.compile(
 
 _ALL_MARKERS = (_START_TAG, _MESSAGE_TAG, _EOM_TAG, _EOT_TAG)
 
-# A bracketed control token, wherever it lands in visible answer text. These
-# are single vocabulary tokens — they NEVER occur in natural answer prose, so
-# scrubbing them from the visible rail has no false positives. (A recipient
-# header like ``to=self`` is deliberately NOT scrubbed here: ``to=`` is ordinary
-# prose — "reply to=me" — and a frontier ``to=`` that later resolves to a real
-# header is already held back by ``_stable_length``'s boundary grammar.)
-_MARKER_TOKEN_RE = re.compile(
-    r"<\|start\|>|<\|message\|>|<\|eom\|>|<\|eot\|>",
+# Residue of a MESSAGE HEADER that survived into visible answer text — the
+# `<|eom|>assistant to=user<|message|>` class that rendered mid-reply. Matching
+# the whole header shape, not individual tokens, is deliberate:
+#
+#   * A lone control token is NOT proof of a leak. A well-formed answer whose
+#     subject is the template itself ("Muse frames turns with the <|start|>
+#     token") legitimately spells one, and deleting it silently corrupts a
+#     correct reply.
+#   * An ATEM call can ride the ``to=user`` rail (the template routes a
+#     tool-less recipient there), so a token-level scrub can also reach inside
+#     `<atem:parameter>` values and corrupt a tool body.
+#
+# Requiring a boundary/START marker AND at least one following header element
+# (`assistant`, `to=<recipient>`, or the `<|message|>` terminator) means only
+# genuine structure is removed. Prose keeps its text.
+_HEADER_RESIDUE_RE = re.compile(
+    r"(?:<\|eom\|>|<\|eot\|>|<\|start\|>)"
+    r"(?:\s*assistant)?"
+    r"(?:\s*to=[^\s<|]*)?"
+    r"\s*(?:<\|message\|>)?"
 )
 
 
-def _strip_answer_markers(body: str) -> str:
-    """Scrub bracketed Muse control tokens from ANSWER (``to=user``) text only.
+def _is_header_residue(match: re.Match) -> bool:
+    """True when the match carried real header structure, not a bare token."""
+    text = match.group(0)
+    tail = re.sub(r"^(?:<\|eom\|>|<\|eot\|>|<\|start\|>)", "", text, count=1)
+    return bool(tail.strip())
 
-    On well-formed output the segmenter has already consumed every marker, so
+
+def _strip_answer_markers(body: str) -> str:
+    """Remove leaked message-header structure from ANSWER (``to=user``) text.
+
+    On well-formed output the segmenter has already consumed every header, so
     this is a no-op. It is a backstop for the malformed / max-tokens-cut case the
-    monotonic streaming counters cannot walk back: a stray ``<|message|>`` /
-    ``<|eom|>`` that reached the stable prefix before it could be classified.
-    Applied only to the user rail — reasoning keeps its text and, crucially,
-    tool-recipient bodies stay byte-for-byte so the ATEM parser sees them
-    verbatim.
+    monotonic streaming counters cannot walk back. Applied only to the user rail:
+    reasoning keeps its text, and a NAMED tool recipient's body is never routed
+    through here at all, so the ATEM parser still sees it byte-for-byte.
     """
-    return _MARKER_TOKEN_RE.sub("", body)
+    return _HEADER_RESIDUE_RE.sub(
+        lambda m: "" if _is_header_residue(m) else m.group(0), body
+    )
 
 
 def _is_prefix_of(text: str, target: str) -> bool:

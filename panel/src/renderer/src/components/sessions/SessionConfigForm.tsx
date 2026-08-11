@@ -139,7 +139,10 @@ export const DEFAULT_CONFIG: SessionConfig = {
   noMemoryAwareCache: false,
   usePagedCache: false,
   pagedCacheBlockSize: 64,
-  maxCacheBlocks: 1000,
+  // 4097 blocks x 64 tokens = 262,144 indexable tokens. The old flat 1000
+  // addressed only 63,936 and silently capped prefix reuse; the main process
+  // also backstops this on every create path.
+  maxCacheBlocks: 4097,
   kvCacheQuantization: 'auto',
   kvCacheGroupSize: 64,
   omniBackend: 'stage1',

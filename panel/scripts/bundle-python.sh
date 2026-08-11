@@ -139,6 +139,29 @@ check_local_jang_source_clean() {
     fi
   fi
 
+  # Dirty is not the only way to ship the wrong runtime. A CLEAN checkout that
+  # is simply behind origin/main passes every check above and silently bundles
+  # a stale JANG — that is how a release went out with the pre-fix DSV4 decode
+  # path, from a long-lived feature branch that looked perfectly healthy.
+  if [ "${VMLX_ALLOW_STALE_JANG_SOURCE:-0}" = "1" ]; then
+    echo "    WARNING: VMLX_ALLOW_STALE_JANG_SOURCE=1 — not checking jang-tools freshness" >&2
+  elif git -C "$JANG_LOCAL" rev-parse --verify --quiet origin/main >/dev/null; then
+    local behind
+    behind="$(git -C "$JANG_LOCAL" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
+    if [ "${behind:-0}" -gt 0 ]; then
+      echo "ERROR: RELEASE BLOCKED — jang-tools source is $behind commit(s) behind origin/main" >&2
+      echo "       source: $JANG_LOCAL" >&2
+      echo "       branch: $(git -C "$JANG_LOCAL" rev-parse --abbrev-ref HEAD)" >&2
+      echo "       Bundling a stale checkout ships an old JANG runtime while every" >&2
+      echo "       version string still reads correct. Point VMLX_JANG_TOOLS_SOURCE at a" >&2
+      echo "       clean checkout at origin/main, or set VMLX_ALLOW_STALE_JANG_SOURCE=1" >&2
+      echo "       for local smoke builds only." >&2
+      exit 1
+    fi
+  else
+    echo "    WARNING: no origin/main ref in $JANG_LOCAL — cannot verify jang-tools freshness" >&2
+  fi
+
   JANG_SOURCE_COMMIT="$(git -C "$JANG_LOCAL" rev-parse HEAD)"
   JANG_SOURCE_VERSION="$(
     sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \

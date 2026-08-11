@@ -181,6 +181,7 @@ def _stable_length(text: str) -> int:
                 hold = max(hold, size)
                 break
 
+
     # 2. A header that has OPENED but not yet reached its <|message|>. The
     #    recipient decides which rail the following body belongs to, so nothing
     #    from the header start onward can be classified until it terminates.
@@ -189,18 +190,30 @@ def _stable_length(text: str) -> int:
     #    or immediately after <|eom|> / <|eot|> / <|start|>. Anchoring on those
     #    is what keeps ordinary prose containing "assistant" or "to=" from
     #    being mistaken for a header and held back forever.
+    #    The hold runs from the BOUNDARY MARKER ITSELF, not merely from the text
+    #    after it. A terminator is only structure if a header follows it; if
+    #    ordinary prose follows, _strip_answer_markers keeps it as text. That
+    #    verdict is not available until the header either completes or fails, so
+    #    releasing `<|eom|>` the moment one character lands behind it publishes a
+    #    marker the monotonic counters can never retract — the
+    #    `<|eom|>assistant to=user` leak seen live in chat.
     boundary = 0
+    marker_start = 0
     for opener in (_EOM_TAG, _EOT_TAG, _START_TAG):
         found = text.rfind(opener)
         if found >= 0:
-            boundary = max(
-                boundary,
-                found if opener is _START_TAG else found + len(opener),
-            )
+            after = found if opener is _START_TAG else found + len(opener)
+            # Strictly greater, so that `<|eom|><|start|>` — where the terminator
+            # and the start tag resolve to the SAME boundary — keeps the hold
+            # anchored on the terminator. Ties broken the other way released the
+            # `<|eom|>` sitting behind the start tag straight into chat.
+            if after > boundary:
+                boundary = after
+                marker_start = found
     pending = text[boundary:]
     if _MESSAGE_TAG not in pending and _viable_header_prefix(pending):
         # This message's header is still arriving.
-        hold = max(hold, len(pending))
+        hold = max(hold, len(text) - marker_start)
 
     return max(0, len(text) - hold)
 
@@ -226,6 +239,13 @@ def _segments(text: str) -> list[tuple[str, str]]:
         return [(_USER_RECIPIENT, text)]
 
     lead = text[: matches[0].start()]
+    # Leading text is a message body like any other, so a terminator ends it.
+    # Here the terminator is unambiguously structure — a header follows it — so
+    # cutting is safe, and not cutting rendered `<|eom|>` mid-chat.
+    for terminator in (_EOM_TAG, _EOT_TAG):
+        cut = lead.find(terminator)
+        if cut >= 0:
+            lead = lead[:cut]
     # Bare "<|start|>assistant" with no <|message|> yet is just the header the
     # prompt already emitted; it is not answer text.
     lead_clean = lead.replace(_START_TAG, "").replace("assistant", "").strip()

@@ -25,6 +25,28 @@ from .language import LanguageModel
 from .vision import MuseVisionAdapter, VisionModel
 
 
+def _as_grid_list(grid_thw: Any) -> List[tuple]:
+    """Normalize a grid_thw into a list of (t, h, w) int triples.
+
+    Callers hand this over as an mx.array, a numpy array, a list of triples or
+    a single flat triple depending on which surface they came through, and a
+    silently mis-parsed grid scrambles every downstream index.
+    """
+    if grid_thw is None:
+        return []
+    if hasattr(grid_thw, "tolist"):
+        grid_thw = grid_thw.tolist()
+    if isinstance(grid_thw, (list, tuple)):
+        if not grid_thw:
+            return []
+        first = grid_thw[0]
+        if isinstance(first, (list, tuple)):
+            return [tuple(int(v) for v in row) for row in grid_thw]
+        if len(grid_thw) == 3:
+            return [tuple(int(v) for v in grid_thw)]
+    raise ValueError(f"Muse Glimmer: unrecognised grid_thw {grid_thw!r}")
+
+
 class Model(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -53,6 +75,8 @@ class Model(nn.Module):
         input_ids: Optional[mx.array] = None,
         pixel_values: Optional[mx.array] = None,
         position_ids: Optional[mx.array] = None,
+        image_grid_thw: Optional[Any] = None,
+        video_grid_thw: Optional[Any] = None,
         **kwargs,
     ) -> mx.array:
         # Normed lookup (see MuseTextModel.embed). Media features are scattered
@@ -62,8 +86,21 @@ class Model(nn.Module):
         if pixel_values is None or self.vision_tower is None:
             return embeds
 
-        features = self.vision_tower(pixel_values, position_ids=position_ids)
-        features = self.vision_projection(self.vision_adapter(features))
+        grid_thw = image_grid_thw if image_grid_thw is not None else video_grid_thw
+        if grid_thw is None:
+            grid_thw = kwargs.get("grid_thw")
+        grid_thw = _as_grid_list(grid_thw)
+        if not grid_thw:
+            raise ValueError(
+                "Muse Glimmer received pixel_values without a grid_thw. Positions, "
+                "rotary and the window partition are all defined over the patch "
+                "grid, so it cannot be inferred from the pixel tensor alone."
+            )
+
+        features = self.vision_tower(pixel_values, grid_thw=grid_thw)
+        features = self.vision_projection(
+            self.vision_adapter(features, grid_thw=grid_thw)
+        )
         return self._scatter_media(input_ids, embeds, features)
 
     def _scatter_media(
@@ -113,6 +150,9 @@ class Model(nn.Module):
             input_ids=input_ids,
             pixel_values=pixel_values,
             position_ids=kwargs.get("vision_position_ids"),
+            image_grid_thw=kwargs.get("image_grid_thw"),
+            video_grid_thw=kwargs.get("video_grid_thw"),
+            grid_thw=kwargs.get("grid_thw"),
         )
         return self.language_model(
             inputs=None, inputs_embeds=inputs_embeds, mask=mask, cache=cache

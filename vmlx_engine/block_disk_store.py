@@ -546,42 +546,52 @@ class BlockDiskStore:
             if not locked:
                 return False
             hash_hex = block_hash.hex()
-            try:
-                row = self._read_conn.execute(
-                    "SELECT file_name FROM blocks WHERE block_hash = ?",
-                    (hash_hex,),
-                ).fetchone()
-            except sqlite3.OperationalError:
-                self._thread_local.read_conn = sqlite3.connect(
-                    str(self._db_path),
-                    timeout=1.0,
-                )
-                row = self._read_conn.execute(
-                    "SELECT file_name FROM blocks WHERE block_hash = ?",
-                    (hash_hex,),
-                ).fetchone()
+            row, _ok = self._query_index_row(
+                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                (hash_hex,),
+            )
             return bool(
                 row is not None
                 and self._indexed_payload_is_readable(str(row[0]))
             )
 
-    def _has_block_guarded(self, block_hash: bytes) -> bool:
-        """Guarded implementation of :meth:`has_block`."""
-        hash_hex = block_hash.hex()
+    def _query_index_row(self, sql: str, params: tuple):
+        """Run an index query, reconnecting once, and NEVER raise.
+
+        The reconnect was itself unprotected: under fd exhaustion
+        ``sqlite3.connect`` raises OperationalError("unable to open database
+        file") and the exception escaped its caller. From ``write_block_async``
+        that skipped the fence settle, leaving ``_active`` stuck above zero
+        forever — the fence never becomes ready, never terminalizes, is never
+        pruned (unfinished fences are retained by design), and at the 64-fence
+        cap ``begin_write_fence`` starts raising. Its caller catches that, warns,
+        and proceeds with ``disk_write_fence_id=None``, so EVERY later request
+        writes unfenced for the life of the process.
+
+        Returning "no row" is the safe answer: it costs a cache miss, and the
+        block is found again once the descriptor storm passes.
+        """
         try:
-            row = self._read_conn.execute(
-                "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
-                (hash_hex,),
-            ).fetchone()
+            return self._read_conn.execute(sql, params).fetchone(), True
         except sqlite3.OperationalError:
+            pass
+        try:
             self._thread_local.read_conn = sqlite3.connect(
                 str(self._db_path),
                 timeout=1.0,
             )
-            row = self._read_conn.execute(
-                "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
-                (hash_hex,),
-            ).fetchone()
+            return self._read_conn.execute(sql, params).fetchone(), True
+        except sqlite3.Error as exc:
+            logger.warning(f"Block index unavailable ({exc}); treating as a miss")
+            return None, False
+
+    def _has_block_guarded(self, block_hash: bytes) -> bool:
+        """Guarded implementation of :meth:`has_block`."""
+        hash_hex = block_hash.hex()
+        row, _ok = self._query_index_row(
+            "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
+            (hash_hex,),
+        )
         if row is None:
             return False
         file_path = self.cache_dir / row[0]
@@ -698,18 +708,12 @@ class BlockDiskStore:
 
         hash_hex = block_hash.hex()
 
-        try:
-            row = self._read_conn.execute(
-                "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
-                (hash_hex,)
-            ).fetchone()
-        except sqlite3.OperationalError:
-            # Connection might be stale after writer vacuum — reconnect
-            self._thread_local.read_conn = sqlite3.connect(str(self._db_path), timeout=1.0)
-            row = self._read_conn.execute(
-                "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
-                (hash_hex,)
-            ).fetchone()
+        # Connection might be stale after a writer vacuum — reconnect once, and
+        # degrade to a miss rather than raising if the reconnect also fails.
+        row, _ok = self._query_index_row(
+            "SELECT file_name, dtype FROM blocks WHERE block_hash = ?",
+            (hash_hex,),
+        )
 
         if row is None:
             with self._stats_lock:
@@ -1535,6 +1539,16 @@ class BlockDiskStore:
 
         if not self._begin_write_producer():
             return False
+        # Every settle path inside RETURNS, so an exception that escapes means a
+        # producer was registered on the fence and never accounted for. That
+        # leaves _active stuck above zero: the fence never becomes ready, never
+        # terminalizes, and is never pruned (unfinished fences are retained by
+        # design), so at the 64-fence cap begin_write_fence starts raising —
+        # which its caller catches, warns about, and continues past with
+        # disk_write_fence_id=None. Every later request then writes UNFENCED for
+        # the life of the process, and pins held by the leaked fence's earlier
+        # writes keep their bytes un-evictable.
+        registered: list[str] = []
         try:
             return self._write_block_async_admitted(
                 block_hash,
@@ -1544,7 +1558,12 @@ class BlockDiskStore:
                 request_id=request_id,
                 fence_id=fence_id,
                 replace_existing=replace_existing,
+                _registered=registered,
             )
+        except BaseException:
+            if registered:
+                self._write_fence_queue_result(fence_id, failed=True)
+            raise
         finally:
             self._end_write_producer()
 
@@ -1558,6 +1577,7 @@ class BlockDiskStore:
         request_id: Optional[str] = None,
         fence_id: Optional[str] = None,
         replace_existing: bool = False,
+        _registered: Optional[list] = None,
     ) -> bool:
         """
         Detach a block on the model-owning thread and queue disk publication.
@@ -1583,6 +1603,10 @@ class BlockDiskStore:
         """
         if fence_id:
             tracked = self._write_fence_expected(fence_id)
+            if tracked and _registered is not None:
+                # A producer is now owed an accounting entry. The caller settles
+                # it if anything below escapes instead of returning.
+                _registered.append(str(fence_id))
         else:
             tracked = False
             if not self._maybe_recover_global_budget_writes():

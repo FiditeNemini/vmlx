@@ -1101,23 +1101,95 @@ def test_dsv4_paged_on_refault_can_exceed_l1_cap_transiently_then_releases():
     )
 
 
-def test_dsv4_longest_match_uses_periodic_anchor_and_replays_matched_tail():
+def _nine_blocks_with_terminal_tail():
+    """9 aligned blocks (2304 tokens); only the last is stamped terminal."""
+    return [
+        SimpleNamespace(token_count=256, cache_data=_topology_block(i, terminal=i == 8))
+        for i in range(9)
+    ]
+
+
+def _normalize(blocks, request_tokens, request_id, matched_tokens=2304):
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache
 
     cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
     cache._expected_num_layers = 43
-    blocks = [
-        SimpleNamespace(token_count=256, cache_data=_topology_block(i, terminal=i == 8))
-        for i in range(9)
-    ]
-    request_tokens = list(range(2304)) + [90_001, 90_002]
-
-    kept, checkpoint, replayed = cache._normalize_dsv4_delta_candidate(
-        request_id="dsv4-partial",
+    return cache._normalize_dsv4_delta_candidate(
+        request_id=request_id,
         blocks=blocks,
-        matched_tokens=2304,
+        matched_tokens=matched_tokens,
         request_tokens=request_tokens,
         disk_store=None,
+    )
+
+
+def test_dsv4_suffix_within_tail_budget_prefers_the_terminal_anchor():
+    """A 2-token suffix rides the terminal anchor rather than falling back.
+
+    A terminal anchor is the exact captured state at `matched` tokens and the
+    chain hash already proves those tokens are a prefix of this request, so
+    continuing forward from it is state-machine-identical to the original pass
+    having received the extra tokens. Choosing the periodic anchor instead is
+    not "safer" — it re-derives 256 tokens with fresh chunk boundaries, which
+    is strictly MORE numerical drift than the bitwise continuation.
+
+    This asserted the periodic fallback until the tail budget defaulted on.
+    """
+    kept, checkpoint, replayed = _normalize(
+        _nine_blocks_with_terminal_tail(),
+        list(range(2304)) + [90_001, 90_002],
+        "dsv4-tail-within-budget",
+    )
+
+    assert len(kept) == 9
+    assert checkpoint == 2304
+    assert replayed == 0
+
+
+def test_dsv4_suffix_at_the_tail_budget_still_takes_the_terminal_anchor():
+    kept, checkpoint, replayed = _normalize(
+        _nine_blocks_with_terminal_tail(),
+        list(range(2304)) + [90_001, 90_002, 90_003, 90_004],
+        "dsv4-tail-at-budget",
+    )
+
+    assert len(kept) == 9
+    assert checkpoint == 2304
+    assert replayed == 0
+
+
+def test_dsv4_suffix_past_the_tail_budget_falls_back_to_the_periodic_anchor():
+    """One token past the budget must fall back — pins the boundary itself.
+
+    The budget is a POLICY throttle, not a correctness boundary: nothing makes
+    a 4-token suffix sound and a 5-token suffix unsound. It bounds which
+    anchors may be admitted while the widened path banks confidence.
+    """
+    kept, checkpoint, replayed = _normalize(
+        _nine_blocks_with_terminal_tail(),
+        list(range(2304)) + [90_001, 90_002, 90_003, 90_004, 90_005],
+        "dsv4-tail-past-budget",
+    )
+
+    assert len(kept) == 8
+    assert checkpoint == 2048
+    assert replayed == 256
+
+
+def test_dsv4_terminal_anchor_tail_budget_zero_restores_historical_behaviour(
+    monkeypatch,
+):
+    """The env override must reach SELECTION, not just the helper.
+
+    The existing budget tests assert the helper's return value and grep the
+    source; neither proves the value is honoured where anchors are chosen.
+    """
+    monkeypatch.setenv("VMLX_DSV4_TERMINAL_ANCHOR_TAIL", "0")
+
+    kept, checkpoint, replayed = _normalize(
+        _nine_blocks_with_terminal_tail(),
+        list(range(2304)) + [90_001, 90_002],
+        "dsv4-tail-budget-disabled",
     )
 
     assert len(kept) == 8

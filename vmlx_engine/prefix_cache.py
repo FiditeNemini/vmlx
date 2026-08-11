@@ -3040,9 +3040,18 @@ class BlockAwarePrefixCache:
         # re-prefills 215 tokens for 5.8s — 53% of the whole decode span — to
         # change ONE token (<think> -> </think>). Both passes pay it.
         #
-        # Gated because DSV4 records are path-dependent and this widens which
-        # anchors may be restored. VMLX_DSV4_TERMINAL_ANCHOR_TAIL sets the
-        # permitted suffix length; 0 or unset keeps the historical <= 1.
+        # The budget is a POLICY THROTTLE, not a correctness boundary. Nothing
+        # in the restore path makes a 4-token suffix sound and a 5-token suffix
+        # unsound: `terminal` already requires a complete record (see the
+        # boundary scan above), a terminal payload is built by the same
+        # export_block_delta as a periodic one, and selection can never admit a
+        # boundary ahead of the chain-hash-verified `matched`. Restoring at a
+        # captured boundary and moving forward never rewinds path-dependent
+        # state — it is the periodic FALLBACK that re-derives tokens under
+        # fresh chunk boundaries and so drifts further from the original pass.
+        # The bound exists only to keep the widened path's blast radius small.
+        # VMLX_DSV4_TERMINAL_ANCHOR_TAIL sets the permitted suffix length;
+        # 0 restores the historical <= 1.
         _terminal_tail_budget = _dsv4_terminal_anchor_tail_budget()
         allow_terminal = len(request_tokens) - matched <= max(1, _terminal_tail_budget)
         selected: Optional[Tuple[int, int, bool, bool, bool]] = None

@@ -1252,10 +1252,19 @@ function applyConfigMetadataOverrides(
   // so M3 flows through the normal multimodal paged-off path and relies on its
   // native MSA cache + the M3-aware prefix/block-disk L2 tier. gemma4 stays
   // excluded (its typed mixed-SWA paged lane is proven).
+  // muse-glimmer is excluded for the same reason as gemma4: it rides that same
+  // typed mixed-SWA paged lane, and the engine already exempts muse_glimmer in
+  // _PAGED_MLLM_EXEMPT_FAMILIES (cli.py) so a bare CLI launch runs PAGED. Without
+  // the exclusion here the app cleared usePagedCache and spawned the engine with
+  // --no-paged-cache, so the UI ran unpaged while the CLI ran paged — observed
+  // live on JANG_4M (app engine argv --no-paged-cache vs bare CLI reporting
+  // paged+mixed_swa+disk+tq-native). That is the exact divergence both lists
+  // exist to prevent.
   if (
     next.isMultimodal === true &&
     !next.forceTextOnly &&
     next.family !== 'gemma4' &&
+    next.family !== 'muse-glimmer' &&
     (next.cacheType === 'kv' || next.cacheType === 'rotating_kv') &&
     next.cacheSubtype !== 'step3p7_full_sliding_kv'
   ) {

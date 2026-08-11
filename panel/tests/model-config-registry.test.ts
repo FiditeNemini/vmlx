@@ -2260,6 +2260,18 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     expect(detected.supportsInstructMode).toBeUndefined()
   })
 
+  it('keeps Muse paged-ON so the app matches the engine paged-exempt set', () => {
+    // vmlx_engine/cli.py _PAGED_MLLM_EXEMPT_FAMILIES contains muse_glimmer, so a
+    // bare CLI launch runs PAGED. The multimodal paged-off override must not
+    // clear it here or the app spawns --no-paged-cache and diverges from the CLI.
+    const dir = makeModelDir({ model_type: 'muse_glimmer' })
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('muse-glimmer')
+    expect(detected.isMultimodal).toBe(true)
+    expect(detected.usePagedCache).toBe(true)
+  })
+
   it('surfaces Muse reasoning_strength modes as effort buttons (no reasoning_effort_levels)', () => {
     // Muse Glimmer declares control: reasoning_strength with modes but NO
     // reasoning_effort_levels; the panel must still show the four strength

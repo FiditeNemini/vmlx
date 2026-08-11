@@ -197,6 +197,16 @@ ensure_mamba_support()
 # Error patterns that indicate cache corruption (must be specific to avoid
 # matching unrelated errors — e.g., "cache" alone would match any error
 # mentioning cache files, directories, or variables).
+# Force the generation-prompt strip OFF for every family, not just the
+# mixed-SWA / openpangu models that hard-disable it. The strip replays suffix
+# tokens from an earlier cache boundary, which is documented to cause small
+# distribution drift on MiMo V2.5; this switch is how that can be MEASURED on
+# any other strip-active family instead of assumed.
+_GEN_PROMPT_STRIP_DISABLED = os.environ.get(
+    "VMLX_DISABLE_GEN_PROMPT_STRIP", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
 CACHE_CORRUPTION_PATTERNS = [
     "'NoneType' object is not subscriptable",
     "BatchKVCache",
@@ -5448,6 +5458,13 @@ class Scheduler:
             # cache key for strict logprob equivalence. Stripping the generation
             # prompt replays several suffix tokens from an earlier RotatingKV
             # boundary; MiMo V2.5 shows small but real distribution drift there.
+            _gpl_fetch = 0
+        elif _GEN_PROMPT_STRIP_DISABLED:
+            # Same reasoning, forced on for ANY family. Exists because the drift
+            # above was only ever established on MiMo V2.5, and whether a given
+            # strip-active family pays it is a measurement nobody could run
+            # without a switch. Costs prefix reuse across generation-prompt
+            # variants, so it is opt-in.
             _gpl_fetch = 0
         if 0 < _gpl_fetch < len(_full_tokens_list):
             _fetch_tokens = _full_tokens_list[:-_gpl_fetch]

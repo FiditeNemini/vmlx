@@ -26,6 +26,20 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.28] - 2026-08-11
+
+### Fixed
+
+- Muse Glimmer failed to load on a fresh `pip install vmlx`. mlx-vlm 0.6 began
+  shipping its own `muse_glimmer` package, and vMLX handed the namespace to it
+  on sight — but upstream names its preprocessing module differently, so the
+  server exited with a missing-module error before it could start, and had it
+  started it would have used a forward pass without this port's corrections.
+  vMLX now keeps its own validated runtime unless an upstream package genuinely
+  provides the same interface. The macOS app was never affected: it pins the
+  older mlx-vlm that has no upstream package, which is why the app tested clean
+  while the published wheel did not.
+
 ## [1.6.27] - 2026-08-11
 
 ### Added

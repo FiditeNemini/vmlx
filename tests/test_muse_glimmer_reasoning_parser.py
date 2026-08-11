@@ -151,3 +151,40 @@ class TestStreaming:
         parser.reset_state()
         again = parser.extract_reasoning_streaming("", text, text)
         assert again is not None and again.reasoning == "A."
+
+
+class TestServerContract:
+    """The server calls reset_state with keywords every parser must tolerate.
+
+    Missing **kwargs turned EVERY Muse chat request into a 500:
+    "MuseGlimmerReasoningParser.reset_state() got an unexpected keyword
+    argument 'think_in_prompt'". Load-testing caught it; unit tests had not,
+    because they called reset_state() bare.
+    """
+
+    def test_reset_state_accepts_the_server_keywords(self, parser):
+        parser.reset_state(think_in_prompt=False, harmony_active=False)
+        parser.reset_state(think_in_prompt=True, harmony_active=True)
+        parser.reset_state()
+
+    def test_reset_state_still_clears_counters_with_keywords(self, parser):
+        text = " to=self<|message|>A.<|eom|>"
+        parser.extract_reasoning_streaming("", text, text)
+        parser.reset_state(think_in_prompt=False, harmony_active=False)
+        again = parser.extract_reasoning_streaming("", text, text)
+        assert again is not None and again.reasoning == "A."
+
+    def test_matches_the_base_class_signature(self):
+        """Any future parser method the server calls must stay keyword-tolerant."""
+        import inspect
+
+        from vmlx_engine.reasoning.base import ReasoningParser
+        from vmlx_engine.reasoning.muse_glimmer_parser import (
+            MuseGlimmerReasoningParser,
+        )
+
+        base = inspect.signature(ReasoningParser.reset_state)
+        mine = inspect.signature(MuseGlimmerReasoningParser.reset_state)
+        base_var_kw = any(p.kind is p.VAR_KEYWORD for p in base.parameters.values())
+        mine_var_kw = any(p.kind is p.VAR_KEYWORD for p in mine.parameters.values())
+        assert base_var_kw and mine_var_kw, "reset_state must accept **kwargs"

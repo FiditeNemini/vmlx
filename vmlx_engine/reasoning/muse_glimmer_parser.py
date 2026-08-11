@@ -84,7 +84,14 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         super().__init__(tokenizer)
         self.reset_state()
 
-    def reset_state(self) -> None:
+    def reset_state(self, **kwargs) -> None:
+        """Reset per-request counters.
+
+        Must accept **kwargs: the server passes ``think_in_prompt`` and
+        ``harmony_active`` to every reasoning parser. Neither applies to Muse —
+        its rail is chosen by recipient at generation time, not opened by the
+        prompt — but refusing the keywords turns every chat request into a 500.
+        """
         self._emitted_reasoning = 0
         self._emitted_content = 0
 

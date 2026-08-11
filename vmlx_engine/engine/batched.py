@@ -52,6 +52,9 @@ _SIMPLE_MLLM_STREAM_TLS = _threading.local()
 
 logger = logging.getLogger(__name__)
 
+# Distinct generation-prompt key failures already warned about (warn once each).
+_GEN_PROMPT_KEY_FAILURES: set[str] = set()
+
 
 def _generation_prompt_cache_extra_key(
     *,
@@ -1437,7 +1440,19 @@ class BatchedEngine(BaseEngine):
                 tokens_without_generation=tokens_without,
             )
         except Exception as e:
-            logger.debug(f"Failed to compute gen_prompt_len: {e}")
+            # Falling back to no extra key puts this request in a DIFFERENT cache
+            # namespace than sibling turns that computed one, so the shared prefix
+            # cannot be reused and the whole prompt re-prefills. That is invisible
+            # at debug level, so warn once per distinct failure.
+            signature = f"{type(e).__name__}:{e}"
+            if signature not in _GEN_PROMPT_KEY_FAILURES:
+                _GEN_PROMPT_KEY_FAILURES.add(signature)
+                logger.warning(
+                    "Could not compute the generation-prompt cache key (%s). This "
+                    "request falls back to the un-keyed cache namespace, so it "
+                    "cannot share cached blocks with turns that did compute one.",
+                    signature,
+                )
             return 0, None
 
     def _compute_gen_prompt_len(

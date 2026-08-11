@@ -150,7 +150,7 @@ export interface ChatOverrides {
   builtinToolsEnabled?: boolean;
   workingDirectory?: string;
   enableThinking?: boolean; // tri-state: undefined=Auto, true=On, false=Off
-  reasoningEffort?: string; // 'low' | 'medium' | 'high' | 'max' | undefined=Auto
+  reasoningEffort?: string; // a canonical REASONING_EFFORT_LEVELS value; undefined=Auto
   hideToolStatus?: boolean;
   webSearchEnabled?: boolean;
   braveSearchEnabled?: boolean;

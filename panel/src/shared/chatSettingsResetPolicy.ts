@@ -13,7 +13,7 @@ export interface ChatSettingsResetOverrides {
   builtinToolsEnabled?: boolean
   workingDirectory?: string
   enableThinking?: boolean
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max' | string
+  reasoningEffort?: string
   hideToolStatus?: boolean
   webSearchEnabled?: boolean
   braveSearchEnabled?: boolean

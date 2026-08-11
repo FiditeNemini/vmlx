@@ -6,6 +6,7 @@ import {
   sanitizeTopKOverride,
   sanitizeTopPOverride,
 } from '../shared/samplingParameterDomain'
+import { REASONING_EFFORT_LEVELS } from '../shared/reasoningEffortPolicy'
 
 export interface ChatOverridePolicyInput {
   chatId: string
@@ -73,7 +74,10 @@ const CHAT_OVERRIDE_BOOLEAN_KEYS = [
 ] as const
 
 const CHAT_OVERRIDE_WIRE_APIS = new Set(['completions', 'responses'])
-const CHAT_OVERRIDE_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
+// Derived from the canonical list, never hand-rolled: a local copy silently
+// DROPS any newly supported level on save. That is what kept Muse's 'xhigh'
+// from persisting even though the button rendered and the engine honoured it.
+const CHAT_OVERRIDE_REASONING_EFFORTS = new Set<string>(REASONING_EFFORT_LEVELS)
 
 export const CHAT_TOP_K_HARD_MAX = TOP_K_MAX
 

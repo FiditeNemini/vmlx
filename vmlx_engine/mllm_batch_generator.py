@@ -6274,7 +6274,29 @@ class MLLMBatchGenerator:
                             f"[cache: {', '.join(_cache_diag)}]"
                         )
                         raise
+                    if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
+                        try:
+                            _m_fwd = mx.get_active_memory() / (1024**3)
+                        except Exception:  # noqa: BLE001
+                            _m_fwd = -1.0
                     _materialize_prefill_cache_state(cache)
+                    if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
+                        # WHERE does the memory fail to come back? Read active
+                        # at each stage of one chunk. The stage whose delta is
+                        # not released by clear_cache is the leak.
+                        try:
+                            _m_mat = mx.get_active_memory() / (1024**3)
+                            _cache_nb = sum(
+                                int(getattr(_s, "nbytes", 0) or 0) for _s in (cache or [])
+                            ) / (1024**3)
+                            logger.info(
+                                "hybrid-prefill-stage chunk=%d processed=%d "
+                                "after_fwd=%.2fGB after_materialize=%.2fGB "
+                                "cache_slots=%.2fGB",
+                                chunk_num, processed, _m_fwd, _m_mat, _cache_nb,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     if _HYBRID_ADAPTIVE_CHUNK and _active_before_chunk > 0:
                         try:
                             _peak = int(mx.get_peak_memory())

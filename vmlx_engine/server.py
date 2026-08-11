@@ -18186,6 +18186,23 @@ def _responses_output_is_reasoning_only(output_items: list) -> bool:
     ) and not _responses_output_has_visible_or_tool(output_items)
 
 
+def _stable_replayed_call_id(name: Any, arguments: Any, ordinal: int) -> str:
+    """A tool-call id that is identical every time the SAME history is replayed.
+
+    Responses replay rebuilds assistant turns from client-supplied `function_call`
+    items. When such an item carries no `call_id`, minting a fresh uuid4 gave the
+    call a DIFFERENT id on every request — and chat templates that render the id
+    (gemma4's does) then produce different prompt bytes each turn, so the prefix
+    cache goes cold from the first historical tool call onward for the rest of the
+    conversation. Deriving the fallback from the call's own content keeps replay
+    byte-stable; the ordinal disambiguates two identical calls in one turn.
+
+    Only for REPLAYED history. A newly generated call still gets a random id.
+    """
+    payload = f"{ordinal}\x00{name}\x00{arguments}"
+    return f"call_{hashlib.sha256(payload.encode('utf-8', 'replace')).hexdigest()[:8]}"
+
+
 def _responses_tool_arguments_for_history(arguments: Any) -> dict:
     """Normalize Responses function arguments for native chat templates.
 
@@ -18221,7 +18238,9 @@ def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
             arguments = _responses_tool_arguments_for_history(
                 _responses_field(item, "arguments", "{}")
             )
-            call_id = _responses_field(item, "call_id") or f"call_{uuid.uuid4().hex[:8]}"
+            call_id = _responses_field(item, "call_id") or _stable_replayed_call_id(
+                name, arguments, len(tool_calls)
+            )
             tool_calls.append(
                 {
                     "id": call_id,
@@ -19024,6 +19043,10 @@ def _responses_input_to_messages(
             messages.append(pending_visible_assistant)
             pending_visible_assistant = None
 
+    # Ordinal disambiguates two identical replayed calls in one turn while
+    # keeping the derived id stable across requests.
+    _replayed_call_ordinal = [0]
+
     for item in input_data:
         if not isinstance(item, dict):
             if hasattr(item, "role"):
@@ -19064,7 +19087,10 @@ def _responses_input_to_messages(
 
         # function_call → assistant message with single tool_call
         if item_type == "function_call":
-            call_id = item.get("call_id", f"call_{uuid.uuid4().hex[:8]}")
+            call_id = item.get("call_id") or _stable_replayed_call_id(
+                item.get("name", ""), item.get("arguments", "{}"), _replayed_call_ordinal[0]
+            )
+            _replayed_call_ordinal[0] += 1
             # Parse arguments to dict — chat templates (Qwen3, Llama, etc.)
             # call .items() on arguments, so they must be a mapping, not a string
             args_raw = item.get("arguments", "{}")

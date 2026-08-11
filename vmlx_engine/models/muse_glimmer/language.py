@@ -175,6 +175,27 @@ class LanguageModel(nn.Module):
             logits = mx.tanh(logits / cap) * cap
         return logits
 
+    def make_cache(self):
+        """One cache per text layer, matching each layer's attention type.
+
+        Without this the loader falls back to a plain KVCache for all 52
+        layers. That is not merely wasteful — the 39 sliding layers would grow
+        unbounded instead of ringing at sliding_window — it also makes the
+        mixed-SWA store reject the result, so the family silently gets NO
+        prefix caching at all (observed live: cached=0 on every repeat,
+        "clean mixed_swa_kv_v1 prompt prefill unavailable").
+        """
+        from mlx_lm.models.cache import KVCache, RotatingKVCache
+
+        window = int(getattr(self.config, "sliding_window", 0) or 0)
+        caches = []
+        for index in range(self.config.num_hidden_layers):
+            if window > 0 and self.config.layer_is_sliding(index):
+                caches.append(RotatingKVCache(max_size=window, keep=0))
+            else:
+                caches.append(KVCache())
+        return caches
+
     @property
     def layers(self):
         return self.model.layers

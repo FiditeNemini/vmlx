@@ -226,6 +226,22 @@ class TestStreamingNeverLeaksMarkers:
             "to=self<|message|>Need a tool.<|eom|>"
             'assistant to=atem.get_weather<|message|><atem:invoke name="x"/><|eot|>'
         ),
+        # A dotted recipient as the FIRST message: no preceding <|eom|> exists
+        # to cut the header off, so a charset that omits "." streamed the whole
+        # header as visible content.
+        "dotted_tool_first_message": (
+            'to=atem.get_weather<|message|><atem:invoke name="x"/><|eot|>'
+        ),
+        # Replies whose last characters are a viable opener prefix. Nothing
+        # flushes a held tail at stream end, so holding these LOSES them.
+        "ends_in_letters": "to=user<|message|>The capital is Malta<|eot|>",
+        "ends_in_bare_to": "to=user<|message|>Go to<|eot|>",
+        "ends_in_assis": "to=user<|message|>Ask the assis<|eot|>",
+        "headerless_unpunctuated": "plain words only here",
+        "headerless_starts_assistant": "assistant helpers are useful",
+        "header_longer_than_any_bound": "to=" + ("x" * 70) + "<|message|>Body.<|eot|>",
+        "truncated_mid_header": "to=self<|mess",
+        "truncated_mid_body": "to=user<|message|>Half a sen",
     }
 
     @staticmethod
@@ -269,3 +285,31 @@ class TestStreamingNeverLeaksMarkers:
         """
         _, content = self._stream("Just plain prose with no markers whatsoever.")
         assert content.strip() == "Just plain prose with no markers whatsoever."
+
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_nothing_is_held_back_at_stream_end(self, name):
+        """A held tail is LOST, not deferred.
+
+        The parser has no finish hook and the server's terminal chunk reuses
+        only what was already emitted, so anything still held when generation
+        stops never reaches the user. Holding must therefore be provably
+        transient. The first version of this fix held any trailing opener
+        prefix globally, which silently truncated every reply ending in a
+        letter run ("...Malta", "...to", "...assis") — invisible to tests
+        whose cases all ended in punctuation or a marker.
+        """
+        raw = self.CASES[name]
+        reasoning, content = self._stream(raw)
+        final = get_parser("muse_glimmer")()
+        final.reset_state()
+        final_reasoning, final_content = final.extract_reasoning(raw)
+        assert content == (final_content or ""), "characters held back and lost"
+        assert reasoning == (final_reasoning or ""), "reasoning held back and lost"
+
+    def test_partial_header_is_not_shown_as_prose_on_either_path(self):
+        """max_tokens inside a header leaves no body — show nothing, not markup."""
+        parser = get_parser("muse_glimmer")()
+        parser.reset_state()
+        reasoning, content = parser.extract_reasoning("to=self<|mess")
+        assert not content and not reasoning

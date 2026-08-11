@@ -47,16 +47,53 @@ _HEADER_RE = re.compile(
 
 _ALL_MARKERS = (_START_TAG, _MESSAGE_TAG, _EOM_TAG, _EOT_TAG)
 
-# A header is only ever `<|start|>assistant to=<recipient><|message|>`, so it
-# can contain nothing but these characters. The moment the pending run shows
-# anything else — punctuation, a newline — it is ordinary prose and must be
-# released, or plain replies would never stream at all.
-_HEADER_CHARS_RE = re.compile(r"^[A-Za-z0-9_<|>=\- ]*$")
-_MAX_HEADER_LEN = 64
+def _is_prefix_of(text: str, target: str) -> bool:
+    return target.startswith(text)
 
 
 def _viable_header_prefix(pending: str) -> bool:
-    return len(pending) <= _MAX_HEADER_LEN and bool(_HEADER_CHARS_RE.match(pending))
+    """Could ``pending`` still grow into ``<|start|>assistant to=X<|message|>``?
+
+    Matched against the GRAMMAR, not a character class. A character class is
+    the wrong tool twice over: too narrow and it rejects the header's own
+    ``<|message|>`` terminator (or a dotted recipient like
+    ``to=atem.get_weather``) and streams a real header as prose; too wide and
+    ordinary prose looks header-shaped, gets held, and — because nothing
+    flushes the tail at stream end — is silently DROPPED.
+
+    Only text that genuinely starts like a header is ever held, so a plain
+    reply streams immediately and can never lose characters.
+    """
+    rest = pending
+
+    # optional <|start|> (or a growing prefix of it)
+    if rest and _START_TAG.startswith(rest):
+        return True
+    if rest.startswith(_START_TAG):
+        rest = rest[len(_START_TAG):]
+
+    rest = rest.lstrip(" \t")
+    # optional literal `assistant` (or a growing prefix of it)
+    if rest and "assistant".startswith(rest):
+        return True
+    if rest.startswith("assistant"):
+        rest = rest[len("assistant"):]
+    rest = rest.lstrip(" \t")
+
+    # optional `to=<recipient>`; the recipient matches _HEADER_RE's [^\s<|]+
+    if rest and "to=".startswith(rest):
+        return True
+    if rest.startswith("to="):
+        rest = rest[3:]
+        cut = 0
+        while cut < len(rest) and rest[cut] not in " \t<|":
+            cut += 1
+        rest = rest[cut:].lstrip(" \t")
+
+    # Nothing left yet just means the header is still arriving (the recipient
+    # may still be growing, or <|message|> has not started); anything that IS
+    # left must be growing into <|message|>.
+    return not rest or _is_prefix_of(rest, _MESSAGE_TAG)
 
 
 def _stable_length(text: str) -> int:
@@ -70,17 +107,31 @@ def _stable_length(text: str) -> int:
     answer text.
 
     So hold back any trailing run that could still grow into a marker or a
-    header, and let the next delta re-decide. Whatever is held is emitted as
-    soon as the ambiguity resolves, and the final non-streaming pass sees the
-    whole text anyway.
+    header, and let the next delta re-decide.
+
+    HOLD ONLY WHAT YOU CAN AFFORD TO LOSE. There is no finish hook in the
+    parser contract and the server's terminal chunk reuses only what was
+    already emitted, so anything still held when generation stops is dropped
+    from the user's view — it is NOT recovered by a later pass. Hold therefore
+    has to be provably transient: a marker prefix always resolves on the next
+    character, and a header region always ends at its ``<|message|>``.
     """
     hold = 0
 
-    # 1. A trailing PROPER PREFIX of anything that opens a marker or header:
-    #    "<", "<|", "<|mess", "t", "to", "assis", ... Holding one of these
-    #    costs a single delta of latency and prevents "to" or "<|eom|" being
-    #    printed as prose.
-    for opener in _ALL_MARKERS + ("to=", "assistant"):
+    # 1. A trailing PROPER PREFIX of a MARKER: "<", "<|", "<|mess", ...
+    #    Every marker starts with "<", which is vanishingly rare in prose, so
+    #    holding these costs one delta and drops nothing in practice.
+    #
+    #    `to=` / `assistant` are deliberately NOT held here. They are only
+    #    header openers INSIDE a header region (rule 2); everywhere else they
+    #    are ordinary words. Holding them globally meant any reply ending in a
+    #    letter run — "...Malta", "...a result", "...to" — kept its last
+    #    characters back, and since nothing flushes the tail at stream end
+    #    (the parser has no finish hook and the server's terminal chunk reuses
+    #    only what was already emitted) those characters were LOST from the
+    #    user's view. Every earlier test ended in punctuation or a marker,
+    #    which is exactly the set that hides this.
+    for opener in _ALL_MARKERS:
         for size in range(len(opener) - 1, 0, -1):
             if text.endswith(opener[:size]):
                 hold = max(hold, size)
@@ -120,7 +171,15 @@ def _segments(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     matches = list(_HEADER_RE.finditer(text))
     if not matches:
-        return [(_USER_RECIPIENT, text)] if text else []
+        if not text:
+            return []
+        # A generation cut off mid-header (max_tokens inside `to=self<|mess`)
+        # has no body to show. Emitting the half-written header as prose is a
+        # leak, and it made the non-streaming path disagree with streaming,
+        # which correctly shows nothing.
+        if _viable_header_prefix(text):
+            return []
+        return [(_USER_RECIPIENT, text)]
 
     lead = text[: matches[0].start()]
     # Bare "<|start|>assistant" with no <|message|> yet is just the header the

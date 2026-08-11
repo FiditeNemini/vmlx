@@ -188,3 +188,84 @@ class TestServerContract:
         base_var_kw = any(p.kind is p.VAR_KEYWORD for p in base.parameters.values())
         mine_var_kw = any(p.kind is p.VAR_KEYWORD for p in mine.parameters.values())
         assert base_var_kw and mine_var_kw, "reset_state must accept **kwargs"
+
+
+class TestStreamingNeverLeaksMarkers:
+    """The streaming path must never print a header or marker as prose.
+
+    Emitted counters only move forward, so a character classified from a
+    half-arrived header can never be taken back. Live in the Electron app this
+    surfaced as `to=self` and a bare `<|message|` rendered as the answer, and
+    as `<|eom|>assistant to=user` sitting in the middle of the reply.
+
+    Every case is driven ONE CHARACTER AT A TIME — the worst case for a
+    streaming parser, and the one that exposed the bug.
+    """
+
+    LEAKS = ("to=self", "to=user", "<|message|", "<|eom|", "<|eot|", "<|start|")
+
+    CASES = {
+        "two_rail": (
+            "to=self<|message|>Let me think.<|eom|>"
+            "assistant to=user<|message|>Paris is the capital.<|eot|>"
+        ),
+        "explicit_start_tags": (
+            "<|start|>assistant to=self<|message|>Thinking.<|eom|>"
+            "<|start|>assistant to=user<|message|>Answer here.<|eot|>"
+        ),
+        "answer_only": "to=user<|message|>Direct answer.<|eot|>",
+        "no_header_at_all": "Just plain prose with no markers whatsoever.",
+        "prose_containing_header_words": (
+            "to=user<|message|>Go to=the store and ask an assistant.<|eot|>"
+        ),
+        "three_messages": (
+            "to=self<|message|>A<|eom|>assistant to=self<|message|>B<|eom|>"
+            "assistant to=user<|message|>Final.<|eot|>"
+        ),
+        "tool_recipient": (
+            "to=self<|message|>Need a tool.<|eom|>"
+            'assistant to=atem.get_weather<|message|><atem:invoke name="x"/><|eot|>'
+        ),
+    }
+
+    @staticmethod
+    def _stream(raw):
+        parser = get_parser("muse_glimmer")()
+        parser.reset_state()
+        previous, reasoning, content = "", "", ""
+        for index in range(1, len(raw) + 1):
+            current = raw[:index]
+            delta = parser.extract_reasoning_streaming(previous, current, raw[index - 1])
+            previous = current
+            if delta:
+                reasoning += delta.reasoning or ""
+                content += delta.content or ""
+        return reasoning, content
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_no_marker_reaches_the_user(self, name):
+        reasoning, content = self._stream(self.CASES[name])
+        for marker in self.LEAKS:
+            assert marker not in content, f"{marker!r} leaked into content"
+            assert marker not in reasoning, f"{marker!r} leaked into reasoning"
+
+    @pytest.mark.parametrize("name", sorted(CASES))
+    def test_streamed_text_matches_the_final_split(self, name):
+        raw = self.CASES[name]
+        reasoning, content = self._stream(raw)
+        final = get_parser("muse_glimmer")()
+        final.reset_state()
+        final_reasoning, final_content = final.extract_reasoning(raw)
+        # Streaming is incremental, so it must be a prefix of the final answer —
+        # and for these complete messages it should be the WHOLE answer.
+        assert (final_content or "").strip() == content.strip()
+        assert (final_reasoning or "").strip() == reasoning.strip()
+
+    def test_plain_text_still_streams_rather_than_being_held(self):
+        """Holding an ambiguous tail must not stall an ordinary reply.
+
+        An over-eager hold made plain replies emit NOTHING until generation
+        finished — correct output, unusable streaming.
+        """
+        _, content = self._stream("Just plain prose with no markers whatsoever.")
+        assert content.strip() == "Just plain prose with no markers whatsoever."

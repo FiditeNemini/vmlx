@@ -45,6 +45,71 @@ _HEADER_RE = re.compile(
 )
 
 
+_ALL_MARKERS = (_START_TAG, _MESSAGE_TAG, _EOM_TAG, _EOT_TAG)
+
+# A header is only ever `<|start|>assistant to=<recipient><|message|>`, so it
+# can contain nothing but these characters. The moment the pending run shows
+# anything else — punctuation, a newline — it is ordinary prose and must be
+# released, or plain replies would never stream at all.
+_HEADER_CHARS_RE = re.compile(r"^[A-Za-z0-9_<|>=\- ]*$")
+_MAX_HEADER_LEN = 64
+
+
+def _viable_header_prefix(pending: str) -> bool:
+    return len(pending) <= _MAX_HEADER_LEN and bool(_HEADER_CHARS_RE.match(pending))
+
+
+def _stable_length(text: str) -> int:
+    """How much of ``text`` can be interpreted without seeing more tokens.
+
+    Streaming hands us the message a few characters at a time, and both the
+    markers and the ``to=<recipient>`` header arrive in pieces. Interpreting a
+    partial piece is unrecoverable here: emitted counters only move forward, so
+    anything mis-classified early stays wrong for the rest of the turn. Live in
+    the app that surfaced as ``to=self`` and bare ``<|message|`` printed as
+    answer text.
+
+    So hold back any trailing run that could still grow into a marker or a
+    header, and let the next delta re-decide. Whatever is held is emitted as
+    soon as the ambiguity resolves, and the final non-streaming pass sees the
+    whole text anyway.
+    """
+    hold = 0
+
+    # 1. A trailing PROPER PREFIX of anything that opens a marker or header:
+    #    "<", "<|", "<|mess", "t", "to", "assis", ... Holding one of these
+    #    costs a single delta of latency and prevents "to" or "<|eom|" being
+    #    printed as prose.
+    for opener in _ALL_MARKERS + ("to=", "assistant"):
+        for size in range(len(opener) - 1, 0, -1):
+            if text.endswith(opener[:size]):
+                hold = max(hold, size)
+                break
+
+    # 2. A header that has OPENED but not yet reached its <|message|>. The
+    #    recipient decides which rail the following body belongs to, so nothing
+    #    from the header start onward can be classified until it terminates.
+    #
+    #    A header may only begin where a message can begin: at the very start,
+    #    or immediately after <|eom|> / <|eot|> / <|start|>. Anchoring on those
+    #    is what keeps ordinary prose containing "assistant" or "to=" from
+    #    being mistaken for a header and held back forever.
+    boundary = 0
+    for opener in (_EOM_TAG, _EOT_TAG, _START_TAG):
+        found = text.rfind(opener)
+        if found >= 0:
+            boundary = max(
+                boundary,
+                found if opener is _START_TAG else found + len(opener),
+            )
+    pending = text[boundary:]
+    if _MESSAGE_TAG not in pending and _viable_header_prefix(pending):
+        # This message's header is still arriving.
+        hold = max(hold, len(pending))
+
+    return max(0, len(text) - hold)
+
+
 def _segments(text: str) -> list[tuple[str, str]]:
     """Split model output into ``(recipient, body)`` pairs.
 
@@ -127,8 +192,12 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         Re-splitting the whole accumulated text each delta keeps a header that
         straddles a chunk boundary from being mistaken for body text; the
         emitted counters then make the result incremental.
+
+        Only the STABLE prefix is split. Emitted counters are monotonic, so a
+        character classified from a half-arrived header can never be taken
+        back — holding the ambiguous tail is the only way to stay correct.
         """
-        reasoning, content = self._split(current_text)
+        reasoning, content = self._split(current_text[: _stable_length(current_text)])
 
         new_reasoning = reasoning[self._emitted_reasoning:]
         new_content = content[self._emitted_content:]

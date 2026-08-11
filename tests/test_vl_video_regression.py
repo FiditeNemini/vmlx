@@ -3267,17 +3267,23 @@ class TestAsyncSSMRederiveReasoningHybrid:
         long GPU stalls blocking new incoming requests). vmlx#245 moved
         the consumer off step() into _drain_one_ssm_rederive, drained by
         the engine loop's idle branch via run_one_idle_task."""
+        import inspect
+
         import vmlx_engine.scheduler as sched
-        src = Path(sched.__file__).read_text()
-        idle_block_idx = src.find("Deferred SSM re-derive (idle-time")
-        assert idle_block_idx > 0, (
-            "idle consumer block missing — re-derives will never execute"
+
+        # Read the FUNCTION, not a text slice between two markers. The slice
+        # used to run from the docstring to `def get_num_waiting`, which drifted
+        # ~320 lines past the end of the consumer and swept in unrelated
+        # `.pop(0)` calls — the guard failed while the contract it protects was
+        # still intact, which is the worst way for a source assertion to break.
+        consumer = getattr(sched.Scheduler, "_drain_one_ssm_rederive", None)
+        assert consumer is not None, (
+            "idle consumer missing — re-derives will never execute"
         )
+        block = inspect.getsource(consumer)
+        assert "Deferred SSM re-derive (idle-time" in block
         # The consumer must yield to foreground work before running the
         # clean prefill (GPU is exclusive; running + re-derive = deadlock)
-        block_end = src.find("def get_num_waiting", idle_block_idx)
-        assert block_end > idle_block_idx
-        block = src[idle_block_idx:block_end]
         assert "self._foreground_pending()" in block, (
             "foreground guard missing: re-derive would collide with active "
             "generation on the GPU (must PARK when work arrives)"
@@ -5830,9 +5836,33 @@ class TestMs75HuggingFaceMirrorEndpoint:
             "a typo silently corrupts HF routing and kills all downloads"
         )
         assert "http:// or https:// URL" in src
-        # One-click preset button for the standard China mirror
+        # One-click preset button for the standard China mirror. The label is
+        # translated, so assert the KEY and that every locale resolves it — a
+        # literal English assertion both broke on i18n and could never have
+        # caught the failure that matters, which is a locale rendering the raw
+        # key string in place of the button text.
         assert "hf-mirror.com" in src
-        assert "Use hf-mirror" in src
+        assert "handleSaveHfEndpoint('https://hf-mirror.com')" in src, (
+            "one-click mirror preset must still point at hf-mirror.com"
+        )
+        assert "sessions.download.useHfMirror" in src
+        import json
+
+        locales = sorted(
+            (REPO_ROOT / "panel/src/renderer/src/i18n/locales").glob("*.json")
+        )
+        assert locales, "no locale catalogs found"
+        for locale in locales:
+            node = json.loads(locale.read_text())
+            for part in "sessions.download.useHfMirror".split("."):
+                assert isinstance(node, dict) and part in node, (
+                    f"{locale.name} is missing sessions.download.useHfMirror — "
+                    f"the button would render the raw key"
+                )
+                node = node[part]
+            assert isinstance(node, str) and node.strip(), (
+                f"{locale.name} has an empty useHfMirror label"
+            )
         # Load saved value on mount
         assert "window.api.settings.get('hf_endpoint')" in src
 

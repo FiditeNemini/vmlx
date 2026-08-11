@@ -107,6 +107,45 @@ def test_prose_that_merely_mentions_a_marker_is_preserved():
     assert content == "Muse opens a turn with the <|start|> token."
 
 
+PROSE_KEPT = {
+    # This exact sentence rendered live as "It opens with the control token" —
+    # the scrub scanned the whole body and ate a correct answer.
+    "header_named_mid_sentence": (
+        "It opens with the <|start|>assistant control token.",
+        "It opens with the <|start|>assistant control token.",
+    ),
+    "bare_token_mid_sentence": (
+        "Use <|start|> then the role name.",
+        "Use <|start|> then the role name.",
+    ),
+    "recipient_named_mid_sentence": (
+        "The reasoning rail is to=self and the answer rail is to=user here.",
+        "The reasoning rail is to=self and the answer rail is to=user here.",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROSE_KEPT))
+def test_prose_about_the_template_survives_the_scrub(name):
+    """Explaining the chat template is exactly when a user spells a header."""
+    body, expected = PROSE_KEPT[name]
+    _, content = MuseGlimmerReasoningParser().extract_reasoning(
+        f" to=user<|message|>{body}<|eot|>"
+    )
+    assert content == expected
+
+
+def test_residue_is_still_scrubbed_at_a_message_boundary():
+    """The backstop must keep working where a real leak actually lands."""
+    parser = MuseGlimmerReasoningParser
+    # generation cut mid-header -> fragment at the TAIL of the body
+    _, tail = parser().extract_reasoning(" to=user<|message|>Answer here<|start|>assistant")
+    assert tail == "Answer here"
+    # structure that outran the segmenter -> fragment at the HEAD of the body
+    _, head = parser().extract_reasoning("<|eom|>assistant to=user<|message|>Real answer.<|eot|>")
+    assert head == "Real answer."
+
+
 def test_reply_ending_in_letters_keeps_its_last_characters():
     """Holding `assistant`/`to=` globally used to eat the tail of a real reply."""
     for tail in ("The capital is Oslo", "I do not know what this refers to",

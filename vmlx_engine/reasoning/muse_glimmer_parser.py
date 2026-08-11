@@ -62,18 +62,29 @@ _ALL_MARKERS = (_START_TAG, _MESSAGE_TAG, _EOM_TAG, _EOT_TAG)
 # Requiring a boundary/START marker AND at least one following header element
 # (`assistant`, `to=<recipient>`, or the `<|message|>` terminator) means only
 # genuine structure is removed. Prose keeps its text.
-_HEADER_RESIDUE_RE = re.compile(
+_HEADER_RESIDUE = (
     r"(?:<\|eom\|>|<\|eot\|>|<\|start\|>)"
     r"(?:\s*assistant)?"
     r"(?:\s*to=[^\s<|]*)?"
     r"\s*(?:<\|message\|>)?"
 )
 
+# Residue is only scrubbed at a message BOUNDARY — the start or the end of a
+# body. A real leak can only appear there: structure that outran the segmenter
+# arrives at the head of the next body, and a generation cut mid-header leaves
+# its fragment at the tail. Header shape in the MIDDLE of a body is prose.
+#
+# Scanning the whole body instead deleted correct answers. Live, Muse replied
+# "It opens with the <|start|>assistant control token" and the user was shown
+# "It opens with the control token" — the sentence a user gets whenever they ask
+# how the chat template works, which is exactly when they will spell a header.
+_LEADING_RESIDUE_RE = re.compile(r"^\s*" + _HEADER_RESIDUE)
+_TRAILING_RESIDUE_RE = re.compile(_HEADER_RESIDUE + r"\s*$")
 
-def _is_header_residue(match: re.Match) -> bool:
+
+def _is_header_residue(text: str) -> bool:
     """True when the match carried real header structure, not a bare token."""
-    text = match.group(0)
-    tail = re.sub(r"^(?:<\|eom\|>|<\|eot\|>|<\|start\|>)", "", text, count=1)
+    tail = re.sub(r"^\s*(?:<\|eom\|>|<\|eot\|>|<\|start\|>)", "", text, count=1)
     return bool(tail.strip())
 
 
@@ -86,9 +97,13 @@ def _strip_answer_markers(body: str) -> str:
     reasoning keeps its text, and a NAMED tool recipient's body is never routed
     through here at all, so the ATEM parser still sees it byte-for-byte.
     """
-    return _HEADER_RESIDUE_RE.sub(
-        lambda m: "" if _is_header_residue(m) else m.group(0), body
-    )
+    leading = _LEADING_RESIDUE_RE.match(body)
+    if leading and _is_header_residue(leading.group(0)):
+        body = body[leading.end():]
+    trailing = _TRAILING_RESIDUE_RE.search(body)
+    if trailing and _is_header_residue(trailing.group(0)):
+        body = body[: trailing.start()]
+    return body
 
 
 def _is_prefix_of(text: str, target: str) -> bool:

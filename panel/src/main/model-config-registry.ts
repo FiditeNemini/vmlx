@@ -202,7 +202,19 @@ registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoning
 // inline think pair, and its only live control is the reasoning_strength template
 // kwarg — enable_thinking and reasoning_effort are both ignored by its template.
 // Same mixed-SWA cache shape as gemma4, so it takes paged like gemma4 does.
-registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
+// TEXT-ONLY for now. The text tower, reasoning rail and ATEM tools are live and
+// proven on all three bundles (2D/4M/6M), but the IMAGE PATH IS NOT WIRED: the
+// bundle's processor_config.json names MuseGlimmerImageProcessor /
+// MuseGlimmerVideoProcessor, classes that exist in neither transformers nor the
+// vendored package, so AutoProcessor silently degrades to a text-only processor
+// and returns no pixel_values at all. The chat template's single <|patch|> token
+// is never expanded either. The model then answers from the text alone and
+// invents a confident description of an image it never saw — verified live: a
+// blue square and a red circle both returned "a single red circle", identical
+// prompt_tokens=75, and reordering them changed nothing. Advertising vision here
+// would ship exactly that. Flip isMultimodal back to true once the processor is
+// ported (task #27).
+registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: false, usePagedCache: true, description: 'Muse Glimmer (text)', priority: 5 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })

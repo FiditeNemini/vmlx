@@ -752,6 +752,18 @@ class BlockDiskStore:
                     # queued below and runs under the exclusive writer lock.
                     delete_on_reject=False,
                 ):
+                    # The validator reports one bool for two different worlds: a
+                    # real caps/JSON rejection, and a stat/open/short-read that
+                    # failed closed. Under fd exhaustion the second is what fires,
+                    # and cleaning up on it deletes a healthy chain.
+                    if self._read_failure_is_transient(file_path):
+                        logger.warning(
+                            f"Header check for block {hash_hex[:12]} failed on a "
+                            f"transient I/O error; keeping the entry"
+                        )
+                        with self._stats_lock:
+                            self.disk_misses += 1
+                        return None
                     # Queue index + file cleanup under the background writer's
                     # exclusive aggregate mutation transaction.
                     self._queue_index_cleanup(hash_hex)
@@ -798,12 +810,58 @@ class BlockDiskStore:
             logger.debug(f"Disk cache hit: {hash_hex[:12]} ({dtype}, {len(cache_data)} layers)")
             return cache_data
         except Exception as e:
+            if self._read_failure_is_transient(file_path, e):
+                # Environment, not content. Count a miss and leave the chain
+                # alone — deleting here would take every descendant with it.
+                logger.warning(
+                    f"Transient read failure for block {hash_hex[:12]} "
+                    f"({type(e).__name__}: {e}); keeping the entry"
+                )
+                with self._stats_lock:
+                    self.disk_misses += 1
+                return None
             logger.warning(f"Failed to load block {hash_hex[:12]}: {e}")
             # Corrupt file — queue removal
             self._queue_index_cleanup(hash_hex)
             with self._stats_lock:
                 self.disk_misses += 1
             return None
+
+    @staticmethod
+    def _read_failure_is_transient(file_path, exc: BaseException | None = None) -> bool:
+        """Is this read failure the environment's fault rather than the file's?
+
+        The distinction decides whether a block is DELETED. `_queue_index_cleanup`
+        does not remove one entry — it walks the descendant chain and unlinks every
+        payload behind it, so treating a transient failure as corruption destroys a
+        healthy chain and turns a warm long-context read back into a cold prefill.
+
+        Type alone cannot decide it: MLX wraps an open failure in RuntimeError
+        (`[load_safetensors] Failed to open file ...`), which is indistinguishable
+        by type from a truncated-file parse error. So probe the file — if it cannot
+        even be opened, the failure was the environment (fd exhaustion, EIO), not
+        the content. Under fd pressure the probe itself fails, which is the same
+        verdict, so the check is safe in exactly the storm it exists for.
+        """
+        if isinstance(exc, (OSError, MemoryError)):
+            return True
+        # MLX names the failure mode in the message, and open-failure reads
+        # differently from every content failure:
+        #   open    -> "[load_safetensors] Failed to open file ..."
+        #   corrupt -> "[load_safetensors] Invalid json header length file ..."
+        #   short   -> "[load_safetensors] The JSON header is N bytes long ..."
+        # Only the first says nothing about the file's contents.
+        if exc is not None and "failed to open file" in str(exc).lower():
+            return True
+        try:
+            fd = os.open(str(file_path), os.O_RDONLY)
+        except OSError:
+            # Cannot open: either the environment is out of descriptors, or the
+            # file is already gone. Neither is evidence that its DESCENDANTS are
+            # corrupt, and a missing file is collected by the orphan scan anyway.
+            return True
+        os.close(fd)
+        return False
 
     def _queue_access_update(self, hash_hex: str) -> None:
         """Queue an access time update for the background writer."""

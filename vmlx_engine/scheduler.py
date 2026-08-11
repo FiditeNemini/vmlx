@@ -5527,6 +5527,20 @@ class Scheduler:
                         self.block_aware_cache.paged_cache.release_request_refs(
                             block_table
                         )
+                        # The BlockAwarePrefixCache entry that fetch_cache
+                        # created must be dropped too. paged_cache.detach_request
+                        # only pops the PAGED table, so that entry survived and
+                        # completion cleanup released the very same block table a
+                        # SECOND time — driving to zero any block whose ref another
+                        # request had legitimately taken through the shared-prefix
+                        # path, then recycling it underneath that live request.
+                        _detach = getattr(
+                            self.block_aware_cache, "detach_request", None
+                        )
+                        if callable(_detach):
+                            _detach(request.request_id)
+                        # Idempotent, and unconditional: the block-aware detach
+                        # forwards to it only when an entry existed.
                         self.block_aware_cache.paged_cache.detach_request(
                             request.request_id
                         )

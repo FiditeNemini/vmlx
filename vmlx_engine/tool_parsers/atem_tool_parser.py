@@ -159,14 +159,16 @@ class AtemToolParser(ToolParser):
                     declared.get("type") if isinstance(declared, dict) else None
                 )
                 args[key] = _coerce(raw_value, declared_type)
+            # FLAT shape. The engine reads tc["name"]/tc["arguments"] directly
+            # and wraps them into the OpenAI envelope itself; returning a
+            # pre-nested {"function": {...}} raises KeyError inside the
+            # dispatcher, which swallows the exception and passes the raw
+            # <atem:...> markup through to the user as visible prose.
             calls.append(
                 {
                     "id": generate_tool_id(),
-                    "type": "function",
-                    "function": {
-                        "name": fn_name,
-                        "arguments": json.dumps(args, ensure_ascii=False),
-                    },
+                    "name": fn_name,
+                    "arguments": json.dumps(args, ensure_ascii=False),
                 }
             )
         return calls

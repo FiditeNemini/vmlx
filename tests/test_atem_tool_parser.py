@@ -20,7 +20,11 @@ def parser():
 
 
 def _args(result, index=0):
-    return json.loads(result.tool_calls[index]["function"]["arguments"])
+    # FLAT shape: the engine reads tc["name"]/tc["arguments"] directly and
+    # builds the OpenAI envelope itself. Asserting a pre-nested
+    # {"function": {...}} here is what let the real defect ship — the
+    # dispatcher KeyError'd and leaked raw <atem:...> markup to the user.
+    return json.loads(result.tool_calls[index]["arguments"])
 
 
 WEATHER_REQUEST = {
@@ -58,7 +62,7 @@ def test_parses_a_well_formed_call(parser):
     result = parser.extract_tool_calls(out, WEATHER_REQUEST)
 
     assert result.tools_called
-    assert result.tool_calls[0]["function"]["name"] == "get_weather"
+    assert result.tool_calls[0]["name"] == "get_weather"
     assert _args(result) == {"location": "San Francisco", "unit": "celsius"}
 
 
@@ -144,7 +148,7 @@ class TestMalformedTolerance:
         )
         result = parser.extract_tool_calls(out, WEATHER_REQUEST)
 
-        assert result.tool_calls[0]["function"]["name"] == "get_weather"
+        assert result.tool_calls[0]["name"] == "get_weather"
         assert _args(result)["location"] == "Cairo"
 
 
@@ -234,3 +238,34 @@ class TestStreaming:
             complete, complete + " trailing", "", [], [], [], WEATHER_REQUEST
         )
         assert again is None, "the same call was emitted twice"
+
+
+def test_tool_call_dicts_match_the_engine_contract(parser):
+    """Pin the shape the server actually consumes.
+
+    vmlx_engine/server.py reads ``tc["name"]`` and ``tc["arguments"]`` off each
+    returned dict and builds the OpenAI ``{"type": "function", "function": ...}``
+    envelope itself. A parser that returns a pre-nested envelope raises KeyError
+    inside the dispatcher, which catches it and falls through to passing the raw
+    model output to the user — so the failure surfaces as visible ``<atem:...>``
+    markup and ``tool_calls: null``, never as an error. This test asserts the
+    flat contract directly instead of trusting a helper.
+    """
+    out = (
+        "<atem:function_calls>\n"
+        '<atem:invoke name="get_weather">\n'
+        '<atem:parameter name="location">Oslo</atem:parameter>\n'
+        "</atem:invoke>\n</atem:function_calls>"
+    )
+    result = parser.extract_tool_calls(out, WEATHER_REQUEST)
+
+    assert result.tools_called
+    for call in result.tool_calls:
+        assert "function" not in call, (
+            "pre-nested envelope: the engine builds that itself"
+        )
+        assert isinstance(call["id"], str) and call["id"]
+        assert isinstance(call["name"], str) and call["name"]
+        # arguments must be a JSON *string*, not a dict
+        assert isinstance(call["arguments"], str)
+        json.loads(call["arguments"])

@@ -87,7 +87,12 @@ class TextConfig(BaseModelConfig):
                 return float(self.layer_rope_theta[index]) > 0.0
             except (TypeError, ValueError):
                 return True
-        return True
+        # No explicit list: fall back to the reference arrangement, where the
+        # FULL-attention layers are the NoPE ones. Returning True here instead
+        # applied rotary to all 52 layers — the exact thing the docstring above
+        # says must not happen. Only the shipped bundles' explicit
+        # layer_rope_theta kept that from biting.
+        return self.layer_is_sliding(index)
 
     def layer_rope_base(self, index: int) -> float:
         if self.layer_rope_theta and index < len(self.layer_rope_theta):

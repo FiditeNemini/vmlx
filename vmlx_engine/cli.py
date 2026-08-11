@@ -606,6 +606,12 @@ _PAGED_INCOMPATIBLE_FAMILIES = {
 _PAGED_MLLM_EXEMPT_FAMILIES = {
     "gemma4",
     "gemma4_text",
+    # Muse Glimmer rides the same typed mixed-SWA paged lane as gemma4 and the
+    # panel registers it usePagedCache: true, so without this a bare CLI launch
+    # silently ran UNPAGED while the app ran paged — the exact divergence this
+    # set exists to prevent. Live-proven paged on JANG_4M: reuse reported as
+    # block-disk+mixed_swa+tq-native across a growing multiturn.
+    "muse_glimmer",
 }
 
 

@@ -215,14 +215,39 @@ class MuseTextModel(nn.Module):
         h = self.embed(inputs) if inputs_embeds is None else inputs_embeds
         if cache is None:
             cache = [None] * len(self.layers)
-        layer_masks = self._make_masks(h, cache) if mask is None else None
+        # A caller-supplied mask is only usable if it already distinguishes the
+        # two attention kinds. A single array applied uniformly re-creates the
+        # bug the per-type masks exist to fix: the 39 sliding layers would see
+        # past their 2048-token window. Accept a per-layer sequence or a
+        # {layer_type: mask} mapping; otherwise build our own.
+        layer_masks = self._resolve_layer_masks(h, cache, mask)
         for index, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
-            h = layer(
-                h,
-                mask=mask if layer_masks is None else layer_masks[index],
-                cache=layer_cache,
-            )
+            h = layer(h, mask=layer_masks[index], cache=layer_cache)
         return self.norm(h)
+
+    def _resolve_layer_masks(self, h, cache, mask):
+        count = len(self.layers)
+        if mask is None:
+            return self._make_masks(h, cache)
+        if isinstance(mask, dict):
+            return [
+                mask.get(
+                    "sliding_attention"
+                    if self.config.layer_is_sliding(i)
+                    else "full_attention"
+                )
+                for i in range(count)
+            ]
+        if isinstance(mask, (list, tuple)) and len(mask) == count:
+            return list(mask)
+        # A bare mask cannot be correct for both kinds. Honour it only where it
+        # is safe (the full-attention layers) and build the windowed mask for
+        # the sliding ones rather than silently widening their attention.
+        built = self._make_masks(h, cache)
+        return [
+            built[i] if self.config.layer_is_sliding(i) else mask
+            for i in range(count)
+        ]
 
 
 class LanguageModel(nn.Module):

@@ -214,7 +214,18 @@ registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoning
 // Max Thinking Tokens control and sent max_thinking_tokens + thinking_budget
 // to a template that ignores both — a control that looks like it works and
 // does nothing. Depth is set only by the `reasoning_strength` template kwarg.
-registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinkingBudget: false, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
+// Muse's ONLY live reasoning control is the `reasoning_strength` template
+// kwarg (low/medium/high/xhigh, default high). Its template reads neither a
+// token budget nor enable_thinking, so:
+//   supportsThinkingBudget: false — a budget control would send a value the
+//     template ignores.
+//   supportsInstructMode: false — there is no truthful thinking-off rail;
+//     without this the Off toggle sends enable_thinking:false and nothing
+//     happens (same reason Step-3.7 sets it).
+// The effort levels below are surfaced through the existing reasoning control
+// and translated to `reasoning_strength` in the request builder, so the knob
+// the user sees is the knob the model actually has.
+registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinking: true, supportsInstructMode: false, supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], supportsThinkingBudget: false, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })

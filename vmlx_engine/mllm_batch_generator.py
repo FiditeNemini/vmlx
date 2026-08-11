@@ -1635,6 +1635,15 @@ def _is_attention_cache_slot(cache: Any) -> bool:
     return _is_kv_like(cache) or type(cache).__name__ in _ATTENTION_CACHE_CLASS_NAMES
 
 
+# Opt-in: allow the clean re-derive to run CHUNKED even for recurrent (SSM)
+# slots. Default OFF — see the note inside _cache_requires_one_shot_rederive for
+# why the existing one-shot rule may be over-conservative and why proving that
+# needs a byte-exactness A/B plus a long coherence run, not an argument.
+_CHUNKED_SSM_REDERIVE = os.environ.get(
+    "VMLX_CHUNKED_SSM_REDERIVE", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _cache_requires_one_shot_rederive(cache_slots: Any) -> bool:
     """Does re-deriving this cache need one contiguous forward pass?
 
@@ -1649,6 +1658,24 @@ def _cache_requires_one_shot_rederive(cache_slots: Any) -> bool:
     classify as chunk-safe would risk storing silently wrong state, whereas the
     one-shot path merely costs memory and can decline.
     """
+    if _CHUNKED_SSM_REDERIVE:
+        # Opt-in: treat recurrent slots as chunk-safe too.
+        #
+        # The one-shot rule was written from a failure on the 2nd chunk, blamed
+        # on ArraysCache's lengths/left_padding being unpopulated on a fresh
+        # make_cache(). Reading mlx-lm, those fields are INERT rather than
+        # uninitialised when None: make_mask() returns None (correct for an
+        # unpadded batch of 1) and advance() is a no-op. So the rule may be
+        # over-conservative, and the cost is severe — hybrid families reuse only
+        # the FIRST turn's blocks and re-prefill O(context) forever after
+        # (measured: cached frozen at 12,217 while TTFT grew 20.2s -> 105.9s).
+        #
+        # Default OFF because the coherence risk is real and asymmetric: these
+        # models collapse into token loops when their state is wrong, and a
+        # wrong cache is stored, not just used once. Enable only alongside a
+        # byte-exactness A/B against the one-shot path plus a long multiturn
+        # coherence run.
+        return False
     slots = cache_slots if isinstance(cache_slots, (list, tuple)) else [cache_slots]
     for slot in slots:
         if slot is None:

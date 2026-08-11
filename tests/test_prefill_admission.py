@@ -144,3 +144,37 @@ class TestSchedulerIntegration:
             )
             is True
         )
+
+
+class TestChunkedSsmRederiveGate:
+    """The chunk-safety rule for recurrent caches, and its opt-in override.
+
+    Recurrent (SSM) slots force a ONE-SHOT clean re-derive, which the
+    O(seq_len^2) memory guard then rejects past ~12k — so hybrid families reuse
+    only the FIRST turn's blocks and re-prefill O(context) forever after
+    (measured on Qwen3.6: cached frozen at 12,217 while TTFT grew 20.2s ->
+    105.9s).
+
+    The override exists to make that testable. It stays default OFF because the
+    risk is asymmetric: a wrong recurrent state is STORED, not just used once,
+    and these models collapse into token loops rather than failing loudly.
+    """
+
+    def test_recurrent_slots_force_one_shot_by_default(self):
+        from vmlx_engine.mllm_batch_generator import _cache_requires_one_shot_rederive
+
+        class _Recurrent:
+            pass
+
+        assert _cache_requires_one_shot_rederive([_Recurrent()]) is True
+
+    def test_unclassifiable_slots_are_treated_as_recurrent(self):
+        """Guessing chunk-safe would store silently wrong state."""
+        from vmlx_engine.mllm_batch_generator import _cache_requires_one_shot_rederive
+
+        assert _cache_requires_one_shot_rederive([object()]) is True
+
+    def test_override_is_off_by_default(self):
+        from vmlx_engine.mllm_batch_generator import _CHUNKED_SSM_REDERIVE
+
+        assert _CHUNKED_SSM_REDERIVE is False

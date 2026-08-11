@@ -1635,10 +1635,20 @@ def _is_attention_cache_slot(cache: Any) -> bool:
     return _is_kv_like(cache) or type(cache).__name__ in _ATTENTION_CACHE_CLASS_NAMES
 
 
-# Opt-in: allow the clean re-derive to run CHUNKED even for recurrent (SSM)
-# slots. Default OFF — see the note inside _cache_requires_one_shot_rederive for
-# why the existing one-shot rule may be over-conservative and why proving that
-# needs a byte-exactness A/B plus a long coherence run, not an argument.
+# Opt-in: allow the CLEAN RE-DERIVE to run chunked even for recurrent (SSM)
+# slots. Default OFF.
+#
+# MEASURED 2026-08-11 — this is NOT what caps hybrid prefix reuse. Turning it on
+# for Qwen3.6-27B left cached frozen at the first turn's 17,750 tokens across a
+# 5-turn conversation, exactly as before. The live prefill already chunks hybrid
+# models by a separate mechanism ("Enabling chunked prefill — verified safe on
+# Qwen3.5 GatedDeltaNet", VMLX_DISABLE_HYBRID_AUTO_CHUNK), so chunk-safety was
+# never the binding constraint.
+#
+# The actual cap is the deliberate store-skip in mllm_scheduler: hybrid + cache
+# hit skips the store, because promoting a live extended cache compounds
+# reconstruction error until Bonsai/Qwen3.5 collapse into a token loop. Lifting
+# THAT is the real unlock, and it needs a long coherence run to justify.
 _CHUNKED_SSM_REDERIVE = os.environ.get(
     "VMLX_CHUNKED_SSM_REDERIVE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}

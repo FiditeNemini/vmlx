@@ -905,7 +905,8 @@
       "loading": "Cargando estadísticas de caché...",
       "clearRam": "Vaciar RAM",
       "clearPrefixL2": "Vaciar prefijos + L2",
-      "clearAll": "Vaciar todo"
+      "clearAll": "Vaciar todo",
+      "reuseExplainer": "La reutilización coincide con el prefijo causal continuo más largo desde el token 0. Solo se preprocesa la cola no coincidente; nunca se reutilizan sufijos arbitrarios ni secuencias intermedias. En familias dependientes de la ruta (DeepSeek V4, ZAYA CCA y modelos de KV rotatorio como Gemma 4 y Muse), un prompt MÁS CORTO que la cadena almacenada puede no reutilizar nada y preprocesarse por completo."
     },
     "embeddings": {
       "sessionMustBeRunning": "La sesión debe estar en ejecución para generar incrustaciones.",

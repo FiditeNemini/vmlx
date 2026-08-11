@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { formatCacheStorageBytes } from '../src/renderer/src/components/sessions/CachePanel'
 
@@ -54,13 +55,23 @@ describe('CachePanel last-request truthfulness', () => {
   })
 
   it('describes only longest causal-prefix reuse and rejects arbitrary suffix claims', () => {
-    expect(source).toContain(
-      'longest continuous causal token prefix from token 0',
+    // The explainer moved into i18n, so the claim now lives in the catalogs —
+    // checking those is strictly stronger than checking the component, because
+    // it verifies what users in every language actually read.
+    expect(source).toContain("t('sessions.cachePanel.reuseExplainer')")
+    const en = JSON.parse(
+      readFileSync(
+        join(__dirname, '..', 'src/renderer/src/i18n/locales/en.json'),
+        'utf8',
+      ),
     )
-    expect(source).toContain('Only the unmatched tail is sent through prefill')
-    expect(source).toMatch(
-      /arbitrary suffix or\s+interior token sequences are never reused/,
-    )
+    const copy: string = en.sessions.cachePanel.reuseExplainer
+    expect(copy).toContain('longest continuous causal token prefix from token 0')
+    expect(copy).toContain('Only the unmatched tail is prefilled')
+    expect(copy).toMatch(/arbitrary suffix or interior sequences are never reused/)
+    // ...and it must NOT stop there: unqualified, that claim is false for
+    // path-dependent families, where a SHORTER prompt can reuse nothing.
+    expect(copy.toLowerCase()).toContain('shorter')
   })
 
   it('separates persistent namespace occupancy from current-engine activity', () => {

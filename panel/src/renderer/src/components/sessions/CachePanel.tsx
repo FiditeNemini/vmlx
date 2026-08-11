@@ -327,10 +327,14 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {schedulerCache && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.prefixCache')}</h4>
+          {/* The old copy promised "longest continuous causal prefix" without
+              qualification, which overpromises for path-dependent families:
+              MEASURED, a prompt shortened by ~130 tokens — well inside one 256
+              block — reused NOTHING, while a same-length divergent tail
+              correctly reused 1792/1878. Also the only untranslated string on
+              this panel. */}
           <p className="mb-2 text-xs text-muted-foreground">
-            Reuse matches the longest continuous causal token prefix from token 0.
-            Only the unmatched tail is sent through prefill; arbitrary suffix or
-            interior token sequences are never reused.
+            {t('sessions.cachePanel.reuseExplainer')}
           </p>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {schedulerCache.hit_rate != null && (

@@ -547,7 +547,11 @@ class TestStatistics:
         block = manager.allocate_block()
         manager.add_block_to_table(table, block, 64)
 
-        manager.clear()
+        # A finished request drops its refs; blocks stay cached at ref 0. clear()
+        # refuses while a request is still LIVE, because rebuilding the pool
+        # recycles its block ids into another request's table.
+        manager.release_request_refs(table)
+        assert manager.clear() is True
 
         # After clear, null block is re-reserved
         assert manager.free_blocks == 9  # 10 - 1 null block
@@ -1997,7 +2001,13 @@ class TestBlockAwarePrefixCache:
 
         assert len(cache) == 2
 
-        cache.clear()
+        # Model the real lifecycle: both requests finish and drop their refs.
+        # Their blocks stay cached at ref 0, which is what makes them clearable.
+        for request_id in ("req-1", "req-2"):
+            table = paged_manager.request_tables.get(request_id)
+            if table is not None:
+                paged_manager.release_request_refs(table)
+        assert cache.clear() is True
 
         assert len(cache) == 0
         stats = cache.get_stats()

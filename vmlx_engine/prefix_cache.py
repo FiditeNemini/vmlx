@@ -7207,16 +7207,28 @@ class BlockAwarePrefixCache:
         self._hit_credits.clear()
         self.paged_cache.reset_stats()
 
-    def clear(self) -> None:
-        """Clear all cached data."""
+    def clear(self, force: bool = False) -> bool:
+        """Clear all cached data.
+
+        Returns False without touching anything when the paged pool is still
+        serving live requests. The busy check runs FIRST: the index wipe below is
+        not reversible, so clearing it and then having the pool refuse would leave
+        the index and the block pool describing different worlds.
+        """
+        if not force and self.paged_cache.blocks_in_use():
+            logger.warning(
+                "Cannot clear block-aware prefix cache: paged blocks are in use"
+            )
+            return False
         self._request_tables.clear()
         with self.paged_cache._lock:
             self._prefix_index.clear()
         for d in self._entries_by_type.values():
             d.clear()
-        self.paged_cache.clear()
+        self.paged_cache.clear(force=True)
         self._n_kv_heads = None  # Reset cached head count (may change on model switch)
         self.reset_stats()
+        return True
 
     def __len__(self) -> int:
         """Return number of active request entries."""

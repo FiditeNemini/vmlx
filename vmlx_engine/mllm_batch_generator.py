@@ -7950,7 +7950,7 @@ class MLLMBatchGenerator:
                         if "broadcast" in str(retry_err).lower() and self.block_aware_cache is not None:
                             logger.warning(f"Retry failed with broadcast — clearing ALL paged cache and retrying once more: {retry_err}")
                             try:
-                                self.block_aware_cache.clear()
+                                self.block_aware_cache.clear(force=True)
                             except Exception:
                                 pass
                             # A3→A2-001 (audit 2026-04-08): do NOT call

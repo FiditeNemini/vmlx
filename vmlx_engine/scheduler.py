@@ -10230,7 +10230,7 @@ class Scheduler:
 
         # Clear caches
         if self.block_aware_cache is not None:
-            self.block_aware_cache.clear()
+            self.block_aware_cache.clear(force=True)
         if self.memory_aware_cache is not None:
             self.memory_aware_cache.clear()
         if self.prefix_cache is not None:
@@ -11397,7 +11397,7 @@ class Scheduler:
 
         # Clear caches
         if self.block_aware_cache is not None:
-            self.block_aware_cache.clear()
+            self.block_aware_cache.clear(force=True)
         if self.memory_aware_cache is not None:
             self.memory_aware_cache.clear()
         if self.prefix_cache is not None:

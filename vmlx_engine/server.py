@@ -13497,6 +13497,10 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
         important for validating and operating restart/L2 restore paths.
     """
     cleared = []
+    # Tiers that were deliberately NOT cleared, so the caller can tell "nothing
+    # to do" apart from "refused because it was busy" instead of being told the
+    # cache is gone when it is not.
+    skipped: list[str] = []
 
     clear_resident_prefix = cache_type in ("ram", "prefix", "all")
     clear_prefix_l2 = cache_type in ("prefix", "all")
@@ -13510,8 +13514,13 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
                 scheduler.memory_aware_cache.clear()
                 cleared.append("memory_aware_prefix")
             if getattr(scheduler, "block_aware_cache", None) is not None:
-                scheduler.block_aware_cache.clear()
-                cleared.append("paged_prefix")
+                # Unforced: this endpoint is reachable mid-generation (async
+                # handler, no idle gate), and rebuilding the pool under a live
+                # request recycles its block ids into another request's table.
+                if scheduler.block_aware_cache.clear():
+                    cleared.append("paged_prefix")
+                else:
+                    skipped.append("paged_prefix:blocks_in_use")
             if getattr(scheduler, "prefix_cache", None) is not None:
                 scheduler.prefix_cache.clear()
                 cleared.append("legacy_prefix")
@@ -13591,8 +13600,18 @@ async def clear_cache(cache_type: str = Query("all", alias="type")):
             pass
 
     if not cleared:
+        if skipped:
+            return {
+                "status": "busy",
+                "cache_type": cache_type,
+                "skipped": skipped,
+                "detail": "cache tiers are in use by live requests; retry when idle",
+            }
         return {"status": "no_caches_found", "cache_type": cache_type}
-    return {"status": "cleared", "caches": cleared, "cache_type": cache_type}
+    result = {"status": "cleared", "caches": cleared, "cache_type": cache_type}
+    if skipped:
+        result["skipped"] = skipped
+    return result
 
 
 # ── Distributed Cluster Endpoints ──

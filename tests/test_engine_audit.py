@@ -13251,8 +13251,12 @@ class TestTurboQuantKVTelemetry:
             def __init__(self, name):
                 self.name = name
 
-            def clear(self):
+            def clear(self, force: bool = False):
                 cleared.append(self.name)
+                # Models a SUCCESSFUL clear. The paged tier now reports whether
+                # it actually cleared, because it refuses while live requests
+                # still hold blocks, and the handler must not claim otherwise.
+                return True
 
         class _PagedManager:
             _disk_store = _Clearable("block_disk_store")
@@ -13309,8 +13313,12 @@ class TestTurboQuantKVTelemetry:
             def __init__(self, name):
                 self.name = name
 
-            def clear(self):
+            def clear(self, force: bool = False):
                 cleared.append(self.name)
+                # Models a SUCCESSFUL clear. The paged tier now reports whether
+                # it actually cleared, because it refuses while live requests
+                # still hold blocks, and the handler must not claim otherwise.
+                return True
 
         class _PagedManager:
             _disk_store = _Clearable("block_disk_store")

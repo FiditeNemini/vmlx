@@ -1443,6 +1443,24 @@ class PagedCacheManager:
             if block.is_null:
                 return False  # Never free null block
 
+            # Same guard as free_blocks() and release_request_refs(); free_block
+            # was the only one of the three without it. A released block is left
+            # in allocated_blocks at ref_count 0 AND linked into the free queue
+            # (release_request_refs, above) — that is a designed steady state, so
+            # an unpaired free here drove ref_count to -1 and relinked a block
+            # that was already queued. Measured consequences: the counter reports
+            # one more free block than the queue can reach, so popleft raises
+            # "No free blocks available" while claiming space; mid-queue, stale
+            # neighbour pointers orphan the tail; and a negative ref_count defeats
+            # the `ref_count == 0` revival guards in touch()/increment_ref(), which
+            # hands one physical block to two requests.
+            if block.ref_count <= 0:
+                logger.warning(
+                    f"free_block: block {block_id} already has "
+                    f"ref_count={block.ref_count}; refusing to double-free"
+                )
+                return False
+
             block.ref_count -= 1
 
             if block.ref_count <= 0:
@@ -1451,11 +1469,14 @@ class PagedCacheManager:
                 # Remove from allocated
                 del self.allocated_blocks[block_id]
 
-                # Add to free queue (back = MRU)
-                self.free_block_queue.append(block)
+                # Only queue a block that is not already linked, mirroring
+                # release_request_refs — appending a queued block corrupts the
+                # intrusive free list.
+                if block.prev_free_block is None and block.next_free_block is None:
+                    self.free_block_queue.append(block)
+                    self.stats.free_blocks += 1
 
                 self.stats.allocated_blocks -= 1
-                self.stats.free_blocks += 1
 
                 return True
 
@@ -2403,8 +2424,39 @@ class PagedCacheManager:
             logger.info("Prefix cache reset successfully")
             return True
 
-    def clear(self) -> None:
-        """Clear all cached data."""
+    def blocks_in_use(self) -> int:
+        """How many non-null blocks a live request still holds a reference to."""
+        with self._lock:
+            return sum(
+                1
+                for block in self.allocated_blocks.values()
+                if block is not None and not block.is_null and block.ref_count > 0
+            )
+
+    def clear(self, force: bool = False) -> bool:
+        """Clear all cached data.
+
+        Refuses while a live request still holds blocks, the same guard
+        ``reset_prefix_cache`` has always had. Without it the pool is rebuilt
+        with block ids 0..N reused immediately, while a surviving request still
+        holds its old BlockTable: its completion path resolves those ids through
+        ``allocated_blocks`` and so decrements, frees and re-hands-out blocks that
+        now belong to a DIFFERENT request. That is the cross-request wrong-answer
+        class, reachable straight from ``DELETE /v1/cache`` mid-generation.
+
+        Teardown callers (batch generator already closed, or a nuclear retry that
+        is rebuilding everything anyway) pass ``force=True``.
+
+        Returns True when the pool was cleared, False when it refused.
+        """
+        if not force:
+            in_use = self.blocks_in_use()
+            if in_use:
+                logger.warning(
+                    f"Cannot clear paged cache: {in_use} block(s) still "
+                    f"referenced by live requests"
+                )
+                return False
         with self._lock:
             # Recreate blocks and queue
             self.blocks = [CacheBlock(block_id=i) for i in range(self.max_blocks)]
@@ -2433,3 +2485,4 @@ class PagedCacheManager:
             )
 
             logger.info("PagedCacheManager cleared")
+            return True

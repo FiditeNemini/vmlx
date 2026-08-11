@@ -221,6 +221,9 @@ export function ApiDashboard() {
                 {t('api.lan')}
               </span>
               <button
+                data-vmlx-control="gateway-lan"
+                aria-pressed={lanEnabled}
+                aria-label={t('api.lan')}
                 onClick={handleLanToggle}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${lanEnabled ? "bg-primary" : "bg-muted"}`}
               >
@@ -243,6 +246,9 @@ export function ApiDashboard() {
                 {t('api.singleModelMode')}
               </span>
               <button
+                data-vmlx-control="gateway-single-model-mode"
+                aria-pressed={singleModelMode}
+                aria-label={t('api.singleModelMode')}
                 onClick={handleSingleModelModeToggle}
                 className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${singleModelMode ? "bg-primary" : "bg-muted"}`}
               >

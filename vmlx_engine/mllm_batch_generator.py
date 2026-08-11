@@ -6243,6 +6243,18 @@ class MLLMBatchGenerator:
                         )
                         chunk_size = max(1, _adaptive_chunk_cap)
                     chunk = input_ids[:, processed:processed + chunk_size]
+                    if _HYBRID_PREFILL_MEM_TRACE:
+                        # Clean per-chunk peak: reset immediately before the
+                        # forward so get_peak_memory() afterwards is THIS
+                        # chunk's requirement, not a running maximum. The
+                        # post-clear_cache active samples are points on a curve
+                        # that swings 26 -> 75GB inside the loop, so they cannot
+                        # be fitted; a reset peak can.
+                        try:
+                            _peak_base = int(mx.get_active_memory())
+                            mx.reset_peak_memory()
+                        except Exception:  # noqa: BLE001
+                            _peak_base = 0
                     if _HYBRID_ADAPTIVE_CHUNK:
                         try:
                             _active_before_chunk = int(mx.get_active_memory())
@@ -6281,6 +6293,29 @@ class MLLMBatchGenerator:
                         except Exception:  # noqa: BLE001
                             _m_fwd = -1.0
                     _materialize_prefill_cache_state(cache)
+                    if _HYBRID_PREFILL_MEM_TRACE:
+                        # AFTER materialize, not before. _call_lm_prefix_without_logits
+                        # only BUILDS the graph — MLX is lazy, so nothing has run yet at
+                        # that point and get_peak_memory() returns the pre-forward value.
+                        # Reading there reported transient=0.00GB for every chunk of a
+                        # 35-chunk span, which is the measurement equivalent of an A/B
+                        # where the new path never engaged. _materialize_prefill_cache_state
+                        # is the eval point, so the peak is only meaningful after it.
+                        try:
+                            _chunk_peak = int(mx.get_peak_memory())
+                            logger.info(
+                                "hybrid-prefill-peak chunk=%d processed=%d "
+                                "ctx=%d chunk_size=%d base=%.2fGB peak=%.2fGB "
+                                "transient=%.2fGB",
+                                chunk_num, processed,
+                                int(getattr(request, "_cached_tokens", 0) or 0) + processed,
+                                chunk_size,
+                                _peak_base / (1024**3),
+                                _chunk_peak / (1024**3),
+                                max(0, _chunk_peak - _peak_base) / (1024**3),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                     if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
                         # WHERE does the memory fail to come back? Read active
                         # at each stage of one chunk. The stage whose delta is

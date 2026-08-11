@@ -337,6 +337,45 @@ class BatchedEngine(BaseEngine):
         """Get the model name."""
         return self._model_name
 
+
+    # Families whose stored prefix KV is truncated exactly to the stripped-key
+    # boundary, so the generation-prompt suffix is REPLAYED on every fetch and a
+    # prefix stored under one reasoning rail is replay-exact for another.
+    #
+    # Hashing the suffix text into block keys (the default) is deliberately
+    # conservative and correct everywhere, but it makes an `enable_thinking`
+    # flip re-prefill the WHOLE prompt: measured on Laguna-S-2.1, 22,525 tokens
+    # went from cached=22524 to cached=0 on the flip alone, with the identical
+    # token count. DSV4 removed a 59s stall at 15k this way (85c068841).
+    #
+    # A family only qualifies when the strip is ACTIVE for it. Mixed-SWA models
+    # and openpangu force _gpl_fetch = 0 (scheduler.py) because replaying suffix
+    # tokens from an earlier RotatingKV boundary shows real distribution drift on
+    # MiMo V2.5 — for those the stored KV still CONTAINS the rail suffix, so
+    # sharing across rails would restore the wrong causal state. minimax_m3 bakes
+    # prompt length into its key by design and is excluded too.
+    #
+    # Every entry here is backed by a temperature-0 A/B proving the post-flip
+    # turn is token-identical to a cold run of the same configuration.
+    _REPLAY_EXACT_GENERATION_PROMPT_FAMILIES = frozenset(
+        {
+            "deepseek_v4",
+            "laguna",
+        }
+    )
+
+    def _replay_exact_generation_prompt(self) -> bool:
+        """May a prefix stored under one reasoning rail serve another?"""
+        family = self._model_family_name()
+        if not family:
+            return False
+        override = os.environ.get("VMLX_REPLAY_EXACT_GEN_PROMPT", "").strip().lower()
+        if override in {"0", "false", "no", "off"}:
+            return family == "deepseek_v4"
+        if override in {"1", "true", "yes", "on"}:
+            return True
+        return family in self._REPLAY_EXACT_GENERATION_PROMPT_FAMILIES
+
     def _model_family_name(self) -> str | None:
         try:
             return get_model_config_registry().lookup(self._model_name).family_name
@@ -1422,7 +1461,7 @@ class BatchedEngine(BaseEngine):
             if gen_len > 0:
                 logger.debug(f"Gen prompt len: {gen_len} tokens")
             gen_len = max(gen_len, 0)
-            if gen_len > 0 and self._model_family_name() == "deepseek_v4":
+            if gen_len > 0 and self._replay_exact_generation_prompt():
                 # DSV4 stores prefix KV truncated exactly to the stripped-key
                 # boundary and replays the request's own generation-prompt
                 # suffix on every fetch, so a prefix stored under the thinking
@@ -1431,6 +1470,9 @@ class BatchedEngine(BaseEngine):
                 # final suffix token. Hashing the suffix into block keys (the
                 # default below) forced the bounded visible-answer pass to
                 # re-prefill the entire prompt (59s stall at 15k tokens).
+                # The literal is retained from the DSV4-only era on purpose: its
+                # value only has to be EQUAL ACROSS RAILS, and changing it would
+                # invalidate every existing DSV4 cache for no benefit.
                 return gen_len, {"generation_prompt": "dsv4-replay-exact"}
             return gen_len, _generation_prompt_cache_extra_key(
                 prompt_with_generation=prompt_with_gen,

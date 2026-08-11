@@ -202,3 +202,42 @@ def test_paged_cache_schema_version_tracks_tool_and_rotating_contracts():
     assert "v11" in PAGED_CACHE_SCHEMA_VERSION
     assert "qwen_tool_continuation" in PAGED_CACHE_SCHEMA_VERSION
     assert "rotating_terminal_window" in PAGED_CACHE_SCHEMA_VERSION
+
+
+class TestReplayExactFamilyAllowlist:
+    """Which families may share prefix KV across reasoning rails.
+
+    A family qualifies only when the generation-prompt strip is ACTIVE for it,
+    so stored KV is truncated to the stripped-key boundary and the rail suffix is
+    replayed on every fetch. Where the strip is force-disabled (mixed-SWA,
+    openpangu) the stored KV still CONTAINS the rail suffix, so sharing would
+    restore the wrong causal state.
+    """
+
+    def _gen(self, family):
+        from vmlx_engine.engine.batched import BatchedEngine
+
+        probe = BatchedEngine.__new__(BatchedEngine)
+        probe._model_family_name = lambda: family
+        return BatchedEngine._replay_exact_generation_prompt(probe)
+
+    def test_proven_families_share_across_rails(self):
+        assert self._gen("deepseek_v4") is True
+        assert self._gen("laguna") is True
+
+    def test_strip_disabled_families_must_not_share(self):
+        for family in ("gemma4_unified", "muse_glimmer", "openpangu_v2", "minimax_m3"):
+            assert self._gen(family) is False, family
+
+    def test_unknown_family_defaults_to_conservative(self):
+        assert self._gen("some_new_family") is False
+        assert self._gen("") is False
+        assert self._gen(None) is False
+
+    def test_env_override_can_force_or_restore(self, monkeypatch):
+        monkeypatch.setenv("VMLX_REPLAY_EXACT_GEN_PROMPT", "0")
+        # back to DSV4-only, the pre-generalisation behaviour
+        assert self._gen("laguna") is False
+        assert self._gen("deepseek_v4") is True
+        monkeypatch.setenv("VMLX_REPLAY_EXACT_GEN_PROMPT", "1")
+        assert self._gen("gemma4_unified") is True

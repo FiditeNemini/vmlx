@@ -215,6 +215,24 @@ def apply_uncalibrated_auto_tq_policy(
     return resolved
 
 
+MIXED_SWA_STORAGE_TQ_ENV = "VMLX_MIXED_SWA_STORAGE_TQ"
+
+
+def mixed_swa_storage_tq_opted_in() -> bool:
+    """Has the operator asked for lossy STORAGE-ONLY KV on mixed-SWA models?
+
+    Off by default: storage-only quantization with live encode disabled makes a
+    warm cache hit disagree with a cold recompute at temperature 0. See the
+    measurements in :func:`apply_mixed_swa_auto_tq_policy`.
+    """
+    return os.environ.get(MIXED_SWA_STORAGE_TQ_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def apply_mixed_swa_auto_tq_policy(
     tq_cfg: dict,
     layer_types: list[str] | tuple[str, ...],
@@ -232,6 +250,30 @@ def apply_mixed_swa_auto_tq_policy(
     has_sliding = any(value == "sliding" for value in normalized)
     if not has_sliding or not full_attention_layers:
         return dict(tq_cfg)
+
+    if not mixed_swa_storage_tq_opted_in():
+        # This policy sets compress_after=0 — live encode OFF — while asking for
+        # q4 on the full-attention slots. That combination is ASYMMETRIC: those
+        # layers keep exact KV in RAM, but come back through the q4 codec when a
+        # block is restored, so a cache hit does not equal recomputation.
+        #
+        # MEASURED on Muse Glimmer 30B, temperature 0, ~7.27k prompt, warm reuse
+        # confirmed in every arm:
+        #   storage-tq4 (this policy): cold 157 tok, warm 241 tok, reasoning DIFFERS
+        #   tq disabled              : cold 154 tok, warm 154 tok, byte-identical
+        #   live q8                  : cold 201 tok, warm 201 tok, byte-identical
+        # Both consistent arms apply the SAME precision to both paths; only the
+        # storage-only arm diverges, and it is the one that shipped by default.
+        #
+        # This config is engine-invented (it only runs when the bundle shipped no
+        # calibrated turboquant block), so nothing here is the model author's
+        # intent. Reuse works identically without it — the compression buys L2
+        # footprint and costs answer stability, which is the wrong trade to make
+        # silently. Opt back in with VMLX_MIXED_SWA_STORAGE_TQ=1.
+        resolved = dict(tq_cfg)
+        resolved["enabled"] = False
+        resolved["auto_policy"] = "mixed_swa_exact_kv_storage"
+        return resolved
 
     resolved = dict(tq_cfg)
     resolved.update(

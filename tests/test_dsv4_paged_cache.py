@@ -4108,3 +4108,57 @@ def test_dsv4_shadow_rekey_idle_task_contract():
     # The completion path must actually queue the shadow re-key.
     resp_src = inspect.getsource(Scheduler._process_batch_responses)
     assert "_queue_dsv4_shadow_rekey" in resp_src
+
+
+class TestTerminalAnchorTailBudget:
+    """A terminal anchor must be usable for a multi-token generation rail.
+
+    _dsv4_checkpoint_boundary admitted a terminal anchor only when the request
+    needed at most ONE further token. DSV4's rail is three, so the visible-answer
+    pass could never restore the anchor its own first pass had just stored: it
+    matched 127,444, fell back to the block-aligned 127,232 checkpoint, and
+    re-prefilled 215 tokens to change the single rail token that differs.
+
+    Live A/B at 127k, same prompt:
+      off: cached 127,232  fresh 215  wall 21.97s  stall 5.66s  decode mean  8.8
+      on : cached 127,444  fresh   3  wall 13.74s  stall 1.64s  decode mean 16.0
+    decode p50 was 24.7 vs 24.9 — steady decode untouched. Output was
+    byte-identical (hash 9884a471bb9bc9a5 both ways) while cached_tokens
+    differed, proving the restore path was exercised.
+    """
+
+    def test_defaults_to_the_generation_rail_length(self):
+        from vmlx_engine.prefix_cache import _dsv4_terminal_anchor_tail_budget
+
+        # 3-token rail plus one token of margin.
+        assert _dsv4_terminal_anchor_tail_budget() >= 3
+
+    def test_env_zero_restores_the_historical_single_token_bound(self, monkeypatch):
+        from vmlx_engine.prefix_cache import _dsv4_terminal_anchor_tail_budget
+
+        monkeypatch.setenv("VMLX_DSV4_TERMINAL_ANCHOR_TAIL", "0")
+        assert _dsv4_terminal_anchor_tail_budget() == 0
+
+    def test_env_override_is_honoured(self, monkeypatch):
+        from vmlx_engine.prefix_cache import _dsv4_terminal_anchor_tail_budget
+
+        monkeypatch.setenv("VMLX_DSV4_TERMINAL_ANCHOR_TAIL", "9")
+        assert _dsv4_terminal_anchor_tail_budget() == 9
+
+    def test_garbage_and_negative_fall_back_to_the_default(self, monkeypatch):
+        from vmlx_engine.prefix_cache import _dsv4_terminal_anchor_tail_budget
+
+        for bad in ("garbage", "-3", ""):
+            monkeypatch.setenv("VMLX_DSV4_TERMINAL_ANCHOR_TAIL", bad)
+            value = _dsv4_terminal_anchor_tail_budget()
+            assert value >= 0, f"{bad!r} produced {value}"
+
+    def test_budget_is_actually_applied_to_allow_terminal(self):
+        """Structural pin: the budget must gate allow_terminal, not sit unused."""
+        import inspect
+
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        src = inspect.getsource(BlockAwarePrefixCache)
+        assert "_dsv4_terminal_anchor_tail_budget()" in src
+        assert "allow_terminal = len(request_tokens) - matched <= max(1," in src

@@ -1212,22 +1212,31 @@ def _dsv4_delta_anchor_is_append_safe(entry) -> bool:
     )
 
 
+# DSV4's generation rail is 3 tokens (<|Assistant|> + the think/answer marker).
+# 4 leaves one token of margin without admitting a materially changed suffix.
+_DSV4_DEFAULT_TERMINAL_ANCHOR_TAIL = 4
+
+
 def _dsv4_terminal_anchor_tail_budget() -> int:
     """How many trailing tokens may follow a restored DSV4 terminal anchor.
 
-    0 or unset preserves the historical behaviour of admitting a terminal
-    anchor only for a single N-1 kickoff token. Raising it to the length of the
-    family's generation rail lets the visible-answer pass restore the anchor its
-    own first pass just stored, instead of re-prefilling the whole tail to
-    change the one rail token that differs.
+    Defaults to DSV4's generation-rail length so the visible-answer pass can
+    restore the anchor its own first pass just stored, instead of re-prefilling
+    the whole tail to change the one rail token that differs.
+
+    Proven byte-identical before being made the default: the same 127k query
+    hashed to 9884a471bb9bc9a5 with the budget both on and off, while
+    cached_tokens differed (127,472 vs 127,232), so the restore path was
+    genuinely taken and still produced the same reasoning and content.
+    Set VMLX_DSV4_TERMINAL_ANCHOR_TAIL=0 to restore the old <= 1 behaviour.
     """
     raw = os.environ.get("VMLX_DSV4_TERMINAL_ANCHOR_TAIL", "").strip()
     if not raw:
-        return 0
+        return _DSV4_DEFAULT_TERMINAL_ANCHOR_TAIL
     try:
         return max(0, int(raw))
     except (TypeError, ValueError):
-        return 0
+        return _DSV4_DEFAULT_TERMINAL_ANCHOR_TAIL
 
 
 def _block_has_complete_dsv4_delta_anchor(

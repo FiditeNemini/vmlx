@@ -1655,6 +1655,27 @@ from .utils.prefill_admission import (
     prefill_valve_enabled as _prefill_valve_enabled,
 )
 
+# Adaptive chunk sizing from MEASURED per-chunk transient. Default OFF.
+#
+# It works as designed — it measured an 18.32GB transient for a 2048-token chunk
+# and shrank 2048 -> 1731 -> 1137 -> 469 — and the process STILL aborted, because
+# by then ACTIVE memory was already ~95GB against a ~107GB limit. No chunk size
+# helps once the resident set is that close to the ceiling.
+#
+# Weights (~15GB) plus the measured cache (~6GB) account for only ~21GB of that
+# 95GB, so ~74GB is live memory that is neither the cache list nor the MLX
+# allocator cache (cache=0.00GB throughout). That is a LEAK, and sizing cannot
+# fix a leak. Shipping this on would add cost without preventing the crash —
+# the same mistake as the reverted budget clamp (a3cedb29f).
+#
+# Kept because the mechanism is right and measurement-driven: turn it on to
+# study per-chunk transients, or once the leak is fixed.
+_HYBRID_ADAPTIVE_CHUNK = os.environ.get(
+    "VMLX_HYBRID_ADAPTIVE_CHUNK", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+_HYBRID_MIN_CHUNK = max(1, int(os.environ.get("VMLX_HYBRID_MIN_CHUNK", "64") or 64))
+
 _HYBRID_PREFILL_MEM_TRACE = os.environ.get(
     "VMLX_HYBRID_PREFILL_MEM_TRACE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -6179,6 +6200,14 @@ class MLLMBatchGenerator:
                 )
                 if _hoisted_all_tokens is None and _sorted_boundaries:
                     _hoisted_all_tokens = input_ids[0].tolist()
+                # Adaptive chunk sizing from MEASURED per-chunk transient.
+                # A modelled budget was tried and failed (a3cedb29f): it assumed
+                # fp16 scores only, while the real forward holds several fp32
+                # intermediates, so the projection was 4-6x optimistic and the
+                # process still aborted. DSV4's valve solves this by adapting
+                # from OBSERVED peaks instead of predicting them; same idea here.
+                _observed_chunk_transient = 0
+                _adaptive_chunk_cap = _tight_text_prefill_step_size
                 _prefill_keep_alloc = os.environ.get(
                     "VMLX_PREFILL_KEEP_ALLOC", ""
                 ).lower() in {"1", "true", "yes", "on"}
@@ -6202,7 +6231,23 @@ class MLLMBatchGenerator:
                         next_ssm_boundary = _sorted_boundaries[_boundary_idx]
                     if next_ssm_boundary is not None:
                         chunk_size = next_ssm_boundary - processed
+                    if _HYBRID_ADAPTIVE_CHUNK and _adaptive_chunk_cap < chunk_size:
+                        logger.info(
+                            "Hybrid prefill chunk %d -> %d at processed=%d "
+                            "(measured transient %.2fGB per chunk)",
+                            chunk_size,
+                            _adaptive_chunk_cap,
+                            processed,
+                            _observed_chunk_transient / (1024**3),
+                        )
+                        chunk_size = max(1, _adaptive_chunk_cap)
                     chunk = input_ids[:, processed:processed + chunk_size]
+                    if _HYBRID_ADAPTIVE_CHUNK:
+                        try:
+                            _active_before_chunk = int(mx.get_active_memory())
+                            mx.reset_peak_memory()
+                        except Exception:  # noqa: BLE001
+                            _active_before_chunk = 0
                     try:
                         _call_lm_prefix_without_logits(
                             lm,
@@ -6230,6 +6275,26 @@ class MLLMBatchGenerator:
                         )
                         raise
                     _materialize_prefill_cache_state(cache)
+                    if _HYBRID_ADAPTIVE_CHUNK and _active_before_chunk > 0:
+                        try:
+                            _peak = int(mx.get_peak_memory())
+                            _, _limit = get_effective_metal_working_set_bytes(mx)
+                            _transient = max(0, _peak - _active_before_chunk)
+                            if _transient > _observed_chunk_transient:
+                                _observed_chunk_transient = _transient
+                            _active_now = int(mx.get_active_memory())
+                            # Headroom for the NEXT chunk, with the same 1.25x
+                            # safety factor the DSV4 valve uses.
+                            _headroom = _limit - _active_now
+                            if _limit > 0 and _transient > 0 and chunk_size > 0:
+                                _per_token = max(1, _transient // max(1, chunk_size))
+                                _fit = int(_headroom / 1.25) // _per_token
+                                _adaptive_chunk_cap = max(
+                                    _HYBRID_MIN_CHUNK,
+                                    min(_tight_text_prefill_step_size, int(_fit)),
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
                     processed += chunk_size
                     chunk_num += 1
                     if processed in ssm_boundaries and processed not in ssm_captured_boundaries:

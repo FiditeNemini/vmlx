@@ -36,6 +36,29 @@ _PERMANENT_SIGNATURES = (
     "maximum allowed buffer size",
 )
 
+# The command-buffer variant is a different animal and MUST NOT be treated as a
+# recoverable Python error. MEASURED on Qwen3.6-27B at a 100,935-token fresh
+# span, after the prefill had correctly chunked:
+#
+#   libc++abi: terminating due to uncaught exception of type std::runtime_error:
+#   [METAL] Command buffer execution failed: Insufficient Memory
+#   (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+#
+# libc++ TERMINATES — the process dies, so unlike [metal::malloc] there is no
+# exception to catch and nothing downstream ever runs. Listing it here is only
+# for triage of logs after the fact; the sole defence is the admission check,
+# which declines before the command buffer is submitted.
+_PROCESS_FATAL_SIGNATURES = (
+    "command buffer execution failed",
+    "kiogpucommandbuffercallbackerroroutofmemory",
+)
+
+
+def is_process_fatal_allocation_signature(text: str) -> bool:
+    """Did this log line come from a Metal failure that ABORTS the process?"""
+    lowered = (text or "").lower()
+    return any(sig in lowered for sig in _PROCESS_FATAL_SIGNATURES)
+
 # Exhaustion that a cache clear can genuinely relieve.
 _TRANSIENT_SIGNATURES = (
     "out of memory",

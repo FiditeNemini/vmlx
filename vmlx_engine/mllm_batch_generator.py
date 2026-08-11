@@ -1649,6 +1649,13 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 # hit skips the store, because promoting a live extended cache compounds
 # reconstruction error until Bonsai/Qwen3.5 collapse into a token loop. Lifting
 # THAT is the real unlock, and it needs a long coherence run to justify.
+from .utils.memory_limits import get_effective_metal_working_set_bytes
+from .utils.prefill_admission import (
+    prefill_valve_check as _prefill_valve_check,
+    prefill_valve_enabled as _prefill_valve_enabled,
+    prefill_valve_min_margin_bytes as _prefill_valve_min_margin_bytes,
+)
+
 _CHUNKED_SSM_REDERIVE = os.environ.get(
     "VMLX_CHUNKED_SSM_REDERIVE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -6193,6 +6200,31 @@ class MLLMBatchGenerator:
                     if next_ssm_boundary is not None:
                         chunk_size = next_ssm_boundary - processed
                     chunk = input_ids[:, processed:processed + chunk_size]
+                    # Admission check. Chunking alone does NOT make this path
+                    # safe: measured on Qwen3.6-27B, a 100,935-token fresh span
+                    # chunked correctly and still died with
+                    #   libc++abi: terminating due to uncaught exception of type
+                    #   std::runtime_error: [METAL] Command buffer execution
+                    #   failed: Insufficient Memory
+                    # which is a PROCESS ABORT — libc++ terminates, so unlike
+                    # [metal::malloc] there is no Python exception to catch. The
+                    # only defence is declining before the command buffer is
+                    # submitted.
+                    if _prefill_valve_enabled():
+                        try:
+                            _active_now = int(mx.get_active_memory())
+                            _, _max_ws_now = get_effective_metal_working_set_bytes(mx)
+                        except Exception:  # noqa: BLE001
+                            _active_now = _max_ws_now = 0
+                        _prefill_valve_check(
+                            _active_now,
+                            _max_ws_now,
+                            0,
+                            _prefill_valve_min_margin_bytes(),
+                            chunk_start=processed,
+                            chunk_end=processed + chunk_size,
+                            model_label=str(self._model_type or "mllm"),
+                        )
                     try:
                         _call_lm_prefix_without_logits(
                             lm,

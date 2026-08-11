@@ -60,6 +60,24 @@ _INLINE_SELF_CORRECTION_TAIL_RE = re.compile(
 )
 
 
+
+def _trim_trailing_eot(text: str) -> str:
+    """Drop a trailing ``<turn|>`` — including one that is still ARRIVING.
+
+    Streaming hands the marker over one character at a time, so a whole-string
+    ``replace`` or an ``endswith`` check never matches mid-flight and the EOS
+    token renders in the answer as ``<turn|``. Holding the partial prefix is
+    safe: the counters that drive emission only ever grow, so if the run turns
+    out to be prose after all it is emitted on the delta that disambiguates it.
+    """
+    while text.endswith(_EOT):
+        text = text[: -len(_EOT)]
+    for size in range(len(_EOT) - 1, 0, -1):
+        if text.endswith(_EOT[:size]):
+            return text[:-size]
+    return text
+
+
 class Gemma4ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Gemma 4 models.
@@ -176,9 +194,9 @@ class Gemma4ReasoningParser(ReasoningParser):
         """
         text = model_output
 
-        # Strip trailing <turn|> tokens (EOS)
-        while text.endswith(_EOT):
-            text = text[:-len(_EOT)]
+        # Strip trailing <turn|> tokens (EOS), including a partial one that is
+        # still arriving — otherwise it renders in chat as `<turn|`.
+        text = _trim_trailing_eot(text)
 
         # Detect the channel anywhere in the generation.  Tool continuations
         # can emit a complete visible answer and then start a second thought
@@ -322,9 +340,8 @@ class Gemma4ReasoningParser(ReasoningParser):
         degraded form where the detokenizer ate the SOC token (leaving
         `thought\\n...<channel|>...`).
         """
-        # Strip trailing <turn|>
-        while text.endswith(_EOT):
-            text = text[:-len(_EOT)]
+        # Strip trailing <turn|>, including a partial one still arriving.
+        text = _trim_trailing_eot(text)
 
         # Native or degraded marker, including a tool-continuation channel
         # that begins after already-visible content.

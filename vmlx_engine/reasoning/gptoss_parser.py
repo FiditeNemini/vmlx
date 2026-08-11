@@ -61,6 +61,23 @@ def _bare_marker_replacer(m: re.Match) -> str:
     return f"{_START_TAG}assistant{_CHANNEL_TAG}{_ANALYSIS_CHANNEL}{_MESSAGE_TAG}"
 
 
+
+def _looks_like_harmony(text: str) -> bool:
+    """Is ``text`` a Harmony control sequence, or still growing into one?
+
+    Used to keep the plain-text fallback from publishing markers as answer text
+    while a channel header is mid-flight. Only text that genuinely opens with a
+    control token is held, so ordinary prose still streams immediately.
+    """
+    head = (text or "").lstrip()
+    if not head:
+        return False
+    for marker in (_START_TAG, _CHANNEL_TAG):
+        if head.startswith(marker) or marker.startswith(head):
+            return True
+    return False
+
+
 class GptOssReasoningParser(ReasoningParser):
     """
     Reasoning parser for GPT-OSS / Harmony protocol models.
@@ -215,6 +232,14 @@ class GptOssReasoningParser(ReasoningParser):
         # Fallback: model isn't using Harmony protocol
         if not self._saw_marker:
             if len(current_text) < self._FALLBACK_THRESHOLD:
+                return None
+            # An analysis channel that has not yet reached its `final` section
+            # parses to nothing, so _saw_marker is still False — and the raw
+            # `<|channel|>analysis<|message|>` header is longer than the
+            # threshold, so the fallback used to publish the MARKERS as answer
+            # text. Text that is (or is still growing into) a Harmony marker is
+            # never plain content, so hold instead of flushing.
+            if _looks_like_harmony(current_text):
                 return None
             if len(current_text) > self._fallback_emitted:
                 new_content = current_text[self._fallback_emitted:]

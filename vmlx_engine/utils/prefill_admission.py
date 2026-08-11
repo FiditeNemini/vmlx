@@ -169,3 +169,52 @@ def classify_allocation_error(error: BaseException | str) -> str | None:
 
 def is_permanent_allocation_error(error: BaseException | str) -> bool:
     return classify_allocation_error(error) == "permanent"
+
+
+# Per-chunk attention budget. NOT the same as the hybrid guard's 8 GiB one-shot
+# threshold: that decides whether to chunk at all, this decides how big a chunk
+# may be, and the two must not share a number.
+#
+# Empirical, from the failure itself: Qwen3.6-27B died with a command-buffer OOM
+# at 30 heads x 2048 x 67292 x 2 = 8.27 GB in a single chunk, against a ~9.5 GB
+# Metal cap. So the scores buffer alone reaching ~8.3 GB is already fatal —
+# whatever else is in flight during the forward pass does not leave room. Half
+# the one-shot guard keeps a wide margin under that measured failure point.
+# VMLX_PREFILL_CHUNK_ATTN_BUDGET_GB tunes it.
+def _chunk_attention_budget_bytes() -> int:
+    try:
+        gb = float(os.environ.get("VMLX_PREFILL_CHUNK_ATTN_BUDGET_GB", "4"))
+    except (TypeError, ValueError):
+        gb = 4.0
+    return max(1, int(gb * _GIB))
+
+
+METAL_SINGLE_BUFFER_BUDGET_BYTES = _chunk_attention_budget_bytes()
+
+
+def max_prefill_chunk_tokens(
+    num_heads: int,
+    context_tokens: int,
+    budget_bytes: int | None = None,
+    bytes_per_score: int = 2,
+) -> int:
+    """Largest chunk whose attention scores still fit one Metal buffer.
+
+    A chunked prefill computes ``chunk x context`` attention scores, NOT
+    ``chunk^2`` — so the per-chunk buffer grows with the CONTEXT even though the
+    chunk size is fixed. A step size that is safe at 10k is fatal at 100k.
+
+    MEASURED: Qwen3.6-27B (~30 heads) at a 67,292-token context chunked at the
+    configured step and still died with a command-buffer OOM, which aborts the
+    process. 30 x 2048 x 67292 x 2 = 8.3 GB — over the cap, in ONE chunk.
+
+    Returns a token count >= 1; callers clamp their step size to it.
+    """
+    if budget_bytes is None:
+        budget_bytes = _chunk_attention_budget_bytes()
+    heads = max(1, int(num_heads or 1))
+    context = max(1, int(context_tokens or 1))
+    per_token = heads * context * max(1, int(bytes_per_score))
+    if per_token <= 0:
+        return 1
+    return max(1, int(budget_bytes) // per_token)

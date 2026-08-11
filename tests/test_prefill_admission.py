@@ -178,3 +178,55 @@ class TestChunkedSsmRederiveGate:
         from vmlx_engine.mllm_batch_generator import _CHUNKED_SSM_REDERIVE
 
         assert _CHUNKED_SSM_REDERIVE is False
+
+
+class TestChunkAttentionClamp:
+    """A chunked prefill computes chunk x CONTEXT scores, not chunk^2.
+
+    So the per-chunk buffer grows with the conversation even though the step
+    size is fixed, and a step that is safe early becomes fatal later. MEASURED
+    on Qwen3.6-27B: at a 67,292-token context the prefill chunked correctly at
+    the configured step and the PROCESS STILL DIED with a Metal command-buffer
+    OOM — 30 heads x 2048 x 67292 x 2 = 8.3 GB in one chunk. libc++ terminates
+    on that, so there is nothing to catch; the chunk has to fit before it is
+    submitted.
+    """
+
+    def test_clamp_shrinks_as_context_grows(self):
+        from vmlx_engine.utils.prefill_admission import max_prefill_chunk_tokens
+
+        caps = [max_prefill_chunk_tokens(30, ctx) for ctx in (10_000, 67_292, 300_000)]
+        assert caps == sorted(caps, reverse=True), caps
+        assert all(cap >= 1 for cap in caps)
+
+    def test_the_measured_failure_would_now_be_clamped(self):
+        from vmlx_engine.utils.prefill_admission import max_prefill_chunk_tokens
+
+        # The exact configuration that aborted the process.
+        assert max_prefill_chunk_tokens(30, 67_292) < 2048
+
+    def test_a_short_context_is_not_penalised(self):
+        from vmlx_engine.utils.prefill_admission import max_prefill_chunk_tokens
+
+        assert max_prefill_chunk_tokens(30, 4_000) > 2048
+
+    def test_degenerate_inputs_never_return_zero(self):
+        """A zero chunk size would hang the prefill loop forever."""
+        from vmlx_engine.utils.prefill_admission import max_prefill_chunk_tokens
+
+        for heads, ctx in ((0, 0), (0, 10), (10, 0), (1, 10**9), (10**6, 10**6)):
+            assert max_prefill_chunk_tokens(heads, ctx) >= 1
+
+    def test_command_buffer_oom_is_flagged_process_fatal(self):
+        from vmlx_engine.utils.prefill_admission import (
+            is_process_fatal_allocation_signature,
+        )
+
+        assert is_process_fatal_allocation_signature(
+            "[METAL] Command buffer execution failed: Insufficient Memory "
+            "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)"
+        )
+        # metal::malloc is catchable and must NOT be lumped in with it
+        assert not is_process_fatal_allocation_signature(
+            "[metal::malloc] Attempting to allocate 4398046511104 bytes"
+        )

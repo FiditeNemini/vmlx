@@ -1651,9 +1651,8 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 # THAT is the real unlock, and it needs a long coherence run to justify.
 from .utils.memory_limits import get_effective_metal_working_set_bytes
 from .utils.prefill_admission import (
-    prefill_valve_check as _prefill_valve_check,
+    max_prefill_chunk_tokens,
     prefill_valve_enabled as _prefill_valve_enabled,
-    prefill_valve_min_margin_bytes as _prefill_valve_min_margin_bytes,
 )
 
 _CHUNKED_SSM_REDERIVE = os.environ.get(
@@ -6199,32 +6198,36 @@ class MLLMBatchGenerator:
                         next_ssm_boundary = _sorted_boundaries[_boundary_idx]
                     if next_ssm_boundary is not None:
                         chunk_size = next_ssm_boundary - processed
-                    chunk = input_ids[:, processed:processed + chunk_size]
-                    # Admission check. Chunking alone does NOT make this path
-                    # safe: measured on Qwen3.6-27B, a 100,935-token fresh span
-                    # chunked correctly and still died with
+                    # A chunked prefill computes chunk x CONTEXT attention
+                    # scores, not chunk^2, so the per-chunk buffer grows with the
+                    # conversation even though the step size is fixed. A step
+                    # that is safe at 10k is fatal at 100k.
+                    #
+                    # MEASURED on Qwen3.6-27B: at a 67,292-token context the
+                    # prefill chunked correctly at the configured step and the
+                    # PROCESS STILL DIED —
                     #   libc++abi: terminating due to uncaught exception of type
                     #   std::runtime_error: [METAL] Command buffer execution
                     #   failed: Insufficient Memory
-                    # which is a PROCESS ABORT — libc++ terminates, so unlike
-                    # [metal::malloc] there is no Python exception to catch. The
-                    # only defence is declining before the command buffer is
-                    # submitted.
+                    # 30 heads x 2048 x 67292 x 2 = 8.3 GB in ONE chunk, over
+                    # the Metal single-buffer cap. libc++ terminates, so there is
+                    # no exception to catch: the chunk must be sized to fit
+                    # BEFORE it is submitted.
                     if _prefill_valve_enabled():
-                        try:
-                            _active_now = int(mx.get_active_memory())
-                            _, _max_ws_now = get_effective_metal_working_set_bytes(mx)
-                        except Exception:  # noqa: BLE001
-                            _active_now = _max_ws_now = 0
-                        _prefill_valve_check(
-                            _active_now,
-                            _max_ws_now,
-                            0,
-                            _prefill_valve_min_margin_bytes(),
-                            chunk_start=processed,
-                            chunk_end=processed + chunk_size,
-                            model_label=str(self._model_type or "mllm"),
+                        _attn_chunk_cap = max_prefill_chunk_tokens(
+                            _n_heads_guess, processed + chunk_size
                         )
+                        if chunk_size > _attn_chunk_cap:
+                            logger.info(
+                                "Hybrid prefill chunk clamped %d -> %d at "
+                                "context=%d (attention scores would exceed the "
+                                "Metal single-buffer cap)",
+                                chunk_size,
+                                _attn_chunk_cap,
+                                processed + chunk_size,
+                            )
+                            chunk_size = _attn_chunk_cap
+                    chunk = input_ids[:, processed:processed + chunk_size]
                     try:
                         _call_lm_prefix_without_logits(
                             lm,

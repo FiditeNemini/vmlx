@@ -3164,7 +3164,16 @@ export class SessionManager extends EventEmitter {
           usePagedCache: detectedFamily === 'deepseek-v4' ? true : (detected.usePagedCache ?? false),
           enableDiskCache: detectedFamily === 'openpangu_v2',
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
-          maxCacheBlocks: detectedFamily === 'deepseek-v4' ? DSV4_MAX_CACHE_BLOCKS : 1000,
+          // Size the index to the generic capacity target, never the old flat
+          // 1000. At the 64-token generic block, 1000 indexes only 63,936
+          // tokens, silently capping prefix reuse below the model's context
+          // window — on Gemma 4 a 77k prompt then reported 0 cached tokens on
+          // an exact repeat and ran slower than a cold prefill. The v14
+          // migration already lifts existing sessions off that value; new
+          // sessions must not be created at it in the first place.
+          maxCacheBlocks: detectedFamily === 'deepseek-v4'
+            ? DSV4_MAX_CACHE_BLOCKS
+            : indexBlocksForCapacity(64),
           enableBlockDiskCache: detectedFamily !== 'openpangu_v2',
           blockDiskCacheMaxGb: 10,
           kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',

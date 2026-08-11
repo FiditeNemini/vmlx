@@ -218,3 +218,66 @@ def max_prefill_chunk_tokens(
     if per_token <= 0:
         return 1
     return max(1, int(budget_bytes) // per_token)
+
+
+def project_span_peak_bytes(
+    measured_transient_bytes: int,
+    measured_at_context: int,
+    final_context: int,
+) -> int:
+    """Extrapolate a measured per-chunk transient to the END of the span.
+
+    The hybrid prefill's transient scales with the CONTEXT being attended over,
+    not with how many query tokens are in flight — established by three chunk
+    sizing experiments that all aborted at the same 73-75k context whether the
+    chunk was 2048 or 556 tokens. So the honest projection is linear in context:
+    a transient of T at context C becomes T * (final / C) at the end.
+
+    Pure, so the threshold is testable without a GPU.
+    """
+    transient = max(0, int(measured_transient_bytes))
+    at = max(1, int(measured_at_context))
+    final = max(1, int(final_context))
+    if final <= at:
+        return transient
+    return int(transient * (final / at))
+
+
+def span_admission_check(
+    active_bytes: int,
+    max_ws_bytes: int,
+    measured_transient_bytes: int,
+    measured_at_context: int,
+    final_context: int,
+    *,
+    fresh_tokens: int,
+    model_label: str = "model",
+    safety: float = 1.25,
+) -> None:
+    """Decline a whole prefill span that cannot finish, BEFORE burning the work.
+
+    Per-chunk admission cannot save this case: by the time the last chunks run,
+    active memory is already near the ceiling and no chunk size fits. Worse, the
+    failure mode there is a Metal command-buffer OOM, which ABORTS the process —
+    there is no exception to catch and the engine is simply gone.
+
+    Deciding once, early, converts that into a clean per-request error while the
+    engine keeps serving. Unknown readings never reject.
+    """
+    if max_ws_bytes <= 0 or active_bytes <= 0 or measured_transient_bytes <= 0:
+        return
+    projected = project_span_peak_bytes(
+        measured_transient_bytes, measured_at_context, final_context
+    )
+    if active_bytes + int(projected * safety) <= max_ws_bytes:
+        return
+    gib = 1024**3
+    raise PrefillAdmissionError(
+        f"{model_label}: prefill admission declined a {fresh_tokens}-token span "
+        f"before starting it — at the final context of {final_context} tokens the "
+        f"projected working set is {(active_bytes + projected * safety) / gib:.1f}GB "
+        f"against a device limit of {max_ws_bytes / gib:.1f}GB (measured "
+        f"{measured_transient_bytes / gib:.2f}GB transient at {measured_at_context} "
+        f"tokens). A context of this length cannot be served on this hardware; "
+        f"shorten the conversation or reduce the prompt."
+    )

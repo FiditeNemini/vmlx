@@ -230,3 +230,70 @@ class TestChunkAttentionClamp:
         assert not is_process_fatal_allocation_signature(
             "[metal::malloc] Attempting to allocate 4398046511104 bytes"
         )
+
+
+class TestSpanAdmissionIsNotYetSufficient:
+    """Whole-span admission: the idea is right, the linear model is NOT.
+
+    Per-chunk admission cannot save the hybrid abort (three implementations,
+    all failed at the same 73-75k context). Deciding once on the whole span
+    before starting it is the right shape — it turns a process abort into a
+    clean per-request error.
+
+    But a transient that scales LINEARLY with context does not reproduce the
+    observed failure, and this test pins that so nobody wires it up believing
+    it works. Fed the real measurements it ADMITS the span that actually died.
+    """
+
+    def test_linear_projection_admits_the_known_fatal_span(self):
+        from vmlx_engine.utils.prefill_admission import span_admission_check
+
+        GIB = 1024**3
+        # Real numbers: 18.32GB transient measured at ~65k context, span ran to
+        # a final context of ~100,935, weights+cache baseline ~21GB, ~107GB limit.
+        span_admission_check(
+            active_bytes=21 * GIB,
+            max_ws_bytes=107 * GIB,
+            measured_transient_bytes=int(18.32 * GIB),
+            measured_at_context=65_536,
+            final_context=100_935,
+            fresh_tokens=67_292,
+            model_label="qwen3_5",
+        )
+        # No exception == admitted == would NOT have prevented the crash.
+        # The observed active at that point was ~95GB, not the ~56GB this
+        # projects, so the real growth is not linear in context.
+
+    def test_it_does_decline_when_the_projection_is_large_enough(self):
+        """The mechanism itself works; only the growth model is wrong."""
+        from vmlx_engine.utils.prefill_admission import (
+            PrefillAdmissionError,
+            span_admission_check,
+        )
+
+        GIB = 1024**3
+        with pytest.raises(PrefillAdmissionError) as excinfo:
+            span_admission_check(
+                active_bytes=80 * GIB,
+                max_ws_bytes=107 * GIB,
+                measured_transient_bytes=30 * GIB,
+                measured_at_context=50_000,
+                final_context=100_000,
+                fresh_tokens=50_000,
+                model_label="qwen3_5",
+            )
+        assert "cannot be served on this hardware" in str(excinfo.value)
+
+    def test_unknown_readings_never_decline(self):
+        from vmlx_engine.utils.prefill_admission import span_admission_check
+
+        GIB = 1024**3
+        for active, limit, transient in ((0, 107 * GIB, GIB), (21 * GIB, 0, GIB), (21 * GIB, 107 * GIB, 0)):
+            span_admission_check(
+                active_bytes=active,
+                max_ws_bytes=limit,
+                measured_transient_bytes=transient,
+                measured_at_context=1000,
+                final_context=100_000,
+                fresh_tokens=99_000,
+            )

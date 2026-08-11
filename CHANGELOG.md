@@ -57,6 +57,22 @@ All notable changes to vMLX Engine will be documented in this file.
 - Ollama `think` string levels (`"low"` / `"medium"` / `"high"`) were silently
   dropped — they normalized to neither true nor false, so thinking never even
   engaged. A level now enables thinking and selects the reasoning effort.
+- Muse Glimmer showed no reasoning-strength controls. Chat Settings offered only
+  the Auto/On thinking toggle, so the four depths the model actually has were
+  unreachable from the app. The panel derived its effort buttons solely from a
+  bundle's `reasoning_effort_levels`, but Muse declares `reasoning_strength` with
+  a `modes` list instead; effort levels are now also read from `modes`, and
+  `xhigh` became a first-class level (labelled "Extra High" in every locale).
+- The prefix cache was capped far below the context window. New sessions were
+  created with a 1000-block index, which at the 64-token block addresses only
+  63,936 tokens — a long prompt could report zero reuse on an exact repeat and
+  run slower than a cold prefill. New sessions now index 262,144 tokens, and
+  existing sessions are migrated.
+- Vision models could run with paged RAM off in the app while the same model ran
+  paged from the command line, so the app silently used a slower cache path.
+  The two now agree, and the migration that was meant to correct existing
+  sessions — which never actually ran, and marked sessions as already-migrated —
+  is fixed.
 
 - Muse Glimmer produced fluent nonsense. Four divergences from Gemma were
   missing from the port: the checkpoint's zero-centered RMSNorm gains were

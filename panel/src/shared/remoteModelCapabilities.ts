@@ -24,8 +24,8 @@ export interface RemoteDetectedConfig {
   reasoningParser?: string
   supportsThinking?: boolean
   supportsInstructMode?: boolean
-  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>
-  defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>
+  defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   supportsThinkingBudget?: boolean
   thinkInTemplate?: boolean
   dsv4PoolQuantDefault?: boolean
@@ -99,10 +99,10 @@ function stringArray(value: unknown): string[] {
     : []
 }
 
-function reasoningEfforts(value: unknown): Array<'low' | 'medium' | 'high' | 'max'> {
+function reasoningEfforts(value: unknown): Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'> {
   return stringArray(value)
     .map(level => level.toLowerCase())
-    .filter((level): level is 'low' | 'medium' | 'high' | 'max' => REASONING_EFFORTS.has(level))
+    .filter((level): level is 'low' | 'medium' | 'high' | 'xhigh' | 'max' => REASONING_EFFORTS.has(level))
 }
 
 /**
@@ -196,7 +196,7 @@ export function detectedConfigFromRemoteCapabilities(
   }
   if (efforts.length > 0) detected.supportedReasoningEfforts = efforts
   if (defaultEffort && REASONING_EFFORTS.has(defaultEffort)) {
-    detected.defaultReasoningEffort = defaultEffort as 'low' | 'medium' | 'high' | 'max'
+    detected.defaultReasoningEffort = defaultEffort as 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   }
   if (typeof capabilities.supports_thinking_budget === 'boolean') {
     detected.supportsThinkingBudget = capabilities.supports_thinking_budget

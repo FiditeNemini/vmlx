@@ -366,6 +366,7 @@
       "effortLow": "Low",
       "effortMedium": "Medium",
       "effortHigh": "High",
+      "effortXhigh": "Extra High",
       "effortMax": "Max",
       "effortDefault": "Default ({value})",
       "effortDefaultNoValue": "Default",

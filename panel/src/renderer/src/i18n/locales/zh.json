@@ -366,6 +366,7 @@
       "effortLow": "低",
       "effortMedium": "中",
       "effortHigh": "高",
+      "effortXhigh": "超高",
       "effortMax": "最大",
       "effortDefault": "默认（{value}）",
       "effortDefaultNoValue": "默认",

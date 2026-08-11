@@ -49,7 +49,7 @@ interface ChatOverrides {
   builtinToolsEnabled?: boolean
   workingDirectory?: string
   enableThinking?: boolean
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   hideToolStatus?: boolean
   webSearchEnabled?: boolean
   braveSearchEnabled?: boolean
@@ -110,8 +110,8 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>(undefined)
   const [detectedSupportsThinking, setDetectedSupportsThinking] = useState<boolean | undefined>(undefined)
   const [detectedSupportsInstructMode, setDetectedSupportsInstructMode] = useState<boolean | undefined>(undefined)
-  const [detectedReasoningEfforts, setDetectedReasoningEfforts] = useState<Array<'low' | 'medium' | 'high' | 'max'> | undefined>(undefined)
-  const [detectedDefaultReasoningEffort, setDetectedDefaultReasoningEffort] = useState<'low' | 'medium' | 'high' | 'max' | undefined>(undefined)
+  const [detectedReasoningEfforts, setDetectedReasoningEfforts] = useState<Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'> | undefined>(undefined)
+  const [detectedDefaultReasoningEffort, setDetectedDefaultReasoningEffort] = useState<'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined>(undefined)
   const [thinkingBudgetSupported, setThinkingBudgetSupported] = useState<boolean | undefined>(undefined)
   const [supportsThinkingBudget, setSupportsThinkingBudget] = useState<boolean | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
@@ -172,7 +172,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     ? 2
     : Math.max(2, displayedRepeatPenalty)
   const thinkingDisabledClass = thinkingSupported ? '' : ' opacity-50 cursor-not-allowed'
-  const selectableReasoningEfforts: Array<'low' | 'medium' | 'high' | 'max'> =
+  const selectableReasoningEfforts: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'> =
     detectedReasoningEfforts ?? (
       detectedFamily === 'hy3'
         ? ['low', 'high']
@@ -183,10 +183,11 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             : []
     )
   const showReasoningEffort = selectableReasoningEfforts.length > 0
-  const reasoningEffortLabel = (effort: 'low' | 'medium' | 'high' | 'max'): string => {
+  const reasoningEffortLabel = (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'): string => {
     if (effort === 'low') return t('chat.settings.effortLow')
     if (effort === 'medium') return t('chat.settings.effortMedium')
     if (effort === 'high') return t('chat.settings.effortHigh')
+    if (effort === 'xhigh') return t('chat.settings.effortXhigh')
     return t('chat.settings.effortMax')
   }
 

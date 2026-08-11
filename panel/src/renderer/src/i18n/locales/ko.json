@@ -366,6 +366,7 @@
       "effortLow": "낮음",
       "effortMedium": "중간",
       "effortHigh": "높음",
+      "effortXhigh": "초고",
       "effortMax": "최대",
       "effortDefault": "기본값 ({value})",
       "effortDefaultNoValue": "기본값",

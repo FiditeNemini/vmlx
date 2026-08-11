@@ -682,11 +682,29 @@ function readJangChatMetadata(
         )
       }
 
-      const effortLevels = normalizeReasoningEffortLevels(reasoning.reasoning_effort_levels)
+      // Effort levels: prefer an explicit `reasoning_effort_levels`, but fall
+      // back to the model's own `modes` list when those modes ARE effort
+      // levels. Muse Glimmer declares `control: reasoning_strength` with
+      // `modes: [low, medium, high, xhigh]` and no `reasoning_effort_levels`,
+      // so without this the Chat Settings panel showed only the Auto/On/Off
+      // thinking toggle and never surfaced the strength buttons the model
+      // actually has. A `modes` list that carries no recognizable effort level
+      // (e.g. only chat/think) yields undefined and leaves the registry value.
+      let effortLevels = normalizeReasoningEffortLevels(reasoning.reasoning_effort_levels)
+      if (effortLevels === undefined && modes) {
+        const modeEffortLevels = normalizeReasoningEffortLevels(modes)
+        if (modeEffortLevels && modeEffortLevels.length > 0) {
+          effortLevels = modeEffortLevels
+        }
+      }
       if (effortLevels !== undefined) {
         next.supportedReasoningEfforts = effortLevels
       }
-      const defaultEffort = normalizeReasoningEffort(reasoning.default_effort)
+      // Default effort: an explicit `default_effort`, else the `default_mode`
+      // when it names one of the effort levels (Muse ships default_mode: high).
+      const defaultEffort =
+        normalizeReasoningEffort(reasoning.default_effort) ??
+        normalizeReasoningEffort(reasoning.default_mode)
       if (
         defaultEffort &&
         (effortLevels === undefined || effortLevels.includes(defaultEffort))

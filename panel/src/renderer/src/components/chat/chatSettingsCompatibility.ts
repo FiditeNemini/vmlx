@@ -1,6 +1,6 @@
 export interface ChatSettingsCompatibilityOverrides {
   enableThinking?: boolean
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max'
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   builtinToolsEnabled?: boolean
 }
 
@@ -12,7 +12,7 @@ export interface ChatSettingsCompatibilityInput {
   reasoningParser?: string
   toolParser?: string
   detectedFamily?: string
-  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>
 }
 
 function basename(path?: string): string {
@@ -28,7 +28,7 @@ function samePath(a?: string, b?: string): boolean {
 function parserUsesEffortLevels(
   parser?: string,
   detectedFamily?: string,
-  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>,
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>,
 ): boolean {
   if (supportedReasoningEfforts !== undefined) return supportedReasoningEfforts.length > 0
   if (detectedFamily === 'hy3') return true
@@ -39,10 +39,10 @@ function parserAcceptsEffort(
   effort: string,
   parser?: string,
   detectedFamily?: string,
-  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'max'>,
+  supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>,
 ): boolean {
   if (supportedReasoningEfforts !== undefined) {
-    return supportedReasoningEfforts.includes(effort as 'low' | 'medium' | 'high' | 'max')
+    return supportedReasoningEfforts.includes(effort as 'low' | 'medium' | 'high' | 'xhigh' | 'max')
   }
   if (detectedFamily === 'hy3') {
     return effort === 'low' || effort === 'high'

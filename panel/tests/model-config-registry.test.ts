@@ -2259,4 +2259,33 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     expect(detected.defaultEnableThinking).toBeUndefined()
     expect(detected.supportsInstructMode).toBeUndefined()
   })
+
+  it('surfaces Muse reasoning_strength modes as effort buttons (no reasoning_effort_levels)', () => {
+    // Muse Glimmer declares control: reasoning_strength with modes but NO
+    // reasoning_effort_levels; the panel must still show the four strength
+    // buttons (previously only Auto/On/Off rendered).
+    const dir = makeModelDir(
+      { model_type: 'muse_glimmer' },
+      {
+        chat: {
+          reasoning: {
+            supported: true,
+            parser: 'muse_glimmer',
+            control: 'reasoning_strength',
+            default_mode: 'high',
+            modes: ['low', 'medium', 'high', 'xhigh'],
+          },
+        },
+      },
+    )
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('muse-glimmer')
+    expect(detected.reasoningParser).toBe('muse_glimmer')
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.supportedReasoningEfforts).toEqual(['low', 'medium', 'high', 'xhigh'])
+    expect(detected.defaultReasoningEffort).toBe('high')
+    // Muse has no chat/instruct mode — the modes list is purely strength levels.
+    expect(detected.supportsInstructMode).toBe(false)
+  })
 })

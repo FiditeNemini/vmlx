@@ -6198,35 +6198,6 @@ class MLLMBatchGenerator:
                         next_ssm_boundary = _sorted_boundaries[_boundary_idx]
                     if next_ssm_boundary is not None:
                         chunk_size = next_ssm_boundary - processed
-                    # A chunked prefill computes chunk x CONTEXT attention
-                    # scores, not chunk^2, so the per-chunk buffer grows with the
-                    # conversation even though the step size is fixed. A step
-                    # that is safe at 10k is fatal at 100k.
-                    #
-                    # MEASURED on Qwen3.6-27B: at a 67,292-token context the
-                    # prefill chunked correctly at the configured step and the
-                    # PROCESS STILL DIED —
-                    #   libc++abi: terminating due to uncaught exception of type
-                    #   std::runtime_error: [METAL] Command buffer execution
-                    #   failed: Insufficient Memory
-                    # 30 heads x 2048 x 67292 x 2 = 8.3 GB in ONE chunk, over
-                    # the Metal single-buffer cap. libc++ terminates, so there is
-                    # no exception to catch: the chunk must be sized to fit
-                    # BEFORE it is submitted.
-                    if _prefill_valve_enabled():
-                        _attn_chunk_cap = max_prefill_chunk_tokens(
-                            _n_heads_guess, processed + chunk_size
-                        )
-                        if chunk_size > _attn_chunk_cap:
-                            logger.info(
-                                "Hybrid prefill chunk clamped %d -> %d at "
-                                "context=%d (attention scores would exceed the "
-                                "Metal single-buffer cap)",
-                                chunk_size,
-                                _attn_chunk_cap,
-                                processed + chunk_size,
-                            )
-                            chunk_size = _attn_chunk_cap
                     chunk = input_ids[:, processed:processed + chunk_size]
                     try:
                         _call_lm_prefix_without_logits(

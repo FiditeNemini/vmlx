@@ -7,6 +7,11 @@ export const REASONING_PARSERS_FOR_CLI = new Set([
   'mistral',
   'gemma4',
   'think_xml',
+  // The engine accepts `muse_glimmer` (and the `muse` alias). Without it here
+  // canonicalizeReasoningParserForCli returned undefined, so selecting it in
+  // the session form emitted NO --reasoning-parser flag at all and the choice
+  // silently fell back to Auto.
+  'muse_glimmer',
 ])
 
 export function canonicalizeReasoningParserForCli(parser?: string): string | undefined {
@@ -18,6 +23,9 @@ export function canonicalizeReasoningParserForCli(parser?: string): string | und
   // the panel/argv boundary so the vendor spelling cannot be silently dropped
   // to Auto or replaced by the incompatible think_xml parser.
   if (parser === 'poolside_v1') return 'deepseek_r1'
+  // The engine registers `muse` as an alias of `muse_glimmer`; canonicalize so
+  // either spelling survives the argv boundary instead of dropping to Auto.
+  if (parser === 'muse') return 'muse_glimmer'
   return REASONING_PARSERS_FOR_CLI.has(parser) ? parser : undefined
 }
 

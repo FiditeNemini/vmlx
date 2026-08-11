@@ -209,7 +209,12 @@ registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoning
 // projected features land at per-token RMS 0.961 against the text stream's ~1.0
 // (they were 21x that, and unreadable, until the adapter's trailing activation
 // was restored).
-registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinkingBudget: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
+// supportsThinkingBudget is FALSE on purpose: Muse's template reads neither a
+// token budget nor enable_thinking/reasoning_effort. Declaring true rendered a
+// Max Thinking Tokens control and sent max_thinking_tokens + thinking_budget
+// to a template that ignores both — a control that looks like it works and
+// does nothing. Depth is set only by the `reasoning_strength` template kwarg.
+registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinkingBudget: false, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })
@@ -424,7 +429,7 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'gemma4_text': 'gemma4-text',
   'gemma4_unified': 'gemma4',
   'gemma4_unified_text': 'gemma4-text',
-  // 'muse_glimmer': 'muse-glimmer',  // re-enable with the family above
+  'muse_glimmer': 'muse-glimmer',
   // ── Phi family ──
   'phi3': 'phi3',
   'phi3v': 'phi3-vision',

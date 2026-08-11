@@ -97,12 +97,43 @@ class MuseGlimmerImageProcessor:
 
     # ---- pixels -----------------------------------------------------------
 
+    @staticmethod
+    def _as_pil(image):
+        """Accept what callers actually hand over, not just PIL images.
+
+        Depending on the surface, an image arrives as a PIL image, a numpy
+        array, a filesystem path, or a data/HTTP URL. Feeding a path straight
+        to ``Image.fromarray`` produces a 0-d unicode array and the opaque
+        "Cannot handle this data type: (1, 1), <U64".
+        """
+        import base64
+        import io
+        from pathlib import Path
+
+        from PIL import Image
+
+        if isinstance(image, Image.Image):
+            return image
+        if isinstance(image, (str, Path)):
+            text = str(image)
+            if text.startswith("data:"):
+                payload = text.split(",", 1)[1] if "," in text else ""
+                return Image.open(io.BytesIO(base64.b64decode(payload)))
+            if text.startswith(("http://", "https://")):
+                import urllib.request
+
+                with urllib.request.urlopen(text, timeout=60) as response:
+                    return Image.open(io.BytesIO(response.read()))
+            return Image.open(text)
+        if isinstance(image, (bytes, bytearray)):
+            return Image.open(io.BytesIO(image))
+        return Image.fromarray(np.asarray(image))
+
     def _to_chw(self, image, size: Tuple[int, int]) -> np.ndarray:
         """RGB -> resize -> rescale -> normalize, as ``[3, H, W]`` float32."""
         from PIL import Image
 
-        if not isinstance(image, Image.Image):
-            image = Image.fromarray(np.asarray(image))
+        image = self._as_pil(image)
         image = image.convert("RGB").resize(
             (size[1], size[0]), resample=Image.Resampling.BICUBIC
         )
@@ -138,11 +169,7 @@ class MuseGlimmerImageProcessor:
     def __call__(self, images: Sequence[Any]) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
         all_patches, grids = [], []
         for image in images:
-            from PIL import Image
-
-            pil = image if isinstance(image, Image.Image) else Image.fromarray(
-                np.asarray(image)
-            )
+            pil = self._as_pil(image)
             size = self.smart_resize(pil.height, pil.width)
             patches, grid = self.patchify([self._to_chw(pil, size)])
             all_patches.append(patches)
@@ -170,15 +197,11 @@ class MuseGlimmerVideoProcessor(MuseGlimmerImageProcessor):
     def __call__(  # type: ignore[override]
         self, frames: Sequence[Any]
     ) -> Tuple[np.ndarray, List[Tuple[int, int, int]]]:
-        from PIL import Image
-
         frames = list(frames)[: self.num_frames]
         if not frames:
             return np.zeros((0, 0), dtype=np.float32), []
 
-        first = frames[0]
-        if not isinstance(first, Image.Image):
-            first = Image.fromarray(np.asarray(first))
+        first = self._as_pil(frames[0])
         # Sized once, from the first frame, under the per-FRAME budget.
         size = self.smart_resize(
             first.height, first.width, max_tokens=self.max_video_frame_tokens
@@ -223,3 +246,79 @@ def expand_media_placeholders(
 def merged_token_count(grid: Tuple[int, int, int], merge_size: int) -> int:
     grid_t, grid_h, grid_w = (int(v) for v in grid)
     return grid_t * (grid_h // merge_size) * (grid_w // merge_size)
+
+
+class MuseGlimmerProcessor:
+    """Tokenizer + image/video processor, in the shape mlx-vlm calls.
+
+    ``AutoProcessor`` cannot build this — the bundle names classes that exist
+    nowhere in transformers — and mlx-vlm's ``prepare_inputs`` only consults
+    ``processor.image_processor`` for resizing before calling
+    ``processor(text=..., images=...)``. So attaching an image processor is not
+    enough: the processor itself has to turn images into ``pixel_values`` and
+    expand the placeholder. Without that the call silently returns text-only
+    inputs and the model confabulates a description of an image it never saw.
+    """
+
+    def __init__(self, tokenizer, image_processor=None, video_processor=None,
+                 image_token_id: int = 200092, video_token_id: int = 200091):
+        self.tokenizer = tokenizer
+        self.image_processor = image_processor or MuseGlimmerImageProcessor()
+        self.video_processor = video_processor or MuseGlimmerVideoProcessor()
+        self.image_token_id = int(image_token_id)
+        self.video_token_id = int(video_token_id)
+
+    # ---- delegation -------------------------------------------------------
+
+    def __getattr__(self, name):
+        # Anything not defined here (detokenizer, eos ids, chat template, the
+        # stopping criteria vMLX attaches) falls through to the tokenizer.
+        return getattr(self.__dict__["tokenizer"], name)
+
+    def apply_chat_template(self, *args, **kwargs):
+        return self.tokenizer.apply_chat_template(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self.tokenizer.decode(*args, **kwargs)
+
+    def batch_decode(self, *args, **kwargs):
+        return self.tokenizer.batch_decode(*args, **kwargs)
+
+    # ---- the call mlx-vlm makes ------------------------------------------
+
+    def __call__(self, text=None, images=None, videos=None, return_tensors=None, **kwargs):
+        if isinstance(text, (list, tuple)):
+            if len(text) != 1:
+                raise ValueError("Muse Glimmer processor handles one prompt at a time.")
+            text = text[0]
+
+        ids = self.tokenizer.encode(text or "", add_special_tokens=False)
+        out = {}
+
+        if videos:
+            frames = videos[0] if isinstance(videos[0], (list, tuple)) else videos
+            patches, grids = self.video_processor(frames)
+            ids = expand_media_placeholders(
+                ids, grids, self.video_token_id, self.image_processor.merge_size
+            )
+            out["pixel_values"] = patches
+            out["video_grid_thw"] = grids
+        elif images:
+            patches, grids = self.image_processor(images)
+            ids = expand_media_placeholders(
+                ids, grids, self.image_token_id, self.image_processor.merge_size
+            )
+            out["pixel_values"] = patches
+            out["image_grid_thw"] = grids
+
+        out["input_ids"] = [ids]
+        out["attention_mask"] = [[1] * len(ids)]
+
+        if return_tensors == "mlx":
+            import mlx.core as mx
+
+            for key in ("input_ids", "attention_mask"):
+                out[key] = mx.array(out[key])
+            if "pixel_values" in out:
+                out["pixel_values"] = mx.array(out["pixel_values"])
+        return out

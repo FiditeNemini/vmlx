@@ -5,6 +5,7 @@ from .config import ModelConfig, TextConfig, VisionConfig
 from .language import LanguageModel
 from .muse_glimmer import Model
 from .processor import (
+    MuseGlimmerProcessor,
     MuseGlimmerImageProcessor,
     MuseGlimmerVideoProcessor,
     expand_media_placeholders,
@@ -29,6 +30,7 @@ __all__ = [
     "TextConfig",
     "VisionConfig",
     "VisionModel",
+    "MuseGlimmerProcessor",
     "expand_media_placeholders",
     "merged_token_count",
 ]

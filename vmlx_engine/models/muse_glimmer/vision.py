@@ -219,7 +219,7 @@ class MuseVisionMLP(nn.Module):
         self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size, bias=True)
 
     def __call__(self, x: mx.array) -> mx.array:
-        return self.fc2(nn.gelu(self.fc1(x)))
+        return self.fc2(nn.gelu_approx(self.fc1(x)))
 
 
 class MuseVisionLayer(nn.Module):
@@ -290,12 +290,17 @@ class VisionModel(nn.Module):
         return int(getattr(self.config, "pos_emb_height", 32) or 32)
 
     def _layer_is_windowed(self, index: int) -> bool:
-        types = getattr(self.config, "vision_layer_types", None)
-        if types and index < len(types):
-            return str(types[index]) != "full_attention"
-        # The shipped 50-layer list breaks the x4 period at the tail
-        # (full at 47 then 49), so never rely on the derived cadence when the
-        # checkpoint gives an explicit list.
+        # Ask the config, which reads the checkpoint's own layer_types. This
+        # used to getattr a field name that does not exist
+        # ("vision_layer_types" vs the real "layer_types"), so it silently fell
+        # through to the x4 cadence below every single time. The shipped
+        # 50-layer list breaks that period at the tail — full at 47 THEN 49 —
+        # so layer 49 ran windowed where the checkpoint says full. Inert at
+        # 448x448 (one window, so both masks are all-True) and wrong for any
+        # larger image or any video.
+        resolver = getattr(self.config, "layer_is_windowed", None)
+        if callable(resolver):
+            return bool(resolver(index))
         return (index + 1) % 4 != 0
 
     def __call__(
@@ -414,10 +419,21 @@ class MuseVisionAdapter(nn.Module):
     ) -> mx.array:
         if features.ndim == 3:
             features = features.reshape(-1, features.shape[-1])
-        if grid_thw:
-            features = self.pixel_shuffle(features, grid_thw)
-        else:
-            group = self.merge_size**2
-            usable = (features.shape[0] // group) * group
-            features = features[:usable].reshape(usable // group, group * features.shape[-1])
-        return self.fc2(nn.gelu(self.fc1(features)))
+        if not grid_thw:
+            # The merge is 2x2-block-major and feature-major within a block;
+            # neither can be reconstructed from the row count alone. Guessing
+            # (grouping 4 consecutive raster rows, concatenated patch-major)
+            # scrambles the image while keeping every shape valid.
+            raise ValueError(
+                "Muse Glimmer vision adapter needs grid_thw to merge patches."
+            )
+        features = self.pixel_shuffle(features, grid_thw)
+        # The activation runs after BOTH adapter layers. Easy to miss reading
+        # this as an ordinary two-layer MLP, and load-bearing: vision_projection
+        # was trained on the one-sided post-gelu distribution, so feeding it the
+        # raw symmetric pre-activation pushes the whole negative half — which
+        # training always crushed to ~0 — through the projection at full
+        # magnitude. That inflates the output AND points each token vector in a
+        # direction the weights never saw, which is why the features came out
+        # ~21x the text stream and stayed unreadable after renormalizing.
+        return nn.gelu_approx(self.fc2(nn.gelu_approx(self.fc1(features))))

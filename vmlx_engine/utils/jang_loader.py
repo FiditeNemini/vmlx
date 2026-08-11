@@ -1176,6 +1176,62 @@ def _build_step3p7_vlm_processor(model_path: Path, eos_token_id=None):
     )
 
 
+def _build_muse_glimmer_vlm_processor(path: Path, eos_token_id=None, model=None):
+    """Muse Glimmer's own processor — AutoProcessor cannot build it.
+
+    The bundle's processor_config.json names MuseGlimmerProcessor /
+    MuseGlimmerImageProcessor / MuseGlimmerVideoProcessor, none of which exist
+    in transformers. AutoProcessor therefore degrades to a TEXT-ONLY processor
+    that quietly drops `images=` on the floor: no pixel_values, the single
+    <|patch|> never expands, and the model answers from the prompt text while
+    confabulating a description of an image it never received. Nothing raises.
+
+    Attaching an image_processor is NOT sufficient — mlx-vlm's prepare_inputs
+    only consults it for resizing and then calls `processor(text=, images=)`,
+    so the processor object itself has to produce the pixels and the expansion.
+    """
+    import json
+
+    from transformers import AutoTokenizer
+
+    from ..models.muse_glimmer_register import register_muse_glimmer_runtime
+
+    register_muse_glimmer_runtime()
+    from mlx_vlm.models.muse_glimmer.processor import (  # noqa: WPS433
+        MuseGlimmerImageProcessor,
+        MuseGlimmerProcessor,
+        MuseGlimmerVideoProcessor,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(str(path), trust_remote_code=True)
+
+    # Honour the bundle's declared preprocessing rather than class defaults.
+    image_kwargs: dict[str, Any] = {}
+    video_kwargs: dict[str, Any] = {}
+    processor_config = Path(path) / "processor_config.json"
+    if processor_config.is_file():
+        try:
+            declared = json.loads(processor_config.read_text())
+            image_kwargs = dict(declared.get("image_processor") or {})
+            video_kwargs = dict(declared.get("video_processor") or {})
+        except (OSError, ValueError):
+            pass
+    for unusable in ("image_processor_type", "video_processor_type", "processor_class"):
+        image_kwargs.pop(unusable, None)
+        video_kwargs.pop(unusable, None)
+
+    config = getattr(model, "config", None)
+    processor = MuseGlimmerProcessor(
+        tokenizer,
+        image_processor=MuseGlimmerImageProcessor(**image_kwargs),
+        video_processor=MuseGlimmerVideoProcessor(**video_kwargs),
+        image_token_id=int(getattr(config, "image_token_id", 200092) or 200092),
+        video_token_id=int(getattr(config, "video_token_id", 200091) or 200091),
+    )
+    _attach_vlm_detokenizer_and_stopping(processor, path, eos_token_id=eos_token_id)
+    return processor
+
+
 def _load_jang_vlm_processor(path: Path, model):
     """Load a VLM processor while preserving local model-family overrides."""
     from mlx_vlm.utils import load_image_processor, load_processor
@@ -1193,6 +1249,11 @@ def _load_jang_vlm_processor(path: Path, model):
 
     if model_type == "step3p7":
         return _build_step3p7_vlm_processor(path, eos_token_id=eos_token_id)
+
+    if model_type == "muse_glimmer":
+        return _build_muse_glimmer_vlm_processor(
+            processor_path, eos_token_id=eos_token_id, model=model
+        )
 
     image_processor = load_image_processor(processor_path)
 

@@ -16,6 +16,10 @@ import pytest
 PIL = pytest.importorskip("PIL")
 from PIL import Image, ImageDraw  # noqa: E402
 
+from vmlx_engine.models.muse_glimmer_register import register_muse_glimmer_runtime  # noqa: E402
+
+register_muse_glimmer_runtime()
+
 _PATH = (
     pathlib.Path(__file__).resolve().parents[1]
     / "vmlx_engine/models/muse_glimmer/processor.py"
@@ -143,3 +147,87 @@ class TestVideo:
         video = MuseGlimmerVideoProcessor(num_frames=4)
         _, grids = video([_image((28, 28))] * 50)
         assert grids[0][0] == 2  # 4 frames -> 2 temporal patches
+
+
+class TestVisionAdapterContract:
+    """Two structural rules that produce valid shapes and fluent nonsense.
+
+    Both were live defects: the missing trailing activation put projected
+    features at ~21x the text stream and made them unreadable, and the layer
+    typing silently fell through to a cadence that mis-typed the final layer.
+    """
+
+    @staticmethod
+    def _vision_config(layer_types=None):
+        from mlx_vlm.models.muse_glimmer.config import VisionConfig
+
+        return VisionConfig(
+            model_type="muse_glimmer_vision", hidden_size=64, intermediate_size=128,
+            num_hidden_layers=50, num_attention_heads=4, patch_size=14,
+            patch_temporal=2, merge_size=2, pos_emb_height=4, pos_emb_width=4,
+            max_position_embeddings=1024, layer_norm_eps=1e-5, hidden_act="gelu",
+            rope_theta=10000.0, layer_types=layer_types or [],
+        )
+
+    def test_layer_typing_reads_the_checkpoint_not_the_cadence(self):
+        """The shipped list breaks the x4 period at the tail: full at 47 THEN 49.
+
+        A `(index+1) % 4` fallback yields 12 full layers and runs layer 49
+        windowed. Inert at 448x448 (single window) and wrong for anything
+        larger or any video.
+        """
+        from mlx_vlm.models.muse_glimmer.vision import VisionModel
+
+        types = ["window_attention"] * 50
+        for i in (3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 49):
+            types[i] = "full_attention"
+        model = VisionModel(self._vision_config(types))
+
+        full = [i for i in range(50) if not model._layer_is_windowed(i)]
+        assert full == [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47, 49]
+        assert 49 in full, "final layer must be full attention, not windowed"
+
+    def test_adapter_activates_after_both_layers(self):
+        """vision_projection was trained on the one-sided post-gelu output.
+
+        Feeding it the raw symmetric pre-activation pushes the negative half —
+        which training crushed to ~0 — through the projection at full
+        magnitude, inflating the output and pointing each token vector
+        somewhere the weights never saw.
+        """
+        import mlx.core as mx
+        import mlx.nn as nn
+        from mlx_vlm.models.muse_glimmer.config import ModelConfig, TextConfig
+        from mlx_vlm.models.muse_glimmer.vision import MuseVisionAdapter
+
+        vision = self._vision_config()
+        model_config = ModelConfig(
+            model_type="muse_glimmer",
+            text_config=TextConfig(model_type="muse_glimmer_text", hidden_size=64),
+            vision_config=vision,
+            projector_hidden_size=32,
+        )
+        adapter = MuseVisionAdapter(model_config)
+        feats = mx.ones((4, vision.hidden_size)) * -5.0  # strongly negative
+        out = adapter(feats, grid_thw=[(1, 2, 2)])
+
+        # gelu_approx has a small negative lobe (~-0.17 min) but cannot emit
+        # large negatives. A missing trailing activation would pass them through.
+        assert float(mx.min(out)) > -1.0, "output looks pre-activation"
+
+    def test_adapter_without_grid_raises_rather_than_guessing(self):
+        import mlx.core as mx
+        from mlx_vlm.models.muse_glimmer.config import ModelConfig, TextConfig
+        from mlx_vlm.models.muse_glimmer.vision import MuseVisionAdapter
+
+        vision = self._vision_config()
+        adapter = MuseVisionAdapter(
+            ModelConfig(
+                model_type="muse_glimmer",
+                text_config=TextConfig(model_type="muse_glimmer_text", hidden_size=64),
+                vision_config=vision,
+                projector_hidden_size=32,
+            )
+        )
+        with pytest.raises(ValueError, match="grid_thw"):
+            adapter(mx.ones((4, vision.hidden_size)))

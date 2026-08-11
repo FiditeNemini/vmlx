@@ -632,6 +632,12 @@ def test_jang_mixed_swa_auto_tq_patches_only_full_attention_slot(monkeypatch):
 
 def test_jang_bonsai_auto_uses_tq8_only_on_attention_slots(monkeypatch):
     from vmlx_engine.utils.jang_loader import _patch_turboquant_make_cache
+    # The auto TQ asymmetry guard disables a STORAGE-only codec when live encode
+    # is off (compress_after == 0), because a restored block would come back
+    # lossy while the RAM copy stayed exact — a cache hit would stop equalling a
+    # recompute. MEASURED on Muse (157 vs 241 tokens) and Qwen3.6 (135 vs 130),
+    # byte-identical once disabled. This test covers the OPTED-IN layout.
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
 
     model = FakeBonsaiModel()
     model_config = {
@@ -673,6 +679,12 @@ def test_jang_bonsai_auto_uses_tq8_only_on_attention_slots(monkeypatch):
 
 def test_jang_hy3_auto_uses_tq4_on_all_attention_slots(monkeypatch):
     from vmlx_engine.utils.jang_loader import _patch_turboquant_make_cache
+    # The auto TQ asymmetry guard disables a STORAGE-only codec when live encode
+    # is off (compress_after == 0), because a restored block would come back
+    # lossy while the RAM copy stayed exact — a cache hit would stop equalling a
+    # recompute. MEASURED on Muse (157 vs 241 tokens) and Qwen3.6 (135 vs 130),
+    # byte-identical once disabled. This test covers the OPTED-IN layout.
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
 
     model = FakeFullKVModel(n_layers=4)
     model_config = {
@@ -932,3 +944,40 @@ def test_mllm_hybrid_prompt_truncation_preserves_tq_storage_metadata():
         "value_bits": 8,
         "seed": 49,
     }
+
+
+def test_auto_tq_storage_guard_covers_every_auto_policy(monkeypatch):
+    """Storage-only TQ with live encode off is asymmetric for ANY family.
+
+    compress_after == 0 means the KV in RAM is EXACT while the storage codec
+    quantizes it, so a restored block comes back lossy and a cache hit stops
+    equalling a recompute. MEASURED on two independent families, temperature 0,
+    same rail, warm reuse confirmed in every arm:
+
+        Muse Glimmer 30B  mixed_swa_..._tq4     cold 157 / warm 241  DIFFERS
+        Qwen3.6-27B       qwen_hybrid_..._tq4   cold 135 / warm 130  DIFFERS
+
+    and byte-identical (154/154, 135/135) with the storage codec disabled.
+
+    The guard is central rather than per-policy because the invariant is not
+    family-specific, and because every one of these configs is engine-INVENTED —
+    the branch only runs when the bundle shipped no calibrated turboquant block.
+    """
+    from vmlx_engine.utils.turboquant_config import (
+        apply_uncalibrated_auto_tq_policy,
+        mixed_swa_storage_tq_opted_in,
+    )
+
+    monkeypatch.delenv("VMLX_MIXED_SWA_STORAGE_TQ", raising=False)
+    assert mixed_swa_storage_tq_opted_in() is False
+
+    # Every uncalibrated auto policy this guard has to cover sets compress_after 0.
+    for config, layer_types in (
+        ({"model_type": "qwen3_5"}, ["ssm", "ssm", "ssm", "attention"] * 8),
+        ({"model_type": "qwen3"}, ["attention"] * 8),
+    ):
+        resolved = apply_uncalibrated_auto_tq_policy(
+            {"enabled": True, "default_key_bits": 3, "seed": 42}, config, layer_types
+        )
+        assert resolved["compress_after"] == 0, resolved.get("auto_policy")
+        assert "storage" in resolved["auto_policy"], resolved["auto_policy"]

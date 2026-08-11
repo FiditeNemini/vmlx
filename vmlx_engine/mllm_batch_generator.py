@@ -1655,6 +1655,10 @@ from .utils.prefill_admission import (
     prefill_valve_enabled as _prefill_valve_enabled,
 )
 
+_HYBRID_PREFILL_MEM_TRACE = os.environ.get(
+    "VMLX_HYBRID_PREFILL_MEM_TRACE", ""
+).strip().lower() in {"1", "true", "yes", "on"}
+
 _CHUNKED_SSM_REDERIVE = os.environ.get(
     "VMLX_CHUNKED_SSM_REDERIVE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -6238,6 +6242,25 @@ class MLLMBatchGenerator:
                             ssm_captured_boundaries.add(processed)
                     if not _prefill_keep_alloc:
                         mx.clear_cache()
+                    if _HYBRID_PREFILL_MEM_TRACE:
+                        # Per-chunk memory trace. The crash at 60-100k looked
+                        # like per-iteration accumulation, but that was inferred
+                        # from WHERE different runs died — and those runs began
+                        # with different disk/RAM cache states, so they were not
+                        # comparable. This measures growth inside ONE run.
+                        try:
+                            logger.info(
+                                "hybrid-prefill-mem chunk=%d processed=%d/%d "
+                                "active=%.2fGB peak=%.2fGB cache=%.2fGB",
+                                chunk_num,
+                                processed,
+                                seq_len,
+                                mx.get_active_memory() / (1024**3),
+                                mx.get_peak_memory() / (1024**3),
+                                mx.get_cache_memory() / (1024**3),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
 
                 # Final chunk: get logits from last token
                 last_chunk = input_ids[:, processed:]

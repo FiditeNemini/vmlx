@@ -386,7 +386,23 @@ if installed < minimum:
         f"RELEASE BLOCKED — bundled JANG {installed} is below required {minimum}"
     )
 PYEOF
-EXPECTED_JANG_COMMIT="$("$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+# Prefer origin/main over the local HEAD as the expected commit. Comparing the
+# bundle against "whichever jang checkout happens to be default" is weak in both
+# directions: it BLOCKS a correct bundle when the local checkout is a stale
+# feature branch, and it PASSES a stale bundle whenever the same stale branch was
+# used for both bundling and verifying — which is exactly how the pre-fix DSV4
+# decode path shipped. origin/main is the same reference no matter which machine
+# or worktree runs this.
+# `git show <rev>:<path>` resolves <path> relative to the CURRENT DIRECTORY when
+# that directory is below the repo root, and the jang checkout may sit in a
+# subdirectory of its repo. Capture the prefix so the lookups below are anchored
+# correctly either way.
+JANG_GIT_PREFIX="$("$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse --show-prefix 2>/dev/null || true)"
+EXPECTED_JANG_COMMIT="$("$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse origin/main 2>/dev/null || true)"
+if [ -z "$EXPECTED_JANG_COMMIT" ]; then
+  echo "    WARNING: no origin/main in $JANG_TOOLS_SOURCE_ROOT — falling back to local HEAD" >&2
+  EXPECTED_JANG_COMMIT="$("$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
+fi
 PROVENANCE_JANG_COMMIT="$(
   run_bundled_python - "$PROVENANCE_FILE" <<'PYEOF'
 import json
@@ -433,7 +449,25 @@ else
       echo "   bundled: $BUNDLED_JANG_TOOLS_DIR/$rel"
       exit 1
     fi
-    SOURCE_SHA="$("$SHASUM_BIN" -a 256 "$JANG_TOOLS_SOURCE_DIR/$rel" | "$AWK_BIN" '{print $1}')"
+    # Hash the file as it exists at origin/main, not as it exists in the local
+    # working tree. The tree is whatever the operator happens to be editing —
+    # comparing against it blocks a correct bundle over unrelated local edits,
+    # and blesses a stale one whenever the same stale tree produced it.
+    SOURCE_SHA=""
+    JANG_BLOB_REF="origin/main:${JANG_GIT_PREFIX}jang_tools/$rel"
+    # Pipe the blob straight into shasum. Capturing it in a variable first would
+    # strip trailing newlines (command substitution does), and every file would
+    # then look like content drift.
+    if "$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" cat-file -e "$JANG_BLOB_REF" 2>/dev/null; then
+      SOURCE_SHA="$(
+        "$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" show "$JANG_BLOB_REF" \
+          | "$SHASUM_BIN" -a 256 | "$AWK_BIN" '{print $1}'
+      )"
+    fi
+    if [ -z "$SOURCE_SHA" ]; then
+      echo "    WARNING: jang_tools/$rel not readable at origin/main — comparing against the working tree" >&2
+      SOURCE_SHA="$("$SHASUM_BIN" -a 256 "$JANG_TOOLS_SOURCE_DIR/$rel" | "$AWK_BIN" '{print $1}')"
+    fi
     BUNDLED_SHA="$("$SHASUM_BIN" -a 256 "$BUNDLED_JANG_TOOLS_DIR/$rel" | "$AWK_BIN" '{print $1}')"
     if [ "$SOURCE_SHA" != "$BUNDLED_SHA" ]; then
       echo "❌ RELEASE BLOCKED — bundled jang_tools/$rel content drift"

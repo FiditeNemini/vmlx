@@ -747,7 +747,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 14
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 15
 
 function markCacheStackStartupDefaultsCurrent(
   config: Partial<ServerConfig>,
@@ -1148,6 +1148,24 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     Number(config.prefixCacheSize) === 100 &&
     Number(config.prefixCacheMaxBytes) === 0
 
+  // v15: a v14 session sitting at paged-OFF purely because the multimodal
+  // paged-off override used to clear it, while detection now resolves the same
+  // bundle to paged-ON (muse-glimmer joined gemma4 on the typed mixed-SWA paged
+  // lane). Without this, existing Muse sessions keep launching the engine with
+  // --no-paged-cache while a bare CLI launch runs paged. Gated on the detected
+  // value having actually flipped to true, so no other family is touched, and on
+  // the untouched generic L2 tuple so a deliberate user paged-off is preserved.
+  const staleV14MultimodalPagedOff =
+    Number(config.cacheStackStartupDefaultsVersion || 0) === 14 &&
+    migrationDetectedUsePaged === true &&
+    !zayaCacheMigrationTarget &&
+    !isM3MigrateTarget &&
+    config.usePagedCache === false &&
+    config.continuousBatching === true &&
+    config.enablePrefixCache === true &&
+    config.enableDiskCache === false &&
+    config.enableBlockDiskCache === true
+
   if (
     !staleContinuousDefaults &&
     !staleNoPrefixBatchDefaults &&
@@ -1159,7 +1177,8 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     !staleV2GenericPagedOn &&
     !stalePhase1GenericPagedOff &&
     !stalePhase2GenericPagedOn &&
-    !staleV7GenericPagedOff
+    !staleV7GenericPagedOff &&
+    !staleV14MultimodalPagedOff
   ) return false
 
   config.continuousBatching = true

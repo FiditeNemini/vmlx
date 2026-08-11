@@ -10214,7 +10214,18 @@ class Scheduler:
         )
 
     def _is_cache_corruption_error(self, error: Exception) -> bool:
-        """Check if an error indicates cache corruption."""
+        """Check if an error indicates cache corruption.
+
+        A PERMANENT allocation failure is explicitly not one. Asking for more
+        than the device's maximum buffer size cannot be relieved by clearing a
+        cache, so routing it into cache-clear + reschedule would re-run the
+        identical doomed allocation forever — the same trap
+        ``DSV4PrefillMemoryError`` is excluded from by name.
+        """
+        from .utils.prefill_admission import is_permanent_allocation_error
+
+        if is_permanent_allocation_error(error):
+            return False
         error_str = str(error)
         return any(pattern in error_str for pattern in CACHE_CORRUPTION_PATTERNS)
 

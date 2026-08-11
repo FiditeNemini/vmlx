@@ -25,6 +25,12 @@ from mlx_lm.models import cache as mlx_cache
 from mlx_lm.models.cache import TokenBuffer
 
 from .mamba_cache import _should_capture_generation_logprobs
+from .memory_limits import get_effective_metal_working_set_bytes
+from .prefill_admission import (
+    prefill_valve_check as _prefill_valve_check,
+    prefill_valve_enabled as _prefill_valve_enabled,
+    prefill_valve_min_margin_bytes as _prefill_valve_min_margin_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -468,10 +474,42 @@ class SingleBatchGenerator:
             "VMLINUX_PREFILL_KEEP_ALLOC",
             os.environ.get("VMLX_PREFILL_KEEP_ALLOC", ""),
         ).lower() in {"1", "true", "yes", "on"}
+        # Admission control. DSV4 has had a prefill valve for a while — it
+        # projects the next chunk's peak and rejects BEFORE submitting GPU work,
+        # because discovering the limit by failing can take the process with it.
+        # Every other family reached this loop with no check at all, which is
+        # how a model advertising ~69k tokens dies somewhere around 20-25k.
+        _valve_on = _prefill_valve_enabled()
+        _valve_max_ws = 0
+        _valve_margin = 0
+        _valve_transient = 0
+        if _valve_on:
+            try:
+                _, _valve_max_ws = get_effective_metal_working_set_bytes(mx)
+            except Exception:  # noqa: BLE001 - never let the guard break prefill
+                _valve_max_ws = 0
+            _valve_on = _valve_max_ws > 0
+            _valve_margin = _prefill_valve_min_margin_bytes()
+
         pos = 0
         while pos < len(tokens):
             n = min(self.prefill_step_size, len(tokens) - pos)
             chunk = tokens[pos : pos + n]
+            if _valve_on:
+                try:
+                    _active = int(mx.get_active_memory())
+                except Exception:  # noqa: BLE001
+                    _active = 0
+                # Unknown readings must never reject a request that would work.
+                _prefill_valve_check(
+                    _active,
+                    _valve_max_ws,
+                    _valve_transient,
+                    _valve_margin,
+                    chunk_start=pos,
+                    chunk_end=pos + n,
+                    model_label=type(self).__name__,
+                )
             with self._stream_context():
                 self._model_call(chunk, req)
                 req.context_tokens.extend(chunk)

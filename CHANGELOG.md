@@ -26,7 +26,40 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.26] - unreleased (in-development rollup)
+## [1.6.27] - unreleased (in-development rollup)
+
+### Added
+
+- Muse Glimmer 30B runs. Its text tower, recipient-routed reasoning rail
+  (`to=self` / `to=user`) and ATEM tool dialect are live and verified on all
+  three bundles (JANG_2D / 4M / 6M). Reasoning depth is controlled by the
+  `reasoning_strength` template kwarg (low/medium/high/xhigh); this family
+  ignores `enable_thinking` and `reasoning_effort` entirely. Registered as
+  TEXT-ONLY for now — the image path is not wired yet.
+
+### Fixed
+
+- Muse Glimmer produced fluent nonsense. Four divergences from Gemma were
+  missing from the port: the checkpoint's zero-centered RMSNorm gains were
+  used unshifted (every norm ran at gain ~0 instead of ~1), Q and K skipped
+  their weightless per-head norm and the query-side `qk_scale_factor`, the
+  embedding lookup skipped its RMSNorm, and the sliding and full attention
+  layers shared a single mask so sliding layers could attend past their
+  window.
+- ATEM tool calls never reached clients. The parser returned a pre-nested
+  OpenAI envelope while the server builds that envelope itself, so every
+  call raised inside the dispatcher and the raw `<atem:...>` markup was
+  passed through as visible chat text with `tool_calls: null`.
+- DeepSeek V4 Flash warm long-context responses drop ~37%. The answer pass
+  differs from the reasoning pass by only the 3-token generation rail, but
+  the terminal-anchor guard admitted a 1-token tail at most, forcing a
+  fallback to the block-aligned checkpoint and a 215-token re-prefill
+  (5.8 s at 127k) to change one token. Measured 21.97 s → 13.74 s with
+  byte-identical output.
+
+Rolling summary above. Per-commit detail: `git log v1.6.24..HEAD`.
+
+## [1.6.26] - superseded by 1.6.27 (in-development rollup)
 
 ### Fixed
 

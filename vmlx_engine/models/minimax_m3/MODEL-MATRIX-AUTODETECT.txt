@@ -1,0 +1,108 @@
+=== 35 models ===
+
+JANGQ-AI/MiniMax-M3-REAP22-JANG_2L
+   fam=minimax_m3 cache=kv/None reason=None tool=None ntools=False think=True mllm=True quant=affine mxtq=None
+
+models/gemma-4-12B-it-qat-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/DeepSeek-V4-Flash-JANG
+   fam=deepseek_v4 cache=kv/deepseek_v4_composite reason=deepseek_r1 tool=dsml ntools=False think=True mllm=False quant=affine mxtq=None
+
+JANGQ-AI/Gemma-4-31B-it-JANG_4M-MTP
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/MiniMax-M2.7-Small-JANGTQ
+   fam=minimax cache=kv/None reason=minimax_m2 tool=minimax ntools=False think=True mllm=False quant=jangtq mxtq={'routed_expert': 2, 'attention': 8,
+
+JANGQ-AI/Step-3.7-Flash-JANG_K
+   fam=step3p7 cache=kv/step3p7_full_sliding_kv reason=qwen3 tool=step3p5 ntools=False think=True mllm=True quant=jangtq mxtq={'attention': 8, 'embedding': 6, 'ro
+
+JANGQ-AI/gemma-4-12B-it-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-12B-it-qat-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-12B-it-qat-MXFP4
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-26B-A4B-it-qat-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-26B-A4B-it-qat-MXFP4
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-31B-it-qat-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-31B-it-qat-MXFP4
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-E2B-it-qat-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-E2B-it-qat-MXFP4
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-E4B-it-qat-JANG_4M
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+JANGQ-AI/gemma-4-E4B-it-qat-MXFP4
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+OsaurusAI/diffusiongemma-26B-A4B-it-MXFP4  <-- FAM=UNKNOWN
+   fam=unknown cache=kv/None reason=None tool=None ntools=False think=None mllm=False quant=affine mxtq=None
+
+OsaurusAI/diffusiongemma-26B-A4B-it-MXFP8  <-- FAM=UNKNOWN
+   fam=unknown cache=kv/None reason=None tool=None ntools=False think=None mllm=False quant=affine mxtq=None
+
+OsaurusAI/gemma-4-12B-it-MXFP4
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+OsaurusAI/gemma-4-12B-it-MXFP8
+   fam=gemma4 cache=kv/None reason=gemma4 tool=gemma4 ntools=False think=True mllm=True quant=affine mxtq=None
+
+dealign.ai/LFM2.5-8B-A1B-MXFP4-CRACK
+   fam=lfm2 cache=hybrid/lfm2_moe_hybrid_ssm reason=qwen3 tool=lfm2 ntools=False think=None mllm=False quant=affine mxtq=None
+
+dealign.ai/LFM2.5-8B-A1B-MXFP8-CRACK
+   fam=lfm2 cache=hybrid/lfm2_moe_hybrid_ssm reason=qwen3 tool=lfm2 ntools=False think=None mllm=False quant=affine mxtq=None
+
+dealign.ai/Ling-2.6-flash-JANGTQ2-CRACK
+   fam=ling cache=hybrid/None reason=None tool=deepseek ntools=False think=False mllm=False quant=jangtq mxtq={'routed_expert': 2, 'attention': 8,
+
+dealign.ai/Ling-2.6-flash-MXFP4-CRACK
+   fam=ling cache=hybrid/None reason=None tool=deepseek ntools=False think=False mllm=False quant=affine mxtq=None
+
+dealign.ai/MiniMax-M2.7-JANGTQ_K-CRACK
+   fam=minimax cache=kv/None reason=minimax_m2 tool=minimax ntools=False think=True mllm=False quant=jangtq mxtq={'routed_expert': {'gate_proj': 2, '
+
+dealign.ai/MiniMax-M2.7-JANG_K-CRACK
+   fam=minimax cache=kv/None reason=minimax_m2 tool=minimax ntools=False think=True mllm=False quant=affine mxtq=None
+
+dealign.ai/Nemotron-Omni-Nano-JANGTQ-CRACK
+   fam=nemotron_h cache=hybrid/nemotron_h_ssm_attention reason=deepseek_r1 tool=nemotron ntools=False think=True mllm=False quant=jangtq mxtq={'attention': 8, 'shared_expert': 8,
+
+dealign.ai/Nemotron-Omni-Nano-JANGTQ4-CRACK
+   fam=nemotron_h cache=hybrid/nemotron_h_ssm_attention reason=deepseek_r1 tool=nemotron ntools=False think=True mllm=False quant=jangtq mxtq={'attention': 8, 'shared_expert': 8,
+
+dealign.ai/Nemotron-Omni-Nano-MXFP4-CRACK
+   fam=nemotron_h cache=hybrid/nemotron_h_ssm_attention reason=deepseek_r1 tool=nemotron ntools=False think=True mllm=False quant=affine mxtq=None
+
+dealign.ai/Qwen3.6-27B-JANG_4M-CRACK
+   fam=qwen3_5 cache=hybrid/None reason=qwen3 tool=qwen ntools=False think=True mllm=False quant=affine mxtq=None
+
+dealign.ai/Qwen3.6-27B-MXFP4-CRACK
+   fam=qwen3_5 cache=hybrid/None reason=qwen3 tool=qwen ntools=False think=True mllm=True quant=affine mxtq=None
+
+dealign.ai/Step-3.7-Flash-JANG_2L-CRACK
+   fam=step3p7 cache=kv/step3p7_full_sliding_kv reason=qwen3 tool=step3p5 ntools=False think=True mllm=True quant=jangtq mxtq={'attention': 8, 'embedding': 6, 'ro
+
+dealign.ai/Step-3.7-Flash-JANG_K-CRACK
+   fam=step3p7 cache=kv/step3p7_full_sliding_kv reason=qwen3 tool=step3p5 ntools=False think=True mllm=True quant=jangtq mxtq={'attention': 8, 'embedding': 6, 'ro
+
+google/diffusiongemma-26B-A4B-it  <-- FAM=UNKNOWN
+   fam=unknown cache=kv/None reason=None tool=None ntools=False think=None mllm=False quant=? mxtq=None
+
+=== FAM=UNKNOWN (3): ['OsaurusAI/diffusiongemma-26B-A4B-it-MXFP4', 'OsaurusAI/diffusiongemma-26B-A4B-it-MXFP8', 'google/diffusiongemma-26B-A4B-it']

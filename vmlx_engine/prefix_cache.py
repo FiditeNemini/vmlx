@@ -17,6 +17,7 @@ This module provides two implementations:
 import copy
 import hashlib
 import importlib.metadata
+import pathlib
 import logging
 import os
 import threading
@@ -113,7 +114,42 @@ def _resolve_runtime_cache_fingerprint() -> str:
         except Exception:
             version = "unknown"
         parts.append(f"{package}={version}")
+    source_id = _resolve_source_checkout_id()
+    if source_id:
+        parts.append(f"src={source_id}")
     return "runtime_cache=" + ",".join(parts)
+
+
+def _resolve_source_checkout_id() -> str:
+    """Content id for the engine sources, but ONLY in a source checkout.
+
+    Package versions alone cannot separate two runtimes during development: the
+    version string sits still while cache/model math changes underneath it, so
+    L2 blocks written by the previous build keep matching and are replayed as if
+    valid. That is not theoretical — it was reproduced live: with a stale
+    block-cache, a warm hit answered a DIFFERENT question than the identical
+    cold request (confidently, deterministically, 6/6), and clearing the cache
+    made warm agree with cold again.
+
+    Hashing ~300 source files costs ~180 ms, which no released user should pay,
+    and they do not need to: a release bumps the version, which already changes
+    the fingerprint. So this only runs when the package sits in a git checkout.
+    """
+    try:
+        package_dir = pathlib.Path(__file__).resolve().parent
+        if not (package_dir.parent / ".git").exists():
+            return ""
+        digest = hashlib.sha256()
+        for path in sorted(package_dir.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            digest.update(path.name.encode("utf-8", "replace"))
+            digest.update(path.read_bytes())
+        return digest.hexdigest()[:12]
+    except Exception:
+        # Never let fingerprinting break startup; falling back to the
+        # version-only string preserves the previous behaviour.
+        return ""
 
 
 # Resolved exactly once at import. Package versions cannot change inside a

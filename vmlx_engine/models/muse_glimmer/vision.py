@@ -316,7 +316,24 @@ class VisionModel(nn.Module):
                 "Muse Glimmer vision tower needs grid_thw; positions, rotary and "
                 "the window partition are all defined over the patch grid."
             )
-        grid_t, grid_h, grid_w = (int(v) for v in grid_thw[0])
+        # Every media item has its OWN grid, and positions / rotary / the
+        # window partition are all defined per grid. Running only grid_thw[0]
+        # over a concatenated patch buffer silently applied the first image's
+        # geometry to all of them (and truncated the gather), so a second image
+        # could not work at all.
+        if len(grid_thw) > 1:
+            outputs = []
+            cursor = 0
+            for grid in grid_thw:
+                t, h, w = (int(v) for v in grid)
+                span = t * h * w
+                outputs.append(self._encode_one(patches[cursor:cursor + span], (t, h, w)))
+                cursor += span
+            return mx.concatenate(outputs, axis=0)
+        return self._encode_one(patches, tuple(int(v) for v in grid_thw[0]))
+
+    def _encode_one(self, patches: mx.array, grid: Tuple[int, int, int]) -> mx.array:
+        grid_t, grid_h, grid_w = grid
         merge = int(self.config.merge_size)
         side = int(getattr(self.config, "pos_emb_height", 32) or 32)
 
@@ -390,7 +407,21 @@ class MuseVisionAdapter(nn.Module):
     def pixel_shuffle(
         self, features: mx.array, grid_thw: Sequence[Tuple[int, int, int]]
     ) -> mx.array:
-        """Raster patches -> merged cells, feature-major within each cell."""
+        """Raster patches -> merged cells, feature-major within each cell.
+
+        Each media item merges under its OWN grid; sharing grid_thw[0] across
+        several images mis-shapes every one after the first.
+        """
+        if len(grid_thw) > 1:
+            merged, cursor = [], 0
+            for grid in grid_thw:
+                t, h, w = (int(v) for v in grid)
+                span = t * h * w
+                merged.append(
+                    self.pixel_shuffle(features[cursor:cursor + span], [(t, h, w)])
+                )
+                cursor += span
+            return mx.concatenate(merged, axis=0)
         merge = self.merge_size
         grid_t, grid_h, grid_w = (int(v) for v in grid_thw[0])
         dim = features.shape[-1]

@@ -231,3 +231,93 @@ class TestVisionAdapterContract:
         )
         with pytest.raises(ValueError, match="grid_thw"):
             adapter(mx.ones((4, vision.hidden_size)))
+
+
+class TestMultiMediaPrompts:
+    """Two paths the panel advertised that could not actually run.
+
+    Both failed structurally, not subtly: the tower and adapter consumed only
+    ``grid_thw[0]``, so a second image got the FIRST image's geometry and a
+    truncated gather; and the processor's ``if videos: ... elif images:``
+    silently discarded every image in a mixed prompt while expanding only the
+    video, leaving the placeholder count and the feature rows disagreeing.
+    """
+
+    IMAGE_TOKEN = 200092
+    VIDEO_TOKEN = 200091
+
+    def test_processor_keeps_both_images_and_video(self):
+        proc = MuseGlimmerImageProcessor()
+        video = MuseGlimmerVideoProcessor()
+        images = [_image((224, 224)), _image((112, 112))]
+        img_patches, img_grids = proc(images)
+        vid_patches, vid_grids = video([_image((112, 112))] * 4)
+
+        assert len(img_grids) == 2, "second image dropped"
+        assert img_patches.shape[0] == sum(t * h * w for t, h, w in img_grids)
+        assert vid_grids and vid_patches.shape[1] == img_patches.shape[1]
+
+    def test_expansion_covers_every_image_independently(self):
+        proc = MuseGlimmerImageProcessor()
+        _, grids = proc([_image((224, 224)), _image((112, 112))])
+        ids = [1, self.IMAGE_TOKEN, 2, self.IMAGE_TOKEN, 3]
+        out = expand_media_placeholders(ids, grids, self.IMAGE_TOKEN, 2)
+        expected = sum(merged_token_count(g, 2) for g in grids)
+        assert out.count(self.IMAGE_TOKEN) == expected
+        # each placeholder expands to ITS OWN grid, not the first one twice
+        assert merged_token_count(grids[0], 2) != merged_token_count(grids[1], 2)
+
+    def test_tower_and_adapter_encode_each_grid_separately(self):
+        import mlx.core as mx
+        import numpy as np
+        from mlx_vlm.models.muse_glimmer.config import ModelConfig, TextConfig, VisionConfig
+        from mlx_vlm.models.muse_glimmer.vision import MuseVisionAdapter, VisionModel
+
+        vision = VisionConfig(
+            model_type="muse_glimmer_vision", hidden_size=64, intermediate_size=128,
+            num_hidden_layers=4, num_attention_heads=4, patch_size=14,
+            patch_temporal=2, merge_size=2, pos_emb_height=4, pos_emb_width=4,
+            max_position_embeddings=1024, layer_norm_eps=1e-5, hidden_act="gelu",
+            rope_theta=10000.0,
+            layer_types=["window_attention"] * 3 + ["full_attention"],
+        )
+        grids = [(1, 8, 8), (1, 4, 4)]
+        total = sum(t * h * w for t, h, w in grids)
+        patches = mx.array(
+            np.random.RandomState(0).randn(total, 3 * 2 * 14 * 14).astype(np.float32)
+        )
+
+        tower = VisionModel(vision)
+        feats = tower(patches, grid_thw=grids)
+        assert feats.shape == (total, vision.hidden_size)
+
+        adapter = MuseVisionAdapter(
+            ModelConfig(
+                model_type="muse_glimmer",
+                text_config=TextConfig(model_type="muse_glimmer_text", hidden_size=64),
+                vision_config=vision,
+                projector_hidden_size=32,
+            )
+        )
+        merged = adapter(feats, grid_thw=grids)
+        assert merged.shape[0] == sum(
+            t * (h // 2) * (w // 2) for t, h, w in grids
+        ), "adapter merged under one grid instead of each"
+
+    def test_batched_scatter_does_not_reuse_row_zero_features(self):
+        """Per-row cumsum restarts at 0, so B>1 re-read row 0's features."""
+        import mlx.core as mx
+
+        from mlx_vlm.models.muse_glimmer.muse_glimmer import Model
+
+        ids = mx.array([[1, self.IMAGE_TOKEN, 2], [3, self.IMAGE_TOKEN, 4]])
+        embeds = mx.zeros((2, 3, 4))
+        # two distinct feature rows, one per batch row
+        features = mx.array([[1.0, 1, 1, 1], [2.0, 2, 2, 2]])
+
+        model = Model.__new__(Model)
+        model.config = type("C", (), {"image_token_id": self.IMAGE_TOKEN,
+                                      "video_token_id": self.VIDEO_TOKEN})()
+        out = Model._scatter_media(model, ids, embeds, features)
+        assert float(out[0, 1, 0]) == 1.0
+        assert float(out[1, 1, 0]) == 2.0, "row 1 re-read row 0's features"

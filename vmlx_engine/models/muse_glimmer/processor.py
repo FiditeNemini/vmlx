@@ -211,6 +211,35 @@ class MuseGlimmerVideoProcessor(MuseGlimmerImageProcessor):
         return patches, [grid]
 
 
+def _as_frame_sequence(videos: Any) -> List[Any]:
+    """Normalize whatever the caller calls "videos" into a list of frames.
+
+    The engine's video fetch hands back a single 4-D ``(frames, H, W, C)``
+    ndarray, not a list. Only unwrapping list/tuple meant that array reached
+    ``_as_pil`` whole and PIL raised on it — so the video path could not run at
+    all, while the panel advertised video.
+
+    Accepts: a 4-D array (frames stacked), a list of frames, or a list
+    containing one of those.
+    """
+    if videos is None:
+        return []
+    candidate = videos
+    # a list/tuple wrapping the real payload (the usual single-video case)
+    if isinstance(candidate, (list, tuple)) and len(candidate) == 1:
+        candidate = candidate[0]
+
+    array = getattr(candidate, "ndim", None)
+    if array == 4:
+        return [np.asarray(frame) for frame in candidate]
+    if array == 3:
+        # one frame handed over bare
+        return [np.asarray(candidate)]
+    if isinstance(candidate, (list, tuple)):
+        return list(candidate)
+    return [candidate]
+
+
 def expand_media_placeholders(
     input_ids: List[int],
     grids: Sequence[Tuple[int, int, int]],
@@ -295,21 +324,33 @@ class MuseGlimmerProcessor:
         ids = self.tokenizer.encode(text or "", add_special_tokens=False)
         out = {}
 
+        # Images and videos are NOT mutually exclusive. `elif` silently dropped
+        # every image in a mixed prompt while expanding only the video, so the
+        # placeholder count and the feature rows disagreed downstream.
+        media_patches, image_grids, video_grids = [], [], []
         if videos:
-            frames = videos[0] if isinstance(videos[0], (list, tuple)) else videos
-            patches, grids = self.video_processor(frames)
+            patches, video_grids = self.video_processor(_as_frame_sequence(videos))
+            if len(patches):
+                media_patches.append(patches)
             ids = expand_media_placeholders(
-                ids, grids, self.video_token_id, self.image_processor.merge_size
+                ids, video_grids, self.video_token_id, self.image_processor.merge_size
             )
-            out["pixel_values"] = patches
-            out["video_grid_thw"] = grids
-        elif images:
-            patches, grids = self.image_processor(images)
+        if images:
+            patches, image_grids = self.image_processor(images)
+            if len(patches):
+                media_patches.append(patches)
             ids = expand_media_placeholders(
-                ids, grids, self.image_token_id, self.image_processor.merge_size
+                ids, image_grids, self.image_token_id, self.image_processor.merge_size
             )
-            out["pixel_values"] = patches
-            out["image_grid_thw"] = grids
+        if media_patches:
+            out["pixel_values"] = (
+                media_patches[0] if len(media_patches) == 1
+                else np.concatenate(media_patches, axis=0)
+            )
+        if image_grids:
+            out["image_grid_thw"] = image_grids
+        if video_grids:
+            out["video_grid_thw"] = video_grids
 
         out["input_ids"] = [ids]
         out["attention_mask"] = [[1] * len(ids)]

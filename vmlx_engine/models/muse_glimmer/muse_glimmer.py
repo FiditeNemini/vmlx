@@ -130,11 +130,16 @@ class Model(nn.Module):
                 "prompt disagree about how many patches this media expands to."
             )
         mask = is_media[..., None]
-        scattered = mx.zeros_like(embeds)
-        idx = mx.cumsum(is_media.astype(mx.int32), axis=-1) - 1
+        # Per-row cumsum restarts at 0 on every batch row, so with B > 1 every
+        # row past the first re-read row 0's features. Offset each row by the
+        # media tokens consumed before it. The engine co-batches VL requests,
+        # so this is a live path, not a hypothetical.
+        flags = is_media.astype(mx.int32)
+        per_row = mx.sum(flags, axis=-1)
+        row_offsets = mx.cumsum(per_row) - per_row  # exclusive prefix sum
+        idx = mx.cumsum(flags, axis=-1) - 1 + row_offsets[..., None]
         gathered = flat[mx.clip(idx, 0, flat.shape[0] - 1)]
-        scattered = mx.where(mask, gathered, embeds)
-        return scattered
+        return mx.where(mask, gathered, embeds)
 
     # ---- forward ---------------------------------------------------------
 

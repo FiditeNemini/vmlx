@@ -25,6 +25,28 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
+def _resolve_qk_scale(config) -> float:
+    """Attention scale for Muse.
+
+    VMLX_MUSE_QK_SCALE_MODE selects the interpretation while the correct one is
+    being established against real output:
+      inv_sqrt_head (default) -- conventional 1/sqrt(head_dim)
+      pre_attn_scalar         -- qk_scale_factor**-0.5, the Gemma convention
+      raw                     -- qk_scale_factor used directly (produces
+                                 degenerate repetition; kept only for A/B)
+    """
+    import os
+
+    head_dim = int(config.head_dim)
+    factor = float(getattr(config, "qk_scale_factor", 0.0) or 0.0)
+    mode = os.environ.get("VMLX_MUSE_QK_SCALE_MODE", "inv_sqrt_head").strip().lower()
+    if mode == "raw" and factor > 0:
+        return factor
+    if mode == "pre_attn_scalar" and factor > 0:
+        return factor ** -0.5
+    return head_dim ** -0.5
+
+
 class MuseAttention(nn.Module):
     def __init__(self, config, layer_idx: int):
         super().__init__()
@@ -32,8 +54,12 @@ class MuseAttention(nn.Module):
         self.n_heads = config.num_attention_heads
         self.n_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        # Declared multiplier, not the conventional inverse-sqrt.
-        self.scale = float(config.qk_scale_factor)
+        # qk_scale_factor is NOT the attention scale itself. Using 3.87
+        # directly (vs 1/sqrt(128) = 0.0884, a 44x difference) saturates
+        # softmax and the model emits degenerate repetition -- observed live as
+        # "the the the the S D D D D...". Treat it the way Gemma treats
+        # query_pre_attn_scalar: an inverse-sqrt pre-attention scalar.
+        self.scale = _resolve_qk_scale(config)
         self.is_sliding = config.layer_is_sliding(layer_idx)
         self.sliding_window = int(config.sliding_window or 0)
 

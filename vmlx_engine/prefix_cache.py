@@ -5557,6 +5557,56 @@ class BlockAwarePrefixCache:
             return None
         return (ids, int(getattr(block_table, "num_tokens", 0) or 0))
 
+    def _reconstruct_memo_fits_in_headroom(self, reconstructed_caches: Any) -> bool:
+        """Is there room to retain a SECOND copy of this reconstruction?
+
+        The memo turns a repeated reconstruction into a lookup (measured on the
+        text path: 3071ms -> 0.015ms at 413 blocks), but it pays for that with a
+        full ``deepcopy``. On a compact DSV4 delta record that is cheap; on a
+        mixed-SWA L1 at 86k tokens it is ~4.6GB, which would roughly DOUBLE
+        resident KV at exactly the depth where memory is already tightest — and
+        an OOM costs far more than the reconstruction it was avoiding.
+
+        So the memo is opportunistic: keep it only while the copy comfortably
+        fits under the device working-set limit, otherwise decline and let the
+        second pass reconstruct. Unknown readings decline too — the safe default
+        here is the slower one, because the fast path's failure mode is an OOM.
+        """
+        try:
+            from .utils.memory_limits import get_effective_metal_working_set_bytes
+
+            active, max_ws = get_effective_metal_working_set_bytes(mx)
+        except Exception:  # noqa: BLE001
+            return False
+        if max_ws <= 0 or active <= 0:
+            return False
+        try:
+            from .memory_cache import estimate_kv_cache_memory
+
+            copy_bytes = int(estimate_kv_cache_memory(reconstructed_caches) or 0)
+        except Exception:  # noqa: BLE001
+            return False
+        if copy_bytes <= 0:
+            return False
+        try:
+            budget_pct = float(
+                os.environ.get("VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT", "70")
+            )
+        except (TypeError, ValueError):
+            budget_pct = 70.0
+        ceiling = int(max_ws * (budget_pct / 100.0))
+        if active + copy_bytes > ceiling:
+            logger.debug(
+                "reconstruct memo declined: copy %.2fGB on top of active %.2fGB "
+                "would pass the %.0f%% working-set budget (%.2fGB)",
+                copy_bytes / (1024**3),
+                active / (1024**3),
+                budget_pct,
+                ceiling / (1024**3),
+            )
+            return False
+        return True
+
     def arm_reconstruct_memo(self, enabled: bool = True) -> None:
         """Ask the next reconstruction to retain a pristine copy for reuse.
 
@@ -6909,20 +6959,23 @@ class BlockAwarePrefixCache:
             reconstruction_succeeded = True
             if getattr(self, "_reconstruct_memo_arm", False) and memo_signature:
                 self._reconstruct_memo_arm = False
-                try:
-                    # Copy before the caller decodes into this state, so the
-                    # retained composite is the prompt-boundary one the second
-                    # pass needs.
-                    self._reconstruct_memo = (
-                        memo_signature,
-                        copy.deepcopy(reconstructed_caches),
-                    )
-                except Exception as memo_err:
+                if not self._reconstruct_memo_fits_in_headroom(reconstructed_caches):
                     self._reconstruct_memo = None
-                    logger.debug(
-                        "reconstruct memo skipped (%s); second pass will replay",
-                        memo_err,
-                    )
+                else:
+                    try:
+                        # Copy before the caller decodes into this state, so the
+                        # retained composite is the prompt-boundary one the second
+                        # pass needs.
+                        self._reconstruct_memo = (
+                            memo_signature,
+                            copy.deepcopy(reconstructed_caches),
+                        )
+                    except Exception as memo_err:
+                        self._reconstruct_memo = None
+                        logger.debug(
+                            "reconstruct memo skipped (%s); second pass will replay",
+                            memo_err,
+                        )
             return reconstructed_caches
 
         except Exception as e:

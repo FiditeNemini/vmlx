@@ -3214,7 +3214,19 @@ class MLLMScheduler:
                 return None, 0
             if covered * 2 < len(truncated_tokens):
                 return None, 0
+            _base_started = time.perf_counter()
             base_cache = cache.reconstruct_cache(block_table)
+            # Whether this second walk was served from the memo armed by the
+            # request's own reconstruction. Logged rather than assumed: the memo
+            # is keyed on (block_ids, num_tokens), so it only ever hits when the
+            # store's base lands on the SAME table the request reconstructed.
+            logger.info(
+                "Clean store base for %s: %d tokens in %.3fs (memo_hit=%s)",
+                request_id,
+                int(getattr(block_table, "num_tokens", 0) or 0),
+                max(0.0, time.perf_counter() - _base_started),
+                bool(getattr(cache, "_last_reconstruct_memo_hit", False)),
+            )
             if base_cache is None:
                 return None, 0
             return base_cache, covered

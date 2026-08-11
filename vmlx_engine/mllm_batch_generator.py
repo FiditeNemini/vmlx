@@ -6804,6 +6804,24 @@ class MLLMBatchGenerator:
                                         time.perf_counter(),
                                     )
                                 )
+                                # The mixed-SWA clean store reconstructs the
+                                # stored chain AGAIN a moment later to build its
+                                # base (mllm_scheduler._clean_store_base_from_stored_chain),
+                                # so the same chain is walked twice per turn.
+                                # Retain a pristine copy here so that second walk
+                                # is a lookup — but only opportunistically: the
+                                # memo declines itself when a second copy would
+                                # not fit under the working-set budget, because
+                                # a mixed-SWA L1 is ~4.6GB at 86k and an OOM
+                                # costs far more than the reconstruction.
+                                _arm_memo = getattr(
+                                    self.block_aware_cache, "arm_reconstruct_memo", None
+                                )
+                                if callable(_arm_memo):
+                                    try:
+                                        _arm_memo(True)
+                                    except Exception:  # noqa: BLE001
+                                        pass
                                 _reconstruct_started = time.perf_counter()
                                 reconstructed = self.block_aware_cache.reconstruct_cache(block_table)
                                 _cache_execution["reconstruction_seconds"] = round(

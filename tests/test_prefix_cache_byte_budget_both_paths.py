@@ -37,11 +37,24 @@ def test_mllm_path_still_derives_a_byte_budget():
 
 
 def test_no_claim_that_the_llm_path_always_bounded_bytes():
-    """Guard the specific false statement that concealed the LLM hole."""
+    """Guard the false statement that concealed the LLM hole.
+
+    The corrected comment QUOTES the false claim in order to retract it, so a
+    bare substring search matches the retraction too — my first version of this
+    test failed for exactly that reason. Require that any occurrence sits next
+    to an explicit correction.
+    """
     src = (ROOT / "vmlx_engine" / "mllm_scheduler.py").read_text(encoding="utf-8")
-    assert not re.search(
-        r"LLM path in\s*#?\s*scheduler\.py has always passed max_bytes", src
-    ), "the false 'LLM path always passed max_bytes' claim is back"
+    pattern = re.compile(
+        r"LLM path in[\s#]*scheduler\.py has always passed max_bytes"
+    )
+    for match in pattern.finditer(src):
+        window = src[max(0, match.start() - 400) : match.end() + 400]
+        assert "WRONG" in window, (
+            "the 'LLM path always passed max_bytes' claim is asserted again "
+            "without being marked as false; that claim is what hid the "
+            "unbounded LLM prefix cache"
+        )
 
 
 def test_budget_resolution_is_bounded_when_nothing_is_configured_explicitly():

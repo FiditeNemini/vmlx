@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { app } from 'electron'
+import { attachChildProcessStreamErrorGuard } from './childProcessStreamGuards'
 
 const exec = promisify(execCallback)
 
@@ -24,37 +25,7 @@ export interface AvailableInstaller {
   label: string
 }
 
-function isExpectedChildProcessStreamDisconnectError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code
-  const message = String((err as Error)?.message || '').toLowerCase()
-  const cause = (err as any)?.cause
-  const wrappedDisconnects = [
-    cause,
-    (err as any)?.reason,
-    (err as any)?.error,
-    (err as any)?.detail,
-  ].filter(Boolean)
-  const nestedErrors = Array.isArray((err as any)?.errors) ? (err as any).errors : []
-  return (
-    code === "EPIPE" ||
-    code === "ECONNRESET" ||
-    code === "ERR_STREAM_DESTROYED" ||
-    code === "ERR_STREAM_WRITE_AFTER_END" ||
-    /EPIPE|write EPIPE|broken pipe|socket hang up|connection reset|premature close|stream.*destroyed|write after end/i.test(message) ||
-    wrappedDisconnects.some((nested) => isExpectedChildProcessStreamDisconnectError(nested)) ||
-    nestedErrors.some((nested) => isExpectedChildProcessStreamDisconnectError(nested))
-  )
-}
 
-function attachChildProcessStreamErrorGuard(
-  stream: NodeJS.ReadableStream | null | undefined,
-  onUnexpected: (err: Error) => void,
-): void {
-  stream?.on('error', (err: Error) => {
-    if (isExpectedChildProcessStreamDisconnectError(err)) return
-    onUnexpected(err)
-  })
-}
 
 // Common installation paths — uv first (recommended), then pip/brew/conda
 // vmlx ships THREE entry-point names — vmlx, vmlx-serve, vmlx-engine — all

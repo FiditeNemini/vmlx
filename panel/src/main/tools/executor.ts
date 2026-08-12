@@ -8,6 +8,7 @@ import { resolve, relative, dirname, basename, isAbsolute, join, sep } from 'pat
 import { execFileSync, spawn, ChildProcess } from 'child_process'
 import { clipboard } from 'electron'
 import { db } from '../database'
+import { attachChildProcessStreamErrorGuard } from '../childProcessStreamGuards'
 
 // ─── Spawned Process Tracking ────────────────────────────────────────────────
 
@@ -30,37 +31,7 @@ export interface ToolResult {
   videoDataUrl?: string
 }
 
-function isExpectedChildProcessStreamDisconnectError(err: unknown): boolean {
-  const code = (err as NodeJS.ErrnoException)?.code
-  const message = String((err as Error)?.message || '').toLowerCase()
-  const cause = (err as any)?.cause
-  const wrappedDisconnects = [
-    cause,
-    (err as any)?.reason,
-    (err as any)?.error,
-    (err as any)?.detail,
-  ].filter(Boolean)
-  const nestedErrors = Array.isArray((err as any)?.errors) ? (err as any).errors : []
-  return (
-    code === "EPIPE" ||
-    code === "ECONNRESET" ||
-    code === "ERR_STREAM_DESTROYED" ||
-    code === "ERR_STREAM_WRITE_AFTER_END" ||
-    /EPIPE|write EPIPE|broken pipe|socket hang up|connection reset|premature close|stream.*destroyed|write after end/i.test(message) ||
-    wrappedDisconnects.some((nested) => isExpectedChildProcessStreamDisconnectError(nested)) ||
-    nestedErrors.some((nested) => isExpectedChildProcessStreamDisconnectError(nested))
-  )
-}
 
-function attachChildProcessStreamErrorGuard(
-  stream: NodeJS.ReadableStream | null | undefined,
-  onUnexpected: (err: Error) => void,
-): void {
-  stream?.on('error', (err: Error) => {
-    if (isExpectedChildProcessStreamDisconnectError(err)) return
-    onUnexpected(err)
-  })
-}
 
 // ─── Security ────────────────────────────────────────────────────────────────
 

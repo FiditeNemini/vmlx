@@ -200,55 +200,61 @@ describe("Ollama gateway parity contracts", () => {
   });
 
   it("guards child process stdio stream EPIPE across app-managed process lanes", () => {
-    const processManagerSource = readFileSync(
-      resolve(process.cwd(), "src/main/process-manager.ts"),
+    // This matcher used to be copied into all five lanes and this test asserted
+    // the whole body appeared in each — i.e. it pinned the DUPLICATION. It is a
+    // rule that decides whether an error is SWALLOWED, so five copies meant a
+    // newly-observed disconnect shape added to one lane left the other four
+    // reporting it as a fault, with nothing to announce the split. (At
+    // extraction time four were byte-identical and ipc/models.ts differed only
+    // in quote style.) Assert the rule at its owner, and that every lane reads
+    // it.
+    const guardSource = readFileSync(
+      resolve(process.cwd(), "src/main/childProcessStreamGuards.ts"),
       "utf8",
     );
-    const engineManagerSource = readFileSync(
-      resolve(process.cwd(), "src/main/engine-manager.ts"),
-      "utf8",
+    for (const code of [
+      "EPIPE",
+      "ECONNRESET",
+      "ERR_STREAM_DESTROYED",
+      "ERR_STREAM_WRITE_AFTER_END",
+    ]) {
+      expect(guardSource).toMatch(new RegExp(`code === ['"]${code}['"]`));
+    }
+    for (const phrase of [
+      "write EPIPE",
+      "broken pipe",
+      "socket hang up",
+      "connection reset",
+      "premature close",
+    ]) {
+      expect(guardSource).toContain(phrase);
+    }
+    // The disconnect can arrive wrapped; the matcher must still recurse.
+    expect(guardSource).toContain("const cause = (err as any)?.cause");
+    expect(guardSource).toContain("const wrappedDisconnects = [");
+    expect(guardSource).toContain("(err as any)?.reason");
+    expect(guardSource).toContain("(err as any)?.error");
+    expect(guardSource).toContain("(err as any)?.detail");
+    expect(guardSource).toContain(
+      "wrappedDisconnects.some((nested) => isExpectedChildProcessStreamDisconnectError(nested))",
     );
-    const developerSource = readFileSync(
-      resolve(process.cwd(), "src/main/ipc/developer.ts"),
-      "utf8",
-    );
-    const modelsSource = readFileSync(
-      resolve(process.cwd(), "src/main/ipc/models.ts"),
-      "utf8",
-    );
-    const toolsExecutorSource = readFileSync(
-      resolve(process.cwd(), "src/main/tools/executor.ts"),
-      "utf8",
+    expect(guardSource).toContain(
+      "const nestedErrors = Array.isArray((err as any)?.errors)",
     );
 
-    for (const sourceText of [
-      processManagerSource,
-      engineManagerSource,
-      developerSource,
-      modelsSource,
-      toolsExecutorSource,
+    for (const rel of [
+      "src/main/process-manager.ts",
+      "src/main/engine-manager.ts",
+      "src/main/ipc/developer.ts",
+      "src/main/ipc/models.ts",
+      "src/main/tools/executor.ts",
     ]) {
-      expect(sourceText).toContain("isExpectedChildProcessStreamDisconnectError");
-      expect(sourceText).toContain('code === "EPIPE"');
-      expect(sourceText).toContain('code === "ECONNRESET"');
-      expect(sourceText).toContain('code === "ERR_STREAM_DESTROYED"');
-      expect(sourceText).toContain('code === "ERR_STREAM_WRITE_AFTER_END"');
-      expect(sourceText).toContain("write EPIPE");
-      expect(sourceText).toContain("broken pipe");
-      expect(sourceText).toContain("socket hang up");
-      expect(sourceText).toContain("connection reset");
-      expect(sourceText).toContain("premature close");
-      expect(sourceText).toContain("const cause = (err as any)?.cause");
-      expect(sourceText).toContain("const wrappedDisconnects = [");
-      expect(sourceText).toContain("(err as any)?.reason");
-      expect(sourceText).toContain("(err as any)?.error");
-      expect(sourceText).toContain("(err as any)?.detail");
-      expect(sourceText).toContain("wrappedDisconnects.some((nested) => isExpectedChildProcessStreamDisconnectError(nested))");
-      expect(sourceText).toContain("const nestedErrors = Array.isArray((err as any)?.errors)");
-      expect(sourceText).toContain("nestedErrors.some((nested) => isExpectedChildProcessStreamDisconnectError(nested))");
-      expect(sourceText).toContain("attachChildProcessStreamErrorGuard");
-      expect(sourceText).toContain(".stdout,");
-      expect(sourceText).toContain(".stderr,");
+      const sourceText = readFileSync(resolve(process.cwd(), rel), "utf8");
+      expect(sourceText).toContain("childProcessStreamGuards");
+      expect(sourceText).toContain("attachChildProcessStreamErrorGuard(");
+      expect(sourceText).not.toContain(
+        "function isExpectedChildProcessStreamDisconnectError(",
+      );
     }
   });
 

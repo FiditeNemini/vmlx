@@ -931,7 +931,10 @@
       "setupStep4": "4. 検出で見つからない場合は「Add Manual」をクリックして IP で追加してください",
       "setupNetworkNote": "Thunderbolt 5: 約 120 Gbps、レイテンシ 0.1ms（最良）。1GbE: パイプライン並列には十分。WiFi: 動作しますが遅めです。他方の Mac に ping できるネットワークなら何でも動作します。",
       "embeddingModelTooltip": "/v1/embeddings エンドポイント用に、起動時に別の埋め込みモデルをプリロードします。メインのチャットモデルと並行して実行されます。例: mlx-community/embeddinggemma-300m-6bit。空のままにすると埋め込みエンドポイントを無効化します。",
-      "additionalArgsTooltip": "serve コマンドに追加される生のコマンドライン引数。上の UI に公開されていないフラグに使用してください。例: --log-level DEBUG。引数は空白で分割され、そのまま CLI に渡されます。"
+      "additionalArgsTooltip": "serve コマンドに追加される生のコマンドライン引数。上の UI に公開されていないフラグに使用してください。例: --log-level DEBUG。引数は空白で分割され、そのまま CLI に渡されます。",
+      "metalWiredLimitHelp": "大きなモデルで Metal のメモリ不足、SIGKILL、カーネルパニックの恐れがある場合、macOS の Metal ワイヤードメモリ上限の調整が必要になることがあります。大容量メモリの Mac の例: {{command}}。物理 RAM と同じ値にはせず、OS・WindowServer・アプリ用の余裕を残してください。128GB の Mac では通常 128000 MB より 115000〜120000 MB のほうが安全です。このコマンドには管理者パスワードが必要で、再起動すると元に戻ります。",
+      "pagedCacheCapacity": "実効インメモリキャッシュ容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン",
+      "pagedCacheMemoryIgnored": "インメモリページドキャッシュが有効な間、キャッシュ TTL は適用されません。キャッシュメモリ上限／キャッシュメモリ % は Apple ユニファイドメモリの L1 使用量を制限し、最大キャッシュブロック数とブロックサイズがトークン容量を制限します。"
     },
     "create": {
       "title": "セッションを作成",

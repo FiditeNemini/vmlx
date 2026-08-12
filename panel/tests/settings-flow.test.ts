@@ -3718,10 +3718,22 @@ describe('JIT Toggle', () => {
         )
         const shared = fs.readFileSync('src/shared/metalWiredLimit.ts', 'utf-8')
 
-        expect(form).toContain('metalWiredLimitHelpText')
-        expect(form).toContain('<InfoNote text={metalWiredLimitHelpText} />')
+        // The COMMAND still comes from the shared module (main reuses it in
+        // error messages); only the prose moved behind t() so it localizes —
+        // with the app in Korean this note was one of only two English
+        // sentences left on the whole form.
+        const catalog = fs.readFileSync(
+            'src/renderer/src/i18n/locales/en.json',
+            'utf-8',
+        )
+        expect(form).toContain('metalWiredLimitCommand')
+        expect(form).toContain(
+            "<InfoNote text={t('sessions.config.metalWiredLimitHelp', { command: metalWiredLimitCommand })} />",
+        )
         expect(shared).toContain('sudo sysctl iogpu.wired_limit_mb=120000')
         expect(shared).toContain('kIOGPUCommandBufferCallbackErrorOutOfMemory')
+        expect(catalog).toContain('Metal wired-memory limit')
+        expect(catalog).toContain('{{command}}')
     })
 
     it('settings form and launch code treat Step3.7 full/sliding KV subtype as typed paged-or-SSD cache', () => {
@@ -4224,8 +4236,17 @@ describe('Feature Interaction', () => {
             resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx'),
             'utf-8',
         )
-        expect(source).toContain('pagedCacheCapacityText')
-        expect(source).toContain('pagedCacheMemoryIgnoredText')
+        // The ARITHMETIC stays in the shared module; the SENTENCE moved behind
+        // t() so it localizes with the rest of the form.
+        const catalog = readFileSync(
+            resolve(__dirname, '../src/renderer/src/i18n/locales/en.json'),
+            'utf-8',
+        )
+        expect(source).toContain('resolvePagedCacheCapacity')
+        expect(source).toContain("t('sessions.config.pagedCacheCapacity'")
+        expect(source).toContain("t('sessions.config.pagedCacheMemoryIgnored')")
+        expect(catalog).toContain('Effective in-memory cache capacity')
+        expect(catalog).toContain('Cache TTL does not apply while In-Memory Paged Cache is on')
         expect(source).toContain('pagedCacheControlsState')
         expect(source).toContain('memoryBudgetControlsDisabled')
         expect(source).toContain('cacheTtlDisabled')

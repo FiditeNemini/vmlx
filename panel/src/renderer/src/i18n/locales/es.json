@@ -931,7 +931,10 @@
       "setupStep4": "4. O haga clic en \"Add Manual\" para añadir por IP si el descubrimiento no los encuentra",
       "setupNetworkNote": "Thunderbolt 5: ~120 Gbps, 0.1 ms de latencia (lo mejor). 1GbE: funciona bien para paralelismo de pipeline. WiFi: funciona pero más lento. Cualquier red que pueda hacer ping a la otra Mac funcionará.",
       "embeddingModelTooltip": "Precarga un modelo de embeddings separado al arrancar para el endpoint /v1/embeddings. Se ejecuta junto al modelo de chat principal. Ejemplo: mlx-community/embeddinggemma-300m-6bit. Déjelo vacío para desactivar el endpoint de embeddings.",
-      "additionalArgsTooltip": "Argumentos de línea de comandos sin procesar añadidos al comando serve. Úselo para indicadores no expuestos en la interfaz de arriba. Ejemplo: --log-level DEBUG. Los argumentos se separan por espacios y se pasan directamente a la CLI."
+      "additionalArgsTooltip": "Argumentos de línea de comandos sin procesar añadidos al comando serve. Úselo para indicadores no expuestos en la interfaz de arriba. Ejemplo: --log-level DEBUG. Los argumentos se separan por espacios y se pasan directamente a la CLI.",
+      "metalWiredLimitHelp": "Si un modelo grande provoca un error de memoria de Metal, SIGKILL o riesgo de kernel panic, macOS puede necesitar un límite de memoria fija de Metal ajustado. Ejemplo para Macs con mucha memoria: {{command}}. No lo iguales a la RAM física; deja margen para el sistema, WindowServer y las apps. En Macs de 128 GB, 115000-120000 MB suele ser más seguro que 128000 MB. El comando requiere contraseña de administrador y se restablece al reiniciar.",
+      "pagedCacheCapacity": "Capacidad efectiva de caché en memoria: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
+      "pagedCacheMemoryIgnored": "El TTL de caché no se aplica mientras la caché paginada en memoria está activa. El límite de memoria de caché / % de memoria de caché limita su uso de L1 de la memoria unificada de Apple; el máximo de bloques de caché y el tamaño de bloque limitan la capacidad en tokens."
     },
     "create": {
       "title": "Crear sesión",

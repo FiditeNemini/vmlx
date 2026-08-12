@@ -931,7 +931,10 @@
       "setupStep4": "4. Or click \"Add Manual\" to add by IP if discovery doesn't find them",
       "setupNetworkNote": "Thunderbolt 5: ~120 Gbps, 0.1ms latency (best). 1GbE: works fine for pipeline parallelism. WiFi: works but slower. Any network that can ping the other Mac will work.",
       "embeddingModelTooltip": "Pre-load a separate embedding model at startup for the /v1/embeddings endpoint. Runs alongside the main chat model. Example: mlx-community/embeddinggemma-300m-6bit. Leave empty to disable embeddings endpoint.",
-      "additionalArgsTooltip": "Raw command-line arguments appended to the serve command. Use this for flags not exposed in the UI above. Example: --log-level DEBUG. Arguments are split by whitespace and passed directly to the CLI."
+      "additionalArgsTooltip": "Raw command-line arguments appended to the serve command. Use this for flags not exposed in the UI above. Example: --log-level DEBUG. Arguments are split by whitespace and passed directly to the CLI.",
+      "metalWiredLimitHelp": "If a large model hits Metal OOM, SIGKILL, or kernel-panic risk, macOS may need a tuned Metal wired-memory limit. Example for large-memory Macs: {{command}}. Do not set it equal to physical RAM; leave OS/WindowServer/app headroom. On 128GB Macs, 115000-120000 MB is usually safer than 128000 MB. The command requires an admin password and resets after reboot.",
+      "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
+      "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity."
     },
     "create": {
       "title": "Create Session",

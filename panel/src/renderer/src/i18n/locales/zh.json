@@ -931,7 +931,10 @@
       "setupStep4": "4. 若发现不到，请点击“Add Manual”按 IP 添加",
       "setupNetworkNote": "Thunderbolt 5：约 120 Gbps，0.1ms 延迟（最佳）。1GbE：流水线并行足够用。WiFi：可用但较慢。任何能 ping 通另一台 Mac 的网络都可以。",
       "embeddingModelTooltip": "启动时为 /v1/embeddings 端点预加载单独的嵌入模型。与主聊天模型并行运行。示例：mlx-community/embeddinggemma-300m-6bit。留空则禁用嵌入端点。",
-      "additionalArgsTooltip": "附加到 serve 命令的原始命令行参数。用于上方 UI 未公开的标志。示例：--log-level DEBUG。参数按空白拆分并直接传递给 CLI。"
+      "additionalArgsTooltip": "附加到 serve 命令的原始命令行参数。用于上方 UI 未公开的标志。示例：--log-level DEBUG。参数按空白拆分并直接传递给 CLI。",
+      "metalWiredLimitHelp": "如果大模型出现 Metal 内存不足、SIGKILL 或内核崩溃风险，macOS 可能需要调整 Metal 常驻内存上限。大内存 Mac 示例：{{command}}。不要将其设为与物理内存相同；请为系统、WindowServer 和应用留出余量。在 128GB 的 Mac 上，115000-120000 MB 通常比 128000 MB 更安全。该命令需要管理员密码，重启后会重置。",
+      "pagedCacheCapacity": "有效内存缓存容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
+      "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。"
     },
     "create": {
       "title": "创建会话",

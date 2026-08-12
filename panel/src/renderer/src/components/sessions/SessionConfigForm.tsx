@@ -10,11 +10,10 @@ import {
   type CacheControlUpdate,
 } from '../../../../shared/cacheControlPolicy'
 import {
-  pagedCacheCapacityText,
   pagedCacheControlsState,
-  pagedCacheMemoryIgnoredText,
+  resolvePagedCacheCapacity,
 } from '../../../../shared/cacheCapacityDisplay'
-import { metalWiredLimitHelpText } from '../../../../shared/metalWiredLimit'
+import { metalWiredLimitCommand } from '../../../../shared/metalWiredLimit'
 import { isLagunaMixedSwaTurboQuantEffective } from '../../../../shared/lagunaCachePolicy'
 import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
@@ -429,11 +428,22 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache
   const effectivePagedCacheBlockSize = dsv4Active ? DSV4_PAGED_CACHE_BLOCK_SIZE : config.pagedCacheBlockSize
   const pagedCacheUiState = pagedCacheControlsState(effectiveUsePagedCache, blockDiskOnly)
-  const effectivePagedCapacityText = pagedCacheCapacityText({
+  // The shared module still owns the ARITHMETIC (and its English sentence, which
+  // the main process reuses in error messages); the renderer owns the wording so
+  // this sentence localizes like every other label around it. Live-caught: with
+  // the app in Korean this line and the Metal wired-limit note were the only
+  // prose left in English on the whole form.
+  const pagedCapacity = resolvePagedCacheCapacity({
     blockSize: effectivePagedCacheBlockSize,
     maxBlocks: config.maxCacheBlocks,
     defaultBlockSize: DEFAULT_CONFIG.pagedCacheBlockSize,
     defaultMaxBlocks: DEFAULT_CONFIG.maxCacheBlocks,
+  })
+  const effectivePagedCapacityText = t('sessions.config.pagedCacheCapacity', {
+    blockSize: pagedCapacity.blockSize,
+    usableBlocks: pagedCapacity.usableBlocks,
+    maxBlocks: pagedCapacity.maxBlocks,
+    tokens: pagedCapacity.capacityTokens.toLocaleString(),
   })
   const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')
   const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache
@@ -880,7 +890,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectiveContinuousBatching && (
           <InfoNote text={t('sessions.config.batchingOffDisablesNote')} />
         )}
-        <InfoNote text={metalWiredLimitHelpText} />
+        <InfoNote text={t('sessions.config.metalWiredLimitHelp', { command: metalWiredLimitCommand })} />
       </Section>
 
       {/* Prefix Cache */}
@@ -927,7 +937,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             ) : (
               <>
                 {effectiveUsePagedCache && (
-                  <IncompatWarning text={pagedCacheMemoryIgnoredText} />
+                  <IncompatWarning text={t('sessions.config.pagedCacheMemoryIgnored')} />
                 )}
                 <SliderField
                   label={t('sessions.config.cacheMemoryLimitMb')}

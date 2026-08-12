@@ -1,5 +1,5 @@
-import { mkdirSync, writeFileSync } from 'fs'
-import { join } from 'path'
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { join, resolve } from 'path'
 import { tmpdir } from 'os'
 import { describe, expect, it } from 'vitest'
 import {
@@ -133,5 +133,59 @@ describe('model launch memory admission', () => {
     expect(unsafeModelLaunchOverrideEnabled({ VMLINUX_ALLOW_UNSAFE_MODEL_LAUNCH: '1' })).toBe(true)
     expect(unsafeModelLaunchReason(91 * gib, 88.3 * gib, { VMLX_ALLOW_UNSAFE_MODEL_LAUNCH: '1' })).toBeNull()
     expect(unsafeModelLaunchReason(91 * gib, 88.3 * gib, { VMLINUX_ALLOW_UNSAFE_MODEL_LAUNCH: '1' })).toBeNull()
+  })
+})
+
+describe('launch admission is actually wired into the launch path', () => {
+  const sessions = readFileSync(
+    resolve(__dirname, '../src/main/sessions.ts'),
+    'utf8',
+  )
+
+  it('consults unsafeModelLaunchReason before spawning the engine', () => {
+    // These three were written, unit-tested, and never called from src/ — the
+    // launch path relied solely on classifyLargeModelMemoryPreflight, whose
+    // block arm requires modelSizeBytes >= 50GB AND availableBytes < 2GB AND
+    // >= 98% used. MEASURED on a 137GB box at 42.2GB free: a 91.9GB model and a
+    // 73.4GB model both classified as merely "warn", so the app would start a
+    // 92GB model into 42GB of free RAM.
+    expect(sessions).toContain('unsafeModelLaunchReason(')
+    expect(sessions).toContain('modelLaunchReserveWarning(')
+    expect(sessions).toContain('unsafeModelLaunchOverrideHint()')
+    expect(sessions).toMatch(
+      /import \{[^}]*unsafeModelLaunchReason[^}]*\} from '\.\/modelLaunchMemory'/s,
+    )
+  })
+
+  it('refuses BEFORE the graded warnings, and names the override', () => {
+    const refusalAt = sessions.indexOf('unsafeModelLaunchReason(')
+    const classifyAt = sessions.indexOf('classifyLargeModelMemoryPreflight({')
+    expect(refusalAt).toBeGreaterThan(-1)
+    expect(classifyAt).toBeGreaterThan(-1)
+    expect(refusalAt).toBeLessThan(classifyAt)
+
+    const block = sessions.slice(refusalAt, classifyAt)
+    expect(block).toContain('Refusing to start this model')
+    expect(block).toContain('unsafeModelLaunchOverrideHint()')
+    expect(block).toContain("status: 'error'")
+    expect(block).toContain('throw new Error')
+  })
+
+  it('the refusal threshold is the one that actually fits, not near-death', () => {
+    const gib = 1024 ** 3
+    // 92GB model, 42GB free, 20GB reclaimable on a 137GB box -> must refuse.
+    expect(
+      unsafeModelLaunchReason(92 * gib, 42 * gib, {}, {
+        reclaimableBytes: 20 * gib,
+        totalBytes: 137 * gib,
+      }),
+    ).toContain('exceeds currently free RAM')
+    // A 21GB model in the same conditions must still be admitted.
+    expect(
+      unsafeModelLaunchReason(21 * gib, 42 * gib, {}, {
+        reclaimableBytes: 20 * gib,
+        totalBytes: 137 * gib,
+      }),
+    ).toBeNull()
   })
 })

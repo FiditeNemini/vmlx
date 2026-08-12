@@ -49,6 +49,9 @@ import {
   launchResidentProfileForModel,
   estimateMacReclaimableMemoryBytes,
   effectiveLaunchAvailableBytes,
+  unsafeModelLaunchReason,
+  unsafeModelLaunchOverrideHint,
+  modelLaunchReserveWarning,
 } from './modelLaunchMemory'
 import {
   BACKEND_STDERR_DISCONNECT_NORMALIZED_LINE,
@@ -2426,6 +2429,40 @@ export class SessionManager extends EventEmitter {
       const totalGB = (totalBytes / 1e9).toFixed(0)
       console.log(`[SESSION] Model estimate: ~${modelGB} GB | RAM: ${availGB} GB free / ${totalGB} GB total (${usagePercent.toFixed(0)}% used)`)
       this.emit('session:log', { sessionId, data: `Model estimate: ~${modelGB} GB | RAM: ${availGB} GB free / ${totalGB} GB total\n` })
+      // Admission ran on classifyLargeModelMemoryPreflight alone, whose block
+      // arm needs modelSizeBytes >= 50GB AND availableBytes < 2GB AND >= 98%
+      // used — by which point the machine is already dying, so in practice it
+      // almost never fires. MEASURED on this box at 42.2 GB free: a 91.9 GB
+      // Inkling and a 73.4 GB DSV4 both came back "warn", i.e. the app would
+      // start a 92 GB model into 42 GB of free RAM and leave the outcome to the
+      // OS.
+      //
+      // The calibrated rule already existed — unsafeModelLaunchReason refuses
+      // when the estimated RESIDENT size exceeds effective free RAM, which is
+      // the question that actually matters — but nothing called it, so it and
+      // its override env were unreachable. Ask it first; keep the graded
+      // warnings below for everything it admits.
+      const hardRefusal = unsafeModelLaunchReason(modelSizeBytes, freemem(), process.env, {
+        reclaimableBytes: estimateMacReclaimableMemoryBytes(),
+        totalBytes,
+      })
+      if (hardRefusal) {
+        const message = appendMetalWiredLimitGuidance(
+          `Refusing to start this model: ${hardRefusal}. Close other apps, stop ` +
+          `any running vMLX sessions, or reboot before loading again. To launch ` +
+          `anyway, set ${unsafeModelLaunchOverrideHint()}.`
+        )
+        console.warn(`[SESSION] ${message}`)
+        this.emit('session:log', { sessionId, data: `⛔ ${message}\n` })
+        db.updateSession(sessionId, { status: 'error', lastStoppedAt: Date.now() })
+        this.emit('session:error', { sessionId, error: message })
+        throw new Error(message)
+      }
+      const reserveWarning = modelLaunchReserveWarning(modelSizeBytes, availableBytes)
+      if (reserveWarning) {
+        console.warn(`[SESSION] ${reserveWarning}`)
+        this.emit('session:log', { sessionId, data: `⚠️  ${reserveWarning}\n` })
+      }
       const memoryPreflight = classifyLargeModelMemoryPreflight({ modelSizeBytes, availableBytes, totalBytes })
       if (memoryPreflight.action === 'block') {
         console.warn(`[SESSION] ${memoryPreflight.message}`)

@@ -14,7 +14,7 @@ interface ImageHistoryProps {
 }
 
 export function ImageHistory({ sessions, currentId, onSelect, onNew, onDelete, onCollapse }: ImageHistoryProps) {
-  const { t } = useTranslation()
+  const { t, locale } = useTranslation()
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   // Relative labels ("5m ago") go stale while mounted; re-render on the shared tick.
   useRelativeTimeTick()
@@ -83,7 +83,7 @@ export function ImageHistory({ sessions, currentId, onSelect, onNew, onDelete, o
                     <p className="text-xs font-medium truncate">{session.modelName}</p>
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
-                    {formatDate(session.updatedAt, t)}
+                    {formatDate(session.updatedAt, t, locale)}
                   </p>
                 </div>
                 <button
@@ -109,6 +109,7 @@ export function ImageHistory({ sessions, currentId, onSelect, onNew, onDelete, o
 function formatDate(
   timestamp: number,
   t: (key: string, params?: Record<string, string | number>) => string,
+  locale?: string,
 ): string {
   const date = new Date(timestamp)
   const now = new Date()
@@ -124,5 +125,6 @@ function formatDate(
   const diffDays = Math.floor(diffHours / 24)
   if (diffDays < 7) return t('chat.list.daysAgo', { n: diffDays })
 
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  // Hardcoded 'en-US' printed English month names in every language.
+  return date.toLocaleDateString(locale || [], { month: 'short', day: 'numeric' })
 }

@@ -10,12 +10,17 @@
 export function formatTimestamp(
   ts: number,
   t: (key: string, params?: Record<string, string | number>) => string,
+  locale?: string,
 ): string {
+  // `[]` means "whatever the OS is set to", which is NOT the app's language.
+  // With the UI in Korean the weekday and month names still came out English,
+  // so a translated bubble carried an untranslated date beside it.
+  const localeArg = locale || [];
   const now = new Date();
   const date = new Date(ts);
   const diffMs = now.getTime() - date.getTime();
 
-  const timeStr = date.toLocaleTimeString([], {
+  const timeStr = date.toLocaleTimeString(localeArg, {
     hour: "numeric",
     minute: "2-digit",
   });
@@ -32,10 +37,10 @@ export function formatTimestamp(
   if (ts >= today.getTime()) return timeStr;
   if (ts >= yesterday.getTime()) return t('chat.bubble.yesterdayAt', { time: timeStr });
   if (ts >= weekAgo.getTime()) {
-    const day = date.toLocaleDateString([], { weekday: "short" });
+    const day = date.toLocaleDateString(localeArg, { weekday: "short" });
     return `${day} ${timeStr}`;
   }
-  const monthDay = date.toLocaleDateString([], {
+  const monthDay = date.toLocaleDateString(localeArg, {
     month: "short",
     day: "numeric",
   });

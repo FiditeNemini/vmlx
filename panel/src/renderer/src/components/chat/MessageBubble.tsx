@@ -189,8 +189,8 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
 }
 
 export const MessageBubble = memo(function MessageBubble({ message, isStreaming, metrics, reasoningContent, reasoningSegments, reasoningDone, answerPassPending, toolStatuses, warnings, sessionId, sessionEndpoint, isLastAssistant, onRegenerate, onEdit }: MessageBubbleProps) {
-  const { t } = useTranslation()
-  const timeLabel = useRelativeTime(message.timestamp, (ts) => formatTimestamp(ts, t))
+  const { t, locale } = useTranslation()
+  const timeLabel = useRelativeTime(message.timestamp, (ts) => formatTimestamp(ts, t, locale))
   const [copied, setCopied] = useState(false)
   const [zoomedImage, setZoomedImage] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)

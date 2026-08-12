@@ -9137,6 +9137,18 @@ def _model_quantization_status(bundle_path: str | None) -> dict:
         or q_jang.get("weight_format")
         or q_cfg.get("format")
     )
+    # A generic "mlx" stamp names the loader, not the codec. The 2026-08
+    # Nemotron bundles carry the actual codec in quantization.mode/method
+    # (mxfp8/mxfp4) — surface that instead of the uninformative wrapper.
+    if str(weight_format or "").strip().lower() in ("", "mlx"):
+        _codec = (
+            q_cfg.get("mode")
+            or q_cfg.get("method")
+            or q_jang.get("mode")
+            or q_jang.get("method")
+        )
+        if isinstance(_codec, str) and _codec.strip().lower() not in ("", "none", "mlx"):
+            weight_format = _codec.strip().lower()
     backend = q_jang.get("quantization_backend") or q_jang.get("backend")
     profile = q_jang.get("profile") or jang_cfg.get("profile") or cfg.get("profile")
     mxtq_bits = (

@@ -15,7 +15,6 @@ The scheduler follows vLLM's design with:
 """
 
 import logging
-import copy
 import os
 import random
 import re
@@ -547,17 +546,6 @@ class Scheduler:
 
         # Mapping between our request IDs and BatchGenerator UIDs
         self.request_id_to_uid: Dict[str, int] = {}
-        # Prompt-boundary KV handed from a soft-capped first pass to the
-        # visible-answer pass that immediately follows it, keyed by the BASE
-        # request id (the answer pass runs as "<base>:visible-answer").
-        #
-        # The existing reconstruct memo cannot serve this: it is armed inside
-        # the reconstruct path, so it captures the state at the START of the
-        # first pass — the prefix REUSED from the previous turn — while the
-        # answer pass asks for the full prompt boundary including the fresh
-        # span the first pass just prefilled. Measured on DSV4-Flash turn 2:
-        # held 324 blocks/82,944 tokens, asked for 649 blocks/166,065.
-        self._answer_pass_snapshots: Dict[str, Any] = {}
         self.uid_to_request_id: Dict[int, str] = {}
 
         # BatchGenerator - the actual batching engine
@@ -6035,111 +6023,6 @@ class Scheduler:
             f"Added request {request.request_id} with {request.num_prompt_tokens} prompt tokens"
         )
 
-    _ANSWER_PASS_SUFFIX = ":visible-answer"
-
-    @staticmethod
-    def _answer_pass_snapshot_reuse_enabled() -> bool:
-        """Default OFF — this hands path-dependent KV between two requests.
-
-        DSV4/ZAYA state is position- and path-dependent, so a wrong hand-off
-        would not raise, it would quietly answer from the wrong state. Opt in
-        with VMLX_ANSWER_PASS_SNAPSHOT_REUSE=1 and A/B the max decode gap on the
-        growing-multiturn bench (7.6s at 83k, 21.8s at 166k are the numbers to
-        beat).
-        """
-        return os.environ.get(
-            "VMLX_ANSWER_PASS_SNAPSHOT_REUSE", "0"
-        ).strip().lower() in {"1", "on", "true", "yes"}
-
-    def _retain_answer_pass_snapshot(
-        self, request: Any, snapshot_cache: Any, prompt_len: int
-    ) -> None:
-        """Keep a first pass's prompt-boundary KV for the answer pass to follow.
-
-        Only for a soft-capped pass, because that is the signal the server will
-        immediately re-issue the same prompt: the family could not close its
-        think rail inside the reserve, so a visible-answer pass is coming.
-        Anything else would retain state nobody collects.
-        """
-        if not self._answer_pass_snapshot_reuse_enabled():
-            return
-        if not getattr(request, "_dsv4_thinking_soft_cap", None):
-            return
-        base_id = str(getattr(request, "request_id", "") or "")
-        if not base_id or base_id.endswith(self._ANSWER_PASS_SUFFIX):
-            return
-        store = getattr(self, "_answer_pass_snapshots", None)
-        if store is None:
-            return
-        try:
-            store[base_id] = (
-                int(prompt_len),
-                copy.deepcopy(snapshot_cache),
-            )
-        except Exception as err:  # noqa: BLE001
-            store.pop(base_id, None)
-            logger.info(
-                "Answer-pass snapshot not retained for %s (%s); the answer "
-                "pass will re-read from L2",
-                base_id,
-                err,
-            )
-            return
-        logger.info(
-            "Retained prompt-boundary snapshot for %s (%d layers, "
-            "prompt_len=%d) so the answer pass can skip the L2 re-read",
-            base_id,
-            len(snapshot_cache),
-            prompt_len,
-        )
-
-    def _take_answer_pass_snapshot(self, request: Any) -> Optional[Any]:
-        """Claim the retained snapshot, once, for THIS answer pass.
-
-        Single use and popped unconditionally: a retained composite that is not
-        consumed immediately is stale, and holding it would pin a full KV copy.
-        """
-        if not self._answer_pass_snapshot_reuse_enabled():
-            return None
-        request_id = str(getattr(request, "request_id", "") or "")
-        if not request_id.endswith(self._ANSWER_PASS_SUFFIX):
-            return None
-        base_id = request_id[: -len(self._ANSWER_PASS_SUFFIX)]
-        store = getattr(self, "_answer_pass_snapshots", None)
-        entry = store.pop(base_id, None) if store else None
-        if entry is None:
-            return None
-        retained_len, snapshot = entry
-        # The answer pass replays the same prompt minus its generation-prompt
-        # tail, so a SHORTER ask is expected and fine — the tail is processed on
-        # top. A LONGER one means this is not the pass we saved for.
-        asked = int(getattr(request, "num_prompt_tokens", 0) or 0)
-        if asked and asked > retained_len:
-            logger.info(
-                "Answer-pass snapshot for %s discarded: retained %d tokens but "
-                "the pass asks for %d",
-                base_id,
-                retained_len,
-                asked,
-            )
-            return None
-        return snapshot
-
-    def _drop_answer_pass_snapshot(self, request_id: str) -> None:
-        """Release on abort/finish so a dropped answer pass cannot pin a copy.
-
-        Tolerates a scheduler built without the full __init__ — abort_request is
-        a cleanup path and must never raise. Tests construct partial schedulers,
-        and so does the deferred-abort path during teardown.
-        """
-        store = getattr(self, "_answer_pass_snapshots", None)
-        if not store:
-            return
-        base = str(request_id or "")
-        if base.endswith(self._ANSWER_PASS_SUFFIX):
-            base = base[: -len(self._ANSWER_PASS_SUFFIX)]
-        store.pop(base, None)
-
     def request_progress(self, request_id: str) -> Optional[int]:
         """Monotonic progress counter for a live request, or None if unknown.
 
@@ -6181,10 +6064,6 @@ class Scheduler:
         Returns:
             True if request was found and aborted, False otherwise
         """
-        # Release any prompt-boundary snapshot held for this request's answer
-        # pass. A dropped answer pass would otherwise pin a full KV copy for the
-        # life of the process.
-        self._drop_answer_pass_snapshot(request_id)
         request = self.requests.pop(request_id, None)
         if request is None:
             return False
@@ -7419,37 +7298,11 @@ class Scheduler:
                             bool(getattr(request, "_dsv4_thinking_soft_cap", None))
                         )
                 _t_reconstruct = time.perf_counter()
-                # The visible-answer pass runs over the SAME prompt the first
-                # pass just finished prefilling, so the first pass's
-                # prompt-boundary snapshot is already the state it needs. Using
-                # it skips re-reading the whole prefix from L2 — the dominant
-                # term of the reasoning-to-content stall (7.6s at 83k tokens /
-                # 325 blocks, 21.8s at 166k / 649, measured on DSV4-Flash).
-                #
-                # The reconstruct memo below cannot cover this: it is armed
-                # inside this same path, so it captures the state at the START
-                # of the first pass — the prefix reused from the PREVIOUS turn —
-                # while the answer pass asks for the full boundary including the
-                # fresh span. Live: held 324 blocks/82,944 tokens, asked for
-                # 649/166,065.
-                cache_to_use = self._take_answer_pass_snapshot(request)
-                if cache_to_use is not None:
-                    logger.info(
-                        "Request %s: reusing the first pass's prompt-boundary "
-                        "snapshot (%d layers) instead of re-reading %d block(s) "
-                        "from L2",
-                        request.request_id,
-                        len(cache_to_use),
-                        len(getattr(block_table, "block_ids", []) or []),
-                    )
-                    if cache_execution is not None:
-                        cache_execution["answer_pass_snapshot_reuse"] = True
-                else:
-                    cache_to_use = (
-                        self.block_aware_cache.reconstruct_cache(block_table)
-                        if self.block_aware_cache is not None and block_table is not None
-                        else None
-                    )
+                cache_to_use = (
+                    self.block_aware_cache.reconstruct_cache(block_table)
+                    if self.block_aware_cache is not None and block_table is not None
+                    else None
+                )
                 self._dsv4_trace_timing(
                     "reconstruct_cache",
                     _t_reconstruct,
@@ -8564,9 +8417,6 @@ class Scheduler:
                                             f"truncation needed."
                                         )
                                         cache_for_extract = snapshot_cache
-                                        self._retain_answer_pass_snapshot(
-                                            request, snapshot_cache, prompt_len
-                                        )
                                     elif self._uses_dsv4_cache:
                                         # DSV4 cache-hit kickoff responses can
                                         # arrive without a generator-captured

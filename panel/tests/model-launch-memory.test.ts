@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MODEL_LAUNCH_FIXED_OVERHEAD_BYTES,
   estimateModelFileBytes,
+  estimateModelLaunchAdmissionBytes,
   estimateModelLaunchResidentBytes,
   estimateMacReclaimableMemoryBytesFromVmStat,
   launchResidentProfileForModelType,
@@ -38,14 +39,18 @@ describe('model launch memory admission', () => {
     // buffers on every ordinary load — a jang_config.json does NOT make a
     // bundle lazy. The old format-keyed ×0.7 under-admitted full-resident
     // affine/mxtq/mxfp8 bundles by ~45%.
-    expect(launchResidentProfileForModelType('nemotron_h')).toEqual({ ratio: 1.0, streamsWeights: false })
-    expect(launchResidentProfileForModelType('minimax_m2')).toEqual({ ratio: 1.0, streamsWeights: false })
-    expect(launchResidentProfileForModelType('llama')).toEqual({ ratio: 1.0, streamsWeights: false })
-    expect(launchResidentProfileForModelType('')).toEqual({ ratio: 1.0, streamsWeights: false })
+    // `admissionRatio` is what a REFUSAL may use; `ratio` stays the
+    // conservative bound behind the graded warnings. For full-resident loads
+    // there is nothing to discount, so the two are equal.
+    expect(launchResidentProfileForModelType('nemotron_h')).toEqual({ ratio: 1.0, admissionRatio: 1.0, streamsWeights: false })
+    expect(launchResidentProfileForModelType('minimax_m2')).toEqual({ ratio: 1.0, admissionRatio: 1.0, streamsWeights: false })
+    expect(launchResidentProfileForModelType('llama')).toEqual({ ratio: 1.0, admissionRatio: 1.0, streamsWeights: false })
+    expect(launchResidentProfileForModelType('')).toEqual({ ratio: 1.0, admissionRatio: 1.0, streamsWeights: false })
     // Expert-streaming loaders genuinely stay below file size (DSV4-Flash
-    // measured ~0.26×, MM3 measured ~0.80×).
-    expect(launchResidentProfileForModelType('deepseek_v4')).toEqual({ ratio: 0.7, streamsWeights: true })
-    expect(launchResidentProfileForModelType('minimax_m3_vl')).toEqual({ ratio: 0.85, streamsWeights: true })
+    // measured ~0.26×, MM3 measured ~0.80×), and those measurements — not the
+    // padded bounds — are what admission is allowed to refuse on.
+    expect(launchResidentProfileForModelType('deepseek_v4')).toEqual({ ratio: 0.7, admissionRatio: 0.35, streamsWeights: true })
+    expect(launchResidentProfileForModelType('minimax_m3_vl')).toEqual({ ratio: 0.85, admissionRatio: 0.8, streamsWeights: true })
   })
 
   it('estimates full-resident bundles at fileBytes + fixed overhead', () => {
@@ -187,5 +192,59 @@ describe('launch admission is actually wired into the launch path', () => {
         totalBytes: 137 * gib,
       }),
     ).toBeNull()
+  })
+})
+
+describe('a refusal must be keyed to the measurement, not the worst case', () => {
+  /**
+   * `unsafeModelLaunchReason` was wired to the CONSERVATIVE residency estimate,
+   * so the safety upper bound became a mandatory admission threshold. For a
+   * 96 GB DSV4-Flash bundle that is 0.7 * 96 + 2 = 69.2 GB — refused on a box
+   * with ~62.8 GB effective free, even though the same bundle measures ~25 GB
+   * resident there and serves requests fine. The bound is for warnings; the
+   * block needs the measurement.
+   */
+  const GB = 1e9
+
+  function dsv4Dir(): string {
+    const dir = makeModelDir('dsv4-admission')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ model_type: 'deepseek_v4' }))
+    return dir
+  }
+
+  function plainDir(): string {
+    const dir = makeModelDir('plain-admission')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ model_type: 'llama' }))
+    return dir
+  }
+
+  it('admits a 96 GB DSV4-Flash bundle with ~62.8 GB effective free', () => {
+    const dir = dsv4Dir()
+    const admission = estimateModelLaunchAdmissionBytes(dir, 96 * GB, 128 * GB)
+    // 0.35 * 96 + 2 = 35.6 GB, comfortably inside the real headroom.
+    expect(admission).toBeLessThan(40 * GB)
+    expect(unsafeModelLaunchReason(admission, 62.8 * GB, {})).toBeNull()
+  })
+
+  it('still refuses a DSV4 bundle that genuinely cannot fit', () => {
+    const dir = dsv4Dir()
+    const admission = estimateModelLaunchAdmissionBytes(dir, 400 * GB, 128 * GB)
+    expect(unsafeModelLaunchReason(admission, 20 * GB, {})).not.toBeNull()
+  })
+
+  it('does not loosen admission for ordinary full-resident bundles', () => {
+    const dir = plainDir()
+    const resident = estimateModelLaunchResidentBytes(dir, 92 * GB, 128 * GB)
+    const admission = estimateModelLaunchAdmissionBytes(dir, 92 * GB, 128 * GB)
+    expect(admission).toBe(resident)
+    // 92 GB of dirty Metal buffers into 42 GB free must still be refused.
+    expect(unsafeModelLaunchReason(admission, 42 * GB, {})).not.toBeNull()
+  })
+
+  it('never lets the block threshold exceed the warning threshold', () => {
+    for (const modelType of ['deepseek_v4', 'minimax_m3', 'llama', 'gemma3', '']) {
+      const profile = launchResidentProfileForModelType(modelType)
+      expect(profile.admissionRatio).toBeLessThanOrEqual(profile.ratio)
+    }
   })
 })

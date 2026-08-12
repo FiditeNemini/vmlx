@@ -44,6 +44,7 @@ import {
 } from './session-model-path'
 import {
   estimateModelFileBytes,
+  estimateModelLaunchAdmissionBytes,
   estimateModelLaunchResidentBytes,
   formatGb,
   launchResidentProfileForModel,
@@ -2365,7 +2366,16 @@ export class SessionManager extends EventEmitter {
       // the question that actually matters — but nothing called it, so it and
       // its override env were unreachable. Ask it first; keep the graded
       // warnings below for everything it admits.
-      const hardRefusal = unsafeModelLaunchReason(modelSizeBytes, freemem(), process.env, {
+      // Refuse on the MEASUREMENT-keyed estimate, not the conservative warning
+      // bound. On 0.7, a 96 GB DSV4-Flash bundle estimated 69.2 GB and was
+      // turned away on a box where it measures ~25 GB resident and runs fine.
+      // The graded warnings below still use the conservative number.
+      const admissionBytes = estimateModelLaunchAdmissionBytes(
+        config.modelPath,
+        modelFileBytes,
+        totalBytes,
+      )
+      const hardRefusal = unsafeModelLaunchReason(admissionBytes, freemem(), process.env, {
         reclaimableBytes: estimateMacReclaimableMemoryBytes(),
         totalBytes,
       })

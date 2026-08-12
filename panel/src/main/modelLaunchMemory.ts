@@ -39,17 +39,43 @@ export function estimateModelFileBytes(modelPath: string): number {
 export const MODEL_LAUNCH_FIXED_OVERHEAD_BYTES = 2e9
 
 export interface LaunchResidentProfile {
-  /** Fraction of file bytes resident after load completes. */
+  /**
+   * Conservative upper bound on the fraction of file bytes resident after load.
+   * Used for the graded WARNINGS — erring high there costs the user a scary
+   * message, which is cheap.
+   */
   ratio: number
+  /**
+   * Fraction to use when REFUSING a launch outright. Never above `ratio`.
+   *
+   * A safety upper bound is not sound as a mandatory admission threshold. For
+   * the streaming families the conservative number is far above what was
+   * actually measured — DSV4-Flash was measured at ~0.26× — so refusing on 0.7
+   * turned away a 96 GB DSV4-Flash bundle at an estimated 69.2 GB when its real
+   * residency is ~25 GB and it runs fine on this box. Refusal has to be keyed
+   * to the measurement, with a margin, not to the worst case.
+   */
+  admissionRatio: number
   /** True when the loader keeps weights on SSD and streams them on demand. */
   streamsWeights: boolean
 }
 
 export function launchResidentProfileForModelType(modelType: string): LaunchResidentProfile {
   const type = String(modelType || '').toLowerCase()
-  if (type.startsWith('deepseek_v4')) return { ratio: 0.7, streamsWeights: true }
-  if (type.startsWith('minimax_m3')) return { ratio: 0.85, streamsWeights: true }
-  return { ratio: 1.0, streamsWeights: false }
+  // DSV4-Flash: measured ~0.26×. 0.35 keeps ~35% headroom over the measurement
+  // for expert residency growing during a long session, and is still half the
+  // conservative warning bound.
+  if (type.startsWith('deepseek_v4')) {
+    return { ratio: 0.7, admissionRatio: 0.35, streamsWeights: true }
+  }
+  // MM3: measured 0.80×; 0.85 is the warning margin, so refuse on the measured
+  // value rather than the padded one.
+  if (type.startsWith('minimax_m3')) {
+    return { ratio: 0.85, admissionRatio: 0.8, streamsWeights: true }
+  }
+  // Ordinary loads COPY weights into dirty Metal buffers, so file size IS the
+  // residency. Nothing to discount.
+  return { ratio: 1.0, admissionRatio: 1.0, streamsWeights: false }
 }
 
 export function launchResidentProfileForModel(modelPath: string): LaunchResidentProfile {
@@ -65,6 +91,20 @@ export function estimateModelLaunchResidentBytes(modelPath: string, modelFileByt
   if (modelFileBytes <= 0) return 0
   const { ratio } = launchResidentProfileForModel(modelPath)
   const residentBytes = Math.round(modelFileBytes * ratio) + MODEL_LAUNCH_FIXED_OVERHEAD_BYTES
+  return totalBytes > 0 ? Math.min(residentBytes, totalBytes) : residentBytes
+}
+
+/**
+ * The estimate a REFUSAL may be based on — measurement-keyed, not worst-case.
+ *
+ * Always <= estimateModelLaunchResidentBytes for the same inputs, so the
+ * warning thresholds stay strictly more cautious than the block threshold and
+ * a model can never be refused without first having been warned about.
+ */
+export function estimateModelLaunchAdmissionBytes(modelPath: string, modelFileBytes: number, totalBytes: number): number {
+  if (modelFileBytes <= 0) return 0
+  const { admissionRatio } = launchResidentProfileForModel(modelPath)
+  const residentBytes = Math.round(modelFileBytes * admissionRatio) + MODEL_LAUNCH_FIXED_OVERHEAD_BYTES
   return totalBytes > 0 ? Math.min(residentBytes, totalBytes) : residentBytes
 }
 

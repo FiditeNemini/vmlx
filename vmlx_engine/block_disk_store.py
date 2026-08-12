@@ -2007,6 +2007,23 @@ class BlockDiskStore:
 
                 try:
                     self._process_write_batch(write_conn, batch)
+                except Exception as batch_exc:  # noqa: BLE001
+                    # One unguarded exception used to escape this loop, run the
+                    # outer `finally: write_conn.close()`, and KILL the writer
+                    # thread for the life of the process. Every later L2 write
+                    # then sat in the queue forever: no disk cache, no error,
+                    # and the fences those writes were supposed to settle never
+                    # resolved, so their blocks stayed pinned and un-evictable.
+                    #
+                    # A failed batch costs a re-prefill. A dead writer costs the
+                    # whole L2 tier. Log it loudly and keep serving.
+                    logger.error(
+                        "Block-disk write batch failed (%d items): %s — "
+                        "writer continues; those blocks fall back to recompute.",
+                        len(batch),
+                        batch_exc,
+                        exc_info=True,
+                    )
                 finally:
                     self._complete_write_items(len(batch))
         finally:

@@ -8,7 +8,7 @@ This module is reverse-engineered from the bundled image processor (byte-for-byt
 Qwen2-VL) + the exact quantized tensor shapes, using mlx_vlm's qwen2_5_vl vision
 tower as the structural template.
 
-Confirmed architecture (see docs BUILD-STATUS):
+Confirmed architecture:
   pixel_values[N, 1176] --3D-conv patch_embed--> [N, 1280]
     + 3D-RoPE (h,w; head_dim 80, rope on 40 dims)
     --> pre_layrnorm --> 32 CLIP-style encoder layers

@@ -259,6 +259,25 @@ docs/audit/
 docs/Handoffs/
 docs/plans/
 docs/runtime/
+
+# Internal working notes must never live in the SOURCE tree — this is a
+# public repo. Campaign logs, status boards, handoff docs and audit notes go
+# under docs/internal/ (ignored above). Six of these had drifted into
+# vmlx_engine/models/minimax_m3/ carrying machine names, branch/PR internals
+# and "HOLD all commits" — moved out 2026-08-12. Patterns, not paths, so a
+# new one cannot reappear in another model dir.
+**/CAMPAIGN-*.md
+**/*-CAMPAIGN.md
+**/MASTER-STATUS.md
+**/BUILD-STATUS.md
+**/*-HANDOFF.md
+**/*-ROOTCAUSE*.md
+**/ISSUE-LEDGER.md
+**/*-PROGRESS-LOG.md
+vmlx_engine/**/STATUS.md
+vmlx_engine/**/NOTES.md
+.agents/
+AGENTS.md
 docs/*.md
 !docs/ARCHITECTURE.md
 !docs/index.md

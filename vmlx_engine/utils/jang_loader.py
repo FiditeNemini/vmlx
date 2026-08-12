@@ -1359,6 +1359,35 @@ def _set_wired_limit_for_model(weight_files):
         # process. 30%-of-model is plenty for dense models too and stays
         # under max_recommended_working_set on M-series with ≥96 GB.
         headroom = max(16 * 1024 * 1024 * 1024, int(total_bytes * 0.30))
+        # The wired limit is ALSO the Metal residency-set capacity, and MLX
+        # commits the residency set once per allocation that fits inside it.
+        # MEASURED on the M5 Max (256x256 bf16 matmul, one eval over 2000 ops):
+        #   wired limit at max working set : 8.77 us/op
+        #   wired limit 0 (set disabled)   : 5.63 us/op
+        # so every allocating op inside the capacity pays ~3.1 us in
+        # -[IOGPUMetalResidencySet commit] -> IOGPUResourceGroupUpdateResources,
+        # a kernel trap. A DSV4-Flash profile at 332k context found ~90% of the
+        # dispatch time of EVERY primitive (Matmul 86%, copy 92%, Gather 97%,
+        # concatenate 87%) sitting in exactly that trap.
+        #
+        # Headroom above the model is what lets KV and scratch allocations land
+        # inside the set and pay that tax. It exists for a real reason (see
+        # above: big MoE bundles SIGKILLed without it), so it stays the default.
+        # This override is how the trade is measured rather than argued.
+        _headroom_env = os.environ.get("VMLX_METAL_WIRED_HEADROOM_GB")
+        if _headroom_env:
+            try:
+                headroom = max(0, int(float(_headroom_env) * 1024 * 1024 * 1024))
+                logger.info(
+                    "  Wired-limit headroom overridden to %.1f GB "
+                    "(VMLX_METAL_WIRED_HEADROOM_GB)",
+                    headroom / 1e9,
+                )
+            except (TypeError, ValueError):
+                logger.warning(
+                    "  Ignoring VMLX_METAL_WIRED_HEADROOM_GB=%r (not a number)",
+                    _headroom_env,
+                )
         target = total_bytes + headroom
         # Cap at OS max working set (sysctl iogpu.wired_limit_mb)
         try:

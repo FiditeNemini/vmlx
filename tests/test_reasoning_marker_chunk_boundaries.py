@@ -2,6 +2,7 @@
 
 import pytest
 
+from vmlx_engine.reasoning.deepseek_r1_parser import DeepSeekR1ReasoningParser
 from vmlx_engine.reasoning.minimax_m3_parser import MiniMaxM3ReasoningParser
 from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
 from vmlx_engine.reasoning.think_xml_parser import ThinkXmlReasoningParser
@@ -70,6 +71,23 @@ def _stream_one_character_at_a_time(parser, text: str) -> tuple[str, str]:
             "first railsecondary private plan",
             "VISIBLE",
         ),
+        # deepseek_r1 is the parser nemotron/nemotron_h, deepseek_v4, laguna
+        # and the qwen3 families resolve to — by request volume the most-used
+        # rail in the product, and it had no every-character-boundary row.
+        (
+            DeepSeekR1ReasoningParser(),
+            "prefix<think>private plan</think>VISIBLE",
+            "private plan",
+            "prefixVISIBLE",
+        ),
+        # DSV4 live-emits the "<thinking>" spelling; a literal "<think>"
+        # needle misses it (its closing ">" never aligns with "ing>").
+        (
+            DeepSeekR1ReasoningParser(),
+            "<thinking>private plan</thinking>VISIBLE",
+            "private plan",
+            "VISIBLE",
+        ),
     ],
 )
 def test_explicit_reasoning_markers_are_safe_at_every_character_boundary(
@@ -97,6 +115,9 @@ def test_explicit_reasoning_markers_are_safe_at_every_character_boundary(
     [
         (Qwen3ReasoningParser(), "private plan</think>VISIBLE"),
         (MiniMaxM3ReasoningParser(), "private plan</mm:think>VISIBLE"),
+        # The implicit rail is deepseek_r1's LIVE mode: the template opens
+        # <think> in the prompt, so the model emits only the close marker.
+        (DeepSeekR1ReasoningParser(), "private plan</think>VISIBLE"),
     ],
 )
 def test_prompt_opened_close_marker_is_safe_at_every_character_boundary(parser, text):

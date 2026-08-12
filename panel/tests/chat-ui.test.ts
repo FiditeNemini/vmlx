@@ -21,30 +21,19 @@ import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi } from 'vitest'
 import { orderComposerContentParts } from '../src/shared/composerContentOrder'
 
-// ─── Re-implement pure functions from chat-utils.ts for testing ──────────────
+// The SHIPPED functions, not copies. This file used to re-implement them, and
+// after the i18n pass the copies did not even share a signature with the real
+// ones (which now take `t`) — so every assertion here was proving a property of
+// the test file. `t` is backed by the real en.json catalog so the English
+// assertions below still mean what they say.
+import { formatTimestamp, getMetricsItems } from '../src/renderer/src/components/chat/chat-utils'
+import { translateFromCatalog } from '../src/renderer/src/i18n/translate'
+import en from '../src/renderer/src/i18n/locales/en.json'
 
-function formatTimestamp(ts: number): string {
-  const now = new Date()
-  const date = new Date(ts)
-  const diffMs = now.getTime() - date.getTime()
+const t = (key: string, params?: Record<string, string | number>) =>
+  translateFromCatalog(en as Record<string, unknown>, en as Record<string, unknown>, key, params)
 
-  const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
 
-  if (diffMs < 60_000) return 'Just now'
-
-  const today = new Date(now); today.setHours(0, 0, 0, 0)
-  const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1)
-  const weekAgo = new Date(today); weekAgo.setDate(weekAgo.getDate() - 7)
-
-  if (ts >= today.getTime()) return timeStr
-  if (ts >= yesterday.getTime()) return `Yesterday ${timeStr}`
-  if (ts >= weekAgo.getTime()) {
-    const day = date.toLocaleDateString([], { weekday: 'short' })
-    return `${day} ${timeStr}`
-  }
-  const monthDay = date.toLocaleDateString([], { month: 'short', day: 'numeric' })
-  return `${monthDay}, ${timeStr}`
-}
 
 function calcTextareaHeight(
   text: string,
@@ -98,67 +87,6 @@ interface MessageMetrics {
   elapsed?: string
 }
 
-function getMetricsItems(metrics: MessageMetrics, isStreaming: boolean): MetricItem[] {
-  const items: MetricItem[] = []
-
-  items.push({
-    label: `${metrics.tokenCount} tokens`,
-    value: `${metrics.tokenCount}`,
-    title: isStreaming ? 'Tokens generated so far' : 'Completion tokens',
-  })
-
-  items.push({
-    label: `${metrics.tokensPerSecond} t/s`,
-    value: metrics.tokensPerSecond,
-    title:
-      'Decode speed after first token; includes reasoning and tool-loop completion tokens',
-  })
-
-  if (metrics.ppSpeed) {
-    items.push({
-      label: `${metrics.ppSpeed} pp/s`,
-      value: metrics.ppSpeed,
-      title: 'Prompt processing speed',
-    })
-  }
-
-  if (metrics.promptTokens && metrics.promptTokens > 0) {
-    const cached = metrics.cachedTokens ? ` (${metrics.cachedTokens} cached)` : ''
-    items.push({
-      label: `${metrics.promptTokens} prompt${cached}`,
-      value: `${metrics.promptTokens}`,
-      title: 'Prompt tokens processed',
-      dimmed: true,
-    })
-  }
-
-  if (metrics.ttft && parseFloat(metrics.ttft) > 0) {
-    items.push({
-      label: `${metrics.ttft}s TTFT`,
-      value: metrics.ttft,
-      title: 'Time to first token',
-      dimmed: !isStreaming,
-    })
-  }
-
-  if (isStreaming && metrics.elapsed) {
-    items.push({
-      label: `${metrics.elapsed}s`,
-      value: metrics.elapsed,
-      title: 'Elapsed time',
-    })
-  }
-
-  if (!isStreaming && metrics.totalTime) {
-    items.push({
-      label: `${metrics.totalTime}s total`,
-      value: metrics.totalTime,
-      title: 'Total request time',
-    })
-  }
-
-  return items
-}
 
 // ─── Tool status grouping (from MessageBubble.tsx) ───────────────────────────
 
@@ -228,9 +156,9 @@ describe('Timestamp Formatting', () => {
     vi.useFakeTimers()
     vi.setSystemTime(now)
     try {
-      expect(formatTimestamp(now.getTime())).toBe('Just now')
-      expect(formatTimestamp(now.getTime() - 30_000)).toBe('Just now')
-      expect(formatTimestamp(now.getTime() - 59_999)).toBe('Just now')
+      expect(formatTimestamp(now.getTime(), t)).toBe('Just now')
+      expect(formatTimestamp(now.getTime() - 30_000, t)).toBe('Just now')
+      expect(formatTimestamp(now.getTime() - 59_999, t)).toBe('Just now')
     } finally {
       vi.useRealTimers()
     }
@@ -241,7 +169,7 @@ describe('Timestamp Formatting', () => {
     const fiveMinAgo = Date.now() - 5 * 60_000
     const today = new Date(); today.setHours(0, 0, 0, 0)
     if (fiveMinAgo >= today.getTime()) {
-      const result = formatTimestamp(fiveMinAgo)
+      const result = formatTimestamp(fiveMinAgo, t)
       expect(result).not.toBe('Just now')
       expect(result).not.toContain('Yesterday')
       // Should be a time like "2:30 PM"
@@ -255,7 +183,7 @@ describe('Timestamp Formatting', () => {
     yesterday.setDate(yesterday.getDate() - 1)
     yesterday.setHours(12, 0, 0, 0)
     const yesterdayTs = yesterday.getTime()
-    const result = formatTimestamp(yesterdayTs)
+    const result = formatTimestamp(yesterdayTs, t)
     expect(result).toContain('Yesterday')
     expect(result).toMatch(/Yesterday \d{1,2}:\d{2}\s?(AM|PM)/i)
   })
@@ -263,7 +191,7 @@ describe('Timestamp Formatting', () => {
   it('formats "Day HH:MM" for this week', () => {
     const today = new Date(); today.setHours(0, 0, 0, 0)
     const threeDaysAgo = new Date(today); threeDaysAgo.setDate(threeDaysAgo.getDate() - 3)
-    const result = formatTimestamp(threeDaysAgo.getTime())
+    const result = formatTimestamp(threeDaysAgo.getTime(), t)
     // Should contain a day abbreviation like "Mon", "Tue", etc.
     expect(result).toMatch(/(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i)
   })
@@ -271,7 +199,7 @@ describe('Timestamp Formatting', () => {
   it('formats "Month Day, HH:MM" for older', () => {
     const today = new Date(); today.setHours(0, 0, 0, 0)
     const monthAgo = new Date(today); monthAgo.setDate(monthAgo.getDate() - 30)
-    const result = formatTimestamp(monthAgo.getTime())
+    const result = formatTimestamp(monthAgo.getTime(), t)
     // Should contain month abbreviation like "Jan", "Feb", etc.
     expect(result).toMatch(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i)
   })
@@ -279,7 +207,7 @@ describe('Timestamp Formatting', () => {
   it('handles future timestamps gracefully', () => {
     const future = Date.now() + 60_000 // 1 minute in future
     // diffMs is negative, so it won't match "Just now"
-    const result = formatTimestamp(future)
+    const result = formatTimestamp(future, t)
     // Should still return a formatted time, not crash
     expect(typeof result).toBe('string')
     expect(result.length).toBeGreaterThan(0)
@@ -443,72 +371,72 @@ describe('Metrics Display Items', () => {
   }
 
   it('always includes token count and speed', () => {
-    const items = getMetricsItems(baseMetrics, false)
+    const items = getMetricsItems(baseMetrics, false, t)
     expect(items.length).toBeGreaterThanOrEqual(2)
     expect(items[0].label).toBe('150 tokens')
     expect(items[1].label).toBe('42.5 t/s')
   })
 
   it('includes pp/s when available', () => {
-    const items = getMetricsItems({ ...baseMetrics, ppSpeed: '120.0' }, false)
+    const items = getMetricsItems({ ...baseMetrics, ppSpeed: '120.0' }, false, t)
     expect(items.find(i => i.label.includes('pp/s'))).toBeDefined()
   })
 
   it('includes prompt tokens when available', () => {
-    const items = getMetricsItems({ ...baseMetrics, promptTokens: 500 }, false)
+    const items = getMetricsItems({ ...baseMetrics, promptTokens: 500 }, false, t)
     const promptItem = items.find(i => i.label.includes('prompt'))
     expect(promptItem).toBeDefined()
     expect(promptItem!.dimmed).toBe(true)
   })
 
   it('shows cached token count in prompt label', () => {
-    const items = getMetricsItems({ ...baseMetrics, promptTokens: 500, cachedTokens: 400 }, false)
+    const items = getMetricsItems({ ...baseMetrics, promptTokens: 500, cachedTokens: 400 }, false, t)
     const promptItem = items.find(i => i.label.includes('prompt'))
     expect(promptItem!.label).toBe('500 prompt (400 cached)')
   })
 
   it('includes TTFT when > 0', () => {
-    const items = getMetricsItems(baseMetrics, false)
+    const items = getMetricsItems(baseMetrics, false, t)
     expect(items.find(i => i.label.includes('TTFT'))).toBeDefined()
   })
 
   it('omits TTFT when 0', () => {
-    const items = getMetricsItems({ ...baseMetrics, ttft: '0' }, false)
+    const items = getMetricsItems({ ...baseMetrics, ttft: '0' }, false, t)
     expect(items.find(i => i.label.includes('TTFT'))).toBeUndefined()
   })
 
   it('shows elapsed during streaming', () => {
-    const items = getMetricsItems({ ...baseMetrics, elapsed: '3.2' }, true)
+    const items = getMetricsItems({ ...baseMetrics, elapsed: '3.2' }, true, t)
     expect(items.find(i => i.label === '3.2s')).toBeDefined()
   })
 
   it('hides elapsed when not streaming', () => {
-    const items = getMetricsItems({ ...baseMetrics, elapsed: '3.2' }, false)
+    const items = getMetricsItems({ ...baseMetrics, elapsed: '3.2' }, false, t)
     expect(items.find(i => i.label === '3.2s')).toBeUndefined()
   })
 
   it('shows totalTime when completed', () => {
-    const items = getMetricsItems({ ...baseMetrics, totalTime: '5.1' }, false)
+    const items = getMetricsItems({ ...baseMetrics, totalTime: '5.1' }, false, t)
     expect(items.find(i => i.label === '5.1s total')).toBeDefined()
   })
 
   it('hides totalTime during streaming', () => {
-    const items = getMetricsItems({ ...baseMetrics, totalTime: '5.1' }, true)
+    const items = getMetricsItems({ ...baseMetrics, totalTime: '5.1' }, true, t)
     expect(items.find(i => i.label === '5.1s total')).toBeUndefined()
   })
 
   it('streaming title says "generated so far"', () => {
-    const items = getMetricsItems(baseMetrics, true)
+    const items = getMetricsItems(baseMetrics, true, t)
     expect(items[0].title).toContain('so far')
   })
 
   it('completed title says "Completion tokens"', () => {
-    const items = getMetricsItems(baseMetrics, false)
+    const items = getMetricsItems(baseMetrics, false, t)
     expect(items[0].title).toBe('Completion tokens')
   })
 
   it('tps title clarifies decode scope instead of implying end-to-end wall time', () => {
-    const items = getMetricsItems(baseMetrics, false)
+    const items = getMetricsItems(baseMetrics, false, t)
     expect(items[1].title).toBe(
       'Decode speed after first token; includes reasoning and tool-loop completion tokens',
     )

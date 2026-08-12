@@ -7142,6 +7142,31 @@ def _request_explicitly_requires_one_tool_once(
     return len(named_tools) == 1
 
 
+def _first_unquoted_marker_pos(text: str, marker: str) -> int:
+    """Position of `marker` as real markup, skipping backtick-quoted mentions.
+
+    A marker MENTIONED in prose is not tool markup. Both suppressed-display
+    paths used a bare .find(), so an answer containing `<tool_call>` inside an
+    inline code span or a fence was TRUNCATED at that point — the rest of the
+    reply never reached the user — and the residue tidy then collapsed every
+    blank line in what survived. Models never wrap markup they actually emit in
+    backticks, so skip those occurrences and keep scanning for a genuine one.
+    """
+    start = 0
+    while True:
+        pos = text.find(marker, start)
+        if pos < 0:
+            return -1
+        before = text[pos - 1] if pos > 0 else ""
+        # Only a PRECEDING backtick means "quoted mention". Testing the char
+        # after the marker as well was too broad: real zaya visual-grounding
+        # markup can be followed by a backtick, and skipping it there let live
+        # markup through into the visible answer.
+        if before != "`":
+            return pos
+        start = pos + 1
+
+
 def _clean_suppressed_tool_markup_for_display(
     output_text: str, request: ChatCompletionRequest | ResponsesRequest | None = None
 ) -> str:
@@ -7158,7 +7183,9 @@ def _clean_suppressed_tool_markup_for_display(
         return _strip_tool_markup_residue_for_display(cleaned_text or "")
 
     marker_positions = [
-        pos for marker in _TOOL_CALL_MARKERS if (pos := output_text.find(marker)) >= 0
+        pos
+        for marker in _TOOL_CALL_MARKERS
+        if (pos := _first_unquoted_marker_pos(output_text, marker)) >= 0
     ]
     if not marker_positions:
         return output_text
@@ -7203,7 +7230,7 @@ def _suppressed_tool_display_delta(
         marker_positions = [
             pos
             for marker in _TOOL_CALL_MARKERS
-            if (pos := accumulated_text.find(marker)) >= 0
+            if (pos := _first_unquoted_marker_pos(accumulated_text, marker)) >= 0
         ]
         if marker_positions:
             cleaned = accumulated_text[: min(marker_positions)].rstrip()

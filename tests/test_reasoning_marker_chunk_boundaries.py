@@ -212,3 +212,41 @@ def test_deepseek_r1_preserves_blank_lines_inside_the_answer():
         DeepSeekR1ReasoningParser(), ["<think>p</think>", "\n\nLine1\n\nLine2"]
     )
     assert content == "Line1\n\nLine2"
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ["<think>", "plan", "</think>", "\n\nAnswer."],
+        ["<think>", "plan", "</think>\n\nAnswer."],
+        ["<think>plan</think>\n\nAnswer."],
+        list("<think>plan</think>\n\nAnswer."),
+    ],
+)
+def test_minimax_m3_think_alias_matches_the_canonical_dialect(chunks):
+    """MiniMax-M3 accepts BOTH <mm:think> and a plain <think> fallback.
+
+    The canonical dialect delegates to the base parser (which strips the
+    structural separator after the close); the alias went through a standalone
+    streaming helper that emitted post-close text verbatim. Same model, same
+    prompt, two dialects — one answered with a leading blank line and the other
+    did not. M3-VL is a media family, so this sat in the multimodal campaign.
+    """
+    reasoning, content = _stream_chunks(MiniMaxM3ReasoningParser(), chunks)
+    assert reasoning == "plan"
+    assert content == "Answer."
+
+
+def test_minimax_m3_canonical_dialect_is_the_parity_reference():
+    reasoning, content = _stream_chunks(
+        MiniMaxM3ReasoningParser(), ["<mm:think>", "plan", "</mm:think>", "\n\nAnswer."]
+    )
+    assert reasoning == "plan"
+    assert content == "Answer."
+
+
+def test_minimax_m3_alias_preserves_blank_lines_inside_the_answer():
+    _, content = _stream_chunks(
+        MiniMaxM3ReasoningParser(), ["<think>", "p", "</think>", "\n\nL1\n\nL2"]
+    )
+    assert content == "L1\n\nL2"

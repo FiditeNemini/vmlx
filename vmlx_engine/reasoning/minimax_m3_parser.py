@@ -136,6 +136,20 @@ def _stream_with_tags(
     if stripped_delta in {start, end}:
         return None
 
+    def _content_after_close(text: str) -> str:
+        """Visible text emitted after the reasoning close, so far.
+
+        The newline(s) directly following the close are a structural boundary
+        between the rail and the answer, not answer text. The canonical
+        <mm:think> dialect delegates to the base parser, which strips them;
+        this alias helper emitted them verbatim, so the SAME MODEL answered
+        with a leading blank line on <think> and without one on <mm:think>.
+        Strip only while nothing visible has been emitted yet.
+        """
+        if end not in text:
+            return ""
+        return text.rpartition(end)[2]
+
     start_in_prev = start in previous_text
     start_in_current = start in current_text
     end_in_prev = end in previous_text
@@ -147,13 +161,16 @@ def _stream_with_tags(
             if end_in_delta:
                 idx = delta_text.find(end)
                 reasoning_part = delta_text[:idx]
-                content_part = delta_text[idx + len(end) :]
+                content_part = delta_text[idx + len(end) :].lstrip()
                 return DeltaMessage(
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
                 )
             if end_in_prev:
-                return DeltaMessage(content=delta_text)
+                content_part = delta_text
+                if not _content_after_close(previous_text).strip():
+                    content_part = content_part.lstrip()
+                return DeltaMessage(content=content_part or None)
             return DeltaMessage(reasoning=delta_text)
 
         if start_in_delta:
@@ -161,7 +178,7 @@ def _stream_with_tags(
             if end_in_delta:
                 end_idx = delta_text.find(end)
                 reasoning_part = delta_text[start_idx + len(start) : end_idx]
-                content_part = delta_text[end_idx + len(end) :]
+                content_part = delta_text[end_idx + len(end) :].lstrip()
                 return DeltaMessage(
                     reasoning=reasoning_part if reasoning_part else None,
                     content=content_part if content_part else None,
@@ -173,13 +190,16 @@ def _stream_with_tags(
         if end_in_delta:
             idx = delta_text.find(end)
             reasoning_part = delta_text[:idx]
-            content_part = delta_text[idx + len(end) :]
+            content_part = delta_text[idx + len(end) :].lstrip()
             return DeltaMessage(
                 reasoning=reasoning_part if reasoning_part else None,
                 content=content_part if content_part else None,
             )
         if end_in_prev:
-            return DeltaMessage(content=delta_text)
+            content_part = delta_text
+            if not _content_after_close(previous_text).strip():
+                content_part = content_part.lstrip()
+            return DeltaMessage(content=content_part or None)
         return DeltaMessage(reasoning=delta_text)
 
     return DeltaMessage(content=delta_text)

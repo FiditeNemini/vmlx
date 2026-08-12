@@ -53,3 +53,28 @@ describe('cache panel reuse explainer', () => {
     expect(en).toMatch(/DeepSeek V4|ZAYA|rotating/i)
   })
 })
+
+describe('hybrid SSM session timeout', () => {
+  /**
+   * FOUND LIVE IN THE APP, not by API testing: a 101,502-token prompt to
+   * Qwen3.6-27B rendered "Message failed - Request timed out after 300s" in the
+   * chat, while the engine served that exact prompt in ~230s of prefill plus
+   * decode. A script passes its own long timeout and never sees this; only a
+   * real user hits the session default.
+   *
+   * The engine-side slow-family bump cannot help here: the panel ALWAYS emits
+   * --timeout, so the engine sees it as explicitly set and leaves it alone.
+   * The default has to be right on the panel side.
+   */
+  it('gives hybrid SSM families the 900s default', () => {
+    const src = readFileSync(join(ROOT, 'src/main/sessions.ts'), 'utf8')
+    expect(src).toContain('HYBRID_SSM_DEFAULT_TIMEOUT_SECONDS = 900')
+    const setMatch = src.match(/HYBRID_SSM_TIMEOUT_FAMILIES = new Set\(\[([^\]]*)\]/)
+    expect(setMatch, 'hybrid timeout family set is gone').toBeTruthy()
+    for (const family of ['qwen3_5', 'qwen3_next', 'nemotron_h']) {
+      expect(setMatch![1]).toContain(family)
+    }
+    // and it must be consulted by the resolver, not just declared
+    expect(src).toContain('HYBRID_SSM_TIMEOUT_FAMILIES.has(normalizedFamily)')
+  })
+})

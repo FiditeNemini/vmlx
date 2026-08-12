@@ -2827,16 +2827,19 @@ _DSV4_ANSWER_RESERVE_MAX = 2048
 _DSV4_MIN_SPLITTABLE_TOKENS = 2
 
 
-def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
-    """First-pass thinking cap for DSV4 when the caller supplied none.
+def _dsv4_default_thinking_cap(
+    max_tokens: int, env_var: str = "DSV4_ANSWER_RESERVE"
+) -> int | None:
+    """First-pass thinking cap when the caller supplied none.
 
     Returns the cap, or None to leave the budget unsplit (a 1-token budget,
-    or an explicit DSV4_ANSWER_RESERVE=0 opt-out).
+    or an explicit <env_var>=0 opt-out). The arithmetic is family-neutral;
+    the historical name stays because the constants were calibrated on DSV4.
     """
     total = int(max_tokens or 0)
     if total < _DSV4_MIN_SPLITTABLE_TOKENS:
         return None
-    raw = os.environ.get("DSV4_ANSWER_RESERVE", "").strip()
+    raw = os.environ.get(env_var, "").strip()
     if raw:
         try:
             reserve = int(raw)
@@ -2858,28 +2861,49 @@ def _dsv4_default_thinking_cap(max_tokens: int) -> int | None:
     return max(1, total - reserve)
 
 
+# Families whose bundles declare server-side thinking-budget management and
+# whose callers never send max_thinking_tokens. Without a default reserve the
+# never-empty answer pass cannot arm (it needs a capped first pass), so a
+# reasoning-heavy run at a tight budget returns EMPTY content at finish=length
+# — live-hit on Nemotron 3.5 Lightning through the real UI 2026-08-11
+# (max_tokens=120, 393 chars of reasoning, zero visible content) even AFTER the
+# family joined the answer-pass sets: membership arms the pass, the reserve is
+# what makes it reachable.
+#
+# DSV4 keeps its SOFT cap (engine-rail-implemented; lifts at </think>);
+# nemotron uses the plain hard split (kwargs max_tokens) like an explicit
+# max_thinking_tokens would.
+_DEFAULT_ANSWER_RESERVE_FAMILIES = frozenset(
+    {"deepseek_v4", "nemotron", "nemotron_h"}
+)
+
+
 def _dsv4_answer_pass_thinking_cap(
     family_name: str | None,
     effective_thinking,
     max_tokens,
 ) -> int | None:
-    """Default DSV4 first-pass cap, or None for every other case.
+    """Default first-pass cap for server-managed-budget families, else None.
 
-    Returns None unless this is deepseek_v4 with thinking on, so no other
-    family's behaviour can change.
+    Returns None unless ``family_name`` manages its thinking budget
+    server-side and thinking is not off, so no other family's behaviour can
+    change.
     """
-    if family_name != "deepseek_v4":
+    if family_name not in _DEFAULT_ANSWER_RESERVE_FAMILIES:
         return None
     if effective_thinking is False:
         return None
-    cap = _dsv4_default_thinking_cap(int(max_tokens or 0))
+    is_dsv4 = family_name == "deepseek_v4"
+    env_var = "DSV4_ANSWER_RESERVE" if is_dsv4 else "VMLX_ANSWER_RESERVE"
+    cap = _dsv4_default_thinking_cap(int(max_tokens or 0), env_var)
     if cap is not None:
         total = int(max_tokens or 0)
         logger.info(
-            "DSV4 thinking budget: first pass capped at %d of %d output tokens "
+            "%s thinking budget: first pass capped at %d of %d output tokens "
             "(%.0f%%); %d reserved so the answer pass can emit visible content. "
-            "Override with DSV4_ANSWER_RESERVE.",
-            cap, total, (cap / max(1, total)) * 100.0, total - cap,
+            "Override with %s.",
+            "DSV4" if is_dsv4 else "Nemotron",
+            cap, total, (cap / max(1, total)) * 100.0, total - cap, env_var,
         )
     return cap
 
@@ -17556,7 +17580,12 @@ async def create_chat_completion(
             else chat_kwargs.get("enable_thinking"),
             chat_kwargs.get("max_tokens"),
         )
-        _ns_dsv4_default_reserve = _ns_pre_mtt is not None
+        # The SOFT-cap flavor is DSV4-only (its engine rail implements the
+        # lift-at-</think> kwarg). Nemotron's default reserve takes the plain
+        # hard split below, exactly like an explicit max_thinking_tokens.
+        _ns_dsv4_default_reserve = (
+            _ns_pre_mtt is not None and _ns_dsv4_family == "deepseek_v4"
+        )
     else:
         _ns_dsv4_default_reserve = False
     if (
@@ -20744,7 +20773,12 @@ async def create_response(
             else chat_kwargs.get("enable_thinking"),
             chat_kwargs.get("max_tokens"),
         )
-        _ns_dsv4_default_reserve = _ns_pre_mtt is not None
+        # The SOFT-cap flavor is DSV4-only (its engine rail implements the
+        # lift-at-</think> kwarg). Nemotron's default reserve takes the plain
+        # hard split below, exactly like an explicit max_thinking_tokens.
+        _ns_dsv4_default_reserve = (
+            _ns_pre_mtt is not None and _ns_dsv4_family == "deepseek_v4"
+        )
     else:
         _ns_dsv4_default_reserve = False
     if (
@@ -22262,12 +22296,17 @@ async def stream_chat_completion(
     _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
     _dsv4_default_reserve = False
     if _explicit_answer_pass_mtt is None:
-        # DSV4 only: reserve answer budget so the never-empty answer pass below
-        # can arm. No-op for every other family.
+        # Server-managed-budget families (DSV4, Nemotron): reserve answer
+        # budget so the never-empty answer pass below can arm. No-op for
+        # every other family. The SOFT-cap flag stays DSV4-only — its engine
+        # rail implements the lift-at-</think> kwarg; Nemotron hard-splits.
         _explicit_answer_pass_mtt = _dsv4_answer_pass_thinking_cap(
             _family_name, _effective_thinking, kwargs.get("max_tokens")
         )
-        _dsv4_default_reserve = _explicit_answer_pass_mtt is not None
+        _dsv4_default_reserve = (
+            _explicit_answer_pass_mtt is not None
+            and _family_name == "deepseek_v4"
+        )
     if (
         _explicit_answer_pass_mtt is not None
         and _is_minimax_m3
@@ -24534,12 +24573,17 @@ async def stream_responses_api(
     _explicit_answer_pass_mtt = getattr(request, "max_thinking_tokens", None)
     _dsv4_default_reserve = False
     if _explicit_answer_pass_mtt is None:
-        # DSV4 only: reserve answer budget so the never-empty answer pass below
-        # can arm. No-op for every other family.
+        # Server-managed-budget families (DSV4, Nemotron): reserve answer
+        # budget so the never-empty answer pass below can arm. No-op for
+        # every other family. The SOFT-cap flag stays DSV4-only — its engine
+        # rail implements the lift-at-</think> kwarg; Nemotron hard-splits.
         _explicit_answer_pass_mtt = _dsv4_answer_pass_thinking_cap(
             _family_name, _effective_thinking, kwargs.get("max_tokens")
         )
-        _dsv4_default_reserve = _explicit_answer_pass_mtt is not None
+        _dsv4_default_reserve = (
+            _explicit_answer_pass_mtt is not None
+            and _family_name == "deepseek_v4"
+        )
     if (
         _explicit_answer_pass_mtt is not None
         and _is_minimax_m3

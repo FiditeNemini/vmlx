@@ -79,12 +79,13 @@ class TestSplitTable:
 
 
 class TestFamilyGate:
-    def test_only_deepseek_v4_is_affected(self):
+    def test_only_server_managed_budget_families_are_affected(self):
         for family in ("qwen3", "laguna", "minimax_m3", "gemma4", "llama", None):
             assert _dsv4_answer_pass_thinking_cap(family, True, 8000) is None, family
 
     def test_thinking_off_is_a_no_op(self):
         assert _dsv4_answer_pass_thinking_cap("deepseek_v4", False, 8000) is None
+        assert _dsv4_answer_pass_thinking_cap("nemotron_h", False, 8000) is None
 
     def test_deepseek_v4_with_thinking_on_splits(self):
         assert _dsv4_answer_pass_thinking_cap("deepseek_v4", True, 8000) == 6000
@@ -92,3 +93,24 @@ class TestFamilyGate:
     def test_thinking_unspecified_still_splits(self):
         # Auto/None must behave like on: the rail is open by default.
         assert _dsv4_answer_pass_thinking_cap("deepseek_v4", None, 8000) == 6000
+
+    def test_nemotron_gets_the_default_reserve_too(self):
+        """The bundle declares budget: server_side and callers never send
+        max_thinking_tokens, so without a default reserve the never-empty
+        answer pass can never arm — live-hit through the real UI 2026-08-11
+        (Lightning MXFP8, max_tokens=120: 393 chars reasoning, EMPTY content)
+        even with the family already in the answer-pass sets."""
+        for family in ("nemotron", "nemotron_h"):
+            assert _dsv4_answer_pass_thinking_cap(family, True, 8000) == 6000, family
+            assert _dsv4_answer_pass_thinking_cap(family, None, 8000) == 6000, family
+
+    def test_nemotron_reserve_env_override_is_family_neutral(self, monkeypatch):
+        """Nemotron honors VMLX_ANSWER_RESERVE, and the DSV4-named env does
+        not leak across families."""
+        monkeypatch.setenv("VMLX_ANSWER_RESERVE", "0")
+        assert _dsv4_answer_pass_thinking_cap("nemotron_h", True, 8000) is None
+        assert _dsv4_answer_pass_thinking_cap("deepseek_v4", True, 8000) == 6000
+        monkeypatch.delenv("VMLX_ANSWER_RESERVE")
+        monkeypatch.setenv("DSV4_ANSWER_RESERVE", "0")
+        assert _dsv4_answer_pass_thinking_cap("nemotron_h", True, 8000) == 6000
+        assert _dsv4_answer_pass_thinking_cap("deepseek_v4", True, 8000) is None

@@ -333,7 +333,12 @@ export const BUILTIN_TOOLS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'ddg_search',
-      description: 'Search the web using DuckDuckGo (free, no API key required). Returns titles, URLs, and snippets.',
+      // Do not name a single backend here: this string is what the MODEL
+      // is told the tool does, and the request is served by whichever
+      // backend answers (DuckDuckGo first, Mojeek as fallback). At the
+      // time of writing DuckDuckGo answers 202 with an anti-bot page, so
+      // naming it told the model something false about its own tool.
+      description: 'Search the web (free, no API key required). Returns titles, URLs, and snippets.',
       parameters: {
         type: 'object',
         properties: {

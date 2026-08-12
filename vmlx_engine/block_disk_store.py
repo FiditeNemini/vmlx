@@ -3268,6 +3268,19 @@ def _serialize_block(
             tensors[f"layer_{i}_values_data"] = values_tuple[0]
             tensors[f"layer_{i}_values_scales"] = values_tuple[1]
             tensors[f"layer_{i}_values_zeros"] = values_tuple[2]
+            # Record the scale/bias dtypes like every other tag does. Without
+            # this, the bfloat16->float32 cast applied on the way to disk was
+            # never undone, so a block that round-tripped through L2 came back
+            # with fp32 scales where a recompute produces bf16. That is a
+            # hit != recompute numerics change, and it sits OUTSIDE TurboQuant,
+            # so the TQ asymmetry guard does not cover it.
+            for _slot, _tup in (("keys", keys_tuple), ("values", values_tuple)):
+                for _part, _idx in (("scales", 1), ("zeros", 2)):
+                    _t = _tup[_idx]
+                    if hasattr(_t, "dtype"):
+                        meta.setdefault("__orig_dtypes__", {})[
+                            f"{i}_q_{_slot}_{_part}"
+                        ] = str(_t.dtype)
             if layer_meta:
                 meta[str(i)] = {"quant_meta": layer_meta}
 
@@ -3627,6 +3640,33 @@ def _deserialize_block(
                     data[f"layer_{i}_values_scales"],
                     data[f"layer_{i}_values_zeros"],
                 )
+
+                # Undo the bfloat16->float32 cast applied on the way to disk.
+                # Without this a block that round-tripped through L2 came back
+                # with fp32 scales/biases where a recompute produces bf16 — a
+                # hit != recompute numerics change, and one OUTSIDE TurboQuant,
+                # so the TQ asymmetry guard never covered it. The packed data
+                # itself is integer and is left alone.
+                def _restore(tup, slot):
+                    parts = list(tup)
+                    for idx, part_name in ((1, "scales"), (2, "zeros")):
+                        want = orig_dtypes.get(f"{i}_q_{slot}_{part_name}")
+                        arr = parts[idx]
+                        if not want or not hasattr(arr, "astype"):
+                            continue
+                        if str(getattr(arr, "dtype", "")) == want:
+                            continue
+                        target = getattr(mx, want.split(".")[-1], None)
+                        if target is not None:
+                            try:
+                                parts[idx] = arr.astype(target)
+                            except Exception:  # noqa: BLE001
+                                pass
+                    return tuple(parts)
+
+                keys_tuple = _restore(keys_tuple, "keys")
+                values_tuple = _restore(values_tuple, "values")
+
                 layer_meta_dict = meta.get(str(i), {})
                 layer_meta = layer_meta_dict.get("quant_meta", layer_meta_dict.get("meta", {}))
                 cache_data.append(("quantized_kv", keys_tuple, values_tuple, layer_meta))

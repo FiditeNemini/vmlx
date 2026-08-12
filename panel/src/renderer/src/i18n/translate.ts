@@ -40,10 +40,21 @@ export function translateFromCatalog(
 ): string {
   try {
     if (typeof key !== 'string') return String(key ?? '')
+    // `defaultValue` is honoured before falling back to the raw key. Load
+    // progress arrives from the MAIN process as `{ labelKey, label }`, and the
+    // call sites pass the English `label` as defaultValue precisely so a key
+    // the renderer's catalog does not carry still shows words. Ignoring it put
+    // a dotted key — `sessions.loadProgress.…` — in the progress bar whenever
+    // main and renderer disagreed about the key set, which is exactly the
+    // version-skew case the defaultValue exists for.
+    const fallback =
+      typeof params?.defaultValue === 'string' && params.defaultValue
+        ? params.defaultValue
+        : key
     const value =
       getTranslation(catalog, key) ??
       getTranslation(fallbackCatalog, key) ??
-      key
+      fallback
     return interpolateTranslation(value, params)
   } catch {
     return key

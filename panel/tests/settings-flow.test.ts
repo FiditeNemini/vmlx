@@ -4610,13 +4610,27 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         const chatSource = readFileSync('src/main/ipc/chat.ts', 'utf8')
         const gatewaySource = readFileSync('src/main/api-gateway.ts', 'utf8')
 
-        expect(sessionsSource).toContain('DSV4_DEFAULT_TIMEOUT_SECONDS = 900')
-        expect(sessionsSource).toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900')
+        // This used to assert a per-file DSV4/MINIMAX const in each surface —
+        // i.e. it PINNED THE DUPLICATION. The rule existed in seven copies and
+        // four had diverged, so the values agreeing per file proved nothing.
+        // Assert the wiring instead: every surface reads the one shared table.
+        const sharedSource = readFileSync('src/shared/slowFamilyTimeouts.ts', 'utf8')
+        expect(sharedSource).toContain('SLOW_FAMILY_TIMEOUT_SECONDS = 900')
+        expect(sharedSource).toContain('minimax_m3')
+        expect(sharedSource).toContain('deepseek-v4')
+
         expect(sessionsSource).toContain('effectiveSessionTimeoutSeconds')
         expect(chatSource).toContain('effectiveFamilyRequestTimeoutSeconds')
-        expect(chatSource).toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900')
         expect(gatewaySource).toContain('effectiveGatewayProxyTimeoutMs')
-        expect(gatewaySource).toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900')
+        for (const [label, src] of [
+            ['sessions', sessionsSource],
+            ['chat IPC', chatSource],
+            ['gateway', gatewaySource],
+        ] as const) {
+            expect(src, `${label} no longer reads the shared timeout table`).toMatch(
+                /slowFamilyTimeouts/,
+            )
+        }
     })
 
     it('mutual exclusion: disk cache NOT emitted when paged cache is active', () => {

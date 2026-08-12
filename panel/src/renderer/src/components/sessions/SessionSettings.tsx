@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { resolveSlowFamilyTimeoutSeconds } from '../../../../shared/slowFamilyTimeouts'
 import { ArrowLeft, ChevronRight } from 'lucide-react'
 import {
   SessionConfigForm,
@@ -71,17 +72,17 @@ function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
   return cacheSubtype === 'mixed_swa_kv' || cacheSubtype === 'step3p7_full_sliding_kv'
 }
 
-const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
-const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
-
+// The CLI preview must show what launch ACTUALLY passes. It knew only
+// deepseek-v4, so it displayed --timeout 300 for six of the seven slow families
+// whose launch passes 900 — a UI-truthfulness bug. Shares one table with
+// sessions.ts, chat.ts and the gateway now.
 function effectiveSessionTimeoutSeconds(config: Partial<SessionConfig>, family?: string): number {
   const configured = config.timeout
   if (configured != null && configured <= 0) return 86400
-  const normalizedFamily = normalizeDetectedFamilyName(family)
-  if (normalizedFamily === 'deepseek-v4' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
-    return DSV4_DEFAULT_TIMEOUT_SECONDS
-  }
-  return configured != null && configured > 0 ? configured : GENERIC_DEFAULT_TIMEOUT_SECONDS
+  return resolveSlowFamilyTimeoutSeconds(
+    configured,
+    normalizeDetectedFamilyName(family),
+  )
 }
 
 function finitePositiveNumber(value: unknown): number | undefined {

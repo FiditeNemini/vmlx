@@ -56,28 +56,50 @@ describe('cache panel reuse explainer', () => {
 
 describe('hybrid SSM session timeout', () => {
   /**
-   * FOUND LIVE IN THE APP, not by API testing: a 101,502-token prompt to
-   * Qwen3.6-27B rendered "Message failed - Request timed out after 300s" in the
-   * chat, while the engine served that exact prompt in ~230s of prefill plus
-   * decode. A script passes its own long timeout and never sees this; only a
-   * real user hits the session default.
+   * FOUND LIVE: a 101,502-token prompt to Qwen3.6-27B rendered "Message failed -
+   * Request timed out after 300s" while the engine served it in ~230s. A script
+   * passes its own long timeout and never sees this; only a real user hits the
+   * session default.
    *
-   * The engine-side slow-family bump cannot help here: the panel ALWAYS emits
-   * --timeout, so the engine sees it as explicitly set and leaves it alone.
-   * The default has to be right on the panel side.
+   * The rule was written out SEVEN times and four copies had diverged. It now
+   * lives once, in panel/src/shared/slowFamilyTimeouts.ts, so assert THAT and
+   * assert every consumer imports it rather than re-declaring a local table.
    */
-  it('gives hybrid SSM families the 900s default', () => {
-    const src = readFileSync(join(ROOT, 'src/main/sessions.ts'), 'utf8')
-    expect(src).toContain('HYBRID_SSM_DEFAULT_TIMEOUT_SECONDS = 900')
-    const setMatch = src.match(/HYBRID_SSM_TIMEOUT_FAMILIES = new Set\(\[([^\]]*)\]/)
-    expect(setMatch, 'hybrid timeout family set is gone').toBeTruthy()
-    // PANEL registry names — the registry maps the engine's qwen3_5/qwen3_next/
-    // nemotron_h to these. Asserting the engine spellings here is what let the
-    // original bug through: the set looked populated but matched nothing.
-    for (const family of ['qwen3.5', 'qwen3-next', 'nemotron-h']) {
-      expect(setMatch![1]).toContain(family)
+  const SHARED = join(ROOT, 'src/shared/slowFamilyTimeouts.ts')
+
+  it('the shared table covers every slow family, by registry name', () => {
+    const src = readFileSync(SHARED, 'utf8')
+    expect(src).toContain('SLOW_FAMILY_TIMEOUT_SECONDS = 900')
+    // Registry names, NOT engine family_name — two earlier fixes were silent
+    // no-ops because they used the engine spellings (qwen3_5, nemotron_h).
+    for (const family of [
+      'deepseek-v4',
+      'minimax_m3',
+      'openpangu_v2',
+      'qwen3.5',
+      'qwen3.5-moe',
+      'qwen3-next',
+      'nemotron-h',
+    ]) {
+      expect(src, `shared table is missing ${family}`).toContain(family)
     }
-    // and it must be consulted by the resolver, not just declared
-    expect(src).toContain('HYBRID_SSM_TIMEOUT_FAMILIES.has(normalizedFamily)')
+  })
+
+  it('every timeout consumer reads the shared table', () => {
+    for (const rel of [
+      'src/main/sessions.ts',
+      'src/main/ipc/chat.ts',
+      'src/main/api-gateway.ts',
+      'src/renderer/src/components/sessions/SessionSettings.tsx',
+    ]) {
+      const src = readFileSync(join(ROOT, rel), 'utf8')
+      expect(src, `${rel} does not import the shared timeout table`).toMatch(
+        /slowFamilyTimeouts/,
+      )
+      // and must not have grown a local copy back
+      expect(src, `${rel} re-declared a local slow-family table`).not.toMatch(
+        /const\s+\w*SLOW_FAMILY\w*\s*:\s*Record/,
+      )
+    }
   })
 })

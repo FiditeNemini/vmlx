@@ -65,6 +65,7 @@ import {
   verifyBundledEngineOnFilesystem,
 } from './engine-manager'
 import { app as electronApp } from 'electron'
+import { resolveSlowFamilyTimeoutSeconds } from '../shared/slowFamilyTimeouts'
 
 /** Result of findEnginePath: either bundled Python or a system binary */
 type EnginePath =
@@ -221,26 +222,6 @@ const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
 const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900
 // openPangu-2.0-Flash: 92B MoE, typically 2-3 bit JANG — slow prefill/decode.
 const OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS = 900
-// Hybrid SSM+attention families chunk their prefill, so a long prompt spends
-// minutes before the first token. FOUND LIVE IN THE APP: a 101,502-token prompt
-// to Qwen3.6-27B rendered "Message failed — Request timed out after 300s" in the
-// chat while the engine served that exact prompt in ~230s of prefill plus
-// decode. API testing cannot find this — a script passes its own long timeout;
-// only a real user hits the session default.
-const HYBRID_SSM_DEFAULT_TIMEOUT_SECONDS = 900
-// PANEL registry names, not engine family_name. The registry maps engine
-// qwen3_5 -> 'qwen3.5', qwen3_next -> 'qwen3-next', nemotron_h -> 'nemotron-h'
-// (model-config-registry.ts:368,372,472), and effectiveFamily here holds the
-// registry name. Using the engine spellings meant this set never matched and
-// the fix silently did nothing — verified live: the engine still received
-// --timeout 300 after a panel rebuild, app restart and session respawn. Same
-// aliasing class as deepseek_v4 -> 'deepseek-v4' in normalizeDetectedFamilyName.
-const HYBRID_SSM_TIMEOUT_FAMILIES = new Set([
-  'qwen3.5',
-  'qwen3.5-moe',
-  'qwen3-next',
-  'nemotron-h',
-])
 
 function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: string): number {
   const configured = config.timeout
@@ -255,14 +236,9 @@ function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: 
   if (normalizedFamily === 'openpangu_v2' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
     return OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS
   }
-  if (
-    normalizedFamily != null &&
-    HYBRID_SSM_TIMEOUT_FAMILIES.has(normalizedFamily) &&
-    (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)
-  ) {
-    return HYBRID_SSM_DEFAULT_TIMEOUT_SECONDS
-  }
-  return configured != null && configured > 0 ? configured : GENERIC_DEFAULT_TIMEOUT_SECONDS
+  // Shared table — see panel/src/shared/slowFamilyTimeouts.ts for why this rule
+  // may only exist once.
+  return resolveSlowFamilyTimeoutSeconds(configured, normalizedFamily)
 }
 
 function finitePositiveNumber(value: unknown): number | undefined {

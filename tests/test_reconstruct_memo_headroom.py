@@ -1,85 +1,120 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The reconstruct memo must decline when a second copy will not fit.
+"""The reconstruct memo must budget against HEADROOM, not total active memory.
 
-The memo turns a repeated reconstruction into a lookup (3071ms -> 0.015ms at
-413 blocks on the text path), but it pays with a full ``deepcopy``. That is
-cheap for a compact DSV4 delta record and ruinous for a mixed-SWA L1, which is
-~4.6GB at 86k tokens — retaining a second copy would roughly DOUBLE resident KV
-at exactly the depth where memory is already tightest, and an OOM costs far more
-than the reconstruction it was avoiding.
+The memo turns the answer pass's repeated reconstruction into a lookup. It was
+declining on every single turn, and the reason only became visible once the
+decline was logged at INFO. Measured live, DSV4-Flash on the box:
 
-So the memo is opportunistic, and every uncertain case must decline: the fast
-path's failure mode is an OOM, so the safe default is the slower one.
+    Reconstruct memo DECLINED: copy 0.54GB on top of active 95.44GB would pass
+    the 70% working-set budget (75.26GB)
+
+`active` includes the resident MODEL, so it was already ~20GB past the ceiling
+before the copy was considered. `active + copy > ceiling` was therefore true for
+any copy size at all — the memo could never be retained once a large model was
+loaded, which is precisely when it is worth having. Meanwhile the answer pass
+re-read the whole prefix from L2 every turn: 7.5s at 83k tokens, 21.7s at 166k,
+reproducible to ~0.3s across runs.
+
+The question that matters is whether the copy fits in what is LEFT.
+
+Created by Jinho Jang (eric@jangq.ai).
 """
+
+from __future__ import annotations
 
 import pytest
 
-from vmlx_engine.prefix_cache import BlockAwarePrefixCache
-from vmlx_engine.paged_cache import PagedCacheManager
+import vmlx_engine.prefix_cache as pc
 
-GIB = 1024**3
+_GB = 1024**3
+
+
+class _Manager:
+    """Just enough object to call the predicate as a bound method."""
+
+    _reconstruct_memo_fits_in_headroom = pc.BlockAwarePrefixCache._reconstruct_memo_fits_in_headroom
 
 
 @pytest.fixture
-def cache():
-    return BlockAwarePrefixCache(
-        model=None, paged_cache_manager=PagedCacheManager(block_size=64, max_blocks=64)
-    )
+def manager():
+    return _Manager()
 
 
 def _patch(monkeypatch, *, active, max_ws, copy_bytes):
+    import vmlx_engine.utils.memory_limits as ml
+    import vmlx_engine.memory_cache as mc
+
     monkeypatch.setattr(
-        "vmlx_engine.utils.memory_limits.get_effective_metal_working_set_bytes",
-        lambda _mx=None: (active, max_ws),
+        ml,
+        "get_effective_metal_working_set_bytes",
+        lambda mx_module=None: (active, max_ws),
     )
-    monkeypatch.setattr(
-        "vmlx_engine.memory_cache.estimate_kv_cache_memory",
-        lambda _caches: copy_bytes,
+    monkeypatch.setattr(mc, "estimate_kv_cache_memory", lambda _caches: copy_bytes)
+
+
+def test_a_small_copy_is_kept_even_with_a_huge_model_resident(manager, monkeypatch):
+    """The exact live reading that was being refused."""
+    _patch(
+        monkeypatch,
+        active=int(95.44 * _GB),
+        max_ws=int(107.5 * _GB),
+        copy_bytes=int(0.54 * _GB),
     )
+    # ~12GB of headroom for a 0.54GB copy. Refusing this is what left a 21.7s
+    # stall on the table.
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is True
 
 
-def test_declines_when_the_copy_would_break_the_budget(cache, monkeypatch):
-    # 4.6GB copy on top of 70GB active, against a 100GB limit -> over the 70% budget
-    _patch(monkeypatch, active=70 * GIB, max_ws=100 * GIB, copy_bytes=int(4.6 * GIB))
-    assert cache._reconstruct_memo_fits_in_headroom(object()) is False
+def test_the_larger_live_copy_also_fits(manager, monkeypatch):
+    _patch(
+        monkeypatch,
+        active=int(95.90 * _GB),
+        max_ws=int(107.5 * _GB),
+        copy_bytes=int(1.07 * _GB),
+    )
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is True
 
 
-def test_allows_when_there_is_comfortable_room(cache, monkeypatch):
-    _patch(monkeypatch, active=10 * GIB, max_ws=100 * GIB, copy_bytes=int(4.6 * GIB))
-    assert cache._reconstruct_memo_fits_in_headroom(object()) is True
+def test_a_copy_that_would_eat_the_remaining_headroom_is_refused(manager, monkeypatch):
+    """The guard still has to guard: an OOM costs more than the replay."""
+    _patch(
+        monkeypatch,
+        active=int(100 * _GB),
+        max_ws=int(107.5 * _GB),
+        # 7.5GB of headroom; a 6GB copy is over the 50% share.
+        copy_bytes=int(6 * _GB),
+    )
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is False
 
 
-@pytest.mark.parametrize(
-    "active,max_ws,copy_bytes",
-    [
-        (0, 100 * GIB, GIB),      # active unreadable
-        (10 * GIB, 0, GIB),       # limit unknown
-        (10 * GIB, 100 * GIB, 0), # size unknown
-    ],
-)
-def test_unknown_readings_decline(cache, monkeypatch, active, max_ws, copy_bytes):
-    """Declining costs a reconstruction; guessing wrong costs an OOM."""
-    _patch(monkeypatch, active=active, max_ws=max_ws, copy_bytes=copy_bytes)
-    assert cache._reconstruct_memo_fits_in_headroom(object()) is False
+def test_no_headroom_at_all_is_refused(manager, monkeypatch):
+    _patch(
+        monkeypatch,
+        active=int(110 * _GB),
+        max_ws=int(107.5 * _GB),
+        copy_bytes=int(0.1 * _GB),
+    )
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is False
 
 
-def test_budget_percentage_is_configurable(cache, monkeypatch):
-    _patch(monkeypatch, active=60 * GIB, max_ws=100 * GIB, copy_bytes=15 * GIB)
-    # 75GB projected: over the default 70% budget...
-    assert cache._reconstruct_memo_fits_in_headroom(object()) is False
-    # ...and under an explicitly raised one.
+def test_the_share_of_headroom_is_configurable(manager, monkeypatch):
+    _patch(
+        monkeypatch,
+        active=int(100 * _GB),
+        max_ws=int(110 * _GB),
+        copy_bytes=int(8 * _GB),
+    )
+    # 10GB headroom, 8GB copy: refused at the 50% default...
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is False
+    # ...allowed when the operator raises the share.
     monkeypatch.setenv("VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT", "90")
-    assert cache._reconstruct_memo_fits_in_headroom(object()) is True
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is True
 
 
-def test_estimator_failure_declines_rather_than_raising(cache, monkeypatch):
-    monkeypatch.setattr(
-        "vmlx_engine.utils.memory_limits.get_effective_metal_working_set_bytes",
-        lambda _mx=None: (10 * GIB, 100 * GIB),
-    )
+def test_unreadable_numbers_still_decline(manager, monkeypatch):
+    """The fast path's failure mode is an OOM, so unknown means no."""
+    _patch(monkeypatch, active=0, max_ws=0, copy_bytes=int(1 * _GB))
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is False
 
-    def _boom(_caches):
-        raise RuntimeError("cannot size this cache")
-
-    monkeypatch.setattr("vmlx_engine.memory_cache.estimate_kv_cache_memory", _boom)
-    assert cache._reconstruct_memo_fits_in_headroom(object()) is False
+    _patch(monkeypatch, active=int(10 * _GB), max_ws=int(100 * _GB), copy_bytes=0)
+    assert manager._reconstruct_memo_fits_in_headroom(object()) is False

@@ -5612,9 +5612,26 @@ class BlockAwarePrefixCache:
         an OOM costs far more than the reconstruction it was avoiding.
 
         So the memo is opportunistic: keep it only while the copy comfortably
-        fits under the device working-set limit, otherwise decline and let the
-        second pass reconstruct. Unknown readings decline too — the safe default
-        here is the slower one, because the fast path's failure mode is an OOM.
+        fits in the REMAINING headroom, otherwise decline and let the second pass
+        reconstruct. Unknown readings decline too — the safe default here is the
+        slower one, because the fast path's failure mode is an OOM.
+
+        MEASURE AGAINST HEADROOM, NOT AGAINST TOTAL ACTIVE. This first compared
+        ``active + copy`` to a percentage of the whole working set, and ``active``
+        includes the resident MODEL. Measured live on DSV4-Flash:
+
+            copy 0.54GB on top of active 95.44GB would pass the 70%
+            working-set budget (75.26GB)
+
+        active alone was already 20GB past the ceiling, so the sum exceeded it no
+        matter how small the copy was — the memo could never be retained once a
+        large model was loaded, which is exactly when it matters. It declined on
+        every turn while the answer pass re-read the whole prefix from L2: 7.5s at
+        83k tokens, 21.7s at 166k, both reproducible to ~0.3s across runs.
+
+        The real question is whether the copy fits in what is left
+        (``max_ws - active``, ~12GB in that reading, for a 0.54GB copy), and how
+        much of that remainder we are willing to spend.
         """
         try:
             from .utils.memory_limits import get_effective_metal_working_set_bytes
@@ -5632,28 +5649,42 @@ class BlockAwarePrefixCache:
             return False
         if copy_bytes <= 0:
             return False
+        headroom = int(max_ws) - int(active)
+        if headroom <= 0:
+            logger.info(
+                "Reconstruct memo DECLINED: no working-set headroom "
+                "(active %.2fGB of %.2fGB); the second pass will re-read from L2.",
+                active / (1024**3),
+                max_ws / (1024**3),
+            )
+            return False
         try:
+            # Percent of the REMAINING headroom the copy may occupy. Named for
+            # the working set for backwards compatibility, but it was measured
+            # against the wrong quantity before and never admitted anything.
             budget_pct = float(
-                os.environ.get("VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT", "70")
+                os.environ.get("VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT", "50")
             )
         except (TypeError, ValueError):
-            budget_pct = 70.0
-        ceiling = int(max_ws * (budget_pct / 100.0))
-        if active + copy_bytes > ceiling:
+            budget_pct = 50.0
+        ceiling = int(headroom * (budget_pct / 100.0))
+        if copy_bytes > ceiling:
             # INFO, not debug: this is a SILENT CAP. When it fires the second
             # pass re-reads the whole prefix from L2 and the user sees a
             # multi-second stall with nothing in the log to explain it — 21.3s
             # at 166k tokens on DSV4-Flash, measured. A guard that declines
             # invisibly also makes any A/B of the memo compare stock to stock.
             logger.info(
-                "Reconstruct memo DECLINED: copy %.2fGB on top of active %.2fGB "
-                "would pass the %.0f%% working-set budget (%.2fGB); the second "
-                "pass will re-read from L2. Raise VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT "
-                "to allow it.",
+                "Reconstruct memo DECLINED: copy %.2fGB exceeds %.0f%% of the "
+                "%.2fGB working-set headroom (%.2fGB allowed, active %.2fGB of "
+                "%.2fGB); the second pass will re-read from L2. Raise "
+                "VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT to allow it.",
                 copy_bytes / (1024**3),
-                active / (1024**3),
                 budget_pct,
+                headroom / (1024**3),
                 ceiling / (1024**3),
+                active / (1024**3),
+                max_ws / (1024**3),
             )
             return False
         return True

@@ -145,10 +145,23 @@ class Gemma4ReasoningParser(ReasoningParser):
         prefix = prefix.strip()
         suffix = suffix.strip()
         if prefix and suffix:
-            if suffix == prefix or suffix.startswith(prefix + "\n"):
+            # MONOTONICITY: the caller diffs this against a counter that only
+            # grows, so this join must never SHRINK as the suffix arrives.
+            #
+            # The dedup branches below returned `suffix` alone whenever the
+            # suffix happened to begin with the prefix. Mid-stream that is a
+            # coincidence, not a duplicate: with prefix "Hi" and the suffix rail
+            # opening "Hi\nMore", the join briefly went "Hi\nHi" -> "Hi\nHi\nM"
+            # under the old concat but "Hi" -> "Hi\nM" under the dedup, so the
+            # counter desynced and one character was duplicated while another
+            # was lost: "Hi\nMore" streamed as "Hi\nHore".
+            #
+            # Only dedup on an EXACT whole-string repeat, which cannot shrink
+            # the result. Genuine prefix-repetition is a display concern for the
+            # completed text, not something to resolve while bytes are still
+            # arriving.
+            if suffix == prefix:
                 return suffix
-            if prefix.startswith(suffix + "\n"):
-                return prefix
             return f"{prefix}\n{suffix}"
         return prefix or suffix or None
 

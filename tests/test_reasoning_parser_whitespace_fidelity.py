@@ -172,3 +172,38 @@ def test_gemma4_literal_turn_marker_in_prose_survives_streaming():
         one_text = one[1] if isinstance(one, tuple) else one
         assert streamed == expected, f"streamed {streamed!r} for {raw!r}"
         assert str(one_text) == expected
+
+
+def test_gemma4_visible_prefix_before_thought_channel_streams_monotonically():
+    """Content before a thought channel must not desync the emission counter.
+
+    _join_visible_content deduped whenever the suffix began with the prefix and
+    returned the suffix ALONE. Mid-stream that is a coincidence, not a
+    duplicate, and it makes the joined string SHRINK while the counter only
+    grows: "Hi" + a suffix rail opening "Hi\\nMore" streamed as "Hi\\nHore" — one
+    character duplicated, another lost — while one-shot returned "Hi\\nMore".
+
+    The invariant under test is streamed == one-shot, not a particular dedup
+    policy. NOTE the marker is <|channel> (no pipe before '>'); an audit
+    write-up used <|channel|> and the case silently did not reproduce.
+    """
+    from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser
+
+    for raw in [
+        "Hi<|channel>thought\nplan\n<channel|>Hi\nMore",
+        "Hi<|channel>thought\nr\n<channel|>Answer",
+        "A<|channel>thought\nx\n<channel|>A",
+    ]:
+        parser = Gemma4ReasoningParser()
+        parts = []
+        for i in range(1, len(raw) + 1):
+            delta = parser.extract_reasoning_streaming(raw[: i - 1], raw[:i], raw[i - 1])
+            if delta is not None and getattr(delta, "content", None):
+                parts.append(delta.content)
+        streamed = "".join(parts)
+        one = Gemma4ReasoningParser().extract_reasoning(raw)
+        one_text = one[1] if isinstance(one, tuple) else one
+        assert streamed == str(one_text), (
+            f"streaming/one-shot disagree for {raw!r}: "
+            f"{streamed!r} vs {str(one_text)!r}"
+        )

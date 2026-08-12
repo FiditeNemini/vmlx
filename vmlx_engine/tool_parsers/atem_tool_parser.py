@@ -68,13 +68,18 @@ def _coerce(value: str, declared_type: str | None) -> Any:
     ``declared_type`` of ``string`` is honoured verbatim: a tool that declares a
     string parameter must receive "true" as the two-character string, not a
     boolean. Only when the schema is silent do we fall back to JSON shape.
+
+    The declared-string branch runs BEFORE the blank check, because "verbatim"
+    has to include whitespace. A newline or a run of spaces is a legitimate
+    value for a string parameter — a tool writing an indent or a separator
+    passes exactly that — and returning the stripped text handed it "" instead.
     """
+    if declared_type == "string":
+        return value
+
     text = value.strip()
     if not text:
         return text
-
-    if declared_type == "string":
-        return value
     if declared_type in {"object", "array"}:
         try:
             return json.loads(text)

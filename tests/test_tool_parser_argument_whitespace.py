@@ -211,3 +211,41 @@ def test_lfm2_single_sided_content_is_unchanged():
         "<|tool_call_start|>[f()]<|tool_call_end|>Only after.", None
     )
     assert after_only.content == "Only after."
+
+
+def test_atem_declared_string_keeps_a_whitespace_only_value():
+    """A declared string parameter is verbatim — including when it is all space.
+
+    _coerce returned the STRIPPED text for any blank-after-strip value before
+    reaching the declared-type branch, so a tool asked to emit an indent, a
+    newline, or a space separator received "" instead. The docstring promised
+    "honoured verbatim"; the blank guard quietly broke that for exactly the
+    values where the whitespace WAS the payload.
+    """
+    from vmlx_engine.tool_parsers.atem_tool_parser import AtemToolParser
+
+    # server.py builds this dict shape before calling the parser; _schema_for
+    # only reads a Mapping, so an object here would silently skip the schema.
+    request = {
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_line",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"sep": {"type": "string"}},
+                    },
+                },
+            }
+        ]
+    }
+    raw = (
+        '<atem:invoke name="write_line">'
+        '<atem:parameter name="sep">   </atem:parameter>'
+        "</atem:invoke>"
+    )
+    result = AtemToolParser().extract_tool_calls(raw, request)
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0]["arguments"])
+    assert args["sep"] == "   ", f"whitespace payload was stripped away: {args!r}"

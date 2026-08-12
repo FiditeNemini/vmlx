@@ -17,6 +17,7 @@ import {
   resolveEffectiveReasoningParser,
 } from '../../../../shared/reasoningParserAliases'
 import { useTranslation } from '../../i18n'
+import { formatModelBytes, formatResidentLoad } from './loadProgressFormat'
 
 interface Session {
   id: string
@@ -619,22 +620,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
 }
 
 /** Extracted component so useSessionsContext() is called from a proper hook scope */
-function formatModelBytes(bytes?: number): string | null {
-  if (!bytes || bytes <= 0) return null
-  return `${(bytes / 1e9).toFixed(1)} GB`
-}
 
-function formatResidentLoad(progress?: { residentMb?: number; modelBytes?: number; expectedResidentBytes?: number; residentPercent?: number }): string | null {
-  if (!progress?.residentMb || progress.residentMb <= 0) return null
-  const resident = `${(progress.residentMb / 1024).toFixed(1)} GB`
-  // residentPercent is normalized against the family's EXPECTED resident
-  // bytes, so the denominator shown must be the same quantity — dividing the
-  // displayed pair by bundle size made the percent look wrong for
-  // expert-streaming families (25 GB / 96 GB tagged "37%").
-  const total = formatModelBytes(progress.expectedResidentBytes ?? progress.modelBytes)
-  const pct = progress.residentPercent != null ? ` (${progress.residentPercent.toFixed(1)}%)` : ''
-  return total ? `${resident} / ${total}${pct}` : `${resident}${pct}`
-}
 
 function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
   const { t } = useTranslation()

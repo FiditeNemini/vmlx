@@ -110,17 +110,37 @@ const TOOL_STREAM_STALL_TIMEOUT_MS = Number.isFinite(
   ? Math.max(5_000, configuredToolStreamStallTimeoutMs)
   : 30_000;
 
+// Slow families that need longer than the generic request timeout, keyed by the
+// PANEL REGISTRY name (which is what detectedFamily holds — the registry maps
+// the engine's qwen3_5 -> "qwen3.5", qwen3_next -> "qwen3-next",
+// nemotron_h -> "nemotron-h"; see model-config-registry.ts:368,372,472).
+//
+// This is the timeout that ACTUALLY fails an in-app chat. It is a THIRD copy of
+// the same rule (sessions.ts has effectiveSessionTimeoutSeconds for the engine
+// --timeout argument, and the engine has its own _SLOW_FAMILY_TIMEOUTS), and it
+// covered only deepseek-v4 and minimax_m3 — not even openpangu_v2. MEASURED:
+// with the engine correctly receiving --timeout 900, a 101,502-token prompt
+// still rendered "Message failed - Request timed out after 300s" because this
+// copy still said 300. Fixing the other two copies alone changed nothing.
+const SLOW_FAMILY_REQUEST_TIMEOUT_SECONDS: Record<string, number> = {
+  "deepseek-v4": DSV4_DEFAULT_TIMEOUT_SECONDS,
+  minimax_m3: MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS,
+  openpangu_v2: 900,
+  // Hybrid SSM+attention families chunk their prefill, so a long prompt spends
+  // minutes before the first token.
+  "qwen3.5": 900,
+  "qwen3.5-moe": 900,
+  "qwen3-next": 900,
+  "nemotron-h": 900,
+};
+
 function effectiveFamilyRequestTimeoutSeconds(
   timeoutSeconds: number,
   detectedFamily?: string,
 ): number {
-  if (detectedFamily === "deepseek-v4" && timeoutSeconds === GENERIC_DEFAULT_TIMEOUT_SECONDS) {
-    return DSV4_DEFAULT_TIMEOUT_SECONDS;
-  }
-  if (detectedFamily === "minimax_m3" && timeoutSeconds === GENERIC_DEFAULT_TIMEOUT_SECONDS) {
-    return MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS;
-  }
-  return timeoutSeconds;
+  if (timeoutSeconds !== GENERIC_DEFAULT_TIMEOUT_SECONDS) return timeoutSeconds;
+  if (!detectedFamily) return timeoutSeconds;
+  return SLOW_FAMILY_REQUEST_TIMEOUT_SECONDS[detectedFamily] ?? timeoutSeconds;
 }
 
 function shouldSuppressGenericAgenticPromptForNativeTools(

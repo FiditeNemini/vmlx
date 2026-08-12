@@ -170,6 +170,17 @@ def apply() -> bool:
                 reason = _ineligibility_reason(self)
                 if reason:
                     logger.debug("MTP path not active: %s", reason)
+                    # Publish it. PerformancePanel has always READ
+                    # batch_generator.last_native_mtp_skip, but nothing in the
+                    # engine ever produced that key, so the skip tile was dead
+                    # UI and only positive engagement could ever display. A
+                    # DEBUG line is not a surface a user can see.
+                    global _LAST_NATIVE_MTP_SKIP
+                    with _MTP_TELEMETRY_LOCK:
+                        _LAST_NATIVE_MTP_SKIP = {
+                            "uid": str(uids[0]),
+                            "reason": reason,
+                        }
 
     def patched_next(self, *args, **kwargs):
         if _is_mtp_eligible(self):
@@ -483,6 +494,9 @@ def _publish_native_mtp_stats(
     return payload
 
 
+_LAST_NATIVE_MTP_SKIP: dict | None = None
+
+
 def native_mtp_stats_snapshot() -> dict:
     """Return immutable process-local BatchGenerator MTP acceptance telemetry."""
     with _MTP_TELEMETRY_LOCK:
@@ -492,6 +506,7 @@ def native_mtp_stats_snapshot() -> dict:
         )
         return {
             "last_native_mtp": copy.deepcopy(_LAST_NATIVE_MTP),
+            "last_native_mtp_skip": copy.deepcopy(_LAST_NATIVE_MTP_SKIP),
             "native_mtp_totals": totals,
         }
 

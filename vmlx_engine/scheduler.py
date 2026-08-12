@@ -11219,7 +11219,14 @@ class Scheduler:
                 )
 
                 native_mtp_stats = native_mtp_stats_snapshot()
-                if native_mtp_stats.get("last_native_mtp") is not None:
+                # Publish when EITHER an engagement or a SKIP was recorded.
+                # Gating on last_native_mtp alone meant a model that never
+                # engaged published nothing at all, so the reason it was
+                # skipped could not reach the UI.
+                if (
+                    native_mtp_stats.get("last_native_mtp") is not None
+                    or native_mtp_stats.get("last_native_mtp_skip") is not None
+                ):
                     stats["batch_generator"].update(native_mtp_stats)
             except Exception as exc:
                 logger.debug("Native MTP telemetry snapshot unavailable: %s", exc)

@@ -1379,6 +1379,16 @@ def serve_command(args):
                     "default; pass --timeout to override).",
                     _old_timeout, _slow_timeout, _mc.family_name,
                 )
+                # server._default_timeout was captured from args.timeout ~350
+                # lines above, BEFORE this lift, so raising args.timeout alone
+                # left the server on 300. That mattered because the two are
+                # enforced at different points: the request timeout correctly
+                # reported 900s at startup while the STREAMING guard
+                # (_stream_timeout, which falls back to _default_timeout) still
+                # killed the response at 300 — measured on a DSV4 long-context
+                # turn, "Streaming exceeded 300.0s timeout" against a log line
+                # one screen earlier reading "Request timeout: 900.0s".
+                server._default_timeout = args.timeout
 
         if _mc.family_name != "unknown":
             # Auto-apply tool parser

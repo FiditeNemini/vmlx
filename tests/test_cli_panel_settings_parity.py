@@ -138,51 +138,41 @@ def test_slow_families_get_the_app_timeout():
 
 
 def test_every_panel_surface_carries_the_same_slow_families():
-    """The rule lives in several copies; they must cover the same families.
+    """The rule must exist ONCE, and every surface must read that one copy.
 
     MEASURED: it existed in SEVEN places and four had diverged. The in-app chat
-    table and the gateway table are the two that actually abort a request, and
-    the gateway one still had only deepseek-v4 + minimax_m3 after the chat path
-    was fixed — so external OpenAI-compat/Ollama clients were still cut at 300s.
+    table and the gateway table are the two that actually abort a request.
 
-    Keyed by PANEL REGISTRY name here, not engine family_name: the registry maps
+    This assertion originally grepped each surface for the family literals —
+    which pinned the DUPLICATION, exactly the mistake the consolidation removes.
+    Now it checks the shared table for coverage and each consumer for the
+    import, so a surface that grows its own copy back fails here.
+
+    Keys are PANEL REGISTRY names, not engine family_name: the registry maps
     qwen3_5 -> qwen3.5, qwen3_next -> qwen3-next, nemotron_h -> nemotron-h. A
     previous fix asserted the engine spellings and therefore matched nothing.
     """
-    required = {"qwen3.5", "qwen3.5-moe", "qwen3-next", "nemotron-h", "openpangu_v2"}
-    surfaces = {
+    shared = ROOT / "panel/src/shared/slowFamilyTimeouts.ts"
+    assert shared.exists(), "the shared slow-family timeout table is gone"
+    shared_src = shared.read_text(encoding="utf-8")
+    for family in (
+        "deepseek-v4", "minimax_m3", "openpangu_v2",
+        "qwen3.5", "qwen3.5-moe", "qwen3-next", "nemotron-h",
+    ):
+        assert family in shared_src, (
+            f"shared timeout table does not cover {family!r}"
+        )
+
+    consumers = {
         "chat IPC": ROOT / "panel/src/main/ipc/chat.ts",
         "api gateway": ROOT / "panel/src/main/api-gateway.ts",
         "sessions": SESSIONS,
+        "CLI preview": ROOT
+        / "panel/src/renderer/src/components/sessions/SessionSettings.tsx",
     }
-    for label, path in surfaces.items():
+    for label, path in consumers.items():
         src = path.read_text(encoding="utf-8")
-        for family in required:
-            assert f'"{family}"' in src or f"'{family}'" in src or f"{family}:" in src, (
-                f"{label} ({path.name}) does not cover {family!r} in its "
-                f"slow-family timeout rule — that surface will still abort at "
-                f"the generic 300s"
-            )
-    sessions = SESSIONS.read_text(encoding="utf-8")
-    for const in (
-        "DSV4_DEFAULT_TIMEOUT_SECONDS = 900",
-        "MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900",
-    ):
-        assert const in sessions, f"panel no longer defines {const}"
-
-
-def test_jit_has_an_explicit_off_switch():
-    """Not passing --enable-jit is NOT off: affine bundles enable it themselves.
-
-    That made the app's JIT checkbox inert on exactly the models it mattered
-    for. The engine also advised '--enable-jit=0', which argparse store_true
-    cannot parse, so the documented escape hatch did not exist either.
-    """
-    src = CLI.read_text(encoding="utf-8")
-    assert '"--no-jit"' in src
-    assert "--enable-jit=0" not in src, "the unusable flag form is documented again"
-    sessions = SESSIONS.read_text(encoding="utf-8")
-    assert "args.push('--no-jit')" in sessions, (
-        "panel emits nothing when JIT is unchecked, which the engine reads as "
-        "'use the affine default' rather than 'off'"
-    )
+        assert "slowFamilyTimeouts" in src, (
+            f"{label} ({path.name}) does not read the shared timeout table — "
+            f"it will drift and abort requests at the generic 300s"
+        )

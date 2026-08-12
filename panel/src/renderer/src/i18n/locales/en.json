@@ -424,7 +424,7 @@
       "effortDefault": "Default ({value})",
       "effortDefaultNoValue": "Default",
       "effortHelpMistral": "Mistral 4: Auto = fast (no reasoning), High = deep step-by-step reasoning.",
-      "effortHelpGeneric": "Controls thinking depth for models that support it. Auto lets the model decide.",
+      "effortHelpGeneric": "Controls thinking depth for models that support it. Default uses the model's own setting.",
       "temperature": "Temperature",
       "temperatureHelp": "Controls randomness. Lower = more focused, higher = more creative.",
       "topP": "Top P",

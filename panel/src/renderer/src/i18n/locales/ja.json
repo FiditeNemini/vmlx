@@ -424,7 +424,7 @@
       "effortDefault": "デフォルト（{value}）",
       "effortDefaultNoValue": "デフォルト",
       "effortHelpMistral": "Mistral 4: 自動 = 高速(推論なし)、高 = 深い段階的推論。",
-      "effortHelpGeneric": "対応モデルの思考の深さを制御します。自動ではモデルが判断します。",
+      "effortHelpGeneric": "対応モデルの思考の深さを制御します。デフォルトはモデル自身の設定を使用します。",
       "temperature": "温度",
       "temperatureHelp": "ランダム性を制御します。低いほど集中的、高いほど創造的です。",
       "topP": "Top P",

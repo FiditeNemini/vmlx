@@ -424,7 +424,7 @@
       "effortDefault": "기본값 ({value})",
       "effortDefaultNoValue": "기본값",
       "effortHelpMistral": "Mistral 4: 자동 = 빠름 (추론 없음), 높음 = 깊이 있는 단계별 추론.",
-      "effortHelpGeneric": "이를 지원하는 모델의 사고 깊이를 제어합니다. 자동은 모델이 결정하도록 합니다.",
+      "effortHelpGeneric": "지원하는 모델의 사고 깊이를 제어합니다. 기본값은 모델 자체 설정을 사용합니다.",
       "temperature": "온도",
       "temperatureHelp": "무작위성을 제어합니다. 낮을수록 더 집중, 높을수록 더 창의적입니다.",
       "topP": "Top P",

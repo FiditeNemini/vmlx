@@ -424,7 +424,7 @@
       "effortDefault": "默认（{value}）",
       "effortDefaultNoValue": "默认",
       "effortHelpMistral": "Mistral 4:Auto = 快速 (不推理),High = 深度逐步推理。",
-      "effortHelpGeneric": "控制支持该功能的模型的思考深度。Auto 让模型自行决定。",
+      "effortHelpGeneric": "控制支持该功能的模型的思考深度。默认使用模型自身的设置。",
       "temperature": "温度",
       "temperatureHelp": "控制随机性。越低 = 越聚焦,越高 = 越有创意。",
       "topP": "Top P",

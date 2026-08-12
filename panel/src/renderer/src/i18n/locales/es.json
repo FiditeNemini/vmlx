@@ -424,7 +424,7 @@
       "effortDefault": "Predeterminado ({value})",
       "effortDefaultNoValue": "Predeterminado",
       "effortHelpMistral": "Mistral 4: Auto = rápido (sin razonamiento), Alto = razonamiento profundo paso a paso.",
-      "effortHelpGeneric": "Controla la profundidad del pensamiento en los modelos que lo admiten. Auto permite que el modelo decida.",
+      "effortHelpGeneric": "Controla la profundidad de razonamiento en los modelos compatibles. Predeterminado usa el ajuste del propio modelo.",
       "temperature": "Temperatura",
       "temperatureHelp": "Controla la aleatoriedad. Menor = más enfocado, mayor = más creativo.",
       "topP": "Top P",

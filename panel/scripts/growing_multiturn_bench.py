@@ -92,6 +92,7 @@ def run_turn(base, model, messages, max_tokens):
     last = start
     usage = {}
     content = []
+    stream_error: str | None = None
     with urllib.request.urlopen(req, timeout=3600) as fh:
         for raw in fh:
             line = raw.decode("utf-8", "replace").strip()
@@ -104,6 +105,16 @@ def run_turn(base, model, messages, max_tokens):
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            # An SSE `error` chunk is how the server reports a failed stream —
+            # it still arrives under a 200, because the response headers were
+            # sent before generation began. Ignoring it made a killed turn
+            # indistinguishable from an empty success: turn 4 of the 400k run
+            # recorded ptok=0 ctok=0 ttft=None and read as "the model said
+            # nothing", when the engine had actually raised
+            # `Streaming exceeded 900.0s timeout` after ~15 minutes of prefill.
+            if chunk.get("error"):
+                stream_error = chunk["error"].get("message") or str(chunk["error"])
+                break
             if chunk.get("usage"):
                 usage = chunk["usage"]
             for choice in chunk.get("choices") or []:
@@ -126,6 +137,7 @@ def run_turn(base, model, messages, max_tokens):
     ctok = int(usage.get("completion_tokens") or 0)
     decode_span = max(1e-9, wall - (ttft or 0))
     return {
+        "error": stream_error,
         "ptok": int(usage.get("prompt_tokens") or 0),
         "ctok": ctok,
         "cached": int(ptd.get("cached_tokens") or 0),
@@ -185,16 +197,29 @@ def main():
             ),
             flush=True,
         )
+        if row["error"]:
+            # Loud, and on its own line: a turn that failed is not a data point,
+            # and averaging it in as "0 tokens" understates the family.
+            print(f"    !! TURN {turn} FAILED: {row['error']}", flush=True)
         if args.out:
             with open(args.out, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(row) + "\n")
 
     if rows:
-        first, last = rows[0], rows[-1]
+        failed = [r for r in rows if r["error"]]
+        # Summarise only the turns that actually produced a response. Folding a
+        # failed turn's zeros into the trend reports a slowdown that never
+        # happened, and drops the failure itself out of sight.
+        ok = [r for r in rows if not r["error"]] or rows
+        first, last = ok[0], ok[-1]
+        if failed:
+            print(f"\n{len(failed)} of {len(rows)} TURNS FAILED — excluded below:")
+            for r in failed:
+                print(f"  turn {r['turn']}: {r['error']} (after {r['wall']}s)")
         print(
-            f"\ncontext {first['ptok']} -> {last['ptok']} tokens over {len(rows)} turns"
+            f"\ncontext {first['ptok']} -> {last['ptok']} tokens over {len(ok)} turns"
         )
-        print(f"  reuse held      : {all(r['cached'] > 0 for r in rows[1:])}")
+        print(f"  reuse held      : {all(r['cached'] > 0 for r in ok[1:])}")
         print(f"  decode p50      : {first['decode_p50']} -> {last['decode_p50']} t/s")
         print(f"  decode mean     : {first['decode_mean']} -> {last['decode_mean']} t/s")
         print(f"  evictions (last): {last['health'].get('l1_evictions')}")

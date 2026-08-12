@@ -1694,6 +1694,14 @@ _HYBRID_MIN_CHUNK = max(1, int(os.environ.get("VMLX_HYBRID_MIN_CHUNK", "64") or 
 # Kept behind a flag rather than deleted because the reasoning is sound for
 # other allocation shapes and it costs one synchronize per chunk to re-test.
 # Do NOT turn it on as a fix without new evidence.
+# Pre-size KV slots to the whole prefill span so the chunk loop stops
+# reallocating every layer's K/V per chunk. ON by default: it removes the
+# dominant source of per-chunk garbage. VMLX_KV_PRESIZE_SPAN=0 restores the
+# incremental 256-token growth.
+_KV_PRESIZE_SPAN = os.environ.get(
+    "VMLX_KV_PRESIZE_SPAN", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+
 _HYBRID_PREFILL_DRAIN = os.environ.get(
     "VMLX_HYBRID_PREFILL_DRAIN", "0"
 ).strip().lower() not in {"0", "false", "no", "off"}
@@ -6237,6 +6245,60 @@ class MLLMBatchGenerator:
                 _prefill_keep_alloc = os.environ.get(
                     "VMLX_PREFILL_KEEP_ALLOC", ""
                 ).lower() in {"1", "true", "yes", "on"}
+                # Pre-size the KV slots for the WHOLE span before chunking.
+                #
+                # KVCache grows by mx.concatenate whenever offset would exceed
+                # capacity, in units of `step` (256, a CLASS attribute). A 2048-
+                # token chunk is an exact multiple of 256, so capacity == offset
+                # at every chunk boundary and EVERY chunk reallocates every
+                # attention layer's full K and V, orphaning the old buffers.
+                #
+                # MEASURED: 16 attention layers x 2 (K,V) x 4 kv_heads x 256
+                # head_dim x 2B = 65,536 B per token of context, so the garbage
+                # is 4.85GB per chunk at 74k and 5.90GB at 92k — exactly the
+                # 4.6-5.9GB/chunk observed, and it scales with CONTEXT, which is
+                # why no chunk-size change ever helped. The slot accounting only
+                # reads current .nbytes, so it reported the legitimate +0.125GB
+                # and the orphans were invisible.
+                #
+                # Setting step per INSTANCE for the span makes the first chunk
+                # allocate full width and every later chunk write in place: zero
+                # reallocations, zero per-chunk garbage. It must be restored
+                # afterwards or the first decode token would allocate another
+                # full-width buffer.
+                _presized_kv_slots: List[Any] = []
+                if _KV_PRESIZE_SPAN and seq_len > 0:
+                    for _slot in (cache or []):
+                        if type(_slot).__name__ != "KVCache":
+                            continue
+                        if "step" in getattr(_slot, "__dict__", {}):
+                            continue  # already instance-scoped; leave it alone
+                        try:
+                            _slot.step = int(seq_len)
+                            _presized_kv_slots.append(_slot)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if _presized_kv_slots:
+                        logger.info(
+                            "Pre-sized %d KV slots to the full %d-token span "
+                            "(avoids a full K/V realloc per chunk).",
+                            len(_presized_kv_slots), seq_len,
+                        )
+
+                def _restore_kv_step() -> None:
+                    """Put `step` back on the class default.
+
+                    Must run on EVERY exit from the prefill — normal completion,
+                    a chunk failure, or an admission decline — because a slot
+                    left at span width would allocate another full-width buffer
+                    on the first decode token.
+                    """
+                    while _presized_kv_slots:
+                        _slot_to_restore = _presized_kv_slots.pop()
+                        try:
+                            del _slot_to_restore.step
+                        except Exception:  # noqa: BLE001
+                            pass
                 while processed < seq_len - 1:  # -1: keep last token for final logits
                     chunk_size = min(_tight_text_prefill_step_size, seq_len - 1 - processed)
                     while (
@@ -6301,19 +6363,25 @@ class MLLMBatchGenerator:
                             )
                         except Exception:  # noqa: BLE001
                             _valve_active, _valve_max_ws = 0, 0
-                        hybrid_chunk_valve_check(
-                            _valve_active,
-                            _valve_max_ws,
-                            _observed_chunk_transient,
-                            _observed_transient_at_ctx,
-                            int(getattr(request, "_cached_tokens", 0) or 0)
-                            + processed
-                            + chunk_size,
-                            _prefill_valve_min_margin,
-                            chunk_start=processed,
-                            chunk_end=processed + chunk_size,
-                            model_label="hybrid prefill",
-                        )
+                        try:
+                            hybrid_chunk_valve_check(
+                                    _valve_active,
+                                _valve_max_ws,
+                                _observed_chunk_transient,
+                                _observed_transient_at_ctx,
+                                int(getattr(request, "_cached_tokens", 0) or 0)
+                                + processed
+                                + chunk_size,
+                                _prefill_valve_min_margin,
+                                chunk_start=processed,
+                                chunk_end=processed + chunk_size,
+                                model_label="hybrid prefill",
+                            )
+                        except Exception:
+                            # A decline leaves the prefill; restore step first or
+                            # the slot keeps span width into decode.
+                            _restore_kv_step()
+                            raise
                     if _HYBRID_ADAPTIVE_CHUNK:
                         try:
                             _active_before_chunk = int(mx.get_active_memory())
@@ -6345,6 +6413,7 @@ class MLLMBatchGenerator:
                             f"total={seq_len}): {chunk_err} "
                             f"[cache: {', '.join(_cache_diag)}]"
                         )
+                        _restore_kv_step()
                         raise
                     if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
                         try:
@@ -6365,7 +6434,15 @@ class MLLMBatchGenerator:
                         _chunk_peak = int(mx.get_peak_memory())
                     except Exception:  # noqa: BLE001
                         _chunk_peak = 0
-                    if _chunk_peak > _peak_base:
+                    # Skip chunk 0 when learning the transient. With the KV
+                    # slots pre-sized, the FIRST chunk pays a one-time
+                    # full-width allocation (measured 8.71GB for a 101,502-token
+                    # span) that does NOT scale with context. The valve projects
+                    # the observed transient linearly in context, so feeding it
+                    # that one-time cost extrapolated to ~425GB at 100k and
+                    # declined every request — including spans this now fits
+                    # comfortably.
+                    if _chunk_peak > _peak_base and chunk_num > 0:
                         _this_transient = _chunk_peak - _peak_base
                         if _this_transient >= _observed_chunk_transient:
                             # Record the context this was observed AT, not just
@@ -6549,6 +6626,8 @@ class MLLMBatchGenerator:
                             )
                         except Exception:  # noqa: BLE001
                             pass
+
+                _restore_kv_step()
 
                 # Final chunk: get logits from last token
                 last_chunk = input_ids[:, processed:]

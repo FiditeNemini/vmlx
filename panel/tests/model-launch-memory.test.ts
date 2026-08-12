@@ -8,6 +8,7 @@ import {
   estimateModelLaunchAdmissionBytes,
   estimateModelLaunchResidentBytes,
   estimateMacReclaimableMemoryBytesFromVmStat,
+  launchResidentProfileForModel,
   launchResidentProfileForModelType,
   modelLaunchReserveWarning,
   unsafeModelLaunchOverrideEnabled,
@@ -246,5 +247,37 @@ describe('a refusal must be keyed to the measurement, not the worst case', () =>
       const profile = launchResidentProfileForModelType(modelType)
       expect(profile.admissionRatio).toBeLessThanOrEqual(profile.ratio)
     }
+  })
+})
+
+describe('an unidentifiable model still yields a usable estimate', () => {
+  /**
+   * The catch path returned a hand-written `{ ratio, streamsWeights }` that
+   * omitted `admissionRatio`. `modelFileBytes * undefined` is NaN, so the
+   * admission estimate was NaN and the refusal message read "estimated launch
+   * resident ~NaN GB". Caught by `npm run typecheck`, which the vitest run does
+   * not perform — so the suite was green with this shipped.
+   */
+  const GB = 1e9
+
+  it('falls back to the full-resident profile with both ratios set', () => {
+    const dir = makeModelDir('no-config')
+    // No config.json at all — readFileSync throws.
+    const profile = launchResidentProfileForModel(dir)
+    expect(profile.ratio).toBe(1.0)
+    expect(profile.admissionRatio).toBe(1.0)
+    expect(profile.streamsWeights).toBe(false)
+  })
+
+  it('produces a finite admission estimate, not NaN', () => {
+    const dir = makeModelDir('bad-config')
+    writeFileSync(join(dir, 'config.json'), '{ this is not json')
+    const admission = estimateModelLaunchAdmissionBytes(dir, 50 * GB, 128 * GB)
+    expect(Number.isFinite(admission)).toBe(true)
+    expect(admission).toBe(50 * GB + MODEL_LAUNCH_FIXED_OVERHEAD_BYTES)
+    // And the refusal it feeds must be a real decision, not "~NaN GB".
+    expect(unsafeModelLaunchReason(admission, 100 * GB, {})).toBeNull()
+    expect(unsafeModelLaunchReason(admission, 10 * GB, {})).toContain('GB')
+    expect(unsafeModelLaunchReason(admission, 10 * GB, {})).not.toContain('NaN')
   })
 })

@@ -501,7 +501,17 @@ describe("Ollama gateway parity contracts", () => {
       resolve(process.cwd(), "src/main/tray.ts"),
       "utf8",
     );
-    expect(source).toContain("gateway_single_model_mode");
+    const gatewaySettingsKeys = readFileSync(
+      resolve(process.cwd(), "src/shared/gatewaySettingsKeys.ts"),
+      "utf8",
+    );
+    // The key now has ONE spelling in src/shared/gatewaySettingsKeys.ts. It was
+    // hand-written at six call sites, and because every reader compares
+    // `=== 'true'` against a getSetting that returns undefined for an unknown
+    // key, a typo in any one of them would silently stop enforcing single-model
+    // mode with nothing thrown and no test failing.
+    expect(source).toContain("GATEWAY_SINGLE_MODEL_MODE_KEY");
+    expect(gatewaySettingsKeys).toContain("'gateway_single_model_mode'");
     expect(source).toContain("enforceSingleModelMode");
     expect(source).toContain("sessionManager.stopSession(s.id)");
     expect(source).toContain("single_model_mode: this.singleModelMode");

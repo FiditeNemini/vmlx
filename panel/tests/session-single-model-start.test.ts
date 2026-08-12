@@ -34,7 +34,10 @@ describe('manual session single-model enforcement', () => {
     const block = source.slice(start, end)
 
     expect(source).toContain('private singleModelStartTransitionPending: Promise<void>')
-    expect(block).toContain("db.getSetting('gateway_single_model_mode') === 'true'")
+    // The literal moved to src/shared/gatewaySettingsKeys.ts so a typo cannot
+    // silently disable enforcement at one call site. Assert the gate still reads
+    // the setting HERE, through the shared key.
+    expect(block).toContain('isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))')
     expect(block).toContain('await this.stopDetectedLocalEnginesForSingleModel(sessionId)')
     expect(block).toContain('await this.adoptDetectedTargetProcessForStart(sessionId)')
     expect(block).toContain("other.type !== 'remote'")
@@ -75,7 +78,7 @@ describe('manual session single-model enforcement', () => {
     const pruneBlock = source.slice(pruneStart, pruneEnd)
 
     expect(detectBlock).toContain('processes = await this.pruneDetectedProcessesForSingleModel(processes)')
-    expect(pruneBlock).toContain("db.getSetting('gateway_single_model_mode') !== 'true'")
+    expect(pruneBlock).toContain('!isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))')
     expect(pruneBlock).toContain('const healthy = processes.filter(proc => proc.healthy)')
     expect(pruneBlock).toContain("['running', 'loading', 'standby'].includes(owner.status)")
     expect(pruneBlock).toContain('keeping pid=${keep.pid} port=${keep.port}')

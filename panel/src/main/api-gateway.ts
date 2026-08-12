@@ -8,6 +8,7 @@
 //                                                    → [Session B :52432]
 //   Ollama /api/* endpoints translated to OpenAI format before forwarding.
 
+import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
 import {
   ClientRequest,
   createServer,
@@ -37,7 +38,7 @@ const JIT_TIMEOUT_MS = 120_000;
 const HEALTH_POLL_MS = 2_000;
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300;
 const PROXY_TIMEOUT_MS = GENERIC_DEFAULT_TIMEOUT_SECONDS * 1000; // generic 5 min max for a single proxied request
-const SINGLE_MODEL_MODE_KEY = "gateway_single_model_mode";
+const SINGLE_MODEL_MODE_KEY = GATEWAY_SINGLE_MODEL_MODE_KEY;
 
 interface ResolvedSession {
   id: string;
@@ -109,7 +110,7 @@ export class ApiGateway extends EventEmitter {
     return this.inFlightResponses.size;
   }
   get singleModelMode(): boolean {
-    return db.getSetting(SINGLE_MODEL_MODE_KEY) === "true";
+    return isGatewaySettingEnabled(db.getSetting(SINGLE_MODEL_MODE_KEY));
   }
 
   setSingleModelMode(enabled: boolean): void {

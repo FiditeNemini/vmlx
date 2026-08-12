@@ -10,6 +10,7 @@
  * - Gray: no models loaded
  */
 
+import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
 import { app, Tray, Menu, nativeImage, BrowserWindow, clipboard } from 'electron'
 import type { ProcessManager } from './process-manager'
 import { db } from './database'
@@ -106,7 +107,7 @@ function buildMenu(
   const totalRunning = running.length + sessionOnlyCount
 
   const gwPort = db.getSetting('gateway_port') || '8080'
-  const singleModelMode = db.getSetting('gateway_single_model_mode') === 'true'
+  const singleModelMode = isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))
   const items: Electron.MenuItemConstructorOptions[] = [
     {
       label: t('main.tray.modelsLoaded', { n: totalRunning }),

@@ -1,3 +1,4 @@
+import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
 import { powerSaveBlocker } from 'electron'
@@ -1919,7 +1920,7 @@ export class SessionManager extends EventEmitter {
     }
 
     const startLocalSession = async () => {
-      if (db.getSetting('gateway_single_model_mode') === 'true') {
+      if (isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) {
         // Validate before unloading the current model. Without this ordering a
         // stale/malformed target can strand the user with zero loaded models.
         this.preflightSessionStart(sessionId)
@@ -1952,7 +1953,7 @@ export class SessionManager extends EventEmitter {
       await this.withSessionLock(sessionId, () => this._startSessionInner(sessionId))
     }
 
-    if (db.getSetting('gateway_single_model_mode') !== 'true') {
+    if (!isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) {
       await startLocalSession()
       return
     }
@@ -1976,7 +1977,7 @@ export class SessionManager extends EventEmitter {
     targetSessionId: string,
     options: { preserveActiveTarget?: boolean } = {},
   ): Promise<boolean> {
-    if (db.getSetting('gateway_single_model_mode') !== 'true') return false
+    if (!isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) return false
     this.preflightSessionStart(targetSessionId)
     await this.stopDetectedLocalEnginesForSingleModel(targetSessionId)
     if (options.preserveActiveTarget) {
@@ -3128,7 +3129,7 @@ export class SessionManager extends EventEmitter {
   async detectAndAdoptAll(): Promise<Session[]> {
     let processes = await this.detect()
     const nonAdoptableDsv4 = processes.filter(proc => !canAdoptExistingLocalEngine(proc.modelPath))
-    const singleModelMode = db.getSetting('gateway_single_model_mode') === 'true'
+    const singleModelMode = isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))
     const existingSessions = db.getSessions()
     for (const proc of nonAdoptableDsv4) {
       if (singleModelMode) {
@@ -3293,7 +3294,7 @@ export class SessionManager extends EventEmitter {
   }
 
   private async pruneDetectedProcessesForSingleModel(processes: DetectedProcess[]): Promise<DetectedProcess[]> {
-    if (db.getSetting('gateway_single_model_mode') !== 'true') return processes
+    if (!isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) return processes
     const healthy = processes.filter(proc => proc.healthy)
     if (healthy.length <= 1) return processes
 

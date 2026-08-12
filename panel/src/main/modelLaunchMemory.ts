@@ -83,7 +83,14 @@ export function launchResidentProfileForModel(modelPath: string): LaunchResident
     const config = JSON.parse(readFileSync(join(modelPath, 'config.json'), 'utf8'))
     return launchResidentProfileForModelType(String(config?.model_type || ''))
   } catch (_) {
-    return { ratio: 1.0, streamsWeights: false }
+    // An unreadable config.json means we cannot identify the family, so assume
+    // the full-resident profile — the conservative choice for both numbers.
+    //
+    // This must go through launchResidentProfileForModelType rather than
+    // hand-rolling the object: written out by hand it omitted admissionRatio,
+    // and `modelFileBytes * undefined` is NaN, so estimateModelLaunchAdmissionBytes
+    // returned NaN and the refusal read "estimated launch resident ~NaN GB".
+    return launchResidentProfileForModelType('')
   }
 }
 

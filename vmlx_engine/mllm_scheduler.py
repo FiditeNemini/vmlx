@@ -755,16 +755,17 @@ class MLLMScheduler:
                     # with distinct prefixes regardless of per-model KV size — the
                     # exact gap the text path closed in Wave-18. enforce_byte_budget()
                     # evicts only free (ref==0) cached blocks, disk-L2 first.
-                    from .memory_cache import MemoryCacheConfig as _MemCacheCfg
+                    from .memory_cache import resolve_paged_resident_policy
 
-                    _mllm_paged_resident_budget = (
-                        0
-                        if block_disk_only
-                        else _MemCacheCfg(
-                            max_memory_mb=self.config.cache_memory_mb,
-                            max_memory_percent=self.config.cache_memory_percent,
-                        ).compute_memory_limit()
-                    )
+                    (
+                        _mllm_paged_resident_budget,
+                        _mllm_explicit_zero_cache,
+                    ) = resolve_paged_resident_policy(self.config, block_disk_only)
+                    if _mllm_explicit_zero_cache:
+                        logger.info(
+                            "cache-memory-mb=0 requested: MLLM paged RAM payloads "
+                            "disabled (frugal); blocks restore transiently."
+                        )
                     _mllm_index_blocks = resolve_mllm_index_blocks(
                         self.config.paged_cache_block_size,
                         self.config.max_cache_blocks,
@@ -785,6 +786,7 @@ class MLLMScheduler:
                         disk_store=block_disk_store,
                         max_resident_bytes=_mllm_paged_resident_budget,
                         disk_only=block_disk_only,
+                        frugal=_mllm_explicit_zero_cache,
                     )
                     if block_disk_only:
                         logger.info(

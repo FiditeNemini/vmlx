@@ -374,9 +374,22 @@ def test_both_schedulers_pass_max_resident_bytes_to_paged_manager():
             f"{name}: production PagedCacheManager must pass max_resident_bytes "
             f"(RAM byte ceiling parity, #98)"
         )
-        assert any("compute_memory_limit()" in src for _ in prod), (
-            f"{name}: must derive the ceiling from MemoryCacheConfig.compute_memory_limit()"
+        # The ceiling is still derived from MemoryCacheConfig.compute_memory_limit(),
+        # but through ONE shared resolver rather than an inline copy per
+        # scheduler. Keeping two copies is how the frugal fix for an explicit
+        # --cache-memory-mb 0 came to be wired into the text path only, leaving
+        # every VLM reporting ram_mirror_policy=resident (measured on /health).
+        assert "resolve_paged_resident_policy(" in src, (
+            f"{name}: must derive the ceiling via the shared resolver"
         )
+
+    from vmlx_engine.memory_cache import resolve_paged_resident_policy
+    import inspect
+
+    assert "compute_memory_limit()" in inspect.getsource(resolve_paged_resident_policy), (
+        "the shared resolver must still derive the ceiling from "
+        "MemoryCacheConfig.compute_memory_limit()"
+    )
 
 
 def test_finished_paged_store_reenforces_budget_after_ref_release():

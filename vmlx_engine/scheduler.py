@@ -1269,7 +1269,7 @@ class Scheduler:
                 # +3.7 GB vs +98 MB for the memory-aware path on the same
                 # workload). enforce_byte_budget() evicts only free (ref==0)
                 # cached blocks, disk-L2 write-through first.
-                from .memory_cache import MemoryCacheConfig as _MemCacheCfg
+                from .memory_cache import resolve_paged_resident_policy
 
                 if _block_disk_only and block_disk_store is None:
                     raise RuntimeError(
@@ -1277,26 +1277,8 @@ class Scheduler:
                         "could not be initialized; refusing to substitute a RAM backend"
                     )
 
-                _paged_resident_budget = (
-                    0
-                    if _block_disk_only
-                    else _MemCacheCfg(
-                        max_memory_mb=self.config.cache_memory_mb,
-                        max_memory_percent=self.config.cache_memory_percent,
-                    ).compute_memory_limit()
-                )
-                # An explicit `--cache-memory-mb 0` asks for NO resident cache.
-                # PagedCacheManager reads max_resident_bytes=0 as the legacy
-                # "unbounded" sentinel, so that request used to buy the exact
-                # opposite: no byte ceiling, and every gated enforce_byte_budget
-                # call site skipped. The same 0 already means "store nothing" to
-                # MemoryAwarePrefixCache, so one flag had opposite meanings per
-                # tier. Route it to the frugal policy, which is what "no RAM
-                # payloads" already means here.
-                _explicit_zero_cache = (
-                    not _block_disk_only
-                    and self.config.cache_memory_mb is not None
-                    and int(self.config.cache_memory_mb) == 0
+                _paged_resident_budget, _explicit_zero_cache = (
+                    resolve_paged_resident_policy(self.config, _block_disk_only)
                 )
                 if _explicit_zero_cache:
                     logger.info(

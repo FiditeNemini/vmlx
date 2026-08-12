@@ -71,16 +71,51 @@ def test_env_off_values_do_not_engage_frugal(monkeypatch, value):
     assert pool.paged_frugal is False
 
 
-def test_scheduler_routes_an_explicit_zero_to_frugal():
-    source = (ROOT / "vmlx_engine" / "scheduler.py").read_text()
-    start = source.index("_explicit_zero_cache = (")
-    block = source[start : start + 900]
-    # Only an EXPLICIT zero counts — None means "auto-detect from percent".
-    assert "self.config.cache_memory_mb is not None" in block
-    assert "int(self.config.cache_memory_mb) == 0" in block
-    # And disk-only already has its own zero-budget meaning; don't double up.
-    assert "not _block_disk_only" in block
-    assert "frugal=_explicit_zero_cache," in source
+def test_the_policy_rule_exists_once():
+    """Only an EXPLICIT zero counts, and disk-only keeps its own meaning."""
+    from vmlx_engine.memory_cache import resolve_paged_resident_policy
+    import inspect
+
+    src = inspect.getsource(resolve_paged_resident_policy)
+    assert "config.cache_memory_mb is not None" in src
+    assert "int(config.cache_memory_mb) == 0" in src
+    assert "if disk_only:" in src
+
+
+def test_the_resolver_returns_frugal_only_for_an_explicit_zero():
+    from types import SimpleNamespace
+    from vmlx_engine.memory_cache import resolve_paged_resident_policy
+
+    def cfg(mb):
+        return SimpleNamespace(cache_memory_mb=mb, cache_memory_percent=0.15)
+
+    _, frugal = resolve_paged_resident_policy(cfg(0), disk_only=False)
+    assert frugal is True, "explicit 0 must engage frugal"
+
+    _, frugal = resolve_paged_resident_policy(cfg(None), disk_only=False)
+    assert frugal is False, "None means auto-detect, not frugal"
+
+    _, frugal = resolve_paged_resident_policy(cfg(4096), disk_only=False)
+    assert frugal is False
+
+    budget, frugal = resolve_paged_resident_policy(cfg(0), disk_only=True)
+    assert (budget, frugal) == (0, False), "disk-only keeps its own zero meaning"
+
+
+def test_BOTH_schedulers_use_the_shared_resolver():
+    """The first version of this fix lived only in the text scheduler.
+
+    MEASURED consequence: Gemma 4 (a VLM, hence the MLLM scheduler) still
+    reported paged_frugal=False / ram_mirror_policy=resident on /health with
+    --cache-memory-mb 0. Every unit test passed; the fix was inert on half the
+    engine. Both paths must call the one resolver AND pass frugal through.
+    """
+    for name in ("scheduler.py", "mllm_scheduler.py"):
+        source = (ROOT / "vmlx_engine" / name).read_text()
+        assert "resolve_paged_resident_policy(" in source, name
+        assert re.search(r"frugal=_\w*explicit_zero_cache,", source), name
+        # and neither may rebuild the budget inline again
+        assert "MemoryCacheConfig as _MemCacheCfg" not in source, name
 
 
 def test_disk_only_still_reports_disk_only_not_frugal():

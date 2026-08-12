@@ -49,6 +49,40 @@ _FALLBACK_CACHE_CEILING_BYTES = 32 * 1024 * 1024 * 1024
 _MIN_CACHE_CEILING_BYTES = 512 * _BYTES_PER_MB
 
 
+def resolve_paged_resident_policy(config, disk_only: bool):
+    """The ONE rule for how a cache-memory setting becomes a paged-RAM policy.
+
+    Returns ``(max_resident_bytes, frugal)``.
+
+    Why this is a function and not two inline copies: ``PagedCacheManager``
+    documents ``max_resident_bytes == 0`` as the legacy UNBOUNDED sentinel,
+    while ``MemoryAwarePrefixCache`` reads the same 0 as "store nothing". So an
+    explicit ``--cache-memory-mb 0`` -- a user asking for the smallest possible
+    resident cache -- resolved to a 0 budget and bought the LARGEST one: no
+    byte ceiling, and every gated ``enforce_byte_budget`` call site skipping.
+
+    Routing that request to the frugal policy instead was first written only in
+    the text scheduler. MEASURED on the box afterwards: Gemma 4 (a VLM, so the
+    MLLM scheduler) still reported ``paged_frugal=False,
+    ram_mirror_policy=resident`` on /health with ``--cache-memory-mb 0``. The
+    unit tests all passed; the fix was simply inert on half the engine. Hence
+    one function, called by both.
+
+    Only an EXPLICIT zero counts. ``None`` means "auto-detect from percent",
+    and disk-only already has its own zero-budget meaning.
+    """
+    if disk_only:
+        return 0, False
+    budget = MemoryCacheConfig(
+        max_memory_mb=config.cache_memory_mb,
+        max_memory_percent=config.cache_memory_percent,
+    ).compute_memory_limit()
+    explicit_zero = (
+        config.cache_memory_mb is not None and int(config.cache_memory_mb) == 0
+    )
+    return budget, explicit_zero
+
+
 def _resolve_cache_memory_ceiling_bytes() -> int:
     """The largest cache this machine may hold, from the OS rather than a guess.
 

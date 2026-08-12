@@ -15032,8 +15032,44 @@ async def ollama_show(fastapi_request: Request):
     """
     name = _resolve_model_name()
     capabilities = ["completion"]
-    _tp = globals().get("_tool_parser")
-    capabilities.append("tools")  # permissive default — most models support tools
+    # Advertise "tools" only when a tool parser actually resolves for the loaded
+    # bundle. This used to be an unconditional append justified as a "permissive
+    # default — most models support tools", above a line that fetched
+    # ``globals().get("_tool_parser")`` and never read it. That name has never
+    # existed anywhere in this module — the global is ``_tool_call_parser`` —
+    # so the lookup was always None and the intended gate never ran. (Which is
+    # lucky: gating on that typo'd name would have removed "tools" from EVERY
+    # model and dropped vMLX out of Copilot's picker entirely.)
+    #
+    # Advertising tools without a parser is not harmless. The client sends tool
+    # schemas, the model emits its native tool markup, nothing extracts it, and
+    # the raw markup lands in visible content as the answer.
+    #
+    # Resolution mirrors _native_tool_format_enabled: explicit CLI parser wins,
+    # otherwise the registry's parser for this bundle; an explicit disable wins
+    # over both. The parser must also be constructible — advertising a name
+    # ToolParserManager cannot resolve is the same lie one step later.
+    if not _tool_call_parser_disabled_explicitly:
+        _active_tool_parser = _tool_call_parser
+        if not _active_tool_parser:
+            try:
+                from .model_config_registry import get_model_config_registry
+
+                _active_tool_parser = get_model_config_registry().get_tool_parser(
+                    _model_path or _model_name or ""
+                )
+            except Exception:
+                _active_tool_parser = None
+        if _active_tool_parser:
+            try:
+                ToolParserManager.get_tool_parser(_active_tool_parser)
+                capabilities.append("tools")
+            except KeyError:
+                logger.warning(
+                    "Not advertising the 'tools' capability: resolved parser "
+                    "%r is not registered",
+                    _active_tool_parser,
+                )
 
     # Vision — on when engine is MLLM mode AND the loader did not explicitly
     # fall back to a text-only runtime (for example Mistral 4 before mlx_vlm

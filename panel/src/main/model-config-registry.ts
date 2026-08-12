@@ -615,19 +615,36 @@ function isExplicitAffineJangConfig(jangCfg: any): boolean {
 function readJangDefaultEnableThinking(jangCfg: any): boolean | undefined {
   if (!jangCfg || typeof jangCfg !== 'object') return undefined
   const chat = jangCfg.chat
-  if (!chat || typeof chat !== 'object') return undefined
-  const templateDefaults = chat.template_kwargs_defaults
-  if (templateDefaults && typeof templateDefaults === 'object') {
-    const value = templateDefaults.enable_thinking
-    if (typeof value === 'boolean') return value
+  if (chat && typeof chat === 'object') {
+    const templateDefaults = chat.template_kwargs_defaults
+    if (templateDefaults && typeof templateDefaults === 'object') {
+      const value = templateDefaults.enable_thinking
+      if (typeof value === 'boolean') return value
+    }
+    const reasoning = chat.reasoning
+    if (reasoning && typeof reasoning === 'object') {
+      const value = reasoning.default_enabled
+      if (typeof value === 'boolean') return value
+      const defaultMode = String(reasoning.default_mode || '').trim().toLowerCase()
+      if (['thinking', 'reasoning', 'think', 'on', 'true'].includes(defaultMode)) return true
+      if (['chat', 'direct', 'instruct', 'off', 'false'].includes(defaultMode)) return false
+    }
   }
-  const reasoning = chat.reasoning
-  if (reasoning && typeof reasoning === 'object') {
-    const value = reasoning.default_enabled
-    if (typeof value === 'boolean') return value
-    const defaultMode = String(reasoning.default_mode || '').trim().toLowerCase()
-    if (['thinking', 'reasoning', 'think', 'on', 'true'].includes(defaultMode)) return true
-    if (['chat', 'direct', 'instruct', 'off', 'false'].includes(defaultMode)) return false
+  // 2026-08 Nemotron stamps declare "on"/"off" strings in a TOP-LEVEL
+  // reasoning block and under capabilities (mirrors the engine reader in
+  // model_config_registry._jang_stamp_default_enable_thinking). Already
+  // shipped, so honor the spelling; an "off" sibling must not be ignored.
+  const topReasoning = jangCfg.reasoning
+  if (topReasoning && typeof topReasoning === 'object') {
+    const value = String(topReasoning.default || '').trim().toLowerCase()
+    if (value === 'on') return true
+    if (value === 'off') return false
+  }
+  const capabilities = jangCfg.capabilities
+  if (capabilities && typeof capabilities === 'object') {
+    const value = String(capabilities.default_reasoning || '').trim().toLowerCase()
+    if (value === 'on') return true
+    if (value === 'off') return false
   }
   return undefined
 }

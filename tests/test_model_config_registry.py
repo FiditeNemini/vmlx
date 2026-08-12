@@ -502,6 +502,52 @@ class TestModelConfigRegistry:
             "jang_config.chat.template_kwargs_defaults.enable_thinking"
         )
 
+    def test_nemotron_stamp_spellings_of_the_reasoning_default_are_honored(
+        self, empty_registry, tmp_path
+    ):
+        """2026-08 Nemotron stamps declare "on"/"off" strings in a TOP-LEVEL
+        reasoning block and under capabilities — neither is the canonical
+        chat.reasoning.default_enabled spelling. "off" is the load-bearing
+        case: the generic reasoning-capable fallback lands ON, so an ignored
+        reader is invisible for an "on" bundle and silently wrong for "off".
+        """
+        empty_registry.register(
+            ModelConfig(
+                family_name="nemotron_h",
+                model_types=["nemotron_h"],
+                cache_type="hybrid",
+                tool_parser="nemotron",
+                reasoning_parser="deepseek_r1",
+                think_in_template=True,
+                supports_thinking=True,
+                priority=10,
+            )
+        )
+        (tmp_path / "config.json").write_text(
+            json.dumps({"model_type": "nemotron_h"})
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps(
+                {
+                    "capabilities": {
+                        "family": "nemotron_h",
+                        "reasoning_parser": "deepseek_r1",
+                        "supports_thinking": True,
+                        "default_reasoning": "on",
+                    },
+                    "reasoning": {"supported": True, "default": "off"},
+                }
+            )
+        )
+
+        result = empty_registry.lookup(str(tmp_path))
+
+        # The dedicated reasoning block outranks the capabilities summary.
+        assert result.architecture_hints["default_enable_thinking"] is False
+        assert result.architecture_hints["default_enable_thinking_source"] == (
+            "jang_config.reasoning.default"
+        )
+
     def test_zaya_is_reasoning_capable_but_does_not_auto_open_in_no_think_prompt(
         self, empty_registry, tmp_path
     ):

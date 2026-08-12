@@ -85,6 +85,25 @@ def collect_multi_eos_ids(
     except Exception:
         pass
 
+    # jang_config.chat.stop_token_ids is the bundle's own declared stop set.
+    # Every shipped bundle so far duplicates it into generation_config.json,
+    # but the key is part of the stamp contract — a bundle carrying ONLY this
+    # spelling (all 2026-08 Nemotron stamps declare it) must still stop at
+    # its turn boundary instead of running on.
+    try:
+        jang_cfg_path = model_path / "jang_config.json"
+        if jang_cfg_path.is_file():
+            jang_chat = json.loads(jang_cfg_path.read_text()).get("chat")
+            jang_stops = (
+                jang_chat.get("stop_token_ids") if isinstance(jang_chat, dict) else None
+            )
+            if isinstance(jang_stops, list):
+                for tid in jang_stops:
+                    if isinstance(tid, int) and not isinstance(tid, bool) and tid >= 0 and tid not in resolved:
+                        resolved.append(tid)
+    except Exception:
+        pass
+
     rust_tok = None
     if use_rust_tokenizer:
         try:

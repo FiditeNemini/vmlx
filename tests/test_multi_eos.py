@@ -157,3 +157,47 @@ def test_collect_multi_eos_ids_rejects_unknown_tokens_as_unresolved(tmp_path: Pa
 
     assert resolved == [1]
     assert unresolved == ["<|missing|>"]
+
+
+def test_collect_multi_eos_ids_honors_jang_config_stop_token_ids(tmp_path: Path):
+    """jang_config.chat.stop_token_ids is the bundle's own declared stop set.
+
+    Every 2026-08 Nemotron stamp declares it, and before this reader existed
+    the key was parsed by NOTHING — a bundle carrying only this spelling (no
+    generation_config.json) kept generating past its turn boundary.
+    """
+    _write_json(
+        tmp_path / "jang_config.json",
+        {"chat": {"stop_token_ids": [2, 11]}},
+    )
+
+    tok = _FakeTokenizer(eos_token_id=11)
+    resolved, unresolved = collect_multi_eos_ids(
+        tok,
+        str(tmp_path),
+        registry_eos_tokens=None,
+        reasoning_parser=None,
+        use_rust_tokenizer=False,
+    )
+
+    assert resolved == [11, 2]
+    assert unresolved == []
+
+
+def test_collect_multi_eos_ids_ignores_malformed_jang_stop_ids(tmp_path: Path):
+    """Non-int, negative, and boolean entries must not poison the stop set."""
+    _write_json(
+        tmp_path / "jang_config.json",
+        {"chat": {"stop_token_ids": ["11", -3, True, None, 7]}},
+    )
+
+    tok = _FakeTokenizer(eos_token_id=1)
+    resolved, _ = collect_multi_eos_ids(
+        tok,
+        str(tmp_path),
+        registry_eos_tokens=None,
+        reasoning_parser=None,
+        use_rust_tokenizer=False,
+    )
+
+    assert resolved == [1, 7]

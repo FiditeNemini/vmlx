@@ -188,18 +188,32 @@ def _jang_stamp_default_enable_thinking(jang_config: Any) -> tuple[bool | None, 
     if not isinstance(jang_config, dict):
         return None, None
     chat = jang_config.get("chat")
-    if not isinstance(chat, dict):
-        return None, None
-    template_defaults = chat.get("template_kwargs_defaults")
-    if isinstance(template_defaults, dict):
-        value = template_defaults.get("enable_thinking")
-        if isinstance(value, bool):
-            return value, "jang_config.chat.template_kwargs_defaults.enable_thinking"
-    reasoning = chat.get("reasoning")
+    if isinstance(chat, dict):
+        template_defaults = chat.get("template_kwargs_defaults")
+        if isinstance(template_defaults, dict):
+            value = template_defaults.get("enable_thinking")
+            if isinstance(value, bool):
+                return value, "jang_config.chat.template_kwargs_defaults.enable_thinking"
+        reasoning = chat.get("reasoning")
+        if isinstance(reasoning, dict):
+            value = reasoning.get("default_enabled")
+            if isinstance(value, bool):
+                return value, "jang_config.chat.reasoning.default_enabled"
+    # The 2026-08 Nemotron stamps declare the default as an "on"/"off" string
+    # in a TOP-LEVEL reasoning block and under capabilities. Those bundles are
+    # already shipped, so honor their spelling too; today they say "on" (which
+    # the generic reasoning-capable fallback also lands on), but a sibling
+    # stamped "off" must not be silently ignored.
+    reasoning = jang_config.get("reasoning")
     if isinstance(reasoning, dict):
-        value = reasoning.get("default_enabled")
-        if isinstance(value, bool):
-            return value, "jang_config.chat.reasoning.default_enabled"
+        value = str(reasoning.get("default") or "").lower()
+        if value in {"on", "off"}:
+            return value == "on", "jang_config.reasoning.default"
+    capabilities = jang_config.get("capabilities")
+    if isinstance(capabilities, dict):
+        value = str(capabilities.get("default_reasoning") or "").lower()
+        if value in {"on", "off"}:
+            return value == "on", "jang_config.capabilities.default_reasoning"
     return None, None
 
 

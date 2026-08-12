@@ -474,6 +474,32 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.nativeMtp).toBeUndefined()
   })
 
+  it('honors the Nemotron stamp spellings of the reasoning default', () => {
+    // 2026-08 Nemotron stamps declare "on"/"off" strings in a TOP-LEVEL
+    // reasoning block and under capabilities.default_reasoning — neither is
+    // the canonical chat.reasoning.default_enabled spelling. "off" is the
+    // load-bearing case: reasoning-capable families default ON otherwise, so
+    // an ignored reader is silently wrong exactly for "off" bundles.
+    const dir = makeModelDir(
+      { model_type: 'nemotron_h' },
+      {
+        capabilities: {
+          family: 'nemotron_h',
+          reasoning_parser: 'deepseek_r1',
+          supports_thinking: true,
+          default_reasoning: 'on',
+        },
+        reasoning: { supported: true, default: 'off' },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.family).toBe('nemotron-h')
+    // The dedicated reasoning block outranks the capabilities summary.
+    expect(detected.defaultEnableThinking).toBe(false)
+  })
+
   it('detects text ZAYA as CCA hybrid with opt-in qwen3 reasoning parser', () => {
     const dir = makeModelDir(
       { model_type: 'zaya' },

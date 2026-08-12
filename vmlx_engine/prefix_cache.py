@@ -3844,8 +3844,20 @@ class BlockAwarePrefixCache:
                     _write_fence["disk_store"] = disk_store
                     _write_fence["fence_id"] = disk_write_fence_id
                 except Exception as fence_error:
-                    logger.warning(
-                        "Block disk: could not begin request write fence for %s: %s",
+                    # The write still proceeds, but WITHOUT a fence: the guards
+                    # below treat a None fence id as "no tracking", so nothing
+                    # settles it and a native payload can stay keep_resident
+                    # with no drain path. That is a real degradation of the
+                    # commit-before-eviction guarantee, not a routine hiccup —
+                    # the most common cause is the >64 unfinished-fence cap, so
+                    # a burst of these means the L2 writer is falling behind.
+                    #
+                    # ERROR, not WARNING: at WARNING this was easy to miss while
+                    # the tier quietly stopped being durable.
+                    logger.error(
+                        "Block disk: could not begin request write fence for "
+                        "%s: %s — writes proceed UNFENCED; native payloads may "
+                        "stay resident with no drain path.",
                         request_id,
                         fence_error,
                     )

@@ -326,7 +326,8 @@ def test_run_one_idle_task_processes_single_entry_and_stores(monkeypatch):
     scheduler._ssm_state_cache = SimpleNamespace(
         store=lambda tokens, plen, layers: stored.append(
             (tokens, plen, layers)
-        )
+        ),
+        has_complete=lambda *a, **k: False,
     )
     kv_layer = SimpleNamespace()
     ssm_layer = SimpleNamespace()
@@ -352,7 +353,9 @@ def test_run_one_idle_task_processes_single_entry_and_stores(monkeypatch):
 
 def test_idle_rederive_parks_before_pop_when_foreground_pending():
     scheduler = _idle_ready_scheduler()
-    scheduler._ssm_state_cache = SimpleNamespace(store=lambda *a: None)
+    scheduler._ssm_state_cache = SimpleNamespace(
+        store=lambda *a: None, has_complete=lambda *a, **k: False
+    )
     scheduler._ssm_rederive_queue.append(([1, 2, 3], 3, "req-1"))
     scheduler._ensure_ssm_rederive_idle_task()
     scheduler.running = {"req-live": object()}
@@ -368,7 +371,9 @@ def test_idle_rederive_parks_mid_prefill_and_requeues_entry_at_front():
     from types import MethodType
 
     scheduler = _idle_ready_scheduler()
-    scheduler._ssm_state_cache = SimpleNamespace(store=lambda *a: None)
+    scheduler._ssm_state_cache = SimpleNamespace(
+        store=lambda *a: None, has_complete=lambda *a, **k: False
+    )
     first = ([1, 2, 3], 3, "req-a")
     second = ([9, 8], 2, "req-b")
     scheduler._ssm_rederive_queue.extend([first, second])
@@ -406,7 +411,8 @@ def test_idle_rederive_foreground_race_yields_before_first_model_chunk(
     stored = []
     model_calls = []
     scheduler._ssm_state_cache = SimpleNamespace(
-        store=lambda *args: stored.append(args)
+        store=lambda *args: stored.append(args),
+        has_complete=lambda *a, **k: False,
     )
     first = ([1, 2, 3], 3, "req-raced")
     second = ([9, 8], 2, "req-next")
@@ -544,3 +550,35 @@ def test_mllm_process_loop_idle_branch_drains_one_task():
     assert "self.has_idle_tasks()" in loop_block
     assert "self.run_one_idle_task" in loop_block
     assert "_step_executor" in loop_block
+
+
+def test_idle_rederive_skips_when_complete_companion_already_stored():
+    """A cache HIT restores FROM the companion at this exact key, then the
+    store path re-queued a re-derive of the very same state. Without the
+    has_complete probe (which the MLLM drain has carried since 1e8602b40 but
+    this text path never got), the idle tick burned a full prompt-length
+    prefill recomputing byte-identical state — starving the next request's
+    TTFT on every warm turn."""
+    from types import MethodType
+
+    scheduler = _idle_ready_scheduler()
+    prefills = []
+    scheduler._ssm_state_cache = SimpleNamespace(
+        store=lambda *a: None,
+        has_complete=lambda tokens, plen, **k: (tokens, plen) == ([1, 2, 3], 3),
+    )
+
+    def _fail_prefill(self, tokens, should_stop=None):
+        prefills.append(tokens)
+        return None
+
+    scheduler._prefill_for_prompt_only_cache = MethodType(_fail_prefill, scheduler)
+    scheduler._ssm_rederive_queue.append(([1, 2, 3], 3, "req-warm"))
+    scheduler._ensure_ssm_rederive_idle_task()
+
+    assert scheduler.run_one_idle_task() is True
+
+    assert prefills == [], "complete companion must skip the clean prefill"
+    assert scheduler._ssm_rederive_queue == []
+    assert scheduler.has_idle_tasks() is False
+    assert scheduler._ssm_rederive_task_queued is False

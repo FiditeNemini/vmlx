@@ -6361,6 +6361,23 @@ class Scheduler:
             return IdleTaskResult.PARKED
         # Process ONE entry per idle iteration to avoid long GPU stalls.
         tokens, prompt_len, orig_request_id = queue.pop(0)
+        if self._ssm_state_cache.has_complete(tokens, prompt_len):
+            # Stored between enqueue and this idle tick (typical after a cache
+            # HIT restored from that very entry, or an identical request
+            # completed first). The deferred prefill would recompute
+            # byte-identical state — a full wasted prompt-length prefill that
+            # starves the next request's TTFT. Same probe the MLLM drain has
+            # carried since 1e8602b40; this text path never got it.
+            logger.info(
+                "SSM re-derive skipped at idle for %s: complete companion "
+                "already stored at %d-token key",
+                orig_request_id,
+                prompt_len,
+            )
+            if queue:
+                return IdleTaskResult.PARKED
+            self._ssm_rederive_task_queued = False
+            return IdleTaskResult.DONE
         try:
             logger.info(
                 f"SSM re-derive: running deferred prefill for "
@@ -9306,6 +9323,26 @@ class Scheduler:
                                 f"{request_id} (companion cache saturated, "
                                 f"{self._ssm_state_cache.max_entries} entries)"
                             )
+                        elif (
+                            self._ssm_state_cache is not None
+                            and self._ssm_state_cache.has_complete(
+                                companion_tokens, companion_len
+                            )
+                        ):
+                            # A complete companion already sits at this exact
+                            # key (typical after a cache HIT, which restored
+                            # from it). The deferred clean prefill would
+                            # recompute byte-identical state and its full
+                            # prompt-length prefill starves the next
+                            # request's TTFT (the #92 MLLM fix, 1e8602b40 —
+                            # this text path never had the probe).
+                            logger.info(
+                                "SSM companion: skipping re-derive for %s: "
+                                "complete companion already stored at "
+                                "%d-token key",
+                                request_id,
+                                companion_len,
+                            )
                         else:
                             if not hasattr(self, "_ssm_rederive_queue"):
                                 self._ssm_rederive_queue = []
@@ -9366,6 +9403,22 @@ class Scheduler:
                             logger.debug(
                                 "SSM companion (gpl=0): skipping re-derive "
                                 f"for {request_id} (companion cache saturated)"
+                            )
+                        elif (
+                            self._ssm_state_cache is not None
+                            and self._ssm_state_cache.has_complete(
+                                companion_tokens, companion_len
+                            )
+                        ):
+                            # Same skip as the gpl>0 branch above: a HIT
+                            # restored from a complete companion at this key,
+                            # so re-deriving it is a full wasted prefill.
+                            logger.info(
+                                "SSM companion (gpl=0): skipping re-derive "
+                                "for %s: complete companion already stored "
+                                "at %d-token key",
+                                request_id,
+                                companion_len,
                             )
                         else:
                             if not hasattr(self, "_ssm_rederive_queue"):

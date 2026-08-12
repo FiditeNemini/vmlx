@@ -97,22 +97,36 @@ function findNextSingleDollar(text: string, start: number): number {
 }
 
 /**
- * A `$` welded to the end of a word is a CURRENCY SYMBOL, not a math opener.
+ * A `$` that is welded to a preceding word AND followed by a digit is a
+ * CURRENCY SYMBOL, not a math opener.
  *
  * `US$5 = CA$7` otherwise offers `5 = CA` as a candidate body, and that body is
  * accepted as math: `CA` is a two-letter run so it is not counted as prose, and
  * the `=` then satisfies the structure test. The line rendered as literal `US`,
  * math `$5 = CA$`, literal `7`.
  *
- * Fixing that by counting two-letter runs as prose again is the wrong lever —
- * it is what made `$E=mc^2$` and `$F = ma$` render as literal text, and it
- * would also reject legitimate `$AB = CD$` geometry. The distinguishing fact is
- * positional, not lexical: real inline math opens at a boundary, while `US$`
- * and `CA$` attach the delimiter to a preceding word.
+ * Counting two-letter runs as prose again is the wrong lever — that is what made
+ * `$E=mc^2$` and `$F = ma$` render literally, and it also rejects legitimate
+ * `$AB = CD$` geometry.
+ *
+ * But looking only BACKWARDS is too blunt, and shipped as a worse regression
+ * than the bug it fixed. Models weld inline math to the preceding token
+ * constantly, and every one of these rendered literally — with the TeX partly
+ * normalized, so the user saw `1024$×$768` rather than either proper math or
+ * clean source:
+ *
+ *     1024$\times$768    10$\mu$s    n$\ge$30    5$\sigma$    x$^2$
+ *
+ * What separates the two is what FOLLOWS the delimiter. Currency continues into
+ * an amount; math continues into TeX — a command, a script marker, a brace. So a
+ * welded `$` is only disqualified when a digit follows it. `US$5` is currency;
+ * `10$\mu$s` is math.
  */
 function isViableMathOpener(text: string, index: number): boolean {
   const before = text[index - 1]
-  return before === undefined || !/[A-Za-z0-9]/.test(before)
+  if (before === undefined || !/[A-Za-z0-9]/.test(before)) return true
+  const after = text[index + 1]
+  return after === undefined || !/[0-9]/.test(after)
 }
 
 function findNextOpeningDollar(text: string, start: number): number {

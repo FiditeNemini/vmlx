@@ -383,3 +383,41 @@ describe('a dollar welded to a word is currency, not a math opener', () => {
     expect(rendersMath('$47 \\times 19 = 893$ and US$43')).toBe(true)
   })
 })
+
+describe('welded inline math still renders — currency is decided by what follows', () => {
+  /**
+   * Looking only BACKWARDS from the `$` shipped a worse regression than the
+   * currency bug it fixed. Models weld inline math to the preceding token
+   * constantly, and all of these rendered literally, with the TeX partly
+   * normalized so the user saw `1024$×$768` — neither proper math nor clean
+   * source. Measured live through the app's own module before the forward check.
+   */
+  const rendersMath = (source: string) =>
+    prepareMarkdownWithMath(source).includes('math-inline')
+
+  it.each([
+    ['a 2$\\times$ speedup'],
+    ['1024$\\times$768'],
+    ['10$\\mu$s'],
+    ['n$\\ge$30'],
+    ['5$\\sigma$'],
+    ['x$^2$'],
+    ['x$_i$'],
+  ])('renders %s', (input) => {
+    expect(rendersMath(input)).toBe(true)
+  })
+
+  it.each([
+    ['US$5 = CA$7'],
+    ['AU$10 = NZ$11'],
+    ['costs US$5 and CA$7 total'],
+  ])('still leaves %s literal', (input) => {
+    expect(rendersMath(input)).toBe(false)
+  })
+
+  it('a boundary opener is unaffected either way', () => {
+    expect(rendersMath('$E=mc^2$')).toBe(true)
+    expect(rendersMath('the identity $E=mc^2$ holds')).toBe(true)
+    expect(rendersMath('$AB = CD$')).toBe(true)
+  })
+})

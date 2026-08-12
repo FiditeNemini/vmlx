@@ -17228,7 +17228,16 @@ async def create_chat_completion(
             preserve_native_format=engine.preserve_native_tool_format,
         )
 
-    has_media = bool(images or videos)
+    # Include audio in the media check: extract_multimodal_content returns only
+    # images+videos, so an audio-only request that reached this text path
+    # (omni dispatch declined or a non-omni model) used to be answered
+    # text-only with the audio silently dropped. _chat_requested_modalities is
+    # computed from the full message summary and does see audio. The reject
+    # call stays arg-free on purpose: it raises 503 for an omni bundle whose
+    # dispatch did not complete (never silently proceed) and 400 for a genuine
+    # text-only runtime — passing the modality set would instead let an omni
+    # runtime that advertises audio return silently and drop the media.
+    has_media = bool(images or videos) or bool(_chat_requested_modalities)
     if has_media and not engine.is_mllm and not _m3_vl_media_ok(engine):
         _reject_unsupported_multimodal("/v1/chat/completions")
 

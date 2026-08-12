@@ -239,3 +239,34 @@ def test_server_rejects_text_only_multimodal_instead_of_silent_drop(monkeypatch)
 
     assert getattr(exc.value, "status_code", None) == 400
     assert "silently ignoring" in str(exc.value.detail) or "silent media drop" in str(exc.value.detail)
+
+
+def test_audio_only_request_is_seen_as_media_not_silently_dropped():
+    """extract_multimodal_content returns only images+videos, so the chat
+    handler's has_media used to be bool(images or videos) — an audio-only
+    request slipped through and was answered text-only with the audio
+    dropped. The requested-modalities summary must see audio so has_media is
+    True and the reject path is reached."""
+    import vmlx_engine.server as server
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Transcribe this."},
+                {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+            ],
+        }
+    ]
+    assert server._messages_requested_modalities(messages) == {"audio"}
+
+    # audio_url adapter shape (Ollama/Anthropic) is detected the same way.
+    url_messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAA="}},
+            ],
+        }
+    ]
+    assert server._messages_requested_modalities(url_messages) == {"audio"}

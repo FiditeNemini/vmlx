@@ -71,7 +71,10 @@ describe('hybrid SSM session timeout', () => {
     expect(src).toContain('HYBRID_SSM_DEFAULT_TIMEOUT_SECONDS = 900')
     const setMatch = src.match(/HYBRID_SSM_TIMEOUT_FAMILIES = new Set\(\[([^\]]*)\]/)
     expect(setMatch, 'hybrid timeout family set is gone').toBeTruthy()
-    for (const family of ['qwen3_5', 'qwen3_next', 'nemotron_h']) {
+    // PANEL registry names — the registry maps the engine's qwen3_5/qwen3_next/
+    // nemotron_h to these. Asserting the engine spellings here is what let the
+    // original bug through: the set looked populated but matched nothing.
+    for (const family of ['qwen3.5', 'qwen3-next', 'nemotron-h']) {
       expect(setMatch![1]).toContain(family)
     }
     // and it must be consulted by the resolver, not just declared

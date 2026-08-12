@@ -228,7 +228,19 @@ const OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS = 900
 // decode. API testing cannot find this — a script passes its own long timeout;
 // only a real user hits the session default.
 const HYBRID_SSM_DEFAULT_TIMEOUT_SECONDS = 900
-const HYBRID_SSM_TIMEOUT_FAMILIES = new Set(['qwen3_5', 'qwen3_next', 'nemotron_h'])
+// PANEL registry names, not engine family_name. The registry maps engine
+// qwen3_5 -> 'qwen3.5', qwen3_next -> 'qwen3-next', nemotron_h -> 'nemotron-h'
+// (model-config-registry.ts:368,372,472), and effectiveFamily here holds the
+// registry name. Using the engine spellings meant this set never matched and
+// the fix silently did nothing — verified live: the engine still received
+// --timeout 300 after a panel rebuild, app restart and session respawn. Same
+// aliasing class as deepseek_v4 -> 'deepseek-v4' in normalizeDetectedFamilyName.
+const HYBRID_SSM_TIMEOUT_FAMILIES = new Set([
+  'qwen3.5',
+  'qwen3.5-moe',
+  'qwen3-next',
+  'nemotron-h',
+])
 
 function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: string): number {
   const configured = config.timeout

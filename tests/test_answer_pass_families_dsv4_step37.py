@@ -114,6 +114,26 @@ def test_answer_pass_buffers_degraded_gemma_thought_prefix():
     assert visible("thoughtful response", finished=False) == "thoughtful response"
 
 
+def test_nemotron_families_armed_for_answer_pass():
+    """Nemotron reasons in a plain <think> block with no stop pressure, so a
+    hard prompt can spend the whole budget reasoning and return EMPTY content
+    at finish=length — it was simply missing from the never-empty set. Both
+    registry spellings ("nemotron" dense, "nemotron_h" hybrid incl. the
+    nemotron_h_v2 model_type alias) must arm the rail, cap the first pass on a
+    client max_thinking_tokens (token-budget keyed like qwen3, not
+    effort-keyed), and use FRESH context: the template renders an appended
+    reasoning turn as a completed assistant turn followed by a second
+    assistant open (render-probed 2026-08-11)."""
+    for fam in ("nemotron", "nemotron_h"):
+        assert fam in server_mod._REASONING_ANSWER_PASS_FAMILIES
+        assert fam in server_mod._THINKING_BUDGET_CAP_FAMILIES
+        assert fam in server_mod._ANSWER_PASS_FRESH_CONTEXT_FAMILIES
+        out = server_mod._answer_pass_messages(_MSGS, fam, _TRUNC)
+        assert out == _MSGS
+        assert out is not _MSGS
+        assert server_mod._reasoning_answer_pass_family_label(fam) == "Nemotron"
+
+
 def test_minimax_family_armed_for_answer_pass():
     """MiniMax-M2.x bundles report family_name "minimax" — the parser name
     "minimax_m2" alone left M2.7 reasoning-only turns EMPTY (live-proven

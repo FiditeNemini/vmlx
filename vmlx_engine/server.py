@@ -2728,6 +2728,19 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         # floor answers cleanly (live-proven).
         "minimax",
         "minimax_m2",
+        # Nemotron reasons in a plain <think> block with no effort mechanism
+        # and no built-in stop pressure, so a hard prompt can spend the whole
+        # budget reasoning and return EMPTY content at finish=length — the
+        # exact class the never-empty pass exists for. Its thinking-off rail
+        # is native: the family template's off-branch prefills <think></think>
+        # and enable_thinking is honored as a template kwarg (render-probed on
+        # Nemotron 3.5 Lightning, 2026-08-11). Both registry spellings —
+        # "nemotron" (dense) and "nemotron_h" (hybrid SSM+attention, also
+        # covers the nemotron_h_v2 model_type alias) — share that template
+        # convention. The mtt first-pass cap applies like qwen3 (token-budget
+        # keyed, not effort-keyed), so neither joins the deepseek_v4 carve-out.
+        "nemotron",
+        "nemotron_h",
         "openpangu_v2",
         "qwen3",
         "qwen3_5",
@@ -2878,6 +2891,8 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
         "laguna": "Laguna",
         "minimax": "MiniMax-M2",
         "minimax_m2": "MiniMax-M2",
+        "nemotron": "Nemotron",
+        "nemotron_h": "Nemotron",
         "openpangu_v2": "openPangu",
         "qwen3": "Qwen3",
         "deepseek_v4": "DeepSeek-V4",
@@ -2921,6 +2936,12 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
         "step3p7",
         "minimax",
         "minimax_m2",
+        # Nemotron renders an appended reasoning turn as a COMPLETED assistant
+        # turn (truncated think closed with </think><|im_end|>) followed by a
+        # second assistant open — the same back-to-back shape as step3p7/
+        # minimax (render-probed on the engine template, 2026-08-11).
+        "nemotron",
+        "nemotron_h",
         "qwen3",
         "qwen3_5",
         "qwen3_5_moe",

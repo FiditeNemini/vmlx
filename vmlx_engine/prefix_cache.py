@@ -2255,6 +2255,31 @@ class BlockAwarePrefixCache:
             )
         except (TypeError, ValueError):
             self._native_block_disk_admission_timeout = 30.0
+        # Ordinary (non-path-dependent) families used a hard 0.0 here, meaning a
+        # block whose payload did not fit the pending-write byte budget AT THAT
+        # INSTANT was discarded rather than waiting for the background writer to
+        # drain. That is not a rare safety valve: MEASURED on the box 2026-08-12
+        # with Nanbeige4.2-3B (a 3B model, so small payloads), an 8.9k-token
+        # prompt plus follow-ups produced 143 disk writes and 128
+        # byte_budget_drops — 47% of the blocks the engine had already paid to
+        # prefill were thrown away, with only a repeated WARNING to show for it.
+        # Bigger models have bigger per-block payloads and drop more.
+        #
+        # The wait happens on the model-owning thread, so it must stay short —
+        # the 30s above is only defensible for path-dependent families, where a
+        # dropped block breaks the chain instead of merely costing a re-prefill.
+        try:
+            self._block_disk_admission_timeout = max(
+                0.0,
+                float(
+                    os.environ.get(
+                        "VMLX_BLOCK_DISK_ADMISSION_TIMEOUT_SECONDS",
+                        "0.25",
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self._block_disk_admission_timeout = 0.25
 
         # Hash table for quick prefix lookup
         # Maps hash(tokens[:block_size*n]) -> (tokens, block_ids)
@@ -3821,7 +3846,7 @@ class BlockAwarePrefixCache:
                         "admission_timeout": (
                             self._native_block_disk_admission_timeout
                             if has_native_path_dependent_cache_data
-                            else 0.0
+                            else self._block_disk_admission_timeout
                         ),
                     }
                     try:

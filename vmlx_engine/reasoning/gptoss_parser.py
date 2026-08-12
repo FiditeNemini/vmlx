@@ -43,12 +43,17 @@ _BARE_MARKER_RE = re.compile(
 # After server/client strip <|start|>, <|channel|>, <|message|>, residual
 # protocol words can remain concatenated in various garbled forms.
 # This regex catches all combinations including doubled words, </prefix, etc.
+# Word boundaries are load-bearing. Without a trailing \b these alternatives
+# match INSIDE ordinary words and delete real prose: "My assistant finally
+# replied." became "My ly replied." because `assistant\s*final` consumed
+# "assistant final" out of "finally". Same class: "Happy to assist" lost its
+# tail. Anchor both ends so only whole protocol words are treated as residue.
 _PROTOCOL_RESIDUE_RE = re.compile(
-    r'</?(?:assistant|analysis|final)+'  # </assistantanalysis, <assistant, etc.
+    r'</?(?:assistant|analysis|final)+\b'  # </assistantanalysis, <assistant, etc.
     r'|'
-    r'(?:assistant\s*){1,3}(?:analysis|final)'  # assistantassistantanalysis, assistant analysis
+    r'\b(?:assistant\s*){1,3}(?:analysis|final)\b'  # assistantanalysis, assistant analysis
     r'|'
-    r'(?:analysis|final)\s*(?:assistant\s*){1,3}',  # analysisassistant, finalassistant
+    r'\b(?:analysis|final)\s*(?:assistant\s*){1,3}\b',  # analysisassistant, finalassistant
     re.IGNORECASE,
 )
 

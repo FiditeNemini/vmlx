@@ -957,8 +957,11 @@ describe('KV Cache Quantization', () => {
             'utf-8',
         )
 
-        expect(source).toContain('Engine-selected native cache')
-        expect(source).toContain('Generic TurboQuant KV is disabled unless a tested override exists')
+        const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(source).toContain("t('sessions.config.codecEngineNative')")
+        expect(enLocale).toContain('Engine-selected native cache')
+        expect(source).toContain("t('sessions.config.hybridStatefulHint')")
+        expect(enLocale).toContain('Generic TurboQuant KV is disabled unless a tested override exists')
         expect(source).not.toContain('ON · Default')
         expect(source).not.toContain('TurboQuant only')
     })
@@ -971,11 +974,15 @@ describe('KV Cache Quantization', () => {
         )
 
         expect(source).toContain("detectedCacheType === 'rotating_kv'")
-        expect(source).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
-        expect(source).toContain("preserves the model's native cache-slot and rotating-window metadata")
-        expect(source).toContain('live full-attention TurboQuant or storage-only q4')
-        expect(source).toContain('Live TurboQuant and stored quantization disabled')
-        expect(source).toContain('Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}')
+        const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(source).toContain("t('sessions.config.codecMixedSwa')")
+        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
+        expect(enLocale).toContain("preserves the model's native cache-slot and rotating-window metadata")
+        expect(enLocale).toContain('live full-attention TurboQuant or storage-only q4')
+        expect(source).toContain("t('sessions.config.codecTqOffAll')")
+        expect(enLocale).toContain('Live TurboQuant and stored quantization disabled')
+        expect(source).toContain("t('sessions.config.codecTqOffStored', { codec: effectiveStoredCacheQuantization })")
+        expect(enLocale).toContain('Live TurboQuant disabled; stored cache {codec}')
         expect(source).toContain("? 'TURBOQUANT OFF'")
         expect(source).toContain("? bonsaiActive ? 'TQ8 AUTO' : 'TQ4 AUTO'")
     })
@@ -988,9 +995,11 @@ describe('KV Cache Quantization', () => {
         )
 
         expect(source).toContain("normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'")
-        expect(source).toContain('Native HY3 KV + TQ4 stored prefixes')
+        const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(source).toContain("t('sessions.config.codecHy3')")
+        expect(enLocale).toContain('Native HY3 KV + TQ4 stored prefixes')
         expect(source).toContain("? 'TQ4 AUTO'")
-        expect(source).toContain('Native MTP D1 copies this cache independently before batch split/verify')
+        expect(enLocale).toContain('Native MTP D1 copies this cache independently before batch split/verify')
     })
 
     it('reports Qwen mixed full-KV Auto and the Bonsai-only all-TQ8 exception', () => {
@@ -1002,13 +1011,17 @@ describe('KV Cache Quantization', () => {
 
         expect(source).toContain("const bonsaiActive = normalizedModelIdentity.includes('bonsai')")
         expect(source).toContain("const qwenFullTqActive = !isMambaCache")
-        expect(source).toContain('TQ4 bulk attention KV + TQ8 boundary layers')
+        const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(source).toContain("t('sessions.config.codecQwenFull')")
+        expect(enLocale).toContain('TQ4 bulk attention KV + TQ8 boundary layers')
         expect(source).toContain('MIXED TQ4/8 AUTO')
-        expect(source).toContain('protects the first/last six boundary layers with TQ8')
-        expect(source).toContain('TQ4 attention KV + native hybrid state')
-        expect(source).toContain('TQ8 attention KV + native hybrid state')
-        expect(source).toContain('Qwen hybrid cache detected — Auto applies TQ4')
-        expect(source).toContain('Bonsai hybrid cache detected — Auto applies TQ8')
+        expect(enLocale).toContain('protects the first/last six boundary layers with TQ8')
+        expect(source).toContain("t('sessions.config.codecQwenHybrid')")
+        expect(enLocale).toContain('TQ4 attention KV + native hybrid state')
+        expect(source).toContain("t('sessions.config.codecBonsaiHybrid')")
+        expect(enLocale).toContain('TQ8 attention KV + native hybrid state')
+        expect(enLocale).toContain('Qwen hybrid cache detected — Auto applies TQ4')
+        expect(enLocale).toContain('Bonsai hybrid cache detected — Auto applies TQ8')
     })
 
     it('chat reasoning Auto copy avoids force-language', () => {
@@ -1291,16 +1304,17 @@ describe('Performance & Generation', () => {
 
     it('surfaces Max Output Tokens separately from Max Context Tokens', () => {
         const formSource = readFileSync(resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx'), 'utf8')
-        const maxOutputIndex = formSource.indexOf('label="Max Output Tokens"')
-        const maxContextIndex = formSource.indexOf('label="Max Context Tokens"')
+        const maxOutputIndex = formSource.indexOf("label={t('sessions.config.maxOutputTokens')}")
+        const maxContextIndex = formSource.indexOf("label={t('sessions.config.maxContextTokens')}")
 
         expect(maxOutputIndex).toBeGreaterThan(-1)
         expect(maxContextIndex).toBeGreaterThan(-1)
         expect(maxOutputIndex).toBeLessThan(maxContextIndex)
         expect(formSource).toContain("onChange={v => onChange('maxTokens', v)}")
-        expect(formSource).toContain('maps to --max-tokens')
-        expect(formSource).toContain('does not change prompt/context length')
-        expect(formSource).toContain('Leave on Bundle / engine default unless you intentionally want a server-level cap')
+        const enLocale = readFileSync(resolve(__dirname, '../src/renderer/src/i18n/locales/en.json'), 'utf8')
+        expect(enLocale).toContain('maps to --max-tokens')
+        expect(enLocale).toContain('does not change prompt/context length')
+        expect(enLocale).toContain('Leave on Bundle / engine default unless you intentionally want a server-level cap')
     })
 
     it('persists bundle/default migration so stale 32768 sessions do not keep relaunching huge output caps', () => {
@@ -2887,9 +2901,12 @@ describe('Default IP and New Settings', () => {
 
         const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
         expect(form).toContain("normalizedDetectedFamily === 'openpangu_v2'")
-        expect(form).toContain('openPangu v2 uses exact typed N-1 prompt snapshots')
+        const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8')
+        expect(form).toContain("t('sessions.config.openPanguTypedCacheNote')")
+        expect(enLocale).toContain('openPangu v2 uses exact typed N-1 prompt snapshots')
         expect(form).toContain('disabled={openPanguExactTypedCache}')
-        expect(form).toContain("Memory-aware mode is required for openPangu's non-aliasing typed cache clone")
+        expect(form).toContain("t('sessions.config.openPanguMemoryAwareNote')")
+        expect(enLocale).toContain("Memory-aware mode is required for openPangu's non-aliasing typed cache clone")
         expect(form).toContain('cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache')
     })
 
@@ -3500,7 +3517,10 @@ describe('JIT Toggle', () => {
         expect(sessions).toContain("args.includes('--kv-cache-quantization')")
         expect(sessions).toContain('DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV')
         expect(form).toContain('detectedArchitectureHints')
-        expect(form).toContain('Auto cache quantization uses TurboQuantKVCache')
+        expect(form).toContain("t('sessions.config.jitDisabledLaguna')")
+        expect(
+            readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8'),
+        ).toContain('Auto cache quantization uses TurboQuantKVCache')
     })
 
     it('Flash MoE and distributed launch modes suppress --enable-jit in preview and runtime policy', () => {
@@ -3540,7 +3560,10 @@ describe('JIT Toggle', () => {
         )
 
         expect(form).toContain('detectedFamily')
-        expect(form).toContain('DeepSeek-V4 native composite cache')
+        expect(form).toContain("t('sessions.config.codecDsv4')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('DeepSeek-V4 native composite cache')
         expect(settings).toContain('detectedFamily={detectedConfig?.family}')
         expect(create).toContain('detectedFamily={detectedFamily}')
         expect(drawer).toContain('detectedFamily={detectedFamily}')
@@ -3584,7 +3607,10 @@ describe('JIT Toggle', () => {
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
 
         expect(form).toContain('detectedIsMultimodal')
-        expect(form).toContain('multimodal/VLM models')
+        expect(form).toContain("t('sessions.config.jitDisabledMultimodal')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('multimodal/VLM models')
         const warningStart = form.indexOf('<IncompatWarning text={dsv4Active')
         const warningEnd = form.indexOf('/>\\n        )}', warningStart)
         const warning = form.slice(warningStart, warningEnd)
@@ -3603,8 +3629,10 @@ describe('JIT Toggle', () => {
             'utf8',
         )
 
-        expect(form).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
-        expect(form).toContain('whether live full-attention TurboQuant or storage-only q4 is active')
+        expect(form).toContain("t('sessions.config.codecMixedSwa')")
+        const enLocale = readFileSync(resolve(__dirname, '../src/renderer/src/i18n/locales/en.json'), 'utf8')
+        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
+        expect(enLocale).toContain('whether live full-attention TurboQuant or storage-only q4 is active')
         expect(form).not.toContain('TQ4 full-attention KV + native rotating SWA')
     })
 
@@ -3621,7 +3649,10 @@ describe('JIT Toggle', () => {
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
 
         expect(form).toContain('zayaCcaActive')
-        expect(form).toContain('ZAYA typed CCA cache')
+        expect(form).toContain("t('sessions.config.jitDisabledZaya')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('ZAYA typed CCA cache')
         expect(settings).toContain('zayaCcaActive')
         expect(sessions).toContain('ZAYA typed CCA cache is path-dependent')
     })
@@ -3658,7 +3689,10 @@ describe('JIT Toggle', () => {
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
 
         expect(form).toContain('zayaTypedCacheRequiresPaged')
-        expect(form).toContain('ZAYA typed CCA cache requires the in-memory paged tier while Prefix Cache is enabled')
+        expect(form).toContain("t('sessions.config.zayaTypedCacheNote')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('ZAYA typed CCA cache requires the in-memory paged tier while Prefix Cache is enabled')
         expect(settings).toContain('zayaTypedCacheRequiresPaged')
         expect(sessions).toContain('resolveCacheLaunchPolicy')
         expect(sessions).toContain('architectureRequiresPagedCache')
@@ -3713,7 +3747,10 @@ describe('JIT Toggle', () => {
 
         expect(form).toContain('detectedCacheSubtype')
         expect(form).toContain("detectedCacheSubtype === 'step3p7_full_sliding_kv'")
-        expect(form).toContain('Under tight Metal headroom, long cold-prompt stores can be skipped')
+        expect(form).toContain("t('sessions.config.stepSsdOnlyNote')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('Under tight Metal headroom, long cold-prompt stores can be skipped')
         expect(settings).toContain('detectedCacheSubtype={detectedConfig?.cacheSubtype}')
         expect(settings).toContain('cacheSubtypeRequiresPaged')
         expect(sessions).toContain('cacheSubtypeRequiresPaged')
@@ -3749,7 +3786,10 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain('dsv4CompositeCacheOptIn')
         expect(form).not.toContain('DSV4 Native Composite Prefix Cache')
         expect(form).not.toContain('DSV4 CSA/HCA Pool Codec')
-        expect(form).toContain('Prefix reuse defaults On and Block Disk Cache (SSD / L2) defaults On as the warm/cold stack')
+        expect(form).toContain("t('sessions.config.dsv4BatchPathNote')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('Prefix reuse defaults On and Block Disk Cache (SSD / L2) defaults On as the warm/cold stack')
         expect(form).not.toContain('cacheControlUpdatesForDsv4CompositeToggle')
         expect(form).not.toContain('cacheControlUpdatesForDsv4BlockDiskToggle')
         expect(form).not.toContain('applyDsv4CompositeCacheToggle')
@@ -3761,7 +3801,10 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain("dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle")
         expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
-        expect(form).toContain('require fixed 256-token blocks')
+        expect(form).toContain("t('sessions.config.blockSizeTooltipDsv4')")
+        expect(
+            fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
+        ).toContain('require fixed 256-token blocks')
         expect(form).toContain('disabled={dsv4Active}')
         expect(form).not.toContain('checked={config.dsv4PrefixCache !== false}')
         expect(form).not.toContain('checked={dsv4Active ? true : config.enablePrefixCache}')
@@ -3792,18 +3835,20 @@ describe('JIT Toggle', () => {
 
         expect(countOccurrences(form, 'label="DSV4 Native Composite Prefix Cache"')).toBe(0)
         expect(countOccurrences(form, 'label="DSV4 CSA/HCA Pool Codec"')).toBe(0)
-        expect(countOccurrences(form, 'label="Block Disk Cache (SSD / L2)"')).toBe(1)
-        expect(countOccurrences(form, 'label="In-Memory Paged Cache (RAM)"')).toBe(1)
+        expect(countOccurrences(form, "label={t('sessions.cache.blockDiskCache')}")).toBe(1)
+        expect(countOccurrences(form, "label={t('sessions.config.pagedKVCache')}")).toBe(1)
         expect(form).not.toContain('LOCKED OFF')
-        expect(form).toContain('<CheckField label="In-Memory Paged Cache (RAM)"')
-        expect(form).toContain('Apple unified memory (shared by CPU and GPU)')
-        expect(form).toContain('Block Disk Cache (SSD / L2) can remain enabled when this RAM tier is Off')
+        expect(form).toContain("<CheckField label={t('sessions.config.pagedKVCache')}")
+        const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(enLocale).toContain('Apple unified memory (shared by CPU and GPU)')
+        expect(enLocale).toContain('Block Disk Cache (SSD / L2) can remain enabled when this RAM tier is Off')
         expect(form).not.toContain('limited GPU RAM')
         expect(form).toContain("e.preventDefault()")
         expect(form).toContain('className="relative inline-flex ml-1"\n      onClick={handleClick}')
         expect(form).not.toContain('disabled={dsv4CompositeRequiresPaged}')
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
-        expect(form).toContain('Native typed codec (bundle-derived)')
+        expect(form).toContain("t('sessions.config.storedQuantNativeTyped')")
+        expect(enLocale).toContain('Native typed codec (bundle-derived)')
         expect(form).not.toContain('DSV4 Native Cache')
         expect(form).not.toContain('DSV4 Composite Prefix Cache')
         expect(form).not.toContain('DSV4 Pool Quantization')
@@ -3851,11 +3896,13 @@ describe('JIT Toggle', () => {
             'utf-8',
         )
 
-        expect(form).toContain('Maximum physical disk space for the managed block-cache root')
-        expect(form).toContain('shared across model/config namespaces and typed companion state')
-        expect(form).toContain('the smallest finite limit is enforced')
-        expect(form).toContain('Set to 0 for unlimited only when no live session supplies a finite limit')
-        expect(form).toContain('the size limit applies across all managed subdirectories and typed companions in this root')
+        expect(form).toContain("t('sessions.config.blockCacheMaxTooltip')")
+        const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(enLocale).toContain('Maximum physical disk space for the managed block-cache root')
+        expect(enLocale).toContain('shared across model/config namespaces and typed companion state')
+        expect(enLocale).toContain('the smallest finite limit is enforced')
+        expect(enLocale).toContain('Set to 0 for unlimited only when no live session supplies a finite limit')
+        expect(enLocale).toContain('the size limit applies across all managed subdirectories and typed companions in this root')
     })
 
     it('settings form disables generic stored KV codec controls for MiniMax-M3 native MSA cache', () => {
@@ -3867,11 +3914,14 @@ describe('JIT Toggle', () => {
         expect(form).toContain("const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache")
         expect(form).toContain("const effectiveStoredCacheQuantization = openPanguExactTypedCache")
         expect(form).toContain("? 'none'")
-        expect(form).toContain("? 'openPangu typed composite cache'")
-        expect(form).toContain("? 'MiniMax-M3 native MSA cache'")
+        expect(form).toContain("? t('sessions.config.codecOpenPangu')")
+        expect(form).toContain("? t('sessions.config.codecM3')")
         expect(form).toContain('openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec')
-        expect(form).toContain('MiniMax-M3 keeps generic KV q4/q8 disabled')
-        expect(form).toContain('native MSA snapshots with keys, values, idx_keys, and absolute offsets')
+        const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(enLocale).toContain('openPangu typed composite cache')
+        expect(enLocale).toContain('MiniMax-M3 native MSA cache')
+        expect(enLocale).toContain('MiniMax-M3 keeps generic KV q4/q8 disabled')
+        expect(enLocale).toContain('native MSA snapshots with keys, values, idx_keys, and absolute offsets')
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
     })
 
@@ -3882,10 +3932,13 @@ describe('JIT Toggle', () => {
         )
 
         expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache')
-        expect(form).toContain('MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets')
-        expect(form).toContain('MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets')
+        const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(form).toContain("t('sessions.config.m3NativeMsaNote')")
+        expect(enLocale).toContain('MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets')
+        expect(form).toContain("t('sessions.config.m3SsdOnlyNote')")
+        expect(enLocale).toContain('MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets')
         expect(form).toContain('architectureBlockDiskOnlySupported && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked')
-        expect(form).toContain('Block Disk Cache provides its persistent L2')
+        expect(enLocale).toContain('Block Disk Cache provides its persistent L2')
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
     })
@@ -3900,13 +3953,16 @@ describe('JIT Toggle', () => {
         expect(form).toContain('{!dsv4Active && config.enableDiskCache &&')
         expect(form).toContain('{!dsv4Active && !batchingOff && prefixOff &&')
         expect(form).not.toContain('Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD')
-        expect(form).toContain('The bounded RAM tier defaults On for hot reuse')
-        expect(form).toContain('defaults On as the warm/cold stack')
+        const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
+        expect(enLocale).toContain('The bounded RAM tier defaults On for hot reuse')
+        expect(enLocale).toContain('defaults On as the warm/cold stack')
         expect(form).not.toContain('In-Memory Paged Cache (RAM) defaults Off')
         expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active'")
         expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache'")
-        expect(form).toContain('DSV4 uses Block Disk Cache (SSD / L2) above for persistent native composite blocks')
-        expect(form).toContain('DSV4 SSD-only mode preserves typed SWA plus CSA/HCA state')
+        expect(form).toContain("t('sessions.config.dsv4LegacyDiskNote')")
+        expect(enLocale).toContain('DSV4 uses Block Disk Cache (SSD / L2) above for persistent native composite blocks')
+        expect(form).toContain("t('sessions.config.dsv4SsdOnlyNote')")
+        expect(enLocale).toContain('DSV4 SSD-only mode preserves typed SWA plus CSA/HCA state')
         expect(form).toContain('{!dsv4Active && showCachingHelp && (')
         expect(form).not.toContain('DSV4 Native Composite Prefix Cache')
     })
@@ -4446,8 +4502,11 @@ describe('Settings → CLI Round-Trip Completeness', () => {
 
     it('server startup generation defaults are model-owned and not editable sliders', () => {
         const source = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
-        expect(source).toContain('Generation defaults are resolved by the engine from generation_config.json/jang_config')
-        expect(source).toContain('label="Max Context Tokens"')
+        expect(source).toContain("t('sessions.config.generationDefaultsNote')")
+        expect(
+            readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8'),
+        ).toContain('Generation defaults are resolved by the engine from generation_config.json/jang_config')
+        expect(source).toContain("label={t('sessions.config.maxContextTokens')}")
         expect(source).not.toContain('label="Default Temperature"')
         expect(source).not.toContain('label="Default Top-P"')
         expect(source).not.toContain('label="Default Top-K"')
@@ -4641,9 +4700,9 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         const create = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
         const drawer = readFileSync('src/renderer/src/components/sessions/ServerSettingsDrawer.tsx', 'utf8')
         const full = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
-        expect(form).toContain('label="Automatic Tool Choice"')
+        expect(form).toContain("label={t('sessions.config.automaticToolChoice')}")
         expect(form).toContain("value === 'auto' ? undefined : value === 'on'")
-        expect(form).toContain("{ value: 'off', label: 'Off' }")
+        expect(form).toContain("{ value: 'off', label: t('chat.settings.thinkingOff') }")
         expect(create).not.toContain('delete stored.enableAutoToolChoice')
         expect(create).toContain('detectedEnableAutoToolChoice={detectedEnableAutoToolChoice}')
         expect(drawer).toContain('detectedEnableAutoToolChoice={detectedEnableAutoToolChoice}')

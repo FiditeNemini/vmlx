@@ -445,26 +445,26 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     : nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization
   const explicitStoredCacheCodec = effectiveStoredCacheQuantization !== 'auto'
   const liveCacheCodecLabel = openPanguExactTypedCache
-    ? 'openPangu typed composite cache'
+    ? t('sessions.config.codecOpenPangu')
     : dsv4Active
-      ? 'DeepSeek-V4 native composite cache'
+      ? t('sessions.config.codecDsv4')
       : m3Active
-        ? 'MiniMax-M3 native MSA cache'
+        ? t('sessions.config.codecM3')
         : explicitStoredCacheCodec
           ? effectiveStoredCacheQuantization === 'none'
-            ? 'Live TurboQuant and stored quantization disabled'
-            : `Live TurboQuant disabled; stored cache ${effectiveStoredCacheQuantization}`
+            ? t('sessions.config.codecTqOffAll')
+            : t('sessions.config.codecTqOffStored', { codec: effectiveStoredCacheQuantization })
           : hy3Active
-            ? 'Native HY3 KV + TQ4 stored prefixes'
+            ? t('sessions.config.codecHy3')
             : mixedSwaCacheActive
-              ? 'Engine-selected mixed-SWA live cache + q4 stored prefixes'
+              ? t('sessions.config.codecMixedSwa')
               : qwenFullTqActive
-                ? 'TQ4 bulk attention KV + TQ8 boundary layers'
+                ? t('sessions.config.codecQwenFull')
               : qwenHybridTqActive
                 ? bonsaiActive
-                  ? 'TQ8 attention KV + native hybrid state'
-                  : 'TQ4 attention KV + native hybrid state'
-              : 'Engine-selected native cache'
+                  ? t('sessions.config.codecBonsaiHybrid')
+                  : t('sessions.config.codecQwenHybrid')
+              : t('sessions.config.codecEngineNative')
   const liveCacheCodecBadge =
     openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec
       ? 'TURBOQUANT OFF'
@@ -556,7 +556,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           serverCount: result.serverCount,
         })
       } else {
-        setMcpValidation({ servers: [], error: result?.error || 'MCP config import failed' })
+        setMcpValidation({ servers: [], error: result?.error || t('sessions.config.mcpImportFailed') })
       }
     } catch (error) {
       setMcpValidation({ servers: [], error: (error as Error).message })
@@ -567,7 +567,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
   const validateMcpConfig = async (path = config.mcpConfig) => {
     if (!path?.trim()) {
-      setMcpValidation({ servers: [], error: 'MCP config path is empty' })
+      setMcpValidation({ servers: [], error: t('sessions.config.mcpPathEmpty') })
       return
     }
     setMcpValidationLoading(true)
@@ -579,7 +579,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           serverCount: result.serverCount,
         })
       } else {
-        setMcpValidation({ servers: [], error: result?.error || 'MCP config validation failed' })
+        setMcpValidation({ servers: [], error: result?.error || t('sessions.config.mcpValidationFailed') })
       }
     } catch (error) {
       setMcpValidation({ servers: [], error: (error as Error).message })
@@ -599,7 +599,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           tools: Array.isArray(result.tools) ? result.tools : [],
         })
       } else {
-        setMcpStatus({ servers: [], tools: [], error: result?.error || 'MCP status unavailable' })
+        setMcpStatus({ servers: [], tools: [], error: result?.error || t('sessions.config.mcpStatusUnavailable') })
       }
     } catch (error) {
       setMcpStatus({ servers: [], tools: [], error: (error as Error).message })
@@ -658,12 +658,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       )}
       {/* Server Settings */}
       <Section title={t('sessions.config.serverSettings')} expanded={expandedSections.server} onToggle={() => toggleSection('server')}>
-        <Field label={t('sessions.config.host')} tooltip="The network interface to bind to. Default 127.0.0.1 (localhost only). Change to 0.0.0.0 to allow connections from other machines on your network (LAN access). Use an API key when binding to 0.0.0.0.">
+        <Field label={t('sessions.config.host')} tooltip={t('sessions.config.hostTooltip')}>
           <input type="text" value={config.host} onChange={e => onChange('host', e.target.value)} className="cfg-input" />
         </Field>
         <SliderField
           label={t('sessions.config.port')}
-          tooltip="The TCP port the server listens on. Each running model instance needs a unique port. Ports are auto-assigned starting from 8000. You can manually set any port between 1024-65535 that isn't already in use."
+          tooltip={t('sessions.config.portTooltip')}
           value={config.port}
           onChange={v => onChange('port', v)}
           min={1024}
@@ -671,15 +671,15 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           step={1}
           defaultValue={DEFAULT_CONFIG.port}
         />
-        <Field label={t('sessions.config.apiKey')} tooltip="Optional authentication key for the OpenAI-compatible API. When set, all API requests must include this key in the Authorization header. Leave empty to allow unauthenticated access (fine for local-only servers).">
+        <Field label={t('sessions.config.apiKey')} tooltip={t('sessions.config.apiKeyTooltip')}>
           <input type="password" value={config.apiKey} onChange={e => onChange('apiKey', e.target.value)} placeholder={t('sessions.config.apiKeyPlaceholder')} className="cfg-input" />
         </Field>
-        <Field label={t('sessions.config.servedModelName')} tooltip="Custom name to expose via the /v1/models API and in response objects. When set, API clients can use this name instead of the full model path. Both the custom name and the actual model name are listed in /v1/models. Leave empty to auto-derive from model path (e.g. 'mlx-community/Llama-3.2-3B').">
+        <Field label={t('sessions.config.servedModelName')} tooltip={t('sessions.config.servedModelNameTooltip')}>
           <input type="text" value={config.servedModelName} onChange={e => onChange('servedModelName', e.target.value)} placeholder={t('sessions.config.servedModelNamePlaceholder')} className="cfg-input" />
         </Field>
         <SliderField
           label={t('sessions.config.rateLimit')}
-          tooltip="Maximum number of API requests allowed per minute. Set to 0 to disable rate limiting. Useful when exposing the server to multiple users or external applications to prevent overloading."
+          tooltip={t('sessions.config.rateLimitTooltip')}
           value={config.rateLimit}
           onChange={v => onChange('rateLimit', v)}
           min={1}
@@ -692,7 +692,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         />
         <SliderField
           label={t('sessions.config.timeout')}
-          tooltip="Maximum time in seconds to wait for a single inference request to complete before timing out. Increase this for very long generations or slow models. Default is 300s for most models; MiniMax-M3 and DSV4 auto-use 900s unless you choose a custom value."
+          tooltip={t('sessions.config.timeoutTooltip')}
           value={config.timeout}
           onChange={v => onChange('timeout', v)}
           min={10}
@@ -703,7 +703,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           unlimitedValue={0}
           unlimitedLabel={t('sessions.config.timeoutNoLimit')}
         />
-        <Field label={t('sessions.config.logLevel')} tooltip="Controls how much detail the server logs. DEBUG shows everything (very verbose). INFO is the default. WARNING and ERROR reduce noise to only important messages.">
+        <Field label={t('sessions.config.logLevel')} tooltip={t('sessions.config.logLevelTooltip')}>
           <select value={config.logLevel || 'INFO'} onChange={e => onChange('logLevel', e.target.value)} className="cfg-input">
             <option value="DEBUG">{t('sessions.config.logLevelDebug')}</option>
             <option value="INFO">{t('sessions.config.logLevelInfo')}</option>
@@ -711,7 +711,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <option value="ERROR">{t('sessions.config.logLevelError')}</option>
           </select>
         </Field>
-        <Field label={t('sessions.config.corsOrigins')} tooltip="Allowed origins for cross-origin API requests (from web browsers). Use * to allow all origins, or a comma-separated list of specific origins (e.g. http://localhost:3000,https://myapp.com). Only matters when external web apps call your API.">
+        <Field label={t('sessions.config.corsOrigins')} tooltip={t('sessions.config.corsOriginsTooltip')}>
           <input type="text" value={config.corsOrigins || '*'} onChange={e => onChange('corsOrigins', e.target.value)} placeholder={t('sessions.config.corsPlaceholder')} className="cfg-input" />
         </Field>
       </Section>
@@ -728,7 +728,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       <Section title={t('sessions.config.concurrentProcessing')} expanded={expandedSections.concurrent} onToggle={() => toggleSection('concurrent')} hidden={isImage}>
         <div className="flex items-center gap-2 mb-2">
-          {!dsv4Active && <PerformanceHint text="Controls how many requests your server handles at once. Keep Continuous Batching ON to enable the caching engine." />}
+          {!dsv4Active && <PerformanceHint text={t('sessions.config.concurrentHint')} />}
           {!dsv4Active && (
             <button
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowCachingHelp(true) }}
@@ -740,8 +740,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           )}
         </div>
         <SliderField
-          label="Max Concurrent Sequences"
-          tooltip="Maximum number of sequences (requests) that can be processed simultaneously. Higher values allow more parallel users but consume more memory. For single-user local use, 1-4 is sufficient. For multi-user servers, 16-256 depending on available RAM."
+          label={t('sessions.config.maxConcurrentSequences')}
+          tooltip={t('sessions.config.maxConcurrentSequencesTooltip')}
           value={effectiveMaxNumSeqs}
           onChange={v => onChange('maxNumSeqs', v)}
           min={1}
@@ -750,12 +750,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.maxNumSeqs}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel="Default (1)"
+          unlimitedLabel={t('sessions.config.defaultWithValue', { n: 1 })}
           disabled={dsv4Active}
         />
         <SliderField
-          label="Prefill Batch Size"
-          tooltip="Maximum number of concurrent prompts processed in parallel during the prefill (prompt processing) phase. Higher = more parallelism for multi-user workloads, more memory pressure during prompt ingest."
+          label={t('sessions.config.prefillBatchSize')}
+          tooltip={t('sessions.config.prefillBatchSizeTooltip')}
           value={effectivePrefillBatchSize}
           onChange={v => onChange('prefillBatchSize', v)}
           min={1}
@@ -764,12 +764,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.prefillBatchSize}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel="Default (512)"
+          unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}
           disabled={dsv4Active}
         />
         <SliderField
-          label="Prefill Step Size"
-          tooltip="Maximum number of tokens processed in a single prefill forward pass per sequence. Larger = fewer kernel launches and faster prefill, more transient memory. Reduce if you OOM mid-prompt on long contexts."
+          label={t('sessions.config.prefillStepSize')}
+          tooltip={t('sessions.config.prefillStepSizeTooltip')}
           value={config.prefillStepSize}
           onChange={v => onChange('prefillStepSize', v)}
           min={64}
@@ -778,12 +778,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.prefillStepSize}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel="Default (2048)"
+          unlimitedLabel={t('sessions.config.defaultWithValue', { n: 2048 })}
           disabled={dsv4Active}
         />
         <SliderField
-          label="Completion Batch Size"
-          tooltip="Maximum number of tokens to generate in a single completion (token generation) step. Similar to prefill batch size but for the generation phase. Larger values can improve throughput for multi-user scenarios."
+          label={t('sessions.config.completionBatchSize')}
+          tooltip={t('sessions.config.completionBatchSizeTooltip')}
           value={effectiveCompletionBatchSize}
           onChange={v => onChange('completionBatchSize', v)}
           min={1}
@@ -792,12 +792,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.completionBatchSize}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel="Default (512)"
+          unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}
           disabled={dsv4Active}
         />
         <CheckField
-          label="Smelt Mode"
-          tooltip="Partial expert loading for MoE models. Loads backbone + N% of experts from SSD, reducing RAM by ~50% while maintaining ~97% baseline speed via cache-biased routing and native SwitchGLU kernels."
+          label={t('sessions.config.smeltMode')}
+          tooltip={t('sessions.config.smeltModeTooltip')}
           checked={effectiveSmeltActive}
           onChange={v => {
             onChange('smelt', v)
@@ -807,19 +807,19 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           disabled={dsv4Active || effectiveFlashMoeActive}
         />
         {dsv4Active && (
-          <IncompatWarning text="Smelt is disabled for DSV4 Flash. DSV4 uses the verified native JANG affine loader and composite cache path." />
+          <IncompatWarning text={t('sessions.config.smeltDisabledDsv4')} />
         )}
         {flashMoeActive && (
-          <IncompatWarning text="Smelt is disabled while Flash MoE is on. They both modify MoE expert layers — use one or the other." />
+          <IncompatWarning text={t('sessions.config.smeltDisabledFlashMoe')} />
         )}
         {smeltActive && (
-          <SliderField label="Smelt Experts %" value={config.smeltExperts} onChange={v => onChange('smeltExperts', v)} min={10} max={100} step={5} defaultValue={50} />
+          <SliderField label={t('sessions.config.smeltExpertsPercent')} value={config.smeltExperts} onChange={v => onChange('smeltExperts', v)} min={10} max={100} step={5} defaultValue={50} />
         )}
-        {smeltActive && <PerformanceHint text={`Loading ${config.smeltExperts}% of experts per MoE layer. Lower = less RAM, slightly more routing bias.`} />}
+        {smeltActive && <PerformanceHint text={t('sessions.config.smeltExpertsHint', { percent: config.smeltExperts })} />}
 
         <CheckField
-          label="Flash MoE (SSD Streaming)"
-          tooltip="Streams MoE expert weights from SSD on-demand instead of keeping them all in RAM. Enables massive MoE models (35B-397B) to run on machines with limited RAM by caching only recently-used experts in a slot-bank cache. Incompatible with Smelt, Distributed, and JIT. ~50% slower than full-RAM mode due to on-demand disk loading."
+          label={t('sessions.config.flashMoe')}
+          tooltip={t('sessions.config.flashMoeTooltip')}
           checked={effectiveFlashMoeActive}
           onChange={v => {
             onChange('flashMoe', v)
@@ -833,16 +833,16 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           disabled={dsv4Active || effectiveSmeltActive || effectiveDistributedActive}
         />
         {dsv4Active && (
-          <IncompatWarning text="Flash MoE is disabled for DSV4 Flash. DSV4 native expert hydration and SWA+CSA/HCA cache restore are not compatible with SSD expert streaming." />
+          <IncompatWarning text={t('sessions.config.flashMoeDisabledDsv4')} />
         )}
         {(smeltActive || distributedActive) && !flashMoeActive && (
-          <IncompatWarning text={`Flash MoE is disabled while ${smeltActive ? 'Smelt' : 'Distributed'} is on. Turn it off to enable Flash MoE.`} />
+          <IncompatWarning text={smeltActive ? t('sessions.config.flashMoeDisabledSmelt') : t('sessions.config.flashMoeDisabledDistributed')} />
         )}
         {flashMoeActive && (
           <>
             <SliderField
-              label="Slot Bank Size"
-              tooltip="Number of expert weight sets cached in RAM. Higher = more cache hits but more RAM. Recommended: 64 for Nemotron/small MoE, 256+ for Qwen3.5 MoE, 512+ for MiniMax (256 experts)."
+              label={t('sessions.config.slotBankSize')}
+              tooltip={t('sessions.config.slotBankSizeTooltip')}
               value={config.flashMoeSlotBank}
               onChange={v => onChange('flashMoeSlotBank', v)}
               min={16}
@@ -851,8 +851,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               defaultValue={DEFAULT_CONFIG.flashMoeSlotBank}
             />
             <SliderField
-              label="I/O Workers"
-              tooltip="Number of parallel disk I/O threads for loading experts. Higher = faster cold loads but more I/O pressure. Default 4 works well for most SSDs."
+              label={t('sessions.config.ioWorkers')}
+              tooltip={t('sessions.config.ioWorkersTooltip')}
               value={config.flashMoeIoSplit}
               onChange={v => onChange('flashMoeIoSplit', v)}
               min={1}
@@ -860,46 +860,46 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               step={1}
               defaultValue={4}
             />
-            <PerformanceHint text={`Streaming experts from SSD with ${config.flashMoeSlotBank}-slot LRU cache. Non-MoE models automatically pass through (no effect). JIT disabled (incompatible with on-demand loading).`} />
+            <PerformanceHint text={t('sessions.config.flashMoeStreamingHint', { slots: config.flashMoeSlotBank })} />
           </>
         )}
         <CheckField
-          label="Continuous Batching"
+          label={t('sessions.config.continuousBatching')}
           tooltip={dsv4Active
-            ? "DSV4 Flash requires the continuous-batching DSV4BatchGenerator path. Prefix reuse uses its native SWA+CSA/HCA typed cache; the RAM paged tier and persistent Block Disk L2 remain independently configurable."
-            : "Keep ON for best performance. This is the master switch for Prefix Cache, In-Memory Paged Cache (RAM), Block Disk Cache (SSD / L2), and stored-cache codecs. Turning it off uses the direct single-request engine and disables the cache features below."}
+            ? t('sessions.config.continuousBatchingTooltipDsv4')
+            : t('sessions.config.continuousBatchingTooltip')}
           checked={effectiveContinuousBatching}
           onChange={v => onChange('continuousBatching', v)}
           disabled={dsv4Active}
         />
-        {!dsv4Active && <PerformanceHint text="Keep ON for best overall behavior: it enables prefix reuse, the in-memory RAM tier, persistent SSD L2, and architecture-specific cache restore while the default max sequence count stays at one for local chat." />}
-        {dsv4Active && <InfoNote text="DSV4 Flash stays on its native DSV4BatchGenerator path. Prefix reuse defaults On and Block Disk Cache (SSD / L2) defaults On as the warm/cold stack. In-Memory Paged Cache (RAM) remains optional and bounded when enabled; the CSA/HCA pool codec remains bundle-derived." />}
+        {!dsv4Active && <PerformanceHint text={t('sessions.config.continuousBatchingHint')} />}
+        {dsv4Active && <InfoNote text={t('sessions.config.dsv4BatchPathNote')} />}
         {!effectiveContinuousBatching && effectivePrefixCacheEnabled && (
-          <InfoNote text="Cache flags will be omitted at launch while continuous batching is off. Turn it back on to use Prefix Cache, In-Memory Paged Cache (RAM), Block Disk Cache (SSD / L2), and stored-cache codecs." />
+          <InfoNote text={t('sessions.config.cacheFlagsOmittedNote')} />
         )}
         {!effectiveContinuousBatching && (
-          <InfoNote text="Turning this off disables Prefix Cache, In-Memory Paged Cache (RAM), KV cache quantization, and disk caching. Enable it to unlock these features." />
+          <InfoNote text={t('sessions.config.batchingOffDisablesNote')} />
         )}
         <InfoNote text={metalWiredLimitHelpText} />
       </Section>
 
       {/* Prefix Cache */}
       <Section title={t('sessions.config.prefixCache')} expanded={expandedSections.prefixCache} onToggle={() => toggleSection('prefixCache')} hidden={isImage}>
-        {!effectivelyNoBatching && <PerformanceHint text="Speeds up repeated conversations by remembering previous prompts. Makes follow-up messages much faster (lower time-to-first-token)." />}
-        {dsv4Active && <InfoNote text="DSV4 prefix reuse preserves the native SWA plus CSA/HCA composite state. It is controlled by this standard Prefix Cache switch; there is no separate hidden DSV4 cache toggle." />}
-        {openPanguExactTypedCache && <InfoNote text="openPangu v2 uses exact typed N-1 prompt snapshots. Memory and prompt-disk L2 preserve MLA KV, DSA indexer state, rotating-SWA metadata, and all three causal-convolution states together. Generic paged blocks, reverse truncation, and generic KV q4/q8 stay off." />}
-        {batchingOff && <IncompatWarning text="Prefix cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable prefix caching." />}
-        <CheckField label="Enable Prefix Cache" tooltip="Caches prompt prefixes so repeated system prompts, documents, and conversation history can reuse their computed state instead of repeating prefill. The selected RAM and/or SSD tier below owns where reusable blocks are retained." checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
+        {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.prefixCacheHint')} />}
+        {dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}
+        {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguTypedCacheNote')} />}
+        {batchingOff && <IncompatWarning text={t('sessions.config.prefixCacheRequiresBatching')} />}
+        <CheckField label={t('sessions.config.enablePrefixCache')} tooltip={t('sessions.config.enablePrefixCacheTooltip')} checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
         {!dsv4Active && effectivePrefixCacheEnabled && (
           <>
-            {openPanguExactTypedCache && <InfoNote text="Memory-aware mode is required for openPangu's non-aliasing typed cache clone. The legacy entry-count backend is unavailable for this family." />}
-            <CheckField label="Legacy Entry-Count Cache" tooltip="Switches from memory-aware cache (which uses Cache Memory %, Cache Memory Limit, and Cache TTL controls) to a simpler entry-count cache. When ON: you control cache by max entries only. When OFF: you get fine-grained memory budget controls (% of RAM, MB limit, TTL expiration). Memory-aware mode is recommended for most users." checked={openPanguExactTypedCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={openPanguExactTypedCache} />
+            {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguMemoryAwareNote')} />}
+            <CheckField label={t('sessions.config.legacyEntryCountCache')} tooltip={t('sessions.config.legacyEntryCountCacheTooltip')} checked={openPanguExactTypedCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={openPanguExactTypedCache} />
             {!dsv4Active && !openPanguExactTypedCache && config.noMemoryAwareCache ? (
               <>
-                <InfoNote text="Legacy mode active — Cache Memory %, Cache Memory Limit, and Cache TTL are hidden. Turn off 'Legacy Entry-Count Cache' above to use memory-aware caching with those controls." />
+                <InfoNote text={t('sessions.config.legacyModeActiveNote')} />
                 <SliderField
-                  label="Max Cache Entries"
-                  tooltip="Maximum number of prefix cache entries to store when using legacy entry-count mode. Each entry stores the KV cache for one unique prefix. Higher values cache more prefixes but use more memory. For finer control over memory usage, switch to memory-aware mode by unchecking 'Legacy Entry-Count Cache' above."
+                  label={t('sessions.config.maxCacheEntries')}
+                  tooltip={t('sessions.config.maxCacheEntriesTooltip')}
                   value={config.prefixCacheSize}
                   onChange={v => onChange('prefixCacheSize', v)}
                   min={1}
@@ -908,11 +908,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   defaultValue={DEFAULT_CONFIG.prefixCacheSize}
                   allowUnlimited
                   unlimitedValue={0}
-                  unlimitedLabel="Default (100)"
+                  unlimitedLabel={t('sessions.config.defaultWithValue', { n: 100 })}
                 />
                 <SliderField
-                  label="Prefix Cache Max Bytes (MB)"
-                  tooltip="Optional global byte budget for the legacy entry-count prefix cache. When set, eviction also fires when total cached bytes exceed this. Eviction priority is assistant → user → system, so shared system prompts persist across users/sessions. 0 = unlimited (entry-count only)."
+                  label={t('sessions.config.prefixCacheMaxBytes')}
+                  tooltip={t('sessions.config.prefixCacheMaxBytesTooltip')}
                   value={Math.floor((config.prefixCacheMaxBytes || 0) / (1024 * 1024))}
                   onChange={v => onChange('prefixCacheMaxBytes', v * 1024 * 1024)}
                   min={0}
@@ -921,7 +921,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   defaultValue={0}
                   allowUnlimited
                   unlimitedValue={0}
-                  unlimitedLabel="Unlimited"
+                  unlimitedLabel={t('sessions.cache.unlimited')}
                 />
               </>
             ) : (
@@ -930,8 +930,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   <IncompatWarning text={pagedCacheMemoryIgnoredText} />
                 )}
                 <SliderField
-                  label="Cache Memory Limit (MB)"
-                  tooltip="Hard limit on memory used by the prefix cache in megabytes. Set to 'Auto-detect' to let the system auto-detect based on available RAM and the percentage setting below. Set an explicit value if you need to reserve memory for other applications."
+                  label={t('sessions.config.cacheMemoryLimitMb')}
+                  tooltip={t('sessions.config.cacheMemoryLimitTooltip')}
                   value={config.cacheMemoryMb}
                   onChange={v => onChange('cacheMemoryMb', v)}
                   min={256}
@@ -940,12 +940,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   defaultValue={4096}
                   allowUnlimited
                   unlimitedValue={0}
-                  unlimitedLabel="Auto-detect"
+                  unlimitedLabel={t('sessions.config.autoDetect')}
                   disabled={pagedCacheUiState.memoryBudgetControlsDisabled}
                 />
                 <SliderField
-                  label="Cache Memory %"
-                  tooltip="Percentage of available system RAM to allocate for the prefix cache. Only used when Cache Memory Limit is set to 'Auto-detect'. Default 15% leaves headroom for model weights and active generation. Higher values cache more prefixes but risk memory pressure during long generations."
+                  label={t('sessions.config.cacheMemoryPercent')}
+                  tooltip={t('sessions.config.cacheMemoryPercentTooltip')}
                   value={config.cacheMemoryPercent}
                   onChange={v => onChange('cacheMemoryPercent', v)}
                   min={1}
@@ -955,10 +955,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   maxInput={100}
                   disabled={pagedCacheUiState.memoryBudgetControlsDisabled}
                 />
-                {blockDiskOnly && <IncompatWarning text="In-Memory Paged Cache (RAM) is Off and Block Disk Cache (SSD / L2) is authoritative, so Cache Memory Limit, Cache Memory %, and Cache TTL do not apply. Block Size and Max Cache Blocks bound the in-memory hash/index capacity; Block Cache Max bounds SSD usage." />}
+                {blockDiskOnly && <IncompatWarning text={t('sessions.config.blockDiskOnlyBudgetNote')} />}
                 <SliderField
-                  label="Cache TTL (minutes)"
-                  tooltip="Time-to-live for memory-aware cache entries. Entries not accessed within this window are evicted to free memory. 'No expiration' means entries are only evicted by memory pressure. This setting has no effect while In-Memory Paged Cache (RAM) is on; that tier uses LRU eviction based on Max Cache Blocks."
+                  label={t('sessions.config.cacheTtlMinutes')}
+                  tooltip={t('sessions.config.cacheTtlTooltip')}
                   value={config.cacheTtlMinutes}
                   onChange={v => onChange('cacheTtlMinutes', v)}
                   min={1}
@@ -967,7 +967,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   defaultValue={30}
                   allowUnlimited
                   unlimitedValue={0}
-                  unlimitedLabel="No expiration"
+                  unlimitedLabel={t('sessions.config.noExpiration')}
                   disabled={pagedCacheUiState.cacheTtlDisabled}
                 />
               </>
@@ -975,48 +975,48 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
             {/* Caching Help Modal */}
             {!dsv4Active && showCachingHelp && (
-              <Modal title="Caching & Compatibility Engine" onClose={() => setShowCachingHelp(false)} className="max-w-2xl max-h-[85vh] overflow-y-auto">
+              <Modal title={t('sessions.config.cachingHelpHeader')} onClose={() => setShowCachingHelp(false)} className="max-w-2xl max-h-[85vh] overflow-y-auto">
                 <div className="space-y-6 text-sm">
                   <div>
                     <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.continuousBatchingEngine')}</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      <strong>{t('sessions.config.continuousBatching')}</strong> is the heart of vMLX's server performance. Unlike simple mode (which processes exactly one request at a time), continuous batching allows multiple requests to be processed simultaneously. More importantly, <strong>it is required to enable all advanced caching features</strong> (Prefix Cache, In-Memory Paged Cache, KV Quantization, and Disk Cache).
+                      <strong>{t('sessions.config.continuousBatching')}</strong> {t('sessions.config.cachingHelpBatchBody')}
                     </p>
                   </div>
 
                   <div>
                     <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.prefixCachingModes')}</h3>
                     <p className="text-muted-foreground leading-relaxed mb-2">
-                      Prefix caching drastically speeds up interactions by remembering previous prompts (like a system prompt or a long document), skipping the expensive prefill phase.
+                      {t('sessions.config.cachingHelpPrefixBody')}
                     </p>
                     <ul className="list-disc pl-5 space-y-2 text-muted-foreground">
-                      <li><strong>{t('sessions.config.memoryAwareDefault')}</strong> Intelligently manages the cache based on explicit memory boundaries (MB) or a percentage of total system RAM. It automatically evicts the oldest items when crossing these limits.</li>
-                      <li><strong>{t('sessions.config.legacyEntryCount')}</strong> A simpler system that just stores a fixed number of complete prompt states regardless of their size. Useful if you want strict deterministic eviction.</li>
+                      <li><strong>{t('sessions.config.memoryAwareDefault')}</strong> {t('sessions.config.memoryAwareDefaultBody')}</li>
+                      <li><strong>{t('sessions.config.legacyEntryCount')}</strong> {t('sessions.config.legacyEntryCountBody')}</li>
                     </ul>
                   </div>
 
                   <div>
                     <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.mambaHybridCompat')}</h3>
                     <p className="text-muted-foreground leading-relaxed mb-2">
-                      Newer models like Qwen 2.5/3, Falcon Mamba, and Jamba mix standard Attention (KV cache) with SSM blocks (Mamba/Arrays cache).
+                      {t('sessions.config.cachingHelpMambaBody')}
                     </p>
                     <ul className="list-disc pl-5 space-y-2 text-muted-foreground">
-                      <li><strong>{t('sessions.config.kvQuantizationLabel')}</strong> vMLX securely isolates Mamba layers. If you turn on KV Quantization (e.g. q8), it will safely compress the Attention layers while leaving the internal Mamba/SSM memory at full precision, ensuring no corruption or quality loss.</li>
-                      <li><strong>{t('sessions.config.inMemoryPagedCache')}</strong> Some models use this RAM tier when Prefix Cache is enabled so attention KV blocks and path-dependent state share one cache contract. Supported models can instead use Block Disk Cache as an SSD-only tier.</li>
+                      <li><strong>{t('sessions.config.kvQuantizationLabel')}</strong> {t('sessions.config.kvQuantizationBody')}</li>
+                      <li><strong>{t('sessions.config.inMemoryPagedCache')}</strong> {t('sessions.config.inMemoryPagedCacheBody')}</li>
                     </ul>
                   </div>
 
                   <div>
                     <h3 className="text-base font-semibold text-foreground mb-2">{t('sessions.config.kvCacheQuantization')}</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      By converting stored prompts to q8 or q4 precision, you can reduce the cache's RAM footprint by 2-4x. <strong>{t('sessions.config.onlyCompressesSavedPrefixes')}</strong>. The actual text generation continues to run at standard full precision natively in MLX.
+                      {t('sessions.config.kvQuantHelpBody1')} <strong>{t('sessions.config.onlyCompressesSavedPrefixes')}</strong>. {t('sessions.config.kvQuantHelpBody2')}
                     </p>
                   </div>
 
                   <div>
                     <h3 className="text-base font-semibold tracking-tight text-foreground mb-2">{t('sessions.config.visionLanguageModels')}</h3>
                     <p className="text-muted-foreground leading-relaxed">
-                      {t('sessions.config.coreEngineHandlesVision')} <strong>{t('sessions.config.prefixCachingWorksForImages')}</strong> If you repeatedly ask questions about the exact same image (like in a tool-calling flow analyzing a dashboard), the massive vision embedding prefill is cached and reused instantly.
+                      {t('sessions.config.coreEngineHandlesVision')} <strong>{t('sessions.config.prefixCachingWorksForImages')}</strong> {t('sessions.config.vlHelpBody')}
                     </p>
                   </div>
                 </div>
@@ -1028,37 +1028,37 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* In-memory paged cache (RAM) */}
       <Section title={pagedCacheSectionTitle} expanded={expandedSections.pagedCache} onToggle={() => toggleSection('pagedCache')} hidden={isImage}>
-        {!effectivelyNoBatching && <PerformanceHint text="Keeps reusable prefix blocks in Apple unified memory as small pages instead of one large allocation. This is the fast RAM tier; Block Disk Cache (SSD / L2) below is the persistent tier." />}
-        {dsv4Active && <InfoNote text="DSV4 uses 256-token typed composite blocks. The bounded RAM tier defaults On for hot reuse, with Block Disk Cache as the persistent warm/cold tier. You can turn RAM Off and keep SSD-only reuse." />}
-        {batchingOff && <IncompatWarning text="In-Memory Paged Cache (RAM) requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above to enable the RAM cache tier." />}
-        {!dsv4Active && config.enableDiskCache && <IncompatWarning text="In-Memory Paged Cache (RAM) and legacy Disk Cache cannot run simultaneously. Enabling the RAM tier will auto-disable legacy Disk Cache. For persistent SSD caching, use 'Block Disk Cache (SSD / L2)' below instead." />}
-        {!dsv4Active && !batchingOff && prefixOff && !cachePolicy.architectureRequiresPagedCache && <InfoNote text="In-Memory Paged Cache (RAM) is a prefix-cache backend. Turning it on will enable Prefix Cache." />}
-        {!batchingOff && prefixOff && cachePolicy.architectureRequiresPagedCache && <IncompatWarning text="This model uses a native/in-memory paged cache when Prefix Cache is enabled. Enable Prefix Cache above to activate the architecture-specific cache stack." />}
-        {zayaTypedCacheRequiresPaged && <InfoNote text="ZAYA typed CCA cache requires the in-memory paged tier while Prefix Cache is enabled. Turn off Prefix Cache to disable this cache stack for ZAYA." />}
-        {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && <InfoNote text="This native cache route requires the in-memory paged tier while Prefix Cache is enabled so KV blocks and path-dependent state stay in the same cache contract." />}
+        {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.pagedCacheHint')} />}
+        {dsv4Active && <InfoNote text={t('sessions.config.dsv4PagedNote')} />}
+        {batchingOff && <IncompatWarning text={t('sessions.config.pagedCacheRequiresBatching')} />}
+        {!dsv4Active && config.enableDiskCache && <IncompatWarning text={t('sessions.config.pagedCacheDiskConflict')} />}
+        {!dsv4Active && !batchingOff && prefixOff && !cachePolicy.architectureRequiresPagedCache && <InfoNote text={t('sessions.config.pagedCacheEnablesPrefix')} />}
+        {!batchingOff && prefixOff && cachePolicy.architectureRequiresPagedCache && <IncompatWarning text={t('sessions.config.nativePagedRequiresPrefix')} />}
+        {zayaTypedCacheRequiresPaged && <InfoNote text={t('sessions.config.zayaTypedCacheNote')} />}
+        {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && <InfoNote text={t('sessions.config.nativeCacheRequiresPagedNote')} />}
         {dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={blockDiskOnly
-          ? "DSV4 SSD-only mode preserves typed SWA plus CSA/HCA state in Block Disk L2 without claiming a retained RAM payload tier."
-          : "DSV4 uses the RAM paged tier as L1 and Block Disk L2 as the persistent fallback, with its pool codec derived from the loaded bundle."} />}
+          ? t('sessions.config.dsv4SsdOnlyNote')
+          : t('sessions.config.dsv4RamL1Note')} />}
         {architectureBlockDiskOnlySupported && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
           ? stepMixedSwaBlockDiskOnly
-            ? "Step full/sliding-KV SSD-only mode is available: typed KV blocks and rotating metadata stay in Block Disk L2 without RAM payloads. Under tight Metal headroom, long cold-prompt stores can be skipped to avoid an unsafe second clean prefill; existing SSD blocks remain reusable."
-            : "Native sliding/mixed-SWA SSD-only mode is available: turn In-Memory Paged Cache Off to keep typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads."
-          : "Hybrid/Mamba SSD-only mode is available: turn In-Memory Paged Cache Off to keep attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive."} />}
+            ? t('sessions.config.stepSsdOnlyNote')
+            : t('sessions.config.mixedSwaSsdOnlyNote')
+          : t('sessions.config.hybridSsdOnlyNote')} />}
         {m3Active && <InfoNote text={blockDiskOnly
-          ? "MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets in Block Disk L2 while keeping persistent RAM payloads disabled."
-          : "MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets. Block Disk Cache provides its persistent L2; generic KV q4/q8 remains disabled."} />}
-        {openPanguExactTypedCache && <InfoNote text="openPangu does not use generic paged blocks: causal-convolution state is cumulative and cannot be reconstructed from an arbitrary block. Use Prefix Cache plus prompt-level Disk Cache (L2) instead." />}
-        <CheckField label="In-Memory Paged Cache (RAM)" tooltip="Keeps reusable prompt-prefix and native cache blocks in Apple unified memory (shared by CPU and GPU) for faster repeated prompts. This is the fast RAM tier and is not persistent. Block Disk Cache (SSD / L2) can remain enabled when this RAM tier is Off." checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
+          ? t('sessions.config.m3SsdOnlyNote')
+          : t('sessions.config.m3NativeMsaNote')} />}
+        {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguNoPagedNote')} />}
+        <CheckField label={t('sessions.config.pagedKVCache')} tooltip={t('sessions.config.pagedKVCacheTooltip')} checked={effectiveUsePagedCache} onChange={v => applyCacheControlUpdates(cacheControlUpdatesForPagedToggle(v, cacheControlState))} disabled={genericPagedCacheToggleDisabled} />
         {(effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
           <>
             <InfoNote text={blockDiskOnly
               ? effectivePagedCapacityText.replace('Effective in-memory cache capacity', 'Effective SSD block-index capacity')
               : effectivePagedCapacityText} />
             <SliderField
-              label="Block Size (tokens)"
+              label={t('sessions.config.blockSizeTokens')}
               tooltip={dsv4Active
-                ? "DSV4 native SWA+CSA/HCA cache records require fixed 256-token blocks. This value is read-only for this architecture."
-                : "Number of tokens per content-addressed cache block in the in-memory paged tier or Block Disk Cache. Smaller blocks reduce waste per sequence but increase management overhead. Default 64 is optimal for most models."}
+                ? t('sessions.config.blockSizeTooltipDsv4')
+                : t('sessions.config.blockSizeTooltip')}
               value={effectivePagedCacheBlockSize}
               onChange={v => onChange('pagedCacheBlockSize', v)}
               min={1}
@@ -1068,8 +1068,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               disabled={dsv4Active}
             />
             <SliderField
-              label="Max Cache Blocks"
-              tooltip="Maximum total number of KV cache blocks allocated. Block 0 is permanently reserved as the null/placeholder block, so usable token capacity = block_size x (max_blocks - 1). Increase for longer contexts, decrease to save memory."
+              label={t('sessions.config.maxCacheBlocks')}
+              tooltip={t('sessions.config.maxCacheBlocksTooltip')}
               value={config.maxCacheBlocks}
               onChange={v => onChange('maxCacheBlocks', v)}
               min={2}
@@ -1079,14 +1079,14 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               maxInput={100000}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel="Default (1000)"
+              unlimitedLabel={t('sessions.config.defaultWithValue', { n: 1000 })}
             />
           </>
         )}
-        {!batchingOff && !effectiveUsePagedCache && <InfoNote text="Block Disk Cache can run as a pure SSD prefix tier while In-Memory Paged Cache remains Off. It keeps only the content-addressed block index in memory, restores KV payloads transiently from SSD, and still requires Prefix Cache." />}
+        {!batchingOff && !effectiveUsePagedCache && <InfoNote text={t('sessions.config.blockDiskPureSsdNote')} />}
         <CheckField
-          label="Block Disk Cache (SSD / L2)"
-          tooltip="Persist content-addressed prefix blocks to SSD. With In-Memory Paged Cache (RAM) On, SSD is L2 behind the RAM tier. With the RAM tier Off, SSD is the authoritative block tier and KV payloads are restored only transiently for reconstruction. Compatible runtimes preserve native TurboQuant or typed cache records."
+          label={t('sessions.cache.blockDiskCache')}
+          tooltip={t('sessions.config.blockDiskCacheTooltip')}
           checked={cachePolicy.blockDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(cacheControlUpdatesForBlockDiskToggle(v, cacheControlState))}
           disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache}
@@ -1094,8 +1094,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {cachePolicy.blockDiskCacheChecked && (
           <>
             <SliderField
-              label="Block Cache Max (GB)"
-              tooltip="Maximum physical disk space for the managed block-cache root, shared across model/config namespaces and typed companion state. Least-recently-used entries are evicted when the aggregate root exceeds the limit. If multiple live sessions share the root, the smallest finite limit is enforced. Set to 0 for unlimited only when no live session supplies a finite limit."
+              label={t('sessions.config.blockCacheMaxGb')}
+              tooltip={t('sessions.config.blockCacheMaxTooltip')}
               value={config.blockDiskCacheMaxGb}
               onChange={v => onChange('blockDiskCacheMaxGb', v)}
               min={0}
@@ -1104,12 +1104,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               defaultValue={10}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel="Unlimited"
+              unlimitedLabel={t('sessions.cache.unlimited')}
             />
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('sessions.config.blockCacheDirectory')}
-                <Tooltip text="Managed root for block-level disk cache files. A model/config-specific subdirectory is created automatically, and the size limit applies across all managed subdirectories and typed companions in this root. Leave empty for ~/.cache/vmlx-engine/block-cache/." />
+                <Tooltip text={t('sessions.config.blockCacheDirectoryTooltip')} />
               </span>
               <input
                 type="text"
@@ -1130,21 +1130,21 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           KV caches, or native typed cache contracts for path-dependent
           architectures such as DSV4, ZAYA, and hybrid SSM. */}
       <Section title={t('sessions.config.kvCacheQuantization')} expanded={expandedSections.kvCacheQuant} onToggle={() => toggleSection('kvCacheQuant')} hidden={isImage}>
-        {batchingOff && <IncompatWarning text="KV cache quantization requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
-        {!batchingOff && prefixOff && <IncompatWarning text="KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization." />}
-        {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text="Mixed sliding/full attention cache detected — Auto preserves the model's native cache-slot and rotating-window metadata and applies q4 at a compatible live or stored-cache boundary selected by the engine. The running health panel reports whether live full-attention TurboQuant or storage-only q4 is active. Explicit None disables both." />}
-        {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text="HY3 plain-KV cache detected — Auto uses TQ4 for RAM/SSD L2 stored prefixes while live decode stays on the native KV cache. Native MTP D1 copies this cache independently before batch split/verify." />}
-        {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? 'Bonsai hybrid cache detected — Auto applies TQ8 only to compatible attention KV and preserves native SSM/GLA companion state.' : 'Qwen hybrid cache detected — Auto applies TQ4 only to compatible attention KV and preserves native SSM/GLA companion state.'} />}
-        {!effectivelyNoBatching && !prefixOff && qwenFullTqActive && <PerformanceHint text="Qwen full-KV cache detected — Auto stores bulk attention KV with TQ4 and protects the first/last six boundary layers with TQ8. Explicit None disables both live TQ-KV and stored quantization." />}
-        {!effectivelyNoBatching && !prefixOff && isMambaCache && !qwenHybridTqActive && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text="Hybrid stateful cache detected — the engine keeps SSM/GLA state native and only uses cache codecs proven for that architecture. Generic TurboQuant KV is disabled unless a tested override exists." />}
-        {!effectivelyNoBatching && dsv4Active && <PerformanceHint text="DeepSeek-V4 keeps generic TurboQuant KV q4/q8 disabled. Prefix RAM/SSD records preserve native SWA+CSA/HCA state, while CSA/HCA pool quantization is read from the loaded bundle rather than a generic cache-codec override." />}
-        {!effectivelyNoBatching && m3Active && <PerformanceHint text="MiniMax-M3 keeps generic KV q4/q8 disabled. Prefix reuse uses native MSA snapshots with keys, values, idx_keys, and absolute offsets; generic stored-KV codecs cannot preserve that cache format." />}
-        {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text="openPangu keeps generic KV q4/q8 disabled. Its exact typed snapshot owns MLA KV, DSA indexer, rotating-SWA metadata, and causal-convolution state as one full-precision record." />}
+        {batchingOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
+        {!batchingOff && prefixOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresPrefix')} />}
+        {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text={t('sessions.config.mixedSwaAutoHint')} />}
+        {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text={t('sessions.config.hy3AutoHint')} />}
+        {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? t('sessions.config.bonsaiHybridHint') : t('sessions.config.qwenHybridHint')} />}
+        {!effectivelyNoBatching && !prefixOff && qwenFullTqActive && <PerformanceHint text={t('sessions.config.qwenFullKvHint')} />}
+        {!effectivelyNoBatching && !prefixOff && isMambaCache && !qwenHybridTqActive && !mixedSwaCacheActive && !dsv4Active && !m3Active && !openPanguExactTypedCache && <PerformanceHint text={t('sessions.config.hybridStatefulHint')} />}
+        {!effectivelyNoBatching && dsv4Active && <PerformanceHint text={t('sessions.config.dsv4KvQuantHint')} />}
+        {!effectivelyNoBatching && m3Active && <PerformanceHint text={t('sessions.config.m3KvQuantHint')} />}
+        {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text={t('sessions.config.openPanguKvQuantHint')} />}
         {/* Live/native cache codec — automatic per architecture. */}
         <div className="block">
           <span className="text-xs font-medium text-muted-foreground">
             {t('sessions.config.liveCacheCodec')}
-            <Tooltip text="Auto mode leaves the CLI flag unset so the engine can choose per architecture: calibrated TurboQuant for compatible plain KV/JANGTQ caches, native composite or typed caches for DSV4/ZAYA/hybrid SSM, and stored-prefix fallback only where that codec is valid." />
+            <Tooltip text={t('sessions.config.liveCacheCodecTooltip')} />
           </span>
           <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
             <span>{liveCacheCodecLabel}</span>
@@ -1158,26 +1158,26 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('sessions.config.nativePoolCodec')}
-                <Tooltip text="This is DSV4's architecture-native compressed-pool codec, not generic TurboQuant KV. The value is detected from the loaded bundle and is not user-overridable from this generic cache panel." />
+                <Tooltip text={t('sessions.config.nativePoolCodecTooltip')} />
               </span>
               <div className="cfg-input flex items-center justify-between" style={{ background: 'var(--card)', cursor: 'default' }}>
                 <span>{t('sessions.config.dsv4PoolQuantization')}</span>
                 <span className="text-xs px-2 py-0.5 rounded" style={{ background: 'var(--success-bg, rgba(34,197,94,0.15))', color: 'var(--success-fg, rgb(34,197,94))' }}>
                   {config.dsv4PoolQuant === true
-                    ? 'ON (BUNDLE)'
+                    ? t('sessions.config.poolQuantOnBundle')
                     : config.dsv4PoolQuant === false
-                      ? 'OFF (BUNDLE)'
-                      : 'ENGINE / BUNDLE DEFAULT'}
+                      ? t('sessions.config.poolQuantOffBundle')
+                      : t('sessions.config.poolQuantEngineDefault')}
                 </span>
               </div>
             </div>
             <CheckField
-              label="DSV4 Activation QAT"
-              tooltip="Restart required. On enables source-native E4M3 round-trips for attention KV and compressed pools plus Hadamard-128 + FP4 E2M1 indexer round-trips. Off skips only those activation-QAT transforms to avoid their runtime overhead; FP32 compressor staging remains enabled and is not controlled here."
+              label={t('sessions.config.dsv4ActivationQat')}
+              tooltip={t('sessions.config.dsv4ActivationQatTooltip')}
               checked={config.dsv4ActivationQat === true}
               onChange={v => onChange('dsv4ActivationQat', v)}
             />
-            <InfoNote text="Default Off. Enable only when you want the source-native DSV4 activation-QAT graph and accept its extra runtime work. This switch does not change weights, sampling, cache pool quantization, or FP32 compressor staging." />
+            <InfoNote text={t('sessions.config.dsv4ActivationQatNote')} />
           </>
         )}
 
@@ -1185,19 +1185,19 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         <div className="block">
           <span className="text-xs font-medium text-muted-foreground">
             {t('sessions.config.storedCacheQuantization')}
-            <Tooltip text="Controls how completed prompt states are stored in the prefix cache. Auto keeps the engine's production codec choice. None explicitly disables stored-cache quantization. q8/q4 force the generic stored-cache codec and also disable calibrated live TurboQuant so the explicit choice is honored." />
+            <Tooltip text={t('sessions.config.storedCacheQuantTooltip')} />
           </span>
           <select value={effectiveStoredCacheQuantization} onChange={e => onChange('kvCacheQuantization', e.target.value)} className="cfg-input" disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}>
-            <option value="auto">{dsv4Active ? 'Native typed codec (bundle-derived)' : 'Auto (engine-selected: native/TurboQuant + stored fallback)'}</option>
+            <option value="auto">{dsv4Active ? t('sessions.config.storedQuantNativeTyped') : t('sessions.config.storedQuantAuto')}</option>
             <option value="none">{t('sessions.config.kvQuantNone')}</option>
-            <option value="q8">q8 (8-bit, ~2x stored cache savings)</option>
-            <option value="q4">q4 (4-bit, ~4x stored cache savings)</option>
+            <option value="q8">{t('sessions.config.storedQuantQ8')}</option>
+            <option value="q4">{t('sessions.config.storedQuantQ4')}</option>
           </select>
         </div>
         {effectiveStoredCacheQuantization !== 'auto' && effectiveStoredCacheQuantization !== 'none' && (
           <SliderField
-            label="Group Size"
-            tooltip="Number of elements quantized together. Smaller groups preserve more precision but use slightly more memory for scale/zero-point metadata. Default 64 is optimal for most models."
+            label={t('convert.groupSize')}
+            tooltip={t('sessions.config.groupSizeTooltip')}
             value={config.kvCacheGroupSize}
             onChange={v => onChange('kvCacheGroupSize', v)}
             min={32}
@@ -1210,20 +1210,20 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* Disk Cache (L2 Persistent) */}
       <Section title={t('sessions.config.diskCachePersistent')} expanded={expandedSections.diskCache} onToggle={() => toggleSection('diskCache')} hidden={isImage}>
-        {!effectivelyNoBatching && <PerformanceHint text="Saves cached prompts to your SSD so they survive server restarts. Next time you load the same model, previous conversations warm up instantly." />}
+        {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.diskCacheHint')} />}
         {dsv4Active ? (
-          <InfoNote text="DSV4 uses Block Disk Cache (SSD / L2) above for persistent native composite blocks. This legacy whole-prompt disk format remains unavailable for DSV4 typed cache records." />
+          <InfoNote text={t('sessions.config.dsv4LegacyDiskNote')} />
         ) : (
-          <InfoNote text="Legacy prompt disk cache works with the memory-aware prefix backend. Block Disk Cache (SSD / L2) persists content-addressed blocks whether In-Memory Paged Cache (RAM) is On or explicitly Off. Only one disk format can be active at a time." />
+          <InfoNote text={t('sessions.config.legacyDiskNote')} />
         )}
-        {openPanguExactTypedCache && <InfoNote text="For openPangu this prompt-level disk cache stores the exact typed N-1 composite and restores it across process restarts. Block Disk Cache remains unavailable." />}
-        {batchingOff && <IncompatWarning text="Disk cache requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above." />}
-        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active' && <IncompatWarning text="Legacy disk cache is not compatible with In-Memory Paged Cache (RAM). For persistent SSD storage, use 'Block Disk Cache (SSD / L2)' in that section instead. To use legacy Disk Cache, disable the RAM tier first." />}
-        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache' && <IncompatWarning text="This architecture requires a native/in-memory paged cache while Prefix Cache is enabled. Use 'Block Disk Cache (SSD / L2)' in the In-Memory Paged Cache section for persistent SSD storage." />}
-        {!batchingOff && prefixOff && !cachePolicy.legacyDiskCacheDisabled && <InfoNote text="Disk cache is persistent L2 behind Prefix Cache. Turning it on will enable Prefix Cache and disable the in-memory and block-cache backends." />}
+        {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguDiskNote')} />}
+        {batchingOff && <IncompatWarning text={t('sessions.config.diskCacheRequiresBatching')} />}
+        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active' && <IncompatWarning text={t('sessions.config.legacyDiskPagedConflict')} />}
+        {!effectivelyNoBatching && cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache' && <IncompatWarning text={t('sessions.config.legacyDiskArchConflict')} />}
+        {!batchingOff && prefixOff && !cachePolicy.legacyDiskCacheDisabled && <InfoNote text={t('sessions.config.diskCacheEnablesPrefix')} />}
         <CheckField
-          label="Enable Disk Cache"
-          tooltip="Persist whole-prompt caches to disk for reuse across server restarts. This legacy format acts as L2 behind the memory-aware prefix backend. It requires Prefix Cache and is not compatible with In-Memory Paged Cache (RAM); use Block Disk Cache (SSD / L2) for persistent content-addressed blocks instead."
+          label={t('sessions.config.enableDiskCache')}
+          tooltip={t('sessions.config.enableDiskCacheTooltip')}
           checked={cachePolicy.legacyDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(cacheControlUpdatesForDiskToggle(v, cacheControlState))}
           disabled={dsv4Active || cachePolicy.legacyDiskCacheDisabled}
@@ -1231,8 +1231,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {cachePolicy.legacyDiskCacheChecked && (
           <>
             <SliderField
-              label="Max Cache Size (GB)"
-              tooltip="Maximum disk space for cached prompt states. Oldest entries are evicted when this limit is exceeded. Set to 0 for unlimited. Each cached prompt typically uses 50-500MB depending on model size and prompt length."
+              label={t('sessions.config.maxCacheSizeGb')}
+              tooltip={t('sessions.config.maxCacheSizeTooltip')}
               value={config.diskCacheMaxGb}
               onChange={v => onChange('diskCacheMaxGb', v)}
               min={0}
@@ -1241,12 +1241,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               defaultValue={10}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel="Unlimited"
+              unlimitedLabel={t('sessions.cache.unlimited')}
             />
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('sessions.config.cacheDirectory')}
-                <Tooltip text="Base directory for disk cache files (.safetensors). A model-specific subdirectory is created automatically. Leave empty for the default location (~/.cache/vmlx-engine/prompt-cache/<model>/). Set a custom path if you want to use a specific drive." />
+                <Tooltip text={t('sessions.config.cacheDirectoryTooltip')} />
               </span>
               <input
                 type="text"
@@ -1262,8 +1262,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* Power Management — visible for ALL model types (text + image) */}
       <Section title={t('sessions.config.powerManagement')} expanded={expandedSections.power} onToggle={() => toggleSection('power')}>
-        <PerformanceHint text="Control when idle models automatically sleep to free GPU memory. Sleeping models auto-wake when a new request arrives." />
-        <Field label="Auto-Sleep" tooltip="Automatically put the model to sleep after a period of inactivity to free memory. Light sleep clears caches but keeps the model loaded (instant wake). Deep sleep unloads the model entirely (2-15s wake). Models auto-wake when a new request arrives.">
+        <PerformanceHint text={t('sessions.config.powerManagementDesc')} />
+        <Field label={t('sessions.config.autoSleep')} tooltip={t('sessions.config.autoSleepDesc')}>
           <label className="flex items-center gap-2 cursor-pointer">
             <input
               type="checkbox"
@@ -1279,8 +1279,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {config.autoSleepEnabled !== false && (
           <>
             <SliderField
-              label="Light Sleep After"
-              tooltip="Minutes of inactivity before entering light sleep. Light sleep clears KV/prefix caches to free memory but keeps the model loaded in GPU. Wake is instant — no reload needed. Set to 0 to disable light sleep."
+              label={t('sessions.config.lightSleepAfter')}
+              tooltip={t('sessions.config.lightSleepAfterTooltip')}
               value={config.idleTimeoutSoftMin ?? (isImage ? 5 : 10)}
               onChange={v => onChange('idleTimeoutSoftMin', v)}
               min={0}
@@ -1289,11 +1289,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               defaultValue={isImage ? 5 : 10}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel="Disabled"
+              unlimitedLabel={t('sessions.config.rateLimitDisabled')}
             />
             <SliderField
-              label="Deep Sleep After"
-              tooltip="Minutes of inactivity before entering deep sleep. Deep sleep unloads the model entirely from GPU memory. The server process stays alive and the model auto-reloads when a new request arrives (2-15 seconds for most models). Set to 0 to disable deep sleep."
+              label={t('sessions.config.deepSleepAfter')}
+              tooltip={t('sessions.config.deepSleepAfterTooltip')}
               value={config.idleTimeoutHardMin ?? (isImage ? 15 : 30)}
               onChange={v => onChange('idleTimeoutHardMin', v)}
               min={0}
@@ -1302,7 +1302,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               defaultValue={isImage ? 15 : 30}
               allowUnlimited
               unlimitedValue={0}
-              unlimitedLabel="Disabled"
+              unlimitedLabel={t('sessions.config.rateLimitDisabled')}
             />
           </>
         )}
@@ -1310,9 +1310,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* Performance */}
       <Section title={t('sessions.config.performanceGeneration')} expanded={expandedSections.performance} onToggle={() => toggleSection('performance')} hidden={isImage}>
-        <PerformanceHint text="Controls token streaming, response length, and prompt-window limits. Max Output Tokens caps generated tokens; Max Context Tokens caps accepted prompt/context tokens." />
+        <PerformanceHint text={t('sessions.config.performanceHint')} />
         {/* Whole-model JIT is not available for path-dependent cache models. */}
-        <Field label="Model-wide JIT (mx.compile)" tooltip="Compile the entire model forward graph for Metal kernel fusion. This is separate from model-native compiled kernels, which remain automatic when supported. Whole-model JIT requires a trace-safe cache topology and a restart.">
+        <Field label={t('sessions.config.modelWideJit')} tooltip={t('sessions.config.modelWideJitTooltip')}>
           <label className={`flex items-center gap-2 ${flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
@@ -1328,30 +1328,30 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         </Field>
         {(flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive) && (
           <IncompatWarning text={dsv4Active
-            ? "Whole-model JIT is not trace-safe for DeepSeek-V4's path-dependent SWA+CSA/HCA cache. Native compiled decode remains automatic: the supported DSV4 runtime uses compiled router/SwiGLU operations and a fused Metal mHC single-token decode kernel."
+            ? t('sessions.config.jitDisabledDsv4')
             : m3Active
-            ? "JIT is disabled for MiniMax-M3 native MSA cache. The Lightning-Indexer idx_keys path must stay on the uncompiled scheduler path."
+            ? t('sessions.config.jitDisabledM3')
             : zayaCcaActive
-            ? "JIT is disabled for ZAYA typed CCA cache. CCA state is path-dependent and the full cache stack benchmarks faster on the uncompiled scheduler path."
+            ? t('sessions.config.jitDisabledZaya')
             : multimodalActive
-            ? "JIT is disabled for multimodal/VLM models. The mlx-vlm streaming path owns image/video preprocessing and stream context state that is not safe to trace with mx.compile."
+            ? t('sessions.config.jitDisabledMultimodal')
             : hybridCacheActive
-            ? "JIT is disabled for hybrid SSM/Mamba cache models. Their path-dependent Python cache objects are not mx.compile safe."
+            ? t('sessions.config.jitDisabledHybrid')
             : turboQuantActive
-            ? "Server-level mx.compile is disabled for JANGTQ/TurboQuant KV because the live cache uses custom TurboQuant objects that mx.compile cannot trace. JANGTQ fused Metal kernels still run."
+            ? t('sessions.config.jitDisabledTurboQuant')
             : lagunaMixedSwaTurboQuantActive
-            ? "JIT is disabled for Laguna while Auto cache quantization uses TurboQuantKVCache on full-attention slots and preserves native rotating sliding-window slots. Choose an explicit stored-cache codec (including None) to disable the live TurboQuant wrapper before enabling JIT."
+            ? t('sessions.config.jitDisabledLaguna')
             : flashMoeActive
-            ? "JIT is disabled while Flash MoE is on. Flash MoE's on-demand expert loading is incompatible with mx.compile tracing."
-            : "JIT is disabled while distributed mode is on. Distributed orchestration cannot safely compile the local coordinator graph."} />
+            ? t('sessions.config.jitDisabledFlashMoe')
+            : t('sessions.config.jitDisabledDistributed')} />
         )}
         {dsv4Active && (
-          <PerformanceHint text="Native compiled decode: Automatic. Only unsafe whole-model cache tracing is unavailable." />
+          <PerformanceHint text={t('sessions.config.dsv4CompiledDecodeHint')} />
         )}
 
         <SliderField
-          label="Stream Interval"
-          tooltip="Controls how often streaming tokens are sent to the client. A value of 1 sends each token immediately (smoothest streaming). Higher values batch multiple tokens together, which improves throughput but makes streaming feel chunkier. Set to 1 for chat use, higher for batch processing."
+          label={t('sessions.config.streamInterval')}
+          tooltip={t('sessions.config.streamIntervalTooltip')}
           value={config.streamInterval}
           onChange={v => onChange('streamInterval', v)}
           min={1}
@@ -1360,8 +1360,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.streamInterval}
         />
         <SliderField
-          label="Max Output Tokens"
-          tooltip="Default generated-token cap for this local server. This maps to --max-tokens and only limits response length; it does not change prompt/context length. Leave on Bundle / engine default unless you intentionally want a server-level cap."
+          label={t('sessions.config.maxOutputTokens')}
+          tooltip={t('sessions.config.maxOutputTokensTooltip')}
           value={config.maxTokens}
           onChange={v => onChange('maxTokens', v)}
           min={1}
@@ -1370,12 +1370,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={(config.defaultMaxNewTokens ?? 0) > 0 ? Math.floor(config.defaultMaxNewTokens ?? 0) : 4096}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel={(config.defaultMaxNewTokens ?? 0) > 0 ? `Bundle (${Math.floor(config.defaultMaxNewTokens ?? 0)})` : 'Bundle / engine default'}
+          unlimitedLabel={(config.defaultMaxNewTokens ?? 0) > 0 ? t('sessions.config.bundleWithValue', { n: Math.floor(config.defaultMaxNewTokens ?? 0) }) : t('sessions.config.bundleEngineDefault')}
           maxInput={1000000}
         />
         <SliderField
-          label="Max Context Tokens"
-          tooltip="Maximum prompt/context tokens accepted by this server before prefill. This maps to --max-prompt-tokens and rejects over-limit prompts with prompt_too_long. It does not trim history and does not cap generated output; per-chat/API max_tokens controls output length."
+          label={t('sessions.config.maxContextTokens')}
+          tooltip={t('sessions.config.maxContextTokensTooltip')}
           value={config.maxContextLength}
           onChange={v => onChange('maxContextLength', v)}
           min={1}
@@ -1384,23 +1384,23 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={detectedMaxContext && detectedMaxContext > 0 ? detectedMaxContext : DEFAULT_CONFIG.maxContextLength}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel={detectedMaxContext && detectedMaxContext > 0 ? `Auto (${detectedMaxContext} model context)` : "Auto (memory-safe)"}
+          unlimitedLabel={detectedMaxContext && detectedMaxContext > 0 ? t('sessions.config.autoModelContext', { n: detectedMaxContext }) : t('sessions.config.autoMemorySafe')}
         />
-        <InfoNote text={`Generation defaults are resolved by the engine from generation_config.json/jang_config when present${generationDefaultsSummary ? `. Current model-declared values: ${generationDefaultsSummary}` : ''}. The app does not synthesize missing sampling values; per-chat and API request parameters override model defaults.`} />
+        <InfoNote text={generationDefaultsSummary ? t('sessions.config.generationDefaultsNoteWithValues', { values: generationDefaultsSummary }) : t('sessions.config.generationDefaultsNote')} />
       </Section>
 
       {/* Tool Integration */}
       <Section title={t('sessions.config.toolIntegrationMCP')} expanded={expandedSections.tools} onToggle={() => toggleSection('tools')} hidden={isImage}>
-        <PerformanceHint text="Lets the model call external tools (web search, code execution, etc.) during conversations. Requires a model that supports tool calling." />
-        <Field label="MCP Config File" tooltip="Path to a JSON config file defining MCP (Model Context Protocol) tool servers. When configured, the model can call external tools during generation. The config file defines tool server endpoints, authentication, and available capabilities.">
+        <PerformanceHint text={t('sessions.config.mcpHint')} />
+        <Field label={t('sessions.config.mcpConfigFile')} tooltip={t('sessions.config.mcpConfigFileTooltip')}>
           <div className="flex gap-2">
             <input type="text" value={config.mcpConfig} onChange={e => onChange('mcpConfig', e.target.value)} placeholder={t('sessions.config.mcpConfigPlaceholder')} className="cfg-input flex-1" />
-            <button type="button" onClick={browseMcpConfig} className="px-3 py-1.5 rounded border border-border text-sm hover:bg-accent">Browse</button>
+            <button type="button" onClick={browseMcpConfig} className="px-3 py-1.5 rounded border border-border text-sm hover:bg-accent">{t('common.browse')}</button>
             <button type="button" onClick={importMcpConfig} className="px-3 py-1.5 rounded border border-border text-sm hover:bg-accent" disabled={mcpImportLoading}>
-              {mcpImportLoading ? 'Importing' : 'Import'}
+              {mcpImportLoading ? t('sessions.config.importing') : t('chat.list.import')}
             </button>
             <button type="button" onClick={() => validateMcpConfig()} className="px-3 py-1.5 rounded border border-border text-sm hover:bg-accent" disabled={mcpValidationLoading}>
-              {mcpValidationLoading ? 'Validating' : 'Validate'}
+              {mcpValidationLoading ? t('sessions.config.validating') : t('sessions.config.validate')}
             </button>
           </div>
         </Field>
@@ -1410,27 +1410,27 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               <span className="text-destructive">{mcpValidation.error}</span>
             ) : (
               <div className="space-y-1">
-                <div className="text-muted-foreground">{mcpValidation.serverCount ?? mcpValidation.servers.length} configured MCP servers</div>
+                <div className="text-muted-foreground">{t('sessions.config.mcpConfiguredServers', { n: mcpValidation.serverCount ?? mcpValidation.servers.length })}</div>
                 {mcpValidation.servers.slice(0, 4).map(server => (
                   <div key={server.name} className="flex items-center justify-between gap-2">
                     <span className="font-medium">{server.name}</span>
-                    <span className="text-muted-foreground">{server.transport || 'mcp'} · {server.enabled === false ? 'disabled' : 'enabled'}</span>
+                    <span className="text-muted-foreground">{server.transport || 'mcp'} · {server.enabled === false ? t('sessions.cache.statusDisabled') : t('sessions.cache.statusEnabled')}</span>
                   </div>
                 ))}
               </div>
             )}
           </div>
         )}
-        <Field label="Enabled MCP Servers" tooltip="Comma or newline separated server names from mcp.json. Empty means every configured server is eligible for this session.">
+        <Field label={t('sessions.config.enabledMcpServers')} tooltip={t('sessions.config.enabledMcpServersTooltip')}>
           <textarea value={config.mcpEnabledServers} onChange={e => onChange('mcpEnabledServers', e.target.value)} placeholder="filesystem,github" className="cfg-input" rows={2} />
         </Field>
-        <Field label="Disabled MCP Servers" tooltip="Comma or newline separated server names to block even when they are present in mcp.json.">
+        <Field label={t('sessions.config.disabledMcpServers')} tooltip={t('sessions.config.disabledMcpServersTooltip')}>
           <textarea value={config.mcpDisabledServers} onChange={e => onChange('mcpDisabledServers', e.target.value)} placeholder="browser_automation&#10;postgres_readonly" className="cfg-input" rows={2} />
         </Field>
-        <Field label="Enabled MCP Tools" tooltip="Comma or newline separated MCP tool names, usually server__tool. Empty means every server-eligible tool is eligible unless denied below.">
+        <Field label={t('sessions.config.enabledMcpTools')} tooltip={t('sessions.config.enabledMcpToolsTooltip')}>
           <textarea value={config.mcpEnabledTools} onChange={e => onChange('mcpEnabledTools', e.target.value)} placeholder="filesystem__read_file&#10;github__search_repositories" className="cfg-input" rows={3} />
         </Field>
-        <Field label="Disabled MCP Tools" tooltip="Comma or newline separated MCP tool names to block even if the model asks for them.">
+        <Field label={t('sessions.config.disabledMcpTools')} tooltip={t('sessions.config.disabledMcpToolsTooltip')}>
           <textarea value={config.mcpDisabledTools} onChange={e => onChange('mcpDisabledTools', e.target.value)} placeholder="filesystem__write_file" className="cfg-input" rows={2} />
         </Field>
         {sessionId && (
@@ -1438,7 +1438,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-medium text-muted-foreground">{t('sessions.config.liveMcpStatus')}</span>
               <button type="button" onClick={refreshMcpStatus} className="text-xs px-2 py-1 rounded border border-border hover:bg-accent" disabled={mcpStatusLoading}>
-                {mcpStatusLoading ? 'Refreshing' : 'Refresh'}
+                {mcpStatusLoading ? t('sessions.config.refreshing') : t('common.refresh')}
               </button>
             </div>
             {mcpStatus?.error && (
@@ -1446,7 +1446,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             )}
             {(mcpStatus?.servers?.length || 0) > 0 && (
               <div className="space-y-1">
-                <div className="text-[11px] text-muted-foreground">Servers</div>
+                <div className="text-[11px] text-muted-foreground">{t('sessions.config.mcpServers')}</div>
                 {(mcpStatus?.servers || []).map(server => {
                   const allowListActive = policyServers.length > 0
                   const checked = !policyDisabledServers.includes(server.name) && (allowListActive ? policyServers.includes(server.name) : server.enabled !== false)
@@ -1454,7 +1454,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                     <label key={server.name} className="flex items-center justify-between gap-2 rounded border border-border/60 px-2 py-1 text-xs">
                       <span className="min-w-0">
                         <span className="font-medium">{server.name}</span>
-                        <span className="ml-2 text-muted-foreground">{server.transport || 'mcp'} · {server.state || 'unknown'} · {server.tools_count ?? 0} tools</span>
+                        <span className="ml-2 text-muted-foreground">{server.transport || 'mcp'} · {server.state || t('sessions.performance.unknown')} · {t('sessions.config.mcpToolsCount', { n: server.tools_count ?? 0 })}</span>
                       </span>
                       <input type="checkbox" checked={checked} onChange={e => toggleMcpServer(server.name, e.target.checked)} />
                     </label>
@@ -1464,13 +1464,13 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             )}
             {(mcpStatus?.tools?.length || 0) > 0 && (
               <div className="space-y-1">
-                <div className="text-[11px] text-muted-foreground">Tools</div>
+                <div className="text-[11px] text-muted-foreground">{t('app.mode.tools')}</div>
                 {(mcpStatus?.tools || []).map(tool => (
                   <label key={tool.name} className="grid grid-cols-[1fr_auto] gap-2 rounded border border-border/60 px-2 py-1 text-xs">
                     <span className="min-w-0">
                       <span className="font-medium break-all">{tool.name}</span>
                       <span className={`ml-2 ${tool.effective ? 'text-primary' : 'text-muted-foreground'}`}>
-                        {tool.effective ? 'effective' : 'blocked'}
+                        {tool.effective ? t('sessions.config.mcpEffective') : t('sessions.config.mcpBlocked')}
                       </span>
                       {tool.description && <span className="block truncate text-muted-foreground">{tool.description}</span>}
                     </span>
@@ -1482,8 +1482,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           </div>
         )}
         <SelectField
-          label="Automatic Tool Choice"
-          tooltip="Auto follows the detected model/tool-parser contract. On explicitly enables automatic tool selection. Off explicitly disables it."
+          label={t('sessions.config.automaticToolChoice')}
+          tooltip={t('sessions.config.automaticToolChoiceTooltip')}
           value={config.enableAutoToolChoice === undefined ? 'auto' : config.enableAutoToolChoice ? 'on' : 'off'}
           onChange={value => onChange(
             'enableAutoToolChoice',
@@ -1492,42 +1492,44 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           options={[
             {
               value: 'auto',
-              label: `Auto (detected: ${detectedEnableAutoToolChoice ? 'On' : 'Off'})`,
+              label: t('sessions.config.autoDetectedWithValue', { value: detectedEnableAutoToolChoice ? t('chat.settings.thinkingOn') : t('chat.settings.thinkingOff') }),
             },
-            { value: 'on', label: 'On' },
-            { value: 'off', label: 'Off' },
+            { value: 'on', label: t('chat.settings.thinkingOn') },
+            { value: 'off', label: t('chat.settings.thinkingOff') },
           ]}
         />
         {config.enableAutoToolChoice === undefined && (
-          <InfoNote text={`Auto-detect is currently ${detectedEnableAutoToolChoice ? 'On' : 'Off'} for this model.`} />
+          <InfoNote text={t('sessions.config.autoDetectCurrently', { value: detectedEnableAutoToolChoice ? t('chat.settings.thinkingOn') : t('chat.settings.thinkingOff') })} />
         )}
         <ParserField
-          label="Tool Call Parser"
-          tooltip="Specifies how to parse the model's tool call output. Each model family uses a different format (Qwen, Llama, Mistral, Hermes, DeepSeek, GLM, etc). 'Auto-detect' reads config.json to pick the right one. If auto-detection fails (e.g. GGUF, renamed fine-tunes), select the parser matching your model's base architecture. Click '?' to see format examples and supported models for each parser."
+          label={t('sessions.config.toolCallParser')}
+          tooltip={t('sessions.config.toolCallParserTooltip')}
+          noneLabel={t('sessions.config.parserNoneToolCalls')}
           value={canonicalizeToolParserId(config.toolCallParser) ?? 'auto'}
           onChange={v => onChange('toolCallParser', v)}
           options={TOOL_PARSER_OPTIONS}
           detectedValue={detectedToolParser}
         />
         <ParserField
-          label="Reasoning Parser"
-          tooltip="Separates reasoning/thinking from final content. Use Auto-detect unless it picks wrong. Qwen3: Qwen, QwQ, MiniMax, StepFun (strict <think> tags). DeepSeek R1: DeepSeek-R1, GLM-4.7, Phi-4, Nemotron (lenient <think> tags). GPT-OSS: GLM-4.7 Flash (Harmony protocol). Mistral 4: Mistral Small/Large 4 ([THINK] tags). Click '?' for full model list."
+          label={t('sessions.config.reasoningParser')}
+          tooltip={t('sessions.config.reasoningParserTooltip')}
+          noneLabel={t('sessions.config.parserNoneReasoning')}
           value={config.reasoningParser === 'none' ? '' : config.reasoningParser}
           onChange={v => onChange('reasoningParser', v)}
           options={REASONING_PARSER_OPTIONS}
           detectedValue={detectedReasoningParser}
         />
         <SelectField
-          label="Model Family (override)"
-          tooltip="Force the model family instead of letting the engine autodetect it from jang_config.json / config.json. Use this for renamed fine-tunes, GGUF, or custom merges where detection picks the wrong family. The chosen family's cache + tool/reasoning parser contract is applied. Leave on Auto unless detection is wrong — forcing a family whose cache contract mismatches the weights (e.g. forcing a plain-KV family onto a hybrid/SSM or MLA model) can produce garbled output."
+          label={t('sessions.config.modelFamilyOverride')}
+          tooltip={t('sessions.config.modelFamilyOverrideTooltip')}
           value={config.modelFamily ?? 'auto'}
           onChange={v => onChange('modelFamily', v === 'auto' ? undefined : v)}
           options={[
-            { value: 'auto', label: `Auto (detected: ${detectedFamily ?? 'unknown'})` },
+            { value: 'auto', label: t('sessions.config.autoDetectedWithValue', { value: detectedFamily ?? t('sessions.performance.unknown') }) },
             ...MODEL_FAMILY_OVERRIDE_NAMES.map(name => ({ value: name, label: name })),
           ]}
         />
-        <Field label="Custom Chat Template" tooltip="Override the model's built-in Jinja2 chat template. Useful when the default template is incompatible with your client (e.g., JetBrains AI Chat). Leave empty to use the model's built-in template. The template receives 'messages' and 'add_generation_prompt' variables.">
+        <Field label={t('sessions.config.customChatTemplate')} tooltip={t('sessions.config.customChatTemplateTooltip')}>
           <textarea
             value={config.chatTemplate ?? ''}
             onChange={e => onChange('chatTemplate', e.target.value || undefined)}
@@ -1538,56 +1540,56 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           />
         </Field>
         <SelectField
-          label="Multimodal Support (VLM)"
-          tooltip="Vision-Language Model mode for models like Qwen2-VL, Qwen3-VL, Pixtral, InternVL, or LLaVA. Auto uses the detected model/runtime policy. Force Off remains an explicit user override. Smelt and documented unsafe runtimes use text-only loading."
+          label={t('sessions.config.multimodalSupport')}
+          tooltip={t('sessions.config.multimodalSupportTooltip')}
           value={dsv4Active || smeltActive || detectedForceTextOnly ? 'off' : config.isMultimodal === true ? 'on' : config.isMultimodal === false ? 'off' : 'auto'}
           onChange={v => onChange('isMultimodal', v === 'on' ? true : v === 'off' ? false : undefined)}
           options={[
-            { value: 'auto', label: 'Auto (detect from model)' },
-            { value: 'on', label: 'Force On' },
-            { value: 'off', label: 'Force Off' },
+            { value: 'auto', label: t('sessions.config.autoDetectFromModel') },
+            { value: 'on', label: t('sessions.config.forceOn') },
+            { value: 'off', label: t('sessions.config.forceOff') },
           ]}
           disabled={dsv4Active || smeltActive || detectedForceTextOnly}
         />
         {dsv4Active && (
-          <InfoNote text="DSV4 Flash is served through the text runtime. Image/video controls stay hidden because this bundle has no VL processor path." />
+          <InfoNote text={t('sessions.config.dsv4TextRuntimeNote')} />
         )}
         {smeltActive && (
-          <IncompatWarning text="VLM is disabled when Smelt Mode is active. Smelt uses text-only loading for partial expert support." />
+          <IncompatWarning text={t('sessions.config.vlmDisabledSmelt')} />
         )}
         {detectedForceTextOnly && (
-          <IncompatWarning text="This bundle includes media metadata, but its detected vMLX runtime is currently text-only. Attachments stay disabled until that family's native media path is live-verified; changing quantization format alone does not make the media route available." />
+          <IncompatWarning text={t('sessions.config.forceTextOnlyNote')} />
         )}
         {!dsv4Active && !smeltActive && !detectedForceTextOnly && config.isMultimodal === true && (
-          <InfoNote text="VLM mode is active — the MLLM scheduler handles image/video processing with Prefix Cache, In-Memory Paged Cache (RAM), and KV quantization support." />
+          <InfoNote text={t('sessions.config.vlmActiveNote')} />
         )}
         {!dsv4Active && !smeltActive && !detectedForceTextOnly && config.isMultimodal === false && (
-          <InfoNote text="VLM mode is off only when the model is not auto-detected as multimodal. Detected VLM bundles launch with image/video support." />
+          <InfoNote text={t('sessions.config.vlmOffNote')} />
         )}
         {omniBackendVisible && (
           <SelectField
-            label="Omni Backend"
-            tooltip="Nemotron-Omni encoder backend. Stage 1 is the correctness-first PyTorch/MPS bridge. Stage 2 maps to --omni-backend stage2 / VMLX_OMNI_BACKEND=stage2 for native MLX RADIO + Parakeet benchmarking."
+            label={t('sessions.config.omniBackend')}
+            tooltip={t('sessions.config.omniBackendTooltip')}
             value={config.omniBackend || 'stage1'}
             onChange={v => onChange('omniBackend', v as 'stage1' | 'stage2')}
             options={[
-              { value: 'stage1', label: 'Stage 1 correctness' },
-              { value: 'stage2', label: 'Stage 2 native MLX' },
+              { value: 'stage1', label: t('sessions.config.omniStage1') },
+              { value: 'stage2', label: t('sessions.config.omniStage2') },
             ]}
           />
         )}
         {normalizedDetectedFamily === 'gemma4' && multimodalActive && (
           <SelectField
-            label="Image Token Budget"
-            tooltip="Gemma 4 visual soft-token budget per image. 280 is the bundle default; use 560 or 1120 for OCR and small text at higher prefill cost. The selected value is sent as image_token_budget and is part of the media cache identity."
+            label={t('sessions.config.imageTokenBudget')}
+            tooltip={t('sessions.config.imageTokenBudgetTooltip')}
             value={String(config.imageTokenBudget ?? 280)}
             onChange={v => onChange('imageTokenBudget', Number(v))}
             options={[
-              { value: '70', label: '70 — fastest / lowest detail' },
-              { value: '140', label: '140 — low detail' },
-              { value: '280', label: '280 — bundle default' },
-              { value: '560', label: '560 — detailed' },
-              { value: '1120', label: '1120 — OCR / small text' },
+              { value: '70', label: t('sessions.config.imageBudget70') },
+              { value: '140', label: t('sessions.config.imageBudget140') },
+              { value: '280', label: t('sessions.config.imageBudget280') },
+              { value: '560', label: t('sessions.config.imageBudget560') },
+              { value: '1120', label: t('sessions.config.imageBudget1120') },
             ]}
           />
         )}
@@ -1597,8 +1599,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {showVideoControls && (
           <>
             <SliderField
-              label="Video Frames/Second"
-              tooltip="For VL models with video support (Qwen 3.6, Qwen3.5-VL). Controls how many frames per second are sampled from an uploaded video clip. Lower = fewer frames = faster prefill but less temporal detail. Qwen 3.6's temporal embeddings tolerate up to ~4 fps; 2 fps is a good default."
+              label={t('sessions.config.videoFps')}
+              tooltip={t('sessions.config.videoFpsTooltip')}
               value={config.videoFps ?? 2}
               onChange={v => onChange('videoFps', v)}
               min={1}
@@ -1607,8 +1609,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               defaultValue={2}
             />
             <SliderField
-              label="Max Video Frames"
-              tooltip="Maximum number of frames extracted from a single video, regardless of fps or duration. Caps prefill cost on long clips. Qwen 3.6 supports up to 32+ frames but most prompts work well with 8."
+              label={t('sessions.config.maxVideoFrames')}
+              tooltip={t('sessions.config.maxVideoFramesTooltip')}
               value={config.videoMaxFrames ?? 8}
               onChange={v => onChange('videoMaxFrames', v)}
               min={2}
@@ -1621,33 +1623,33 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       </Section>
 
       {/* Native in-model MTP */}
-      <Section title="Native MTP" expanded={expandedSections.nativeMtp} onToggle={() => toggleSection('nativeMtp')} hidden={isImage || dsv4Active || !nativeMtpDetected}>
+      <Section title={t('sessions.config.nativeMtp')} expanded={expandedSections.nativeMtp} onToggle={() => toggleSection('nativeMtp')} hidden={isImage || dsv4Active || !nativeMtpDetected}>
         {!nativeMtpSupported && (
-          <IncompatWarning text={detectedNativeMtp?.blockedReason || 'Native MTP weights were detected, but this bundle has not passed the runtime compatibility gate. Autoregressive decode remains active.'} />
+          <IncompatWarning text={detectedNativeMtp?.blockedReason || t('sessions.config.nativeMtpBlockedFallback')} />
         )}
         {nativeMtpSupported && (
           <>
-        <PerformanceHint text="Uses the model's own preserved MTP heads and measured model-local depth when present, with D3 as the generic fallback." />
+        <PerformanceHint text={t('sessions.config.nativeMtpHint')} />
         {nativeMtpMode === 'auto' && (
-          <InfoNote text="Auto preserves the bundle's generation_config/jang_config sampling defaults. It activates MTP only for compatible requests; sampled requests fall back to autoregressive decode and the server logs the reason." />
+          <InfoNote text={t('sessions.config.nativeMtpAutoNote')} />
         )}
         {nativeMtpMode === 'deterministic' && (
-          <InfoNote text={`Explicit deterministic mode applies D${nativeMtpDepth} and greedy startup sampling so omitted API/chat sampling values enter the native MTP path. Explicit per-request sampling parameters still win.`} />
+          <InfoNote text={t('sessions.config.nativeMtpDeterministicNote', { depth: nativeMtpDepth })} />
         )}
         <SelectField
-          label="Native MTP Mode"
-          tooltip="Auto preserves bundle sampling defaults and uses MTP only when a request is compatible. Deterministic mode explicitly replaces omitted sampling values with greedy defaults. Off disables the in-model MTP runtime."
+          label={t('sessions.config.nativeMtpMode')}
+          tooltip={t('sessions.config.nativeMtpModeTooltip')}
           value={nativeMtpMode}
           onChange={v => onChange('nativeMtpMode', v as 'deterministic' | 'auto' | 'off')}
           options={[
-            { value: 'auto', label: 'Auto (bundle defaults)' },
-            { value: 'deterministic', label: 'Deterministic override' },
-            { value: 'off', label: 'Off' },
+            { value: 'auto', label: t('sessions.config.mtpAutoBundleDefaults') },
+            { value: 'deterministic', label: t('sessions.config.mtpDeterministicOverride') },
+            { value: 'off', label: t('chat.settings.thinkingOff') },
           ]}
         />
         <SliderField
-          label="Native MTP Depth"
-          tooltip="Number of tokens drafted per native-MTP verification cycle. Model-local tuning picks the measured default; changing this slider creates a manual override."
+          label={t('sessions.config.nativeMtpDepth')}
+          tooltip={t('sessions.config.nativeMtpDepthTooltip')}
           value={nativeMtpDepth}
           onChange={v => {
             onChange('nativeMtpDepth', v)
@@ -1659,23 +1661,23 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={3}
           disabled={nativeMtpMode === 'off'}
         />
-        <InfoNote text={`Detected scope: ${detectedNativeMtp?.runtimeScope || 'text'}; native cache: ${detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown'}; depth source: ${detectedNativeMtp?.depthSource || 'default'}. Hybrid cache bundles use the in-memory paged tier while Prefix Cache is enabled so KV blocks and SSM state stay in one cache contract.`} />
+        <InfoNote text={t('sessions.config.nativeMtpDetectedNote', { scope: detectedNativeMtp?.runtimeScope || 'text', cache: detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown', depthSource: detectedNativeMtp?.depthSource || 'default' })} />
           </>
         )}
       </Section>
 
       {/* Speculative Decoding */}
       <Section title={t('sessions.config.specDecoding')} expanded={expandedSections.specDecode} onToggle={() => toggleSection('specDecode')} hidden={isImage || dsv4Active}>
-        <PerformanceHint text="Use a small draft model to propose tokens, then verify them in a single target model pass. Can give 20-90% speedup with zero quality loss." />
-        {config.continuousBatching && <IncompatWarning text="Speculative decoding is incompatible with continuous batching. The draft model is omitted at launch while the cache-stack scheduler is active." />}
-        {multimodalActive && <IncompatWarning text="Speculative decoding is incompatible with multimodal (VLM) models. The draft model is omitted at launch for VLM requests." />}
-        <Field label="Draft Model" tooltip="Path or HuggingFace name of a small draft model. Must use the same tokenizer as the main model. Example: mlx-community/Llama-3.2-1B-Instruct-4bit for a Llama 3 target model. Leave empty to disable speculative decoding.">
+        <PerformanceHint text={t('sessions.config.specDecodeHint')} />
+        {config.continuousBatching && <IncompatWarning text={t('sessions.config.specDecodeIncompatBatching')} />}
+        {multimodalActive && <IncompatWarning text={t('sessions.config.specDecodeIncompatVlm')} />}
+        <Field label={t('sessions.config.draftModel')} tooltip={t('sessions.config.draftModelTooltip')}>
           <input type="text" value={config.speculativeModel} onChange={e => onChange('speculativeModel', e.target.value)} placeholder={t('sessions.config.specModelPlaceholder')} className="cfg-input" disabled={config.continuousBatching || multimodalActive || dsv4Active} />
         </Field>
         {config.speculativeModel && (
           <SliderField
-            label="Draft Tokens per Step"
-            tooltip="Number of tokens the draft model proposes per speculative decoding step. Higher values = more potential speedup but lower acceptance rate. Sweet spot is typically 2-5."
+            label={t('sessions.config.draftTokensPerStep')}
+            tooltip={t('sessions.config.draftTokensPerStepTooltip')}
             value={config.numDraftTokens}
             onChange={v => onChange('numDraftTokens', v)}
             min={1}
@@ -1691,32 +1693,20 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       <Section title={t('sessions.config.distributed')} expanded={expandedSections.distributed} onToggle={() => toggleSection('distributed')} hidden={isImage || dsv4Active}>
         <div className="mx-4 mt-3 mb-2 rounded-md border-2 border-amber-500 bg-amber-500/15 px-3 py-3 text-xs text-amber-800 dark:text-amber-100">
           <div className="font-bold uppercase tracking-wide text-[11px] mb-1.5 text-amber-900 dark:text-amber-50">
-            ⚠ Pre-Alpha — localhost loopback only
+            {t('sessions.config.preAlphaHeader')}
           </div>
           <div className="leading-relaxed text-amber-900/90 dark:text-amber-100/90 space-y-1.5">
             <p>
-              <strong>This feature is under active development and is not
-              safe to expose on any network you don't fully control.</strong>
+              <strong>{t('sessions.config.preAlphaWarnBody1')}</strong>
             </p>
-            <p>
-              Known gaps: cluster secret is sent plaintext over the wire (no
-              TLS, no HMAC); worker crash recovery is not implemented;
-              coordinator-loss re-election recovery is a stub; protocol has
-              no version handshake; tensor parallelism is stubbed.
-            </p>
-            <p>
-              {t('sessions.config.recommendedUsageToday')} <code>vmlx-worker</code> on
-              the same Mac you're running the coordinator on (different port),
-              bound to <code>127.0.0.1</code>, as a smoke test. Real multi-Mac
-              deployment is blocked behind Phase 2 hardening. See
-              <code>docs/guides/distributed-setup.md</code>.
-            </p>
+            <p>{t('sessions.config.preAlphaWarnBody2')}</p>
+            <p>{t('sessions.config.preAlphaUsage')}</p>
           </div>
         </div>
-        <PerformanceHint text="Pipeline parallelism splits transformer layers across nodes. Each request passes hidden states over a TCP connection between workers. In localhost loopback testing, the overhead is dominated by the loopback memcpy — useful for verifying correctness, not performance." />
+        <PerformanceHint text={t('sessions.config.distributedHint')} />
         <CheckField
-          label="Enable Distributed Inference"
-          tooltip="Split the model across multiple Macs. Requires vmlx-worker running on each additional Mac. The coordinator (this Mac) handles tokenization, embedding, and final projection."
+          label={t('sessions.config.enableDistributed')}
+          tooltip={t('sessions.config.enableDistributedTooltip')}
           checked={!!config.distributedEnabled}
           onChange={v => {
             onChange('distributedEnabled', v)
@@ -1727,24 +1717,24 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           disabled={flashMoeActive}
         />
         {flashMoeActive && (
-          <IncompatWarning text="Distributed is disabled while Flash MoE is on. Flash MoE patches local model layers — distributed workers have their own model copies." />
+          <IncompatWarning text={t('sessions.config.distributedDisabledFlashMoe')} />
         )}
         {config.distributedEnabled && (
           <>
             <SelectField
-              label="Parallelism Mode"
-              tooltip="Pipeline: split layers across nodes (simple, works with any network). Tensor: split weights within layers (requires high bandwidth, 10GbE+ recommended)."
+              label={t('sessions.config.parallelismMode')}
+              tooltip={t('sessions.config.parallelismModeTooltip')}
               value={config.distributedMode || 'pipeline'}
               onChange={v => onChange('distributedMode', v as 'pipeline' | 'tensor')}
               options={[
-                { value: 'pipeline', label: 'Pipeline Parallelism (split layers)' },
-                { value: 'tensor', label: 'Tensor Parallelism (split weights) — coming soon' },
+                { value: 'pipeline', label: t('sessions.config.pipelineParallelism') },
+                { value: 'tensor', label: t('sessions.config.tensorParallelism') },
               ]}
             />
             {config.distributedMode === 'tensor' && (
-              <IncompatWarning text="Tensor parallelism is not yet implemented. Use pipeline parallelism for now." />
+              <IncompatWarning text={t('sessions.config.tensorNotImplemented')} />
             )}
-            <Field label="Cluster Secret" tooltip="Shared secret for authenticating worker nodes. All workers must use the same secret. Leave empty for no authentication (only safe on trusted networks).">
+            <Field label={t('sessions.config.clusterSecret')} tooltip={t('sessions.config.clusterSecretTooltip')}>
               <input
                 type="password"
                 value={config.distributedSecret || ''}
@@ -1753,16 +1743,16 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 className="cfg-input"
               />
             </Field>
-            <InfoNote text="Worker nodes: Install vMLX on each Mac and run 'vmlx-worker --secret YOUR_SECRET' from Terminal. Workers auto-advertise via Bonjour — the coordinator discovers them automatically." />
+            <InfoNote text={t('sessions.config.workerNodesNote')} />
             <DistributedNodeList enabled={!!config.distributedEnabled} sessionId={sessionId} />
             <div className="px-4 py-3 space-y-2">
               <div className="text-xs font-medium text-foreground">{t('sessions.config.setupGuide')}</div>
               <div className="text-xs text-muted-foreground space-y-1">
-                <p>1. Connect Macs via <strong>{t('sessions.config.thunderboltCable')}</strong> (fastest) or Ethernet/WiFi</p>
-                <p>2. On each worker Mac: <code className="bg-muted px-1 rounded">pip install vmlx && vmlx-worker --secret YOUR_SECRET</code></p>
-                <p>3. Workers appear automatically above via Bonjour discovery</p>
-                <p>4. Or click "Add Manual" to add by IP if discovery doesn't find them</p>
-                <p className="text-muted-foreground/70 pt-1">Thunderbolt 5: ~120 Gbps, 0.1ms latency (best). 1GbE: works fine for pipeline parallelism. WiFi: works but slower. Any network that can ping the other Mac will work.</p>
+                <p>{t('sessions.config.setupStep1')}</p>
+                <p>{t('sessions.config.setupStep2')} <code className="bg-muted px-1 rounded">pip install vmlx && vmlx-worker --secret YOUR_SECRET</code></p>
+                <p>{t('sessions.config.setupStep3')}</p>
+                <p>{t('sessions.config.setupStep4')}</p>
+                <p className="text-muted-foreground/70 pt-1">{t('sessions.config.setupNetworkNote')}</p>
               </div>
             </div>
           </>
@@ -1772,7 +1762,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {/* Embedding Model */}
       {!isImage && (
       <div className="mb-2">
-        <Field label={t('sessions.config.embeddingModel')} tooltip="Pre-load a separate embedding model at startup for the /v1/embeddings endpoint. Runs alongside the main chat model. Example: mlx-community/embeddinggemma-300m-6bit. Leave empty to disable embeddings endpoint.">
+        <Field label={t('sessions.config.embeddingModel')} tooltip={t('sessions.config.embeddingModelTooltip')}>
           <input type="text" value={config.embeddingModel} onChange={e => onChange('embeddingModel', e.target.value)} placeholder={t('sessions.config.embeddingPlaceholder')} className="cfg-input" />
         </Field>
       </div>
@@ -1780,7 +1770,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* Additional */}
       <div className="mb-4">
-        <Field label={t('sessions.config.additionalArgs')} tooltip="Raw command-line arguments appended to the serve command. Use this for flags not exposed in the UI above. Example: --log-level DEBUG. Arguments are split by whitespace and passed directly to the CLI.">
+        <Field label={t('sessions.config.additionalArgs')} tooltip={t('sessions.config.additionalArgsTooltip')}>
           <input type="text" value={config.additionalArgs} onChange={e => onChange('additionalArgs', e.target.value)} placeholder={t('sessions.config.additionalArgsPlaceholder')} className="cfg-input" />
         </Field>
       </div>
@@ -2102,8 +2092,8 @@ const REASONING_PARSER_OPTIONS: ParserOption[] = [
   },
 ]
 
-function ParserField({ label, tooltip, value, onChange, options, detectedValue }: {
-  label: string; tooltip: string; value: string; onChange: (v: string) => void; options: ParserOption[]; detectedValue?: string
+function ParserField({ label, tooltip, value, onChange, options, detectedValue, noneLabel }: {
+  label: string; tooltip: string; value: string; onChange: (v: string) => void; options: ParserOption[]; detectedValue?: string; noneLabel?: string
 }) {
   const { t } = useTranslation()
   const [showHelp, setShowHelp] = useState(false)
@@ -2127,7 +2117,7 @@ function ParserField({ label, tooltip, value, onChange, options, detectedValue }
       </span>
       <select value={value} onChange={e => onChange(e.target.value)} className="cfg-input">
         {options.map(o => (
-          <option key={o.value} value={o.value}>{o.value === 'auto' && detectedValue ? `Auto (detected: ${detectedValue})` : o.label}</option>
+          <option key={o.value} value={o.value}>{o.value === 'auto' ? (detectedValue ? t('sessions.config.autoDetectedWithValue', { value: detectedValue }) : t('sessions.config.parserAutoRecommended')) : o.value === '' && noneLabel ? noneLabel : o.label}</option>
         ))}
       </select>
       {helpVisible && (
@@ -2154,7 +2144,7 @@ function ParserField({ label, tooltip, value, onChange, options, detectedValue }
             )
           })}
           <div className="pt-1 border-t border-border text-[10px] text-muted-foreground/70 italic leading-snug">
-            Fine-tunes inherit the base model&apos;s parser. A Llama fine-tune uses llama, a Qwen fine-tune uses qwen, regardless of its marketing name. When auto-detect fails, select the parser matching the base architecture.
+            {t('sessions.config.parserFinetunesNote')}
           </div>
         </div>
       )}

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Maximize2, Loader2 } from "lucide-react";
+import { useTranslation } from "../i18n";
 
 interface ActiveDownload {
   jobId: string;
@@ -20,6 +21,7 @@ interface DownloadStatusBarProps {
 }
 
 export function DownloadStatusBar({ onComplete }: DownloadStatusBarProps) {
+  const { t } = useTranslation();
   const [activeDownloads, setActiveDownloads] = useState<ActiveDownload[]>([]);
   const [queueCount, setQueueCount] = useState(0);
   const onCompleteRef = useRef(onComplete);
@@ -128,8 +130,8 @@ export function DownloadStatusBar({ onComplete }: DownloadStatusBarProps) {
               className={`truncate font-medium ${primary?.error ? "text-destructive" : ""}`}
             >
               {primary?.error
-                ? `Failed: ${shortName(primary.repoId)}`
-                : `Downloading ${shortName(primary?.repoId || "")}`}
+                ? t("downloads.bar.failed", { name: shortName(primary.repoId) ?? "" })
+                : t("downloads.bar.downloading", { name: shortName(primary?.repoId || "") ?? "" })}
             </span>
             {p?.percent != null && (
               <span className="text-muted-foreground">{p.percent}%</span>
@@ -144,16 +146,16 @@ export function DownloadStatusBar({ onComplete }: DownloadStatusBarProps) {
             )}
             {p?.eta && <span className="text-muted-foreground">{p.eta}</span>}
             {!p && !primary?.error && (
-              <span className="text-muted-foreground">Starting...</span>
+              <span className="text-muted-foreground">{t("downloads.bar.starting")}</span>
             )}
             {activeDownloads.length > 1 && (
               <span className="text-muted-foreground">
-                +{activeDownloads.length - 1} more
+                {t("downloads.bar.moreCount", { n: activeDownloads.length - 1 })}
               </span>
             )}
             {queueCount > 0 && (
               <span className="text-muted-foreground">
-                +{queueCount} queued
+                {t("downloads.bar.queuedCount", { n: queueCount })}
               </span>
             )}
           </div>
@@ -169,7 +171,7 @@ export function DownloadStatusBar({ onComplete }: DownloadStatusBarProps) {
         <button
           onClick={() => window.api.models.openDownloadWindow()}
           className="p-1 text-muted-foreground hover:text-foreground"
-          title="Open Downloads window"
+          title={t("downloads.bar.openTitle")}
         >
           <Maximize2 className="h-3 w-3" />
         </button>

@@ -84,7 +84,7 @@ export function DownloadsView() {
     const unsubError = window.api.models.onDownloadError((data: any) => {
       // Show error on active card briefly, then move to completed as failed
       setActiveDownloads(prev => prev.map(d =>
-        d.jobId === data.jobId ? { ...d, error: data.error || 'Download failed', progress: undefined } : d
+        d.jobId === data.jobId ? { ...d, error: data.error || t('sessions.download.toast.failedTitle'), progress: undefined } : d
       ))
       setTimeout(() => {
         setActiveDownloads(prev => prev.filter(d => d.jobId !== data.jobId))
@@ -142,10 +142,10 @@ export function DownloadsView() {
       {/* Header */}
       <div className="flex items-center gap-2 px-4 py-3 border-b border-border bg-card" style={{ WebkitAppRegion: 'drag' } as any}>
         <Download className="h-5 w-5 text-primary" />
-        <h1 className="text-sm font-semibold">Downloads</h1>
+        <h1 className="text-sm font-semibold">{t('downloads.view.header')}</h1>
         <span className="ml-auto text-xs text-muted-foreground">
-          {activeDownloads.length > 0 ? `${activeDownloads.length} active` : 'No active downloads'}
-          {queue.length > 0 && ` · ${queue.length} queued`}
+          {activeDownloads.length > 0 ? t('downloads.view.activeCount', { n: activeDownloads.length }) : t('downloads.view.empty')}
+          {queue.length > 0 && ` · ${t('downloads.view.queuedCount', { n: queue.length })}`}
         </span>
       </div>
 
@@ -169,15 +169,15 @@ export function DownloadsView() {
                     <button
                       onClick={() => window.api.models.pauseDownload(dl.jobId)}
                       className="text-xs text-yellow-600 hover:text-yellow-500 px-2 py-1 border border-yellow-500/30 rounded flex items-center gap-1"
-                      title="Pause download"
+                      title={t('downloads.view.pauseTitle')}
                     >
-                      <Pause className="h-3 w-3" /> Pause
+                      <Pause className="h-3 w-3" /> {t('downloads.view.pause')}
                     </button>
                     <button
                       onClick={() => window.api.models.cancelDownload(dl.jobId)}
                       className="text-xs text-destructive hover:text-destructive/80 px-2 py-1 border border-destructive/30 rounded"
                     >
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                   </div>
                 )}
@@ -189,7 +189,7 @@ export function DownloadsView() {
                     <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${Math.min(p.percent || 0, 100)}%` }} />
                   </div>
                   <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span className="font-medium">{p.percent != null ? `${p.percent}%` : 'Starting...'}</span>
+                    <span className="font-medium">{p.percent != null ? `${p.percent}%` : t('common.starting')}</span>
                     <div className="flex gap-3">
                       {p.downloaded && p.total && <span>{p.downloaded} / {p.total}</span>}
                       {p.speed && <span>{p.speed}</span>}
@@ -217,7 +217,7 @@ export function DownloadsView() {
         {/* Paused */}
         {paused.length > 0 && (
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Paused ({paused.length})</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">{t('downloads.view.paused', { n: paused.length })}</h3>
             {paused.map((item) => (
               <div key={item.jobId} className="py-2 px-3 border border-yellow-500/30 bg-yellow-500/5 rounded mb-1">
                 <div className="flex items-center justify-between">
@@ -238,7 +238,7 @@ export function DownloadsView() {
                       }}
                       className="text-xs text-green-600 hover:text-green-500 px-2 py-1 border border-green-500/30 rounded flex items-center gap-1"
                     >
-                      <Play className="h-3 w-3" /> Resume
+                      <Play className="h-3 w-3" /> {t('downloads.view.resume')}
                     </button>
                     <button
                       onClick={() => {
@@ -264,7 +264,7 @@ export function DownloadsView() {
         {/* Queued */}
         {queue.length > 0 && (
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Queued ({queue.length})</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">{t('downloads.view.queued', { n: queue.length })}</h3>
             {queue.map((item, i) => (
               <div key={item.jobId || i} className="flex items-center justify-between py-2 px-3 border border-border rounded mb-1">
                 <div className="flex items-center gap-2">
@@ -282,7 +282,7 @@ export function DownloadsView() {
         {/* Completed */}
         {completed.length > 0 && (
           <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Completed</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">{t('downloads.view.completed')}</h3>
             {completed.map((item) => (
               <div key={item.jobId} className="flex items-center gap-2 py-2 px-3 border border-border rounded mb-1">
                 {item.status === 'complete' ? (
@@ -291,7 +291,7 @@ export function DownloadsView() {
                   <X className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                 )}
                 <span className="text-sm truncate">{shortName(item.repoId)}</span>
-                <span className="text-xs text-muted-foreground ml-auto">{item.status === 'complete' ? 'Done' : 'Cancelled'}</span>
+                <span className="text-xs text-muted-foreground ml-auto">{item.status === 'complete' ? t('downloads.view.done') : t('downloads.view.cancelled')}</span>
               </div>
             ))}
           </div>

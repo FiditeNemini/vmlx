@@ -26,15 +26,15 @@ function formatNumber(n: number): string {
   return n.toString()
 }
 
-function timeAgo(dateStr: string | null | undefined): string {
+function timeAgo(dateStr: string | null | undefined, t: (key: string, params?: Record<string, string | number>) => string): string {
   if (!dateStr) return ''
   const diff = Date.now() - new Date(dateStr).getTime()
   if (isNaN(diff)) return ''
   const days = Math.floor(diff / 86400000)
-  if (days < 1) return 'today'
-  if (days < 30) return `${days}d ago`
-  if (days < 365) return `${Math.floor(days / 30)}mo ago`
-  return `${Math.floor(days / 365)}y ago`
+  if (days < 1) return t('sessions.download.timeToday')
+  if (days < 30) return t('chat.list.daysAgo', { n: days })
+  if (days < 365) return t('sessions.download.timeMonthsAgo', { n: Math.floor(days / 30) })
+  return t('sessions.download.timeYearsAgo', { n: Math.floor(days / 365) })
 }
 
 const COLLECTION_SLUGS = {
@@ -134,7 +134,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
         console.error('Failed to load JANG collection:', err)
         setCollectionErrors(prev => ({
           ...prev,
-          jang: (err instanceof Error ? err.message : String(err)) || 'Fetch failed',
+          jang: (err instanceof Error ? err.message : String(err)) || t('sessions.download.fetchFailed'),
         }))
       })
       .finally(() => setLoadingCollectionTabs(prev => ({ ...prev, jang: false })))
@@ -167,7 +167,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
         return next
       })
       if (data.status === 'complete') {
-        showToast('success', `Download complete: ${data.repoId}`)
+        showToast('success', t('sessions.download.toast.completeTitle', { repo: data.repoId }))
         onDownloadCompleteRef.current()
         // Refresh local model list so the "Downloaded" badge appears immediately
         window.api.models.scan().then((models: any[]) => {
@@ -195,10 +195,9 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
       const errMsg = `${data.repoId.split('/').pop()}: ${data.error}`
       setDownloadError(errMsg)
       if (data.gated) {
-        showToast('error', 'Gated model — HuggingFace token required',
-          'This model requires authentication. Add your HF token in the download settings below.')
+        showToast('error', t('sessions.download.toast.gatedTitle'), t('sessions.download.toast.gatedBody'))
       } else {
-        showToast('error', 'Download failed', errMsg)
+        showToast('error', t('sessions.download.toast.failedTitle'), errMsg)
       }
     })
 
@@ -291,9 +290,9 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
       }
       setHfToken(token.trim())
       setHasSavedHfToken(!!token.trim())
-      showToast('success', token.trim() ? 'HuggingFace token saved' : 'HuggingFace token removed')
+      showToast('success', token.trim() ? t('sessions.download.toast.tokenSaved') : t('sessions.download.toast.tokenRemoved'))
     } catch (err) {
-      showToast('error', 'Failed to save token', (err as Error).message)
+      showToast('error', t('sessions.download.toast.tokenSaveFailed'), (err as Error).message)
     } finally {
       setHfTokenSaving(false)
     }
@@ -306,8 +305,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
     const raw = endpoint.trim()
     const normalized = normalizeHfEndpointSetting(raw)
     if (raw && !normalized) {
-      showToast('error', 'Invalid mirror URL',
-        'Endpoint must be an http:// or https:// URL')
+      showToast('error', t('sessions.download.toast.mirrorInvalid'), t('sessions.download.toast.mirrorInvalidBody'))
       return
     }
     const trimmed = normalized ?? ''
@@ -320,10 +318,10 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
       }
       setHfEndpoint(trimmed)
       showToast('success', trimmed
-        ? `HuggingFace mirror set: ${trimmed}`
-        : 'HuggingFace mirror cleared (using huggingface.co)')
+        ? t('sessions.download.toast.mirrorSet', { url: trimmed })
+        : t('sessions.download.toast.mirrorCleared'))
     } catch (err) {
-      showToast('error', 'Failed to save mirror endpoint', (err as Error).message)
+      showToast('error', t('sessions.download.toast.mirrorSaveFailed'), (err as Error).message)
     } finally {
       setHfEndpointSaving(false)
     }
@@ -344,7 +342,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
         console.error(`Failed to load ${tab} collection:`, err)
         setCollectionErrors(prev => ({
           ...prev,
-          [tab]: (err instanceof Error ? err.message : String(err)) || 'Fetch failed',
+          [tab]: (err instanceof Error ? err.message : String(err)) || t('sessions.download.fetchFailed'),
         }))
       } finally {
         setLoadingCollectionTabs(prev => ({ ...prev, [tab]: false }))
@@ -364,7 +362,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
       console.error(`Retry failed for ${tab} collection:`, err)
       setCollectionErrors(prev => ({
         ...prev,
-        [tab]: (err instanceof Error ? err.message : String(err)) || 'Fetch failed',
+        [tab]: (err instanceof Error ? err.message : String(err)) || t('sessions.download.fetchFailed'),
       }))
     } finally {
       setLoadingCollectionTabs(prev => ({ ...prev, [tab]: false }))
@@ -387,7 +385,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
-          Search and download MLX models from HuggingFace. Downloads run in the background.
+          {t('sessions.download.intro')}
         </p>
         <button
           onClick={() => window.dispatchEvent(new Event('open-download-popup'))}
@@ -407,7 +405,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
           onClick={handleBrowseDownloadDir}
           className="px-2 py-1 text-xs border border-border rounded hover:bg-accent whitespace-nowrap"
         >
-          Change
+          {t('sessions.download.change')}
         </button>
       </div>
 
@@ -420,16 +418,16 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
                 type={showHfToken ? 'text' : 'password'}
                 value={hfToken}
                 onChange={(e) => setHfToken(e.target.value)}
-                placeholder={hasSavedHfToken ? 'Saved token configured (enter a new token to replace)' : 'hf_...'}
+                placeholder={hasSavedHfToken ? t('app.about.savedTokenPlaceholder') : t('sessions.download.hfTokenPlaceholder')}
                 className="w-full px-2 py-1 pr-16 bg-background border border-input rounded text-xs font-mono"
               />
             <div className="absolute right-1 top-1/2 -translate-y-1/2 flex items-center gap-1">
               <button
                 onClick={() => setShowHfToken(!showHfToken)}
                 className="px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
-                title={showHfToken ? 'Hide token' : 'Show token'}
+                title={showHfToken ? t('sessions.download.hideTokenTitle') : t('sessions.download.showTokenTitle')}
               >
-                {showHfToken ? 'Hide' : 'Show'}
+                {showHfToken ? t('app.about.hide') : t('app.about.show')}
               </button>
             </div>
           </div>
@@ -438,11 +436,11 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             disabled={hfTokenSaving}
             className="px-2 py-1 text-xs border border-border rounded hover:bg-accent whitespace-nowrap disabled:opacity-40"
           >
-            {hfTokenSaving ? 'Saving...' : 'Save'}
+            {hfTokenSaving ? t('common.saving') : t('common.save')}
           </button>
         </div>
         <p className="text-[10px] text-muted-foreground ml-14">
-          Required for gated models (Flux, Llama, etc).{' '}
+          {t('sessions.download.gatedModelsNote')}{' '}
           <a
             href="https://huggingface.co/settings/tokens"
             target="_blank"
@@ -467,7 +465,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
               type="text"
               value={hfEndpoint}
               onChange={(e) => setHfEndpoint(e.target.value)}
-              placeholder="https://huggingface.co (default) — e.g. https://hf-mirror.com"
+              placeholder={t('sessions.download.hfMirrorPlaceholder')}
               className="w-full px-2 py-1 bg-background border border-input rounded text-xs font-mono"
             />
           </div>
@@ -476,22 +474,19 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             disabled={hfEndpointSaving}
             className="px-2 py-1 text-xs border border-border rounded hover:bg-accent whitespace-nowrap disabled:opacity-40"
           >
-            {hfEndpointSaving ? 'Saving...' : 'Save'}
+            {hfEndpointSaving ? t('common.saving') : t('common.save')}
           </button>
           <button
             onClick={() => handleSaveHfEndpoint('https://hf-mirror.com')}
             disabled={hfEndpointSaving}
             className="px-2 py-1 text-xs border border-border rounded hover:bg-accent whitespace-nowrap disabled:opacity-40"
-            title="One-click preset for users in mainland China"
+            title={t('sessions.download.mirrorPresetChinaTitle')}
           >
             {t('sessions.download.useHfMirror')}
           </button>
         </div>
         <p className="text-[10px] text-muted-foreground ml-16">
-          Routes all HuggingFace traffic (downloads + API) through an
-          alternate endpoint. Useful when huggingface.co is slow or blocked.
-          Leave empty to use huggingface.co directly. Restart any
-          in-progress downloads after changing.
+          {t('sessions.download.mirrorHelp')}
         </p>
       </div>
 
@@ -502,18 +497,18 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
             onClick={() => handleModelTypeChange('text')}
             className={`px-2.5 py-2 text-xs transition-colors ${modelType === 'text' ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground hover:bg-accent'}`}
           >
-            Text
+            {t('sessions.download.typeText')}
           </button>
           <button
             onClick={() => handleModelTypeChange('image')}
             className={`px-2.5 py-2 text-xs transition-colors ${modelType === 'image' ? 'bg-violet-500/15 text-violet-400 font-medium' : 'text-muted-foreground hover:bg-accent'}`}
           >
-            Image
+            {t('app.mode.image')}
           </button>
         </div>
         <input
           type="text"
-          placeholder={modelType === 'image' ? 'Search image models (flux, sdxl, z-image...)' : 'Search MLX models...'}
+          placeholder={modelType === 'image' ? t('sessions.download.searchImagePlaceholder') : t('sessions.download.searchTextPlaceholder')}
           value={searchQuery}
           onChange={(e) => handleSearch(e.target.value)}
           className="flex-1 px-3 py-2 bg-background border border-input rounded text-sm"
@@ -524,27 +519,27 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
               value={sortBy}
               onChange={(e) => handleSortChange(e.target.value)}
               className="px-2 py-2 bg-background border border-input rounded text-xs text-foreground"
-              title="Sort results by"
+              title={t('sessions.download.sortTitle')}
             >
-              <option value="downloads">Downloads</option>
-              <option value="relevance">Relevance</option>
+              <option value="downloads">{t('sessions.download.sortDownloads')}</option>
+              <option value="relevance">{t('sessions.download.sortRelevance')}</option>
               <option value="lastModified">{t('sessions.download.recentlyUpdated')}</option>
-              <option value="trending">Trending</option>
-              <option value="likes">Likes</option>
+              <option value="trending">{t('sessions.download.sortTrending')}</option>
+              <option value="likes">{t('sessions.download.sortLikes')}</option>
               <option value="size">{t('sessions.download.modelSize')}</option>
             </select>
             {sortBy !== 'relevance' && (
               <button
                 onClick={handleDirToggle}
                 className="px-1.5 py-2 bg-background border border-input rounded text-xs text-foreground hover:bg-accent"
-                title={sortDir === 'desc' ? 'Highest first' : 'Lowest first'}
+                title={sortDir === 'desc' ? t('sessions.download.sortHighestFirst') : t('sessions.download.sortLowestFirst')}
               >
                 {sortDir === 'desc' ? '\u2193' : '\u2191'}
               </button>
             )}
           </>
         )}
-        {loading && <span className="text-xs text-muted-foreground">Searching...</span>}
+        {loading && <span className="text-xs text-muted-foreground">{t('sessions.download.searching')}</span>}
       </div>
 
       {error && (
@@ -555,7 +550,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
 
       {downloadError && (
         <div className="p-2 bg-destructive/10 border border-destructive/30 rounded text-xs text-destructive">
-          Download failed: {downloadError}
+          {t('sessions.download.downloadFailedDetail', { error: downloadError })}
         </div>
       )}
 
@@ -577,7 +572,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
                 onClick={() => handleCollectionTabChange('uncensored')}
                 className={`px-2.5 py-1 text-xs rounded transition-colors ${collectionTab === 'uncensored' ? 'bg-red-500/15 text-red-400 font-medium' : 'text-muted-foreground hover:bg-accent'}`}
               >
-                Uncensored
+                {t('sessions.download.uncensored')}
               </button>
             </div>
           )}
@@ -590,7 +585,7 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
               // staring at "No models" wondering if the network died.
               <div className="text-sm py-4 text-center space-y-2">
                 <p className="text-muted-foreground">
-                  Failed to load {collectionTab === 'jang' ? 'JANG' : 'Uncensored'} collection from HuggingFace.
+                  {t('sessions.download.collectionLoadFailed', { name: collectionTab === 'jang' ? 'JANG' : t('sessions.download.uncensored') })}
                 </p>
                 <p className="text-xs text-muted-foreground/70 max-w-md mx-auto break-words">
                   {collectionErrors[collectionTab]}
@@ -599,12 +594,12 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
                   onClick={() => retryCollectionFetch(collectionTab)}
                   className="px-3 py-1 text-xs rounded border border-border hover:bg-accent"
                 >
-                  Retry
+                  {t('common.retry')}
                 </button>
               </div>
             ) : displayModels.length === 0 ? (
               <p className="text-sm text-muted-foreground py-4 text-center">
-                {searchQuery.trim() ? (modelType === 'image' ? 'No image models found' : 'No MLX models found') : 'No models in this collection'}
+                {searchQuery.trim() ? (modelType === 'image' ? t('sessions.download.noImageModels') : t('sessions.download.noMlxModels')) : t('sessions.download.noCollectionModels')}
               </p>
             ) : (
               displayModels.map(model => (
@@ -613,10 +608,10 @@ export function DownloadTab({ onDownloadComplete }: DownloadTabProps) {
                   setSelectedReadme(null)
                   setLoadingReadme(true)
                   window.api.models.fetchReadme(model.id).then(text => {
-                    setSelectedReadme(text || 'No README available.')
+                    setSelectedReadme(text || t('sessions.download.noReadme'))
                     setLoadingReadme(false)
                   }).catch(() => {
-                    setSelectedReadme('Failed to load README.')
+                    setSelectedReadme(t('sessions.download.readmeLoadFailed'))
                     setLoadingReadme(false)
                   })
                 }} className={`cursor-pointer ${selectedModel?.id === model.id ? 'ring-1 ring-primary rounded' : ''}`}>
@@ -718,6 +713,7 @@ function ModelCard({ model, isDownloading, isDownloaded, onDownload }: {
   isDownloaded: boolean
   onDownload: () => void
 }) {
+  const { t } = useTranslation()
   const shortName = model.id.includes('/') ? model.id.split('/').slice(1).join('/') : model.id
 
   return (
@@ -730,10 +726,10 @@ function ModelCard({ model, isDownloading, isDownloaded, onDownload }: {
             </div>
             <div className="text-xs text-muted-foreground">{model.author}</div>
             <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
-              {model.size && <span title="Model size (safetensors)" className="font-semibold text-foreground">{model.size}</span>}
-              <span title="Downloads">{formatNumber(model.downloads)} downloads</span>
-              <span title="Likes">{model.likes} likes</span>
-              {timeAgo(model.lastModified) && <span>{timeAgo(model.lastModified)}</span>}
+              {model.size && <span title={t('sessions.download.modelSizeTitle')} className="font-semibold text-foreground">{model.size}</span>}
+              <span title={t('sessions.download.sortDownloads')}>{t('sessions.download.downloadsLabel', { n: formatNumber(model.downloads) })}</span>
+              <span title={t('sessions.download.sortLikes')}>{t('sessions.download.likesLabel', { n: model.likes })}</span>
+              {timeAgo(model.lastModified, t) && <span>{timeAgo(model.lastModified, t)}</span>}
             </div>
             {model.note && (
               <p className="text-[10px] text-muted-foreground mt-1 line-clamp-2 whitespace-pre-line">{model.note}</p>
@@ -755,13 +751,13 @@ function ModelCard({ model, isDownloading, isDownloaded, onDownload }: {
             <button
               onClick={(e) => { e.stopPropagation(); window.open(`https://huggingface.co/${model.id}`, '_blank') }}
               className="px-1.5 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border rounded"
-              title="View on HuggingFace"
+              title={t('sessions.download.viewOnHFTitle')}
             >
               ↗
             </button>
             {isDownloaded && !isDownloading ? (
               <span className="px-3 py-1.5 text-xs text-primary border border-primary/30 rounded whitespace-nowrap">
-                Downloaded
+                {t('sessions.download.downloaded')}
               </span>
             ) : (
               <button
@@ -769,7 +765,7 @@ function ModelCard({ model, isDownloading, isDownloaded, onDownload }: {
                 disabled={isDownloading}
                 className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-40 whitespace-nowrap"
               >
-                {isDownloading ? 'Downloading...' : 'Download'}
+                {isDownloading ? t('sessions.download.downloading') : t('sessions.create.download')}
               </button>
             )}
           </div>

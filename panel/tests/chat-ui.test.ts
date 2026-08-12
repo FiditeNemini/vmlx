@@ -1321,8 +1321,11 @@ describe('Media attachment product path', () => {
     expect(chat).toContain('sessionImageTokenBudget')
     expect(chat.match(/obj\.image_token_budget = sessionImageTokenBudget/g)).toHaveLength(2)
     expect(chat).toContain('image_token_budget: body.image_token_budget')
-    expect(settings).toContain('label="Image Token Budget"')
-    expect(settings).toContain("{ value: '1120', label: '1120 — OCR / small text' }")
+    expect(settings).toContain("label={t('sessions.config.imageTokenBudget')}")
+    expect(settings).toContain("{ value: '1120', label: t('sessions.config.imageBudget1120') }")
+    const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8')
+    expect(enLocale).toContain('"imageTokenBudget": "Image Token Budget"')
+    expect(enLocale).toContain('1120 — OCR / small text')
   })
 
   it('text-file attachments stay plain text instead of forcing multimodal routing', () => {

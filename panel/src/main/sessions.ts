@@ -1,4 +1,5 @@
 import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
+import { healthFailureToleranceCount } from '../shared/enginePatienceWindows'
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
 import { powerSaveBlocker } from 'electron'
@@ -3928,14 +3929,18 @@ export class SessionManager extends EventEmitter {
       return
     }
 
-    // Scale max failures with session timeout (5s interval → timeout/5, min 60)
+    // Tolerate silence for at least as long as the ENGINE will. A large fresh
+    // prefill blocks the engine's event loop, so /health does not answer at all
+    // while it runs (measured: no response within 60s at 249k cached + 83k
+    // fresh, process R at 77% CPU). The engine's streaming guard waits
+    // `timeout` and then spends its unknown-progress grace windows, so this
+    // used to declare the session down at 1x timeout while the engine was still
+    // patiently computing for 3x.
     let maxFails = SessionManager.MAX_FAIL_COUNT
     if (session) {
       try {
         const cfg = JSON.parse(session.config)
-        if (cfg.timeout && cfg.timeout > 0) {
-          maxFails = Math.max(60, Math.ceil(cfg.timeout / 5))
-        }
+        maxFails = healthFailureToleranceCount(cfg.timeout)
       } catch (_) { }
     }
 

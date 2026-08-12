@@ -1282,8 +1282,18 @@ class PagedCacheManager:
         OOM. Five call sites gated on ``max_resident_bytes > 0`` alone, which is
         exactly 0 in that mode — so every one of them skipped, and the pressure
         guard the docstring below promises was unreachable from all of them.
+
+        ``paged_frugal`` counts for the same reason, and NOT counting it left a
+        real hole: an explicit ``--cache-memory-mb 0`` sets frugal with a zero
+        ceiling, but the native path-dependent families (DSV4, ZAYA CCA,
+        rotating/mixed-SWA) override frugal with ``keep_in_ram`` so their
+        composite state survives until its async L2 write is readable. That pin
+        is meant to be temporary — it is released once L2 confirms — but with
+        enforcement unreachable nothing ever ran the pass that releases it. The
+        user asked for zero resident bytes and got an unbounded, unaccounted
+        mirror on exactly the families with the largest per-block state.
         """
-        return self.max_resident_bytes > 0 or self.disk_only
+        return self.max_resident_bytes > 0 or self.disk_only or self.paged_frugal
 
     def enforce_byte_budget(self, required_bytes: int = 0) -> int:
         """Evict free cached blocks until resident RAM is within the byte ceiling.

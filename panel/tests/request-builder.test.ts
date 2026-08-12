@@ -64,8 +64,12 @@ function buildRequestBody(
         detectedFamily !== 'deepseek-v4'
             ? undefined
             : overrides?.enableThinking
-    const applyLocalThinkingBudget = (obj: Record<string, any>) => {
-        if (isRemote || thinkingBudget == null || obj.enable_thinking === false) return
+    const applyThinkingBudget = (obj: Record<string, any>) => {
+        // No isRemote gate: the engine now emits supports_thinking_budget in
+        // /v1/capabilities, so remote sessions know it too. Keeping the gate
+        // here would make the newly-rendered remote control decorative — the
+        // capability check below is what keeps an older remote engine silent.
+        if (thinkingBudget == null || obj.enable_thinking === false) return
         // Only families whose engine honors a top-level max_thinking_tokens cap
         // (registry supportsThinkingBudget) or whose chat TEMPLATE declares a budget
         // marker (thinkingBudgetSupported) get the field. Families with a reasoning
@@ -122,7 +126,7 @@ function buildRequestBody(
             detectedFamily,
             supportedReasoningEfforts,
         })
-        applyLocalThinkingBudget(obj)
+        applyThinkingBudget(obj)
         return obj
     } else {
         const obj: Record<string, any> = {
@@ -150,7 +154,7 @@ function buildRequestBody(
             detectedFamily,
             supportedReasoningEfforts,
         })
-        applyLocalThinkingBudget(obj)
+        applyThinkingBudget(obj)
         return obj
     }
 }
@@ -958,9 +962,9 @@ describe('buildRequestBody source parity', () => {
         expect(responsesBranch).toContain('applyReasoningRequestFields(obj, {')
         expect(responsesBranch).toContain('enableThinking: effectiveEnableThinkingOverride')
         expect(responsesBranch).toContain('supportedReasoningEfforts,')
-        expect(responsesBranch).toContain('applyLocalThinkingBudget(obj);')
+        expect(responsesBranch).toContain('applyThinkingBudget(obj);')
         expect(responsesBranch.match(/applyReasoningRequestFields\(obj, \{/g)?.length).toBe(1)
-        expect(responsesBranch.match(/applyLocalThinkingBudget\(obj\);/g)?.length).toBe(1)
+        expect(responsesBranch.match(/applyThinkingBudget\(obj\);/g)?.length).toBe(1)
         expect(responsesBranch).toContain('splitResponsesSystemMessages(')
         expect(responsesBranch).toContain('chatDetectedFamily === "deepseek-v4"')
     })

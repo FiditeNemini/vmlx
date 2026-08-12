@@ -117,3 +117,53 @@ describe('working-directory precondition scope', () => {
     expect(dispatch).toContain('if (!WORKING_DIR_INDEPENDENT_TOOLS.has(toolName)) {')
   })
 })
+
+/**
+ * The exemption must apply at BOTH gates.
+ *
+ * chat.ts rejects every tool when `overrides.workingDirectory` is absent,
+ * BEFORE executeBuiltinTool runs — so the executor's exemption was unreachable
+ * whenever the directory was UNSET (it only helped a configured-but-broken
+ * one). Found by an adversarial re-review of the executor fix, not by the
+ * executor's own tests, which never exercised the caller.
+ */
+describe('working-directory exemption applies at the chat gate too', () => {
+  const chat = readFileSync(resolve(__dirname, '../src/main/ipc/chat.ts'), 'utf-8')
+
+  it('the chat gate consults the same shared set', () => {
+    expect(chat).toContain('WORKING_DIR_INDEPENDENT_TOOLS')
+    expect(chat).toContain('!WORKING_DIR_INDEPENDENT_TOOLS.has(tc.function.name)')
+  })
+
+  it('imports the set rather than re-listing the tools', () => {
+    expect(chat).toMatch(/import\s*\{[\s\S]*WORKING_DIR_INDEPENDENT_TOOLS[\s\S]*\}\s*from\s*"\.\.\/tools\/executor"/)
+    expect(chat).not.toMatch(/'ddg_search',\s*\n\s*'web_search'/)
+  })
+
+  it('the executor exports it', () => {
+    expect(executor).toContain('export const WORKING_DIR_INDEPENDENT_TOOLS')
+  })
+})
+
+/**
+ * Making the Max Thinking Tokens control RENDER on remote sessions is only
+ * half the job — the value has to leave the app. The helper returned early on
+ * isRemote, so the newly visible control was decorative.
+ */
+describe('thinking budget reaches remote sessions', () => {
+  const chat = readFileSync(resolve(__dirname, '../src/main/ipc/chat.ts'), 'utf-8')
+
+  it('no longer discards the budget for remote sessions', () => {
+    const start = chat.indexOf('const applyThinkingBudget =')
+    expect(start).toBeGreaterThan(-1)
+    const body = chat.slice(start, start + 2400)
+    expect(body).not.toMatch(/if \(isRemote \|\|/)
+    expect(body).toContain('resolvedThinkingBudget == null')
+  })
+
+  it('still gates on the capability, so an older remote engine sends nothing', () => {
+    const start = chat.indexOf('const applyThinkingBudget =')
+    const body = chat.slice(start, start + 2400)
+    expect(body).toContain('supportsThinkingBudget === true || thinkingBudgetSupported === true')
+  })
+})

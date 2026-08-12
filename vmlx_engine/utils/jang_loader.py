@@ -1376,6 +1376,11 @@ def _set_wired_limit_for_model(weight_files):
         # This override is how the trade is measured rather than argued.
         _headroom_env = os.environ.get("VMLX_METAL_WIRED_HEADROOM_GB")
         if _headroom_env:
+            # OverflowError, not just TypeError/ValueError: "inf" and "1e309"
+            # parse as floats fine and then raise on int(), and OverflowError is
+            # NOT a subclass of either. Uncaught it escaped to the outer handler
+            # and skipped set_wired_limit ENTIRELY -- a bad env value silently
+            # cost the model its wired limit instead of falling back to default.
             try:
                 headroom = max(0, int(float(_headroom_env) * 1024 * 1024 * 1024))
                 logger.info(
@@ -1383,9 +1388,10 @@ def _set_wired_limit_for_model(weight_files):
                     "(VMLX_METAL_WIRED_HEADROOM_GB)",
                     headroom / 1e9,
                 )
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 logger.warning(
-                    "  Ignoring VMLX_METAL_WIRED_HEADROOM_GB=%r (not a number)",
+                    "  Ignoring VMLX_METAL_WIRED_HEADROOM_GB=%r (not a usable "
+                    "number); keeping the computed headroom",
                     _headroom_env,
                 )
         target = total_bytes + headroom

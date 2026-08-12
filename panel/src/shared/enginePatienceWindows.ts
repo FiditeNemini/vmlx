@@ -48,8 +48,14 @@ export function healthFailureToleranceCount(timeoutSeconds: number | undefined):
   const timeout = Number(timeoutSeconds)
   if (!Number.isFinite(timeout) || timeout <= 0) return MIN_HEALTH_FAIL_COUNT
   const enginePatienceSeconds = timeout * (1 + ENGINE_UNKNOWN_PROGRESS_GRACE_WINDOWS)
+  // +1 because the caller acts ON the Nth failure, so N failures only span
+  // (N-1) intervals of elapsed time. Without it, an endpoint that refuses
+  // immediately (rather than hanging) is declared down one interval EARLY --
+  // 2695s against 2700s of engine patience at the 900s slow-family timeout.
+  // Small, but the whole point of this function is "at least as long", and
+  // that has to be true rather than nearly true.
   return Math.max(
     MIN_HEALTH_FAIL_COUNT,
-    Math.ceil(enginePatienceSeconds / HEALTH_POLL_INTERVAL_SECONDS),
+    Math.ceil(enginePatienceSeconds / HEALTH_POLL_INTERVAL_SECONDS) + 1,
   )
 }

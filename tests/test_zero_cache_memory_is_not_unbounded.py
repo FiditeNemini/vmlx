@@ -130,3 +130,38 @@ def test_disk_only_still_reports_disk_only_not_frugal():
     assert src is not None
     assert '"disk_only"' in src.group(1)
     assert src.group(1).index('"disk_only"') < src.group(1).index('"frugal_env"')
+
+
+def test_frugal_makes_byte_budget_enforcement_REACHABLE():
+    """Frugal with a zero ceiling must still enforce — this was the hole.
+
+    The native path-dependent families (DSV4, ZAYA CCA, rotating/mixed-SWA)
+    override frugal with `keep_in_ram` so their composite state survives until
+    its async L2 write is readable (prefix_cache.py). That pin is meant to be
+    temporary and is released once L2 confirms — but if enforcement is
+    unreachable, nothing ever runs the pass that releases it. The user asked
+    for zero resident bytes and got an unbounded, unaccounted mirror on exactly
+    the families with the largest per-block state.
+    """
+    pool = _manager(max_resident_bytes=0, frugal=True)
+    assert pool.paged_frugal is True
+    assert pool.enforces_byte_budget is True, (
+        "explicit zero-cache must still run the byte-budget/pressure pass"
+    )
+
+
+def test_plain_zero_without_frugal_is_still_the_inert_sentinel():
+    """Guard the boundary: only frugal/disk-only lift the zero ceiling."""
+    pool = _manager(max_resident_bytes=0, frugal=False)
+    assert pool.enforces_byte_budget is False
+
+
+def test_enforcement_reachability_covers_all_three_reasons():
+    from vmlx_engine.paged_cache import PagedCacheManager
+    import inspect
+
+    src = inspect.getsource(PagedCacheManager).split("def enforces_byte_budget")[1]
+    src = src.split("def ")[0]
+    assert "self.max_resident_bytes > 0" in src
+    assert "self.disk_only" in src
+    assert "self.paged_frugal" in src

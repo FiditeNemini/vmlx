@@ -18,7 +18,10 @@ import {
   isBuiltinTool,
   AGENTIC_SYSTEM_PROMPT,
 } from "../tools/registry";
-import { executeBuiltinTool } from "../tools/executor";
+import {
+  executeBuiltinTool,
+  WORKING_DIR_INDEPENDENT_TOOLS,
+} from "../tools/executor";
 import { detectModelConfigFromDir } from "../model-config-registry";
 import { getAuthHeaders } from "./utils";
 import {
@@ -2103,8 +2106,19 @@ export function registerChatHandlers(
             chatDetectedFamily !== "deepseek-v4"
               ? undefined
               : overrides?.enableThinking;
-          const applyLocalThinkingBudget = (obj: Record<string, any>) => {
-            if (isRemote || resolvedThinkingBudget == null || obj.enable_thinking === false) {
+          const applyThinkingBudget = (obj: Record<string, any>) => {
+            // This used to be named for the LOCAL path and returned early on
+            // isRemote. That was right while the capability was unknowable over
+            // the wire -- but the engine now emits supports_thinking_budget in
+            // /v1/capabilities, so a remote session knows it too. Without this,
+            // making the control RENDER remotely just made it decorative: the
+            // user set a budget and neither max_thinking_tokens nor
+            // chat_template_kwargs.thinking_budget ever left the app.
+            //
+            // Safe against an older remote engine that does not emit the key:
+            // supportsThinkingBudget stays undefined and the capability gate
+            // below returns without sending anything.
+            if (resolvedThinkingBudget == null || obj.enable_thinking === false) {
               return;
             }
             // Engine-level reasoning-phase cap: the server honors a top-level
@@ -2241,7 +2255,7 @@ export function registerChatHandlers(
               detectedFamily: chatDetectedFamily,
               supportedReasoningEfforts,
             });
-            applyLocalThinkingBudget(obj);
+            applyThinkingBudget(obj);
             applyMuseReasoningStrength(obj);
             // VLM video sampling — forward to engine only when session
             // config has non-default values. Remote OpenAI-compatible
@@ -2313,7 +2327,7 @@ export function registerChatHandlers(
               supportedReasoningEfforts,
               allowRequestControls: !isStrictApi,
             });
-            applyLocalThinkingBudget(obj);
+            applyThinkingBudget(obj);
             applyMuseReasoningStrength(obj);
             // VLM video sampling — local engine only (strict 3rd-party APIs
             // reject unknown fields, remote OpenAI-compat doesn't support it).
@@ -3792,7 +3806,17 @@ export function registerChatHandlers(
                     toolIteration,
                     tc.id,
                   );
-                } else if (!overrides?.workingDirectory) {
+                } else if (
+                  !overrides?.workingDirectory &&
+                  !WORKING_DIR_INDEPENDENT_TOOLS.has(tc.function.name)
+                ) {
+                  // The SAME exemption the executor applies, from the same set.
+                  // Without it here this gate rejected EVERY tool before
+                  // executeBuiltinTool ever ran, so the executor's exemption was
+                  // unreachable whenever the directory was UNSET -- it only
+                  // helped a configured-but-broken one. Searching the web,
+                  // fetching a URL, reading the clipboard or the clock need no
+                  // folder.
                   resultText =
                     "Error: Working directory not set. Configure it in Chat Settings.";
                   emitToolStatus(
@@ -3803,7 +3827,10 @@ export function registerChatHandlers(
                     tc.id,
                   );
                 } else {
-                  const workDir = overrides.workingDirectory;
+                  // Undefined only for the working-dir-independent tools the
+                  // guard above lets through; executeBuiltinTool never reads it
+                  // for those, and for every other tool the guard proves it set.
+                  const workDir = overrides?.workingDirectory ?? "";
                   console.log(`[CHAT] Builtin tool: ${tc.function.name}`);
                   const result = await executeBuiltinTool(
                     tc.function.name,

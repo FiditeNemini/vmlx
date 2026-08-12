@@ -20,17 +20,22 @@ import {
  * watches the session die while the engine is still computing their answer.
  */
 describe('panel health tolerance vs engine patience', () => {
-  it('waits at least as long as the engine will', () => {
+  it('waits at least as long as the engine will, measured as ELAPSED time', () => {
     for (const timeout of [300, 900, 1800, 2400]) {
-      const tolerated = healthFailureToleranceCount(timeout) * HEALTH_POLL_INTERVAL_SECONDS
+      // The caller acts ON the Nth failure, so N failures span (N-1) intervals.
+      // Measuring N*interval overstates the wait and hid a one-interval early
+      // give-up against an endpoint that refuses immediately.
+      const failures = healthFailureToleranceCount(timeout)
+      const elapsedBeforeGivingUp = (failures - 1) * HEALTH_POLL_INTERVAL_SECONDS
       const enginePatience = timeout * (1 + ENGINE_UNKNOWN_PROGRESS_GRACE_WINDOWS)
-      expect(tolerated).toBeGreaterThanOrEqual(enginePatience)
+      expect(elapsedBeforeGivingUp).toBeGreaterThanOrEqual(enginePatience)
     }
   })
 
-  it('is 3x the old behaviour at the shipped 900s slow-family timeout', () => {
+  it('covers the full engine patience at the shipped 900s slow-family timeout', () => {
     // Old rule was ceil(timeout / 5) polls = 900s of tolerance.
-    expect(healthFailureToleranceCount(900) * HEALTH_POLL_INTERVAL_SECONDS).toBe(2700)
+    const failures = healthFailureToleranceCount(900)
+    expect((failures - 1) * HEALTH_POLL_INTERVAL_SECONDS).toBe(2700)
   })
 
   it('keeps a floor when no timeout is configured', () => {

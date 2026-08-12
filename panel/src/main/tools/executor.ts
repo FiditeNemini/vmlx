@@ -128,7 +128,7 @@ function describeUnusableWorkingDir(workingDir: string): string | null {
  * so adding a filesystem tool here fails rather than silently skipping its
  * precondition.
  */
-const WORKING_DIR_INDEPENDENT_TOOLS: ReadonlySet<string> = new Set([
+export const WORKING_DIR_INDEPENDENT_TOOLS: ReadonlySet<string> = new Set([
   'ddg_search',
   'web_search',
   'fetch_url',

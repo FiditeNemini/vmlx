@@ -3996,6 +3996,29 @@ export class SessionManager extends EventEmitter {
       return
     }
     const session = db.getSession(sessionId)
+    // Abort in-flight streams FIRST, for EVERY downed session.
+    //
+    // This used to live inside the local branch below, which gave it two ways
+    // to never run: a remote session returns before reaching it, and a session
+    // already marked `error` never enters the branch at all. Either way the
+    // chat's activeRequests entry outlives the engine, and chat:sendMessage
+    // then rejects the user's NEXT message with "a message is already being
+    // generated for this chat" — a toast that auto-dismisses, after which the
+    // chat is simply dead until the 30-minute stale-lock cap expires.
+    //
+    // MEASURED in the dev app: a message sent into such a chat rendered in the
+    // transcript and produced no reply, while the engine sat idle at 0.3% CPU.
+    // A brand-new chat answered the same prompt in 4.95s.
+    //
+    // Safe to run unconditionally: abortByEndpoint only touches entries whose
+    // endpoint matches, and aborting an already-settled request is a no-op.
+    if (session?.host && session.port) {
+      this.emit('session:abortInference', {
+        sessionId,
+        host: session.host,
+        port: session.port,
+      })
+    }
     if (session && (session.status === 'running' || session.status === 'loading')) {
       if (session.type === 'remote') {
         // Remote endpoint truly unreachable after sustained failures — mark as error.
@@ -4032,10 +4055,7 @@ export class SessionManager extends EventEmitter {
         this.processes.delete(sessionId)
       }
       this.failCounts.delete(sessionId)
-      // Abort any in-flight SSE streams before marking down
-      if (session.host && session.port) {
-        this.emit('session:abortInference', { sessionId, host: session.host, port: session.port })
-      }
+      // (in-flight SSE streams were aborted above, for every downed session)
       db.updateSession(sessionId, {
         status: 'error',
         pid: undefined,

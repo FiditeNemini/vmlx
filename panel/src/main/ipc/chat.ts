@@ -1048,15 +1048,24 @@ export function registerChatHandlers(
       if (existing) {
         const age = Date.now() - existing.startedAt;
         // Use the timeout configured when that request started, plus 30s buffer
-        // Cap at 10 minutes to prevent indefinite lock (e.g., when serverTimeout is 86400s)
+        // Cap at 30 minutes to prevent indefinite lock (e.g. serverTimeout=86400s)
         const staleLockMs = Math.min(
           existing.timeoutMs + 30_000,
           30 * 60 * 1000,
         );
-        if (age > staleLockMs) {
-          // Lock is stale — abort and clear it
+        // An ALREADY-ABORTED controller can never produce a response, so it
+        // must never hold the chat hostage for the full stale window. Every
+        // abort path (session down, explicit Stop, window reload) deletes the
+        // entry itself; this is the backstop for the one that forgets. Without
+        // it a single missed delete makes the chat silently unusable for up to
+        // 30 minutes — the user sends, sees their message appear, and gets a
+        // toast that vanishes.
+        const abandoned = existing.controller.signal.aborted;
+        if (abandoned || age > staleLockMs) {
+          // Lock is stale or abandoned — abort and clear it
           console.log(
-            `[CHAT] Clearing stale lock for ${chatId} (${Math.round(age / 1000)}s old, limit ${Math.round(staleLockMs / 1000)}s)`,
+            `[CHAT] Clearing ${abandoned ? "abandoned" : "stale"} lock for ${chatId} ` +
+              `(${Math.round(age / 1000)}s old, limit ${Math.round(staleLockMs / 1000)}s)`,
           );
           try {
             existing.controller.abort();

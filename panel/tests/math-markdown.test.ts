@@ -339,3 +339,47 @@ describe('single-dollar math with multi-letter symbols', () => {
     expect(renders('$dx$')).toBe(false)
   })
 })
+
+describe('a dollar welded to a word is currency, not a math opener', () => {
+  /**
+   * Raising the prose threshold to three letters (so `$E=mc^2$` renders) let
+   * `US$5 = CA$7` through: the candidate body `5 = CA` has no 3+ letter run, so
+   * nothing marks it as prose, and the `=` then satisfies the structure test.
+   * The line rendered as literal `US`, math `$5 = CA$`, literal `7`.
+   *
+   * The fix is positional rather than lexical, because lowering the threshold
+   * again would re-break `$E=mc^2$` AND reject legitimate `$AB = CD$` geometry.
+   * Real inline math opens at a boundary; `US$` and `CA$` attach the delimiter
+   * to the preceding word.
+   */
+  const rendered = (source: string) => prepareMarkdownWithMath(source)
+  const rendersMath = (source: string) => rendered(source).includes('math-inline')
+
+  it('leaves two currency amounts alone', () => {
+    expect(rendersMath('US$5 = CA$7')).toBe(false)
+  })
+
+  it.each([
+    ['US$5 = CA$7'],
+    ['AU$10 = NZ$11'],
+    ['costs US$5 and CA$7 total'],
+  ])('leaves %s entirely literal', (input) => {
+    expect(rendersMath(input)).toBe(false)
+  })
+
+  it('still renders math that opens at a boundary', () => {
+    expect(rendersMath('$E=mc^2$')).toBe(true)
+    expect(rendersMath('the identity $E=mc^2$ holds')).toBe(true)
+    expect(rendersMath('($E=mc^2$)')).toBe(true)
+  })
+
+  it('still renders geometry that the lexical rule would have rejected', () => {
+    expect(rendersMath('$AB = CD$')).toBe(true)
+  })
+
+  it('a plain currency pair after real math still ends the math', () => {
+    // Guards the reject path: the closer of a rejected pair must be re-qualified
+    // as an opener rather than adopted outright.
+    expect(rendersMath('$47 \\times 19 = 893$ and US$43')).toBe(true)
+  })
+})

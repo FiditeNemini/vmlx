@@ -96,13 +96,43 @@ function findNextSingleDollar(text: string, start: number): number {
   return -1
 }
 
+/**
+ * A `$` welded to the end of a word is a CURRENCY SYMBOL, not a math opener.
+ *
+ * `US$5 = CA$7` otherwise offers `5 = CA` as a candidate body, and that body is
+ * accepted as math: `CA` is a two-letter run so it is not counted as prose, and
+ * the `=` then satisfies the structure test. The line rendered as literal `US`,
+ * math `$5 = CA$`, literal `7`.
+ *
+ * Fixing that by counting two-letter runs as prose again is the wrong lever —
+ * it is what made `$E=mc^2$` and `$F = ma$` render as literal text, and it
+ * would also reject legitimate `$AB = CD$` geometry. The distinguishing fact is
+ * positional, not lexical: real inline math opens at a boundary, while `US$`
+ * and `CA$` attach the delimiter to a preceding word.
+ */
+function isViableMathOpener(text: string, index: number): boolean {
+  const before = text[index - 1]
+  return before === undefined || !/[A-Za-z0-9]/.test(before)
+}
+
+function findNextOpeningDollar(text: string, start: number): number {
+  let index = start
+  while (index >= 0) {
+    index = findNextSingleDollar(text, index)
+    if (index < 0) return -1
+    if (isViableMathOpener(text, index)) return index
+    index += 1
+  }
+  return -1
+}
+
 function replaceSingleDollarMathLine(
   line: string,
   renderBody: (body: string) => string,
 ): string {
   let output = ''
   let unchangedStart = 0
-  let opener = findNextSingleDollar(line, 0)
+  let opener = findNextOpeningDollar(line, 0)
 
   while (opener >= 0) {
     let closer = findNextSingleDollar(line, opener + 1)
@@ -113,16 +143,21 @@ function replaceSingleDollarMathLine(
         output += line.slice(unchangedStart, opener)
         output += renderBody(body)
         unchangedStart = closer + 1
-        opener = findNextSingleDollar(line, unchangedStart)
+        opener = findNextOpeningDollar(line, unchangedStart)
         break
       }
 
       // A rejected pair must not consume the candidate closer. It may be the
       // valid opener that follows literal currency, as in
-      // `$43 and $47 \times 19 = 893$`.
+      // `$43 and $47 \times 19 = 893$`. It may equally be a currency `$` welded
+      // to a word, which is not an opener at all, so re-qualify it rather than
+      // adopting it outright.
       output += line.slice(unchangedStart, opener + 1)
       unchangedStart = opener + 1
-      opener = closer
+      opener = isViableMathOpener(line, closer)
+        ? closer
+        : findNextOpeningDollar(line, closer + 1)
+      if (opener < 0) break
       closer = findNextSingleDollar(line, opener + 1)
     }
 

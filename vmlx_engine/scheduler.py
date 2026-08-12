@@ -11068,13 +11068,20 @@ class Scheduler:
                     is_pattern_match = self._is_cache_corruption_error(e)
                     is_gen_type_error = isinstance(e, (IndexError, TypeError))
                     is_cache_error = is_pattern_match or is_gen_type_error
-                    # A DSV4 prefill-valve abort is a deterministic
-                    # capacity rejection, not corruption: clearing caches
-                    # and rescheduling would re-run the doomed prefill in a
-                    # loop. Match by class name (mirrors
-                    # _is_dsv4_cache_class_name) to avoid an import cycle.
+                    # A prefill-valve abort is a deterministic capacity
+                    # rejection, not corruption: clearing caches and
+                    # rescheduling would re-run the doomed prefill in a loop.
+                    # Match by class name (mirrors _is_dsv4_cache_class_name) to
+                    # avoid an import cycle.
+                    #
+                    # PrefillAdmissionError is the family-agnostic valve, now
+                    # also raised by the hybrid chunked prefill. It has to be
+                    # listed here for the same reason DSV4's is: without it the
+                    # hybrid decline is retried until max_retries, re-running a
+                    # prefill already measured as unservable.
                     if any(
-                        cls.__name__ == "DSV4PrefillMemoryError"
+                        cls.__name__
+                        in ("DSV4PrefillMemoryError", "PrefillAdmissionError")
                         for cls in type(e).__mro__
                     ):
                         is_cache_error = False

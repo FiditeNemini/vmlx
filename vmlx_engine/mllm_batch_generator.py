@@ -1651,6 +1651,11 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 # THAT is the real unlock, and it needs a long coherence run to justify.
 from .utils.memory_limits import get_effective_metal_working_set_bytes
 from .utils.prefill_admission import (
+    hybrid_chunk_valve_check,
+    prefill_valve_enabled,
+    prefill_valve_min_margin_bytes,
+)
+from .utils.prefill_admission import (
     max_prefill_chunk_tokens,
     prefill_valve_enabled as _prefill_valve_enabled,
 )
@@ -6207,6 +6212,9 @@ class MLLMBatchGenerator:
                 # process still aborted. DSV4's valve solves this by adapting
                 # from OBSERVED peaks instead of predicting them; same idea here.
                 _observed_chunk_transient = 0
+                _observed_transient_at_ctx = 0
+                _prefill_valve_enabled = prefill_valve_enabled()
+                _prefill_valve_min_margin = prefill_valve_min_margin_bytes()
                 _max_active_seen = 0
                 _adaptive_chunk_cap = _tight_text_prefill_step_size
                 _prefill_keep_alloc = os.environ.get(
@@ -6243,18 +6251,52 @@ class MLLMBatchGenerator:
                         )
                         chunk_size = max(1, _adaptive_chunk_cap)
                     chunk = input_ids[:, processed:processed + chunk_size]
-                    if _HYBRID_PREFILL_MEM_TRACE:
-                        # Clean per-chunk peak: reset immediately before the
-                        # forward so get_peak_memory() afterwards is THIS
-                        # chunk's requirement, not a running maximum. The
-                        # post-clear_cache active samples are points on a curve
-                        # that swings 26 -> 75GB inside the loop, so they cannot
-                        # be fitted; a reset peak can.
+                    # Per-chunk peak baseline. Reset immediately before the
+                    # forward so get_peak_memory() after the eval is THIS
+                    # chunk's requirement rather than a running maximum. Always
+                    # measured, not only under the trace flag, because the
+                    # admission valve below adapts from it.
+                    try:
+                        _peak_base = int(mx.get_active_memory())
+                        mx.reset_peak_memory()
+                    except Exception:  # noqa: BLE001
+                        _peak_base = 0
+                    # ADMISSION: decline before submitting GPU work.
+                    #
+                    # This loop was the one prefill path with no valve, and it
+                    # does not fail with a catchable Python error — it dies with
+                    # "[METAL] Command buffer execution failed: Insufficient
+                    # Memory", which libc++ turns into a process abort. There is
+                    # no exception to handle, so the ONLY defence is to not
+                    # submit the chunk.
+                    #
+                    # MEASURED on Qwen3.6-27B, cold 101,502-token prefill: the
+                    # per-chunk transient is linear in context,
+                    # transient = 2.82GB + 0.00015 * ctx (residuals <=0.02GB),
+                    # growing only ~0.31GB per 2048-token chunk. So the largest
+                    # transient observed so far, with DSV4's 1.25x margin, is a
+                    # sound projection for the next chunk. The run aborted at
+                    # chunk 47 needing ~110GB; this declines it instead.
+                    if _prefill_valve_enabled and _observed_chunk_transient > 0:
                         try:
-                            _peak_base = int(mx.get_active_memory())
-                            mx.reset_peak_memory()
+                            _valve_active, _valve_max_ws = (
+                                get_effective_metal_working_set_bytes(mx)
+                            )
                         except Exception:  # noqa: BLE001
-                            _peak_base = 0
+                            _valve_active, _valve_max_ws = 0, 0
+                        hybrid_chunk_valve_check(
+                            _valve_active,
+                            _valve_max_ws,
+                            _observed_chunk_transient,
+                            _observed_transient_at_ctx,
+                            int(getattr(request, "_cached_tokens", 0) or 0)
+                            + processed
+                            + chunk_size,
+                            _prefill_valve_min_margin,
+                            chunk_start=processed,
+                            chunk_end=processed + chunk_size,
+                            model_label="hybrid prefill",
+                        )
                     if _HYBRID_ADAPTIVE_CHUNK:
                         try:
                             _active_before_chunk = int(mx.get_active_memory())
@@ -6293,16 +6335,42 @@ class MLLMBatchGenerator:
                         except Exception:  # noqa: BLE001
                             _m_fwd = -1.0
                     _materialize_prefill_cache_state(cache)
+                    # AFTER materialize, not before. _call_lm_prefix_without_logits
+                    # only BUILDS the graph — MLX is lazy, so nothing has run yet at
+                    # that point and get_peak_memory() returns the pre-forward value.
+                    # Reading there reported transient=0.00GB for every chunk of a
+                    # 35-chunk span, which is the measurement equivalent of an A/B
+                    # where the new path never engaged, and it is why four sizing
+                    # attempts were tuned against zeros.
+                    # _materialize_prefill_cache_state is the eval point, so the
+                    # peak is only meaningful after it.
+                    try:
+                        _chunk_peak = int(mx.get_peak_memory())
+                    except Exception:  # noqa: BLE001
+                        _chunk_peak = 0
+                    if _chunk_peak > _peak_base:
+                        _this_transient = _chunk_peak - _peak_base
+                        if _this_transient >= _observed_chunk_transient:
+                            # Record the context this was observed AT, not just
+                            # the magnitude: the valve scales it forward by the
+                            # context ratio, so a transient without its context
+                            # cannot be projected.
+                            _observed_chunk_transient = _this_transient
+                            # END context, not start. A chunk attends over the
+                            # context it FINISHES at, and at chunk 0 the start
+                            # context is 0 — projecting from that multiplied the
+                            # transient by the whole next context and produced a
+                            # 6448GB estimate that declined chunk 1 of a prompt
+                            # the device serves comfortably. Observation and
+                            # projection must use the same end-of-chunk basis.
+                            _observed_transient_at_ctx = max(
+                                1,
+                                int(getattr(request, "_cached_tokens", 0) or 0)
+                                + processed
+                                + chunk_size,
+                            )
                     if _HYBRID_PREFILL_MEM_TRACE:
-                        # AFTER materialize, not before. _call_lm_prefix_without_logits
-                        # only BUILDS the graph — MLX is lazy, so nothing has run yet at
-                        # that point and get_peak_memory() returns the pre-forward value.
-                        # Reading there reported transient=0.00GB for every chunk of a
-                        # 35-chunk span, which is the measurement equivalent of an A/B
-                        # where the new path never engaged. _materialize_prefill_cache_state
-                        # is the eval point, so the peak is only meaningful after it.
                         try:
-                            _chunk_peak = int(mx.get_peak_memory())
                             logger.info(
                                 "hybrid-prefill-peak chunk=%d processed=%d "
                                 "ctx=%d chunk_size=%d base=%.2fGB peak=%.2fGB "

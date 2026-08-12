@@ -243,6 +243,60 @@ def project_span_peak_bytes(
     return int(transient * (final / at))
 
 
+def hybrid_chunk_valve_check(
+    active_bytes: int,
+    max_ws_bytes: int,
+    observed_transient_bytes: int,
+    observed_at_context: int,
+    next_context: int,
+    min_margin_bytes: int,
+    *,
+    chunk_start: int,
+    chunk_end: int,
+    model_label: str = "model",
+    safety: float = 1.10,
+) -> None:
+    """Per-chunk admission for the hybrid prefill, projected along the context.
+
+    Why this and not :func:`prefill_valve_check`: that one pads the largest
+    observed transient by a flat 1.25x, which suits DSV4 where the transient is
+    volatile. The hybrid transient is not volatile — MEASURED on Qwen3.6-27B it
+    is a straight line in context (2.82GB + 0.00015*ctx, residuals <=0.02GB)
+    that grows only ~0.31GB per 2048-token chunk. Against a real 107.52GB
+    device limit the flat pad refuses chunks that demonstrably run: chunk 46
+    peaked at 104.41GB and would have been declined at 108.65GB projected.
+
+    Scaling the last observed transient by the context ratio instead predicts
+    the measured peaks to within 0.06GB:
+
+        ctx 92,160 -> projected 98.21GB, actual 98.21GB
+        ctx 94,208 -> projected 104.47GB, actual 104.41GB   (ran, admitted)
+        ctx 96,256 -> projected 110.80GB                     (aborted, declined)
+
+    ``safety`` sits inside the window those two chunks define (0.81 < s < 1.18);
+    1.10 keeps ~10% headroom while still separating them.
+
+    Unknown readings never reject.
+    """
+    if max_ws_bytes <= 0 or active_bytes <= 0 or observed_transient_bytes <= 0:
+        return
+    projected = project_span_peak_bytes(
+        observed_transient_bytes, observed_at_context, next_context
+    )
+    projected = max(int(projected * safety), int(min_margin_bytes))
+    if active_bytes + projected <= max_ws_bytes:
+        return
+    raise PrefillAdmissionError(
+        f"{model_label}: prefill admission rejected chunk "
+        f"[{chunk_start}:{chunk_end}) at a context of {next_context} tokens — "
+        f"active Metal working set {active_bytes / _GIB:.2f}GB plus a projected "
+        f"{projected / _GIB:.2f}GB for this chunk exceeds the device "
+        f"working-set limit {max_ws_bytes / _GIB:.2f}GB. A context of this "
+        f"length cannot be served on this hardware; shorten the conversation "
+        f"or reduce the prompt."
+    )
+
+
 def span_admission_check(
     active_bytes: int,
     max_ws_bytes: int,

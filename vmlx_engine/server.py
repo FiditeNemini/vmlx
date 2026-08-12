@@ -2728,6 +2728,17 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         # floor answers cleanly (live-proven).
         "minimax",
         "minimax_m2",
+        # Nanbeige 4.2 runs the qwen3 reasoning parser with think_in_template,
+        # so a hard prompt spends the whole budget inside <think> and returns
+        # EMPTY content at finish=length. Live-measured on the box 2026-08-12,
+        # Nanbeige4.2-3B-JANG_4M, max_tokens=220/max_thinking_tokens=160:
+        # finish=length, reasoning 1016 chars, content 0 chars — while the
+        # IDENTICAL request against nemotron_h (already a member) answered in
+        # 259 chars, which isolates the difference to this set.
+        # Its thinking-off rail is native, not coercion: enable_thinking=False
+        # prefills "<think>\n\n</think>\n\n" (render-probed on the bundle's own
+        # template, 2026-08-12), so it does not hit the step3p7 carve-out below.
+        "nanbeige",
         # Nemotron reasons in a plain <think> block with no effort mechanism
         # and no built-in stop pressure, so a hard prompt can spend the whole
         # budget reasoning and return EMPTY content at finish=length — the
@@ -2745,6 +2756,22 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "qwen3",
         "qwen3_5",
         "qwen3_5_moe",
+        # Parity additions, reasoned from the registry rows rather than from a
+        # live bundle — no bundle on this box resolves to either family, so
+        # unlike every entry above they are NOT live-proven. Treat them as
+        # covering their twin, not as tested rails.
+        #   qwen3_next: reasoning_parser="qwen3", think_in_template=True,
+        #     supports_thinking=True — byte-identical reasoning contract to
+        #     qwen3/qwen3_5/qwen3_5_moe directly above (model_configs.py).
+        #   gemma4_text: the text-only twin of gemma4, identical tool_parser,
+        #     reasoning_parser, eos_tokens and special_tokens_to_clean; it
+        #     differs only by is_mllm/architecture_hints. NOTE the real Gemma 4
+        #     bundles (26B-A4B, E4B, 31B) carry text_config.model_type
+        #     "gemma4_text" yet still resolve to family "gemma4" — verified
+        #     through registry.lookup(), 2026-08-12 — so this row is reached
+        #     only by a bundle whose TOP-LEVEL model_type is gemma4_text.
+        "qwen3_next",
+        "gemma4_text",
         # DSV4 can run the thinking block to the full budget without a visible
         # answer and has a source-owned direct encoder for its bounded retry.
         # Step3p7 is deliberately absent: its official template always opens
@@ -2911,14 +2938,21 @@ def _dsv4_answer_pass_thinking_cap(
 def _reasoning_answer_pass_family_label(family_name: str) -> str:
     return {
         "gemma4": "Gemma4",
+        # gemma4_text is the text-only twin and must not fall through to the
+        # "Qwen3.5" default below — this label is printed in the engine log the
+        # user reads in the Logs tab, so an unmapped family names the WRONG
+        # model in a line about their own request.
+        "gemma4_text": "Gemma4",
         "hy_v3": "Hy3",
         "laguna": "Laguna",
         "minimax": "MiniMax-M2",
         "minimax_m2": "MiniMax-M2",
+        "nanbeige": "Nanbeige",
         "nemotron": "Nemotron",
         "nemotron_h": "Nemotron",
         "openpangu_v2": "openPangu",
         "qwen3": "Qwen3",
+        "qwen3_next": "Qwen3-Next",
         "deepseek_v4": "DeepSeek-V4",
         "step3p7": "Step-3.7",
     }.get(family_name, "Qwen3.5")
@@ -2969,6 +3003,18 @@ _ANSWER_PASS_FRESH_CONTEXT_FAMILIES = frozenset(
         "qwen3",
         "qwen3_5",
         "qwen3_5_moe",
+        # Nanbeige appends the truncated reasoning turn as a COMPLETED assistant
+        # turn — "</think>\n\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n
+        # </think>\n\n" — i.e. the same back-to-back assistant shape as
+        # nemotron/step3p7/minimax (render-probed on the bundle's own template,
+        # 2026-08-12). Replaying that would ask the model to answer after an
+        # empty turn, so the salvage runs on fresh context instead.
+        "nanbeige",
+        # Parity with their twins above; see the matching note in
+        # _REASONING_ANSWER_PASS_FAMILIES — reasoned from the registry rows, not
+        # live-proven, because no bundle here resolves to either family.
+        "qwen3_next",
+        "gemma4_text",
     }
 )
 

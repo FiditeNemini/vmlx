@@ -143,3 +143,70 @@ def test_minimax_family_armed_for_answer_pass():
     label = server_mod._reasoning_answer_pass_family_label
     assert label("minimax") == "MiniMax-M2"
     assert label("minimax_m2") == "MiniMax-M2"
+
+
+def test_nanbeige_armed_for_answer_pass():
+    """Nanbeige 4.2 runs the qwen3 reasoning parser with think_in_template, so a
+    hard prompt spends the whole budget inside <think> and returns EMPTY content
+    at finish=length — it was simply missing from the never-empty set.
+
+    Live-measured on the box 2026-08-12 (Nanbeige4.2-3B-JANG_4M, max_tokens=220,
+    max_thinking_tokens=160, temp 0): finish=length, reasoning 1016 chars,
+    content 0 chars. The IDENTICAL request against nemotron_h — already a member
+    — answered in 259 chars, which isolates the difference to this set. After
+    adding it: content 250 chars, reasoning capped 1016 -> 740.
+
+    FRESH context, not an appended reasoning turn: the bundle's own template
+    renders the appended turn as "</think>\\n\\n<|im_end|>\\n<|im_start|>
+    assistant\\n<think>..." — a completed assistant turn followed by a second
+    assistant open, the same back-to-back shape as nemotron/step3p7/minimax
+    (render-probed 2026-08-12).
+
+    The rail is native rather than coercion — enable_thinking=False prefills
+    "<think>\\n\\n</think>\\n\\n" — so it does not belong in the step3p7 carve-out.
+    """
+    assert "nanbeige" in server_mod._REASONING_ANSWER_PASS_FAMILIES
+    assert "nanbeige" in server_mod._THINKING_BUDGET_CAP_FAMILIES
+    assert "nanbeige" in server_mod._ANSWER_PASS_FRESH_CONTEXT_FAMILIES
+    out = server_mod._answer_pass_messages(_MSGS, "nanbeige", _TRUNC)
+    assert out == _MSGS
+    assert out is not _MSGS
+
+
+def test_qwen3_next_and_gemma4_text_cover_their_twins():
+    """Parity additions reasoned from the registry rows, NOT live-proven — no
+    bundle on the test box resolves to either family, so they are guarding the
+    twin rather than a measured repro.
+
+    qwen3_next declares reasoning_parser="qwen3", think_in_template=True,
+    supports_thinking=True — the same reasoning contract as qwen3/qwen3_5/
+    qwen3_5_moe, which are all members.
+
+    gemma4_text is the text-only twin of gemma4: identical tool_parser,
+    reasoning_parser, eos_tokens and special_tokens_to_clean, differing only by
+    is_mllm/architecture_hints. Note the shipping Gemma 4 bundles (26B-A4B, E4B,
+    31B) carry text_config.model_type "gemma4_text" yet still resolve to family
+    "gemma4" through registry.lookup() (verified 2026-08-12), so this row is
+    reached only by a bundle whose TOP-LEVEL model_type is gemma4_text.
+    """
+    for fam in ("qwen3_next", "gemma4_text"):
+        assert fam in server_mod._REASONING_ANSWER_PASS_FAMILIES
+        assert fam in server_mod._THINKING_BUDGET_CAP_FAMILIES
+        assert fam in server_mod._ANSWER_PASS_FRESH_CONTEXT_FAMILIES
+
+
+def test_every_answer_pass_family_has_an_explicit_label():
+    """_reasoning_answer_pass_family_label falls back to "Qwen3.5", and the
+    result is printed in the engine log the user reads in the Logs tab. An
+    unmapped member therefore names the WRONG model in a line about the user's
+    own request — nanbeige, qwen3_next and gemma4_text all did before this
+    guard. Any family added to the set must be added to the label map too.
+    """
+    label = server_mod._reasoning_answer_pass_family_label
+    for fam in server_mod._REASONING_ANSWER_PASS_FAMILIES:
+        if fam in ("qwen3_5", "qwen3_5_moe"):
+            continue  # these two legitimately own the "Qwen3.5" fallback
+        assert label(fam) != "Qwen3.5", (
+            f"{fam} is in _REASONING_ANSWER_PASS_FAMILIES but has no entry in "
+            "_reasoning_answer_pass_family_label, so it silently logs as Qwen3.5"
+        )

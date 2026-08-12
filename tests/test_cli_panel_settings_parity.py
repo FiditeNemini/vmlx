@@ -69,11 +69,24 @@ def test_step3p7_is_paged_exempt_like_the_panel_requires():
     from vmlx_engine.cli import _PAGED_MLLM_EXEMPT_FAMILIES
 
     assert "step3p7" in _PAGED_MLLM_EXEMPT_FAMILIES
-    panel = SESSIONS.read_text(encoding="utf-8")
-    assert "step3p7_full_sliding_kv" in panel, (
+    # The panel's cache-shape rules used to be byte-identical copies in the argv
+    # BUILDER (sessions.ts) and the argv PREVIEW (SessionSettings.tsx). They now
+    # live in one shared module, so assert the RULE, and separately that both
+    # consumers read it — grepping sessions.ts for the literal would pin the
+    # duplication this consolidation removed.
+    shared = ROOT / "panel/src/shared/cacheTypeCapabilities.ts"
+    assert shared.exists(), "the shared cache-shape capability module is gone"
+    assert "step3p7_full_sliding_kv" in shared.read_text(encoding="utf-8"), (
         "panel no longer declares the step3p7 paged-required subtype; "
         "re-check whether the CLI exemption is still correct"
     )
+    for consumer in (
+        SESSIONS,
+        ROOT / "panel/src/renderer/src/components/sessions/SessionSettings.tsx",
+    ):
+        assert "cacheTypeCapabilities" in consumer.read_text(encoding="utf-8"), (
+            f"{consumer.name} stopped reading the shared cache-shape rules"
+        )
 
 
 def _serve_arg_default(flag: str):
@@ -176,3 +189,96 @@ def test_every_panel_surface_carries_the_same_slow_families():
             f"{label} ({path.name}) does not read the shared timeout table — "
             f"it will drift and abort requests at the generic 300s"
         )
+
+
+# Engine family_name -> panel REGISTRY name. Taken from
+# panel/src/main/model-config-registry.ts MODEL_TYPE_TO_FAMILY individually, not
+# transliterated: the registry is not internally consistent about underscores
+# vs dots vs hyphens, and two earlier fixes in this project were silent no-ops
+# because they assumed it was.
+_ENGINE_TO_PANEL_FAMILY = {
+    "gemma4": "gemma4",
+    "gemma4_text": "gemma4-text",
+    "hy_v3": "hy3",
+    "laguna": "laguna",
+    "minimax": "minimax",
+    # Engine-only alias: "minimax_m2" is the M2.x REASONING PARSER name, and the
+    # engine deliberately keeps it in the set so a future bundle that does report
+    # it as a family stays covered. No bundle resolves to it today, so it shares
+    # the panel row of the family that does.
+    "minimax_m2": "minimax",
+    "nanbeige": "nanbeige",
+    "nemotron": "nemotron",
+    "nemotron_h": "nemotron-h",
+    "openpangu_v2": "openpangu_v2",
+    "qwen3": "qwen3",
+    "qwen3_5": "qwen3.5",
+    "qwen3_5_moe": "qwen3.5-moe",
+    "qwen3_next": "qwen3-next",
+}
+
+
+def test_thinking_budget_families_match_between_engine_and_app():
+    """The app must offer a budget control for every family the engine caps.
+
+    This is not cosmetic. The engine's never-empty answer pass is ARMED by a
+    CAPPED first pass — without a cap the model can spend the whole budget
+    inside <think> and return EMPTY content at finish=length, and the salvage
+    never runs. The only way a user supplies that cap from the app is the "Max
+    Thinking Tokens" field, which renders only when the family's
+    supportsThinkingBudget is true.
+
+    MEASURED 2026-08-12: nemotron/nemotron_h had been in the engine's cap set
+    since 2026-08-11, but no panel row declared supportsThinkingBudget, so the
+    Chat Settings drawer for a LIVE Nemotron session showed Enable Thinking and
+    no budget field — the fix existed and the user could not reach it. Nanbeige
+    was in the same state, with a measured empty answer to show for it
+    (max_tokens=220/max_thinking_tokens=160: reasoning 1016 chars, content 0).
+    """
+    from vmlx_engine.server import _THINKING_BUDGET_CAP_FAMILIES
+
+    shared = ROOT / "panel/src/shared/thinkingBudgetFamilies.ts"
+    assert shared.exists(), "the shared thinking-budget family list is gone"
+    panel_families = set(
+        re.findall(r"^\s*'([^']+)',$", shared.read_text(encoding="utf-8"), re.M)
+    )
+    assert panel_families, "could not parse THINKING_BUDGET_FAMILIES"
+
+    unmapped = set(_THINKING_BUDGET_CAP_FAMILIES) - set(_ENGINE_TO_PANEL_FAMILY)
+    assert not unmapped, (
+        f"engine caps {sorted(unmapped)} but this test has no panel registry "
+        "spelling for them — add the mapping AND the panel entry, or the app "
+        "silently hides the control that arms their answer pass"
+    )
+
+    expected = {_ENGINE_TO_PANEL_FAMILY[f] for f in _THINKING_BUDGET_CAP_FAMILIES}
+    missing = expected - panel_families
+    assert not missing, (
+        f"panel does not offer a thinking budget for {sorted(missing)}, which "
+        "the engine caps — their never-empty answer pass is unreachable in-app"
+    )
+    # minimax_m3 runs its own dedicated reasoning-only answer path rather than
+    # the shared cap set, so it is legitimately panel-only.
+    assert panel_families - expected <= {"minimax_m3"}, (
+        f"panel offers a thinking budget for {sorted(panel_families - expected)}"
+        " that the engine does not cap — the control would do nothing"
+    )
+
+
+def test_registry_rows_no_longer_carry_their_own_thinking_budget_flag():
+    """The flag must come from the one shared list, not from per-family rows.
+
+    Eleven rows each declared it by hand, and the ones added later simply forgot
+    — which is how nemotron shipped a capped engine and an app with no control.
+    """
+    registry = ROOT / "panel/src/main/model-config-registry.ts"
+    src = registry.read_text(encoding="utf-8")
+    assert "thinkingBudgetFamilies" in src, (
+        "model-config-registry.ts no longer reads the shared family list"
+    )
+    assert "familySupportsThinkingBudget(familyName)" in src, (
+        "registerFamily no longer derives supportsThinkingBudget from the list"
+    )
+    assert not re.search(r"supportsThinkingBudget:\s*(?:true|false)", src), (
+        "a registerFamily row grew its own supportsThinkingBudget literal back"
+    )

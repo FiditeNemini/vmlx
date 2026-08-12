@@ -2240,7 +2240,11 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
       const dir = makeModelDir({ model_type: modelType })
       const detected = detectModelConfigFromDir(dir)
       expect(detected.family).toBe(family)
-      expect(detected.supportsThinkingBudget).toBeUndefined()
+      // Was `undefined` while each row declared the flag by hand and these two
+      // simply omitted it. It is now an explicit `false` derived from the one
+      // shared THINKING_BUDGET_FAMILIES list — a stronger statement, not a
+      // weaker one, and what the ChatSettings `=== true` gate has always read.
+      expect(detected.supportsThinkingBudget).toBe(false)
     })
   }
 
@@ -2272,7 +2276,10 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     expect(detected.defaultEnableThinking).toBe(true)
     expect(detected.defaultReasoningEffort).toBe('low')
     expect(detected.supportedReasoningEfforts).toEqual(['low', 'high', 'max'])
-    expect(detected.supportsThinkingBudget).toBeUndefined()
+    // Explicit false now, derived from the shared THINKING_BUDGET_FAMILIES
+    // list rather than omitted per-row — DSV4 keys on reasoning_effort, not a
+    // token budget, so a budget control would send an inert value.
+    expect(detected.supportsThinkingBudget).toBe(false)
   })
 
   it('does not invent DSV4 effort levels or a default for an unstamped bundle', () => {

@@ -66,5 +66,28 @@ export function formatJangQuantizationLabel(config: {
     return explicitBits ? `JANG ${explicitBits}-bit` : 'JANG'
   }
 
+  // Any other weight_format that still declares a PROFILE.
+  //
+  // MXFP bundles land here: they carry a real jang_config.json, but with
+  //   weight_format: "mlx", profile: "MXFP4", quantization: { bits: 4, ... }
+  // and "mlx" matches neither branch above, so the label came back undefined.
+  // MEASURED via the app's own detectConfig:
+  //   Nemotron-Omni-Nano-MXFP4-CRACK -> quantizationLabel: null
+  //   gemma-4-E4B-it-qat-JANG_4M     -> "JANG_4M"
+  // In the session list that renders as NO badge at all, which is
+  // indistinguishable from "unquantized" — for a whole format family, in a
+  // list where the badge is how you tell a 4-bit bundle from a ternary one.
+  //
+  // Gated on `profile` on purpose: a bundle that declares no profile has
+  // nothing truthful to show, and inventing a label would be worse than the
+  // blank it replaces.
+  if (profile) {
+    if (actualBits != null) return `${profile} (${actualBits}b)`
+    if (routedAverageBits != null) {
+      return `${profile} (${Number(routedAverageBits.toFixed(2))}b routed)`
+    }
+    return explicitBits ? `${profile} (${explicitBits}b)` : profile
+  }
+
   return undefined
 }

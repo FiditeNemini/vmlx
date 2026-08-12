@@ -1682,6 +1682,26 @@ _HYBRID_ADAPTIVE_CHUNK = os.environ.get(
 
 _HYBRID_MIN_CHUNK = max(1, int(os.environ.get("VMLX_HYBRID_MIN_CHUNK", "64") or 64))
 
+# One-shot attention buffer size above which a hybrid prefill switches to the
+# chunked path (and above which the SSM clean re-derive declines) rather than
+# ask Metal for a single allocation it will refuse.
+#
+# This was written out twice as a bare `8 * 1024 ** 3` local, which is the
+# duplicated-constant pattern that has bitten this project repeatedly. Worse,
+# the chunked path's own comment asks that "correctness should be spot-checked
+# by the caller" for families other than qwen3_5 — and with the threshold
+# hardcoded there was NO WAY to make a family take the chunked path at a prompt
+# size where the one-shot path also works, so the comparison the comment asks
+# for could not be performed at all. Lowering this makes chunking reachable on a
+# small prompt, which is what turns that caveat into something testable.
+_HYBRID_ONE_SHOT_GUARD_BYTES = max(
+    1,
+    int(
+        os.environ.get("VMLX_HYBRID_ONE_SHOT_GUARD_BYTES", str(8 * 1024**3))
+        or 8 * 1024**3
+    ),
+)
+
 # Drain the generation stream before each per-chunk clear_cache.
 #
 # DEFAULT OFF — this was tried against the hybrid retention and MEASURED to do
@@ -5965,7 +5985,7 @@ class MLLMBatchGenerator:
         # `/init` sending full-repo context through a hybrid model).
         # Estimate attention_scores = heads * seq_len^2 * 2 bytes. Use a
         # conservative 8 GB threshold (Metal cap is 9.5 GB on 64 GB Macs).
-        _OOM_GUARD_BYTES = 8 * 1024 * 1024 * 1024
+        _OOM_GUARD_BYTES = _HYBRID_ONE_SHOT_GUARD_BYTES
         _n_heads_guess = _infer_attention_heads_for_hybrid_oom_guard(
             self.language_model
         )
@@ -9862,7 +9882,7 @@ class MLLMBatchGenerator:
                     ]
 
             if _cache_requires_one_shot_rederive(fresh_cache):
-                _OOM_GUARD_BYTES = 8 * 1024 * 1024 * 1024
+                _OOM_GUARD_BYTES = _HYBRID_ONE_SHOT_GUARD_BYTES
                 _n_heads_guess = _infer_attention_heads_for_hybrid_oom_guard(
                     self.language_model
                 )

@@ -716,13 +716,29 @@ def test_session_preview_and_real_launch_share_dsv4_and_image_sanitizers():
     sessions = Path("panel/src/main/sessions.ts").read_text()
     settings = Path("panel/src/renderer/src/components/sessions/SessionSettings.tsx").read_text()
 
+    shared = Path("panel/src/shared/launchArgValues.ts").read_text()
+
     def extract_set(source: str, name: str) -> set[str]:
-        match = re.search(rf"const {name} = new Set\(\[\n(?P<body>.*?)\n\]\)", source, re.S)
+        match = re.search(
+            rf"(?:export )?const {name} = new Set\(\[\n(?P<body>.*?)\n\]\)",
+            source,
+            re.S,
+        )
         assert match, f"missing {name}"
         return set(re.findall(r"'(--[^']+)'", match.group("body")))
 
+    # ADDITIONAL_ARG_VALUE_FLAGS moved out of both files: it was a 66-entry list
+    # duplicated across the argv BUILDER and the CLI-preview renderer, and now
+    # lives once in src/shared/launchArgValues.ts with both importing it.
+    # Asserting the two copies match would pin the duplication that was removed,
+    # so read the rule from its owner and check the consumers import it.
+    assert extract_set(shared, "ADDITIONAL_ARG_VALUE_FLAGS")
+    for consumer in (sessions, settings):
+        assert "launchArgValues" in consumer
+        assert "const ADDITIONAL_ARG_VALUE_FLAGS" not in consumer
+
+    # These two are still per-file and MUST stay in agreement.
     for set_name in (
-        "ADDITIONAL_ARG_VALUE_FLAGS",
         "IMAGE_ADDITIONAL_ARG_BLOCKLIST",
         "DSV4_ADDITIONAL_ARG_BLOCKLIST",
     ):

@@ -2268,6 +2268,13 @@ class BlockAwarePrefixCache:
         # The wait happens on the model-owning thread, so it must stay short —
         # the 30s above is only defensible for path-dependent families, where a
         # dropped block breaks the chain instead of merely costing a re-prefill.
+        # O(n) chained prefix-index hashing. Default OFF: it changes the
+        # in-memory index KEYS (not any persisted record), and the win is a
+        # lock-hold reduction that still wants a live long-conversation A/B
+        # before it becomes the default.
+        self._chained_prefix_index_hash = os.environ.get(
+            "VMLX_CHAINED_PREFIX_INDEX_HASH", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         try:
             self._block_disk_admission_timeout = max(
                 0.0,
@@ -7065,17 +7072,29 @@ class BlockAwarePrefixCache:
             best_len = 0
             extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
 
-            # Try progressively longer prefixes
-            for num_blocks in range(1, len(tokens) // self.block_size + 1):
-                prefix_len = num_blocks * self.block_size
-                if prefix_len > len(tokens):
-                    break
-
-                prefix_tokens = tokens[:prefix_len]
-                prefix_hash = self._prefix_index_hash(
-                    prefix_tokens,
-                    cache_extra_keys=cache_extra_keys,
+            # Try progressively longer prefixes.
+            if self._chained_prefix_index_hash:
+                candidates = list(
+                    self._prefix_index_hash_sequence(
+                        tokens,
+                        len(tokens) // self.block_size,
+                        cache_extra_keys=cache_extra_keys,
+                    )
                 )
+            else:
+                candidates = [
+                    (
+                        n * self.block_size,
+                        self._prefix_index_hash(
+                            tokens[: n * self.block_size],
+                            cache_extra_keys=cache_extra_keys,
+                        ),
+                    )
+                    for n in range(1, len(tokens) // self.block_size + 1)
+                    if n * self.block_size <= len(tokens)
+                ]
+            for prefix_len, prefix_hash in candidates:
+                prefix_tokens = tokens[:prefix_len]
 
                 if prefix_hash in self._prefix_index:
                     entry = self._prefix_index[prefix_hash]
@@ -7219,6 +7238,74 @@ class BlockAwarePrefixCache:
             extra_keys=cache_extra_keys,
         ).hex()
 
+    def _prefix_index_key(
+        self,
+        tokens: List[int],
+        cache_extra_keys: Optional[Any] = None,
+    ) -> str:
+        """The `_prefix_index` key for `tokens` under the ACTIVE scheme.
+
+        The derivation is now conditional on VMLX_CHAINED_PREFIX_INDEX_HASH, so
+        anything that needs a key — production code, a probe, a test — must ask
+        here rather than call `_prefix_index_hash` directly. Calling the
+        from-scratch hash while the chained scheme is active silently produces a
+        key nothing stored, which reads as a cache miss rather than an error.
+        """
+        if not self._chained_prefix_index_hash:
+            return self._prefix_index_hash(
+                tokens, cache_extra_keys=cache_extra_keys
+            )
+        key = None
+        for _prefix_len, candidate in self._prefix_index_hash_sequence(
+            tokens,
+            max(1, -(-len(tokens) // self.block_size)),
+            cache_extra_keys=cache_extra_keys,
+        ):
+            key = candidate
+        return key if key is not None else self._prefix_index_hash(
+            tokens, cache_extra_keys=cache_extra_keys
+        )
+
+    def _prefix_index_hash_sequence(
+        self,
+        tokens: List[int],
+        num_blocks: int,
+        cache_extra_keys: Optional[Any] = None,
+    ):
+        """Yield ``(prefix_len, hash)`` for each block-aligned prefix.
+
+        The lookup and the update both walk every block-aligned prefix of the
+        prompt. Hashing each prefix FROM SCRATCH makes that quadratic in the
+        prompt: block i re-hashes i*block_size tokens, so the total is
+        O(len(tokens)^2 / block_size). At 61k tokens with 64-token blocks that
+        is ~29 million token-hashes per call — and it runs under
+        ``paged_cache._lock``, so every other cache operation waits on it.
+
+        ``compute_block_hash`` already takes a parent hash and is a chain, so
+        the same walk can be done incrementally: hash only the new block and
+        fold in the previous prefix's hash. That is O(len(tokens)) total.
+
+        The chained values DIFFER from the from-scratch ones. That is safe
+        because ``_prefix_index`` is a plain in-memory dict rebuilt per process
+        (declared at __init__, never persisted, never compared against an L2
+        record) and both the reader and the writer take their keys from here —
+        but it is exactly why this is env-gated and default OFF until it has a
+        live A/B on a long conversation.
+        """
+        parent = None
+        total = len(tokens)
+        for index in range(1, num_blocks + 1):
+            start = (index - 1) * self.block_size
+            end = min(index * self.block_size, total)
+            if start >= end:
+                break
+            parent = compute_block_hash(
+                parent,
+                tokens[start:end],
+                extra_keys=cache_extra_keys,
+            )
+            yield end, parent.hex()
+
     def _update_prefix_index(
         self,
         tokens: List[int],
@@ -7228,7 +7315,20 @@ class BlockAwarePrefixCache:
         """Update prefix index with new token sequence."""
         extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
         with self.paged_cache._lock:
-            # Index block-aligned prefixes
+            # Index block-aligned prefixes.
+            if self._chained_prefix_index_hash:
+                for i, (prefix_len, prefix_hash) in enumerate(
+                    self._prefix_index_hash_sequence(
+                        tokens, len(block_ids), cache_extra_keys=cache_extra_keys
+                    ),
+                    start=1,
+                ):
+                    self._prefix_index[prefix_hash] = (
+                        tokens[:prefix_len],
+                        block_ids[:i],
+                        extra_marker,
+                    )
+                return
             for i in range(1, len(block_ids) + 1):
                 prefix_len = min(i * self.block_size, len(tokens))
                 prefix_tokens = tokens[:prefix_len]

@@ -859,7 +859,11 @@ class TestBlockAwarePrefixCache:
         stale_tokens = [1, 2, 3, 4, 5, 6]
         stored = cache.store_cache("stale", stale_tokens, ["stale-state"])
         assert stored is not None
-        stale_key = cache._prefix_index_hash(stale_tokens)
+        # Ask for the key through the accessor that honours the active
+        # derivation scheme; calling _prefix_index_hash directly computes the
+        # from-scratch key, which is not what the writer stored when
+        # VMLX_CHAINED_PREFIX_INDEX_HASH is on.
+        stale_key = cache._prefix_index_key(stale_tokens)
         stale_entry = cache._prefix_index[stale_key]
 
         stale_request = cache._request_tables.pop("stale")

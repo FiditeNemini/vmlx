@@ -2630,11 +2630,49 @@ def _check_no_duplicate_mlx():
         spec = importlib.util.find_spec("mlx")
         if spec is None:
             return
-        locations = list(spec.submodule_search_locations or [])
+        def _is_installed_mlx_package(path: str) -> bool:
+            """True only for a directory that really is the ``mlx`` package.
+
+            A bare ``os.path.isdir`` check here was a live hazard. ``sys.path``
+            contains the CWD, so ``os.path.join("", "mlx")`` resolves to a
+            RELATIVE ``mlx`` — and on a machine whose home directory holds an
+            ``~/mlx`` folder of source checkouts, running the engine from $HOME
+            made that folder look like a second MLX install. The preflight then
+            aborted startup and named the user's entire repo directory as
+            something to delete.
+
+            Require the markers an installed MLX actually has: a package
+            ``__init__.py`` plus the compiled ``core`` extension it cannot work
+            without.
+            """
+            try:
+                if not os.path.isdir(path):
+                    return False
+                if not os.path.isfile(os.path.join(path, "__init__.py")):
+                    return False
+                for entry in os.listdir(path):
+                    if entry == "core" and os.path.isdir(os.path.join(path, entry)):
+                        return True
+                    if entry.startswith("core") and entry.endswith(
+                        (".so", ".pyd", ".dylib")
+                    ):
+                        return True
+                return False
+            except Exception:
+                return False
+
+        locations = [
+            loc
+            for loc in (spec.submodule_search_locations or [])
+            if _is_installed_mlx_package(loc)
+        ]
         for p in sys.path:
             try:
-                cand = os.path.join(p, "mlx")
-                if os.path.isdir(cand) and cand not in locations:
+                # Resolve to an absolute path before doing anything with it: an
+                # empty sys.path entry means CWD, and a relative match would
+                # otherwise be reported to the user as a bare "mlx".
+                cand = os.path.abspath(os.path.join(p or os.getcwd(), "mlx"))
+                if _is_installed_mlx_package(cand) and cand not in locations:
                     locations.append(cand)
             except Exception:
                 pass
@@ -2671,14 +2709,22 @@ def _check_no_duplicate_mlx():
             sys.stderr.write(f"  - {p}{tag}\n")
 
         if extras:
+            # NEVER print a delete command. This message is read by a user whose
+            # engine just refused to start, i.e. exactly the moment they will
+            # paste whatever it says straight into a terminal. Name the path and
+            # the environment that owns it, and let them use that environment's
+            # own package manager.
             sys.stderr.write(
-                "\nFix — remove the extra (non-bundled) mlx only:\n"
+                "\nFix — remove the extra (non-bundled) mlx only. Uninstall it "
+                "from the environment that owns it; do not delete files by "
+                "hand:\n"
             )
             for p in extras:
                 # Best guess for what site-packages this lives in: the parent
                 # of `<sp>/mlx` is `<sp>`. We hint at the python that owns it.
                 sp = os.path.dirname(os.path.realpath(p))
-                sys.stderr.write(f"  rm -rf {p!r}  # from {sp}\n")
+                sys.stderr.write(f"  extra mlx package: {p}\n")
+                sys.stderr.write(f"    installed into:  {sp}\n")
             sys.stderr.write(
                 "\nDO NOT run `pip uninstall mlx mlx-lm` against the bundled "
                 "python — that removes the bundled mlx_lm and produces a "

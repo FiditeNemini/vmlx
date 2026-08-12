@@ -60,8 +60,16 @@ def _panel_label_is_rendered(panel_source: str, english: str) -> bool:
                 flat[dotted] = value
 
     _walk(catalog)
+    # Substring, not equality: several of these assertions pin a FRAGMENT of a
+    # sentence ("budgeted", "reset when", "runtime sidecar") rather than a whole
+    # label, and a fragment of a rendered string is still shown to the user. The
+    # key must additionally be referenced by the component, which is what keeps
+    # a short fragment from matching some unrelated entry elsewhere in the
+    # catalog.
     return any(
-        value == english and (dotted in panel_source or dotted.split(".")[-1] in panel_source)
+        isinstance(value, str)
+        and english in value
+        and (dotted in panel_source or dotted.split(".")[-1] in panel_source)
         for dotted, value in flat.items()
     )
 
@@ -9874,10 +9882,23 @@ class TestStartupCompatibilityGuards:
         ZAYA and Hy3 can be launched via auto-detection, but direct users also
         pass --tool-call-parser explicitly.  Missing choices make the CLI reject
         a valid product setting before the server can apply the registry.
+
+        The CLI now builds choices from ToolParserManager at parse time (the
+        hand list drifted and rejected registered parsers like muse/zaya), so
+        check the EFFECTIVE acceptance set — scanning cli.py for quoted name
+        literals only ever validated the hand-list implementation, and a name
+        in a comment would have satisfied it.
         """
+        from vmlx_engine.tool_parsers import ToolParserManager
+
+        cli_tool_choices = {"auto", "none", *ToolParserManager.list_registered()}
+        assert "zaya_xml" in cli_tool_choices
+        assert "hunyuan" in cli_tool_choices
+        # Pin the derivation itself: if choices stop coming from the registry,
+        # this set no longer describes what argparse accepts and the coverage
+        # guard below would pass vacuously.
         cli_source = Path("./vmlx_engine/cli.py").read_text()
-        assert '"zaya_xml"' in cli_source
-        assert '"hunyuan"' in cli_source
+        assert "ToolParserManager.list_registered()" in cli_source
 
     def test_cli_tool_parser_choices_cover_family_registry_parsers(self):
         """Every parser emitted by model_configs.py must be CLI-selectable.
@@ -9885,9 +9906,14 @@ class TestStartupCompatibilityGuards:
         The panel resolves family parsers before launching the server. If
         argparse choices lag behind the model registry, a valid auto-detected
         session fails at startup before the engine can use that parser.
+
+        Same contract shape as the reasoning-parser guard below: the CLI
+        derives choices from the runtime ToolParserManager registry, so a
+        family tool_parser is CLI-selectable iff it is registered there.
         """
         from vmlx_engine.model_configs import register_all
         from vmlx_engine.model_config_registry import ModelConfigRegistry
+        from vmlx_engine.tool_parsers import ToolParserManager
 
         import vmlx_engine.model_config_registry as mcr
 
@@ -9896,17 +9922,17 @@ class TestStartupCompatibilityGuards:
         registry = ModelConfigRegistry()
         register_all(registry)
 
-        cli_source = Path("./vmlx_engine/cli.py").read_text()
+        cli_tool_choices = {"auto", "none", *ToolParserManager.list_registered()}
         missing = sorted(
             {
                 config.tool_parser
                 for config in registry._configs
-                if config.tool_parser and f'"{config.tool_parser}"' not in cli_source
+                if config.tool_parser and config.tool_parser not in cli_tool_choices
             }
         )
         assert not missing
-        assert '"gemma3"' in cli_source
-        assert '"gemma3n"' in cli_source
+        assert "gemma3" in cli_tool_choices
+        assert "gemma3n" in cli_tool_choices
 
     def test_cli_reasoning_parser_choices_cover_family_registry_parsers(self):
         """Every reasoning parser emitted by model_configs.py must be CLI-selectable.
@@ -13898,36 +13924,36 @@ class TestTurboQuantKVTelemetry:
         assert "insufficient_memory_for_full_cache_merge" in scheduler_source
         assert "merge_budget = avail * budget_fraction" in scheduler_source
         assert '"budget_mb"' in scheduler_source
-        assert "Cache Reuse Skips" in cache_panel_source
-        assert "Cache Hit Tokens" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Cache Reuse Skips")
+        assert _panel_label_is_rendered(cache_panel_source, "Cache Hit Tokens")
         assert _panel_label_is_rendered(cache_panel_source, "Hit Tokens by Detail")
         assert "hybrid_kv_without_ssm" in Path("./vmlx_engine/server.py").read_text()
         assert "ssm_prefix_lookup" in Path("./vmlx_engine/mllm_batch_generator.py").read_text()
-        assert "Hybrid KV-Only Misses" in cache_panel_source
-        assert "KV-Only Tokens" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Hybrid KV-Only Misses")
+        assert _panel_label_is_rendered(cache_panel_source, "KV-Only Tokens")
         assert "last_hybrid_kv_without_ssm" in cache_panel_source
-        assert "Hybrid KV-Only Misses" in performance_panel_source
+        assert _panel_label_is_rendered(performance_panel_source, "Hybrid KV-Only Misses")
         assert "last_hybrid_kv_without_ssm" in performance_panel_source
-        assert "Partial Reuse" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Partial Reuse")
         assert "last_cache_reuse_skip" in cache_panel_source
         assert "last_cache_reuse_partial" in cache_panel_source
         assert "used_needed_mb" in cache_panel_source
-        assert "budgeted" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "budgeted")
         assert "needed_mb" in cache_panel_source
         assert "budget_mb" in cache_panel_source
         assert "available_mb" in cache_panel_source
-        assert "partial reuse failed" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "partial reuse failed")
         assert "dropped_cached_tokens" in cache_panel_source
         assert "full_prefill_tokens" in cache_panel_source
         assert "partial_reuse_unavailable_reason" in cache_panel_source
         assert "cache_format" in cache_panel_source
-        assert "Partial Reuse" in performance_panel_source
-        assert "Cache Hit Tokens" in performance_panel_source
+        assert _panel_label_is_rendered(performance_panel_source, "Partial Reuse")
+        assert _panel_label_is_rendered(performance_panel_source, "Cache Hit Tokens")
         assert "last_cache_reuse_partial" in performance_panel_source
         assert "used_needed_mb" in performance_panel_source
-        assert "budgeted" in performance_panel_source
+        assert _panel_label_is_rendered(performance_panel_source, "budgeted")
         assert "budget_mb" in performance_panel_source
-        assert "partial reuse failed" in performance_panel_source
+        assert _panel_label_is_rendered(performance_panel_source, "partial reuse failed")
         assert "dropped_cached_tokens" in performance_panel_source
         assert "full_prefill_tokens" in performance_panel_source
         assert "partial_reuse_unavailable_reason" in performance_panel_source
@@ -13941,26 +13967,26 @@ class TestTurboQuantKVTelemetry:
             "./panel/src/renderer/src/components/sessions/SessionView.tsx"
         ).read_text()
 
-        assert "Tokens on Disk" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Tokens on Disk")
         assert _panel_label_is_rendered(cache_panel_source, "Cache Totals")
-        assert "RAM Resident Tokens" in cache_panel_source
-        assert "L1 Indexed Tokens" in cache_panel_source
-        assert "L1 Resident Memory" in cache_panel_source
-        assert "L1 Evictions" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "RAM Resident Tokens")
+        assert _panel_label_is_rendered(cache_panel_source, "L1 Indexed Tokens")
+        assert _panel_label_is_rendered(cache_panel_source, "L1 Resident Memory")
+        assert _panel_label_is_rendered(cache_panel_source, "L1 Evictions")
         assert "max_bytes_mb" in cache_panel_source
-        assert "SSM Evictions" in cache_panel_source
-        assert "L2 Tokens on Disk" in cache_panel_source
-        assert "SSM L2 Tokens" in cache_panel_source
-        assert "Persisted Block Reads" in cache_panel_source
-        assert "This Engine Reads H / M" in cache_panel_source
-        assert "This Engine Writes" in cache_panel_source
-        assert "This Engine Evictions" in cache_panel_source
-        assert "Writer Pending / In Flight" in cache_panel_source
-        assert "Off-thread Writes Q / C / F" in cache_panel_source
-        assert "Last Local Reconciliation Trim" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "SSM Evictions")
+        assert _panel_label_is_rendered(cache_panel_source, "L2 Tokens on Disk")
+        assert _panel_label_is_rendered(cache_panel_source, "SSM L2 Tokens")
+        assert _panel_label_is_rendered(cache_panel_source, "Persisted Block Reads")
+        assert _panel_label_is_rendered(cache_panel_source, "This Engine Reads H / M")
+        assert _panel_label_is_rendered(cache_panel_source, "This Engine Writes")
+        assert _panel_label_is_rendered(cache_panel_source, "This Engine Evictions")
+        assert _panel_label_is_rendered(cache_panel_source, "Writer Pending / In Flight")
+        assert _panel_label_is_rendered(cache_panel_source, "Off-thread Writes Q / C / F")
+        assert _panel_label_is_rendered(cache_panel_source, "Last Local Reconciliation Trim")
         assert "blockDiskCache.disk_size_bytes" in cache_panel_source
         assert "!blockDiskCache && schedulerCache.disk_hits" in cache_panel_source
-        assert "reset when" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "reset when")
         assert "min-w-[12rem] overflow-hidden" in session_view_source
         assert "max-w-64 truncate" in session_view_source
         assert "flex-shrink-0 max-[800px]:basis-full" not in session_view_source
@@ -13971,9 +13997,9 @@ class TestTurboQuantKVTelemetry:
         ).read_text()
 
         assert "prestacked_bundle" in performance_panel_source
-        assert "JANGTQ Layout" in performance_panel_source
-        assert "runtime sidecar" in performance_panel_source
-        assert "F16 Passthrough" in performance_panel_source
+        assert _panel_label_is_rendered(performance_panel_source, "JANGTQ Layout")
+        assert _panel_label_is_rendered(performance_panel_source, "runtime sidecar")
+        assert _panel_label_is_rendered(performance_panel_source, "F16 Passthrough")
         assert "passthrough_bit_widths_used" in performance_panel_source
         assert "routed_expert_bits_label" in performance_panel_source
         assert "compat_warnings" in performance_panel_source

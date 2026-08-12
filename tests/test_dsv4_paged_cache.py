@@ -510,9 +510,25 @@ def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
     # the engine logs "DSV4-Flash native SWA+CSA/HCA cache owns cache
     # compression; forcing generic --kv-cache-quantization...".
     assert "effectiveFamily !== 'deepseek-v4' && effectiveFamily !== 'minimax_m3' && effectiveFamily !== 'openpangu_v2' && config.kvCacheQuantization" in sessions
-    assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in form
-    assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in settings
-    assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in sessions
+    # The engine->registry family alias used to be a byte-identical private copy
+    # in all three of these files, spanning the main AND renderer processes. It
+    # now lives once in src/shared/detectedFamilyNames.ts. Asserting the body in
+    # each file again would pin exactly the duplication that was removed — and
+    # a wrong spelling here (deepseek_v4 vs deepseek-v4) is what silently no-op'd
+    # two earlier fixes, so check the rule at its owner and that each consumer
+    # imports rather than redefines it.
+    shared = (
+        Path(__file__).resolve().parents[1]
+        / "panel/src/shared/detectedFamilyNames.ts"
+    ).read_text()
+    assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in shared
+    for name, source in (("form", form), ("settings", settings), ("sessions", sessions)):
+        assert "detectedFamilyNames" in source, (
+            f"{name} stopped importing the shared family-alias rule"
+        )
+        assert "function normalizeDetectedFamilyName" not in source, (
+            f"{name} grew its own copy of the family-alias rule back"
+        )
 
 
 def test_panel_names_dsv4_cache_as_native_composite_not_generic_paged_kv():

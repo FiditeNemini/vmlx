@@ -51,9 +51,18 @@ class TestPagedDefaultFamilyParity:
         window = registry[idx : idx + 800]
         assert "usePagedCache: true" in window
         assert "cacheSubtype: 'step3p7_full_sliding_kv'" in window
-        sessions = (panel_root / "sessions.ts").read_text()
-        req = sessions.index("function cacheSubtypeRequiresPaged")
-        assert "step3p7_full_sliding_kv" in sessions[req : req + 300]
+        # The cache-shape predicates used to be byte-identical copies in
+        # sessions.ts (the argv BUILDER) and SessionSettings.tsx (the argv
+        # PREVIEW). They now live in one shared module, so read the rule from
+        # its owner and separately confirm the builder still consumes it —
+        # grepping sessions.ts for the function body would pin the duplication.
+        shared = (
+            panel_root.parent / "shared" / "cacheTypeCapabilities.ts"
+        ).read_text()
+        req = shared.index("function cacheSubtypeRequiresPaged")
+        assert "PAGED_REQUIRED_CACHE_SUBTYPES" in shared[req : req + 300]
+        assert "step3p7_full_sliding_kv" in shared
+        assert "cacheTypeCapabilities" in (panel_root / "sessions.ts").read_text()
 
     def test_panel_opts_muse_into_paged_too(self):
         registry = (

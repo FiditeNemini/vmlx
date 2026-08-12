@@ -1339,7 +1339,11 @@ class PagedCacheManager:
         return evicted
 
     def _force_drop_undrainable_locked(self, target_resident_bytes: int) -> int:
-        """Shed ``keep_resident`` payloads that can never reach L2. Lock held.
+        """Shed payloads that can never reach L2. Lock held.
+
+        Covers ordinary KV as well as ``keep_resident`` natives — see the note
+        on the candidate filter below for why restricting to the latter left the
+        byte ceiling unenforceable during an L2 outage.
 
         A native composite payload is pinned resident so its RAM mirror outlives
         the async L2 write. When that write can never land — no disk store is
@@ -1379,7 +1383,18 @@ class PagedCacheManager:
                 and not b.is_null
                 and b.cache_data is not None
                 and b.block_hash is not None
-                and b.keep_resident
+                # NOT filtered on keep_resident. This last-resort pass existed
+                # only for native/pinned payloads, so an ORDINARY KV block whose
+                # L2 admission was rejected — keep_resident stays False, the
+                # durability fence refuses, nothing else reclaims it — could
+                # never be dropped. While L2 was full or failing, the byte
+                # ceiling was therefore unenforceable for plain KV and RAM grew
+                # for as long as the outage lasted.
+                #
+                # Every other guard still applies (unreferenced, has a payload
+                # and a hash, not a live parent, not about to drain), so chains
+                # are still peeled leaf-first. Losing a plain block costs a
+                # re-prefill, which is this pass's own stated doctrine.
                 and b.block_hash not in live_parents
                 and not drainable_soon(b)
             ]

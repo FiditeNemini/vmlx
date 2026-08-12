@@ -703,3 +703,73 @@ async def test_omni_dispatch_rejects_unsupported_video_before_session_load(tmp_p
 
     assert exc.value.status_code != 400
     assert exc.value.status_code == 500
+
+
+class TestOmniSplitMatchesStreaming:
+    """Non-stream must split the reply the same way the stream splitter does.
+
+    MEASURED on the live Omni bundle (identical image request, 243 chars of
+    thinking, cut by max_tokens):
+        STREAM      content_len=0   reasoning_len=243   (correct)
+        NON-STREAM  content_len=243 reasoning_len=0     (raw thinking rendered
+                                                         as the visible answer)
+    The Omni template OPENS the thinking rail in the prompt, so a reply that
+    never emits </think> is still entirely inside that rail.
+    _OmniIncrementalRailSplitter defaults to mode="reasoning" and flushes an
+    unclosed tail as reasoning; _split_omni_reply fell through to
+    "everything is content".
+    """
+
+    def test_truncated_prompt_opened_rail_is_reasoning_not_content(self):
+        from vmlx_engine.omni_multimodal import _split_omni_reply
+
+        reasoning, content = _split_omni_reply(
+            "Thinking Process:\n\n1. Analyze the request", explicit_thinking_off=False
+        )
+        assert content == ""
+        assert reasoning == "Thinking Process:\n\n1. Analyze the request"
+
+    def test_unclosed_self_opened_rail_splits_and_hides_the_marker(self):
+        from vmlx_engine.omni_multimodal import _split_omni_reply
+
+        reasoning, content = _split_omni_reply(
+            "visible so far<think>plan cut off here", explicit_thinking_off=False
+        )
+        assert content == "visible so far"
+        assert reasoning == "plan cut off here"
+        assert "<think" not in content
+
+    def test_completed_rails_are_unchanged(self):
+        from vmlx_engine.omni_multimodal import _split_omni_reply
+
+        assert _split_omni_reply(
+            "private plan</think>The image is blue.", explicit_thinking_off=False
+        ) == ("private plan", "The image is blue.")
+        assert _split_omni_reply(
+            "pre<think>plan</think>The image is blue.", explicit_thinking_off=False
+        ) == ("plan", "preThe image is blue.")
+
+    def test_thinking_off_keeps_everything_visible(self):
+        from vmlx_engine.omni_multimodal import _split_omni_reply
+
+        reasoning, content = _split_omni_reply(
+            "The image is blue.", explicit_thinking_off=True
+        )
+        assert reasoning is None
+        assert content == "The image is blue."
+
+    def test_no_shape_leaks_a_marker_into_content(self):
+        from vmlx_engine.omni_multimodal import _split_omni_reply
+
+        for raw, off in [
+            ("Thinking Process:\n\n1. Analyze", False),
+            ("private plan</think>Answer.", False),
+            ("pre<think>plan</think>Answer.", False),
+            ("visible<think>cut", False),
+            ("<think>cut", False),
+            ("Answer.", True),
+            ("<think>plan</think>Answer.", True),
+        ]:
+            _, content = _split_omni_reply(raw, explicit_thinking_off=off)
+            assert "<think" not in (content or "")
+            assert "</think" not in (content or "")

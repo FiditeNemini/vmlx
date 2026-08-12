@@ -1243,6 +1243,28 @@ def _split_omni_reply(
         b = content.index("</think>")
         reasoning_content = content[:b].strip()
         content = content[b + len("</think>") :].strip()
+    elif not explicit_thinking_off and "<think>" in content:
+        # Model opened its own rail and was cut before closing it: the prefix
+        # is visible prose, everything after the marker is private thinking.
+        # Never render the raw marker.
+        a = content.index("<think>")
+        reasoning_content = content[a + len("<think>") :].strip() or None
+        content = content[:a].strip()
+    elif not explicit_thinking_off:
+        # The Omni template OPENS the thinking rail in the prompt, so a reply
+        # that never emits </think> is still entirely INSIDE that rail — it is
+        # reasoning, not the answer. This branch used to fall through to
+        # "everything is content", so a reply cut by max_tokens mid-thought
+        # rendered the model's raw private thinking as the visible answer with
+        # reasoning_content empty.
+        #
+        # MEASURED on the live Omni bundle, identical image request, 243 chars:
+        #   STREAM      content_len=0   reasoning_len=243   (correct)
+        #   NON-STREAM  content_len=243 reasoning_len=0     (leaked)
+        # _OmniIncrementalRailSplitter defaults to mode="reasoning" and flushes
+        # an unclosed tail as reasoning; this mirrors it so the two agree.
+        reasoning_content = content.strip()
+        content = ""
     else:
         content = content.strip()
     if explicit_thinking_off:

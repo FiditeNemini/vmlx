@@ -20,6 +20,7 @@ import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
 import { resolveEffectiveReasoningParser } from '../../../../shared/reasoningParserAliases'
 import { resolveEffectiveToolParser } from '../../../../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../../../../shared/toolLaunchArgs'
+import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
 import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
@@ -43,18 +44,7 @@ interface SessionSettingsProps {
   onBack: () => void
 }
 
-function normalizeDetectedFamilyName(family?: string): string | undefined {
-  if (!family) return undefined
-  if (family === 'deepseek_v4') return 'deepseek-v4'
-  if (family === 'zaya1_vl') return 'zaya1-vl'
-  if (family === 'bailing_hybrid') return 'ling'
-  return family
-}
 
-function isZayaCcaFamily(family?: string): boolean {
-  const normalized = normalizeDetectedFamilyName(family)
-  return normalized === 'zaya' || normalized === 'zaya1-vl'
-}
 
 function cacheTypeRequiresPaged(cacheType?: string): boolean {
   return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'

@@ -3074,7 +3074,16 @@ describe('Default IP and New Settings', () => {
 
     it('ZAYA sessions keep the qwen3 reasoning parser and model-owned no-thinking default', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
-        expect(source).toContain('function isZayaCcaFamily')
+        // The family-alias rules live in ONE module now (they used to be three
+        // byte-identical copies across main and renderer). sessions.ts must
+        // import them rather than redefine them, or main and renderer can drift
+        // on what a family is called — the exact mismatch that has silently
+        // no-op'd family-gated settings fixes in this project before.
+        const shared = readFileSync('src/shared/detectedFamilyNames.ts', 'utf8')
+        expect(shared).toContain('function isZayaCcaFamily')
+        expect(source).toContain('isZayaCcaFamily')
+        expect(source).toMatch(/import \{[^}]*isZayaCcaFamily[^}]*\} from '[^']*shared\/detectedFamilyNames'/)
+        expect(source).not.toContain('function isZayaCcaFamily')
         expect(source).toContain('if (isZayaCcaFamily(freshFamily))')
         expect(source).toContain("config.reasoningParser = freshConfig.reasoningParser || 'auto'")
         expect(source).toContain('delete config.defaultEnableThinking')

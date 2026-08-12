@@ -68,6 +68,7 @@ import {
 } from './engine-manager'
 import { app as electronApp } from 'electron'
 import { resolveSlowFamilyTimeoutSeconds } from '../shared/slowFamilyTimeouts'
+import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../shared/detectedFamilyNames'
 
 /** Result of findEnginePath: either bundled Python or a system binary */
 type EnginePath =
@@ -109,18 +110,7 @@ interface BundleStartupDefaults {
   source?: 'generation_config' | 'jang_config'
 }
 
-function normalizeDetectedFamilyName(family?: string): string | undefined {
-  if (!family) return undefined
-  if (family === 'deepseek_v4') return 'deepseek-v4'
-  if (family === 'zaya1_vl') return 'zaya1-vl'
-  if (family === 'bailing_hybrid') return 'ling'
-  return family
-}
 
-function isZayaCcaFamily(family?: string): boolean {
-  const normalized = normalizeDetectedFamilyName(family)
-  return normalized === 'zaya' || normalized === 'zaya1-vl'
-}
 
 function hasDsv4IdentityHint(modelPath: string): boolean {
   const isDsv4Value = (value: unknown): boolean => {

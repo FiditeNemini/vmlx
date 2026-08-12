@@ -20,6 +20,7 @@ import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
 import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
+import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
 export interface SessionConfig {
   host: string
   port: number
@@ -224,18 +225,7 @@ export const MODEL_FAMILY_OVERRIDE_NAMES: string[] = [
   'openpangu_v2',
 ]
 
-function normalizeDetectedFamilyName(family?: string): string | undefined {
-  if (!family) return undefined
-  if (family === 'deepseek_v4') return 'deepseek-v4'
-  if (family === 'zaya1_vl') return 'zaya1-vl'
-  if (family === 'bailing_hybrid') return 'ling'
-  return family
-}
 
-function isZayaCcaFamily(family?: string): boolean {
-  const normalized = normalizeDetectedFamilyName(family)
-  return normalized === 'zaya' || normalized === 'zaya1-vl'
-}
 
 // Expert = current defaults (backwards compatible, full control)
 export const EXPERT_CONFIG = { ...DEFAULT_CONFIG }

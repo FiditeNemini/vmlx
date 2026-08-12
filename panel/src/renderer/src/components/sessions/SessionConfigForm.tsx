@@ -397,9 +397,18 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const bonsaiActive = normalizedModelIdentity.includes('bonsai')
   const qwenHybridTqActive = isMambaCache && (normalizedDetectedFamily || '').startsWith('qwen')
   const qwenFullTqActive = !isMambaCache && (normalizedDetectedFamily || '').startsWith('qwen')
+  // step3p7_full_sliding_kv belongs here too. It is already listed as
+  // mixed-SWA in mixedSwaBlockDiskOnlySupported above and in
+  // subtypeRequiresPagedCache below, and the ENGINE classifies it as mixed-SWA
+  // (mllm_scheduler's detector returns true for it alongside mixed_swa_kv).
+  // Omitting it here alone made the cache codec badge read a generic "AUTO"
+  // with the engine-native description, for a family the rest of the app —
+  // and the engine — treats as mixed-SWA. Display-only, but display-only is
+  // exactly where a wrong label goes unnoticed.
   const mixedSwaCacheActive =
     detectedCacheType === 'rotating_kv' ||
-    detectedCacheSubtype === 'mixed_swa_kv'
+    detectedCacheSubtype === 'mixed_swa_kv' ||
+    detectedCacheSubtype === 'step3p7_full_sliding_kv'
   const subtypeRequiresPagedCache =
     detectedCacheSubtype === 'step3p7_full_sliding_kv' ||
     detectedCacheSubtype === 'mixed_swa_kv'

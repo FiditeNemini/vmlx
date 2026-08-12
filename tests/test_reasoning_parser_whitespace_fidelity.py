@@ -238,3 +238,39 @@ def test_marker_only_delta_keeps_its_leading_whitespace():
     assert streamed.startswith("Intro\n"), (
         f"newline before the think block was swallowed: {streamed!r}"
     )
+
+
+def test_quoted_close_tag_is_prose_not_a_reasoning_boundary():
+    """`</think>` inside backticks must not swallow the answer's opening text.
+
+    The bare-close branch (implicit mode: the template injects <think> as a
+    special token that gets eaten, so the model emits only the close) treated
+    ANY occurrence as the boundary. So an answer that merely MENTIONED the tag
+    lost everything before it to the reasoning rail:
+
+        "Code: `</think>` here"   ->   "` here"
+
+    Gating the branch on _think_in_prompt was tried first and BROKE implicit
+    mode — three existing tests caught it. The working discriminator is the same
+    one used for tool markers in the suppressed-tool display path: skip
+    occurrences preceded by a backtick, since a model never wraps a real emitted
+    close in backticks.
+    """
+    from vmlx_engine.reasoning import get_parser
+
+    parser_cls = get_parser("qwen3")
+
+    for raw in (
+        "Code: `</think>` here",
+        "Use `</think>` to close the block.",
+        "Plain answer with no tags.",
+    ):
+        result = parser_cls().extract_reasoning(raw)
+        content = result[1] if isinstance(result, tuple) else result
+        assert str(content) == raw, (
+            f"a quoted mention was treated as a reasoning boundary: {content!r}"
+        )
+
+    # ...and a genuine bare close must still split (implicit mode).
+    result = parser_cls().extract_reasoning("reasoning here</think>the answer")
+    assert result == ("reasoning here", "the answer")

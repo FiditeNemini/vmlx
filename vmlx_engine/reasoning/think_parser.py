@@ -60,6 +60,23 @@ def delta_safe_reasoning_marker_view(
     return safe_previous, safe_current, safe_delta
 
 
+def _first_unquoted(text: str, marker: str) -> int:
+    """Index of `marker` as real markup, skipping backtick-quoted mentions.
+
+    Mirrors _first_unquoted_marker_pos in server.py. Only a PRECEDING backtick
+    counts as quoting: testing the following character too was tried there and
+    was too broad.
+    """
+    start = 0
+    while True:
+        pos = text.find(marker, start)
+        if pos < 0:
+            return -1
+        if pos == 0 or text[pos - 1] != "`":
+            return pos
+        start = pos + 1
+
+
 class BaseThinkingReasoningParser(ReasoningParser):
     """
     Base parser for models using <think>...</think> style tags.
@@ -250,10 +267,26 @@ class BaseThinkingReasoningParser(ReasoningParser):
             content = "".join(content_parts).strip()
             return reasoning or None, content or None
 
-        # Case 2: Only closing tag (think was injected in prompt)
-        # Everything before </think> is reasoning
-        if self.end_token in text:
-            reasoning, _, content = text.partition(self.end_token)
+        # Case 2: Only closing tag (think was injected in prompt).
+        # Everything before </think> is reasoning.
+        #
+        # But a QUOTED mention is not a close. Implicit mode is a real, tested
+        # contract (the template injects <think> as a special token that gets
+        # eaten, so the model emits only the close), so this cannot simply be
+        # gated on _think_in_prompt — that breaks implicit mode. Instead skip
+        # occurrences wrapped in backticks, exactly as the suppressed-tool
+        # display path does for tool markers.
+        #
+        # Without this, any answer that MENTIONS the tag lost its opening text
+        # to the reasoning rail:
+        #   "Code: `</think>` here"  ->  "` here"
+        #   a fenced "foo</think>bar" -> "bar"
+        # A model explaining or quoting the tag is ordinary prose, and models
+        # never wrap a real emitted close in backticks.
+        end_pos = _first_unquoted(text, self.end_token)
+        if end_pos >= 0:
+            reasoning = text[:end_pos]
+            content = text[end_pos + len(self.end_token) :]
             return reasoning.strip() or None, content.strip() or None
 
         # Case 3: Only start tag (incomplete reasoning, no end yet)

@@ -40,13 +40,26 @@ def _health(base):
             h = json.load(fh)
     except Exception:
         return {}
+    # These live under cache.totals / cache.scheduler_cache, NOT at the top of
+    # cache. Reading them one level too high returned None for every field and
+    # every row this script produced silently reported "no cache activity" —
+    # measured against a run whose real numbers were cache_hits 304,
+    # cache_hit_rate 0.66, tokens_saved 9703, l2_tokens_on_disk 66,206.
     cache = h.get("cache") or {}
+    totals = cache.get("totals") or {}
+    sched = cache.get("scheduler_cache") or {}
     return {
-        "ram_tokens": cache.get("ram_tokens"),
-        "l1_bytes_mb": cache.get("l1_bytes_mb"),
-        "l1_evictions": cache.get("l1_evictions"),
-        "l2_block_tokens": cache.get("l2_block_tokens"),
-        "l2_total_tokens": cache.get("l2_total_tokens"),
+        "ram_tokens": totals.get("ram_tokens_cached"),
+        "l1_resident_mb": totals.get("l1_resident_bytes_mb"),
+        "l1_evictions": totals.get("l1_evictions"),
+        "l1_indexed_tokens": totals.get("l1_indexed_tokens"),
+        "l2_block_tokens": totals.get("l2_block_tokens_on_disk"),
+        "l2_ssm_tokens": totals.get("l2_ssm_tokens_on_disk"),
+        "l2_total_tokens": totals.get("l2_tokens_on_disk"),
+        "cache_hits": sched.get("cache_hits"),
+        "cache_hit_rate": sched.get("cache_hit_rate"),
+        "tokens_saved": sched.get("tokens_saved"),
+        "disk_hits": sched.get("disk_hits"),
     }
 
 
@@ -185,6 +198,9 @@ def main():
         print(f"  decode p50      : {first['decode_p50']} -> {last['decode_p50']} t/s")
         print(f"  decode mean     : {first['decode_mean']} -> {last['decode_mean']} t/s")
         print(f"  evictions (last): {last['health'].get('l1_evictions')}")
+        print(f"  cache hits      : {last['health'].get('cache_hits')} "
+              f"(rate {last['health'].get('cache_hit_rate')})")
+        print(f"  tokens saved    : {last['health'].get('tokens_saved')}")
 
 
 if __name__ == "__main__":

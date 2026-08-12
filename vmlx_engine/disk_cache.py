@@ -103,6 +103,76 @@ def _metadata_cache_classes(metadata: Optional[Dict[str, Any]]) -> List[str]:
     return [name for _, name in sorted(classes)]
 
 
+# save_metadata key under which store() records which flattened arrays were
+# widened for serialization (bf16 -> f32; numpy has no bf16). In the file's
+# flat metadata namespace it appears as "1.widened_dtypes" because
+# save_metadata is element 1 of [cache_info, save_metadata, cache_classes].
+_WIDENED_DTYPES_META_KEY = "widened_dtypes"
+
+
+def _metadata_widened_dtypes(metadata: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Return the {flattened-array-key: original-dtype-name} widening record.
+
+    Files written before the record existed have no entry and return {} —
+    they keep loading exactly as before (widened-but-exact f32), never an
+    error.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    raw = metadata.get(f"1.{_WIDENED_DTYPES_META_KEY}") or metadata.get(
+        _WIDENED_DTYPES_META_KEY
+    )
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        record = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Disk cache widened-dtype record is malformed; "
+            "leaving restored arrays widened"
+        )
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {
+        k: v
+        for k, v in record.items()
+        if isinstance(k, str) and isinstance(v, str)
+    }
+
+
+def _restore_widened_dtypes(
+    raw_arrays: Dict[str, Any], file_metadata: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Cast arrays widened at store time back to their recorded original dtype.
+
+    Reverses ONLY the keys named by the store-side record, so TQ float16
+    decompressions and genuinely-f32 states are untouched. A restored cache
+    must re-enter generation in its compute dtype: mlx-lm caches extend via
+    mx.concatenate, which silently promotes a bf16 model's fresh KV into the
+    restored f32 — the cache then stays f32 for its whole life (2x live KV
+    bytes, attention numerics off the fresh-compute bf16 path). Measured
+    2026-08-12: restored state 2.00x bytes, extended buffer 2.12x, attention
+    output diverges from fresh compute at bf16 rounding scale.
+    """
+    record = _metadata_widened_dtypes(file_metadata)
+    if not record or not _HAS_MLX:
+        return raw_arrays
+    restored = dict(raw_arrays)
+    for key, dtype_name in record.items():
+        arr = restored.get(key)
+        target = getattr(mx, dtype_name, None)
+        if (
+            arr is None
+            or not isinstance(arr, mx.array)
+            or not isinstance(target, mx.Dtype)
+        ):
+            continue
+        if arr.dtype != target:
+            restored[key] = arr.astype(target)
+    return restored
+
+
 class _ConnectionPool:
     """Simple SQLite connection pool (thread-safe).
 
@@ -605,9 +675,40 @@ class DiskCacheManager:
                     # ─── Step 3: Standard format (mlx-lm or legacy TQ remap) ───
                     is_tq_hit = False
                     self._last_fetch_tq_native = False
+                    # Reverse the serialization widening BEFORE cache objects
+                    # are built: mlx-lm's from_state has no dtype hook, and a
+                    # cache restored as f32 stays f32 for its whole life
+                    # (update_and_fetch extends through mx.concatenate, which
+                    # promotes bf16+f32 to f32). Old files carry no record and
+                    # pass through unchanged.
+                    raw_arrays = _restore_widened_dtypes(
+                        raw_arrays, file_metadata
+                    )
                     try:
-                        from mlx_lm.models.cache import load_prompt_cache
-                        cache = load_prompt_cache(str(file_path))
+                        # Same construction as mlx-lm's load_prompt_cache, but
+                        # from the arrays this function already loaded (and
+                        # dtype-restored) instead of a second mx.load of the
+                        # same file. Exception parity with load_prompt_cache:
+                        # it resolves classes via globals()[c] (KeyError);
+                        # default-less getattr raises AttributeError — both
+                        # feed the legacy remap below, as before.
+                        import mlx_lm.models.cache as _cache_mod
+                        from mlx_lm.utils import tree_unflatten
+                        _arrays_unflat = tree_unflatten(
+                            list(raw_arrays.items())
+                        )
+                        _meta_unflat = tree_unflatten(
+                            list(file_metadata.items())
+                        )
+                        _info, _save_meta, _classes = _meta_unflat
+                        cache = [
+                            getattr(_cache_mod, _cls).from_state(
+                                _state, _meta_state
+                            )
+                            for _cls, _state, _meta_state in zip(
+                                _classes, _arrays_unflat, _info
+                            )
+                        ]
                     except (KeyError, AttributeError):
                         # TurboQuantKVCache not in mlx-lm globals — remap to KVCache.
                         # This handles old-format disk caches written before TQ-native.
@@ -1000,6 +1101,25 @@ class DiskCacheManager:
             save_metadata["created_at"] = str(time.time())
             save_metadata["runtime_cache_fingerprint"] = _runtime_cache_fingerprint()
 
+            # Record which flattened arrays the loop below is about to widen
+            # (bf16 -> f32; numpy has no bf16) so _fetch_impl can cast them
+            # back. Without the record a restored bf16 cache re-enters
+            # generation as f32 and STAYS f32: KVCache.update_and_fetch
+            # extends through mx.concatenate, which promotes bf16+f32 to f32.
+            widened_dtypes = {
+                k: "bfloat16"
+                for k, v in cache_data_flat.items()
+                if isinstance(v, mx.array) and v.dtype == mx.bfloat16
+            }
+            if widened_dtypes:
+                save_metadata[_WIDENED_DTYPES_META_KEY] = json.dumps(
+                    widened_dtypes
+                )
+            else:
+                # Callers may hand in a reused metadata dict; never let a
+                # previous store's record describe this cache's arrays.
+                save_metadata.pop(_WIDENED_DTYPES_META_KEY, None)
+
             cache_metadata = [cache_info, save_metadata, cache_classes]
             cache_metadata_flat = dict(tree_flatten(cache_metadata))
 
@@ -1033,11 +1153,10 @@ class DiskCacheManager:
             import numpy as np
             np_cache = {}
             pending_arrays = []
-            # NOTE: this module has no dtype-restore hook at all (unlike
-            # block_disk_store, which records per-layer originals and casts
-            # back), so a bf16 cache still comes back widened. That gap is
-            # pre-existing and separate from the value corruption fixed here —
-            # widened-but-exact beats narrowed-and-clipped either way.
+            # The widened keys were recorded in save_metadata above
+            # (_WIDENED_DTYPES_META_KEY); _fetch_impl casts them back on load,
+            # mirroring block_disk_store's per-tensor orig_dtype restore.
+            # Old files without the record still load, widened-but-exact.
             arrays_to_eval = []
             for k, v in cache_data_flat.items():
                 if isinstance(v, mx.array):

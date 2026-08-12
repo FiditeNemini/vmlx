@@ -406,7 +406,18 @@ def test_metal_oom_startup_errors_surface_wired_limit_guidance() -> None:
     assert "Insufficient Memory" in shared
     assert "appendMetalWiredLimitGuidance(reason)" in sessions
     assert "Process exited before becoming ready" in sessions
-    assert "metalWiredLimitHelpText" in form
+    # The form shows this guidance through t() so it localizes (the shared module
+    # above still owns the command and the detection strings, because the MAIN
+    # process appends them to error messages that are not localized). Assert the
+    # form is wired to the key AND that en.json carries the guidance, so the note
+    # cannot silently lose either half.
+    assert "metalWiredLimitCommand" in form
+    assert "t('sessions.config.metalWiredLimitHelp'" in form
+    catalog = (
+        ROOT / "panel" / "src" / "renderer" / "src" / "i18n" / "locales" / "en.json"
+    ).read_text(encoding="utf-8")
+    assert "Metal wired-memory limit" in catalog
+    assert "115000-120000 MB" in catalog
 
 
 def test_large_model_low_memory_preflight_blocks_before_engine_spawn() -> None:

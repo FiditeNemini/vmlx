@@ -51,7 +51,12 @@ logger = logging.getLogger(__name__)
 
 # Supported content-part types per OpenAI chat schema (+ vMLX extension for video).
 _IMAGE_TYPES = {"image_url", "image"}
-_AUDIO_TYPES = {"input_audio", "audio"}
+# audio_url is the missing symmetric partner of image_url/video_url. The
+# Ollama and Anthropic adapters both emit audio as {"type": "audio_url"},
+# and the request schema accepts it — but it used to be recognized nowhere,
+# so those requests skipped omni dispatch and were answered text-only with
+# no error. Recognize it exactly like image_url/video_url.
+_AUDIO_TYPES = {"input_audio", "audio", "audio_url"}
 _VIDEO_TYPES = {"video_url", "video"}
 _CRADIO_CACHE_REPO = "C_hyphen_RADIOv2_hyphen_H"
 _CRADIO_CACHE_REVISION = "0d8f4c18c877166eda07ddae1386bcad256b7a6a"
@@ -478,7 +483,12 @@ def _extract_parts(
                         elif Path(url).exists():
                             cur_images.append(Path(url))
                 elif ptype in _AUDIO_TYPES:
-                    src = part.get("input_audio") or part.get("audio") or {}
+                    src = (
+                        part.get("input_audio")
+                        or part.get("audio")
+                        or part.get("audio_url")
+                        or {}
+                    )
                     if isinstance(src, dict):
                         b64 = src.get("data")
                         fmt = src.get("format", "wav")
@@ -488,8 +498,14 @@ def _extract_parts(
                         elif src.get("url", "").startswith("data:"):
                             raw, ext = _decode_data_url(src["url"])
                             cur_audio = _materialize_to_temp(raw, ext, scratch_dir)
-                    elif isinstance(src, str) and Path(src).exists():
-                        cur_audio = Path(src)
+                        elif isinstance(src.get("url"), str) and Path(src["url"]).exists():
+                            cur_audio = Path(src["url"])
+                    elif isinstance(src, str):
+                        if src.startswith("data:"):
+                            raw, ext = _decode_data_url(src)
+                            cur_audio = _materialize_to_temp(raw, ext, scratch_dir)
+                        elif Path(src).exists():
+                            cur_audio = Path(src)
                 elif ptype in _VIDEO_TYPES:
                     src = part.get("video_url") or part.get("video") or {}
                     url = src.get("url") if isinstance(src, dict) else src
@@ -995,10 +1011,17 @@ class OmniMultimodalDispatcher:
             Default-OFF until Wave 4 (`bilinear_pos_embed`) and full
             rel-pos parity ship. Opt in for benchmarking only.
 
-        Override: ``VMLX_OMNI_BACKEND={stage1|stage2|pytorch|mlx}``.
+        Override: ``VMLX_OMNI_BACKEND={stage1|stage2|pytorch|mlx}`` (legacy
+        ``VMLINUX_OMNI_BACKEND`` accepted for back-compat — the CLI used to set
+        only the legacy name while this reader read only the canonical one, so
+        ``--omni-backend`` was inert).
         Default: ``stage1`` (correct).
         """
-        env = os.environ.get("VMLX_OMNI_BACKEND", "").strip().lower()
+        env = (
+            os.environ.get("VMLX_OMNI_BACKEND")
+            or os.environ.get("VMLINUX_OMNI_BACKEND")
+            or ""
+        ).strip().lower()
         if env in ("stage1", "pytorch"):
             return "stage1"
         if env in ("stage2", "mlx"):

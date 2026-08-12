@@ -3294,6 +3294,10 @@ _MULTIMODAL_CONTENT_TYPES = {
     "input_video",
     "input_audio",
     "audio",
+    # audio_url is emitted by the Ollama and Anthropic adapters; without it
+    # here, request_has_multimodal returned False and the request skipped omni
+    # dispatch, silently answered text-only.
+    "audio_url",
 }
 
 
@@ -3347,8 +3351,8 @@ def _content_multimodal_summary(content) -> dict:
         if ptype in ("input_video",):
             src = part.get("video_url") or part.get("url") or part.get("file_id")
             return src.get("url") if isinstance(src, dict) else src
-        if ptype in ("input_audio", "audio"):
-            src = part.get("input_audio") or part.get("audio")
+        if ptype in ("input_audio", "audio", "audio_url"):
+            src = part.get("input_audio") or part.get("audio") or part.get("audio_url")
             if isinstance(src, dict):
                 return src.get("url") or ("<inline_audio_data>" if src.get("data") else None)
             return src
@@ -3457,7 +3461,7 @@ def _requested_modalities_from_summary(summary: dict) -> set[str]:
         modalities.add("image")
     if types & {"video_url", "video", "input_video"}:
         modalities.add("video")
-    if types & {"input_audio", "audio"}:
+    if types & {"input_audio", "audio", "audio_url"}:
         modalities.add("audio")
     return modalities
 

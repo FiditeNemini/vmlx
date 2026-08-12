@@ -1110,6 +1110,9 @@ def serve_command(args):
             if server._default_min_p is None:
                 server._default_min_p = 0.0
     if getattr(args, "omni_backend", None):
+        # Set the canonical name the backend picker reads; keep the legacy
+        # name too for anything still consulting it.
+        os.environ["VMLX_OMNI_BACKEND"] = args.omni_backend
         os.environ["VMLINUX_OMNI_BACKEND"] = args.omni_backend
 
     # Apply default enable_thinking

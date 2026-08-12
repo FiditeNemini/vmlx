@@ -529,6 +529,51 @@ def test_omni_extracts_input_audio_shape_emitted_by_panel(tmp_path):
     assert audio.read_bytes() == b"RIFF"
 
 
+def test_omni_extracts_audio_url_data_shape_from_adapters(tmp_path):
+    """The Ollama and Anthropic adapters emit audio as {"type": "audio_url"}.
+    Before audio_url was recognized, request_has_multimodal returned False,
+    the request skipped omni dispatch, and audio was silently answered
+    text-only. It must now round-trip like input_audio."""
+    import base64
+
+    data_url = "data:audio/wav;base64," + base64.b64encode(b"RIFFxx").decode()
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Transcribe the sound."},
+                {"type": "audio_url", "audio_url": {"url": data_url}},
+            ],
+        }
+    ]
+
+    assert request_has_multimodal(messages) is True
+    assert request_modalities(messages) == {"audio"}
+    text, images, audio, video = _extract_parts(messages, tmp_path)
+    assert text == "Transcribe the sound."
+    assert images == []
+    assert video is None
+    assert audio is not None
+    assert audio.read_bytes() == b"RIFFxx"
+
+
+def test_omni_backend_reads_both_env_spellings(monkeypatch):
+    """--omni-backend used to set VMLINUX_OMNI_BACKEND while the picker read
+    only VMLX_OMNI_BACKEND, so the flag was inert. Both spellings now work."""
+    from vmlx_engine.omni_multimodal import OmniMultimodalDispatcher
+
+    monkeypatch.delenv("VMLX_OMNI_BACKEND", raising=False)
+    monkeypatch.delenv("VMLINUX_OMNI_BACKEND", raising=False)
+    assert OmniMultimodalDispatcher._pick_backend() == "stage1"
+
+    monkeypatch.setenv("VMLINUX_OMNI_BACKEND", "stage2")
+    assert OmniMultimodalDispatcher._pick_backend() == "stage2"
+
+    monkeypatch.delenv("VMLINUX_OMNI_BACKEND")
+    monkeypatch.setenv("VMLX_OMNI_BACKEND", "mlx")
+    assert OmniMultimodalDispatcher._pick_backend() == "stage2"
+
+
 def test_omni_conversation_signature_salts_audio_bytes():
     def messages(audio_data):
         return [

@@ -5386,10 +5386,22 @@ class TestMs68CollectionErrorVsEmpty:
         assert "retryCollectionFetch" in src, (
             "explicit retry entry point missing"
         )
-        # The retry button text in the fallback UI
-        assert ">Retry<" in src or "Retry\n" in src, (
+        # The button text is translated now, so the raw ">Retry<" literal is
+        # gone. The invariant is that the error fallback wires a BUTTON to the
+        # retry handler and labels it with the retry copy — so scope the label
+        # check to the handler's onClick site instead of anywhere in the file,
+        # and pin the English catalog entry the key resolves to.
+        onclick_idx = src.find("retryCollectionFetch(collectionTab)")
+        assert onclick_idx != -1, (
+            "error fallback must invoke the retry handler on click"
+        )
+        assert "{t('common.retry')}" in src[onclick_idx:onclick_idx + 400], (
             "retry button must exist in the error fallback UI"
         )
+        en_catalog = (
+            REPO_ROOT / "panel/src/renderer/src/i18n/locales/en.json"
+        ).read_text()
+        assert '"retry": "Retry"' in en_catalog
 
     def test_error_ui_distinct_from_empty(self):
         src = (REPO_ROOT / "panel/src/renderer/src/components/sessions/DownloadTab.tsx").read_text()
@@ -5835,7 +5847,15 @@ class TestMs75HuggingFaceMirrorEndpoint:
             "save handler must normalize and validate the endpoint — otherwise "
             "a typo silently corrupts HF routing and kills all downloads"
         )
-        assert "http:// or https:// URL" in src
+        # The rejection toast copy is translated; the invariant is the save
+        # path still refuses a scheme-less endpoint AND tells the user the
+        # http(s) rule, so assert the toast references the catalog key and the
+        # English entry still spells the requirement.
+        assert "t('sessions.download.toast.mirrorInvalidBody')" in src
+        en_catalog = (
+            REPO_ROOT / "panel/src/renderer/src/i18n/locales/en.json"
+        ).read_text()
+        assert "http:// or https:// URL" in en_catalog
         # One-click preset button for the standard China mirror. The label is
         # translated, so assert the KEY and that every locale resolves it — a
         # literal English assertion both broke on i18n and could never have

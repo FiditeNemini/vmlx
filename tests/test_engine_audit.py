@@ -14024,9 +14024,17 @@ class TestTurboQuantKVTelemetry:
         assert "maxNumSeqs: 1" in sessions_source
         assert "prefillBatchSize: 512" in sessions_source
         assert "completionBatchSize: 512" in sessions_source
-        assert 'unlimitedLabel="Default (1)"' in session_form_source
-        assert 'unlimitedLabel="Default (512)"' in session_form_source
-        assert 'unlimitedLabel="Default (2048)"' in session_form_source
+        # The "Default (N)" pills render from the locale catalog since the i18n
+        # pass. The invariant is unchanged — the label must claim the SAME
+        # default the launcher/CLI actually apply — so pin the interpolated n
+        # per control plus the English template that prints it.
+        en_locale_source = Path(
+            "./panel/src/renderer/src/i18n/locales/en.json"
+        ).read_text()
+        assert "unlimitedLabel={t('sessions.config.defaultWithValue', { n: 1 })}" in session_form_source
+        assert "unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}" in session_form_source
+        assert "unlimitedLabel={t('sessions.config.defaultWithValue', { n: 2048 })}" in session_form_source
+        assert '"defaultWithValue": "Default ({n})"' in en_locale_source
         assert "isLingCrackModelPath" not in sessions_source
         assert "out.defaultTemperature = 20" not in sessions_source
         assert (
@@ -14140,9 +14148,28 @@ class TestTurboQuantKVTelemetry:
         assert "IMAGE_ADDITIONAL_ARG_BLOCKLIST" in preview_source
         assert "DSV4_ADDITIONAL_ARG_BLOCKLIST" in sessions_source
         assert "DSV4_ADDITIONAL_ARG_BLOCKLIST" in preview_source
-        for source in (sessions_source, preview_source):
-            assert "flag.includes('=')" in source
-            assert "flag.slice(0, flag.indexOf('='))" in source
+        # The equals-form ("--flag=value") stripping used to be duplicated in
+        # the argv builder and the preview — the pair whose divergence has
+        # already shown a user one command while running another. It now lives
+        # ONCE in filterAdditionalArgs in src/shared/launchArgValues.ts
+        # (6f9b6eaa3); asserting the body per file again would pin exactly the
+        # duplication that was removed, so check the rule at its owner and that
+        # both sides consume the owner instead of re-implementing it.
+        launch_arg_values_source = Path(
+            "./panel/src/shared/launchArgValues.ts"
+        ).read_text()
+        assert "flag.includes('=')" in launch_arg_values_source
+        assert "flag.slice(0, flag.indexOf('='))" in launch_arg_values_source
+        for name, source in (
+            ("sessions.ts", sessions_source),
+            ("SessionSettings.tsx", preview_source),
+        ):
+            assert "filterAdditionalArgs" in source and "launchArgValues" in source, (
+                f"{name} must import filterAdditionalArgs from the shared owner"
+            )
+            assert "function filterAdditionalArgs" not in source, (
+                f"{name} grew a private copy of filterAdditionalArgs back"
+            )
         assert "canonicalizeToolParserId" in sessions_source
         parser_aliases_source = Path(
             "./panel/src/shared/toolParserAliases.ts"
@@ -14199,13 +14226,28 @@ class TestTurboQuantKVTelemetry:
             preview_source, "DSV4_ADDITIONAL_ARG_BLOCKLIST"
         )
         assert sessions_dsv4_blocklist == preview_dsv4_blocklist
-        sessions_value_flags = extract_set(
-            sessions_source, "ADDITIONAL_ARG_VALUE_FLAGS"
+        # ADDITIONAL_ARG_VALUE_FLAGS moved to ONE owner in
+        # src/shared/launchArgValues.ts (6f9b6eaa3), so extracting it per file
+        # would now fail on the duplication being REMOVED — backwards. Read the
+        # set at its owner; the old sessions==preview equality is enforced
+        # structurally by both sides importing that single owner, so the check
+        # becomes: neither side redeclares a private copy.
+        launch_arg_values_source = Path(
+            "./panel/src/shared/launchArgValues.ts"
+        ).read_text()
+        value_flags = extract_set(
+            launch_arg_values_source, "ADDITIONAL_ARG_VALUE_FLAGS"
         )
-        preview_value_flags = extract_set(
-            preview_source, "ADDITIONAL_ARG_VALUE_FLAGS"
-        )
-        assert sessions_value_flags == preview_value_flags
+        for name, source in (
+            ("sessions.ts", sessions_source),
+            ("SessionSettings.tsx", preview_source),
+        ):
+            assert "const ADDITIONAL_ARG_VALUE_FLAGS" not in source, (
+                f"{name} reintroduced a private copy of ADDITIONAL_ARG_VALUE_FLAGS"
+            )
+            assert "filterAdditionalArgs" in source and "launchArgValues" in source, (
+                f"{name} must consume the shared value-flag rule via the owner"
+            )
 
         # DSV4 launch policy owns cache/tool/parser/VLM/runtime flags. Stale
         # additionalArgs must not be able to duplicate or override any flag the
@@ -14229,8 +14271,7 @@ class TestTurboQuantKVTelemetry:
             assert flag in sessions_dsv4_blocklist
             assert flag in preview_dsv4_blocklist
         for flag in ("--uds", "--inference-endpoints", "--wake-timeout"):
-            assert flag in sessions_value_flags
-            assert flag in preview_value_flags
+            assert flag in value_flags
 
     def test_vlm_video_sampling_is_request_scoped_not_restart_required(self):
         sessions_source = Path("./panel/src/main/sessions.ts").read_text()
@@ -14308,9 +14349,13 @@ class TestTurboQuantKVTelemetry:
         assert "turboQuantActive || lagunaMixedSwaTurboQuantActive" in form_source
         assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}" in form_source
         assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
-        assert "Native compiled decode: Automatic" in form_source
-        assert "compiled router/SwiGLU operations" in form_source
-        assert "fused Metal mHC single-token decode kernel" in form_source
+        # This copy moved to the locale catalog in the i18n pass; the invariant
+        # stays user-facing — the DSV4 JIT surface must still tell the truth
+        # that compiled decode is automatic and name the real mechanisms
+        # (router/SwiGLU + fused Metal mHC), not just grey out the toggle.
+        assert _panel_label_is_rendered(form_source, "Native compiled decode: Automatic")
+        assert _panel_label_is_rendered(form_source, "compiled router/SwiGLU operations")
+        assert _panel_label_is_rendered(form_source, "fused Metal mHC single-token decode kernel")
         assert "native compiled router/SwiGLU and fused Metal mHC decode remain automatic" in sessions_source
         assert "disabled={config.continuousBatching || multimodalActive || dsv4Active}" in form_source
 

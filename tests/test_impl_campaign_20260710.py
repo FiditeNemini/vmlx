@@ -210,7 +210,18 @@ def test_ui_defaults_prefix_on_paged_off_and_hy3_mtp_native_type_visible():
     assert "usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true)" in registry
     assert "'hy_v3'" in registry
     assert "nativeCacheType: hy3 ? 'plain_kv_v1'" in registry
-    assert "native cache:" in form
+    # The "native cache: <type>" note renders from the locale catalog since the
+    # i18n pass. The invariant is what this test is named for — the DETECTED
+    # native cache type (hy3's plain_kv_v1) stays visible in the UI — so assert
+    # the form interpolates the detected type into the note and the English
+    # template still prints it.
+    en_catalog = open("panel/src/renderer/src/i18n/locales/en.json").read()
+    assert "t('sessions.config.nativeMtpDetectedNote'" in form
+    assert (
+        "cache: detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown'"
+        in form
+    )
+    assert "native cache: {cache}" in en_catalog
 
 
 def test_laguna_dedicated_loader_reaches_mixed_swa_patch():

@@ -536,13 +536,26 @@ def test_panel_names_dsv4_cache_as_native_composite_not_generic_paged_kv():
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
+    en_catalog = Path("panel/src/renderer/src/i18n/locales/en.json").read_text()
 
     assert "const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')" in form
-    assert "DSV4 Native Cache" not in form
     assert "const pagedCacheToggleLabel = dsv4Active" not in form
-    assert "DSV4 Native Composite Prefix Cache" not in form
-    assert "there is no separate hidden DSV4 cache toggle" in form
-    assert "restored SWA+CSA/HCA state has not proven output-equivalent" not in form
+    # The "no hidden toggle" reassurance is user-visible copy, so the i18n pass
+    # moved it into the locale catalog. The invariant is unchanged: the form
+    # must still render it for DSV4 and the English entry must still make the
+    # no-second-toggle promise.
+    assert "{dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}" in form
+    assert "there is no separate hidden DSV4 cache toggle" in en_catalog
+    # Stale DSV4-branded cache names must stay dead in the source AND in the
+    # catalog — labels live in en.json now, so a resurrected key/value pair is
+    # how this copy would reach users today.
+    for stale in (
+        "DSV4 Native Cache",
+        "DSV4 Native Composite Prefix Cache",
+        "restored SWA+CSA/HCA state has not proven output-equivalent",
+    ):
+        assert stale not in form
+        assert stale not in en_catalog
 
 
 def test_panel_suppresses_dsv4_batch_sizes_but_passes_real_prefill_step():
@@ -577,6 +590,7 @@ def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
+    en_catalog = Path("panel/src/renderer/src/i18n/locales/en.json").read_text()
 
     assert "const effectiveContinuousBatching = dsv4Active ? true : config.continuousBatching" in form
     assert "dsv4PrefixCache: false" in form
@@ -591,12 +605,22 @@ def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
     assert "cacheControlUpdatesForDsv4PoolQuantToggle" not in form
     assert "applyDsv4PoolQuantToggle" not in form
     assert "const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache" in form
-    assert "there is no separate hidden DSV4 cache toggle" in form
-    assert "restored SWA+CSA/HCA state has not proven output-equivalent" not in form
+    # The no-second-toggle copy is rendered via the locale catalog since the
+    # i18n pass; the form must reference the key and English must still carry
+    # the promise this test is named after.
+    assert "{dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}" in form
+    assert "there is no separate hidden DSV4 cache toggle" in en_catalog
     assert "checked={config.dsv4PrefixCache !== false}" not in form
-    assert "DSV4 Composite Prefix Cache" not in form
-    assert "DSV4 Native Cache" not in form
-    assert "DSV4 Pool Quantization" not in form
+    # Stale second-cache branding must not return in the source or as a
+    # catalog entry — en.json is where a resurrected label would render from.
+    for stale in (
+        "restored SWA+CSA/HCA state has not proven output-equivalent",
+        "DSV4 Composite Prefix Cache",
+        "DSV4 Native Cache",
+        "DSV4 Pool Quantization",
+    ):
+        assert stale not in form
+        assert stale not in en_catalog
     assert "checked={dsv4Active ? true : config.enablePrefixCache}" not in form
     assert "hidden={isImage || dsv4Active}" in form
     assert "const showVideoControls = !dsv4Active" in form
@@ -650,22 +674,33 @@ def test_dsv4_cache_ui_uses_shared_cache_owner_without_duplicate_labels():
     from pathlib import Path
 
     form = Path("panel/src/renderer/src/components/sessions/SessionConfigForm.tsx").read_text()
+    en_catalog = Path("panel/src/renderer/src/i18n/locales/en.json").read_text()
 
     assert 'label="DSV4 Native Composite Prefix Cache"' not in form
     assert 'label="DSV4 CSA/HCA Pool Codec"' not in form
-    assert 'label="Block Disk Cache (SSD / L2)"' in form
+    # Labels render from the locale catalog since the i18n pass. The invariant
+    # ("the SHARED tier controls exist, spelled the shared way") now means: the
+    # form references the shared keys, and en.json still spells them without a
+    # DSV4 prefix.
+    assert "label={t('sessions.cache.blockDiskCache')}" in form
+    assert '"blockDiskCache": "Block Disk Cache (SSD / L2)"' in en_catalog
     assert "DSV4 Block Disk Cache (SSD / L2)" not in form
+    assert "DSV4 Block Disk Cache (SSD / L2)" not in en_catalog
 
     # DSV4 uses the standard prefix/RAM/L2 controls; only the incompatible
     # generic stored-KV codec selector stays disabled. There is no second
     # DSV4-specific prefix toggle.
-    assert '<CheckField label="Enable Prefix Cache"' in form
-    assert '!dsv4Active && (\n          <CheckField label="Enable Prefix Cache"' not in form
-    assert '<CheckField label="In-Memory Paged Cache (RAM)"' in form
+    assert "<CheckField label={t('sessions.config.enablePrefixCache')}" in form
+    assert '"enablePrefixCache": "Enable Prefix Cache"' in en_catalog
+    assert "!dsv4Active && (\n          <CheckField label={t('sessions.config.enablePrefixCache')}" not in form
+    assert "<CheckField label={t('sessions.config.pagedKVCache')}" in form
+    assert '"pagedKVCache": "In-Memory Paged Cache (RAM)"' in en_catalog
     assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
     assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
     assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form
 
+    # A stale label would reach users through a catalog entry now, so check
+    # both surfaces.
     for stale_label in (
         "DSV4 Native Cache",
         "DSV4 Composite Prefix Cache",
@@ -673,6 +708,7 @@ def test_dsv4_cache_ui_uses_shared_cache_owner_without_duplicate_labels():
         "DSV4 Flash composite prefix cache is disabled",
     ):
         assert stale_label not in form
+        assert stale_label not in en_catalog
 
 
 def test_dsv4_product_ui_uses_shared_cache_defaults_and_cli_env_stays_explicit():

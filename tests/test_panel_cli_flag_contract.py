@@ -36,11 +36,48 @@ def _panel_source_flags() -> dict[str, set[str]]:
     }
 
 
+# Constants that used to be copied into every call site and now have ONE owner
+# under src/shared/. A consumer no longer names the constant at all — it calls
+# the shared helper that consults it — so the check below is that the consumer
+# gets the rule from the owner rather than keeping a private copy.
+SHARED_CONSTANT_OWNERS = {
+    "ADDITIONAL_ARG_VALUE_FLAGS": "panel/src/shared/launchArgValues.ts",
+}
+
+
+def _resolve_constant_owner(rel: str, const_name: str) -> str:
+    """Return the file that DEFINES ``const_name`` for ``rel``.
+
+    This test was written when each of these constants was duplicated per file,
+    and it compared the copies. That is the right check for the ones still
+    declared locally, but reading only ``rel`` raises ValueError once a constant
+    moves to a shared owner — a green-to-red flip caused by the duplication
+    being REMOVED, which is backwards.
+
+    So: a local declaration is still compared as before; a shared one resolves
+    to its owner after asserting ``rel`` actually imports from that module. If a
+    private copy is ever reintroduced, the local branch takes over and the two
+    sides get compared against each other again.
+    """
+    source = (ROOT / rel).read_text(encoding="utf-8")
+    if f"const {const_name}" in source:
+        return rel
+    owner = SHARED_CONSTANT_OWNERS.get(const_name)
+    assert owner, f"{rel} does not define {const_name} and it has no shared owner"
+    module_stem = Path(owner).stem
+    assert re.search(rf"from\s*['\"][^'\"]*/{re.escape(module_stem)}['\"]", source), (
+        f"{rel} neither declares {const_name} nor imports from {owner} — "
+        "it must not carry a private copy of this rule"
+    )
+    return owner
+
+
 def _constant_flag_set(rel: str, const_name: str, _seen: set[str] | None = None) -> set[str]:
     _seen = set(_seen or ())
     if const_name in _seen:
         return set()
     _seen.add(const_name)
+    rel = _resolve_constant_owner(rel, const_name)
     source = (ROOT / rel).read_text(encoding="utf-8")
     start = source.index(f"const {const_name}")
     end = source.index("])", start)

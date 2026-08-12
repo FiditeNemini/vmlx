@@ -251,7 +251,20 @@ def _segments(text: str) -> list[tuple[str, str]]:
         # which correctly shows nothing.
         if _viable_header_prefix(text):
             return []
-        return [(_USER_RECIPIENT, text)]
+        # Cut terminators here too. Every other branch does, but this one
+        # returned the raw text, so a plain answer ending in a terminator —
+        # "Hi there<|eot|>" with no header anywhere — rendered the TERMINATOR in
+        # the non-streaming response while streaming correctly showed "Hi there".
+        # Cutting is unambiguous in this branch: there is no header, so nothing
+        # structural follows the terminator that could be lost.
+        body = text
+        for terminator in (_EOM_TAG, _EOT_TAG):
+            cut = body.find(terminator)
+            if cut >= 0:
+                body = body[:cut]
+        if not body:
+            return []
+        return [(_USER_RECIPIENT, body)]
 
     lead = text[: matches[0].start()]
     # Leading text is a message body like any other, so a terminator ends it.

@@ -153,3 +153,28 @@ def test_reply_ending_in_letters_keeps_its_last_characters():
         raw = f" to=user<|message|>{tail}"
         _, content = _stream(raw, _char_chunks(raw))
         assert content == tail
+
+
+def test_no_header_answer_still_cuts_terminators():
+    """A plain answer ending in a terminator must not render the terminator.
+
+    Every other branch of the recipient split cuts <|eom|>/<|eot|>; the
+    no-header branch returned the raw text, so "Hi there<|eot|>" put the
+    TERMINATOR in the non-streaming API response while streaming correctly
+    showed "Hi there". Cutting is unambiguous here — with no header, nothing
+    structural follows the terminator.
+    """
+    from vmlx_engine.reasoning.muse_glimmer_parser import (
+        MuseGlimmerReasoningParser,
+    )
+
+    for raw, expected in [
+        ("Hi there<|eot|>", "Hi there"),
+        ("Done.<|eom|>", "Done."),
+        ("Plain answer.", "Plain answer."),
+    ]:
+        result = MuseGlimmerReasoningParser().extract_reasoning(raw)
+        content = result[1] if isinstance(result, tuple) else result
+        assert "<|eot|>" not in str(content), f"terminator leaked for {raw!r}"
+        assert "<|eom|>" not in str(content), f"terminator leaked for {raw!r}"
+        assert str(content) == expected

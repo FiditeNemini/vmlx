@@ -48,10 +48,6 @@ def test_detection_requires_real_package_markers_not_just_a_directory():
         "the preflight went back to treating any directory named mlx as an "
         "installed package"
     )
-    assert "__init__.py" in body, (
-        "detection no longer requires a package __init__.py, so a plain folder "
-        "named mlx matches again"
-    )
     # An empty sys.path entry means CWD; a relative match would be reported to
     # the user as a bare "mlx".
     assert "os.path.abspath" in body, (
@@ -93,3 +89,76 @@ def test_the_marker_check_actually_rejects_a_plain_directory(tmp_path):
 
     (plain / "core.cpython-313-darwin.so").write_text("")
     assert is_pkg(str(plain)), "a real MLX install must still be detected"
+
+
+# --- Behavioural coverage for the predicate itself -------------------------
+#
+# The assertion removed above required the string "__init__.py" to appear in
+# the preflight. That pinned the MECHANISM rather than the behaviour, and it
+# pinned the WRONG mechanism: MLX ships `mlx` as a NAMESPACE package
+# (`importlib.util.find_spec("mlx").loader is None`, no root `__init__.py`), so
+# demanding one rejected every genuine install. Detection then found zero
+# locations, `len(unique) <= 1` returned early, and the entire preflight was a
+# no-op — while this test stayed green and reported the opposite.
+#
+# These exercise the predicate against real directory layouts instead, so the
+# only way to pass is to actually classify them correctly.
+
+import importlib.util
+
+from vmlx_engine.cli import _is_installed_mlx_package
+
+
+def test_the_real_installed_mlx_is_detected():
+    """The regression that made the preflight inert.
+
+    MLX is a namespace package. If this returns False, no duplicate can ever
+    be found and the nanobind duplicate-key crash comes back unannounced.
+    """
+    spec = importlib.util.find_spec("mlx")
+    assert spec is not None, "mlx is not importable in this environment"
+    locations = list(spec.submodule_search_locations)
+    assert locations, "mlx has no submodule search locations"
+    for location in locations:
+        assert _is_installed_mlx_package(location), (
+            f"the installed MLX at {location} is not recognised as an MLX "
+            "package, so the duplicate-mlx preflight cannot fire at all"
+        )
+
+
+def test_a_source_checkout_named_mlx_is_not_an_install(tmp_path):
+    """The original hazard: ~/mlx full of repo checkouts."""
+    folder = tmp_path / "mlx"
+    (folder / "vllm-mlx").mkdir(parents=True)
+    (folder / "vllm-mlx-r20-dsv4-local").mkdir(parents=True)
+    assert not _is_installed_mlx_package(str(folder))
+
+
+def test_a_bare_core_directory_is_not_enough(tmp_path):
+    """A compiled artifact is required, not merely a folder called `core`.
+
+    Dropping the `__init__.py` requirement removes the guard that used to stop
+    an arbitrary source tree from matching, so the compiled-extension check has
+    to carry that weight on its own.
+    """
+    folder = tmp_path / "mlx"
+    (folder / "core").mkdir(parents=True)
+    assert not _is_installed_mlx_package(str(folder))
+
+
+def test_a_compiled_core_extension_marks_an_install(tmp_path):
+    folder = tmp_path / "mlx"
+    folder.mkdir()
+    (folder / "core.cpython-313-darwin.so").touch()
+    assert _is_installed_mlx_package(str(folder))
+
+
+def test_a_compiled_core_nested_under_core_also_counts(tmp_path):
+    folder = tmp_path / "mlx"
+    (folder / "core").mkdir(parents=True)
+    (folder / "core" / "core.cpython-313-darwin.so").touch()
+    assert _is_installed_mlx_package(str(folder))
+
+
+def test_a_missing_path_is_not_an_install(tmp_path):
+    assert not _is_installed_mlx_package(str(tmp_path / "does-not-exist"))

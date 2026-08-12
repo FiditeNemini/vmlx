@@ -2621,6 +2621,52 @@ def _check_macos_compat():
                 sys.exit(2)
 
 
+def _is_installed_mlx_package(path: str) -> bool:
+    """True only for a directory that really is the ``mlx`` package.
+
+    A bare ``os.path.isdir`` check here was a live hazard. ``sys.path``
+    contains the CWD, so ``os.path.join("", "mlx")`` resolves to a
+    RELATIVE ``mlx`` — and on a machine whose home directory holds an
+    ``~/mlx`` folder of source checkouts, running the engine from $HOME
+    made that folder look like a second MLX install. The preflight then
+    aborted startup and named the user's entire repo directory as
+    something to delete.
+
+    The discriminator is the COMPILED ``core`` extension, and only that.
+    A source checkout named ``mlx`` does not carry one; an installed MLX
+    cannot work without one; and it is the exact artifact whose double
+    load raises the nanobind duplicate-key error this preflight exists
+    to prevent.
+
+    Do NOT also require ``__init__.py``. MLX ships ``mlx`` as a
+    NAMESPACE package — ``importlib.util.find_spec("mlx")`` returns
+    ``loader=None`` and there is no root ``__init__.py`` — so demanding
+    one rejects every genuine install and silently turns the whole
+    preflight into a no-op, which is how it shipped.
+    """
+    try:
+        if not os.path.isdir(path):
+            return False
+        def _has_compiled_core(directory: str) -> bool:
+            return any(
+                entry.startswith("core")
+                and entry.endswith((".so", ".pyd", ".dylib"))
+                for entry in os.listdir(directory)
+            )
+
+        if _has_compiled_core(path):
+            return True
+        # Some layouts put the extension inside `core/` instead of
+        # beside it. Still require a COMPILED artifact — matching a
+        # bare `core/` directory would re-admit any source tree that
+        # happens to contain one, which is the hazard the docstring
+        # above describes.
+        nested = os.path.join(path, "core")
+        return os.path.isdir(nested) and _has_compiled_core(nested)
+    except Exception:
+        return False
+
+
 def _check_no_duplicate_mlx():
     """vmlx#120 / mlxstudio#101 — `nanobind error: refusing to add duplicate
     key "cpu" to enumeration "mlx.core.DeviceType"` happens when the MLX C
@@ -2640,37 +2686,6 @@ def _check_no_duplicate_mlx():
         spec = importlib.util.find_spec("mlx")
         if spec is None:
             return
-        def _is_installed_mlx_package(path: str) -> bool:
-            """True only for a directory that really is the ``mlx`` package.
-
-            A bare ``os.path.isdir`` check here was a live hazard. ``sys.path``
-            contains the CWD, so ``os.path.join("", "mlx")`` resolves to a
-            RELATIVE ``mlx`` — and on a machine whose home directory holds an
-            ``~/mlx`` folder of source checkouts, running the engine from $HOME
-            made that folder look like a second MLX install. The preflight then
-            aborted startup and named the user's entire repo directory as
-            something to delete.
-
-            Require the markers an installed MLX actually has: a package
-            ``__init__.py`` plus the compiled ``core`` extension it cannot work
-            without.
-            """
-            try:
-                if not os.path.isdir(path):
-                    return False
-                if not os.path.isfile(os.path.join(path, "__init__.py")):
-                    return False
-                for entry in os.listdir(path):
-                    if entry == "core" and os.path.isdir(os.path.join(path, entry)):
-                        return True
-                    if entry.startswith("core") and entry.endswith(
-                        (".so", ".pyd", ".dylib")
-                    ):
-                        return True
-                return False
-            except Exception:
-                return False
-
         locations = [
             loc
             for loc in (spec.submodule_search_locations or [])

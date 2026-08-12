@@ -40,6 +40,7 @@ _SLOW_FAMILY_TIMEOUTS = {
     # they pass their own long timeout; only a real user hits the session
     # default.
     "qwen3_5": 900,
+    "qwen3_5_moe": 900,
     "qwen3_next": 900,
     "nemotron_h": 900,
 }

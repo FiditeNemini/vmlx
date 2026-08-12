@@ -128,8 +128,41 @@ def test_slow_families_get_the_app_timeout():
     assert set(_SLOW_FAMILY_TIMEOUTS) >= {
         "deepseek_v4", "minimax_m3", "openpangu_v2",
     }
-    assert {"qwen3_5", "qwen3_next", "nemotron_h"} <= set(_SLOW_FAMILY_TIMEOUTS)
+    # qwen3_5_moe was missing here while every panel copy had it, so a bare CLI
+    # launch of a Qwen3.6-MoE was still cut off at 300s. The old assertion did
+    # not require it.
+    assert {
+        "qwen3_5", "qwen3_5_moe", "qwen3_next", "nemotron_h",
+    } <= set(_SLOW_FAMILY_TIMEOUTS)
     assert all(v == 900 for v in _SLOW_FAMILY_TIMEOUTS.values())
+
+
+def test_every_panel_surface_carries_the_same_slow_families():
+    """The rule lives in several copies; they must cover the same families.
+
+    MEASURED: it existed in SEVEN places and four had diverged. The in-app chat
+    table and the gateway table are the two that actually abort a request, and
+    the gateway one still had only deepseek-v4 + minimax_m3 after the chat path
+    was fixed — so external OpenAI-compat/Ollama clients were still cut at 300s.
+
+    Keyed by PANEL REGISTRY name here, not engine family_name: the registry maps
+    qwen3_5 -> qwen3.5, qwen3_next -> qwen3-next, nemotron_h -> nemotron-h. A
+    previous fix asserted the engine spellings and therefore matched nothing.
+    """
+    required = {"qwen3.5", "qwen3.5-moe", "qwen3-next", "nemotron-h", "openpangu_v2"}
+    surfaces = {
+        "chat IPC": ROOT / "panel/src/main/ipc/chat.ts",
+        "api gateway": ROOT / "panel/src/main/api-gateway.ts",
+        "sessions": SESSIONS,
+    }
+    for label, path in surfaces.items():
+        src = path.read_text(encoding="utf-8")
+        for family in required:
+            assert f'"{family}"' in src or f"'{family}'" in src or f"{family}:" in src, (
+                f"{label} ({path.name}) does not cover {family!r} in its "
+                f"slow-family timeout rule — that surface will still abort at "
+                f"the generic 300s"
+            )
     sessions = SESSIONS.read_text(encoding="utf-8")
     for const in (
         "DSV4_DEFAULT_TIMEOUT_SECONDS = 900",

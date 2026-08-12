@@ -37,6 +37,20 @@ const HEALTH_POLL_MS = 2_000;
 const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300;
 const DSV4_DEFAULT_TIMEOUT_SECONDS = 900;
 const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900;
+// Slow families, keyed by PANEL REGISTRY name (what detectModelConfigFromDir
+// returns). This gateway hop had only deepseek-v4 and minimax_m3, so external
+// OpenAI-compat/Ollama clients on :8080 were still aborted at 300s for
+// openpangu_v2 and every hybrid SSM family even after the in-app chat path was
+// fixed — the same defect one hop further out.
+const SLOW_FAMILY_GATEWAY_TIMEOUT_SECONDS: Record<string, number> = {
+  "deepseek-v4": DSV4_DEFAULT_TIMEOUT_SECONDS,
+  minimax_m3: MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS,
+  openpangu_v2: 900,
+  "qwen3.5": 900,
+  "qwen3.5-moe": 900,
+  "qwen3-next": 900,
+  "nemotron-h": 900,
+};
 const PROXY_TIMEOUT_MS = GENERIC_DEFAULT_TIMEOUT_SECONDS * 1000; // generic 5 min max for a single proxied request
 const SINGLE_MODEL_MODE_KEY = "gateway_single_model_mode";
 
@@ -153,23 +167,21 @@ export class ApiGateway extends EventEmitter {
       detectedFamily = undefined;
     }
 
-    if (
-      sessionTimeout == null &&
-      detectedFamily !== "deepseek-v4" &&
-      detectedFamily !== "minimax_m3"
-    ) {
+    const slowFamilySeconds = detectedFamily
+      ? SLOW_FAMILY_GATEWAY_TIMEOUT_SECONDS[detectedFamily]
+      : undefined;
+
+    if (sessionTimeout == null && slowFamilySeconds == null) {
       return PROXY_TIMEOUT_MS;
     }
 
+    // A slow family wins only while the session is still on the generic
+    // default; an explicitly chosen session timeout is always honoured.
     const effectiveSeconds =
-      detectedFamily === "deepseek-v4" &&
+      slowFamilySeconds != null &&
       (sessionTimeout == null ||
         sessionTimeout === GENERIC_DEFAULT_TIMEOUT_SECONDS)
-        ? DSV4_DEFAULT_TIMEOUT_SECONDS
-        : detectedFamily === "minimax_m3" &&
-            (sessionTimeout == null ||
-              sessionTimeout === GENERIC_DEFAULT_TIMEOUT_SECONDS)
-          ? MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS
+        ? slowFamilySeconds
         : sessionTimeout != null
           ? sessionTimeout
           : GENERIC_DEFAULT_TIMEOUT_SECONDS;

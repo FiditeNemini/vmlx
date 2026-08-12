@@ -6255,7 +6255,7 @@ class Scheduler:
                 _stored_entry.block_table if _stored_entry else None
             )
             self.block_aware_cache.paged_cache.detach_request(request_id)
-            if self.block_aware_cache.paged_cache.max_resident_bytes > 0:
+            if self.block_aware_cache.paged_cache.enforces_byte_budget:
                 self.block_aware_cache.paged_cache.enforce_byte_budget()
         except Exception as _rel_e:
             logger.debug(
@@ -6772,7 +6772,7 @@ class Scheduler:
                 _stored_entry.block_table if _stored_entry else None
             )
             self.block_aware_cache.paged_cache.detach_request(store_id)
-            if self.block_aware_cache.paged_cache.max_resident_bytes > 0:
+            if self.block_aware_cache.paged_cache.enforces_byte_budget:
                 self.block_aware_cache.paged_cache.enforce_byte_budget()
         except Exception as _rel_e:
             logger.debug(
@@ -10010,8 +10010,7 @@ class Scheduler:
                                 # pins them. Enforce the configured L1 byte
                                 # ceiling again after releasing those refs.
                                 if (
-                                    self.block_aware_cache.paged_cache.max_resident_bytes
-                                    > 0
+                                    self.block_aware_cache.paged_cache.enforces_byte_budget
                                 ):
                                     self.block_aware_cache.paged_cache.enforce_byte_budget()
                             except Exception as _rel_e:

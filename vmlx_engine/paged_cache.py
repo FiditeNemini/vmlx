@@ -1260,6 +1260,20 @@ class PagedCacheManager:
             return 0
         return total
 
+    @property
+    def enforces_byte_budget(self) -> bool:
+        """Whether ``enforce_byte_budget()`` will do anything for this cache.
+
+        Callers must ask THIS, not ``max_resident_bytes > 0``. Disk-only mode
+        has a zero ceiling by construction ("no persistent payloads") but
+        deliberately keeps the Metal working-set PRESSURE guard, which is the
+        only thing standing between a reconstruction's transient buffers and an
+        OOM. Five call sites gated on ``max_resident_bytes > 0`` alone, which is
+        exactly 0 in that mode — so every one of them skipped, and the pressure
+        guard the docstring below promises was unreachable from all of them.
+        """
+        return self.max_resident_bytes > 0 or self.disk_only
+
     def enforce_byte_budget(self, required_bytes: int = 0) -> int:
         """Evict free cached blocks until resident RAM is within the byte ceiling.
 
@@ -1295,7 +1309,7 @@ class PagedCacheManager:
         prefix cache once reconstruction finishes; only genuine Metal pressure
         justifies shedding them early.
         """
-        if self.max_resident_bytes <= 0 and not self.disk_only:
+        if not self.enforces_byte_budget:
             return 0
         required_bytes = max(0, int(required_bytes or 0))
         # Metal query stays outside the lock: cheap allocator-counter reads,
@@ -1985,7 +1999,7 @@ class PagedCacheManager:
         block.dsv4_native_interval = _native_dsv4_interval_from_payload(cache_data)
         block.token_count = token_count
         block.touch()
-        if self.max_resident_bytes > 0 or self.disk_only:
+        if self.enforces_byte_budget:
             self._note_resident(block, resident_nbytes)
         if block.cache_data_transient:
             self.transient_disk_promotions += 1
@@ -2134,7 +2148,7 @@ class PagedCacheManager:
         # byte ceiling immediately after those refs become free; otherwise a
         # large native DSV4 prompt can remain above the user's limit until an
         # unrelated later request happens to store or promote another block.
-        if released and self.max_resident_bytes > 0:
+        if released and self.enforces_byte_budget:
             self.enforce_byte_budget()
         return released
 

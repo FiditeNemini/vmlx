@@ -4756,7 +4756,7 @@ class BlockAwarePrefixCache:
         # with distinct prefixes. No-op when the ceiling is disabled. The blocks
         # just stored for this request are ref_count>=1, so they are never the
         # ones evicted here.
-        if self.paged_cache.max_resident_bytes > 0:
+        if self.paged_cache.enforces_byte_budget:
             self.paged_cache.enforce_byte_budget()
 
         return block_table

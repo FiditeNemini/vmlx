@@ -26440,6 +26440,70 @@ def _raise_nofile_soft_limit() -> None:
         logger.warning("Could not raise RLIMIT_NOFILE soft limit: %s", exc)
 
 
+def _delegate_module_main_to_cli(argv: list[str] | None = None) -> bool:
+    """Route ``python -m vmlx_engine.server`` through the CLI's serve path.
+
+    This module's ``main()`` grew its own argparse, and it is a SECOND LAUNCHER:
+    it applies none of the family policy that ``cli.py`` applies. Started this
+    way, an engine gets ``--timeout 300`` with no slow-family lift, no
+    paged-cache default, no cache-index sizing by target tokens, and no
+    TQ/DSV4 policy — the same "same build, different launcher" class as the
+    max-cache-blocks 1000-vs-4097 defect, which cost a 77k prompt all of its
+    reuse depending only on how the process was started.
+
+    It is not dead code, which is why it cannot simply be deleted: the panel
+    parses and ADOPTS processes started this way (`sessions.ts` looks for
+    "python -m vmlx_engine.server"), so a session created from one silently
+    inherits the unpoliced defaults.
+
+    The two parsers are near-identical — of this module's 35 flags, the CLI's
+    serve subcommand already accepts 33 by the same name, and the other two map
+    cleanly (``--model X`` is the CLI's positional, ``--mllm`` is its
+    ``--is-mllm``). So translate and delegate rather than maintain two
+    launchers. Returns True when it handled the invocation.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    translated: list[str] = []
+    model: str | None = None
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--model":
+            if index + 1 >= len(argv):
+                return False  # malformed; let the local parser report it
+            model = argv[index + 1]
+            index += 2
+            continue
+        if token.startswith("--model="):
+            model = token.split("=", 1)[1]
+            index += 1
+            continue
+        if token == "--mllm":
+            translated.append("--is-mllm")
+            index += 1
+            continue
+        translated.append(token)
+        index += 1
+
+    from .cli import main as cli_main
+
+    serve_argv = ["serve"]
+    if model is not None:
+        serve_argv.append(model)
+    serve_argv.extend(translated)
+
+    logger.warning(
+        "`python -m vmlx_engine.server` is delegating to `vmlx-engine serve`. "
+        "The module entry point applies no family policy of its own, so "
+        "running it directly used to skip the slow-family timeout, the paged "
+        "cache default and the token-sized cache index. Prefer "
+        "`vmlx-engine serve <model>`."
+    )
+    sys.argv = [sys.argv[0], *serve_argv]
+    cli_main()
+    return True
+
+
 def main():
     """Run the server."""
     _raise_nofile_soft_limit()
@@ -26889,4 +26953,8 @@ Examples:
 
 
 if __name__ == "__main__":
-    main()
+    # Only the MODULE entry point delegates. Anything that imports and calls
+    # server.main() directly keeps the old behaviour, so this cannot change a
+    # caller that already has its own policy layer.
+    if not _delegate_module_main_to_cli():
+        main()

@@ -284,3 +284,58 @@ describe('prepareMarkdownWithMath', () => {
     expect(rendered).toContain('893')
   })
 })
+
+describe('single-dollar math with multi-letter symbols', () => {
+  /**
+   * The currency guard rejected any alphabetic run of TWO or more letters that
+   * was not a math function name — while its own comment claimed the rule
+   * "keeps `$E=mc^2$` valid". It did not: `mc` is a two-letter run, so the most
+   * recognisable inline formula in physics rendered as literal dollar-wrapped
+   * text, as did `$F = ma$` and `$ab = cd$`.
+   *
+   * LIVE-REPRODUCED in the app before the fix: asked for `$E = mc^2$` on its own
+   * line, the chat rendered `<p>$E = mc^2$</p>` with zero .katex nodes while the
+   * heading, list and inline code in the same reply rendered correctly.
+   *
+   * The threshold is now three letters. Two-letter runs still cannot smuggle
+   * prose through, because a span must additionally show math STRUCTURE (a TeX
+   * command, one of {}_^=<>, or an infix operator) before it is accepted.
+   */
+  const renders = (tex: string) =>
+    prepareMarkdownWithMath(tex).includes('math-inline')
+
+  it.each([
+    ['$E=mc^2$'],
+    ['$E = mc^2$'],
+    ['$F = ma$'],
+    ['$ab = cd$'],
+  ])('renders %s instead of leaving the dollars visible', (input) => {
+    expect(renders(input)).toBe(true)
+  })
+
+  it.each([
+    ['$x^2 + y^2 = z^2$'],
+    ['$47 \\times 19$'],
+    ['$a$'],
+    ['$\\alpha$'],
+  ])('still renders %s', (input) => {
+    expect(renders(input)).toBe(true)
+  })
+
+  it.each([
+    ['$5$'],
+    ['$100$'],
+    ['$47 \\times 19 ... This seems to be ... $43'],
+    ['$x is 5$'],
+    ['$the answer is here$'],
+  ])('still refuses %s', (input) => {
+    expect(renders(input)).toBe(false)
+  })
+
+  it('a bare two-letter symbol with no math structure stays literal', () => {
+    // Deliberate: `$dx$` alone is indistinguishable from prose or currency, and
+    // accepting it would reopen the false positives above. Recorded so the
+    // conservative choice is not mistaken for an oversight.
+    expect(renders('$dx$')).toBe(false)
+  })
+})

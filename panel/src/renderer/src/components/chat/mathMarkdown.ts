@@ -41,15 +41,28 @@ function looksLikeSingleDollarMath(text: string): boolean {
   if (/^[+\-*/=<>]/.test(trimmed) || /[+\-*/=<>]$/.test(trimmed)) return false
   if (/^\d+(?:[.,]\d{2})?$/.test(trimmed)) return false
   // A missing single-dollar closer must never let a later currency amount
-  // terminate a prose-sized span. Strip TeX commands and permit only
-  // single-letter variables or established math function names in the
-  // remaining alphabetic runs. This keeps `$E=mc^2$` and `$47 \times 19$`
-  // valid while rejecting model text such as
-  // `$47 \times 19 ... This seems to be ... $43`.
+  // terminate a prose-sized span. Strip TeX commands, then look at the
+  // remaining alphabetic runs: real prose words give the span away, while a
+  // short run of letters is almost always a product of variables.
+  //
+  // This rejected on runs of TWO or more, and its own comment claimed that
+  // "keeps `$E=mc^2$` valid". MEASURED against the real predicate — it does
+  // not. `mc` is a two-letter run and not a math function name, so the single
+  // most recognisable inline formula rendered as literal text, as did
+  // `$F = ma$` and `$ab = cd$`. Live-reproduced in the app: the model emitted
+  // `$E = mc^2$` and the chat showed the dollar signs.
+  //
+  // Three is the right threshold. English prose words in these false-positive
+  // spans are 3+ ("This", "seems", "the"), so the example the comment cites,
+  // `$47 \times 19 ... This seems to be ... $43`, is still rejected. Two-letter
+  // runs cannot sneak prose through on their own either, because a span still
+  // has to show math STRUCTURE below — a TeX command, one of `{}_^=<>`, or an
+  // infix operator — before this returns true. `$x is 5$` has none and is
+  // still rejected.
   const lexicalView = trimmed
     .replace(/\\text\s*\{[^{}]*\}/g, '')
     .replace(/\\[A-Za-z]+/g, '')
-  const proseWords = lexicalView.match(/[A-Za-z]{2,}/g) || []
+  const proseWords = lexicalView.match(/[A-Za-z]{3,}/g) || []
   if (
     proseWords.some(
       (word) =>

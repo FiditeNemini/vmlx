@@ -882,6 +882,21 @@ class PagedCacheManager:
             if not reusable:
                 reusable = self._maybe_evict_cached_block(block)
             if reusable:
+                # Hand back a CLEAN block.
+                #
+                # A block with block_hash None was returned with its previous
+                # tenant's cache_data still attached. The eviction branch above
+                # clears the payload, but the hash-None branch did not — and the
+                # frugal store path can set a NEW block_hash without setting
+                # cache_data, while reconstruct trusts any non-None cache_data.
+                # That is a route to serving one request's KV under another
+                # request's hash: a correctness bug, not just wasted RAM.
+                #
+                # Release under the lock we already hold; this also corrects the
+                # resident-byte accounting the stale payload was still counted
+                # against.
+                if block.cache_data is not None:
+                    self._release_resident_payload_locked(block)
                 return block
             self.free_block_queue.append(block)
         return None

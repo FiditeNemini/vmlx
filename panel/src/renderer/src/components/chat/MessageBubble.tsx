@@ -1,7 +1,6 @@
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/github-dark.css'
-import DOMPurify from 'dompurify'
 import { useState, useMemo, useCallback, useRef, useEffect, memo } from 'react'
 import { AlertTriangle, Copy, Check, User, Sparkles, RefreshCw, Pencil, Loader2 } from 'lucide-react'
 import { ReasoningBox } from './ReasoningBox'
@@ -16,6 +15,7 @@ import {
 } from './mathMarkdown'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
 import { useTranslation } from '../../i18n'
+import { sanitizeChatHtml } from './sanitizeChatHtml'
 
 interface Message {
   id: string
@@ -70,24 +70,6 @@ function parseMarkdown(
  * Sanitize HTML using DOMPurify — allows safe markdown output, blocks XSS.
  * All user/model content passes through this before being rendered via innerHTML.
  */
-function sanitizeHtml(html: string): string {
-  return DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
-    ADD_TAGS: ['pre', 'code'],
-    // KaTeX's HTML renderer uses inline layout styles and aria-hidden spans.
-    // DOMPurify still owns the allowlist; scripts/events remain forbidden.
-    ADD_ATTR: [
-      'class',
-      'style',
-      'aria-hidden',
-      'aria-label',
-      'role',
-      'data-vmlx-math-source-codepoints',
-      'data-vmlx-math-delimiter',
-      'data-vmlx-math-display-mode'
-    ]
-  })
-}
 
 /** Group tool statuses into tool call groups. Each 'calling' phase starts a new group.
  *  Also extracts contentOffset for inline positioning. */
@@ -269,7 +251,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   // Render a DOMPurify-sanitized markdown segment
   const renderMarkdownSegment = useCallback((text: string, key: string, userContent = false) => {
     if (!text) return null
-    const safeHtml = sanitizeHtml(parseMarkdown(
+    const safeHtml = sanitizeChatHtml(parseMarkdown(
       text,
       t('chat.bubble.codeDefaultLang'),
       t('chat.bubble.codeCopy'),
@@ -390,7 +372,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     }
 
     if (!content.trim()) return null
-    const safeHtml = sanitizeHtml(parseMarkdown(
+    const safeHtml = sanitizeChatHtml(parseMarkdown(
       content,
       t('chat.bubble.codeDefaultLang'),
       t('chat.bubble.codeCopy')

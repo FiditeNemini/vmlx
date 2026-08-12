@@ -242,7 +242,9 @@ const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900
 
 function extractFlagSetFromSource(sourceRel: string, constName: string): Set<string> {
     const source = readFileSync(sourceRel, 'utf8')
-    const start = source.indexOf(`const ${constName}`)
+    const start = source.indexOf(`const ${constName}`) >= 0
+        ? source.indexOf(`const ${constName}`)
+        : source.indexOf(`export const ${constName}`)
     if (start === -1) throw new Error(`Missing ${constName} in ${sourceRel}`)
     const end = source.indexOf('])', start)
     if (end === -1) throw new Error(`Unterminated ${constName} in ${sourceRel}`)
@@ -250,8 +252,12 @@ function extractFlagSetFromSource(sourceRel: string, constName: string): Set<str
     return new Set([...block.matchAll(/['"](--[a-z0-9][a-z0-9-]*)['"]/g)].map(match => match[1]))
 }
 
+// The value-flag list moved out of sessions.ts: it was a 66-entry duplicate
+// shared by the argv BUILDER and the CLI-preview renderer, so it now lives in
+// src/shared/launchArgValues.ts and both import it. Read the rule from its
+// owner — grepping sessions.ts would pin the duplication that was removed.
 const ADDITIONAL_ARG_VALUE_FLAGS = extractFlagSetFromSource(
-    'src/main/sessions.ts',
+    'src/shared/launchArgValues.ts',
     'ADDITIONAL_ARG_VALUE_FLAGS',
 )
 

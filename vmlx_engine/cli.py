@@ -19,6 +19,11 @@ import sys
 
 DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 DSV4_MAX_CACHE_BLOCKS = 4097  # 4096 data blocks + reserved null block
+# Generic cache-index target, mirroring GENERIC_INDEX_TARGET_TOKENS in
+# panel/src/main/sessions.ts. Both surfaces must size the index by TOKENS, not
+# by a flat block count, or the same build reuses differently depending on
+# whether it was started by the app or from the CLI.
+GENERIC_INDEX_TARGET_TOKENS = 262144
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
 
@@ -612,6 +617,11 @@ _PAGED_MLLM_EXEMPT_FAMILIES = {
     # set exists to prevent. Live-proven paged on JANG_4M: reuse reported as
     # block-disk+mixed_swa+tq-native across a growing multiturn.
     "muse_glimmer",
+    # step3p7 is is_mllm=True but the panel registers usePagedCache: true AND
+    # treats its cache subtype (step3p7_full_sliding_kv) as paged-required, so a
+    # bare CLI launch re-prefilled every repeated long prompt while the app
+    # reused blocks. Same divergence as muse_glimmer above.
+    "step3p7",
 }
 
 
@@ -1258,6 +1268,40 @@ def serve_command(args):
                 "(bounded-block prefix reuse; pass --no-paged-cache to opt out).",
                 _mc.family_name,
             )
+
+        # The generic --max-cache-blocks default is a flat block COUNT, so the
+        # context it indexes depends on the block size: 1000 blocks at 64 tokens
+        # indexes only 63,936 tokens. The panel has sized this by target tokens
+        # since the measurement in panel/src/main/sessions.ts (a 77k prompt got
+        # ZERO reuse on an exact repeat, 82.5s vs 55.7s cold), so a CLI-started
+        # engine and an app-started engine on the SAME build had different reuse
+        # ceilings. Mirror indexBlocksForCapacity here.
+        #
+        # Index size only — resident RAM stays governed by --cache-memory-mb /
+        # --cache-memory-percent, and DSV4 keeps its own 4097 lift above.
+        if (
+            not getattr(args, "max_cache_blocks_explicit", False)
+            and not _is_dsv4_model
+        ):
+            _generic_block_size = int(
+                getattr(args, "paged_cache_block_size", 64) or 64
+            )
+            if _generic_block_size > 0:
+                _sized = (
+                    -(-GENERIC_INDEX_TARGET_TOKENS // _generic_block_size) + 1
+                )
+                _old_blocks = int(getattr(args, "max_cache_blocks", 0) or 0)
+                if _sized > _old_blocks:
+                    args.max_cache_blocks = _sized
+                    logger.info(
+                        "max_cache_blocks %d -> %d to index %d tokens at a "
+                        "%d-token block (matches the app default; pass "
+                        "--max-cache-blocks to override).",
+                        _old_blocks,
+                        _sized,
+                        GENERIC_INDEX_TARGET_TOKENS,
+                        _generic_block_size,
+                    )
 
         if _mc.family_name != "unknown":
             # Auto-apply tool parser

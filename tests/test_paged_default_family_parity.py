@@ -33,7 +33,27 @@ class TestPagedDefaultFamilyParity:
             "gemma4",
             "gemma4_text",
             "muse_glimmer",
+            # step3p7 is is_mllm, but the panel registers step-3.7-flash with
+            # usePagedCache: true AND cacheSubtypeRequiresPaged() returns true
+            # for step3p7_full_sliding_kv, so the app runs it paged-REQUIRED
+            # while a bare CLI launch ran it unpaged. Verified against the panel
+            # in test_panel_requires_paged_for_step3p7 below rather than trusted
+            # as a snapshot — this assertion is a hardcoded list, so on its own
+            # it only records what someone once believed.
+            "step3p7",
         }
+
+    def test_panel_requires_paged_for_step3p7(self):
+        """Derive the step3p7 claim from the panel instead of asserting a snapshot."""
+        panel_root = Path(__file__).resolve().parents[1] / "panel" / "src" / "main"
+        registry = (panel_root / "model-config-registry.ts").read_text()
+        idx = registry.index("registerFamily('step-3.7-flash'")
+        window = registry[idx : idx + 800]
+        assert "usePagedCache: true" in window
+        assert "cacheSubtype: 'step3p7_full_sliding_kv'" in window
+        sessions = (panel_root / "sessions.ts").read_text()
+        req = sessions.index("function cacheSubtypeRequiresPaged")
+        assert "step3p7_full_sliding_kv" in sessions[req : req + 300]
 
     def test_panel_opts_muse_into_paged_too(self):
         registry = (

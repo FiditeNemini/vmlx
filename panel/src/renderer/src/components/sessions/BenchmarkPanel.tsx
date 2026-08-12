@@ -71,7 +71,7 @@ export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sess
       setCurrentResults(result.results)
       await loadHistory()
     } catch (err: any) {
-      setError(err.message || 'Benchmark failed')
+      setError(err.message || t('sessions.benchmark.failed'))
     } finally {
       setRunning(false)
       setProgress(null)
@@ -117,7 +117,7 @@ export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sess
             disabled={running}
             className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50"
           >
-            {running ? 'Running...' : 'Run Benchmark'}
+            {running ? t('sessions.benchmark.running') : t('sessions.view.benchTitle')}
           </button>
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer">
             <input
@@ -154,7 +154,7 @@ export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sess
             onClick={() => setShowHistory(!showHistory)}
             className="text-xs text-muted-foreground hover:text-foreground"
           >
-            {showHistory ? 'Hide' : 'Show'} History ({history.length})
+            {showHistory ? t('app.about.hide') : t('app.about.show')} {t('sessions.benchmark.history', { n: history.length })}
           </button>
           {showHistory && (
             <div className="mt-2 space-y-3 max-h-64 overflow-auto">
@@ -188,16 +188,17 @@ export function BenchmarkPanel({ sessionId, endpoint, modelPath, modelName, sess
 }
 
 function ResultsTable({ results, compact }: { results: PromptResult[]; compact?: boolean }) {
+  const { t } = useTranslation()
   return (
     <div className="overflow-auto">
       <table className={`w-full text-xs ${compact ? '' : 'mt-2'}`}>
         <thead>
           <tr className="text-muted-foreground border-b border-border">
-            <th className="text-left py-1 pr-2">Test</th>
+            <th className="text-left py-1 pr-2">{t('sessions.benchmark.headerTest')}</th>
             <th className="text-right py-1 px-1">TTFT</th>
             <th className="text-right py-1 px-1">TPS</th>
             <th className="text-right py-1 px-1">PP t/s</th>
-            <th className="text-right py-1 pl-1">Time</th>
+            <th className="text-right py-1 pl-1">{t('sessions.benchmark.headerTime')}</th>
           </tr>
         </thead>
         <tbody>
@@ -220,7 +221,7 @@ function ResultsTable({ results, compact }: { results: PromptResult[]; compact?:
           ))}
           {/* Summary row */}
           <tr className="font-medium">
-            <td className="py-1 pr-2">Average</td>
+            <td className="py-1 pr-2">{t('sessions.benchmark.rowAverage')}</td>
             <td className="text-right py-1 px-1 font-mono">
               {(() => {
                 const valid = results.filter(r => r.ttft > 0)

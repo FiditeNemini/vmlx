@@ -526,7 +526,9 @@
       "regenerateTitle": "応答を再生成",
       "waitingForResponse": "モデルの応答を待っています...",
       "finalizingAnswer": "回答を仕上げています...",
-      "noVisibleResponse": "表示可能な応答は生成されませんでした。"
+      "noVisibleResponse": "表示可能な応答は生成されませんでした。",
+      "justNow": "たった今",
+      "yesterdayAt": "昨日 {time}"
     },
     "messages": {
       "emptyPrimary": "メッセージを送信して会話を開始",
@@ -589,6 +591,21 @@
       "readAloudTitle": "読み上げ",
       "stop": "停止",
       "speak": "読み上げ"
+    },
+    "metrics": {
+      "tokensLabel": "{n} トークン",
+      "tokensTitleStreaming": "これまでに生成されたトークン",
+      "tokensTitleDone": "補完トークン",
+      "tpsTitle": "最初のトークン以降のデコード速度。推論およびツールループの補完トークンを含みます",
+      "ppsTitle": "プロンプト処理速度",
+      "promptLabel": "プロンプト {n}",
+      "cachedSuffix": "（{cached} キャッシュ済み）",
+      "promptTitleCache": "プロンプトトークン — キャッシュ: {detail}",
+      "promptTitle": "処理されたプロンプトトークン",
+      "ttftTitle": "最初のトークンまでの時間",
+      "elapsedTitle": "経過時間",
+      "totalLabel": "合計 {v}秒",
+      "totalTitle": "リクエストの合計時間"
     }
   },
   "sessions": {
@@ -1622,7 +1639,16 @@
       "downloadNote": "モデルはHuggingFaceからダウンロードされます（モデルと量子化により約6-24 GB）。",
       "youMayNeedTo": "必要に応じて",
       "setHfTokenLink": "HFトークンを設定",
-      "andAcceptThe": "し、次のライセンスに同意してください:"
+      "andAcceptThe": "し、次のライセンスに同意してください:",
+      "descSchnell": "最速の生成（4ステップ）",
+      "descZImageTurbo": "高速ターボ生成（4ステップ）",
+      "descDev": "高品質な生成（20ステップ）",
+      "descKlein4b": "高速・小型（20ステップ）",
+      "descKlein9b": "中品質（20ステップ）",
+      "descQwenImage": "高いプロンプト理解力（20ステップ）",
+      "descQwenImageEdit": "指示ベースの編集（28ステップ）",
+      "descKontext": "被写体を保った編集（24ステップ）",
+      "descFill": "マスクによるインペインティング（20ステップ）"
     },
     "prompt": {
       "variationLabel": "バリエーション",

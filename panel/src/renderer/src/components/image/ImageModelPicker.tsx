@@ -17,15 +17,31 @@ const MODEL_ICONS: Record<string, typeof Zap> = {
 }
 
 // Build NAMED_MODELS from the shared registry + icons
+// Renderer-side i18n for the shared image-model registry. The registry in
+// src/shared/imageModels.ts stays English (it feeds non-localized main-process
+// surfaces); the picker resolves a per-model key and falls back to the shared
+// desc so an unmapped model still renders.
+const MODEL_DESC_KEYS: Record<string, string> = {
+  'schnell': 'image.picker.descSchnell',
+  'z-image-turbo': 'image.picker.descZImageTurbo',
+  'dev': 'image.picker.descDev',
+  'klein-4b': 'image.picker.descKlein4b',
+  'klein-9b': 'image.picker.descKlein9b',
+  'qwen-image': 'image.picker.descQwenImage',
+  'qwen-image-edit': 'image.picker.descQwenImageEdit',
+  'kontext': 'image.picker.descKontext',
+  'fill': 'image.picker.descFill',
+}
+
 const NAMED_MODELS = IMAGE_MODELS.map(m => ({
   ...m,
   icon: MODEL_ICONS[m.id] || Zap,
 }))
 
 const QUANTIZE_OPTIONS = [
-  { value: 4, label: '4-bit', desc: 'Fastest, lowest memory' },
-  { value: 8, label: '8-bit', desc: 'Better quality' },
-  { value: 0, label: 'Full', desc: 'Best quality, most memory' },
+  { value: 4, label: '4-bit', descKey: 'image.picker.quant4Desc' },
+  { value: 8, label: '8-bit', descKey: 'image.picker.quant8Desc' },
+  { value: 0, labelKey: 'image.topbar.quantFull', descKey: 'image.picker.quantFullDesc' },
 ]
 
 export interface ImageServerSettings {
@@ -132,7 +148,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
             const missing = Array.isArray(result.missing) ? result.missing as string[] : []
             if (missing.length > 0) {
               setModelMissing(prev => ({ ...prev, [key]: missing }))
-              setDownloadError(`Download completed but model is incomplete: ${missing.join(', ')}`)
+              setDownloadError(t('image.picker.incompleteAfterDownload', { missing: missing.join(', ') }))
               setDownloadState('error')
               return
             }
@@ -159,13 +175,10 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
     })
     const unsubError = window.api.models.onDownloadError((data: any) => {
       if (downloadState === 'downloading' && isActiveDownloadEvent(data)) {
-        const errMsg = data.error || 'Download failed'
+        const errMsg = data.error || t('image.picker.downloadFailed')
         const isGated = data.gated
         if (isGated) {
-          setDownloadError(
-            'This model requires a HuggingFace token. Go to the Server tab > Download section and add your HF token, ' +
-            'then accept the model license at huggingface.co.'
-          )
+          setDownloadError(t('image.picker.gatedTokenRequired'))
         } else {
           setDownloadError(errMsg)
         }
@@ -246,23 +259,21 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
         <div className="text-center">
           <h2 className="text-2xl font-bold mb-2">{t('image.picker.startImageServer')}</h2>
           <p className="text-sm text-muted-foreground">
-            Choose a model below or browse for a local model.
+            {t('image.picker.chooseModelBelow')}
             {!hasHfToken && (
               <span className="text-warning"> {t('image.picker.noHfTokenWarning')}</span>
             )}
           </p>
           <p className="text-xs text-muted-foreground mt-2">
-            <strong>Generation:</strong> Schnell is fastest (4 steps), Dev is highest quality. 4-bit uses ~6GB, Full ~24GB.
-            For 16GB RAM, use Schnell or Klein 4B at 4-bit.
+            <strong>{t('image.picker.genStrong')}</strong> {t('image.picker.genHintBody')}
             <br />
-            <strong>Editing:</strong> Full precision only — quantized edit models produce unusable results.
-            Requires 24-54 GB depending on model.
+            <strong>{t('image.picker.editStrong')}</strong> {t('image.picker.editHintBody')}
           </p>
         </div>
 
         {/* Generation Models */}
         <div>
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Image Generation</h3>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">{t('image.picker.imageGeneration')}</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {NAMED_MODELS.filter(m => m.category === 'generate').map((model) => {
             const Icon = model.icon
@@ -292,7 +303,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                         <CheckCircle className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
                       )}
                     </div>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">{model.desc}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">{MODEL_DESC_KEYS[model.id] ? t(MODEL_DESC_KEYS[model.id]) : model.desc}</p>
                     <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground">
                       <span>{model.steps} steps</span>
                       <span>·</span>
@@ -309,8 +320,8 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
 
         {/* Image Editing Models */}
         <div>
-          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">Image Editing</h3>
-          <p className="text-[11px] text-muted-foreground mb-2">Submit a photo + text prompt to edit, inpaint, or transform images. Full precision only for best quality. More editing models coming soon.</p>
+          <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">{t('image.picker.imageEditing')}</h3>
+          <p className="text-[11px] text-muted-foreground mb-2">{t('image.picker.editModelsIntro')}</p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {NAMED_MODELS.filter(m => m.category === 'edit').map((model) => {
             const Icon = model.icon
@@ -340,7 +351,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                         <CheckCircle className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
                       )}
                     </div>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">{model.desc}</p>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">{MODEL_DESC_KEYS[model.id] ? t(MODEL_DESC_KEYS[model.id]) : model.desc}</p>
                     <div className="flex items-center gap-2 mt-1 text-[10px] text-muted-foreground">
                       <span>{model.steps} steps</span>
                       <span>·</span>
@@ -373,45 +384,45 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                   type="text"
                   value={customPath}
                   onChange={e => setCustomPath(e.target.value)}
-                  placeholder="e.g., black-forest-labs/FLUX.1-schnell or /path/to/model"
+                  placeholder={t('image.picker.customPathPlaceholder')}
                   className="flex-1 px-3 py-2 text-sm bg-background border border-input rounded"
                 />
                 <button
                   onClick={handleBrowse}
                   className="px-3 py-2 text-sm border border-input rounded hover:bg-accent"
-                  title="Browse folders"
+                  title={t('image.picker.browseTitle')}
                 >
                   <FolderOpen className="h-4 w-4" />
                 </button>
               </div>
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2">
-                  <label className="text-xs text-muted-foreground">Mode:</label>
+                  <label className="text-xs text-muted-foreground">{t('image.picker.modeLabel')}</label>
                   <select
                     value={customCategory}
                     onChange={e => setCustomCategory(e.target.value as 'generate' | 'edit')}
                     className="px-2 py-1 text-xs bg-background border border-input rounded"
                   >
-                    <option value="generate">Image Generation</option>
-                    <option value="edit">Image Editing</option>
+                    <option value="generate">{t('image.picker.imageGeneration')}</option>
+                    <option value="edit">{t('image.picker.imageEditing')}</option>
                   </select>
                 </div>
                 <div className="flex items-center gap-2">
-                  <label className="text-xs text-muted-foreground" title="Which mflux Python class to use for loading this model">Class:</label>
+                  <label className="text-xs text-muted-foreground" title={t('image.picker.classTitle')}>{t('image.picker.classLabel')}</label>
                   <select
                     value={customMfluxClass}
                     onChange={e => setCustomMfluxClass(e.target.value)}
                     className="px-2 py-1 text-xs bg-background border border-input rounded"
                   >
-                    <option value="Flux1">Flux1 (Schnell, Dev)</option>
-                    <option value="ZImage">ZImage (Z-Image Turbo)</option>
-                    <option value="Flux2Klein">Flux2Klein (Klein 4B/9B)</option>
-                    <option value="QwenImage">QwenImage</option>
-                    <option value="QwenImageEdit">QwenImageEdit</option>
-                    <option value="Flux1Kontext">Flux1Kontext</option>
-                    <option value="Flux1Fill">Flux1Fill</option>
-                    <option value="FIBO">FIBO</option>
-                    <option value="SeedVR2">SeedVR2 (Upscale)</option>
+                    <option value="Flux1">{t('image.picker.classFlux1')}</option>
+                    <option value="ZImage">{t('image.picker.classZImage')}</option>
+                    <option value="Flux2Klein">{t('image.picker.classFlux2Klein')}</option>
+                    <option value="QwenImage">{t('image.picker.classQwenImage')}</option>
+                    <option value="QwenImageEdit">{t('image.picker.classQwenImageEdit')}</option>
+                    <option value="Flux1Kontext">{t('image.picker.classFlux1Kontext')}</option>
+                    <option value="Flux1Fill">{t('image.picker.classFlux1Fill')}</option>
+                    <option value="FIBO">{t('image.picker.classFIBO')}</option>
+                    <option value="SeedVR2">{t('image.picker.classSeedVR2')}</option>
                   </select>
                 </div>
               </div>
@@ -465,7 +476,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 <p className="text-xs mt-1">{downloadError}</p>
                 {!hasHfToken && (
                   <p className="text-xs mt-2">
-                    {t('image.picker.addHfToken')} <strong>Server tab &gt; Download</strong> section.{' '}
+                    {t('image.picker.addHfToken')} <strong>{t('image.picker.serverTabDownloadStrong')}</strong> {t('image.picker.sectionSuffix')}{' '}
                     <a
                       href="https://huggingface.co/settings/tokens"
                       target="_blank"
@@ -490,7 +501,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 <p className="font-medium">{t('image.picker.incompleteDownload')}</p>
                 <p className="text-xs mt-1">
                   {t('image.picker.missingComponents')} <strong>{missingComponents.join(', ')}</strong>.
-                  Re-download the model to get all files, or the server will hang trying to fetch them.
+                  {' '}{t('image.picker.redownloadHint')}
                 </p>
               </div>
             </div>
@@ -501,7 +512,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
         {(selectedModel || (showCustom && customPath.trim())) && (
           <div className="flex items-center gap-4 p-4 bg-card border border-border rounded-lg">
             <div className="flex-1">
-              <label className="text-xs text-muted-foreground block mb-1.5">Quantization</label>
+              <label className="text-xs text-muted-foreground block mb-1.5">{t('image.picker.quantization')}</label>
               <div className="flex gap-1.5">
                 {filteredQuantizeOptions.map(opt => (
                   <button
@@ -513,8 +524,8 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                         : 'bg-muted text-muted-foreground hover:bg-muted/80'
                     }`}
                   >
-                    <span className="font-medium">{opt.label}</span>
-                    <span className="block text-[10px] opacity-75 mt-0.5">{opt.desc}</span>
+                    <span className="font-medium">{'labelKey' in opt && opt.labelKey ? t(opt.labelKey) : opt.label}</span>
+                    <span className="block text-[10px] opacity-75 mt-0.5">{t(opt.descKey)}</span>
                   </button>
                 ))}
               </div>
@@ -525,7 +536,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
               <label className="text-xs text-muted-foreground block mb-1.5">{t('image.picker.serverSettings')}</label>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[10px] text-muted-foreground">Host</label>
+                  <label className="text-[10px] text-muted-foreground">{t('sessions.create.host')}</label>
                   <input type="text" value={serverHost} onChange={e => setServerHost(e.target.value)}
                     className="w-full px-2 py-1 bg-muted border border-input rounded text-xs" />
                 </div>
@@ -537,7 +548,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 <div>
                   <label className="text-[10px] text-muted-foreground">{t('image.picker.apiKey')}</label>
                   <input type="password" value={serverApiKey} onChange={e => setServerApiKey(e.target.value)}
-                    placeholder="Optional" className="w-full px-2 py-1 bg-muted border border-input rounded text-xs" />
+                    placeholder={t('image.picker.apiKeyPlaceholder')} className="w-full px-2 py-1 bg-muted border border-input rounded text-xs" />
                 </div>
                 <div>
                   <label className="text-[10px] text-muted-foreground">{t('image.picker.logLevel')}</label>
@@ -583,7 +594,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 className="px-6 py-3 bg-muted text-muted-foreground rounded-lg flex items-center gap-2 font-medium text-sm opacity-60"
               >
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Checking...
+                {t('image.picker.checkingButton')}
               </button>
             ) : (
               <button
@@ -591,7 +602,7 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
                 className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2 font-medium text-sm"
               >
                 <Download className="h-4 w-4" />
-                Download
+                {t('sessions.create.download')}
               </button>
             )}
           </div>
@@ -607,10 +618,10 @@ export function ImageModelPicker({ onSelect }: ImageModelPickerProps) {
           </button>
         </div>
         <p className="text-[11px] text-muted-foreground text-center">
-          Models are downloaded from HuggingFace (~6-24 GB depending on model and quantization).
+          {t('image.picker.downloadNote')}
           {!hasHfToken && (
             <span>
-              {' '}You may need to <a href="https://huggingface.co/settings/tokens" className="underline" target="_blank" rel="noopener">set an HF token</a> and accept the{' '}
+              {' '}{t('image.picker.youMayNeedTo')} <a href="https://huggingface.co/settings/tokens" className="underline" target="_blank" rel="noopener">{t('image.picker.setHfTokenLink')}</a> {t('image.picker.andAcceptThe')}{' '}
               <a href="https://huggingface.co/black-forest-labs/FLUX.1-schnell" className="underline" target="_blank" rel="noopener">{t('image.picker.fluxLicense')}</a>.
             </span>
           )}

@@ -141,7 +141,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
           className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
         >
           <ArrowLeft className="h-3 w-3" />
-          Back
+          {t('common.back')}
         </button>
 
         <h2 className="text-2xl font-bold">{t('tools.doctor.modelDoctor')}</h2>
@@ -159,7 +159,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
                 value={modelPath}
                 onChange={e => setModelPath(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && runDoctor()}
-                placeholder="/path/to/model or org/model-name"
+                placeholder={t('tools.doctor.pathPlaceholder')}
                 className="flex-1 px-3 py-2 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                 list="doctor-model-paths"
                 disabled={running}
@@ -174,7 +174,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
                   onClick={cancel}
                   className="px-4 py-2 text-sm bg-destructive text-destructive-foreground rounded hover:bg-destructive/90"
                 >
-                  Cancel
+                  {t('common.cancel')}
                 </button>
               ) : (
                 <button
@@ -198,7 +198,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
             />
             <span className="text-muted-foreground">
               {t('tools.doctor.includeInferenceTest')}
-              <span className="text-xs ml-1">(loads full model, uses significant memory)</span>
+              <span className="text-xs ml-1">{t('doctor.includeInferenceHint')}</span>
             </span>
           </label>
         </div>
@@ -226,15 +226,15 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
               )}
               <div>
                 <p className="text-sm font-medium">
-                  {running ? 'Running diagnostics...' :
-                   wasCancelled ? 'Diagnostics cancelled' :
-                   failCount > 0 ? `${failCount} issue${failCount > 1 ? 's' : ''} found` :
-                   warnCount > 0 ? `${passCount} passed, ${warnCount} warning${warnCount > 1 ? 's' : ''}` :
-                   `All ${passCount} checks passed`}
+                  {running ? t('doctor.runningDiagnostics') :
+                   wasCancelled ? t('doctor.diagnosticsCancelled') :
+                   failCount > 0 ? t('doctor.issuesFound', { count: failCount, plural: failCount > 1 ? 's' : '' }) :
+                   warnCount > 0 ? t('doctor.passedWithWarnings', { passed: passCount, warnings: warnCount, plural: warnCount > 1 ? 's' : '' }) :
+                   t('doctor.allChecksPassed', { count: passCount })}
                 </p>
                 {!running && !wasCancelled && (
                   <p className="text-xs text-muted-foreground">
-                    {passCount} passed, {failCount} failed, {warnCount} warnings
+                    {t('doctor.summaryDetail', { passed: passCount, failed: failCount, warnings: warnCount })}
                   </p>
                 )}
               </div>
@@ -254,6 +254,7 @@ export function ModelDoctor({ initialModelPath, onBack, models = [] }: ModelDoct
 }
 
 function CheckCard({ check }: { check: CheckResult }) {
+  const { t } = useTranslation()
   const statusIcon = {
     pass: <CheckCircle2 className="h-4 w-4 text-green-500" />,
     fail: <XCircle className="h-4 w-4 text-destructive" />,
@@ -276,7 +277,7 @@ function CheckCard({ check }: { check: CheckResult }) {
         {statusIcon[check.status]}
         <span className="text-sm font-medium">{check.name}</span>
         <span className="text-xs text-muted-foreground uppercase">
-          {check.status === 'running' ? 'checking...' : check.status}
+          {check.status === 'running' ? t('doctor.checking') : check.status}
         </span>
       </div>
       {check.details.length > 0 && (

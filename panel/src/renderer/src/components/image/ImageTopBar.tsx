@@ -62,7 +62,7 @@ export function ImageTopBar({
   onToggleSidebar
 }: ImageTopBarProps) {
   const { t } = useTranslation()
-  const quantizeLabel = quantize === 0 ? 'Full' : `${quantize}-bit`
+  const quantizeLabel = quantize === 0 ? t('image.topbar.quantFull') : `${quantize}-bit`
   const [showPicker, setShowPicker] = useState(false)
   const [loadingElapsed, setLoadingElapsed] = useState(0)
 
@@ -118,7 +118,7 @@ export function ImageTopBar({
   }, [showPicker])
 
   const displaySource = displayModelName || model
-  const displayName = displaySource ? (displaySource.includes('/') ? displaySource.split('/').pop() : displaySource) : 'No model selected'
+  const displayName = displaySource ? (displaySource.includes('/') ? displaySource.split('/').pop() : displaySource) : t('image.topbar.noModelSelected')
 
   const genModels = AVAILABLE_MODELS.filter(m => m.category === 'generate')
   const editModels = AVAILABLE_MODELS.filter(m => m.category === 'edit')
@@ -133,7 +133,7 @@ export function ImageTopBar({
           <button
             onClick={onToggleSidebar}
             className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors mr-1"
-            title="Show history"
+            title={t('image.topbar.historyTitle')}
           >
             <PanelLeftOpen className="h-4 w-4" />
           </button>
@@ -145,7 +145,7 @@ export function ImageTopBar({
             onClick={() => !generating && setShowPicker(!showPicker)}
             disabled={generating}
             className={`flex items-center gap-1 text-sm font-medium transition-colors ${generating ? 'opacity-50 cursor-not-allowed' : 'hover:text-primary'}`}
-            title={generating ? 'Cannot switch while generating' : 'Switch model'}
+            title={generating ? t('image.topbar.cannotSwitchTitle') : t('image.topbar.switchModelTitle')}
           >
             <span className="truncate max-w-[200px]">{displayName}</span>
             <ChevronDown className={`h-3 w-3 text-muted-foreground transition-transform flex-shrink-0 ${showPicker ? 'rotate-180' : ''}`} />
@@ -222,10 +222,10 @@ export function ImageTopBar({
             'bg-gray-400'
           }`} />
           <span className="text-xs text-muted-foreground">
-            {status === 'running' && port ? `Running on :${port}` :
-             status === 'starting' ? `Loading model... ${formatElapsed(loadingElapsed)}` :
-             status === 'error' ? 'Error' :
-             'Stopped'}
+            {status === 'running' && port ? t('image.topbar.runningOnPort', { port }) :
+             status === 'starting' ? `${t('chat.interface.loadingBanner')} ${formatElapsed(loadingElapsed)}` :
+             status === 'error' ? t('status.error') :
+             t('status.stopped')}
           </span>
         </div>
       </div>
@@ -235,14 +235,14 @@ export function ImageTopBar({
         <button
           onClick={onLogs}
           className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-          title="Logs"
+          title={t('image.topbar.logsTitle')}
         >
           <ScrollText className="h-4 w-4" />
         </button>
         <button
           onClick={onSettings}
           className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-          title="Settings"
+          title={t('image.topbar.settingsTitle')}
         >
           <Settings className="h-4 w-4" />
         </button>
@@ -250,7 +250,7 @@ export function ImageTopBar({
           <button
             onClick={onStop}
             className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-destructive transition-colors"
-            title={status === 'starting' ? 'Cancel loading' : 'Stop server'}
+            title={status === 'starting' ? t('image.topbar.cancelLoadingTitle') : t('image.topbar.stopServerTitle')}
           >
             <Square className="h-4 w-4" />
           </button>
@@ -259,7 +259,7 @@ export function ImageTopBar({
           <button
             onClick={onChangeModel}
             className="p-1.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
-            title="Retry"
+            title={t('image.topbar.retryTitle')}
           >
             <RefreshCw className="h-4 w-4" />
           </button>

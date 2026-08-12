@@ -35,11 +35,11 @@ export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelI
       if (result.success) {
         setOutput(result.output)
       } else {
-        setError(result.error || 'Failed to inspect model')
+        setError(result.error || t('tools.inspector.failed'))
       }
     } catch (err: any) {
       if (!mountedRef.current || thisCallId !== callIdRef.current) return
-      setError(err.message || 'Failed to inspect model')
+      setError(err.message || t('tools.inspector.failed'))
     } finally {
       if (mountedRef.current && thisCallId === callIdRef.current) {
         setLoading(false)
@@ -62,7 +62,7 @@ export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelI
           className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
         >
           <ArrowLeft className="h-3 w-3" />
-          Back
+          {t('common.back')}
         </button>
 
         <h2 className="text-2xl font-bold">{t('tools.inspector.modelInspector')}</h2>
@@ -80,7 +80,7 @@ export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelI
                 value={modelPath}
                 onChange={e => setModelPath(e.target.value)}
                 onKeyDown={e => e.key === 'Enter' && runInfo(modelPath)}
-                placeholder="/path/to/model or org/model-name"
+                placeholder={t('tools.inspector.pathPlaceholder')}
                 className="w-full px-3 py-2 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
                 list="model-paths"
                 disabled={loading}
@@ -97,7 +97,7 @@ export function ModelInspector({ initialModelPath, onBack, models = [] }: ModelI
               className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 flex items-center gap-2"
             >
               {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-              Inspect
+              {t('inspector.inspectButton')}
             </button>
           </div>
         </div>

@@ -57,7 +57,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
 
       setResult({ dimensions: dims, tokens, preview, similarity })
     } catch (err: any) {
-      setError(err.message || 'Embedding failed')
+      setError(err.message || t('sessions.embeddings.failed'))
     } finally {
       setLoading(false)
     }
@@ -85,7 +85,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
         <textarea
           value={textA}
           onChange={e => setTextA(e.target.value)}
-          placeholder="Enter text to embed..."
+          placeholder={t('sessions.embeddings.textAPlaceholder')}
           rows={3}
           className="w-full text-xs px-2 py-1.5 bg-background border border-input rounded resize-none focus:outline-none focus:ring-1 focus:ring-ring"
         />
@@ -93,11 +93,11 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
 
       {/* Text B (similarity) */}
       <div>
-        <label className="text-xs text-muted-foreground block mb-1">Text B (optional — for similarity)</label>
+        <label className="text-xs text-muted-foreground block mb-1">{t('sessions.embeddings.textB')}</label>
         <textarea
           value={textB}
           onChange={e => setTextB(e.target.value)}
-          placeholder="Enter second text to compare..."
+          placeholder={t('sessions.embeddings.textBPlaceholder')}
           rows={3}
           className="w-full text-xs px-2 py-1.5 bg-background border border-input rounded resize-none focus:outline-none focus:ring-1 focus:ring-ring"
         />
@@ -109,7 +109,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
         disabled={loading || !textA.trim()}
         className="px-4 py-2 text-sm bg-primary text-primary-foreground rounded hover:bg-primary/90 disabled:opacity-50 w-full"
       >
-        {loading ? 'Embedding...' : textB.trim() ? 'Embed & Compare' : 'Generate Embedding'}
+        {loading ? t('sessions.embeddings.embedding') : textB.trim() ? t('sessions.embeddings.embedAndCompare') : t('sessions.embeddings.generate')}
       </button>
 
       {/* Error */}
@@ -122,11 +122,11 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
         <div className="space-y-2">
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-background px-3 py-2 rounded border border-border">
-              <div className="text-xs text-muted-foreground">Dimensions</div>
+              <div className="text-xs text-muted-foreground">{t('sessions.embed.dimensions')}</div>
               <div className="font-mono text-sm">{result.dimensions}</div>
             </div>
             <div className="bg-background px-3 py-2 rounded border border-border">
-              <div className="text-xs text-muted-foreground">Tokens</div>
+              <div className="text-xs text-muted-foreground">{t('sessions.embed.tokens')}</div>
               <div className="font-mono text-sm">{result.tokens}</div>
             </div>
           </div>
@@ -137,7 +137,7 @@ export function EmbeddingsPanel({ endpoint, sessionStatus, sessionId }: Embeddin
               <div className="font-mono text-lg font-bold">
                 {result.similarity.toFixed(4)}
                 <span className="text-xs text-muted-foreground ml-2">
-                  {result.similarity > 0.8 ? 'Very Similar' : result.similarity > 0.5 ? 'Somewhat Similar' : 'Different'}
+                  {result.similarity > 0.8 ? t('sessions.embeddings.verySimilar') : result.similarity > 0.5 ? t('sessions.embeddings.somewhatSimilar') : t('sessions.embeddings.different')}
                 </span>
               </div>
               {/* Visual bar */}

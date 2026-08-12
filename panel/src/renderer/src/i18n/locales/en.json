@@ -526,7 +526,9 @@
       "regenerateTitle": "Regenerate response",
       "waitingForResponse": "Waiting for model response...",
       "finalizingAnswer": "Finalizing answer...",
-      "noVisibleResponse": "No visible response was produced."
+      "noVisibleResponse": "No visible response was produced.",
+      "justNow": "Just now",
+      "yesterdayAt": "Yesterday {time}"
     },
     "messages": {
       "emptyPrimary": "Send a message to start the conversation",
@@ -589,6 +591,21 @@
       "readAloudTitle": "Read aloud",
       "stop": "stop",
       "speak": "speak"
+    },
+    "metrics": {
+      "tokensLabel": "{n} tokens",
+      "tokensTitleStreaming": "Tokens generated so far",
+      "tokensTitleDone": "Completion tokens",
+      "tpsTitle": "Decode speed after first token; includes reasoning and tool-loop completion tokens",
+      "ppsTitle": "Prompt processing speed",
+      "promptLabel": "{n} prompt",
+      "cachedSuffix": " ({cached} cached)",
+      "promptTitleCache": "Prompt tokens — cache: {detail}",
+      "promptTitle": "Prompt tokens processed",
+      "ttftTitle": "Time to first token",
+      "elapsedTitle": "Elapsed time",
+      "totalLabel": "{v}s total",
+      "totalTitle": "Total request time"
     }
   },
   "sessions": {
@@ -1622,7 +1639,16 @@
       "downloadNote": "Models are downloaded from HuggingFace (~6-24 GB depending on model and quantization).",
       "youMayNeedTo": "You may need to",
       "setHfTokenLink": "set an HF token",
-      "andAcceptThe": "and accept the"
+      "andAcceptThe": "and accept the",
+      "descSchnell": "Fastest generation (4 steps)",
+      "descZImageTurbo": "Fast turbo generation (4 steps)",
+      "descDev": "High quality generation (20 steps)",
+      "descKlein4b": "Fast & small (20 steps)",
+      "descKlein9b": "Medium quality (20 steps)",
+      "descQwenImage": "Strong prompt understanding (20 steps)",
+      "descQwenImageEdit": "Instruction-based editing (28 steps)",
+      "descKontext": "Subject-consistent editing (24 steps)",
+      "descFill": "Inpainting with mask (20 steps)"
     },
     "prompt": {
       "variationLabel": "Variation",

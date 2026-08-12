@@ -107,16 +107,16 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
   const isGenerating = isActive && lastStatus.phase === 'generating'
   const summaryParts: string[] = []
   if (isGenerating) {
-    summaryParts.push('Generating tool call...')
+    summaryParts.push(t('chat.toolStatus.generating'))
   } else if (isActive) {
-    summaryParts.push(`Using ${toolCount} tool${toolCount !== 1 ? 's' : ''}...`)
+    summaryParts.push(t('chat.toolStatus.using', { n: toolCount }))
   } else if (hasInterrupted) {
-    summaryParts.push(`${toolCount} tool${toolCount !== 1 ? 's' : ''} interrupted`)
+    summaryParts.push(t('chat.toolStatus.interrupted', { n: toolCount }))
   } else {
-    summaryParts.push(`Used ${toolCount} tool${toolCount !== 1 ? 's' : ''}`)
+    summaryParts.push(t('chat.toolStatus.used', { n: toolCount }))
   }
   if (errorCount > 0) {
-    summaryParts.push(`(${errorCount} failed)`)
+    summaryParts.push(t('chat.toolStatus.failedSuffix', { n: errorCount }))
   }
   const summary = summaryParts.join(' ')
 

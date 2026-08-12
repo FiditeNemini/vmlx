@@ -526,7 +526,9 @@
       "regenerateTitle": "重新生成响应",
       "waitingForResponse": "正在等待模型响应...",
       "finalizingAnswer": "正在整理最终回答...",
-      "noVisibleResponse": "未生成可见响应。"
+      "noVisibleResponse": "未生成可见响应。",
+      "justNow": "刚刚",
+      "yesterdayAt": "昨天 {time}"
     },
     "messages": {
       "emptyPrimary": "发送消息以开始对话",
@@ -589,6 +591,21 @@
       "readAloudTitle": "朗读",
       "stop": "停止",
       "speak": "朗读"
+    },
+    "metrics": {
+      "tokensLabel": "{n} 个 token",
+      "tokensTitleStreaming": "到目前为止生成的 token",
+      "tokensTitleDone": "补全 token",
+      "tpsTitle": "首个 token 之后的解码速度；包含推理和工具循环的补全 token",
+      "ppsTitle": "提示词处理速度",
+      "promptLabel": "提示词 {n}",
+      "cachedSuffix": "（{cached} 已缓存）",
+      "promptTitleCache": "提示词 token — 缓存：{detail}",
+      "promptTitle": "已处理的提示词 token",
+      "ttftTitle": "首个 token 时间",
+      "elapsedTitle": "已用时间",
+      "totalLabel": "共 {v} 秒",
+      "totalTitle": "请求总时间"
     }
   },
   "sessions": {
@@ -1622,7 +1639,16 @@
       "downloadNote": "模型从 HuggingFace 下载（视模型和量化方式约 6-24 GB）。",
       "youMayNeedTo": "你可能需要",
       "setHfTokenLink": "设置 HF 令牌",
-      "andAcceptThe": "并接受"
+      "andAcceptThe": "并接受",
+      "descSchnell": "生成最快（4 步）",
+      "descZImageTurbo": "快速涡轮生成（4 步）",
+      "descDev": "高质量生成（20 步）",
+      "descKlein4b": "快速小巧（20 步）",
+      "descKlein9b": "中等质量（20 步）",
+      "descQwenImage": "提示词理解力强（20 步）",
+      "descQwenImageEdit": "基于指令的编辑（28 步）",
+      "descKontext": "主体一致性编辑（24 步）",
+      "descFill": "蒙版修复填充（20 步）"
     },
     "prompt": {
       "variationLabel": "变体",

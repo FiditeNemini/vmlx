@@ -5955,9 +5955,15 @@ class TestVmlx57DeleteLocalModel:
 
     def test_ui_has_delete_button_in_model_list(self):
         src = (REPO_ROOT / "panel/src/renderer/src/components/sessions/CreateSession.tsx").read_text()
+        en_locale = (REPO_ROOT / "panel/src/renderer/src/i18n/locales/en.json").read_text()
         assert "vmlx#57" in src
-        # Trash icon + confirm dialog + IPC call + re-scan
-        assert "Delete " in src and "Delete a local model" not in src[:1000]
+        # The delete button copy moved behind t() in the i18n pass. The
+        # invariant is unchanged — the row must carry a delete affordance whose
+        # label says what gets removed — so pin the key wiring in the .tsx AND
+        # the English copy the key resolves to.
+        assert "t('sessions.create.deleteModelTitle', { name: model.name })" in src
+        assert '"deleteModelTitle": "Delete {name} from disk"' in en_locale
+        assert "Delete a local model" not in src[:1000]
         assert "confirm(" in src, (
             "delete must have a confirm() — the path is rm -rf'd"
         )
@@ -5967,8 +5973,11 @@ class TestVmlx57DeleteLocalModel:
             "must rescan after delete — otherwise the row stays in the "
             "list even though the files are gone"
         )
-        # Confirm dialog quotes the path so user knows what they're nuking
-        assert "Path: ${model.path}" in src or "model.path" in src
+        # Confirm dialog quotes the path so user knows what they're nuking:
+        # the confirm body interpolates model.path and the catalog template
+        # prints it after the "Path:" label.
+        assert "t('sessions.create.deleteModelConfirm', { label, path: model.path })" in src
+        assert "Path: {path}" in en_locale
 
 
 class TestGemma4DegradedChannelStripping:
@@ -10108,9 +10117,22 @@ class TestModelDeleteAlwaysVisible:
         what will be rm'd — especially important for models inside
         system dirs."""
         src = Path(self.CREATE_SESSION).read_text()
-        assert "Path: ${model.path}" in src, (
+        # The confirm body moved behind t() in the i18n pass. The invariant is
+        # unchanged — the dialog must print the full model.path — so pin the
+        # interpolation in the .tsx AND the "Path:" line in the English
+        # template the key resolves to.
+        en_locale = Path(
+            str(self.CREATE_SESSION).replace(
+                "components/sessions/CreateSession.tsx", "i18n/locales/en.json"
+            )
+        ).read_text()
+        assert "t('sessions.create.deleteModelConfirm', { label, path: model.path })" in src, (
             "confirm dialog must include the full model.path so user "
             "can verify before committing to the delete"
+        )
+        assert "Path: {path}" in en_locale, (
+            "the confirm template must print the interpolated path after "
+            "a Path: label"
         )
 
 

@@ -1358,9 +1358,15 @@ describe('Media attachment product path', () => {
     expect(source).toContain('error?.error')
     expect(source).toContain('error?.detail')
     expect(source).toContain('wrappedDisconnects.some((nested) => isExpectedChatDisconnectError(nested))')
-    expect(source).toContain('Server connection lost. The model server may have crashed or stopped. Try restarting the session.')
-    expect(source).toContain('const msg = formatChatSendErrorMessage(error)')
+    // The connection-lost copy moved behind t() in the i18n pass. The invariant
+    // is unchanged — an expected disconnect must render THIS sentence — so pin
+    // the key in the formatter AND the English copy that key resolves to.
+    const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8')
+    expect(source).toContain("return t('chat.interface.toast.connectionLost')")
+    expect(enLocale).toContain('"connectionLost": "Server connection lost. The model server may have crashed or stopped. Try restarting the session."')
+    expect(source).toContain('const msg = formatChatSendErrorMessage(error, t)')
     expect(source).not.toContain("const msg = error?.message || 'Unknown error'")
+    expect(source).not.toContain("const msg = error?.message || t('chat.interface.toast.unknownError')")
   })
 
   it('does not log expected chat EPIPE disconnects as raw failed-message console errors', () => {

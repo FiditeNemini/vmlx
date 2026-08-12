@@ -316,21 +316,21 @@ export function MaskPainter({
         <button
           onClick={() => setTool("brush")}
           className={`p-1.5 rounded transition-colors ${tool === "brush" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-          title="Paint mask (white = area to edit)"
+          title={t('image.mask.paintTitle')}
         >
           <Paintbrush className="h-4 w-4" />
         </button>
         <button
           onClick={() => setTool("rect")}
           className={`p-1.5 rounded transition-colors ${tool === "rect" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-          title="Rectangle select — drag a box over the area to fill"
+          title={t('image.mask.rectTitle')}
         >
           <Square className="h-4 w-4" />
         </button>
         <button
           onClick={() => setTool("eraser")}
           className={`p-1.5 rounded transition-colors ${tool === "eraser" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-          title="Erase mask (remove painted area)"
+          title={t('image.mask.eraseTitle')}
         >
           <Eraser className="h-4 w-4" />
         </button>
@@ -341,20 +341,20 @@ export function MaskPainter({
         <button
           onClick={() => setBrushSize((s) => Math.max(5, s - 5))}
           className="p-1 text-muted-foreground hover:text-foreground"
-          title="Smaller brush"
+          title={t('image.mask.smallerTitle')}
         >
           <Minus className="h-3.5 w-3.5" />
         </button>
         <span
           className="text-xs text-muted-foreground w-8 text-center"
-          title="Brush size in pixels"
+          title={t('image.mask.brushSizeTitle')}
         >
           {brushSize}px
         </span>
         <button
           onClick={() => setBrushSize((s) => Math.min(100, s + 5))}
           className="p-1 text-muted-foreground hover:text-foreground"
-          title="Larger brush"
+          title={t('image.mask.largerTitle')}
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
@@ -364,7 +364,7 @@ export function MaskPainter({
         <button
           onClick={handleClear}
           className="p-1.5 text-muted-foreground hover:text-foreground rounded"
-          title="Clear entire mask"
+          title={t('image.mask.clearTitle')}
         >
           <RotateCcw className="h-4 w-4" />
         </button>
@@ -374,14 +374,14 @@ export function MaskPainter({
         <button
           onClick={handleConfirm}
           className="px-3 py-1 bg-primary text-primary-foreground rounded text-xs font-medium flex items-center gap-1"
-          title="Apply mask and edit"
+          title={t('image.mask.applyTitle')}
         >
-          <Check className="h-3.5 w-3.5" /> Apply
+          <Check className="h-3.5 w-3.5" /> {t('image.mask.apply')}
         </button>
         <button
           onClick={onCancel}
           className="px-2 py-1 text-muted-foreground hover:text-destructive rounded text-xs"
-          title="Cancel mask painting"
+          title={t('image.mask.cancelTitle')}
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -389,8 +389,7 @@ export function MaskPainter({
 
       {/* Help text */}
       <p className="text-[10px] text-muted-foreground">
-        Paint over areas you want to edit (shown in red). The model will
-        fill/replace only the painted areas.
+        {t('image.mask.helpText')}
       </p>
       {maskError && (
         <p className="text-[10px] text-destructive">{maskError}</p>

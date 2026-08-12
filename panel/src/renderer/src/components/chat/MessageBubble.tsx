@@ -190,7 +190,7 @@ function useTypewriter(fullContent: string, isStreaming: boolean): string {
 
 export const MessageBubble = memo(function MessageBubble({ message, isStreaming, metrics, reasoningContent, reasoningSegments, reasoningDone, answerPassPending, toolStatuses, warnings, sessionId, sessionEndpoint, isLastAssistant, onRegenerate, onEdit }: MessageBubbleProps) {
   const { t } = useTranslation()
-  const timeLabel = useRelativeTime(message.timestamp, formatTimestamp)
+  const timeLabel = useRelativeTime(message.timestamp, (ts) => formatTimestamp(ts, t))
   const [copied, setCopied] = useState(false)
   const [zoomedImage, setZoomedImage] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -390,7 +390,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
     if (message.role !== 'assistant') return null
 
     if (metrics) {
-      const items = getMetricsItems(metrics, !!isStreaming)
+      const items = getMetricsItems(metrics, !!isStreaming, t)
       return (
         <div className="mt-3 pt-2 border-t border-border/30 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground/70">
           {isStreaming && (

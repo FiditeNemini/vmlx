@@ -43,8 +43,13 @@ describe('load progress honesty', () => {
     const card = read('src/renderer/src/components/sessions/SessionCard.tsx')
     const view = read('src/renderer/src/components/sessions/SessionView.tsx')
 
-    expect(card).toContain('Model files:')
-    expect(view).toContain('Model files:')
+    // The label moved behind t() in the i18n pass. The invariant is unchanged —
+    // both surfaces must render the model-files line — so pin the key in both
+    // components AND the English copy that key resolves to.
+    const en = read('src/renderer/src/i18n/locales/en.json')
+    expect(card).toContain("t('sessions.card.modelFiles')")
+    expect(view).toContain("t('sessions.card.modelFiles')")
+    expect(en).toContain('"modelFiles": "Model files:"')
   })
 
   it('polls process RSS during loading and renders resident RAM separately', () => {
@@ -57,8 +62,11 @@ describe('load progress honesty', () => {
     expect(source).toContain("execFileSync('ps', ['-o', 'rss=', '-g'")
     expect(source).toContain('residentPercent')
     expect(context).toContain('residentPercent?: number')
-    expect(card).toContain('Resident RAM:')
-    expect(view).toContain('Resident RAM:')
+    // Same i18n retarget as the model-files label above.
+    const en = read('src/renderer/src/i18n/locales/en.json')
+    expect(card).toContain("t('sessions.card.residentRam')")
+    expect(view).toContain("t('sessions.card.residentRam')")
+    expect(en).toContain('"residentRam": "Resident RAM:"')
   })
 })
 

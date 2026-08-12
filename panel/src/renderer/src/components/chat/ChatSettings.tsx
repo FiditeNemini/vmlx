@@ -478,7 +478,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
             <div className="flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
               <div className="space-y-1.5">
-                <div className="font-medium">Review saved chat settings</div>
+                <div className="font-medium">{t('chat.settings.reviewSaved')}</div>
                 {compatibilityWarnings.map((warning) => (
                   <p key={warning} className="leading-snug">{warning}</p>
                 ))}
@@ -704,7 +704,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
               label={t('chat.settings.maxTokens')}
               value={displayedOverrides.maxTokens}
               onChange={v => update('maxTokens', v)}
-              placeholder={displayedModelDefaults.maxTokens ? `${displayedModelDefaults.maxTokens} (model default)` : t('chat.settings.maxTokensPlaceholder')}
+              placeholder={displayedModelDefaults.maxTokens ? t('chat.settings.modelDefaultWithValue', { value: displayedModelDefaults.maxTokens }) : t('chat.settings.maxTokensPlaceholder')}
               help={t('chat.settings.maxTokensHelp')}
             />
             {/* Show ONLY for families whose engine honors a top-level
@@ -719,7 +719,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                 label={t('chat.settings.maxThinkingTokens')}
                 value={displayedOverrides.maxThinkingTokens}
                 onChange={v => update('maxThinkingTokens', v)}
-                placeholder={displayedModelDefaults.maxThinkingTokens ? `${displayedModelDefaults.maxThinkingTokens} (model default)` : t('chat.settings.maxThinkingTokensPlaceholder')}
+                placeholder={displayedModelDefaults.maxThinkingTokens ? t('chat.settings.modelDefaultWithValue', { value: displayedModelDefaults.maxThinkingTokens }) : t('chat.settings.maxThinkingTokensPlaceholder')}
                 help={t('chat.settings.maxThinkingTokensHelp')}
               />
             )}
@@ -1005,6 +1005,7 @@ function SliderField({ label, value, onChange, min, max, step, help, format, exa
   format?: (v: number) => string
   exactInput?: { min?: number; max?: number }
 }) {
+  const { t } = useTranslation()
   return (
     <div>
       <div className="flex justify-between text-sm mb-1">
@@ -1016,7 +1017,7 @@ function SliderField({ label, value, onChange, min, max, step, help, format, exa
         {exactInput ? (
           <input
             type="number"
-            aria-label={`${label} exact value`}
+            aria-label={t('chat.settings.exactValueAria', { label })}
             value={value}
             min={exactInput.min}
             max={exactInput.max}

@@ -636,7 +636,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         } catch {
           if (active) {
             setConfig(DEFAULT_CONFIG)
-            setMessage({ type: 'error', text: 'Stored configuration was corrupted and has been reset to defaults. Save to persist.' })
+            setMessage({ type: 'error', text: t('sessions.settings.configCorrupt') })
             setDirty(true)
           }
         }
@@ -668,14 +668,14 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
       if (data.sessionId === sessionId) {
         setSession(prev => prev ? { ...prev, status: 'running' } : prev)
         setRestarting(false)
-        setMessage({ type: 'success', text: 'Session restarted with new settings.' })
+        setMessage({ type: 'success', text: t('sessions.settings.restartedToast') })
       }
     })
     const unsubError = window.api.sessions.onError((data: any) => {
       if (data.sessionId === sessionId) {
         setSession(prev => prev ? { ...prev, status: 'error' } : prev)
         setRestarting(false)
-        setMessage({ type: 'error', text: `Restart failed: ${data.error}` })
+        setMessage({ type: 'error', text: t('sessions.settings.restartFailed', { error: data.error }) })
       }
     })
     return () => {
@@ -701,14 +701,14 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         setMessage({
           type: 'success',
           text: result.restartRequired
-            ? `Settings saved. Restart the session for changes to take effect (${result.changedKeys?.join(', ')}).`
-            : 'Settings saved.'
+            ? t('sessions.settings.savedRestartRequired', { keys: result.changedKeys?.join(', ') ?? '' })
+            : t('sessions.settings.savedToast')
         })
         // Refresh session data
         const s = await window.api.sessions.get(sessionId)
         if (s) setSession(s)
       } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to save' })
+        setMessage({ type: 'error', text: result.error || t('sessions.settings.saveFailed') })
       }
     } catch (e) {
       setMessage({ type: 'error', text: (e as Error).message })
@@ -724,7 +724,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
       // Save first
       const saveResult = await window.api.sessions.update(sessionId, config)
       if (!saveResult.success) {
-        setMessage({ type: 'error', text: saveResult.error || 'Failed to save' })
+        setMessage({ type: 'error', text: saveResult.error || t('sessions.settings.saveFailed') })
         setSaving(false)
         return
       }
@@ -732,10 +732,10 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
 
       // Stop and wait for the process to actually exit
       setRestarting(true)
-      setMessage({ type: 'success', text: 'Stopping session...' })
+      setMessage({ type: 'success', text: t('sessions.settings.stopping') })
       const stopResult = await window.api.sessions.stop(sessionId)
       if (!stopResult.success) {
-        setMessage({ type: 'error', text: `Failed to stop: ${stopResult.error}` })
+        setMessage({ type: 'error', text: t('sessions.settings.stopFailed', { error: stopResult.error ?? '' }) })
         setRestarting(false)
         setSaving(false)
         return
@@ -743,10 +743,10 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
 
       // sessions.stop resolves only after stopSession has completed, so the
       // new process can start immediately without an arbitrary renderer delay.
-      setMessage({ type: 'success', text: 'Starting session with new settings...' })
+      setMessage({ type: 'success', text: t('sessions.settings.starting') })
       const startResult = await window.api.sessions.start(sessionId)
       if (!startResult.success) {
-        setMessage({ type: 'error', text: `Failed to start: ${startResult.error}` })
+        setMessage({ type: 'error', text: t('sessions.settings.startFailed', { error: startResult.error ?? '' }) })
         setRestarting(false)
       }
       // Success/failure will be handled by event listeners above

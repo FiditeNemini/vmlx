@@ -7,7 +7,10 @@
  *  - This week: "Mon 2:30 PM"
  *  - Older: "Mar 5, 2:30 PM"
  */
-export function formatTimestamp(ts: number): string {
+export function formatTimestamp(
+  ts: number,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
   const now = new Date();
   const date = new Date(ts);
   const diffMs = now.getTime() - date.getTime();
@@ -17,7 +20,7 @@ export function formatTimestamp(ts: number): string {
     minute: "2-digit",
   });
 
-  if (diffMs < 60_000) return "Just now";
+  if (diffMs < 60_000) return t('chat.bubble.justNow');
 
   const today = new Date(now);
   today.setHours(0, 0, 0, 0);
@@ -27,7 +30,7 @@ export function formatTimestamp(ts: number): string {
   weekAgo.setDate(weekAgo.getDate() - 7);
 
   if (ts >= today.getTime()) return timeStr;
-  if (ts >= yesterday.getTime()) return `Yesterday ${timeStr}`;
+  if (ts >= yesterday.getTime()) return t('chat.bubble.yesterdayAt', { time: timeStr });
   if (ts >= weekAgo.getTime()) {
     const day = date.toLocaleDateString([], { weekday: "short" });
     return `${day} ${timeStr}`;
@@ -116,43 +119,46 @@ export interface MessageMetrics {
 export function getMetricsItems(
   metrics: MessageMetrics,
   isStreaming: boolean,
+  t: (key: string, params?: Record<string, string | number>) => string,
 ): MetricItem[] {
   const items: MetricItem[] = [];
 
   items.push({
-    label: `${metrics.tokenCount} tokens`,
+    label: t('chat.metrics.tokensLabel', { n: metrics.tokenCount }),
     value: `${metrics.tokenCount}`,
-    title: isStreaming ? "Tokens generated so far" : "Completion tokens",
+    title: isStreaming
+      ? t('chat.metrics.tokensTitleStreaming')
+      : t('chat.metrics.tokensTitleDone'),
   });
 
   items.push({
     label: `${metrics.tokensPerSecond} t/s`,
     value: metrics.tokensPerSecond,
-    title:
-      "Decode speed after first token; includes reasoning and tool-loop completion tokens",
+    title: t('chat.metrics.tpsTitle'),
   });
 
   if (metrics.ppSpeed) {
     items.push({
       label: `${metrics.ppSpeed} pp/s`,
       value: metrics.ppSpeed,
-      title: "Prompt processing speed",
+      title: t('chat.metrics.ppsTitle'),
     });
   }
 
   if (metrics.promptTokens && metrics.promptTokens > 0) {
     let cached = "";
     if (metrics.cachedTokens) {
-      // Show cache detail if available (e.g. "paged", "paged+ssm(23)+tq", "disk")
+      // Show cache detail if available (e.g. "paged", "paged+ssm(23)+tq", "disk").
+      // The detail token is an engine echo and stays verbatim.
       const detail = metrics.cacheDetail ? ` ${metrics.cacheDetail}` : "";
-      cached = ` (${metrics.cachedTokens}${detail} cached)`;
+      cached = t('chat.metrics.cachedSuffix', { cached: `${metrics.cachedTokens}${detail}` });
     }
     items.push({
-      label: `${metrics.promptTokens} prompt${cached}`,
+      label: `${t('chat.metrics.promptLabel', { n: metrics.promptTokens })}${cached}`,
       value: `${metrics.promptTokens}`,
       title: metrics.cacheDetail
-        ? `Prompt tokens — cache: ${metrics.cacheDetail}`
-        : "Prompt tokens processed",
+        ? t('chat.metrics.promptTitleCache', { detail: metrics.cacheDetail })
+        : t('chat.metrics.promptTitle'),
       dimmed: true,
     });
   }
@@ -161,7 +167,7 @@ export function getMetricsItems(
     items.push({
       label: `${metrics.ttft}s TTFT`,
       value: metrics.ttft,
-      title: "Time to first token",
+      title: t('chat.metrics.ttftTitle'),
       dimmed: !isStreaming,
     });
   }
@@ -170,15 +176,15 @@ export function getMetricsItems(
     items.push({
       label: `${metrics.elapsed}s`,
       value: metrics.elapsed,
-      title: "Elapsed time",
+      title: t('chat.metrics.elapsedTitle'),
     });
   }
 
   if (!isStreaming && metrics.totalTime) {
     items.push({
-      label: `${metrics.totalTime}s total`,
+      label: t('chat.metrics.totalLabel', { v: metrics.totalTime }),
       value: metrics.totalTime,
-      title: "Total request time",
+      title: t('chat.metrics.totalTitle'),
     });
   }
 

@@ -16,6 +16,10 @@ const CATEGORY_KEYS: Record<string, string> = {
   "Cancel": "endpoints.cancelCategory",
   "Health": "endpoints.health",
   "Anthropic": "endpoints.anthropic",
+  "Messages API": "endpoints.messagesApi",
+  "Chat & Generate": "endpoints.chatGenerate",
+  "Models & Info": "endpoints.modelsInfo",
+  "Liveness": "endpoints.liveness",
 };
 
 const DESCRIPTION_KEYS: Record<string, string> = {
@@ -29,6 +33,10 @@ const DESCRIPTION_KEYS: Record<string, string> = {
   "Cancel in-flight streaming requests": "endpoints.cancelDesc",
   "Server health and status": "endpoints.healthDesc",
   "Anthropic Messages API — use with Claude Code, Anthropic SDK, or any Anthropic-compatible client": "endpoints.anthropicDesc",
+  "Model information": "endpoints.modelInfoDesc",
+  "Ollama-compatible endpoints — use with ollama CLI or any Ollama client. Responses use NDJSON streaming.": "endpoints.ollamaChatDesc",
+  "Model information and embeddings": "endpoints.modelsEmbeddingsDesc",
+  "Ollama compatibility check": "endpoints.ollamaLivenessDesc",
 };
 
 const ENDPOINT_DESC_KEYS: Record<string, string> = {
@@ -57,6 +65,14 @@ const ENDPOINT_DESC_KEYS: Record<string, string> = {
   "Cancel a responses stream": "endpoints.cancelResponsesEndpoint",
   "Cancel a text completion stream": "endpoints.cancelCompletionsEndpoint",
   "Health check — model status, memory, MCP info": "endpoints.healthEndpoint",
+  "Create a message (streaming or non-streaming)": "endpoints.createMessageEndpoint",
+  "Health check": "endpoints.healthCheckEndpoint",
+  "Chat completion (NDJSON streaming)": "endpoints.ollamaChatEndpoint",
+  "Text generation (NDJSON streaming)": "endpoints.ollamaGenerateEndpoint",
+  "Show model details": "endpoints.showModelEndpoint",
+  "Generate embeddings": "endpoints.ollamaEmbeddingsEndpoint",
+  "Generate embeddings (alias)": "endpoints.ollamaEmbedAliasEndpoint",
+  'Liveness check — returns "vMLX Gateway is running"': "endpoints.livenessCheckEndpoint",
 };
 
 interface Endpoint {

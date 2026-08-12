@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react'
+import { useTranslation } from '../../i18n'
 import { Copy, Check } from 'lucide-react'
 import type { ApiFormat } from './ApiDashboard'
 
@@ -397,6 +398,7 @@ const FORMAT_BUILDERS: Record<ApiFormat, Record<string, (b: string, k: string | 
 }
 
 export function CodeSnippets({ baseUrl, apiKey, modelId, isImage = false, isEdit = false, format = 'openai' }: CodeSnippetsProps) {
+  const { t } = useTranslation()
   const availableLangs = isImage ? IMAGE_LANGS : FORMAT_LANGS[format]
   const [lang, setLang] = useState<Lang>(availableLangs[0].key)
   const [copied, setCopied] = useState(false)
@@ -429,7 +431,7 @@ export function CodeSnippets({ baseUrl, apiKey, modelId, isImage = false, isEdit
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <h3 className="text-sm font-medium">Quick Start</h3>
+        <h3 className="text-sm font-medium">{t('snippets.quickStart')}</h3>
         <div className="flex gap-1">
           {availableLangs.map(l => (
             <button
@@ -453,7 +455,7 @@ export function CodeSnippets({ baseUrl, apiKey, modelId, isImage = false, isEdit
         <button
           onClick={handleCopy}
           className="absolute top-2 right-2 p-1.5 rounded bg-muted/80 hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          title="Copy"
+          title={t('api.copy')}
         >
           {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
         </button>

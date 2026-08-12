@@ -152,12 +152,12 @@ export function SessionCard({
           <div className="flex min-w-0 items-center gap-1.5">
             {isRemote && (
               <span className="text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded flex-shrink-0">
-                Remote
+                {t('sessions.card.remoteBadge')}
               </span>
             )}
             {isImage && (
               <span className="text-xs bg-violet-500/15 text-violet-400 px-1.5 py-0.5 rounded flex-shrink-0">
-                Image
+                {t('sessions.card.imageBadge')}
               </span>
             )}
             <h3
@@ -242,13 +242,13 @@ export function SessionCard({
               </p>
               {formatModelBytes(progress.modelBytes) && (
                 <p className="text-[10px] text-muted-foreground/80">
-                  Model files: {formatModelBytes(progress.modelBytes)}
-                  {progress.lazyResident ? ' — expert weights stream from SSD; resident RAM stays below bundle size' : ''}
+                  {t('sessions.card.modelFiles')} {formatModelBytes(progress.modelBytes)}
+                  {progress.lazyResident ? t('sessions.card.lazyResidentNote') : ''}
                 </p>
               )}
               {residentLoad && (
                 <p className="text-[10px] text-muted-foreground/80">
-                  Resident RAM: {residentLoad}
+                  {t('sessions.card.residentRam')} {residentLoad}
                 </p>
               )}
             </div>

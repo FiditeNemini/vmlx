@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { Trash2, Download, Pause, Play } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface LogsPanelProps {
   sessionId: string
@@ -27,6 +28,7 @@ function getLineClass(line: string): string {
 }
 
 export function LogsPanel({ sessionId, sessionStatus, isRemote }: LogsPanelProps) {
+  const { t } = useTranslation()
   const [lines, setLines] = useState<string[]>([])
   const [paused, setPaused] = useState(false)
   const [filter, setFilter] = useState('')
@@ -105,7 +107,7 @@ export function LogsPanel({ sessionId, sessionStatus, isRemote }: LogsPanelProps
       <div className="flex items-center gap-2 px-3 py-2 border-b border-border flex-shrink-0">
         <input
           type="text"
-          placeholder="Filter logs..."
+          placeholder={t('sessions.logs.filterPlaceholder')}
           value={filter}
           onChange={e => setFilter(e.target.value)}
           className="flex-1 px-2 py-1 text-xs bg-background border border-input rounded focus:outline-none focus:ring-1 focus:ring-ring"
@@ -113,21 +115,21 @@ export function LogsPanel({ sessionId, sessionStatus, isRemote }: LogsPanelProps
         <button
           onClick={() => setPaused(!paused)}
           className={`p-1 rounded text-xs ${paused ? 'text-warning' : 'text-muted-foreground hover:text-foreground'}`}
-          title={paused ? 'Resume live logs' : 'Pause live logs'}
+          title={paused ? t('sessions.logs.resumeTitle') : t('sessions.logs.pauseTitle')}
         >
           {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
         </button>
         <button
           onClick={handleExport}
           className="p-1 rounded text-muted-foreground hover:text-foreground text-xs"
-          title="Export logs"
+          title={t('sessions.logs.exportTitle')}
         >
           <Download className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={handleClear}
           className="p-1 rounded text-muted-foreground hover:text-destructive text-xs"
-          title="Clear logs"
+          title={t('sessions.logs.clearTitle')}
         >
           <Trash2 className="h-3.5 w-3.5" />
         </button>
@@ -135,10 +137,10 @@ export function LogsPanel({ sessionId, sessionStatus, isRemote }: LogsPanelProps
 
       {/* Status bar */}
       <div className="flex items-center gap-2 px-3 py-1 text-[10px] text-muted-foreground border-b border-border flex-shrink-0">
-        <span>{displayLines.length} lines</span>
-        {filter && <span>({lines.length} total)</span>}
-        {paused && <span className="text-warning font-medium">PAUSED</span>}
-        {sessionStatus !== 'running' && <span className="text-destructive">{isRemote ? 'Not connected' : 'Server not running'}</span>}
+        <span>{t('sessions.logs.lineCount', { n: displayLines.length })}</span>
+        {filter && <span>{t('sessions.logs.totalCount', { n: lines.length })}</span>}
+        {paused && <span className="text-warning font-medium">{t('sessions.logs.paused')}</span>}
+        {sessionStatus !== 'running' && <span className="text-destructive">{isRemote ? t('sessions.logs.notConnected') : t('sessions.logs.serverNotRunning')}</span>}
       </div>
 
       {/* Log output */}
@@ -150,8 +152,8 @@ export function LogsPanel({ sessionId, sessionStatus, isRemote }: LogsPanelProps
         {displayLines.length === 0 ? (
           <div className="text-slate-500 text-center py-8">
             {sessionStatus === 'running'
-              ? 'No log output yet...'
-              : isRemote ? 'Connect to see connection logs' : 'Start the server to see logs'}
+              ? t('sessions.logs.noOutputYet')
+              : isRemote ? t('sessions.logs.connectToSee') : t('sessions.logs.startToSee')}
           </div>
         ) : (
           displayLines.map((line, i) => (

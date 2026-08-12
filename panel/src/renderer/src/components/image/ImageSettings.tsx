@@ -46,14 +46,14 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
   return (
     <div className="border-b border-border bg-muted/30 px-4 py-3 max-h-[50vh] overflow-auto">
       <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
-        {isEdit ? 'Edit Settings' : 'Generation Settings'}
+        {isEdit ? t('image.settings.editSettings') : t('image.settings.generationSettings')}
       </h3>
 
       {/* Standard Settings */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3">
         {/* Steps */}
         <div>
-          <label className="text-xs text-muted-foreground block mb-1" title="Number of denoising iterations. More steps = better quality but slower. Schnell works well at 4, Dev needs 20+.">Steps &#9432;</label>
+          <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.stepsTitle')}>{t('image.settings.steps')} &#9432;</label>
           <input
             type="number"
             value={settings.steps}
@@ -66,7 +66,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
 
         {/* Size */}
         <div>
-          <label className="text-xs text-muted-foreground block mb-1" title="Output image dimensions. Larger = more detail but slower and more memory. 1024x1024 is standard.">Size &#9432;</label>
+          <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.sizeTitle')}>{t('image.settings.size')} &#9432;</label>
           <select
             value={currentSize?.label || 'custom'}
             onChange={(e) => {
@@ -83,7 +83,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
 
         {/* Guidance */}
         <div>
-          <label className="text-xs text-muted-foreground block mb-1" title="How closely the image follows your prompt. Higher = more literal, lower = more creative. Default 3.5 works for most prompts.">Guidance &#9432;</label>
+          <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.guidanceTitle')}>{t('image.settings.guidance')} &#9432;</label>
           <input
             type="number"
             value={settings.guidance}
@@ -97,7 +97,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
 
         {/* Seed */}
         <div>
-          <label className="text-xs text-muted-foreground block mb-1" title="Random seed for reproducibility. Same seed + same prompt = same image. Leave empty for random.">Seed &#9432;</label>
+          <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.seedTitle')}>{t('image.settings.seed')} &#9432;</label>
           <input
             type="number"
             value={settings.seed ?? ''}
@@ -105,7 +105,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
               const val = e.target.value.trim()
               update('seed', val ? parseInt(val) : undefined)
             }}
-            placeholder="Random"
+            placeholder={t('image.settings.seedPlaceholder')}
             className="w-full px-2 py-1 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
           />
         </div>
@@ -113,7 +113,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
         {/* Strength (edit mode only) */}
         {isEdit && (
           <div>
-            <label className="text-xs text-muted-foreground block mb-1" title="How much to change the source image. 0.0 = no change, 1.0 = completely redrawn. 0.7-0.85 works well for most edits.">Strength &#9432;</label>
+            <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.strengthTitle')}>{t('image.settings.strength')} &#9432;</label>
             <input
               type="number"
               value={settings.strength}
@@ -129,7 +129,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
         {/* Count (generate mode only — edit always returns 1) */}
         {!isEdit && (
           <div>
-            <label className="text-xs text-muted-foreground block mb-1" title="How many images to generate per prompt. Each uses the same settings but different random seeds. Max 4.">Count &#9432;</label>
+            <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.countTitle')}>{t('image.settings.count')} &#9432;</label>
             <input
               type="number"
               value={settings.count}
@@ -143,9 +143,9 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
 
         {/* Quantize (read-only — set at server start) */}
         <div>
-          <label className="text-xs text-muted-foreground block mb-1" title="Model precision. Set when starting the server and cannot be changed while running.">Quantize &#9432;</label>
+          <label className="text-xs text-muted-foreground block mb-1" title={t('image.settings.quantizeTitle')}>{t('image.settings.quantize')} &#9432;</label>
           <div className="w-full px-2 py-1 bg-muted/50 border border-input rounded text-xs text-muted-foreground">
-            {settings.quantize === 0 ? 'Full Precision' : `${settings.quantize}-bit`}
+            {settings.quantize === 0 ? t('sessions.create.quantFullPrecision') : `${settings.quantize}-bit`}
           </div>
         </div>
       </div>
@@ -164,15 +164,15 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
         </div>
         {showNegativeHelp && (
           <p className="text-[10px] text-muted-foreground bg-muted/50 rounded px-2 py-1.5 mb-1.5">
-            Describe what you <strong>don't</strong> want in the image. Useful for avoiding common artifacts.
-            Example: <em>"blurry, low quality, text, watermark, deformed hands"</em>
+            {t('image.settings.negativeHelpBody')}{' '}
+            <em>{t('image.settings.negativeHelpExample')}</em>
           </p>
         )}
         <input
           type="text"
           value={settings.negativePrompt}
           onChange={(e) => update('negativePrompt', e.target.value)}
-          placeholder="Things to avoid in the image..."
+          placeholder={t('image.settings.negativePlaceholder')}
           className="w-full px-2 py-1 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
         />
       </div>
@@ -183,7 +183,7 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
         className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2"
       >
         {showAdvanced ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        Advanced
+        {t('image.settings.advanced')}
       </button>
       {showAdvanced && (
         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 mb-3 pl-4 border-l border-border">
@@ -220,13 +220,13 @@ export function ImageSettings({ settings, onChange, model, mode }: ImageSettings
         className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors mb-2"
       >
         {showServer ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        Server
+        {t('image.settings.server')}
       </button>
       {showServer && (
         <div className="pl-4 border-l border-border text-xs text-muted-foreground space-y-1">
           <p>{t('image.settings.hostLocalhost')}</p>
           <p>{t('image.settings.portAutoAssigned')}</p>
-          <p>Model: {model || 'none'}</p>
+          <p>{t('image.settings.modelLine', { model: model || 'none' })}</p>
           <p className="text-[10px] mt-2 opacity-70">
             {t('image.settings.serverManagedAutomatically')}
           </p>

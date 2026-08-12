@@ -209,12 +209,12 @@ export function InputBox({ onSend, onAbort, disabled, loading, sessionEndpoint, 
               {att.kind === 'audio' ? (
                 <div className="h-20 w-20 rounded-lg border border-border bg-muted flex flex-col items-center justify-center overflow-hidden text-muted-foreground">
                   <Music className="h-6 w-6" />
-                  <span className="mt-1 max-w-[72px] truncate text-[10px]">Audio</span>
+                  <span className="mt-1 max-w-[72px] truncate text-[10px]">{t('endpoints.audio')}</span>
                 </div>
               ) : att.kind === 'text' ? (
                 <div className="h-20 w-20 rounded-lg border border-border bg-muted flex flex-col items-center justify-center overflow-hidden text-muted-foreground">
                   <FileText className="h-6 w-6" />
-                  <span className="mt-1 max-w-[72px] truncate text-[10px]">Text</span>
+                  <span className="mt-1 max-w-[72px] truncate text-[10px]">{t('chat.input.textAttachment')}</span>
                 </div>
               ) : att.kind === 'video' ? (
                 <div className="h-20 w-20 rounded-lg border border-border bg-black flex items-center justify-center overflow-hidden">

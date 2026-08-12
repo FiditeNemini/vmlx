@@ -100,7 +100,7 @@ export function ApiDashboard() {
   const handlePortSubmit = async () => {
     const port = parseInt(portInput, 10);
     if (isNaN(port) || port < 1024 || port > 65535) {
-      setPortError("Port must be 1024-65535");
+      setPortError(t('api.portRange'));
       return;
     }
     setPortError(null);
@@ -113,7 +113,7 @@ export function ApiDashboard() {
       setGwHost(status?.host || host);
       setGwLanHost(status?.lanHost ?? null);
     } catch (err: any) {
-      setPortError(err?.message || "Failed to change port");
+      setPortError(err?.message || t('api.changePortFailed'));
     }
   };
 
@@ -130,7 +130,7 @@ export function ApiDashboard() {
       setGwHost(status?.host || host);
       setGwLanHost(status?.lanHost ?? null);
     } catch (err: any) {
-      setPortError(err?.message || "Failed to change host");
+      setPortError(err?.message || t('api.changeHostFailed'));
       setLanEnabled(!newLan);
     }
   };
@@ -144,7 +144,7 @@ export function ApiDashboard() {
         setSingleModelMode(status.singleModelMode);
       }
     } catch (err: any) {
-      setPortError(err?.message || "Failed to change single model mode");
+      setPortError(err?.message || t('api.changeSingleModelFailed'));
       setSingleModelMode(!next);
     }
   };
@@ -189,7 +189,7 @@ export function ApiDashboard() {
 
           <div className="space-y-1.5">
             {/* Gateway URL */}
-            <CopyRow label="URL" value={gatewayUrl} />
+            <CopyRow label={t('api.url')} value={gatewayUrl} />
 
             {/* Port editor */}
             <div className="flex items-center gap-2 text-xs">
@@ -367,6 +367,7 @@ function CopyRow({
   value: string;
   masked?: boolean;
 }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const display = masked
     ? `${value.slice(0, 4)}${"*".repeat(Math.max(0, value.length - 8))}${value.slice(-4)}`
@@ -387,7 +388,7 @@ function CopyRow({
       <button
         onClick={handleCopy}
         className="p-1 text-muted-foreground hover:text-foreground rounded transition-colors flex-shrink-0"
-        title="Copy"
+        title={t('api.copy')}
       >
         {copied ? (
           <Check className="h-3 w-3 text-green-500" />

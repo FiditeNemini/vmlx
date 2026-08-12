@@ -8,10 +8,10 @@ import { useTranslation } from '../../i18n'
 type QuantMode = 'mlx' | 'jang'
 type Preset = 'balanced' | 'quality' | 'compact' | 'custom' | string
 
-const MLX_PRESETS: Record<string, { bits: number; groupSize: number; label: string; desc: string }> = {
-  balanced: { bits: 4, groupSize: 64, label: 'Balanced (4-bit)', desc: 'Good quality/size tradeoff — recommended' },
-  quality: { bits: 8, groupSize: 64, label: 'Quality (8-bit)', desc: 'Larger but better quality' },
-  compact: { bits: 3, groupSize: 64, label: 'Compact (3-bit)', desc: 'Smallest, some quality loss' },
+const MLX_PRESETS: Record<string, { bits: number; groupSize: number; labelKey: string; descKey: string }> = {
+  balanced: { bits: 4, groupSize: 64, labelKey: 'tools.converter.presetBalancedLabel', descKey: 'tools.converter.presetBalancedDesc' },
+  quality: { bits: 8, groupSize: 64, labelKey: 'tools.converter.presetQualityLabel', descKey: 'tools.converter.presetQualityDesc' },
+  compact: { bits: 3, groupSize: 64, labelKey: 'tools.converter.presetCompactLabel', descKey: 'tools.converter.presetCompactDesc' },
 }
 
 const JANG_PRESETS: Record<string, { profile: string; method: string; label: string; desc: string; avgBits: string }> = {
@@ -158,7 +158,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
       if (layerMatch) {
         const current = parseInt(layerMatch[1])
         const total = parseInt(layerMatch[2])
-        return { label: `Quantizing layer ${current}/${total}`, percent: Math.round((current / total) * 100) }
+        return { label: t('tools.converter.quantizingLayer', { current, total }), percent: Math.round((current / total) * 100) }
       }
       // Percentage patterns: "45%" or "45.2%"
       const pctMatch = line.match(/(\d+(?:\.\d+)?)\s*%/)
@@ -167,14 +167,14 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
         return { label: line.trim().slice(0, 60), percent: pct }
       }
       // Phase detection
-      if (/calibrat/i.test(line)) return { label: 'Calibrating...', percent: undefined }
-      if (/quantiz/i.test(line)) return { label: 'Quantizing...', percent: undefined }
-      if (/saving|writing/i.test(line)) return { label: 'Saving weights...', percent: 90 }
-      if (/smoke.*test|verif/i.test(line)) return { label: 'Verifying output...', percent: 95 }
-      if (/download/i.test(line)) return { label: 'Downloading model...', percent: undefined }
-      if (/load/i.test(line)) return { label: 'Loading model...', percent: undefined }
+      if (/calibrat/i.test(line)) return { label: t('tools.converter.calibrating'), percent: undefined }
+      if (/quantiz/i.test(line)) return { label: t('tools.converter.quantizing'), percent: undefined }
+      if (/saving|writing/i.test(line)) return { label: t('tools.converter.savingWeights'), percent: 90 }
+      if (/smoke.*test|verif/i.test(line)) return { label: t('tools.converter.verifyingOutput'), percent: 95 }
+      if (/download/i.test(line)) return { label: t('image.picker.downloadingModel'), percent: undefined }
+      if (/load/i.test(line)) return { label: t('chat.interface.loadingBanner'), percent: undefined }
     }
-    return { label: 'Converting...', percent: undefined }
+    return { label: t('tools.converter.converting'), percent: undefined }
   })()
 
   useEffect(() => {
@@ -245,7 +245,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
           className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
         >
           <ArrowLeft className="h-3 w-3" />
-          Back
+          {t('common.back')}
         </button>
 
         <h2 className="text-2xl font-bold">{t('tools.converter.modelConverter')}</h2>
@@ -255,7 +255,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
 
         {/* Quantization Mode Toggle */}
         <div className="space-y-2">
-          <label className="text-sm font-medium">Format</label>
+          <label className="text-sm font-medium">{t('tools.converter.format')}</label>
           <div className="flex gap-2">
             <button
               onClick={() => { setQuantMode('jang'); setPreset('jang_3m') }}
@@ -295,7 +295,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
             value={modelPath}
             onChange={e => setModelPath(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && runConvert()}
-            placeholder="/path/to/model or org/model-name"
+            placeholder={t('tools.converter.sourcePlaceholder')}
             className="w-full px-3 py-2 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
             list="convert-model-paths"
             disabled={running}
@@ -309,7 +309,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
 
         {/* Presets */}
         <div className="space-y-3">
-          <label className="text-sm font-medium">Profile</label>
+          <label className="text-sm font-medium">{t('tools.converter.profile')}</label>
           <div className="grid grid-cols-2 gap-2">
             {quantMode === 'jang' ? (
               <>
@@ -324,7 +324,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                   if (tierKeys.length === 0) return null
                   return (
                     <div key={tier} className="col-span-2">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">{tier} tier</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">{t('convert.tier', { tier })}</p>
                       <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                         {tierKeys.map(([key, p]) => (
                           <button
@@ -361,7 +361,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                     }`}
                   >
                     <p className="text-xs font-medium">{t('tools.converter.customChooseBits')}</p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">Set Critical (attention), Important (embeddings), Compress (MLP) bits independently</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">{t('tools.converter.customHint')}</p>
                   </button>
                   {preset === 'jang_custom' && (
                     <div className="grid grid-cols-3 gap-2 mt-2">
@@ -400,8 +400,8 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                         : 'border-border hover:bg-accent'
                     }`}
                   >
-                    <p className="text-sm font-medium">{p.label}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">{p.desc}</p>
+                    <p className="text-sm font-medium">{t(p.labelKey)}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">{t(p.descKey)}</p>
                   </button>
                 ))}
                 <button
@@ -415,7 +415,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                 >
                   <div className="flex items-center gap-1.5">
                     <Settings2 className="h-3.5 w-3.5" />
-                    <p className="text-sm font-medium">Custom</p>
+                    <p className="text-sm font-medium">{t('tools.converter.customFull')}</p>
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">{t('tools.converter.fullControl')}</p>
                 </button>
@@ -450,7 +450,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
           >
             <AlertTriangle className="h-4 w-4 text-amber-500 mt-0.5 shrink-0" />
             <div className="text-xs text-amber-200">
-              <p className="font-medium">Compatibility note for {detectedModelType}</p>
+              <p className="font-medium">{t('tools.converter.compatNoteFor', { type: detectedModelType ?? '' })}</p>
               <p className="mt-0.5 opacity-90">{jangCompatWarning}</p>
             </div>
           </div>
@@ -463,7 +463,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1">
-                <label className="text-xs font-medium">Bits</label>
+                <label className="text-xs font-medium">{t('tools.converter.bits')}</label>
                 <select
                   value={bits}
                   onChange={e => setBits(Number(e.target.value))}
@@ -491,14 +491,14 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium">Mode</label>
+                <label className="text-xs font-medium">{t('tools.converter.mode')}</label>
                 <select
                   value={mode}
                   onChange={e => setMode(e.target.value)}
                   disabled={running}
                   className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
                 >
-                  <option value="default">Default</option>
+                  <option value="default">{t('tools.converter.modeDefault')}</option>
                   <option value="NF4">NF4</option>
                 </select>
               </div>
@@ -511,7 +511,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
                   disabled={running}
                   className="w-full px-3 py-2 bg-background border border-input rounded text-sm"
                 >
-                  <option value="">Auto</option>
+                  <option value="">{t('tools.converter.dtypeAuto')}</option>
                   <option value="float16">float16</option>
                   <option value="bfloat16">bfloat16</option>
                 </select>
@@ -548,7 +548,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               type="text"
               value={outputDir}
               onChange={e => setOutputDir(e.target.value)}
-              placeholder={quantMode === 'jang' ? 'Auto-generated (e.g., Model-Name-JANG_3M)' : 'Auto-generated (e.g., Model-Name-vmlx-4bit)'}
+              placeholder={quantMode === 'jang' ? t('convert.outputDirPlaceholderJang') : t('convert.outputDirPlaceholderMlx')}
               className="flex-1 px-3 py-2 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
               disabled={running}
             />
@@ -556,7 +556,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               onClick={handleBrowseOutput}
               disabled={running}
               className="px-3 py-2 text-sm border border-input rounded hover:bg-accent transition-colors disabled:opacity-50"
-              title="Browse"
+              title={t('tools.converter.browseTitle')}
             >
               <FolderOpen className="h-4 w-4" />
             </button>
@@ -599,7 +599,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
               className="px-6 py-2.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 flex items-center gap-2"
             >
               <Play className="h-4 w-4" />
-              {quantMode === 'jang' ? 'Convert to JANG' : 'Convert to MLX'}
+              {quantMode === 'jang' ? t('convert.convertToJang') : t('convert.convertToMlx')}
             </button>
           )}
         </div>
@@ -629,7 +629,7 @@ export function ModelConverter({ initialModelPath, onBack, onServe, models = [] 
             ) : (
               <>
                 <XCircle className="h-5 w-5 text-destructive" />
-                <p className="text-sm font-medium">{wasCancelled ? 'Conversion cancelled' : 'Conversion failed'}</p>
+                <p className="text-sm font-medium">{wasCancelled ? t('convert.conversionCancelled') : t('convert.conversionFailed')}</p>
               </>
             )}
           </div>

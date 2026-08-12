@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Loader2, Terminal } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface LogViewerProps {
   logLines: string[]
@@ -8,6 +9,7 @@ interface LogViewerProps {
 }
 
 export function LogViewer({ logLines, running, defaultOpen = false }: LogViewerProps) {
+  const { t } = useTranslation()
   const [showLog, setShowLog] = useState(defaultOpen)
   const logRef = useRef<HTMLPreElement>(null)
 
@@ -30,7 +32,7 @@ export function LogViewer({ logLines, running, defaultOpen = false }: LogViewerP
           : <Terminal className="h-3.5 w-3.5 text-muted-foreground" />
         }
         <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex-1">
-          {running ? 'Output Log' : 'Verbose Output'} ({logLines.length} lines)
+          {running ? t('tools.logViewer.outputLog') : t('tools.logViewer.verboseOutput')} {t('tools.logViewer.lineCount', { n: logLines.length })}
         </span>
         {showLog
           ? <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />

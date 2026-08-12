@@ -185,7 +185,7 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
     if (result.success) {
       await loadDirectories()
     } else {
-      setDirError(result.error || 'Failed to add directory')
+      setDirError(result.error || t('sessions.create.addDirectoryFailed'))
     }
   }
 

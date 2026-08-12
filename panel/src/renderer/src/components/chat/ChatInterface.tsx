@@ -132,18 +132,21 @@ function isExpectedChatDisconnectError(error: any): boolean {
   )
 }
 
-function formatChatSendErrorMessage(error: any): string {
+function formatChatSendErrorMessage(
+  error: any,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
   if (isExpectedChatDisconnectError(error)) {
-    return 'Server connection lost. The model server may have crashed or stopped. Try restarting the session.'
+    return t('chat.interface.toast.connectionLost')
   }
   // ipcRenderer.invoke rejections arrive wrapped as
   // "Error invoking remote method 'chat:sendMessage': Error: <real message>" —
   // strip the plumbing so the toast reads like a sentence (GH #253).
   return (
-    String(error?.message || 'Unknown error')
+    String(error?.message || t('chat.interface.toast.unknownError'))
       .replace(/^Error invoking remote method '[^']+':\s*/i, '')
       .replace(/^Error:\s*/, '')
-      .trim() || 'Unknown error'
+      .trim() || t('chat.interface.toast.unknownError')
   )
 }
 
@@ -546,8 +549,8 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       if (!isExpectedChatDisconnectError(error)) {
         console.error('Failed to send message:', error)
       }
-      const msg = formatChatSendErrorMessage(error)
-      showToast('error', 'Message failed', msg)
+      const msg = formatChatSendErrorMessage(error, t)
+      showToast('error', t('chat.interface.toast.messageFailedTitle'), msg)
       // Reload messages from DB to restore consistent state
       try {
         const freshMessages = await window.api.chat.getMessages(chatId)
@@ -636,7 +639,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       await window.api.chat.deleteMessagesFrom(chatId, lastUser.timestamp)
     } catch (error) {
       console.error('Failed to truncate chat for regeneration:', error)
-      showToast('error', 'Regenerate failed', 'Could not replace the previous response.')
+      showToast('error', t('chat.interface.toast.regenerateFailedTitle'), t('chat.interface.toast.regenerateFailedBody'))
       return
     }
     setMessages(prev => prev.filter(m => m.timestamp < lastUser.timestamp))
@@ -671,7 +674,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
               onClick={onNewChat}
               className="px-5 py-2.5 bg-primary text-primary-foreground rounded-xl hover:bg-primary/90 font-medium text-sm transition-colors"
             >
-              New Chat
+              {t('chat.interface.newChat')}
             </button>
           )}
         </div>
@@ -713,7 +716,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
                 type="text"
                 value={askUserInput}
                 onChange={e => setAskUserInput(e.target.value)}
-                placeholder="Type your answer..."
+                placeholder={t('chat.interface.askUserPlaceholder')}
                 autoFocus
                 className="flex-1 px-3 py-1.5 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
               />
@@ -770,7 +773,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
               try {
                 await window.api.sessions.start(sessionId)
               } catch (e) {
-                showToast('error', 'Failed to start', (e as Error).message)
+                showToast('error', t('chat.interface.toast.failedToStart'), (e as Error).message)
               }
             }}
             className="text-xs px-3 py-1 bg-success text-success-foreground rounded hover:bg-success/90 transition-colors font-medium"

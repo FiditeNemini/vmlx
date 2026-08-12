@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useTranslation } from '../../i18n'
 
 interface NodeInfo {
   node_id: string
@@ -44,6 +45,7 @@ const LINK_LABELS: Record<string, string> = {
 }
 
 export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListProps): JSX.Element | null {
+  const { t } = useTranslation()
   const [nodes, setNodes] = useState<NodeInfo[]>([])
   const [scanning, setScanning] = useState(false)
   const [showManual, setShowManual] = useState(false)
@@ -83,7 +85,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
       if (result.success) {
         await fetchNodes() // Refresh after scan
       } else {
-        setError(result.error || 'Scan failed')
+        setError(result.error || t('sessions.distributed.scanFailed'))
       }
     } catch (e) {
       setError((e as Error).message)
@@ -101,7 +103,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
         setShowManual(false)
         await fetchNodes()
       } else {
-        setError(result.error || 'Failed to add node')
+        setError(result.error || t('sessions.distributed.addNodeFailed'))
       }
     } catch (e) {
       setError((e as Error).message)
@@ -123,20 +125,20 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
   return (
     <div className="px-4 py-3 space-y-3">
       <div className="flex items-center justify-between">
-        <div className="text-xs font-medium text-foreground">Cluster Nodes</div>
+        <div className="text-xs font-medium text-foreground">{t('sessions.distributed.clusterNodes')}</div>
         <div className="flex gap-2">
           <button
             onClick={handleScan}
             disabled={scanning}
             className="text-xs px-2 py-1 rounded bg-primary/10 hover:bg-primary/20 text-primary transition-colors disabled:opacity-50"
           >
-            {scanning ? 'Scanning...' : 'Scan for Nodes'}
+            {scanning ? t('sessions.distributed.scanning') : t('sessions.distributed.scanForNodes')}
           </button>
           <button
             onClick={() => setShowManual(!showManual)}
             className="text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80 text-foreground transition-colors"
           >
-            Add Manual
+            {t('sessions.distributed.addManual')}
           </button>
         </div>
       </div>
@@ -151,7 +153,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
             type="text"
             value={manualAddress}
             onChange={e => setManualAddress(e.target.value)}
-            placeholder="IP address (e.g. 192.168.1.50)"
+            placeholder={t('sessions.distributed.ipPlaceholder')}
             className="cfg-input flex-1 text-xs"
             onKeyDown={e => e.key === 'Enter' && handleAddManual()}
           />
@@ -159,7 +161,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
             type="text"
             value={manualPort}
             onChange={e => setManualPort(e.target.value)}
-            placeholder="Port"
+            placeholder={t('sessions.create.port')}
             className="cfg-input w-16 text-xs"
             onKeyDown={e => e.key === 'Enter' && handleAddManual()}
           />
@@ -167,14 +169,14 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
             onClick={handleAddManual}
             className="text-xs px-2 py-1 rounded bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
           >
-            Add
+            {t('sessions.directories.add')}
           </button>
         </div>
       )}
 
       {nodes.length === 0 ? (
         <div className="text-xs text-muted-foreground italic py-2">
-          No nodes discovered yet. Start workers on other Macs, then click "Scan for Nodes".
+          {t('sessions.distributed.noNodes')}
         </div>
       ) : (
         <div className="space-y-2">
@@ -196,7 +198,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
                   </span>
                   {node.is_coordinator && (
                     <span className="text-[10px] px-1 py-0.5 rounded bg-blue-500/20 text-blue-400 font-medium">
-                      Coordinator
+                      {t('sessions.distributed.coordinator')}
                     </span>
                   )}
                   {node.link_type && (
@@ -209,7 +211,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
                   <span>{node.chip}</span>
                   <span>{node.ram_gb}GB RAM</span>
                   {node.assigned_layers && (
-                    <span>Layers {node.assigned_layers[0]}-{node.assigned_layers[1] - 1}</span>
+                    <span>{t('sessions.distributed.layersRange', { from: node.assigned_layers[0], to: node.assigned_layers[1] - 1 })}</span>
                   )}
                   {node.latency_ms !== undefined && node.latency_ms < 999 && (
                     <span>{node.latency_ms.toFixed(1)}ms</span>
@@ -225,7 +227,7 @@ export function DistributedNodeList({ sessionId, enabled }: DistributedNodeListP
                 <button
                   onClick={() => handleRemove(node.node_id)}
                   className="text-[10px] text-muted-foreground hover:text-red-400 transition-colors px-1"
-                  title="Remove from cluster"
+                  title={t('sessions.distributed.removeFromCluster')}
                 >
                   x
                 </button>

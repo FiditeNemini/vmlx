@@ -155,12 +155,9 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
     const targetCount = chats.length
     if (targetCount === 0) return
     const scopeLabel = modelPath
-      ? `all ${targetCount} chat${targetCount === 1 ? '' : 's'} for this model`
-      : `ALL ${targetCount} chat${targetCount === 1 ? '' : 's'} across every model`
-    if (!confirm(
-      `Delete ${scopeLabel}?\n\n` +
-      `This wipes the chat rows and their messages. Cannot be undone.`
-    )) return
+      ? t('chat.list.scopeOne', { n: targetCount })
+      : t('chat.list.scopeAll', { n: targetCount })
+    if (!confirm(t('chat.list.clearConfirmTemplate', { scope: scopeLabel }))) return
     try {
       const res = await window.api.chat.deleteAll(modelPath ? { modelPath } : undefined)
       if (!res?.success) {
@@ -207,14 +204,14 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
     const diff = now.getTime() - date.getTime()
     const days = Math.floor(diff / (1000 * 60 * 60 * 24))
 
-    if (days === 0) return 'Today'
-    if (days === 1) return 'Yesterday'
-    if (days < 7) return `${days}d ago`
+    if (days === 0) return t('chat.list.today')
+    if (days === 1) return t('chat.list.yesterday')
+    if (days < 7) return t('chat.list.daysAgo', { n: days })
     return date.toLocaleDateString()
   }
 
   if (loading) {
-    return <div className="p-4 text-center text-muted-foreground">Loading...</div>
+    return <div className="p-4 text-center text-muted-foreground">{t('chat.list.loading')}</div>
   }
 
   const displayChats = searchResults !== null ? searchResults : chats
@@ -257,7 +254,7 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
             <button
               onClick={(e) => handleRenameStart(chat, e)}
               className="text-xs hover:text-foreground"
-              title="Rename"
+              title={t('chat.list.renameTitle')}
             >
               <Pencil className="h-3 w-3" />
             </button>
@@ -265,15 +262,15 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
               <button
                 onClick={(e) => { e.stopPropagation(); setExportingId(exportingId === chat.id ? null : chat.id) }}
                 className="text-xs hover:text-foreground"
-                title="Export"
+                title={t('chat.list.exportTitle')}
               >
                 ↗
               </button>
               {exportingId === chat.id && (
                 <div className="absolute right-0 top-6 z-20 bg-popover border border-border rounded shadow-lg py-1 min-w-[100px]">
-                  <button onClick={e => handleExport(chat.id, 'json', e)} className="w-full text-left px-3 py-1 text-xs hover:bg-accent">JSON</button>
-                  <button onClick={e => handleExport(chat.id, 'markdown', e)} className="w-full text-left px-3 py-1 text-xs hover:bg-accent">Markdown</button>
-                  <button onClick={e => handleExport(chat.id, 'sharegpt', e)} className="w-full text-left px-3 py-1 text-xs hover:bg-accent">ShareGPT</button>
+                  <button onClick={e => handleExport(chat.id, 'json', e)} className="w-full text-left px-3 py-1 text-xs hover:bg-accent">{t('chat.list.exportJson')}</button>
+                  <button onClick={e => handleExport(chat.id, 'markdown', e)} className="w-full text-left px-3 py-1 text-xs hover:bg-accent">{t('chat.list.exportMarkdown')}</button>
+                  <button onClick={e => handleExport(chat.id, 'sharegpt', e)} className="w-full text-left px-3 py-1 text-xs hover:bg-accent">{t('chat.list.exportSharegpt')}</button>
                 </div>
               )}
             </div>
@@ -283,7 +280,7 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
                 onClick={e => e.stopPropagation()}
                 onChange={e => handleMoveToFolder(chat.id, e.target.value || undefined)}
                 className="text-xs bg-transparent border-none cursor-pointer w-5 opacity-60 hover:opacity-100"
-                title="Move to folder"
+                title={t('chat.list.moveToFolderTitle')}
               >
                 <option value="">📁</option>
                 {folders.map(f => (
@@ -294,7 +291,7 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
             <button
               onClick={(e) => handleDelete(chat.id, e)}
               className="text-xs hover:text-destructive"
-              title="Delete"
+              title={t('chat.list.deleteTitle')}
             >
               <Trash2 className="h-3 w-3" />
             </button>
@@ -312,16 +309,16 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
             onClick={onNewChat}
             className="flex-1 min-w-0 px-4 py-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 font-medium truncate"
           >
-            + New Chat
+            {t('chat.list.newChat')}
           </button>
           <button
             onClick={handleImport}
             className="flex-shrink-0 px-2.5 py-2 border border-border rounded hover:bg-accent text-sm flex items-center gap-1.5 whitespace-nowrap"
-            title="Import chat from file"
-            aria-label="Import chat"
+            title={t('chat.list.importTitle')}
+            aria-label={t('chat.list.importAria')}
           >
             <Upload className="h-3.5 w-3.5" />
-            <span>Import</span>
+            <span>{t('chat.list.import')}</span>
           </button>
           {/* vmlx#70: bulk clear. Hidden when there's nothing to clear so
               users don't mis-click an empty list. */}
@@ -329,13 +326,15 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
             <button
               onClick={handleClearAll}
               className="flex-shrink-0 px-2.5 py-2 border border-border rounded hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-400 text-sm flex items-center gap-1.5 whitespace-nowrap text-muted-foreground"
-              title={modelPath
-                ? `Delete all ${chats.length} chats for this model`
-                : `Delete ALL ${chats.length} chats across every model`}
-              aria-label="Clear all chats"
+              title={t('chat.list.clearAllTitle', {
+                scope: modelPath
+                  ? t('chat.list.scopeOne', { n: chats.length })
+                  : t('chat.list.scopeAll', { n: chats.length }),
+              })}
+              aria-label={t('chat.list.clearAllAria')}
             >
               <Eraser className="h-3.5 w-3.5" />
-              <span>Clear</span>
+              <span>{t('chat.list.clear')}</span>
             </button>
           )}
         </div>
@@ -345,7 +344,7 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
           type="text"
           value={searchQuery}
           onChange={e => handleSearch(e.target.value)}
-          placeholder="Search chats..."
+          placeholder={t('chat.list.searchPlaceholder')}
           className="w-full px-3 py-1.5 bg-background border border-input rounded text-sm focus:outline-none focus:ring-1 focus:ring-ring"
         />
 
@@ -358,11 +357,11 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
                 value={newFolderName}
                 onChange={e => setNewFolderName(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter') handleCreateFolder(); if (e.key === 'Escape') setShowNewFolder(false) }}
-                placeholder="Folder name"
+                placeholder={t('chat.list.folderPlaceholder')}
                 className="flex-1 px-2 py-1 bg-background border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring"
                 autoFocus
               />
-              <button onClick={handleCreateFolder} className="text-xs px-2 py-1 bg-primary text-primary-foreground rounded">OK</button>
+              <button onClick={handleCreateFolder} className="text-xs px-2 py-1 bg-primary text-primary-foreground rounded">{t('chat.list.ok')}</button>
               <button onClick={() => setShowNewFolder(false)} className="text-xs px-1 py-1 text-muted-foreground"><X className="h-3 w-3" /></button>
             </div>
           ) : (
@@ -370,7 +369,7 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
               onClick={() => setShowNewFolder(true)}
               className="text-xs text-muted-foreground hover:text-foreground px-2 py-1"
             >
-              + Folder
+              {t('chat.list.addFolder')}
             </button>
           )}
         </div>
@@ -402,7 +401,7 @@ export function ChatList({ currentChatId, onChatSelect, onNewChat, modelPath }: 
                   <button
                     onClick={(e) => handleDeleteFolder(folder.id, e)}
                     className="ml-auto opacity-0 group-hover:opacity-100 text-[10px] hover:text-destructive"
-                    title="Delete folder"
+                    title={t('chat.list.deleteFolderTitle')}
                   >
                     <X className="h-3 w-3" />
                   </button>

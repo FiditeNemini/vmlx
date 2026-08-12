@@ -67,7 +67,7 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground border border-border rounded-md hover:bg-accent transition-colors"
           >
             <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
+            {t('common.refresh')}
           </button>
         </div>
 
@@ -76,7 +76,7 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
-            placeholder="Search models..."
+            placeholder={t('tools.dashboard.searchPlaceholder')}
             value={filter}
             onChange={e => setFilter(e.target.value)}
             className="w-full pl-9 pr-4 py-2 bg-background border border-input rounded-md text-sm focus:outline-none focus:ring-1 focus:ring-ring"
@@ -134,7 +134,7 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
         {!loading && mlxModels.length > 0 && (
           <div className="space-y-3">
             <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-              MLX Models ({mlxModels.length})
+              {t('tools.dashboard.mlxModelsCount', { n: mlxModels.length })}
             </h3>
             <div className="grid gap-2">
               {mlxModels.map(model => (
@@ -156,10 +156,10 @@ export function ToolsDashboard({ onInspect, onDiagnose, onConvert, onServe }: To
           <div className="text-center py-12">
             <HardDrive className="h-8 w-8 text-muted-foreground mx-auto mb-3" />
             <p className="text-sm text-muted-foreground">
-              {filter ? 'No models match your search' : 'No local models found'}
+              {filter ? t('tools.dashboard.noMatch') : t('tools.dashboard.noLocalModels')}
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              Download models from the Server tab, or use Convert to quantize a HuggingFace model
+              {t('tools.dashboard.emptyHint')}
             </p>
           </div>
         )}
@@ -175,6 +175,7 @@ function ModelCard({ model, onInspect, onDiagnose, onConvert, onServe }: {
   onConvert: () => void
   onServe: () => void
 }) {
+  const { t } = useTranslation()
   return (
     <div className="flex items-center justify-between p-3 border border-border rounded-lg hover:bg-accent/50 transition-colors group">
       <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -200,28 +201,28 @@ function ModelCard({ model, onInspect, onDiagnose, onConvert, onServe }: {
         <button
           onClick={onInspect}
           className="p-1.5 text-muted-foreground hover:text-foreground rounded hover:bg-background transition-colors"
-          title="Inspect"
+          title={t('tools.dashboard.inspectTitle')}
         >
           <Eye className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={onDiagnose}
           className="p-1.5 text-muted-foreground hover:text-foreground rounded hover:bg-background transition-colors"
-          title="Diagnose"
+          title={t('tools.dashboard.diagnoseTitle')}
         >
           <Stethoscope className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={onConvert}
           className="p-1.5 text-muted-foreground hover:text-foreground rounded hover:bg-background transition-colors"
-          title="Convert"
+          title={t('tools.dashboard.convertTitle')}
         >
           <ArrowRightLeft className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={onServe}
           className="p-1.5 text-muted-foreground hover:text-primary rounded hover:bg-background transition-colors"
-          title="Serve"
+          title={t('tools.dashboard.serveTitle')}
         >
           <Play className="h-3.5 w-3.5" />
         </button>

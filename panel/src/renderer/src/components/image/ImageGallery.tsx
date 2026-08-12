@@ -10,6 +10,7 @@ import {
   FileText,
 } from "lucide-react";
 import type { ImageGenerationInfo } from "./ImageTab";
+import { useTranslation } from "../../i18n";
 
 interface ImageGalleryProps {
   generations: ImageGenerationInfo[];
@@ -29,6 +30,7 @@ export function ImageGallery({
   onRegenerate,
   onDelete,
 }: ImageGalleryProps) {
+  const { t } = useTranslation();
   if (generations.length === 0 && !generating) {
     return (
       <div className="h-full flex flex-col items-center justify-center text-center px-8">
@@ -45,13 +47,13 @@ export function ImageGallery({
         </div>
         <h3 className="text-lg font-semibold mb-2">
           {mode === "edit"
-            ? "Edit your first image"
-            : "Generate your first image"}
+            ? t('image.gallery.emptyEditTitle')
+            : t('image.gallery.emptyGenTitle')}
         </h3>
         <p className="text-sm text-muted-foreground max-w-sm">
           {mode === "edit"
-            ? "Upload a source image and type a prompt below to edit it with the selected model."
-            : "Type a prompt below and click Generate to create an image with the selected model."}
+            ? t('image.gallery.emptyEditBody')
+            : t('image.gallery.emptyGenBody')}
         </p>
         <p className="text-[9px] text-muted-foreground/30 mt-8">mlx.studio</p>
       </div>
@@ -96,6 +98,7 @@ function ImageCard({
   onDelete?: (gen: ImageGenerationInfo) => void;
   sessionMode?: "generate" | "edit";
 }) {
+  const { t } = useTranslation();
   const [imageData, setImageData] = useState<string | null>(null);
   const [sourceData, setSourceData] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -167,9 +170,9 @@ function ImageCard({
   // ms#61: delete this image from the gallery (DB + files).
   const handleDelete = useCallback(() => {
     // Lightweight confirmation — a missed click shouldn't nuke the image.
-    if (!confirm("Delete this image? The file will be removed permanently.")) return;
+    if (!confirm(t('image.gallery.deleteConfirm'))) return;
     onDelete?.(generation);
-  }, [onDelete, generation]);
+  }, [onDelete, generation, t]);
 
   return (
     <div
@@ -191,18 +194,18 @@ function ImageCard({
             ) : imageData ? (
               <img
                 src={imageData}
-                alt="Edited"
+                alt={t('image.gallery.editedAlt')}
                 className="w-full h-full object-contain"
               />
             ) : (
               <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-xs">
-                Failed to load
+                {t('image.gallery.loadFailed')}
               </div>
             )}
             <span
               className={`absolute top-1.5 right-1.5 text-[9px] px-1.5 py-0.5 text-white rounded font-medium ${isVariation ? "bg-emerald-600/80" : "bg-violet-600/80"}`}
             >
-              {isVariation ? "Variation" : "Edited"}
+              {isVariation ? t('image.gallery.variationBadge') : t('image.gallery.editedAlt')}
             </span>
 
             {/* Source image thumbnail (bottom-left corner) */}
@@ -210,11 +213,11 @@ function ImageCard({
               <div className="absolute bottom-2 left-2 w-16 h-16 rounded border-2 border-white/60 overflow-hidden shadow-lg">
                 <img
                   src={sourceData}
-                  alt="Source"
+                  alt={t('image.gallery.sourceAlt')}
                   className="w-full h-full object-contain"
                 />
                 <span className="absolute bottom-0 left-0 right-0 text-[8px] text-center bg-black/60 text-white py-px">
-                  {isVariation ? "Source" : "Original"}
+                  {isVariation ? t('image.gallery.sourceAlt') : t('image.gallery.originalLabel')}
                 </span>
               </div>
             )}
@@ -235,7 +238,7 @@ function ImageCard({
             />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center text-muted-foreground text-xs">
-              Failed to load
+              {t('image.gallery.loadFailed')}
             </div>
           )}
 
@@ -245,7 +248,7 @@ function ImageCard({
               <button
                 onClick={handleCopySeed}
                 className="px-2 py-1 bg-black/60 text-white rounded text-xs flex items-center gap-1 hover:bg-black/80 transition-colors backdrop-blur-sm"
-                title="Copy seed"
+                title={t('image.gallery.copySeedTitle')}
               >
                 <Copy className="h-3.5 w-3.5" />
                 {generation.seed}
@@ -260,12 +263,12 @@ function ImageCard({
         <div className="flex items-center gap-1 mb-1">
           {isVariation && (
             <span className="text-[9px] px-1 py-0 rounded bg-emerald-500/15 text-emerald-500 flex-shrink-0">
-              Var
+              {t('image.gallery.varBadge')}
             </span>
           )}
           {isEdit && (
             <span className="text-[9px] px-1 py-0 rounded bg-violet-500/15 text-violet-400 flex-shrink-0">
-              Edit
+              {t('image.history.editBadge')}
             </span>
           )}
           <p
@@ -279,7 +282,7 @@ function ImageCard({
           <span>
             {generation.width}x{generation.height}
           </span>
-          <span>{generation.steps} steps</span>
+          <span>{t('image.gallery.stepsCount', { n: generation.steps })}</span>
           {generation.strength != null && (
             <span>str: {generation.strength}</span>
           )}
@@ -300,37 +303,37 @@ function ImageCard({
                     ? "bg-violet-500/15 text-violet-400 hover:bg-violet-500/25"
                     : "bg-emerald-500/15 text-emerald-500 hover:bg-emerald-500/25"
                 }`}
-                title="Use this image as starting point for next generation"
+                title={t('image.gallery.iterateTitle')}
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-                Iterate
+                {t('image.gallery.iterate')}
               </button>
             )}
             <button
               onClick={handleSave}
               className="flex-1 py-1.5 rounded text-xs font-medium flex items-center justify-center gap-1.5 bg-muted text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-              title="Save image to disk"
+              title={t('image.gallery.saveTitle')}
             >
               <Download className="h-3.5 w-3.5" />
-              Save
+              {t('image.gallery.save')}
             </button>
             {/* ms#61: copy prompt */}
             <button
               onClick={handleCopyPrompt}
               className="py-1.5 px-2 rounded text-xs font-medium flex items-center justify-center gap-1.5 bg-muted text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
-              title="Copy the prompt used to generate this image"
-              aria-label="Copy prompt"
+              title={t('image.gallery.copyPromptTitle')}
+              aria-label={t('image.gallery.copyPromptAria')}
             >
               <FileText className="h-3.5 w-3.5" />
-              {promptCopied ? "Copied!" : "Prompt"}
+              {promptCopied ? t('common.copied') : t('image.gallery.promptButton')}
             </button>
             {/* ms#61: delete this image (DB row + file) */}
             {onDelete && (
               <button
                 onClick={handleDelete}
                 className="py-1.5 px-2 rounded text-xs font-medium flex items-center justify-center gap-1.5 bg-muted text-muted-foreground hover:bg-red-500/15 hover:text-red-400 transition-colors"
-                title="Delete this image from the gallery"
-                aria-label="Delete image"
+                title={t('image.gallery.deleteTitle')}
+                aria-label={t('image.gallery.deleteAria')}
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -343,6 +346,7 @@ function ImageCard({
 }
 
 function GeneratingSkeleton({ mode }: { mode?: "generate" | "edit" }) {
+  const { t } = useTranslation();
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -352,7 +356,7 @@ function GeneratingSkeleton({ mode }: { mode?: "generate" | "edit" }) {
 
   const formatTime = (s: number) =>
     s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-  const label = mode === "edit" ? "Editing" : "Generating";
+  const label = mode === "edit" ? t('image.gallery.editing') : t('image.gallery.generating');
   const color = mode === "edit" ? "text-violet-400" : "text-primary";
 
   return (

@@ -159,14 +159,14 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
     const unsubReady = window.api.sessions.onReady((data: any) => {
       if (data.sessionId === session.id) {
         setRestarting(false)
-        setMessage({ type: 'success', text: 'Restarted with new settings.' })
+        setMessage({ type: 'success', text: t('sessions.drawer.restartedToast') })
         onSessionUpdate?.()
       }
     })
     const unsubError = window.api.sessions.onError((data: any) => {
       if (data.sessionId === session.id && restartingRef.current) {
         setRestarting(false)
-        setMessage({ type: 'error', text: `Restart failed: ${data.error}` })
+        setMessage({ type: 'error', text: t('sessions.settings.restartFailed', { error: data.error }) })
       }
     })
     return () => {
@@ -190,13 +190,13 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         setDirty(false)
         setMessage({
           type: 'success',
-          text: isRemote ? 'Saved. Applies to next request.' : (
-            result.restartRequired ? `Saved. Restart to apply (${result.changedKeys?.join(', ')}).` : 'Settings saved.'
+          text: isRemote ? t('sessions.drawer.savedRemote') : (
+            result.restartRequired ? t('sessions.drawer.savedRestartToApply', { keys: result.changedKeys?.join(', ') ?? '' }) : t('sessions.settings.savedToast')
           )
         })
         onSessionUpdate?.()
       } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to save' })
+        setMessage({ type: 'error', text: result.error || t('sessions.settings.saveFailed') })
       }
     } catch (e) {
       setMessage({ type: 'error', text: (e as Error).message })
@@ -211,17 +211,17 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
     try {
       const saveResult = await window.api.sessions.update(session.id, config)
       if (!saveResult.success) {
-        setMessage({ type: 'error', text: saveResult.error || 'Failed to save' })
+        setMessage({ type: 'error', text: saveResult.error || t('sessions.settings.saveFailed') })
         setSaving(false)
         return
       }
       setDirty(false)
       setRestarting(true)
-      setMessage({ type: 'success', text: 'Stopping...' })
+      setMessage({ type: 'success', text: t('sessions.drawer.stopping') })
 
       const stopResult = await window.api.sessions.stop(session.id)
       if (!stopResult.success) {
-        setMessage({ type: 'error', text: `Failed to stop: ${stopResult.error}` })
+        setMessage({ type: 'error', text: t('sessions.settings.stopFailed', { error: stopResult.error ?? '' }) })
         setRestarting(false)
         setSaving(false)
         return
@@ -230,10 +230,10 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
       // sessions.stop resolves only after stopSession has killed the process,
       // cleared its durable PID, and emitted session:stopped. Subscribing after
       // that await misses the event and adds a guaranteed timeout delay.
-      setMessage({ type: 'success', text: 'Starting with new settings...' })
+      setMessage({ type: 'success', text: t('sessions.drawer.startingWithNewSettings') })
       const startResult = await window.api.sessions.start(session.id)
       if (!startResult.success) {
-        setMessage({ type: 'error', text: `Failed to start: ${startResult.error}` })
+        setMessage({ type: 'error', text: t('sessions.settings.startFailed', { error: startResult.error ?? '' }) })
         setRestarting(false)
       }
       onSessionUpdate?.()
@@ -403,7 +403,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           <div className="space-y-3">
             <SliderField
               label={t('sessions.config.timeout')}
-              tooltip="Maximum time to wait for a response from the remote server before timing out. Increase this for slow models, long generations, or high-latency connections. Default 300s (5 minutes)."
+              tooltip={t('sessions.drawer.timeoutTooltip')}
               value={config.timeout}
               onChange={v => handleChange('timeout', v)}
               min={10}

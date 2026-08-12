@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useTranslation } from '../../i18n'
 import { ImageModelPicker } from './ImageModelPicker'
 import { ImagePromptBar } from './ImagePromptBar'
 import { ImageGallery } from './ImageGallery'
@@ -56,6 +57,7 @@ interface ImageGenerationStatus {
 }
 
 export function ImageTab() {
+  const { t } = useTranslation()
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [sessions, setSessions] = useState<ImageSessionInfo[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
@@ -199,15 +201,12 @@ export function ImageTab() {
     const unsubError = window.api.sessions.onError((data: any) => {
       if (data.sessionId === serverSessionIdRef.current) {
         setServerStatus('error')
-        const errMsg = data.error || 'Server error'
+        const errMsg = data.error || t('image.tab.serverError')
         // Detect gated/auth errors and show helpful message
         const isGated = /40[13]|gated|access.*denied|authentication|authorized|forbidden/i.test(errMsg)
         if (isGated) {
           setError(
-            'Model download failed — authentication required. ' +
-            'Go to the Server tab > Download section and add your HuggingFace token, ' +
-            'then accept the model license on huggingface.co. ' +
-            'Original error: ' + errMsg.slice(0, 200)
+            t('image.tab.gatedDownloadError', { error: errMsg.slice(0, 200) })
           )
         } else {
           setError(errMsg)
@@ -350,7 +349,7 @@ export function ImageTab() {
         // Status will transition to 'running' via polling or session events
       } else {
         setServerStatus('error')
-        setError(result.error || 'Failed to start server')
+        setError(result.error || t('sessions.view.toast.failedToStartServer'))
       }
     } catch (err) {
       setServerStatus('error')
@@ -366,7 +365,7 @@ export function ImageTab() {
 
     // Edit mode requires a source image (gen mode allows optional source for img2img)
     if (sessionMode === 'edit' && !sourceImage) {
-      setError('Upload a source image before editing.')
+      setError(t('image.tab.uploadSourceFirst'))
       return
     }
 
@@ -383,7 +382,7 @@ export function ImageTab() {
           setCurrentSessionId(sessionId)
           await loadSessions()
         } else {
-          throw new Error('Failed to create image session')
+          throw new Error(t('image.tab.createSessionFailed'))
         }
       }
 
@@ -431,7 +430,7 @@ export function ImageTab() {
         setGenerations(prev => [...prev, ...result.generations])
         await loadSessions() // Refresh session list (updatedAt changed)
       } else {
-        setError(result.error || (sessionMode === 'edit' ? 'Edit failed' : 'Generation failed'))
+        setError(result.error || (sessionMode === 'edit' ? t('image.tab.editFailed') : t('image.tab.generationFailed')))
       }
     } catch (err) {
       setError((err as Error).message)
@@ -567,7 +566,7 @@ export function ImageTab() {
               />
             ) : (
               <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
-                Start an image model to view server logs
+                {t('image.tab.startModelForLogs')}
               </div>
             )}
           </div>
@@ -576,7 +575,7 @@ export function ImageTab() {
         {error && (
           <div className="mx-4 mt-2 px-3 py-2 bg-destructive/10 border border-destructive/20 rounded-md text-sm text-destructive">
             {error}
-            <button onClick={() => setError(null)} className="ml-2 text-xs underline">Dismiss</button>
+            <button onClick={() => setError(null)} className="ml-2 text-xs underline">{t('image.tab.dismissError')}</button>
           </div>
         )}
 
@@ -591,7 +590,7 @@ export function ImageTab() {
               try {
                 const dataUrl = await window.api.image.readFile(gen.imagePath)
                 if (!dataUrl) {
-                  setError('Failed to load image for iteration — file may have been deleted')
+                  setError(t('image.tab.iterateLoadFailedDeleted'))
                   return
                 }
                 handleSourceImageChange({ dataUrl, name: `iterate-${gen.id.slice(0, 8)}.png` })
@@ -611,7 +610,7 @@ export function ImageTab() {
                 setIterateCounter(c => c + 1) // force re-trigger even if same prompt
               } catch (err) {
                 console.error('Failed to load image for iteration:', err)
-                setError('Failed to load image for iteration')
+                setError(t('image.tab.iterateLoadFailed'))
               }
             }}
             onDelete={async (gen) => {
@@ -621,14 +620,14 @@ export function ImageTab() {
               try {
                 const r = await window.api.image.deleteGeneration(gen.id)
                 if (!r.success) {
-                  setError(`Failed to delete image: ${r.error || 'unknown'}`)
+                  setError(t('image.tab.deleteFailed', { error: r.error || 'unknown' }))
                   return
                 }
                 // Drop from local state — no need to refetch the whole list.
                 setGenerations(prev => prev.filter(g => g.id !== gen.id))
               } catch (err) {
                 console.error('Failed to delete image:', err)
-                setError('Failed to delete image')
+                setError(t('image.tab.deleteFailedPlain'))
               }
             }}
           />

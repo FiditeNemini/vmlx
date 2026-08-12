@@ -325,8 +325,8 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       const installation = await window.api.engine.checkInstallation()
       if (!installation?.installed) {
         setLaunchError(
-          'Inference engine not found. Restart vMLX to run first-time setup, ' +
-          'or install manually:\n\n' +
+          t('sessions.create.engineNotFound') +
+          '\n\n' +
           '  uv tool install vmlx\n' +
           '  pip3 install vmlx'
         )
@@ -337,7 +337,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     }
 
     setLaunching(true)
-    setLogs(['Creating session...'])
+    setLogs([t('sessions.create.creatingSession')])
 
     try {
       // Set model type so buildArgs skips text-specific flags for image models.
@@ -350,19 +350,19 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       const createResult = await window.api.sessions.create(selectedModel, launchConfig)
       if (!mountedRef.current) return
       if (!createResult.success) {
-        throw new Error(createResult.error || 'Failed to create session')
+        throw new Error(createResult.error || t('sessions.context.createFailed'))
       }
       const session = createResult.session
       launchSessionIdRef.current = session.id
-      setLogs(prev => [...prev, `Session created: ${session.id}`, 'Starting server...'])
+      setLogs(prev => [...prev, t('sessions.create.sessionCreated', { id: session.id }), t('main.loadProgress.startingServer')])
 
       const result = await window.api.sessions.start(session.id)
       if (!mountedRef.current) return
       if (result.success) {
-        setLogs(prev => [...prev, 'Server is ready!'])
+        setLogs(prev => [...prev, t('sessions.create.serverReady')])
         launchTimerRef.current = setTimeout(() => onCreated(session.id), 500)
       } else {
-        const errorMsg = result.error || 'Unknown error'
+        const errorMsg = result.error || t('chat.interface.toast.unknownError')
         setLogs(prev => [...prev, `\nERROR: ${errorMsg}`])
         setLaunchError(errorMsg)
         setLaunching(false)
@@ -389,7 +389,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         remoteOrganization: remoteOrganization.trim() || undefined
       })
       if (!remoteResult.success) {
-        throw new Error(remoteResult.error || 'Failed to create remote session')
+        throw new Error(remoteResult.error || t('layout.chatToolbar.remoteCreateFailed'))
       }
       const session = remoteResult.session
 
@@ -397,7 +397,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       if (result.success) {
         onCreated(session.id)
       } else {
-        setLaunchError(result.error || 'Failed to connect to remote endpoint')
+        setLaunchError(result.error || t('sessions.create.connectRemoteFailed'))
         setRemoteConnecting(false)
       }
     } catch (error) {
@@ -426,7 +426,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       // Rescan with the new directory
       await scanModels()
     } else {
-      setDirError(result.error || 'Failed to add directory')
+      setDirError(result.error || t('sessions.create.addDirectoryFailed'))
     }
   }
 
@@ -727,15 +727,12 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                         e.stopPropagation()
                         const label = model.size ? `${model.name} (${model.size})` : model.name
                         if (!confirm(
-                          `Delete "${label}" from disk?\n\n` +
-                          `Path: ${model.path}\n\n` +
-                          `This removes the downloaded files permanently. ` +
-                          `Any running session using this model will be stopped first.`
+                          t('sessions.create.deleteModelConfirm', { label, path: model.path })
                         )) return
                         try {
                           const r = await window.api.models.deleteLocal(model.path)
                           if (!r?.success) {
-                            alert(`Failed to delete: ${r?.error || 'unknown error'}`)
+                            alert(t('sessions.create.deleteFailed', { error: r?.error || t('chat.interface.toast.unknownError') }))
                             return
                           }
                           // If the selected model was just nuked, drop the selection
@@ -749,12 +746,12 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                             setModels(scanned)
                           } catch (_) { /* non-fatal */ }
                         } catch (err) {
-                          alert(`Failed to delete: ${(err as Error).message}`)
+                          alert(t('sessions.create.deleteFailed', { error: (err as Error).message }))
                         }
                       }}
                       className="absolute top-2 right-2 opacity-60 group-hover:opacity-100 transition-opacity p-1.5 rounded hover:bg-red-500/15 hover:text-red-400 text-muted-foreground text-xs"
-                      title={`Delete ${model.name} from disk`}
-                      aria-label={`Delete ${model.name} from disk`}
+                      title={t('sessions.create.deleteModelTitle', { name: model.name })}
+                      aria-label={t('sessions.create.deleteModelTitle', { name: model.name })}
                     >
                       {/* Inline Trash2 SVG — avoid adding another lucide import to this file */}
                       <svg

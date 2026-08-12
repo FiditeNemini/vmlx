@@ -80,7 +80,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             // One main-process operation prevents development effect replay
             // from racing a separate get/create pair into duplicate chats.
             try {
-              const title = `Chat ${new Date().toLocaleString()}`
+              const title = t('sessions.view.defaultChatTitle', { date: new Date().toLocaleString() })
               const chat = await window.api.chat.ensureForModel(title, s.modelPath)
               setCurrentChatId(chat.id)
             } catch (_) { /* will show empty state */ }
@@ -189,7 +189,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
   const handleNewChat = async () => {
     if (!session) return
     try {
-      const title = `Chat ${new Date().toLocaleString()}`
+      const title = t('sessions.view.defaultChatTitle', { date: new Date().toLocaleString() })
       const chat = await window.api.chat.create(title, 'default', undefined, session.modelPath)
       setCurrentChatId(chat.id)
       setShowChatList(false)
@@ -636,17 +636,19 @@ function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
         />
       </div>
       <p className="text-[10px] text-muted-foreground mt-1">
-        {progress?.label ?? t('sessions.view.loadProgressFallback')} {progress ? `(${progress.progress}%)` : ''}
+        {progress
+          ? (progress.labelKey ? t(progress.labelKey, { defaultValue: progress.label }) : progress.label)
+          : t('sessions.view.loadProgressFallback')} {progress ? `(${progress.progress}%)` : ''}
       </p>
       {formatModelBytes(progress?.modelBytes) && (
         <p className="text-[10px] text-muted-foreground/80 mt-0.5">
-          Model files: {formatModelBytes(progress?.modelBytes)}
-          {progress?.lazyResident ? ' — expert weights stream from SSD; resident RAM stays below bundle size' : ''}
+          {t('sessions.card.modelFiles')} {formatModelBytes(progress?.modelBytes)}
+          {progress?.lazyResident ? t('sessions.card.lazyResidentNote') : ''}
         </p>
       )}
       {residentLoad && (
         <p className="text-[10px] text-muted-foreground/80 mt-0.5">
-          Resident RAM: {residentLoad}
+          {t('sessions.card.residentRam')} {residentLoad}
         </p>
       )}
     </div>

@@ -526,7 +526,9 @@
       "regenerateTitle": "Regenerar respuesta",
       "waitingForResponse": "Esperando la respuesta del modelo...",
       "finalizingAnswer": "Finalizando la respuesta...",
-      "noVisibleResponse": "No se generó ninguna respuesta visible."
+      "noVisibleResponse": "No se generó ninguna respuesta visible.",
+      "justNow": "Justo ahora",
+      "yesterdayAt": "Ayer {time}"
     },
     "messages": {
       "emptyPrimary": "Envíe un mensaje para iniciar la conversación",
@@ -589,6 +591,21 @@
       "readAloudTitle": "Leer en voz alta",
       "stop": "detener",
       "speak": "hablar"
+    },
+    "metrics": {
+      "tokensLabel": "{n} tokens",
+      "tokensTitleStreaming": "Tokens generados hasta ahora",
+      "tokensTitleDone": "Tokens de la respuesta",
+      "tpsTitle": "Velocidad de decodificación tras el primer token; incluye tokens de razonamiento y del bucle de herramientas",
+      "ppsTitle": "Velocidad de procesamiento del prompt",
+      "promptLabel": "{n} de prompt",
+      "cachedSuffix": " ({cached} en caché)",
+      "promptTitleCache": "Tokens del prompt — caché: {detail}",
+      "promptTitle": "Tokens del prompt procesados",
+      "ttftTitle": "Tiempo hasta el primer token",
+      "elapsedTitle": "Tiempo transcurrido",
+      "totalLabel": "{v}s en total",
+      "totalTitle": "Tiempo total de la solicitud"
     }
   },
   "sessions": {
@@ -1622,7 +1639,16 @@
       "downloadNote": "Los modelos se descargan de HuggingFace (~6-24 GB según el modelo y la cuantización).",
       "youMayNeedTo": "Puede que necesites",
       "setHfTokenLink": "configurar un token de HF",
-      "andAcceptThe": "y aceptar la"
+      "andAcceptThe": "y aceptar la",
+      "descSchnell": "Generación más rápida (4 pasos)",
+      "descZImageTurbo": "Generación turbo rápida (4 pasos)",
+      "descDev": "Generación de alta calidad (20 pasos)",
+      "descKlein4b": "Rápido y pequeño (20 pasos)",
+      "descKlein9b": "Calidad media (20 pasos)",
+      "descQwenImage": "Gran comprensión del prompt (20 pasos)",
+      "descQwenImageEdit": "Edición por instrucciones (28 pasos)",
+      "descKontext": "Edición con sujeto consistente (24 pasos)",
+      "descFill": "Inpainting con máscara (20 pasos)"
     },
     "prompt": {
       "variationLabel": "Variación",

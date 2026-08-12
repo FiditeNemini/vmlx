@@ -156,17 +156,17 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
         // Variation mode: show source + original prompt
         <div className="mb-2 p-2 bg-emerald-500/5 border border-emerald-500/20 rounded-md">
           <div className="flex items-center gap-3">
-            <img src={sourceImage!.dataUrl} alt="Source" className="h-14 w-14 rounded object-cover flex-shrink-0 border border-border" />
+            <img src={sourceImage!.dataUrl} alt={t('image.gallery.sourceAlt')} className="h-14 w-14 rounded object-cover flex-shrink-0 border border-border" />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5 mb-0.5">
                 <RefreshCw className="h-3 w-3 text-emerald-500 flex-shrink-0" />
-                <span className="text-[10px] font-medium text-emerald-500 uppercase tracking-wider">Variation</span>
-                <span className="text-[10px] text-muted-foreground ml-1">strength {settings.strength}</span>
+                <span className="text-[10px] font-medium text-emerald-500 uppercase tracking-wider">{t('image.prompt.variationLabel')}</span>
+                <span className="text-[10px] text-muted-foreground ml-1">{t('image.prompt.strengthValue', { value: settings.strength })}</span>
               </div>
               <p className="text-xs text-foreground line-clamp-2" title={iteratePrompt!}>{iteratePrompt}</p>
             </div>
             <button onClick={() => { onSourceImageChange(null); onClearIterate?.() }}
-              className="p-1 text-muted-foreground hover:text-destructive rounded flex-shrink-0" title="Cancel">
+              className="p-1 text-muted-foreground hover:text-destructive rounded flex-shrink-0" title={t('image.prompt.cancelTitle')}>
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -182,12 +182,12 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
             />
           ) : sourceImage ? (
             <div className="flex items-center gap-3 p-2 bg-violet-500/5 border border-violet-500/20 rounded-md">
-              <img src={sourceImage.dataUrl} alt="Source" className="h-12 w-12 rounded object-cover flex-shrink-0" />
+              <img src={sourceImage.dataUrl} alt={t('image.gallery.sourceAlt')} className="h-12 w-12 rounded object-cover flex-shrink-0" />
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium truncate">{sourceImage.name}</p>
                 <p className="text-[10px] text-muted-foreground">
-                  {isFillModel ? 'Source image for inpainting' : 'Source image for instruction-based editing'}
-                  {isFillModel && maskBase64 && <span className="text-violet-400 ml-1">(mask applied)</span>}
+                  {isFillModel ? t('image.prompt.sourceInpainting') : t('image.prompt.sourceInstructionEdit')}
+                  {isFillModel && maskBase64 && <span className="text-violet-400 ml-1">{t('image.prompt.maskApplied')}</span>}
                 </p>
               </div>
               <div className="flex items-center gap-1 flex-shrink-0">
@@ -199,13 +199,13 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
                         ? 'bg-violet-500/15 text-violet-400 hover:bg-violet-500/25'
                         : 'bg-primary/10 text-primary hover:bg-primary/20'
                     }`}
-                    title="Paint a mask to select which areas to fill/replace"
+                    title={t('image.prompt.maskTitle')}
                   >
                     <Paintbrush className="h-3 w-3" />
-                    {maskBase64 ? 'Edit Mask' : 'Paint Mask'}
+                    {maskBase64 ? t('image.prompt.editMask') : t('image.prompt.paintMask')}
                   </button>
                 )}
-                <button onClick={() => onSourceImageChange(null)} className="p-1 text-muted-foreground hover:text-destructive rounded" title="Remove">
+                <button onClick={() => onSourceImageChange(null)} className="p-1 text-muted-foreground hover:text-destructive rounded" title={t('image.prompt.removeSourceTitle')}>
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -226,16 +226,16 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
       {/* Quick settings row */}
       <div className="flex items-center gap-4 mb-2 text-xs">
         <div className="flex items-center gap-1">
-          <label className="text-muted-foreground">Steps</label>
-          <Help tip="Number of denoising steps. More steps = higher quality but slower. Schnell/Z-Image: 4 steps. Dev: 20 steps. Qwen Edit: 28 steps." />
+          <label className="text-muted-foreground">{t('image.prompt.steps')}</label>
+          <Help tip={t('image.prompt.stepsTip')} />
           <input type="number" value={settings.steps}
             onChange={(e) => onSettingsChange({ ...settings, steps: Math.max(1, Math.min(100, parseInt(e.target.value) || 1)) })}
             className="w-14 px-1.5 py-0.5 bg-muted border border-input rounded text-xs text-center focus:outline-none focus:ring-1 focus:ring-ring"
             min={1} max={100} />
         </div>
         <div className="flex items-center gap-1">
-          <label className="text-muted-foreground">Size</label>
-          <Help tip="Output image dimensions. Must be multiples of 16. Larger = more VRAM and slower. 1024x1024 is standard." />
+          <label className="text-muted-foreground">{t('image.prompt.size')}</label>
+          <Help tip={t('image.prompt.sizeTip')} />
           <select value={sizeLabel}
             onChange={(e) => { const preset = SIZE_PRESETS.find(p => p.label === e.target.value); if (preset) onSettingsChange({ ...settings, width: preset.width, height: preset.height }) }}
             className="px-1.5 py-0.5 bg-muted border border-input rounded text-xs focus:outline-none focus:ring-1 focus:ring-ring">
@@ -243,8 +243,8 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
           </select>
         </div>
         <div className="flex items-center gap-1">
-          <label className="text-muted-foreground">Guidance</label>
-          <Help tip="Classifier-free guidance scale. Higher = more prompt adherence but less creative freedom. 3-5 for Flux models, 7-12 for other models." />
+          <label className="text-muted-foreground">{t('image.prompt.guidance')}</label>
+          <Help tip={t('image.prompt.guidanceTip')} />
           <input type="number" value={settings.guidance}
             onChange={(e) => onSettingsChange({ ...settings, guidance: Math.max(0, Math.min(20, parseFloat(e.target.value) || 0)) })}
             className="w-14 px-1.5 py-0.5 bg-muted border border-input rounded text-xs text-center focus:outline-none focus:ring-1 focus:ring-ring"
@@ -253,10 +253,10 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
         {/* Strength: show for edit mode and variation mode */}
         {(isEdit || isVariation) && (
           <div className="flex items-center gap-1">
-            <label className="text-muted-foreground">Strength</label>
+            <label className="text-muted-foreground">{t('image.prompt.strength')}</label>
             <Help tip={isEdit
-              ? "How much to change the source image. 0 = no change, 1 = completely new. For edits, 0.6-0.8 works well."
-              : "How much the variation differs from the original. 0 = identical, 1 = completely different. For variations, 0.7-0.9 works well."
+              ? t('image.prompt.strengthEditTip')
+              : t('image.prompt.strengthVariationTip')
             } />
             <input type="number" value={settings.strength}
               onChange={(e) => onSettingsChange({ ...settings, strength: Math.max(0, Math.min(1, parseFloat(e.target.value) || 0)) })}
@@ -265,7 +265,7 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
           </div>
         )}
         {!isEdit && !isVariation && settings.count > 1 && (
-          <span className="text-muted-foreground">x{settings.count} images</span>
+          <span className="text-muted-foreground">{t('image.prompt.imageCount', { n: settings.count })}</span>
         )}
       </div>
 
@@ -274,12 +274,12 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
         <textarea ref={textareaRef} value={prompt}
           onChange={(e) => setPrompt(e.target.value)} onKeyDown={handleKeyDown} onPaste={handlePaste}
           placeholder={
-            disabled ? 'Waiting for server to start...'
-              : isVariation ? 'Add to prompt for next variation (or leave empty for random variation)...'
-              : isEdit && !sourceImage ? 'Upload a source image above, then describe your edit...'
-              : needsMask && !maskBase64 ? 'Paint a mask first (click "Paint Mask" above), then describe what to fill...'
-              : isEdit ? 'Describe the edit to apply (e.g., "make the sky purple")...'
-              : 'Describe the image you want to generate...'
+            disabled ? t('image.prompt.placeholderWaiting')
+              : isVariation ? t('image.prompt.placeholderVariation')
+              : isEdit && !sourceImage ? t('image.prompt.placeholderNeedSource')
+              : needsMask && !maskBase64 ? t('image.prompt.placeholderNeedMask')
+              : isEdit ? t('image.prompt.placeholderEdit')
+              : t('image.prompt.placeholderGenerate')
           }
           disabled={disabled || generating} rows={2}
           className="flex-1 px-3 py-2 bg-muted border border-input rounded-md text-sm resize-none focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 placeholder:text-muted-foreground/60"
@@ -287,7 +287,7 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
         {generating ? (
           <button onClick={() => window.api.image.cancelGeneration()}
             className="px-4 py-2 rounded-md bg-destructive text-destructive-foreground hover:bg-destructive/90 flex items-center gap-2 self-end">
-            <X className="h-4 w-4" /><span className="text-sm">Cancel</span>
+            <X className="h-4 w-4" /><span className="text-sm">{t('image.prompt.cancel')}</span>
           </button>
         ) : (
           <button onClick={handleSubmit} disabled={!canSubmit}
@@ -297,7 +297,7 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
                 : 'bg-primary text-primary-foreground hover:bg-primary/90'
             }`}>
             {isVariation ? <RefreshCw className="h-4 w-4" /> : isEdit ? <Pencil className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-            <span className="text-sm">{isVariation ? 'Vary' : isEdit ? 'Edit' : 'Generate'}</span>
+            <span className="text-sm">{isVariation ? t('image.prompt.vary') : isEdit ? t('image.prompt.edit') : t('image.prompt.generate')}</span>
           </button>
         )}
       </div>
@@ -306,8 +306,8 @@ export function ImagePromptBar({ onGenerate, disabled, generating, settings, onS
       {isVariation && (
         <p className="mt-1.5 text-[10px] text-muted-foreground truncate">
           {prompt.trim()
-            ? <>Prompt: <span className="text-foreground/70">{iteratePrompt}, {prompt.trim()}</span></>
-            : <>{t('image.promptBar.variationOf')} <span className="text-foreground/70">{iteratePrompt}</span> (new seed)</>
+            ? <>{t('image.prompt.promptLabel')} <span className="text-foreground/70">{iteratePrompt}, {prompt.trim()}</span></>
+            : <>{t('image.promptBar.variationOf')} <span className="text-foreground/70">{iteratePrompt}</span> {t('image.prompt.variationNewSeed')}</>
           }
         </p>
       )}

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { X } from 'lucide-react'
+import { useTranslation } from '../../i18n'
 
 interface DirectoryManagerProps {
   userDirs: string[]
@@ -22,6 +23,7 @@ export function DirectoryManager({
   onClearError,
   description
 }: DirectoryManagerProps) {
+  const { t } = useTranslation()
   const [manualPath, setManualPath] = useState('')
 
   const handleAddManualPath = () => {
@@ -33,7 +35,7 @@ export function DirectoryManager({
 
   return (
     <>
-      <h3 className="text-sm font-semibold mb-3">Model Scan Directories</h3>
+      <h3 className="text-sm font-semibold mb-3">{t('sessions.directories.title')}</h3>
       {description && (
         <p className="text-xs text-muted-foreground mb-3">{description}</p>
       )}
@@ -41,11 +43,11 @@ export function DirectoryManager({
       {/* Built-in directories */}
       {builtinDirs.length > 0 && (
         <div className="mb-3">
-          <span className="text-xs text-muted-foreground uppercase tracking-wider">Default</span>
+          <span className="text-xs text-muted-foreground uppercase tracking-wider">{t('sessions.directories.default')}</span>
           {builtinDirs.map(dir => (
             <div key={dir} className="flex items-center gap-2 mt-1 px-2 py-1.5 bg-muted/50 rounded text-xs text-muted-foreground">
               <span className="truncate flex-1" title={dir}>{dir}</span>
-              <span className="text-xs opacity-50 flex-shrink-0">built-in</span>
+              <span className="text-xs opacity-50 flex-shrink-0">{t('sessions.directories.builtIn')}</span>
             </div>
           ))}
         </div>
@@ -54,14 +56,14 @@ export function DirectoryManager({
       {/* User directories */}
       {userDirs.length > 0 && (
         <div className="mb-3">
-          <span className="text-xs text-muted-foreground uppercase tracking-wider">Custom</span>
+          <span className="text-xs text-muted-foreground uppercase tracking-wider">{t('sessions.directories.custom')}</span>
           {userDirs.map(dir => (
             <div key={dir} className="flex items-center gap-2 mt-1 px-2 py-1.5 bg-muted/50 rounded text-xs">
               <span className="truncate flex-1" title={dir}>{dir}</span>
               <button
                 onClick={() => onRemove(dir)}
                 className="text-destructive hover:text-destructive/80 flex-shrink-0"
-                title="Remove directory"
+                title={t('sessions.directories.removeTitle')}
               >
                 <X className="h-3.5 w-3.5" />
               </button>
@@ -74,7 +76,7 @@ export function DirectoryManager({
       <div className="flex items-center gap-2 mt-2">
         <input
           type="text"
-          placeholder="Enter path or browse..."
+          placeholder={t('sessions.directories.placeholder')}
           value={manualPath}
           onChange={(e) => { setManualPath(e.target.value); onClearError() }}
           onKeyDown={(e) => { if (e.key === 'Enter') handleAddManualPath() }}
@@ -85,13 +87,13 @@ export function DirectoryManager({
           disabled={!manualPath.trim()}
           className="px-2 py-1.5 text-xs border border-border rounded hover:bg-accent disabled:opacity-50"
         >
-          Add
+          {t('sessions.directories.add')}
         </button>
         <button
           onClick={onBrowse}
           className="px-2 py-1.5 text-xs border border-border rounded hover:bg-accent"
         >
-          Browse...
+          {t('sessions.directories.browse')}
         </button>
       </div>
       {dirError && (

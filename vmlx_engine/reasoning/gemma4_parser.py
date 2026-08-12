@@ -303,9 +303,21 @@ class Gemma4ReasoningParser(ReasoningParser):
             # (18 chars) and degraded "thought\n" (8 chars). If accumulated
             # text is NOT a prefix of either, this is plain content — flush.
             stripped = current_text.lstrip()
+            # The degraded marker is exactly ``thought\n``. A bare
+            # ``startswith(_THOUGHT)`` stayed true FOREVER once an answer began
+            # with the word "thought", so the hold below never released and the
+            # whole reply was dropped — content='' and reasoning='' with no
+            # server-side recovery (both accumulators stay empty, so the
+            # late-flush and answer-pass re-arm branches never fire). Measured:
+            # "thought experiments show that X." and "thoughtful reply here."
+            # both streamed as NOTHING while one-shot returned them intact.
+            # Hold only while the text can still BECOME the marker (a proper
+            # prefix of "thought\n") or already IS it ("thought\n…").
+            degraded_marker = _THOUGHT + "\n"
             could_be_channel = (
                 _SOC.startswith(stripped) or stripped.startswith(_SOC)
-                or (_THOUGHT + "\n").startswith(stripped) or stripped.startswith(_THOUGHT)
+                or degraded_marker.startswith(stripped)
+                or stripped.startswith(degraded_marker)
                 or any(
                     prefix.lower().startswith(stripped.lower())
                     or stripped.lower().startswith(prefix.lower())

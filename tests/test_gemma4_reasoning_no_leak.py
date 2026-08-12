@@ -154,3 +154,71 @@ class TestGemma4ReasoningParserNoLeak:
                     f"{family_name} reasoning_parser changed away from gemma4: "
                     f"{entry.reasoning_parser!r}"
                 )
+
+
+def _gemma4_stream(chunks):
+    from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser
+
+    parser = Gemma4ReasoningParser()
+    parser.reset_state(think_in_prompt=False)
+    previous = ""
+    reasoning, content = [], []
+    for chunk in chunks:
+        current = previous + chunk
+        delta = parser.extract_reasoning_streaming(previous, current, chunk)
+        if delta is not None:
+            if delta.reasoning:
+                reasoning.append(delta.reasoning)
+            if delta.content:
+                content.append(delta.content)
+        previous = current
+    return "".join(reasoning), "".join(content)
+
+
+class TestGemma4AnswerStartingWithThought:
+    """An answer whose first word is "thought" must not vanish.
+
+    The degraded channel marker is exactly ``thought\\n``. The hold guard used
+    a bare ``stripped.startswith("thought")``, which stays true FOREVER once an
+    answer opens with that word — so the parser held the whole reply and
+    emitted content='' AND reasoning=''. Nothing recovers it server-side:
+    both accumulators stay empty, so the late-reasoning flush and the
+    never-empty answer-pass re-arm are never triggered. One-shot extraction
+    returned the text intact, so streaming silently disagreed with it.
+    """
+
+    def test_thought_experiments_answer_survives(self):
+        _, content = _gemma4_stream(
+            ["thought", " experiments", " show", " that", " X."]
+        )
+        assert content == "thought experiments show that X."
+
+    def test_thoughtful_answer_survives(self):
+        _, content = _gemma4_stream(["thoughtful", " reply here."])
+        assert content == "thoughtful reply here."
+
+    def test_survives_character_by_character(self):
+        text = "thought experiments show X."
+        _, content = _gemma4_stream(list(text))
+        assert content == text
+
+    def test_genuine_degraded_marker_still_routes_to_reasoning(self):
+        reasoning, content = _gemma4_stream(
+            ["thought\n", "private plan", "<channel|>", "Visible answer."]
+        )
+        assert reasoning == "private plan"
+        assert content == "Visible answer."
+
+    def test_genuine_full_marker_still_routes_to_reasoning(self):
+        reasoning, content = _gemma4_stream(
+            ["<|channel>thought\n", "private plan", "<channel|>", "Visible answer."]
+        )
+        assert reasoning == "private plan"
+        assert content == "Visible answer."
+
+    def test_genuine_full_marker_char_split_still_routes(self):
+        reasoning, content = _gemma4_stream(
+            list("<|channel>thought\nprivate plan<channel|>Visible answer.")
+        )
+        assert reasoning == "private plan"
+        assert content == "Visible answer."

@@ -21854,6 +21854,14 @@ def _dump_sse_json(obj) -> str:
 
 _SSE_KEEPALIVE_INTERVAL = 15.0  # seconds
 
+# How many extra timeout windows to spend when the engine cannot report progress
+# at all. A probe returning None means "unknown", not "stalled", and from outside
+# the engine a 250k-token prefill is indistinguishable from a wedged request. Two
+# extra windows is enough for a prefill that overran its window to land (the
+# DSV4-Flash turn that motivated this needed 903s against 900s) while still
+# bounding how long a genuinely wedged request can hold the engine.
+_UNKNOWN_PROGRESS_GRACE_WINDOWS = 2
+
 
 async def _stream_with_keepalive(
     async_gen,
@@ -21879,40 +21887,84 @@ async def _stream_with_keepalive(
     pending = asyncio.ensure_future(it.__anext__())
     start = time.monotonic()
     last_progress: int | None = None
+    # A probe means this is the SERVER-DEFAULT timeout, which is documented as a
+    # stall detector. An explicit per-request timeout passes no probe and is
+    # documented as wall-clock, so it must keep firing even while output flows.
+    progress_aware = progress_probe is not None
+    unknown_progress_windows = 0
     try:
         while True:
             if total_timeout and (time.monotonic() - start) > total_timeout:
-                progress = None
-                if progress_probe is not None:
-                    try:
-                        progress = progress_probe()
-                    except Exception:
-                        progress = None
-                if progress is not None and progress > 0 and (
-                    last_progress is None or progress > last_progress
-                ):
-                    logger.info(
-                        "Stream still progressing (%d tokens, +%d this "
-                        "window) — extending %.1fs timeout window",
-                        progress,
-                        progress - (last_progress or 0),
-                        total_timeout,
-                    )
-                    last_progress = progress
+                # An item already sitting in `pending` is the strongest possible
+                # evidence of progress — stronger than any out-of-band probe —
+                # and discarding it throws away work already paid for.
+                #
+                # LIVE: DSV4-Flash turn 4 of the 400k benchmark, a 332k prompt
+                # with 249k reused and 83k fresh, was killed at wall=903.3s
+                # against the 900s window. Its first token landed as the window
+                # expired, the probe happened to report nothing, and ~15 minutes
+                # of completed prefill was thrown away as "wedged".
+                if progress_aware and pending.done():
                     start = time.monotonic()
                 else:
-                    raise TimeoutError(
-                        f"Streaming exceeded {total_timeout}s timeout"
-                    )
+                    progress = None
+                    if progress_probe is not None:
+                        try:
+                            progress = progress_probe()
+                        except Exception:
+                            progress = None
+                    if progress is not None and progress > 0 and (
+                        last_progress is None or progress > last_progress
+                    ):
+                        logger.info(
+                            "Stream still progressing (%d tokens, +%d this "
+                            "window) — extending %.1fs timeout window",
+                            progress,
+                            progress - (last_progress or 0),
+                            total_timeout,
+                        )
+                        last_progress = progress
+                        start = time.monotonic()
+                    elif (
+                        progress_aware
+                        and progress is None
+                        and unknown_progress_windows < _UNKNOWN_PROGRESS_GRACE_WINDOWS
+                    ):
+                        # The probe could not tell us anything, so silence here
+                        # is genuinely ambiguous: a wedged request and a
+                        # 250k-token prefill look identical from out here. Under
+                        # the server default, spend a bounded grace rather than
+                        # destroying work that may be nearly finished.
+                        unknown_progress_windows += 1
+                        logger.warning(
+                            "Stream %.1fs window elapsed with no engine progress "
+                            "reading — cannot distinguish a long prefill from a "
+                            "wedged request; extending (%d/%d)",
+                            total_timeout,
+                            unknown_progress_windows,
+                            _UNKNOWN_PROGRESS_GRACE_WINDOWS,
+                        )
+                        start = time.monotonic()
+                    else:
+                        raise TimeoutError(
+                            f"Streaming exceeded {total_timeout}s timeout"
+                        )
             done, _ = await asyncio.wait({pending}, timeout=interval)
             if done:
                 try:
-                    yield pending.result()
+                    item = pending.result()
                 except StopAsyncIteration:
                     return
                 except Exception as e:
                     logger.error(f"Stream generator error: {e}")
                     raise
+                # Output produced means not stalled. Reset the window here too,
+                # so a stream that keeps delivering is never killed for having
+                # run a long time — that is what `total_timeout` means under the
+                # server default, per this function's own docstring.
+                if progress_aware:
+                    start = time.monotonic()
+                yield item
                 pending = asyncio.ensure_future(it.__anext__())
             else:
                 yield None  # keep-alive sentinel

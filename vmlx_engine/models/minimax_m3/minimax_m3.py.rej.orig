@@ -1,9 +1,0 @@
-@@ -34,6 +34,8 @@
- try:
-     from .cache import MiniMaxM3SparseCache, make_minimax_m3_cache
-+    from .m3_affine2_switch import MiniMaxM3Affine2SwitchGLU
- except Exception:  # pragma: no cover - standalone / mlx_lm-namespace import
-     import os as _os, sys as _sys
-     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
-     from cache import MiniMaxM3SparseCache, make_minimax_m3_cache  # type: ignore
-+    from m3_affine2_switch import MiniMaxM3Affine2SwitchGLU  # type: ignore

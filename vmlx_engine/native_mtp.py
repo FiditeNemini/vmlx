@@ -929,6 +929,26 @@ def maybe_apply_native_mtp(
             status["status"] = "runtime_patch_failed"
             status["runtime_reason"] = "native MTP patch failed to apply"
     else:
+        # A bundle that DECLARES MTP but is not runtime-supported used to
+        # deactivate in total silence, so the model ran plain autoregressive
+        # with nothing in the log to say why. MEASURED: Nemotron 3.5 Lightning
+        # (JANG_2L/4M/6M, 34 mtp.layers.0.* tensors, num_nextn_predict_layers=1)
+        # and Inkling both hit this — the only surfaces telling the truth were
+        # /health.mtp and the CLI startup banner. Decode-time ineligibility is
+        # DEBUG-only, so nothing at INFO ever mentioned it.
+        #
+        # Say it once, at INFO, when the bundle declared MTP. Silence about a
+        # feature the bundle advertises is the defect.
+        if status.get("mtp_declared") or status.get("artifact_available"):
+            logger.info(
+                "Native MTP NOT active for %s: %s (family=%s, status=%s). "
+                "The bundle declares MTP weights; generation will run "
+                "autoregressive.",
+                model_path,
+                status.get("runtime_reason") or "runtime not supported",
+                status.get("family"),
+                status.get("status"),
+            )
         deactivate_native_mtp()
     return status
 

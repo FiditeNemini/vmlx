@@ -152,6 +152,23 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
             # separator after a genuine private rail.
             if self._explicit_direct_rail():
                 content_part = self._strip_owned_reasoning_closes(delta_text)
+                # A close that ended a GENUINE private rail — the model opened
+                # <think>/<thinking> itself — is a structural boundary: the
+                # newline(s) after it separate the rail from the answer and
+                # must not reach the user. qwen3 and the base implicit path
+                # both strip them; leaving them here made every nemotron /
+                # deepseek_v4 / laguna answer start with a blank line, and made
+                # streaming disagree with this parser's own non-stream output.
+                # The whitespace-preserving case this branch was written for is
+                # a STRAY close after already-visible prose (no opener), which
+                # still keeps its spacing.
+                head, _, tail = previous_text.rpartition(self.end_token)
+                opened_own_rail = any(
+                    start_marker in head
+                    for start_marker, _ in self.reasoning_marker_pairs
+                )
+                if opened_own_rail and not tail.strip():
+                    content_part = content_part.lstrip()
                 return DeltaMessage(content=content_part or None)
             if self.end_token in delta_text:
                 content_part = self._strip_owned_reasoning_closes(delta_text)

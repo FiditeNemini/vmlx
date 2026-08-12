@@ -153,3 +153,62 @@ def test_qwen_complete_extraction_routes_secondary_thinking_alias_to_reasoning()
     assert reasoning == "canonical private\nsecondary private"
     assert content == "R18-Q27-UI-1-DONE"
     assert "<thinking" not in content
+
+
+def _stream_chunks(parser, chunks, think_in_prompt=False):
+    parser.reset_state(think_in_prompt=think_in_prompt)
+    previous = ""
+    reasoning: list[str] = []
+    content: list[str] = []
+    for chunk in chunks:
+        current = previous + chunk
+        delta = parser.extract_reasoning_streaming(previous, current, chunk)
+        if delta is not None:
+            if delta.reasoning:
+                reasoning.append(delta.reasoning)
+            if delta.content:
+                content.append(delta.content)
+        previous = current
+    return "".join(reasoning), "".join(content)
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        ["<think>", "plan", "</think>", "\n\n", "Answer here"],
+        ["<think>plan</think>", "\n\nAnswer here"],
+        ["<think>plan</think>\n\nAnswer here"],
+        ["<thinking>plan</thinking>", "\n\nAnswer here"],
+    ],
+)
+def test_deepseek_r1_strips_the_separator_after_a_genuine_rail(chunks):
+    """The newline(s) after a close that ended the model's OWN <think> rail
+    are a structural boundary, not answer text.
+
+    On the explicit direct rail (reset_state(think_in_prompt=False) — what the
+    server does for every request whose template did not open the rail) these
+    used to stream through verbatim, so every nemotron / deepseek_v4 / laguna
+    answer began with a blank line and streaming disagreed with the parser's
+    own non-stream output. qwen3 on identical input has always stripped them.
+    """
+    _, content = _stream_chunks(DeepSeekR1ReasoningParser(), chunks)
+    assert content == "Answer here"
+
+
+def test_deepseek_r1_keeps_whitespace_after_a_stray_close():
+    """The case the preserve-whitespace branch exists for: a close with NO
+    opener, after prose that was already streamed as visible content. That is
+    redundant markup between two visible runs, so the spacing is the user's."""
+    _, content = _stream_chunks(
+        DeepSeekR1ReasoningParser(), ["Visible prose", "</think>", "\n\nmore text"]
+    )
+    assert content == "Visible prose\n\nmore text"
+
+
+def test_deepseek_r1_preserves_blank_lines_inside_the_answer():
+    """Only the leading separator is structural — paragraph breaks within the
+    answer are content and must survive."""
+    _, content = _stream_chunks(
+        DeepSeekR1ReasoningParser(), ["<think>p</think>", "\n\nLine1\n\nLine2"]
+    )
+    assert content == "Line1\n\nLine2"

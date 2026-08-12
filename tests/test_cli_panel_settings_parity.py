@@ -119,7 +119,16 @@ def test_slow_families_get_the_app_timeout():
     """900s for DSV4/M3/openPangu existed only panel-side; CLI killed at 300s."""
     from vmlx_engine.cli import _SLOW_FAMILY_TIMEOUTS
 
-    assert set(_SLOW_FAMILY_TIMEOUTS) == {"deepseek_v4", "minimax_m3", "openpangu_v2"}
+    # The three the panel declares, plus the hybrid SSM families whose chunked
+    # prefill takes minutes on a long prompt. The hybrid entries came from a
+    # LIVE app failure: a 101,502-token prompt to Qwen3.6-27B rendered "Message
+    # failed - Request timed out after 300s" in the chat while the engine served
+    # it in ~230s of prefill. API probes pass their own long timeout and never
+    # see it.
+    assert set(_SLOW_FAMILY_TIMEOUTS) >= {
+        "deepseek_v4", "minimax_m3", "openpangu_v2",
+    }
+    assert {"qwen3_5", "qwen3_next", "nemotron_h"} <= set(_SLOW_FAMILY_TIMEOUTS)
     assert all(v == 900 for v in _SLOW_FAMILY_TIMEOUTS.values())
     sessions = SESSIONS.read_text(encoding="utf-8")
     for const in (

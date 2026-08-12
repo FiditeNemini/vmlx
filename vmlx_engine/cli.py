@@ -32,6 +32,16 @@ _SLOW_FAMILY_TIMEOUTS = {
     "deepseek_v4": DSV4_DEFAULT_TIMEOUT_SECONDS,
     "minimax_m3": 900,
     "openpangu_v2": 900,
+    # Hybrid SSM+attention families chunk their prefill, so a long prompt takes
+    # minutes before the first token. FOUND LIVE IN THE APP, not by API testing:
+    # a 101,502-token prompt to Qwen3.6-27B rendered "Message failed — Request
+    # timed out after 300s" in the chat, while the engine served the identical
+    # prompt in ~230s of prefill plus decode. API probes never saw it because
+    # they pass their own long timeout; only a real user hits the session
+    # default.
+    "qwen3_5": 900,
+    "qwen3_next": 900,
+    "nemotron_h": 900,
 }
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4

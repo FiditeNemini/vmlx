@@ -66,11 +66,20 @@ class QwenToolParser(ToolParser):
     # required args, the server dropped it "missing required argument", and the
     # whole `<tool_call><function=...><parameter:...>` XML leaked into content
     # (reason_off/tool was unaffected because that path emitted JSON args).
+    # `\s*` around the capture ate the argument's own leading indentation:
+    # a value rendered as "\n    def f():\n        pass\n" came back as
+    # "def f():\n        pass" — first line unindented, second still at 8
+    # spaces, i.e. broken Python once written to disk. Strip at most ONE
+    # framing newline per side (plus spaces/tabs on the marker's own line), so
+    # the XML framing goes and the payload's relative indentation survives.
     PARAMETER_PATTERN = re.compile(
-        r"<parameter(?:=|:|\s+name=[\"']|>)([^>\"'\s]+)[\"']?>\s*(.*?)\s*</parameter>",
+        r"<parameter(?:=|:|\s+name=[\"']|>)([^>\"'\s]+)[\"']?>"
+        r"[ \t]*\n?(.*?)\n?[ \t]*</parameter>",
         re.DOTALL,
     )
-    BARE_ARG_PATTERN = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</\1>", re.DOTALL)
+    BARE_ARG_PATTERN = re.compile(
+        r"<([A-Za-z_][A-Za-z0-9_]*)>[ \t]*\n?(.*?)\n?[ \t]*</\1>", re.DOTALL
+    )
     TOOL_BLOCK_PATTERN = re.compile(
         r"<tool_call>\s*.*?\s*</tool_call>",
         re.DOTALL,
@@ -310,9 +319,17 @@ class QwenToolParser(ToolParser):
 
     @staticmethod
     def _coerce_arg_value(value: str) -> Any:
-        value = value.strip()
+        # Strip only to TEST for JSON, never to produce the string result.
+        # `value.strip()` before the fallback removed the payload's own leading
+        # indentation: a code argument rendered as
+        #     "\n    def f():\n        pass\n"
+        # came back as "def f():\n        pass" — first line unindented while
+        # the second kept 8 spaces, which is a syntax error once written to
+        # disk. JSON scalars still coerce (" 42 " -> 42) because the parse runs
+        # on the stripped copy.
+        candidate = value.strip()
         try:
-            return json.loads(value)
+            return json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
             return value
 

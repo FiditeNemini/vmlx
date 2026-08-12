@@ -90,3 +90,50 @@ def test_argument_whitespace_round_trips(module_name, payload_name):
         f"{module_name} altered the argument:\n"
         f"  want {payload!r}\n  got  {args.get('code')!r}"
     )
+
+
+INDENTED_CODE_ARG = "    def f():\n        pass"
+
+
+def test_qwen_xml_parameter_keeps_first_line_indentation():
+    """A code argument's own leading indentation must survive the XML framing.
+
+    `<parameter=...>\\s*(.*?)\\s*</parameter>` plus a `.strip()` in the value
+    coercion ate it: a payload rendered as "\\n    def f():\\n        pass\\n"
+    came back as "def f():\\n        pass" — first line unindented while the
+    second still had 8 spaces, which is a SyntaxError once written to disk.
+
+    The existing CODE_ARG fixture could never catch this because its first line
+    has no indentation. Only ONE framing newline per side may be stripped, and
+    the coercion may strip only to TEST for JSON, not to produce the string.
+    """
+    import json as _json
+
+    from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+
+    raw = (
+        "<tool_call>\n<function=write_file>\n"
+        f"<parameter=code>\n{INDENTED_CODE_ARG}\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    result = QwenToolParser().extract_tool_calls(raw, None)
+    assert result.tools_called
+    got = _json.loads(result.tool_calls[0]["arguments"])["code"]
+    assert got == INDENTED_CODE_ARG, (
+        f"code argument lost its indentation: {got!r}"
+    )
+
+
+def test_qwen_json_scalar_still_coerces_despite_whitespace():
+    """Keeping payload whitespace must not break JSON scalar coercion."""
+    import json as _json
+
+    from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+
+    raw = (
+        "<tool_call>\n<function=n>\n"
+        "<parameter=count> 42 </parameter>\n</function>\n</tool_call>"
+    )
+    result = QwenToolParser().extract_tool_calls(raw, None)
+    value = _json.loads(result.tool_calls[0]["arguments"])["count"]
+    assert value == 42 and isinstance(value, int)

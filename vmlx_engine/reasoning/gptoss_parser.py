@@ -329,10 +329,29 @@ class GptOssReasoningParser(ReasoningParser):
         if not text:
             return text
         # Strip garbled special token fragments: <|word. or <|word| or <|word
-        text = re.sub(r'<\|?(?:assistant|analysis|final|end|start|channel|message)[^a-zA-Z]*', '', text, flags=re.IGNORECASE)
-        # Strip leading/trailing protocol words
-        text = re.sub(r'^(?:assistant|analysis|final)\s*', '', text, flags=re.IGNORECASE)
-        text = re.sub(r'\s*(?:assistant|analysis|final)$', '', text, flags=re.IGNORECASE)
+        after_fragments = re.sub(
+            r'<\|?(?:assistant|analysis|final|end|start|channel|message)[^a-zA-Z]*',
+            '', text, flags=re.IGNORECASE,
+        )
+        saw_marker_fragment = after_fragments != text
+        text = after_fragments
+        # Strip leading/trailing BARE protocol words — but only as residue, not
+        # as prose. These are ordinary English words: an unconditional strip ate
+        # the last word of any reply ending in them and the first word of one
+        # starting with them. MEASURED before this guard:
+        #   "I am your assistant"          -> "I am your"
+        #   "Give this to your assistant"  -> "Give this to your"
+        #   "Run the analysis"             -> "Run the"
+        #   "This is final"                -> "This is"
+        #   "assistant helped me"          -> "helped me"
+        # Only strip when the text actually carried a marker fragment (so we are
+        # demonstrably cleaning protocol debris) or when the bare word IS the
+        # entire text.
+        if saw_marker_fragment or re.fullmatch(
+            r'\s*(?:assistant|analysis|final)\s*', text, flags=re.IGNORECASE
+        ):
+            text = re.sub(r'^\s*(?:assistant|analysis|final)\s*', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'\s*(?:assistant|analysis|final)\s*$', '', text, flags=re.IGNORECASE)
         # Strip concatenated protocol residue in the middle
         text = _PROTOCOL_RESIDUE_RE.sub('', text)
         return text.strip()

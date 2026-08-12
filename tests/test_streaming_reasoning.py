@@ -945,17 +945,33 @@ class TestGptOssParserComplete:
     # --- Protocol residue cleaning ---
 
     def test_clean_protocol_residue_leading(self):
-        """Leading protocol words should be stripped."""
+        """Leading protocol words are stripped WHEN they are residue.
+
+        These strings used to be bare ("assistant Hello"), which is
+        indistinguishable from prose that simply starts with the word — and the
+        unconditional strip that satisfied them also turned "assistant helped
+        me" into "helped me". The intent was always to clean Harmony debris, so
+        the fixture now carries the marker fragment that makes it debris.
+        """
         from vmlx_engine.reasoning.gptoss_parser import GptOssReasoningParser
-        assert GptOssReasoningParser._clean_protocol_residue("assistant Hello") == "Hello"
-        assert GptOssReasoningParser._clean_protocol_residue("analysis Hello") == "Hello"
-        assert GptOssReasoningParser._clean_protocol_residue("final Hello") == "Hello"
+        assert GptOssReasoningParser._clean_protocol_residue("<|start|>assistant Hello") == "Hello"
+        assert GptOssReasoningParser._clean_protocol_residue("<|channel|>analysis Hello") == "Hello"
+        assert GptOssReasoningParser._clean_protocol_residue("<|channel|>final Hello") == "Hello"
+        # A bare protocol word that IS the whole text is still residue.
+        assert GptOssReasoningParser._clean_protocol_residue("assistant") == ""
 
     def test_clean_protocol_residue_trailing(self):
-        """Trailing protocol words should be stripped."""
+        """Trailing protocol words are stripped WHEN they are residue.
+
+        "Hello assistant" was asserted to become "Hello" — the same rule ate the
+        last word of "I am your assistant", "Run the analysis" and "This is
+        final". Real prose wins; debris still gets cleaned.
+        """
         from vmlx_engine.reasoning.gptoss_parser import GptOssReasoningParser
-        assert GptOssReasoningParser._clean_protocol_residue("Hello assistant") == "Hello"
-        assert GptOssReasoningParser._clean_protocol_residue("Hello analysis") == "Hello"
+        assert GptOssReasoningParser._clean_protocol_residue("<|message|>Hello assistant") == "Hello"
+        assert GptOssReasoningParser._clean_protocol_residue("<|message|>Hello analysis") == "Hello"
+        # Prose that merely ends in one of these words must survive intact.
+        assert GptOssReasoningParser._clean_protocol_residue("I am your assistant") == "I am your assistant"
 
     def test_clean_protocol_residue_garbled_tokens(self):
         """Garbled special token fragments should be stripped."""

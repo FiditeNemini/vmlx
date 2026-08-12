@@ -71,10 +71,17 @@ describe('DSV4 activation-QAT status presentation', () => {
     ]) {
       const source = readFileSync(file, 'utf8')
       expect(source).toContain('describeDsv4ActivationQat')
-      expect(source).toContain('label="DSV4 QAT Requested"')
-      expect(source).toContain('label="DSV4 QAT Observed"')
-      expect(source).toContain('label="DSV4 QAT Paths"')
-      expect(source).toContain('label="DSV4 QAT Kernels"')
+      // Both panels render the four cards through the shared i18n keys; the
+      // English copy lives in the locale catalog now.
+      expect(source).toContain("label={t('sessions.cache.dsv4QatRequested')}")
+      expect(source).toContain("label={t('sessions.cache.dsv4QatObserved')}")
+      expect(source).toContain("label={t('sessions.cache.dsv4QatPaths')}")
+      expect(source).toContain("label={t('sessions.cache.dsv4QatKernels')}")
     }
+    const catalog = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8')
+    expect(catalog).toContain('DSV4 QAT Requested')
+    expect(catalog).toContain('DSV4 QAT Observed')
+    expect(catalog).toContain('DSV4 QAT Paths')
+    expect(catalog).toContain('DSV4 QAT Kernels')
   })
 })

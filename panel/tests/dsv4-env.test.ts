@@ -323,8 +323,14 @@ describe('DSV4 runtime controls in SessionConfigForm', () => {
 
     expect(source).toContain('pool_quant?: {')
     expect(source).toContain('health.native_cache?.pool_quant')
-    expect(source).toContain('label="DSV4 Pool Quant"')
-    expect(source).toContain("health.native_cache.pool_quant.enabled ? 'enabled' : 'disabled'")
+    // Label and status copy render through i18n now; the English lives in the catalog.
+    expect(source).toContain("label={t('sessions.performance.dsv4PoolQuant')}")
+    expect(source).toContain("health.native_cache.pool_quant.enabled ? t('sessions.cache.statusEnabled') : t('sessions.cache.statusDisabled')")
+    const catalog = fs.readFileSync(
+      path.resolve(__dirname, '../src/renderer/src/i18n/locales/en.json'),
+      'utf8',
+    )
+    expect(catalog).toContain('DSV4 Pool Quant')
   })
 
   it('does not document hidden DSV4 finalizer behavior in the settings UI', () => {

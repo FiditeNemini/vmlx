@@ -129,9 +129,9 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       setError(null)
     } catch (err: any) {
       if (!requestGuard.isCurrent(requestToken)) return
-      setError(err.message || 'Failed to fetch cache stats')
+      setError(err.message || t('sessions.cache.fetchStatsFailed'))
     }
-  }, [endpoint.host, endpoint.port, requestGuard, sessionId, sessionStatus])
+  }, [endpoint.host, endpoint.port, requestGuard, sessionId, sessionStatus, t])
 
   const fetchStats = useCallback(async (
     expectedIdentity = requestGuard.captureIdentity(),
@@ -290,33 +290,33 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.cacheTotals')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {cacheTotals.ram_tokens_cached != null && (
-              <StatCard label="RAM Resident Tokens" value={(cacheTotals.ram_tokens_cached || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.ramResidentTokens')} value={(cacheTotals.ram_tokens_cached || 0).toLocaleString()} />
             )}
             {cacheTotals.l1_indexed_tokens != null && (
-              <StatCard label="L1 Indexed Tokens" value={(cacheTotals.l1_indexed_tokens || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.l1IndexedTokens')} value={(cacheTotals.l1_indexed_tokens || 0).toLocaleString()} />
             )}
             {cacheTotals.l1_resident_bytes_mb != null && (
               <StatCard
-                label="L1 Resident Memory"
+                label={t('sessions.cache.l1ResidentMemory')}
                 value={`${(cacheTotals.l1_resident_bytes_mb || 0).toFixed(1)} / ${(cacheTotals.l1_max_resident_bytes_mb || 0).toFixed(1)} MB`}
               />
             )}
             {cacheTotals.l1_evictions != null && (
-              <StatCard label="L1 Evictions" value={(cacheTotals.l1_evictions || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.l1Evictions')} value={(cacheTotals.l1_evictions || 0).toLocaleString()} />
             )}
             {cacheTotals.l2_tokens_on_disk != null && (
-              <StatCard label="L2 Tokens on Disk" value={(cacheTotals.l2_tokens_on_disk || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.l2TokensOnDisk')} value={(cacheTotals.l2_tokens_on_disk || 0).toLocaleString()} />
             )}
             {cacheTotals.l2_prompt_tokens_on_disk != null && (
-              <StatCard label="Prompt L2 Tokens" value={(cacheTotals.l2_prompt_tokens_on_disk || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.promptL2Tokens')} value={(cacheTotals.l2_prompt_tokens_on_disk || 0).toLocaleString()} />
             )}
             {cacheTotals.l2_block_tokens_on_disk != null && (
-              <StatCard label="Block L2 Tokens" value={(cacheTotals.l2_block_tokens_on_disk || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.blockL2Tokens')} value={(cacheTotals.l2_block_tokens_on_disk || 0).toLocaleString()} />
             )}
             {(() => {
               const ssmL2Tokens = cacheTotals.l2_ssm_tokens_on_disk ?? cacheTotals.ssm_tokens_on_disk
               return ssmL2Tokens != null && ssmL2Tokens > 0 ? (
-                <StatCard label="SSM L2 Tokens" value={(ssmL2Tokens || 0).toLocaleString()} />
+                <StatCard label={t('sessions.cache.ssmL2Tokens')} value={(ssmL2Tokens || 0).toLocaleString()} />
               ) : null
             })()}
           </div>
@@ -338,16 +338,16 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           </p>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {schedulerCache.hit_rate != null && (
-              <StatCard label="Hit Rate" value={`${(schedulerCache.hit_rate * 100).toFixed(1)}%`} />
+              <StatCard label={t('sessions.cache.hitRate')} value={`${(schedulerCache.hit_rate * 100).toFixed(1)}%`} />
             )}
             {(schedulerCache.entry_count ?? schedulerCache.entries) != null && (
-              <StatCard label="Entries" value={String(schedulerCache.entry_count ?? schedulerCache.entries)} />
+              <StatCard label={t('sessions.cache.entries')} value={String(schedulerCache.entry_count ?? schedulerCache.entries)} />
             )}
             {(schedulerCache.current_memory_mb ?? schedulerCache.memory_mb) != null && (
-              <StatCard label="Memory" value={`${(schedulerCache.current_memory_mb ?? schedulerCache.memory_mb).toFixed(1)} MB`} />
+              <StatCard label={t('sessions.cache.memory')} value={`${(schedulerCache.current_memory_mb ?? schedulerCache.memory_mb).toFixed(1)} MB`} />
             )}
             {schedulerCache.hits != null && (
-              <StatCard label="Hits / Misses" value={`${schedulerCache.hits} / ${schedulerCache.misses || 0}`} />
+              <StatCard label={t('sessions.cache.hitsMisses')} value={`${schedulerCache.hits} / ${schedulerCache.misses || 0}`} />
             )}
             {/* Paged/native backends never drive allocated_blocks / utilization /
                 tokens_saved-as-residency (allocator counters stay pinned at the
@@ -356,36 +356,43 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                 paged fields are absent. */}
             {(schedulerCache.total_tokens_cached ?? schedulerCache.tokens_saved) != null && (
               <StatCard
-                label="Cached Tokens"
+                label={t('sessions.cache.cachedTokens')}
                 value={(schedulerCache.total_tokens_cached ?? schedulerCache.tokens_saved).toLocaleString()}
               />
             )}
             {schedulerCache.total_tokens_cached != null && schedulerCache.tokens_saved != null && (
-              <StatCard label="Tokens Saved" value={schedulerCache.tokens_saved.toLocaleString()} />
+              <StatCard label={t('sessions.cache.tokensSaved')} value={schedulerCache.tokens_saved.toLocaleString()} />
             )}
             {schedulerCache.evictions != null && (
-              <StatCard label="Evictions" value={String(schedulerCache.evictions)} />
+              <StatCard label={t('sessions.cache.evictions')} value={String(schedulerCache.evictions)} />
             )}
             {schedulerCache.block_size != null && (
-              <StatCard label="Block Size" value={`${schedulerCache.block_size} tokens`} />
+              <StatCard label={t('sessions.cache.blockSize')} value={t('chat.bubble.tokensSuffix', { n: schedulerCache.block_size })} />
             )}
             {(schedulerCache.cached_blocks ?? schedulerCache.allocated_blocks) != null && (
               <StatCard
-                label="Blocks"
-                value={`${schedulerCache.cached_blocks ?? schedulerCache.allocated_blocks} / ${schedulerCache.max_blocks} (${schedulerCache.shared_blocks ?? 0} shared)`}
+                label={t('sessions.cache.blocks')}
+                value={t('sessions.cache.blocksValue', {
+                  cached: schedulerCache.cached_blocks ?? schedulerCache.allocated_blocks,
+                  max: schedulerCache.max_blocks,
+                  shared: schedulerCache.shared_blocks ?? 0,
+                })}
               />
             )}
             {(schedulerCache.cache_occupancy ?? schedulerCache.utilization) != null && (
               <StatCard
-                label="Utilization"
+                label={t('sessions.cache.utilization')}
                 value={`${((schedulerCache.cache_occupancy ?? schedulerCache.utilization) * 100).toFixed(1)}%`}
               />
             )}
             {!blockDiskCache && schedulerCache.disk_hits != null && (schedulerCache.disk_hits > 0 || schedulerCache.disk_misses > 0) && (
-              <StatCard label="L2 Disk Hits" value={`${schedulerCache.disk_hits} / ${schedulerCache.disk_misses} miss`} />
+              <StatCard
+                label={t('sessions.cache.l2DiskHits')}
+                value={t('sessions.cache.l2DiskHitsValue', { hits: schedulerCache.disk_hits, misses: schedulerCache.disk_misses ?? 0 })}
+              />
             )}
             {schedulerCache.cow_copies != null && schedulerCache.cow_copies > 0 && (
-              <StatCard label="COW Copies" value={String(schedulerCache.cow_copies)} />
+              <StatCard label={t('sessions.cache.cowCopies')} value={String(schedulerCache.cow_copies)} />
             )}
             {/* F4 (audit 2026-04-08): Agent 1's PrefixCacheManager
                  cache_type LRU exposes per-type byte / entry counts.
@@ -393,21 +400,21 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                  user / assistant priority pinning at a glance. */}
             {schedulerCache.max_bytes != null && schedulerCache.max_bytes > 0 && schedulerCache.nbytes != null && (
               <StatCard
-                label="Cache Bytes"
+                label={t('sessions.cache.cacheBytes')}
                 value={`${(schedulerCache.nbytes / (1024 * 1024)).toFixed(1)} / ${(schedulerCache.max_bytes / (1024 * 1024)).toFixed(0)} MB`}
               />
             )}
           </div>
           {schedulerCache.entries_by_type && (
             <div className="grid grid-cols-3 gap-2 text-xs mt-2">
-              {(['system', 'user', 'assistant'] as const).map((t) => {
-                const n = schedulerCache.entries_by_type?.[t] ?? 0
-                const b = schedulerCache.nbytes_by_type?.[t] ?? 0
+              {(['system', 'user', 'assistant'] as const).map((entryType) => {
+                const n = schedulerCache.entries_by_type?.[entryType] ?? 0
+                const b = schedulerCache.nbytes_by_type?.[entryType] ?? 0
                 if (n === 0 && b === 0) return null
                 return (
-                  <div key={t} className="bg-background px-2 py-1.5 rounded border border-border">
-                    <div className="text-[10px] uppercase text-muted-foreground">{t}</div>
-                    <div className="font-mono">{n} entries</div>
+                  <div key={entryType} className="bg-background px-2 py-1.5 rounded border border-border">
+                    <div className="text-[10px] uppercase text-muted-foreground">{t(`sessions.cache.entryType.${entryType}`)}</div>
+                    <div className="font-mono">{t('sessions.cache.entriesCount', { n })}</div>
                     <div className="font-mono text-[10px] text-muted-foreground">{(b / (1024 * 1024)).toFixed(1)} MB</div>
                   </div>
                 )
@@ -436,12 +443,12 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
               return (
                 <>
                   <StatCard
-                    label="Entries"
+                    label={t('sessions.cache.entries')}
                     value={`${ssm.entries ?? 0} / ${ssm.max_entries ?? 0}`}
                   />
                   {ssm.nbytes_mb != null && ssm.nbytes_mb > 0 && (
                     <StatCard
-                      label="SSM Bytes"
+                      label={t('sessions.cache.ssmBytes')}
                       value={ssm.max_bytes_mb != null
                         ? `${ssm.nbytes_mb.toFixed(1)} / ${ssm.max_bytes_mb.toFixed(1)} MB`
                         : `${ssm.nbytes_mb.toFixed(1)} MB`}
@@ -449,7 +456,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                   )}
                   {ssm.evictions != null && (
                     <StatCard
-                      label="SSM Evictions"
+                      label={t('sessions.cache.ssmEvictions')}
                       value={ssm.evicted_bytes_mb != null && ssm.evicted_bytes_mb > 0
                         ? `${ssm.evictions} / ${ssm.evicted_bytes_mb.toFixed(1)} MB`
                         : String(ssm.evictions)}
@@ -457,13 +464,13 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                   )}
                   {ssm.disk?.total_tokens_on_disk != null && (
                     <StatCard
-                      label="SSM Tokens on Disk"
+                      label={t('sessions.cache.ssmTokensOnDisk')}
                       value={(ssm.disk.total_tokens_on_disk || 0).toLocaleString()}
                     />
                   )}
                   {ssm.disk?.hits != null && (
                     <StatCard
-                      label="SSM L2 Hits / Misses"
+                      label={t('sessions.cache.ssmL2HitsMisses')}
                       value={`${ssm.disk.hits || 0} / ${ssm.disk.misses || 0}`}
                     />
                   )}
@@ -477,48 +484,52 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {/* Scheduler Stats */}
       {schedulerStats && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Scheduler</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cache.scheduler')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
-            <StatCard label="Requests" value={String(schedulerStats.num_requests_processed || 0)} />
-            <StatCard label="Running" value={String(schedulerStats.num_running || 0)} />
-            <StatCard label="Waiting" value={String(schedulerStats.num_waiting || 0)} />
+            <StatCard label={t('sessions.cache.requests')} value={String(schedulerStats.num_requests_processed || 0)} />
+            <StatCard label={t('status.running')} value={String(schedulerStats.num_running || 0)} />
+            <StatCard label={t('sessions.cache.waiting')} value={String(schedulerStats.num_waiting || 0)} />
             {schedulerStats.ewma_ttft_seconds != null && (
-              <StatCard label="TTFT EWMA" value={`${Number(schedulerStats.ewma_ttft_seconds || 0).toFixed(3)} s`} />
+              <StatCard label={t('sessions.cache.ttftEwma')} value={`${Number(schedulerStats.ewma_ttft_seconds || 0).toFixed(3)} s`} />
             )}
-            <StatCard label="Prompt Tokens" value={(schedulerStats.total_prompt_tokens || 0).toLocaleString()} />
-            <StatCard label="Completion Tokens" value={(schedulerStats.total_completion_tokens || 0).toLocaleString()} />
+            <StatCard label={t('sessions.cache.promptTokens')} value={(schedulerStats.total_prompt_tokens || 0).toLocaleString()} />
+            <StatCard label={t('sessions.cache.completionTokens')} value={(schedulerStats.total_completion_tokens || 0).toLocaleString()} />
             {schedulerStats.cache_hit_tokens != null && (
-              <StatCard label="Cache Hit Tokens" value={(schedulerStats.cache_hit_tokens || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.cacheHitTokens')} value={(schedulerStats.cache_hit_tokens || 0).toLocaleString()} />
             )}
             {schedulerStats.cache_hit_requests != null && (
-              <StatCard label="Cache Hit Requests" value={(schedulerStats.cache_hit_requests || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.cacheHitRequests')} value={(schedulerStats.cache_hit_requests || 0).toLocaleString()} />
             )}
             {schedulerStats.hybrid_kv_without_ssm_hits != null && (
-              <StatCard label="Hybrid KV-Only Misses" value={(schedulerStats.hybrid_kv_without_ssm_hits || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.hybridKvOnlyMisses')} value={(schedulerStats.hybrid_kv_without_ssm_hits || 0).toLocaleString()} />
             )}
             {schedulerStats.hybrid_kv_without_ssm_tokens != null && schedulerStats.hybrid_kv_without_ssm_tokens > 0 && (
-              <StatCard label="KV-Only Tokens" value={(schedulerStats.hybrid_kv_without_ssm_tokens || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.kvOnlyTokens')} value={(schedulerStats.hybrid_kv_without_ssm_tokens || 0).toLocaleString()} />
             )}
             {schedulerStats.cache_reuse_skips != null && (
-              <StatCard label="Cache Reuse Skips" value={String(schedulerStats.cache_reuse_skips || 0)} />
+              <StatCard label={t('sessions.cache.cacheReuseSkips')} value={String(schedulerStats.cache_reuse_skips || 0)} />
             )}
             {schedulerStats.cache_reuse_skip_tokens != null && schedulerStats.cache_reuse_skip_tokens > 0 && (
-              <StatCard label="Skipped Hit Tokens" value={(schedulerStats.cache_reuse_skip_tokens || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.skippedHitTokens')} value={(schedulerStats.cache_reuse_skip_tokens || 0).toLocaleString()} />
             )}
             {schedulerStats.cache_reuse_partial_downgrades != null && (
-              <StatCard label="Partial Reuse" value={String(schedulerStats.cache_reuse_partial_downgrades || 0)} />
+              <StatCard label={t('sessions.cache.partialReuse')} value={String(schedulerStats.cache_reuse_partial_downgrades || 0)} />
             )}
             {schedulerStats.cache_reuse_partial_tokens != null && schedulerStats.cache_reuse_partial_tokens > 0 && (
-              <StatCard label="Partial Hit Tokens" value={(schedulerStats.cache_reuse_partial_tokens || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.partialHitTokens')} value={(schedulerStats.cache_reuse_partial_tokens || 0).toLocaleString()} />
             )}
           </div>
           {schedulerStats.last_cache_reuse_partial && (
             <div className="mt-2 text-xs bg-accent/10 border border-accent/30 text-foreground px-3 py-2 rounded">
-              Cache reuse was memory-fit: used {(schedulerStats.last_cache_reuse_partial.used_cached_tokens ?? 0).toLocaleString()} of {(schedulerStats.last_cache_reuse_partial.original_cached_tokens ?? 0).toLocaleString()} cached tokens,
-              estimated merge {schedulerStats.last_cache_reuse_partial.used_needed_mb ?? '?'} MB within {schedulerStats.last_cache_reuse_partial.budget_mb ?? schedulerStats.last_cache_reuse_partial.available_mb ?? '?'} MB budgeted,
-              prefilling {(schedulerStats.last_cache_reuse_partial.tail_tokens ?? 0).toLocaleString()} tail tokens.
+              {t('sessions.cache.reusePartialMessage', {
+                used: (schedulerStats.last_cache_reuse_partial.used_cached_tokens ?? 0).toLocaleString(),
+                original: (schedulerStats.last_cache_reuse_partial.original_cached_tokens ?? 0).toLocaleString(),
+                neededMb: schedulerStats.last_cache_reuse_partial.used_needed_mb ?? '?',
+                budgetMb: schedulerStats.last_cache_reuse_partial.budget_mb ?? schedulerStats.last_cache_reuse_partial.available_mb ?? '?',
+                tailTokens: (schedulerStats.last_cache_reuse_partial.tail_tokens ?? 0).toLocaleString(),
+              })}
               {schedulerStats.last_cache_reuse_partial.cache_format && (
-                <> Format {schedulerStats.last_cache_reuse_partial.cache_format}.</>
+                <> {t('sessions.cache.formatSentence', { format: schedulerStats.last_cache_reuse_partial.cache_format })}</>
               )}
             </div>
           )}
@@ -534,28 +545,32 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           )}
           {schedulerStats.last_hybrid_kv_without_ssm && (
             <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning-foreground px-3 py-2 rounded">
-              Hybrid cache full-prefilled: KV had {(schedulerStats.last_hybrid_kv_without_ssm.cached_tokens ?? 0).toLocaleString()} reusable tokens,
-              but no matching SSM companion state ({schedulerStats.last_hybrid_kv_without_ssm.reason || 'missing_ssm'}).
+              {t('sessions.cache.hybridFullPrefillMessage', {
+                cachedTokens: (schedulerStats.last_hybrid_kv_without_ssm.cached_tokens ?? 0).toLocaleString(),
+                reason: schedulerStats.last_hybrid_kv_without_ssm.reason || 'missing_ssm',
+              })}
               {schedulerStats.last_hybrid_kv_without_ssm.checkpoint_tokens != null && (
-                <> Checkpoint {(schedulerStats.last_hybrid_kv_without_ssm.checkpoint_tokens ?? 0).toLocaleString()} tokens.</>
+                <> {t('sessions.cache.checkpointSentence', { tokens: (schedulerStats.last_hybrid_kv_without_ssm.checkpoint_tokens ?? 0).toLocaleString() })}</>
               )}
             </div>
           )}
           {schedulerStats.last_cache_reuse_skip && (
             <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning-foreground px-3 py-2 rounded">
-              Cache reuse skipped after partial reuse failed: needed {schedulerStats.last_cache_reuse_skip.needed_mb ?? '?'} MB,
-              budget {schedulerStats.last_cache_reuse_skip.budget_mb ?? schedulerStats.last_cache_reuse_skip.available_mb ?? '?'} MB,
-              available {schedulerStats.last_cache_reuse_skip.available_mb ?? '?'} MB,
-              dropped {(schedulerStats.last_cache_reuse_skip.dropped_cached_tokens ?? schedulerStats.last_cache_reuse_skip.cached_tokens ?? 0).toLocaleString()} cached tokens,
-              full-prefilling {(schedulerStats.last_cache_reuse_skip.full_prefill_tokens ?? schedulerStats.last_cache_reuse_skip.prompt_tokens ?? 0).toLocaleString()} tokens.
+              {t('sessions.cache.reuseSkipMessage', {
+                neededMb: schedulerStats.last_cache_reuse_skip.needed_mb ?? '?',
+                budgetMb: schedulerStats.last_cache_reuse_skip.budget_mb ?? schedulerStats.last_cache_reuse_skip.available_mb ?? '?',
+                availableMb: schedulerStats.last_cache_reuse_skip.available_mb ?? '?',
+                droppedTokens: (schedulerStats.last_cache_reuse_skip.dropped_cached_tokens ?? schedulerStats.last_cache_reuse_skip.cached_tokens ?? 0).toLocaleString(),
+                prefillTokens: (schedulerStats.last_cache_reuse_skip.full_prefill_tokens ?? schedulerStats.last_cache_reuse_skip.prompt_tokens ?? 0).toLocaleString(),
+              })}
               {schedulerStats.last_cache_reuse_skip.cache_contract && (
-                <> Contract {schedulerStats.last_cache_reuse_skip.cache_contract}.</>
+                <> {t('sessions.cache.contractSentence', { contract: schedulerStats.last_cache_reuse_skip.cache_contract })}</>
               )}
               {schedulerStats.last_cache_reuse_skip.cache_format && (
-                <> Format {schedulerStats.last_cache_reuse_skip.cache_format}.</>
+                <> {t('sessions.cache.formatSentence', { format: schedulerStats.last_cache_reuse_skip.cache_format })}</>
               )}
               {schedulerStats.last_cache_reuse_skip.partial_reuse_unavailable_reason && (
-                <> Partial reason: {schedulerStats.last_cache_reuse_skip.partial_reuse_unavailable_reason}.</>
+                <> {t('sessions.cache.partialReasonSentence', { reason: schedulerStats.last_cache_reuse_skip.partial_reuse_unavailable_reason })}</>
               )}
             </div>
           )}
@@ -569,93 +584,93 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           </h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {lastCacheExecution.cache_detail && (
-              <StatCard label="Cache Detail" value={String(lastCacheExecution.cache_detail)} />
+              <StatCard label={t('sessions.cache.cacheDetail')} value={String(lastCacheExecution.cache_detail)} />
             )}
             {(lastCacheExecution.selection?.selected ?? lastCacheExecution.selection) != null && (
               <StatCard
-                label="Selection"
+                label={t('sessions.cache.selection')}
                 value={String(lastCacheExecution.selection?.selected ?? lastCacheExecution.selection)}
               />
             )}
             {lastCacheExecution.cache_reuse_applied != null && (
               <StatCard
-                label="Reuse Applied"
-                value={lastCacheExecution.cache_reuse_applied ? 'yes' : 'no'}
+                label={t('sessions.cache.reuseApplied')}
+                value={lastCacheExecution.cache_reuse_applied ? t('common.yes') : t('common.no')}
               />
             )}
             {lastCacheExecution.cache_outcome && (
-              <StatCard label="Outcome" value={String(lastCacheExecution.cache_outcome)} />
+              <StatCard label={t('sessions.cache.outcome')} value={String(lastCacheExecution.cache_outcome)} />
             )}
             {lastCacheExecution.prompt_tokens != null && (
               <StatCard
-                label="Prompt Tokens"
+                label={t('sessions.cache.promptTokens')}
                 value={Number(lastCacheExecution.prompt_tokens || 0).toLocaleString()}
               />
             )}
             {lastCacheExecution.cached_tokens != null && (
               <StatCard
-                label="Cached Prefix"
+                label={t('sessions.cache.cachedPrefix')}
                 value={Number(lastCacheExecution.cached_tokens || 0).toLocaleString()}
               />
             )}
             {lastCacheExecution.attempted_cached_tokens != null && (
               <StatCard
-                label="Attempted Prefix"
+                label={t('sessions.cache.attemptedPrefix')}
                 value={Number(lastCacheExecution.attempted_cached_tokens || 0).toLocaleString()}
               />
             )}
             {lastCacheExecution.uncached_prompt_tokens != null && (
               <StatCard
-                label="Uncached Tail"
+                label={t('sessions.cache.uncachedTail')}
                 value={Number(lastCacheExecution.uncached_prompt_tokens || 0).toLocaleString()}
               />
             )}
             {lastCacheExecution.prefill_tokens != null && (
               <StatCard
-                label="Forwarded Prefill"
+                label={t('sessions.cache.forwardedPrefill')}
                 value={Number(lastCacheExecution.prefill_tokens || 0).toLocaleString()}
               />
             )}
             {lastCacheExecution.generation_prompt_suffix_tokens != null && (
               <StatCard
-                label="Generation Suffix"
+                label={t('sessions.cache.generationSuffix')}
                 value={Number(lastCacheExecution.generation_prompt_suffix_tokens || 0).toLocaleString()}
               />
             )}
             {lastCacheExecution.blocks != null && (
-              <StatCard label="Matched Blocks" value={Number(lastCacheExecution.blocks || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.matchedBlocks')} value={Number(lastCacheExecution.blocks || 0).toLocaleString()} />
             )}
             {lastCacheExecution.disk_blocks != null && (
-              <StatCard label="SSD Blocks Read" value={Number(lastCacheExecution.disk_blocks || 0).toLocaleString()} />
+              <StatCard label={t('sessions.cache.ssdBlocksRead')} value={Number(lastCacheExecution.disk_blocks || 0).toLocaleString()} />
             )}
             {lastCacheExecution.reconstruction_seconds != null && (
               <StatCard
-                label="Reconstruction"
+                label={t('sessions.cache.reconstruction')}
                 value={`${(Number(lastCacheExecution.reconstruction_seconds || 0) * 1000).toFixed(2)} ms`}
               />
             )}
             {lastCacheExecution.dequantization_seconds != null && (
               <StatCard
-                label="Dequantization"
+                label={t('sessions.cache.dequantization')}
                 value={`${(Number(lastCacheExecution.dequantization_seconds || 0) * 1000).toFixed(2)} ms`}
               />
             )}
             {lastCacheExecution.tq_rewrap_seconds != null && (
               <StatCard
-                label="TQ Re-wrap"
+                label={t('sessions.cache.tqRewrap')}
                 value={`${(Number(lastCacheExecution.tq_rewrap_seconds || 0) * 1000).toFixed(2)} ms`}
               />
             )}
             {lastCacheExecution.total_worker_cache_seconds != null && (
               <StatCard
-                label="Worker Cache Time"
+                label={t('sessions.cache.workerCacheTime')}
                 value={`${(Number(lastCacheExecution.total_worker_cache_seconds || 0) * 1000).toFixed(2)} ms`}
               />
             )}
           </div>
           {lastCacheExecution.fallback_reason && (
             <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning-foreground px-3 py-2 rounded">
-              Cache reuse fell back to prefill: {String(lastCacheExecution.fallback_reason)}.
+              {t('sessions.cache.fallbackMessage', { reason: String(lastCacheExecution.fallback_reason) })}
             </div>
           )}
         </div>
@@ -667,80 +682,84 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.cacheContract')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
             {nativeCache?.cache_type && (
-              <StatCard label="Native Cache" value={nativeCache.cache_type} />
+              <StatCard label={t('sessions.cache.nativeCache')} value={nativeCache.cache_type} />
             )}
             {nativeCache?.schema && (
-              <StatCard label="Schema" value={nativeCache.schema} />
+              <StatCard label={t('sessions.cache.schema')} value={nativeCache.schema} />
             )}
             {turboQuantKv && (
               <StatCard
-                label="TurboQuant KV"
+                label={t('sessions.cache.turboquantKv')}
                 value={
                   turboQuantKv.enabled
                     ? turboQuantKv.single_sequence_only
-                      ? 'enabled (single-seq)'
-                      : 'enabled'
-                    : 'disabled'
+                      ? t('sessions.cache.statusEnabledSingleSeq')
+                      : t('sessions.cache.statusEnabled')
+                    : t('sessions.cache.statusDisabled')
                 }
               />
             )}
             {turboQuantKv?.single_sequence_only && (
               <StatCard
-                label="TQ Batch"
-                value={`${turboQuantKv.effective_max_num_seqs ?? 1} seq / prefill ${turboQuantKv.effective_prefill_batch_size ?? 1} / decode ${turboQuantKv.effective_completion_batch_size ?? 1}`}
+                label={t('sessions.cache.tqBatch')}
+                value={t('sessions.cache.tqBatchValue', {
+                  seqs: turboQuantKv.effective_max_num_seqs ?? 1,
+                  prefill: turboQuantKv.effective_prefill_batch_size ?? 1,
+                  decode: turboQuantKv.effective_completion_batch_size ?? 1,
+                })}
               />
             )}
             {nativeCache?.generic_turboquant_kv && (
               <StatCard
                 label={
                   nativeCache.generic_turboquant_kv.reason === 'hybrid_attention_kv_only'
-                    ? 'Selective TQ-KV'
-                    : 'Generic TQ-KV'
+                    ? t('sessions.cache.selectiveTqKv')
+                    : t('sessions.cache.genericTqKv')
                 }
                 value={
                   nativeCache.generic_turboquant_kv.enabled
-                    ? 'enabled'
-                    : `off (${nativeCache.generic_turboquant_kv.reason || 'native'})`
+                    ? t('sessions.cache.statusEnabled')
+                    : t('sessions.cache.offWithReason', { reason: nativeCache.generic_turboquant_kv.reason || 'native' })
                 }
               />
             )}
             {dsv4ActivationQatDisplay && (
               <>
-                <StatCard label="DSV4 QAT Requested" value={dsv4ActivationQatDisplay.requestedEffective} />
-                <StatCard label="DSV4 QAT Observed" value={dsv4ActivationQatDisplay.observedAttestation} />
-                <StatCard label="DSV4 QAT Paths" value={dsv4ActivationQatDisplay.paths} />
-                <StatCard label="DSV4 QAT Kernels" value={dsv4ActivationQatDisplay.fusedKernels} />
+                <StatCard label={t('sessions.cache.dsv4QatRequested')} value={dsv4ActivationQatDisplay.requestedEffective} />
+                <StatCard label={t('sessions.cache.dsv4QatObserved')} value={dsv4ActivationQatDisplay.observedAttestation} />
+                <StatCard label={t('sessions.cache.dsv4QatPaths')} value={dsv4ActivationQatDisplay.paths} />
+                <StatCard label={t('sessions.cache.dsv4QatKernels')} value={dsv4ActivationQatDisplay.fusedKernels} />
               </>
             )}
             {attentionKvStorage && (
               <StatCard
-                label="Attention KV L2"
+                label={t('sessions.cache.attentionKvL2')}
                 value={
                   tqStoredPrefix ?? (attentionKvStorage.enabled
-                    ? `q${attentionKvStorage.bits} / group ${attentionKvStorage.group_size ?? 64}`
-                    : 'disabled')
+                    ? t('sessions.cache.attentionKvL2Value', { bits: attentionKvStorage.bits, groupSize: attentionKvStorage.group_size ?? 64 })
+                    : t('sessions.cache.statusDisabled'))
                 }
               />
             )}
             {attentionKvStorage?.ssm_policy && (
               <StatCard
-                label="SSM Policy"
+                label={t('sessions.cache.ssmPolicy')}
                 value={`${attentionKvStorage.ssm_policy}${attentionKvStorage.rederive ? ' + rederive' : ''}`}
               />
             )}
             {kvQuant && !tqStoredPrefix && (
               <StatCard
-                label="Stored KV Quant"
+                label={t('sessions.cache.storedKvQuant')}
                 value={
                   kvQuant?.enabled
-                    ? `${kvQuant.bits}-bit / group ${kvQuant.group_size}`
-                    : 'disabled'
+                    ? t('sessions.cache.storedKvQuantValue', { bits: kvQuant.bits, groupSize: kvQuant.group_size })
+                    : t('sessions.cache.statusDisabled')
                 }
               />
             )}
             {nativeCache?.components?.length > 0 && (
               <StatCard
-                label="Components"
+                label={t('sessions.cache.components')}
                 value={nativeCache.components.join(', ')}
               />
             )}
@@ -753,15 +772,15 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.diskCacheL2')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
-            {diskCache.entries != null && <StatCard label="Entries" value={String(diskCache.entries)} />}
-            {(diskCache.total_size_mb ?? diskCache.size_mb) != null && <StatCard label="Size" value={`${(diskCache.total_size_mb ?? diskCache.size_mb ?? 0).toFixed(1)} MB`} />}
-            {diskCache.total_tokens_on_disk != null && <StatCard label="Tokens on Disk" value={(diskCache.total_tokens_on_disk || 0).toLocaleString()} />}
-            {diskCache.hit_rate != null && <StatCard label="Hit Rate" value={`${(diskCache.hit_rate * 100).toFixed(1)}%`} />}
-            {diskCache.hits != null && <StatCard label="Hits / Misses" value={`${diskCache.hits} / ${diskCache.misses ?? 0}`} />}
-            {diskCache.stores != null && <StatCard label="Stores" value={String(diskCache.stores)} />}
-            {diskCache.tq_native_stores != null && diskCache.tq_native_stores > 0 && <StatCard label="TQ-Native Stores" value={String(diskCache.tq_native_stores)} />}
-            {diskCache.tq_native_hits != null && diskCache.tq_native_hits > 0 && <StatCard label="TQ-Native Hits" value={String(diskCache.tq_native_hits)} />}
-            {diskCache.pending_writes != null && diskCache.pending_writes > 0 && <StatCard label="Pending Writes" value={String(diskCache.pending_writes)} />}
+            {diskCache.entries != null && <StatCard label={t('sessions.cache.entries')} value={String(diskCache.entries)} />}
+            {(diskCache.total_size_mb ?? diskCache.size_mb) != null && <StatCard label={t('image.prompt.size')} value={`${(diskCache.total_size_mb ?? diskCache.size_mb ?? 0).toFixed(1)} MB`} />}
+            {diskCache.total_tokens_on_disk != null && <StatCard label={t('sessions.cache.tokensOnDisk')} value={(diskCache.total_tokens_on_disk || 0).toLocaleString()} />}
+            {diskCache.hit_rate != null && <StatCard label={t('sessions.cache.hitRate')} value={`${(diskCache.hit_rate * 100).toFixed(1)}%`} />}
+            {diskCache.hits != null && <StatCard label={t('sessions.cache.hitsMisses')} value={`${diskCache.hits} / ${diskCache.misses ?? 0}`} />}
+            {diskCache.stores != null && <StatCard label={t('sessions.cache.stores')} value={String(diskCache.stores)} />}
+            {diskCache.tq_native_stores != null && diskCache.tq_native_stores > 0 && <StatCard label={t('sessions.cache.tqNativeStores')} value={String(diskCache.tq_native_stores)} />}
+            {diskCache.tq_native_hits != null && diskCache.tq_native_hits > 0 && <StatCard label={t('sessions.cache.tqNativeHits')} value={String(diskCache.tq_native_hits)} />}
+            {diskCache.pending_writes != null && diskCache.pending_writes > 0 && <StatCard label={t('sessions.cache.pendingWrites')} value={String(diskCache.pending_writes)} />}
           </div>
         </div>
       )}
@@ -771,67 +790,66 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.blockDiskCache')}</h4>
           <p className="mb-2 text-xs text-muted-foreground">
-            Namespace values describe this model/configuration. Managed-root
-            values include every block-cache namespace and typed companion under
-            the same SSD root. Namespace occupancy and block-read counts persist
-            across restarts; this-engine reads, writes, and evictions reset when
-            the model server starts.
+            {t('sessions.cache.blockDiskExplainer')}
           </p>
           <div className="grid grid-cols-2 gap-2 text-sm">
-            <StatCard label="Namespace Blocks" value={String(blockDiskCache.blocks_on_disk ?? 0)} />
+            <StatCard label={t('sessions.cache.namespaceBlocks')} value={String(blockDiskCache.blocks_on_disk ?? 0)} />
             <StatCard
-              label="Namespace Size"
+              label={t('sessions.cache.namespaceSize')}
               value={blockDiskCache.disk_size_bytes != null
                 ? formatCacheStorageBytes(blockDiskCache.disk_size_bytes)
                 : `${(blockDiskCache.disk_size_gb ?? 0).toFixed(2)} GB`}
             />
             {globalBlockDiskBudget && (
               <StatCard
-                label="Managed Root Size"
+                label={t('sessions.cache.managedRootSize')}
                 value={globalBlockDiskBudget.accounted === true && globalBlockDiskBudget.bytes_after != null
                   ? `${(globalBlockDiskBudget.bytes_after / 1024 ** 3).toFixed(2)} GB`
-                  : 'Reconciliation pending'}
+                  : t('sessions.cache.reconciliationPending')}
               />
             )}
             {globalBlockDiskBudget?.max_size_bytes != null && (
               <StatCard
-                label="Managed Root Limit"
+                label={t('sessions.cache.managedRootLimit')}
                 value={globalBlockDiskBudget.max_size_bytes > 0
                   ? `${(globalBlockDiskBudget.max_size_bytes / 1024 ** 3).toFixed(2)} GB`
-                  : 'Unlimited'}
+                  : t('sessions.cache.unlimited')}
               />
             )}
             {globalBlockDiskBudget && (
               <StatCard
-                label="Managed Root Status"
+                label={t('sessions.cache.managedRootStatus')}
                 value={globalBlockDiskBudget.accounted !== true
-                  ? 'Reconciliation pending'
+                  ? t('sessions.cache.reconciliationPending')
                   : globalBlockDiskBudget.compliant
-                    ? 'Within limit'
-                    : 'Over limit'}
+                    ? t('sessions.cache.withinLimit')
+                    : t('sessions.cache.overLimit')}
               />
             )}
-            {blockDiskCache.total_tokens_on_disk != null && <StatCard label="Namespace Tokens" value={(blockDiskCache.total_tokens_on_disk || 0).toLocaleString()} />}
-            <StatCard label="Persisted Block Reads" value={String(blockDiskCache.total_accesses ?? 0)} />
-            <StatCard label="This Engine Reads H / M" value={`${blockDiskCache.disk_hits ?? 0} / ${blockDiskCache.disk_misses ?? 0}`} />
-            <StatCard label="This Engine Writes" value={String(blockDiskCache.disk_writes ?? 0)} />
-            <StatCard label="This Engine Evictions" value={String(blockDiskCache.disk_evictions ?? 0)} />
+            {blockDiskCache.total_tokens_on_disk != null && <StatCard label={t('sessions.cache.namespaceTokens')} value={(blockDiskCache.total_tokens_on_disk || 0).toLocaleString()} />}
+            <StatCard label={t('sessions.cache.persistedBlockReads')} value={String(blockDiskCache.total_accesses ?? 0)} />
+            <StatCard label={t('sessions.cache.thisEngineReads')} value={`${blockDiskCache.disk_hits ?? 0} / ${blockDiskCache.disk_misses ?? 0}`} />
+            <StatCard label={t('sessions.cache.thisEngineWrites')} value={String(blockDiskCache.disk_writes ?? 0)} />
+            <StatCard label={t('sessions.cache.thisEngineEvictions')} value={String(blockDiskCache.disk_evictions ?? 0)} />
             {blockDiskCache.write_pipeline && (
               <StatCard
-                label="Writer Pending / In Flight"
+                label={t('sessions.cache.writerPendingInFlight')}
                 value={`${blockDiskCache.write_pipeline.pending_items ?? 0} / ${blockDiskCache.write_pipeline.inflight ?? 0}`}
               />
             )}
             {blockDiskCache.write_pipeline && (
               <StatCard
-                label="Off-thread Writes Q / C / F"
+                label={t('sessions.cache.offThreadWrites')}
                 value={`${blockDiskCache.write_pipeline.offthread_serializations_queued ?? 0} / ${blockDiskCache.write_pipeline.offthread_serializations_completed ?? 0} / ${blockDiskCache.write_pipeline.offthread_serialization_failures ?? 0}`}
               />
             )}
             {globalBlockDiskBudget && (
               <StatCard
-                label="Last Local Reconciliation Trim"
-                value={`${globalBlockDiskBudget.evicted_entries ?? 0} entries / ${((globalBlockDiskBudget.evicted_bytes ?? 0) / 1024 ** 3).toFixed(2)} GB`}
+                label={t('sessions.cache.lastReconciliationTrim')}
+                value={t('sessions.cache.entriesGbValue', {
+                  entries: globalBlockDiskBudget.evicted_entries ?? 0,
+                  gb: ((globalBlockDiskBudget.evicted_bytes ?? 0) / 1024 ** 3).toFixed(2),
+                })}
               />
             )}
           </div>
@@ -850,14 +868,14 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
       {showEntries && entries && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
-            Cache Entries ({entries.count || 0}) — {entries.cache_type}
+            {t('sessions.cache.cacheEntriesHeader', { count: entries.count || 0, type: entries.cache_type ?? '' })}
           </h4>
           <div className="max-h-48 overflow-auto space-y-1">
             {entries.entries?.map((entry: any, i: number) => (
               <div key={i} className="text-xs bg-background px-2 py-1 rounded border border-border flex justify-between">
-                <span>{entry.tokens_count} tokens</span>
+                <span>{t('chat.bubble.tokensSuffix', { n: entry.tokens_count })}</span>
                 {entry.memory_mb && <span className="text-muted-foreground">{entry.memory_mb} MB</span>}
-                {entry.ref_count != null && <span className="text-muted-foreground">refs: {entry.ref_count}</span>}
+                {entry.ref_count != null && <span className="text-muted-foreground">{t('sessions.cache.refsCount', { count: entry.ref_count })}</span>}
               </div>
             ))}
           </div>
@@ -876,7 +894,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             }}
             onKeyDown={e => { if (e.key === 'Enter' && warmInput.trim()) handleWarm() }}
             disabled={actionBusy}
-            placeholder="Enter system prompt to warm cache with..."
+            placeholder={t('sessions.cache.warmPlaceholder')}
             autoFocus
             className="flex-1 px-2 py-1.5 text-xs bg-background border border-input rounded focus:outline-none focus:ring-1 focus:ring-ring"
           />
@@ -889,7 +907,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             disabled={actionBusy}
             className="px-2 py-1.5 text-xs text-muted-foreground hover:text-foreground"
           >
-            Cancel
+            {t('common.cancel')}
           </button>
         </div>
       )}
@@ -901,19 +919,19 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           disabled={actionBusy}
           className="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent disabled:opacity-50"
         >
-          {loading ? 'Loading...' : showEntries ? 'Refresh Entries' : 'Show Entries'}
+          {loading ? t('common.loading') : showEntries ? t('sessions.cache.refreshEntries') : t('sessions.cache.showEntries')}
         </button>
         <button
           onClick={handleWarm}
           disabled={actionBusy}
           className="px-3 py-1.5 text-xs border border-border rounded hover:bg-accent disabled:opacity-50"
         >
-          {warming ? 'Warming...' : 'Warm Cache'}
+          {warming ? t('sessions.cache.warming') : t('sessions.cache.warmCache')}
         </button>
         <button
           onClick={() => handleClear('ram')}
           disabled={actionBusy}
-          title="Clear resident/indexed cache state while preserving disk-backed L2"
+          title={t('sessions.cache.clearRamTitle')}
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
           {t('sessions.cachePanel.clearRam')}
@@ -921,7 +939,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         <button
           onClick={() => handleClear('prefix')}
           disabled={actionBusy}
-          title="Clear prefix cache from RAM and disk-backed L2"
+          title={t('sessions.cache.clearPrefixTitle')}
           className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
         >
           {t('sessions.cachePanel.clearPrefixL2')}

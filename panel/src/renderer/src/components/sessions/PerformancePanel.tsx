@@ -351,20 +351,20 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
       {/* Engine Info */}
       {health && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Engine</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.perf.engine')}</h4>
           <div className="grid grid-cols-2 gap-2 text-xs">
-            <InfoCard label="Status" value={health.status} />
-            <InfoCard label="Engine" value={health.engine_type || 'unknown'} />
-            <InfoCard label="Model Type" value={health.model_type || '-'} />
+            <InfoCard label={t('chat.settings.status')} value={health.status} />
+            <InfoCard label={t('sessions.perf.engine')} value={health.engine_type || t('sessions.performance.unknown')} />
+            <InfoCard label={t('sessions.performance.modelType')} value={health.model_type || '-'} />
             {(health.quantization_format || health.quantization) && (
               <InfoCard
-                label="Weight Quant"
-                value={formatWeightQuant(health)}
+                label={t('sessions.performance.weightQuant')}
+                value={formatWeightQuant(health, t)}
               />
             )}
             {health.quantization?.codec && (
               <InfoCard
-                label="Weight Codec"
+                label={t('sessions.performance.weightCodec')}
                 value={
                   health.quantization.codec === 'turboquant_codebook'
                     ? health.quantization.routed_expert_bits_label
@@ -376,192 +376,209 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             )}
             {health.quantization?.codec === 'turboquant_codebook' && (
               <InfoCard
-                label="JANGTQ Layout"
+                label={t('sessions.performance.jangtqLayout')}
                 value={
                   health.quantization.sidecar?.prestacked_bundle
-                    ? 'pre-stacked bundle'
+                    ? t('sessions.performance.layoutPrestackedBundle')
                     : health.quantization.sidecar?.jangtq_runtime
-                      ? 'runtime sidecar'
+                      ? t('sessions.performance.layoutRuntimeSidecar')
                       : health.quantization.sidecar?.jang_config
-                        ? 'config only'
-                        : 'unknown'
+                        ? t('sessions.performance.layoutConfigOnly')
+                        : t('sessions.performance.unknown')
                 }
               />
             )}
             {health.quantization?.passthrough_tensor_count ? (
               <InfoCard
-                label="F16 Passthrough"
-                value={`${health.quantization.passthrough_tensor_count} tensors (${(health.quantization.passthrough_bit_widths_used || []).join('/') || 16}-bit)`}
+                label={t('sessions.performance.f16Passthrough')}
+                value={t('sessions.performance.f16PassthroughValue', {
+                  count: health.quantization.passthrough_tensor_count,
+                  bits: (health.quantization.passthrough_bit_widths_used || []).join('/') || 16,
+                })}
               />
             ) : null}
             {health.acceleration?.kernel_type && (
               <InfoCard
-                label="Metal NA"
+                label={t('sessions.performance.metalNa')}
                 value={
                   health.acceleration.metal_na_active_on_host
-                    ? 'active'
+                    ? t('sessions.performance.statusActive')
                     : health.acceleration.kernel_type === 'turboquant_codebook'
-                      ? 'not used by JANGTQ'
+                      ? t('sessions.performance.notUsedByJangtq')
                       : health.acceleration.metal_na_capable
-                        ? 'unavailable'
-                        : 'not applicable'
+                        ? t('sessions.performance.statusUnavailable')
+                        : t('sessions.performance.notApplicable')
                 }
               />
             )}
             {health.mtp && health.mtp.status && health.mtp.status !== 'not_configured' && (
               <InfoCard
-                label="MTP"
+                label={t('sessions.performance.mtp')}
                 value={
                   health.mtp.runtime_active
-                    ? `active${health.mtp.effective_depth ? ` D${health.mtp.effective_depth}` : ''}${health.mtp.runtime_scope ? ` (${health.mtp.runtime_scope})` : ''}`
+                    ? `${t('sessions.performance.statusActive')}${health.mtp.effective_depth ? ` D${health.mtp.effective_depth}` : ''}${health.mtp.runtime_scope ? ` (${health.mtp.runtime_scope})` : ''}`
                     : health.mtp.runtime_available
-                      ? 'weights present; runtime ready'
+                      ? t('sessions.performance.weightsPresentRuntimeReady')
                     : health.mtp.artifact_available
-                      ? 'weights present; runtime unwired'
+                      ? t('sessions.performance.weightsPresentRuntimeUnwired')
                       : health.mtp.status.replace(/_/g, ' ')
                 }
               />
             )}
             {health.mtp?.effective_depth && health.mtp.runtime_available && (
               <InfoCard
-                label="MTP Depth"
-                value={`D${health.mtp.effective_depth}${health.mtp.effective_depth_source === 'default' ? ' default' : ''}`}
+                label={t('sessions.performance.mtpDepth')}
+                value={health.mtp.effective_depth_source === 'default'
+                  ? t('sessions.performance.mtpDepthDefaultValue', { depth: health.mtp.effective_depth })
+                  : `D${health.mtp.effective_depth}`}
               />
             )}
             {health.mtp?.runtime_scope && health.mtp.runtime_available && (
               <InfoCard
-                label="MTP Scope"
-                value={health.mtp.vl_runtime_available ? health.mtp.runtime_scope : `${health.mtp.runtime_scope} only`}
+                label={t('sessions.performance.mtpScope')}
+                value={health.mtp.vl_runtime_available
+                  ? health.mtp.runtime_scope
+                  : t('sessions.performance.scopeOnlyValue', { scope: health.mtp.runtime_scope })}
               />
             )}
             {health.mtp?.request_policy && health.mtp.runtime_available && (
               <InfoCard
-                label="MTP Policy"
-                value={health.mtp.request_policy === 'deterministic-defaults' ? 'deterministic defaults' : health.mtp.request_policy}
+                label={t('sessions.performance.mtpPolicy')}
+                value={health.mtp.request_policy === 'deterministic-defaults' ? t('sessions.performance.deterministicDefaults') : health.mtp.request_policy}
               />
             )}
             {health.mtp?.request_gate && health.mtp.runtime_available && (
               <InfoCard
-                label="MTP Gate"
+                label={t('sessions.performance.mtpGate')}
                 value={health.mtp.request_gate.replace(',', ', ')}
               />
             )}
             {(health.mtp?.mtp_tensor_count != null || health.mtp?.vision_tensor_count != null) && (
               <InfoCard
-                label="MTP Tensors"
-                value={`${health.mtp?.mtp_tensor_count ?? 0} mtp / ${health.mtp?.vision_tensor_count ?? 0} vision`}
+                label={t('sessions.performance.mtpTensors')}
+                value={t('sessions.performance.mtpTensorsValue', {
+                  mtp: health.mtp?.mtp_tensor_count ?? 0,
+                  vision: health.mtp?.vision_tensor_count ?? 0,
+                })}
               />
             )}
             {lastNativeMtp && (
               <InfoCard
-                label="MTP Accept"
+                label={t('sessions.performance.mtpAccept')}
                 value={`${lastNativeMtp.accepted_tokens ?? 0}/${lastNativeMtp.drafted_tokens ?? 0} (${formatPercent(lastNativeMtp.acceptance_rate)})`}
               />
             )}
             {lastNativeMtp?.depth_acceptance_rates && (
               <InfoCard
-                label="MTP Depth Rates"
+                label={t('sessions.performance.mtpDepthRates')}
                 value={formatMtpDepthRates(lastNativeMtp.depth_acceptance_rates, lastNativeMtp.final_depth)}
               />
             )}
             {lastNativeMtp?.forwards && (
               <InfoCard
-                label="MTP Forwards"
+                label={t('sessions.performance.mtpForwards')}
                 value={`v${lastNativeMtp.forwards.verify_main ?? 0} / r${lastNativeMtp.forwards.replay_main ?? 0} / m${lastNativeMtp.forwards.mtp ?? 0}`}
               />
             )}
             {lastNativeMtp?.timings_ms && (
               <InfoCard
-                label="MTP Timing"
+                label={t('sessions.performance.mtpTiming')}
                 value={`${Number(lastNativeMtp.timings_ms.avg_cycle ?? 0).toFixed(1)} ms/cyc`}
               />
             )}
             {health.kv_cache_quantization?.enabled && (
-              <InfoCard label="KV Quant" value={`${health.kv_cache_quantization.bits}-bit`} />
+              <InfoCard label={t('sessions.performance.kvQuant')} value={`${health.kv_cache_quantization.bits}-bit`} />
             )}
             {health.native_cache?.cache_type && (
-              <InfoCard label="Native Cache" value={health.native_cache.cache_type} />
+              <InfoCard label={t('sessions.cache.nativeCache')} value={health.native_cache.cache_type} />
             )}
             {health.native_cache && (health.native_cache.paged != null || health.native_cache.block_disk_l2 != null) && (
               <InfoCard
-                label="Cache Stack"
-                value={`${health.native_cache.paged ? 'RAM paged' : health.native_cache.prefix ? 'prefix' : 'no-prefix'}${health.native_cache.block_disk_l2 ? ' + SSD L2' : ''}`}
+                label={t('sessions.performance.cacheStack')}
+                value={`${health.native_cache.paged ? t('sessions.performance.cacheStackRamPaged') : health.native_cache.prefix ? t('sessions.performance.cacheStackPrefix') : t('sessions.performance.cacheStackNoPrefix')}${health.native_cache.block_disk_l2 ? ' + SSD L2' : ''}`}
               />
             )}
             {health.native_cache?.components?.length ? (
               <InfoCard
-                label="Cache Components"
+                label={t('sessions.performance.cacheComponents')}
                 value={health.native_cache.components.join(', ')}
               />
             ) : null}
             {health.native_cache?.ssm_entries != null && (
-              <InfoCard label="SSM Entries" value={String(health.native_cache.ssm_entries || 0)} />
+              <InfoCard label={t('sessions.performance.ssmEntries')} value={String(health.native_cache.ssm_entries || 0)} />
             )}
             {health.turboquant_kv_cache && (
               <InfoCard
-                label="TQ-KV"
+                label={t('sessions.performance.tqKv')}
                 value={
                   health.turboquant_kv_cache.enabled
                     ? health.turboquant_kv_cache.single_sequence_only
-                      ? 'enabled (single-seq)'
-                      : 'enabled'
-                    : 'disabled'
+                      ? t('sessions.cache.statusEnabledSingleSeq')
+                      : t('sessions.cache.statusEnabled')
+                    : t('sessions.cache.statusDisabled')
                 }
               />
             )}
             {health.turboquant_kv_cache?.single_sequence_only && (
               <InfoCard
-                label="TQ Batch"
-                value={`${health.turboquant_kv_cache.effective_max_num_seqs ?? 1} seq / prefill ${health.turboquant_kv_cache.effective_prefill_batch_size ?? 1} / decode ${health.turboquant_kv_cache.effective_completion_batch_size ?? 1}`}
+                label={t('sessions.cache.tqBatch')}
+                value={t('sessions.cache.tqBatchValue', {
+                  seqs: health.turboquant_kv_cache.effective_max_num_seqs ?? 1,
+                  prefill: health.turboquant_kv_cache.effective_prefill_batch_size ?? 1,
+                  decode: health.turboquant_kv_cache.effective_completion_batch_size ?? 1,
+                })}
               />
             )}
             {health.native_cache?.generic_turboquant_kv && (
               <InfoCard
                 label={
                   health.native_cache.generic_turboquant_kv.reason === 'hybrid_attention_kv_only'
-                    ? 'Selective TQ-KV'
-                    : 'Generic TQ-KV'
+                    ? t('sessions.cache.selectiveTqKv')
+                    : t('sessions.cache.genericTqKv')
                 }
                 value={
                   health.native_cache.generic_turboquant_kv.enabled
-                    ? 'enabled'
-                    : `off: ${health.native_cache.generic_turboquant_kv.reason || 'native'}`
+                    ? t('sessions.cache.statusEnabled')
+                    : t('sessions.performance.offWithReasonColon', { reason: health.native_cache.generic_turboquant_kv.reason || 'native' })
                 }
               />
             )}
             {health.native_cache?.pool_quant && (
               <InfoCard
-                label="DSV4 Pool Quant"
+                label={t('sessions.performance.dsv4PoolQuant')}
                 value={
                   health.native_cache.pool_quant.error
-                    ? `error: ${health.native_cache.pool_quant.error}`
+                    ? t('sessions.performance.poolQuantErrorValue', { error: health.native_cache.pool_quant.error })
                     : health.native_cache.pool_quant.matches_request === false
-                      ? `mismatch: requested ${health.native_cache.pool_quant.requested ? 'on' : 'off'}, observed ${health.native_cache.pool_quant.observed ? 'on' : 'off'}`
-                      : health.native_cache.pool_quant.enabled ? 'enabled' : 'disabled'
+                      ? t('sessions.performance.poolQuantMismatchValue', {
+                          requested: health.native_cache.pool_quant.requested ? t('sessions.performance.stateOn') : t('sessions.performance.stateOff'),
+                          observed: health.native_cache.pool_quant.observed ? t('sessions.performance.stateOn') : t('sessions.performance.stateOff'),
+                        })
+                      : health.native_cache.pool_quant.enabled ? t('sessions.cache.statusEnabled') : t('sessions.cache.statusDisabled')
                 }
               />
             )}
             {dsv4ActivationQatDisplay && (
               <>
-                <InfoCard label="DSV4 QAT Requested" value={dsv4ActivationQatDisplay.requestedEffective} />
-                <InfoCard label="DSV4 QAT Observed" value={dsv4ActivationQatDisplay.observedAttestation} />
-                <InfoCard label="DSV4 QAT Paths" value={dsv4ActivationQatDisplay.paths} />
-                <InfoCard label="DSV4 QAT Kernels" value={dsv4ActivationQatDisplay.fusedKernels} />
+                <InfoCard label={t('sessions.cache.dsv4QatRequested')} value={dsv4ActivationQatDisplay.requestedEffective} />
+                <InfoCard label={t('sessions.cache.dsv4QatObserved')} value={dsv4ActivationQatDisplay.observedAttestation} />
+                <InfoCard label={t('sessions.cache.dsv4QatPaths')} value={dsv4ActivationQatDisplay.paths} />
+                <InfoCard label={t('sessions.cache.dsv4QatKernels')} value={dsv4ActivationQatDisplay.fusedKernels} />
               </>
             )}
             {attentionKvStorage && (
               <InfoCard
-                label="Attention KV L2"
+                label={t('sessions.cache.attentionKvL2')}
                 value={
                   tqStoredPrefix ?? (attentionKvStorage.enabled
                     ? `q${attentionKvStorage.bits} / g${attentionKvStorage.group_size ?? 64}`
-                    : 'disabled')
+                    : t('sessions.cache.statusDisabled'))
                 }
               />
             )}
             {attentionKvStorage?.ssm_policy && (
               <InfoCard
-                label="SSM Policy"
+                label={t('sessions.cache.ssmPolicy')}
                 value={`${attentionKvStorage.ssm_policy}${attentionKvStorage.rederive ? ' + rederive' : ''}`}
               />
             )}
@@ -582,7 +599,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
           ) : null}
           {lastNativeMtp?.fallback_reason ? (
             <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning px-3 py-2 rounded">
-              Native MTP fallback: {lastNativeMtp.fallback_reason}
+              {t('sessions.performance.nativeMtpFallback', { reason: lastNativeMtp.fallback_reason })}
             </div>
           ) : null}
         </div>
@@ -591,114 +608,125 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
       {/* Scheduler */}
       {health?.scheduler && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Scheduler</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cache.scheduler')}</h4>
           <div className="grid grid-cols-2 gap-2 text-xs">
             <InfoCard
-              label="Queue"
-              value={`${health.scheduler.num_running ?? 0} running / ${health.scheduler.num_waiting ?? 0} waiting`}
+              label={t('sessions.performance.queue')}
+              value={t('sessions.performance.queueValue', {
+                running: health.scheduler.num_running ?? 0,
+                waiting: health.scheduler.num_waiting ?? 0,
+              })}
             />
             {health.scheduler.ewma_ttft_seconds != null && (
               <InfoCard
-                label="TTFT EWMA"
+                label={t('sessions.cache.ttftEwma')}
                 value={`${Number(health.scheduler.ewma_ttft_seconds || 0).toFixed(3)} s`}
               />
             )}
             {health.scheduler.cache_hit_tokens != null && (
               <InfoCard
-                label="Cache Hit Tokens"
+                label={t('sessions.cache.cacheHitTokens')}
                 value={(health.scheduler.cache_hit_tokens || 0).toLocaleString()}
               />
             )}
             {health.scheduler.cache_hit_requests != null && (
               <InfoCard
-                label="Cache Hit Requests"
+                label={t('sessions.cache.cacheHitRequests')}
                 value={(health.scheduler.cache_hit_requests || 0).toLocaleString()}
               />
             )}
             {health.scheduler.hybrid_kv_without_ssm_hits != null && (
               <InfoCard
-                label="Hybrid KV-Only Misses"
+                label={t('sessions.cache.hybridKvOnlyMisses')}
                 value={(health.scheduler.hybrid_kv_without_ssm_hits || 0).toLocaleString()}
               />
             )}
             {health.scheduler.hybrid_kv_without_ssm_tokens != null && health.scheduler.hybrid_kv_without_ssm_tokens > 0 && (
               <InfoCard
-                label="KV-Only Tokens"
+                label={t('sessions.cache.kvOnlyTokens')}
                 value={(health.scheduler.hybrid_kv_without_ssm_tokens || 0).toLocaleString()}
               />
             )}
             {health.scheduler.cache_reuse_skips != null && (
-              <InfoCard label="Cache Skips" value={String(health.scheduler.cache_reuse_skips || 0)} />
+              <InfoCard label={t('sessions.performance.cacheSkips')} value={String(health.scheduler.cache_reuse_skips || 0)} />
             )}
             {health.scheduler.cache_reuse_skip_tokens != null && health.scheduler.cache_reuse_skip_tokens > 0 && (
               <InfoCard
-                label="Skipped Tokens"
+                label={t('sessions.performance.skippedTokens')}
                 value={(health.scheduler.cache_reuse_skip_tokens || 0).toLocaleString()}
               />
             )}
             {health.scheduler.cache_reuse_partial_downgrades != null && (
               <InfoCard
-                label="Partial Reuse"
+                label={t('sessions.cache.partialReuse')}
                 value={String(health.scheduler.cache_reuse_partial_downgrades || 0)}
               />
             )}
             {health.scheduler.cache_reuse_partial_tokens != null && health.scheduler.cache_reuse_partial_tokens > 0 && (
               <InfoCard
-                label="Partial Hit Tokens"
+                label={t('sessions.cache.partialHitTokens')}
                 value={(health.scheduler.cache_reuse_partial_tokens || 0).toLocaleString()}
               />
             )}
             {health.scheduler.batch_generator?.last_native_mtp && (
               <InfoCard
-                label="MTP Last"
+                label={t('sessions.performance.mtpLast')}
                 value={`D${health.scheduler.batch_generator.last_native_mtp.final_depth ?? '?'}${
                   health.scheduler.batch_generator.last_native_mtp.acceptance_rate != null
-                    ? ` ${Math.round((health.scheduler.batch_generator.last_native_mtp.acceptance_rate || 0) * 100)}% accept`
+                    ? ` ${t('sessions.performance.percentAcceptValue', { percent: Math.round((health.scheduler.batch_generator.last_native_mtp.acceptance_rate || 0) * 100) })}`
                     : ''
                 }`}
               />
             )}
             {health.scheduler.batch_generator?.last_native_mtp_skip && (
               <InfoCard
-                label="MTP Skip"
-                value={health.scheduler.batch_generator.last_native_mtp_skip.reason || 'skipped'}
+                label={t('sessions.performance.mtpSkip')}
+                value={health.scheduler.batch_generator.last_native_mtp_skip.reason || t('sessions.performance.skipped')}
               />
             )}
           </div>
           {health.scheduler.last_cache_reuse_partial && (
             <div className="mt-2 text-xs bg-accent/10 border border-accent/30 text-foreground px-3 py-2 rounded">
-              Cache reuse was memory-fit: used {(health.scheduler.last_cache_reuse_partial.used_cached_tokens ?? 0).toLocaleString()} of {(health.scheduler.last_cache_reuse_partial.original_cached_tokens ?? 0).toLocaleString()} cached tokens,
-              estimated merge {health.scheduler.last_cache_reuse_partial.used_needed_mb ?? '?'} MB within {health.scheduler.last_cache_reuse_partial.budget_mb ?? health.scheduler.last_cache_reuse_partial.available_mb ?? '?'} MB budgeted,
-              prefilling {(health.scheduler.last_cache_reuse_partial.tail_tokens ?? 0).toLocaleString()} tail tokens.
+              {t('sessions.cache.reusePartialMessage', {
+                used: (health.scheduler.last_cache_reuse_partial.used_cached_tokens ?? 0).toLocaleString(),
+                original: (health.scheduler.last_cache_reuse_partial.original_cached_tokens ?? 0).toLocaleString(),
+                neededMb: health.scheduler.last_cache_reuse_partial.used_needed_mb ?? '?',
+                budgetMb: health.scheduler.last_cache_reuse_partial.budget_mb ?? health.scheduler.last_cache_reuse_partial.available_mb ?? '?',
+                tailTokens: (health.scheduler.last_cache_reuse_partial.tail_tokens ?? 0).toLocaleString(),
+              })}
               {health.scheduler.last_cache_reuse_partial.cache_format && (
-                <> Format {health.scheduler.last_cache_reuse_partial.cache_format}.</>
+                <> {t('sessions.cache.formatSentence', { format: health.scheduler.last_cache_reuse_partial.cache_format })}</>
               )}
             </div>
           )}
           {health.scheduler.last_hybrid_kv_without_ssm && (
             <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning px-3 py-2 rounded">
-              Hybrid cache full-prefilled: KV had {(health.scheduler.last_hybrid_kv_without_ssm.cached_tokens ?? 0).toLocaleString()} reusable tokens,
-              but no matching SSM companion state ({health.scheduler.last_hybrid_kv_without_ssm.reason || 'missing_ssm'}).
+              {t('sessions.cache.hybridFullPrefillMessage', {
+                cachedTokens: (health.scheduler.last_hybrid_kv_without_ssm.cached_tokens ?? 0).toLocaleString(),
+                reason: health.scheduler.last_hybrid_kv_without_ssm.reason || 'missing_ssm',
+              })}
               {health.scheduler.last_hybrid_kv_without_ssm.checkpoint_tokens != null && (
-                <> Checkpoint {(health.scheduler.last_hybrid_kv_without_ssm.checkpoint_tokens ?? 0).toLocaleString()} tokens.</>
+                <> {t('sessions.cache.checkpointSentence', { tokens: (health.scheduler.last_hybrid_kv_without_ssm.checkpoint_tokens ?? 0).toLocaleString() })}</>
               )}
             </div>
           )}
           {health.scheduler.last_cache_reuse_skip && (
             <div className="mt-2 text-xs bg-warning/10 border border-warning/30 text-warning px-3 py-2 rounded">
-              Cache reuse skipped after partial reuse failed: needed {health.scheduler.last_cache_reuse_skip.needed_mb ?? '?'} MB,
-              budget {health.scheduler.last_cache_reuse_skip.budget_mb ?? health.scheduler.last_cache_reuse_skip.available_mb ?? '?'} MB,
-              available {health.scheduler.last_cache_reuse_skip.available_mb ?? '?'} MB,
-              dropped {(health.scheduler.last_cache_reuse_skip.dropped_cached_tokens ?? health.scheduler.last_cache_reuse_skip.cached_tokens ?? 0).toLocaleString()} cached tokens,
-              full-prefilling {(health.scheduler.last_cache_reuse_skip.full_prefill_tokens ?? health.scheduler.last_cache_reuse_skip.prompt_tokens ?? 0).toLocaleString()} tokens.
+              {t('sessions.cache.reuseSkipMessage', {
+                neededMb: health.scheduler.last_cache_reuse_skip.needed_mb ?? '?',
+                budgetMb: health.scheduler.last_cache_reuse_skip.budget_mb ?? health.scheduler.last_cache_reuse_skip.available_mb ?? '?',
+                availableMb: health.scheduler.last_cache_reuse_skip.available_mb ?? '?',
+                droppedTokens: (health.scheduler.last_cache_reuse_skip.dropped_cached_tokens ?? health.scheduler.last_cache_reuse_skip.cached_tokens ?? 0).toLocaleString(),
+                prefillTokens: (health.scheduler.last_cache_reuse_skip.full_prefill_tokens ?? health.scheduler.last_cache_reuse_skip.prompt_tokens ?? 0).toLocaleString(),
+              })}
               {health.scheduler.last_cache_reuse_skip.cache_contract && (
-                <> Contract {health.scheduler.last_cache_reuse_skip.cache_contract}.</>
+                <> {t('sessions.cache.contractSentence', { contract: health.scheduler.last_cache_reuse_skip.cache_contract })}</>
               )}
               {health.scheduler.last_cache_reuse_skip.cache_format && (
-                <> Format {health.scheduler.last_cache_reuse_skip.cache_format}.</>
+                <> {t('sessions.cache.formatSentence', { format: health.scheduler.last_cache_reuse_skip.cache_format })}</>
               )}
               {health.scheduler.last_cache_reuse_skip.partial_reuse_unavailable_reason && (
-                <> Partial reason: {health.scheduler.last_cache_reuse_skip.partial_reuse_unavailable_reason}.</>
+                <> {t('sessions.cache.partialReasonSentence', { reason: health.scheduler.last_cache_reuse_skip.partial_reuse_unavailable_reason })}</>
               )}
             </div>
           )}
@@ -708,59 +736,70 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
       {/* Cache */}
       {health?.cache && (
         <div>
-          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Cache</h4>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.view.cache')}</h4>
           <div className="grid grid-cols-2 gap-2 text-xs">
             {health.cache.totals?.ram_tokens_cached != null && (
               <InfoCard
-                label="RAM Resident Tokens"
+                label={t('sessions.cache.ramResidentTokens')}
                 value={(health.cache.totals.ram_tokens_cached || 0).toLocaleString()}
               />
             )}
             {health.cache.totals?.l1_indexed_tokens != null && (
               <InfoCard
-                label="L1 Indexed Tokens"
+                label={t('sessions.cache.l1IndexedTokens')}
                 value={(health.cache.totals.l1_indexed_tokens || 0).toLocaleString()}
               />
             )}
             {health.cache.totals?.l1_resident_bytes_mb != null && (
               <InfoCard
-                label="L1 Resident Memory"
+                label={t('sessions.cache.l1ResidentMemory')}
                 value={`${(health.cache.totals.l1_resident_bytes_mb || 0).toFixed(1)} / ${(health.cache.totals.l1_max_resident_bytes_mb || 0).toFixed(1)} MB`}
               />
             )}
             {health.cache.totals?.l1_evictions != null && (
               <InfoCard
-                label="L1 Evictions"
+                label={t('sessions.cache.l1Evictions')}
                 value={(health.cache.totals.l1_evictions || 0).toLocaleString()}
               />
             )}
             {(health.cache.totals?.l2_tokens_on_disk_store_sum ?? health.cache.totals?.l2_tokens_on_disk) != null && (
               <InfoCard
-                label="L2 Token Entries"
-                value={`${(health.cache.totals?.l2_tokens_on_disk_store_sum ?? health.cache.totals?.l2_tokens_on_disk ?? 0).toLocaleString()} store-sum`}
+                label={t('sessions.performance.l2TokenEntries')}
+                value={t('sessions.performance.storeSumValue', {
+                  count: (health.cache.totals?.l2_tokens_on_disk_store_sum ?? health.cache.totals?.l2_tokens_on_disk ?? 0).toLocaleString(),
+                })}
               />
             )}
             {health.cache.disk_cache?.entries != null && (
               <InfoCard
-                label="Prompt L2"
-                value={`${health.cache.disk_cache.entries || 0} entries / ${(health.cache.disk_cache.total_tokens_on_disk || 0).toLocaleString()} tokens`}
+                label={t('sessions.performance.promptL2')}
+                value={t('sessions.performance.entriesTokensValue', {
+                  entries: health.cache.disk_cache.entries || 0,
+                  tokens: (health.cache.disk_cache.total_tokens_on_disk || 0).toLocaleString(),
+                })}
               />
             )}
             {health.cache.block_disk_cache?.blocks_on_disk != null && (
               <InfoCard
-                label="Block Disk L2 (SSD)"
-                value={`${health.cache.block_disk_cache.blocks_on_disk || 0} blocks / ${(health.cache.block_disk_cache.total_tokens_on_disk || 0).toLocaleString()} tokens`}
+                label={t('sessions.performance.blockDiskL2Ssd')}
+                value={t('sessions.performance.blocksTokensValue', {
+                  blocks: health.cache.block_disk_cache.blocks_on_disk || 0,
+                  tokens: (health.cache.block_disk_cache.total_tokens_on_disk || 0).toLocaleString(),
+                })}
               />
             )}
             {health.cache.ssm_companion?.disk?.entries != null && (
               <InfoCard
-                label="SSM L2"
-                value={`${health.cache.ssm_companion.disk.entries || 0} entries / ${(health.cache.ssm_companion.disk.total_tokens_on_disk || 0).toLocaleString()} tokens`}
+                label={t('sessions.performance.ssmL2')}
+                value={t('sessions.performance.entriesTokensValue', {
+                  entries: health.cache.ssm_companion.disk.entries || 0,
+                  tokens: (health.cache.ssm_companion.disk.total_tokens_on_disk || 0).toLocaleString(),
+                })}
               />
             )}
             {health.cache.ssm_companion?.nbytes_mb != null && (
               <InfoCard
-                label="SSM Resident Memory"
+                label={t('sessions.performance.ssmResidentMemory')}
                 value={health.cache.ssm_companion.max_bytes_mb != null
                   ? `${health.cache.ssm_companion.nbytes_mb.toFixed(1)} / ${health.cache.ssm_companion.max_bytes_mb.toFixed(1)} MB`
                   : `${health.cache.ssm_companion.nbytes_mb.toFixed(1)} MB`}
@@ -768,7 +807,7 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             )}
             {health.cache.ssm_companion?.evictions != null && (
               <InfoCard
-                label="SSM Evictions"
+                label={t('sessions.cache.ssmEvictions')}
                 value={health.cache.ssm_companion.evicted_bytes_mb != null && health.cache.ssm_companion.evicted_bytes_mb > 0
                   ? `${health.cache.ssm_companion.evictions} / ${health.cache.ssm_companion.evicted_bytes_mb.toFixed(1)} MB`
                   : String(health.cache.ssm_companion.evictions)}
@@ -783,9 +822,9 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.performance.gpuMemoryMetal')}</h4>
           <div className="grid grid-cols-3 gap-2">
-            <MemoryCard label="Active" value={health.memory.active_mb} />
-            <MemoryCard label="Peak" value={health.memory.peak_mb} />
-            <MemoryCard label="Cache" value={health.memory.cache_mb} />
+            <MemoryCard label={t('sessions.performance.memActive')} value={health.memory.active_mb} />
+            <MemoryCard label={t('sessions.performance.memPeak')} value={health.memory.peak_mb} />
+            <MemoryCard label={t('sessions.view.cache')} value={health.memory.cache_mb} />
           </div>
 
           {/* Memory Graph */}
@@ -805,7 +844,10 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
   )
 }
 
-function formatWeightQuant(health: HealthData): string {
+function formatWeightQuant(
+  health: HealthData,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
   const q = health.quantization
   const qf = health.quantization_format
   const bits =
@@ -824,7 +866,7 @@ function formatWeightQuant(health: HealthData): string {
     return q.routed_expert_bits_label || `JANGTQ${bits != null ? ` ${bits}-bit` : ''}${group != null ? ` g${group}` : ''}`
   }
   if (qf?.type) return `${qf.type.toUpperCase()}${bits != null ? ` ${bits}-bit` : ''}${group != null ? ` g${group}` : ''}`
-  return bits != null ? `${bits}-bit` : 'unknown'
+  return bits != null ? `${bits}-bit` : t('sessions.performance.unknown')
 }
 
 function formatPercent(value?: number | null): string {

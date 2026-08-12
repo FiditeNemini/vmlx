@@ -75,16 +75,23 @@ describe('CachePanel last-request truthfulness', () => {
   })
 
   it('separates persistent namespace occupancy from current-engine activity', () => {
-    for (const marker of [
-      'Persisted Block Reads',
-      'This Engine Reads H / M',
-      'This Engine Writes',
-      'This Engine Evictions',
-      'Writer Pending / In Flight',
-      'Off-thread Writes Q / C / F',
-      'Last Local Reconciliation Trim',
+    // The labels render through i18n keys; assert the wiring in the source and
+    // the English copy in the locale catalog.
+    const catalog = readFileSync(
+      join(__dirname, '..', 'src/renderer/src/i18n/locales/en.json'),
+      'utf8',
+    )
+    for (const [key, marker] of [
+      ["t('sessions.cache.persistedBlockReads')", 'Persisted Block Reads'],
+      ["t('sessions.cache.thisEngineReads')", 'This Engine Reads H / M'],
+      ["t('sessions.cache.thisEngineWrites')", 'This Engine Writes'],
+      ["t('sessions.cache.thisEngineEvictions')", 'This Engine Evictions'],
+      ["t('sessions.cache.writerPendingInFlight')", 'Writer Pending / In Flight'],
+      ["t('sessions.cache.offThreadWrites')", 'Off-thread Writes Q / C / F'],
+      ["t('sessions.cache.lastReconciliationTrim')", 'Last Local Reconciliation Trim'],
     ]) {
-      expect(source).toContain(marker)
+      expect(source).toContain(key)
+      expect(catalog).toContain(marker)
     }
     expect(source).toContain('!blockDiskCache && schedulerCache.disk_hits')
     expect(source).toContain('blockDiskCache.disk_size_bytes')

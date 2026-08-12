@@ -162,7 +162,13 @@ class Gemma4ReasoningParser(ReasoningParser):
         still become Gemma's native full marker or its line-delimited degraded
         marker.
         """
-        text = text.replace(_EOT, "")
+        # Trim only a TRAILING <turn|> (including one still arriving), never a
+        # whole-buffer replace. The replace shrank the accumulated text under a
+        # monotonic emission counter, so a literal <turn|> in the answer body
+        # desynced it: "Use <turn|> to end turns." streamed as
+        # "Use <turn|d turns." — the signature defect class of applying a
+        # whole-string operation to a growing buffer.
+        text = _trim_trailing_eot(text)
         safe_end = len(text)
 
         full_marker = _SOC + _THOUGHT + "\n"

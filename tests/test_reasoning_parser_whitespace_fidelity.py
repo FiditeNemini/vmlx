@@ -143,3 +143,32 @@ def test_streaming_agrees_with_oneshot(pname, bname):
             f"{pname}/{bname}/{label}: streaming and one-shot disagree\n"
             f"  stream  {streamed!r}\n  oneshot {oneshot!r}"
         )
+
+
+def test_gemma4_literal_turn_marker_in_prose_survives_streaming():
+    """A literal <turn|> in the answer must not desync the emission counter.
+
+    _plain_content_before_possible_thought did text.replace(_EOT, "") over the
+    WHOLE accumulated buffer. That shrinks the text under a monotonic counter,
+    so "Use <turn|> to end turns." streamed as "Use <turn|d turns." while the
+    one-shot path returned it intact — the signature defect class of applying a
+    whole-string operation to a growing buffer. Only a TRAILING marker may be
+    trimmed.
+    """
+    from vmlx_engine.reasoning.gemma4_parser import Gemma4ReasoningParser
+
+    for raw, expected in [
+        ("Use <turn|> to end turns.", "Use <turn|> to end turns."),
+        ("Ends with marker<turn|>", "Ends with marker"),
+    ]:
+        parser = Gemma4ReasoningParser()
+        parts = []
+        for i in range(1, len(raw) + 1):
+            delta = parser.extract_reasoning_streaming(raw[: i - 1], raw[:i], raw[i - 1])
+            if delta is not None and getattr(delta, "content", None):
+                parts.append(delta.content)
+        streamed = "".join(parts)
+        one = Gemma4ReasoningParser().extract_reasoning(raw)
+        one_text = one[1] if isinstance(one, tuple) else one
+        assert streamed == expected, f"streamed {streamed!r} for {raw!r}"
+        assert str(one_text) == expected

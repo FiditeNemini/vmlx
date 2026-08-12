@@ -522,13 +522,24 @@ def test_metal_pressure_disabled_via_env(monkeypatch):
 def test_metal_pressure_margin_env_override(monkeypatch):
     from vmlx_engine import paged_cache as pc
 
+    # Assert against the CONSTANT, not a frozen literal. This test hardcoded
+    # 4GiB, so it locked in a margin whose own comment justified it by a ~3.4GB
+    # measurement that two later measurements outgrew — the test defended the
+    # stale number instead of the behaviour (env override + safe fallback).
+    default = pc._DEFAULT_PRESSURE_MARGIN_BYTES
     monkeypatch.delenv("VMLX_PAGED_METAL_PRESSURE_MARGIN_GB", raising=False)
-    assert pc.paged_metal_pressure_margin_bytes() == 4 * 1024**3
+    assert pc.paged_metal_pressure_margin_bytes() == default
     monkeypatch.setenv("VMLX_PAGED_METAL_PRESSURE_MARGIN_GB", "2.5")
     assert pc.paged_metal_pressure_margin_bytes() == int(2.5 * 1024**3)
     # Unparseable values fall back to the default instead of raising.
     monkeypatch.setenv("VMLX_PAGED_METAL_PRESSURE_MARGIN_GB", "junk")
-    assert pc.paged_metal_pressure_margin_bytes() == 4 * 1024**3
+    assert pc.paged_metal_pressure_margin_bytes() == default
+    # And the default must still cover the measured 8.71GB one-time pre-size
+    # allocation, or the pressure evictor fires too late to help.
+    assert default >= int(8.71 * 1024**3), (
+        "the Metal-pressure margin no longer covers the measured pre-size "
+        "allocation"
+    )
 
 
 def test_metal_pressure_overage_uses_ws_guard_threshold(monkeypatch):

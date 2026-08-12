@@ -55,9 +55,23 @@ BlockHash = NewType("BlockHash", bytes)
 # re-promotion latency for process survival.
 _PRESSURE_EVICT_ENV = "VMLX_PAGED_METAL_PRESSURE_EVICT"
 _PRESSURE_MARGIN_ENV = "VMLX_PAGED_METAL_PRESSURE_MARGIN_GB"
-# Default margin must cover the largest observed prefill transient (~3.4GB on
-# the box 1M gate) with slack.
-_DEFAULT_PRESSURE_MARGIN_BYTES = 4 * 1024**3
+# Default margin must cover the largest ONE-TIME prefill allocation with slack.
+#
+# The old value of 4GiB was justified by a ~3.4GB transient measured on the box
+# 1M gate. Two later measurements outgrew it and nobody reconciled the constant:
+#
+#   * the KV pre-size fix allocates the full span on the FIRST chunk — measured
+#     8.71GB for a 101,502-token prompt on Qwen3.6-27B;
+#   * the hybrid per-chunk transient reaches ~17GB at 94k context
+#     (2.82GB + 0.00015 * ctx).
+#
+# The per-chunk figure is NOT this margin's job — the prefill admission valve
+# projects it per chunk and declines before submitting GPU work. This margin
+# only has to keep the pressure evictor from firing too late to matter against
+# the one-time allocation, so it is sized to the 8.71GB measurement with slack.
+# Raising it further costs cache: a larger margin evicts earlier and reduces
+# reuse, so it should track a measurement rather than be padded for comfort.
+_DEFAULT_PRESSURE_MARGIN_BYTES = 10 * 1024**3
 
 
 def paged_metal_pressure_evict_enabled() -> bool:

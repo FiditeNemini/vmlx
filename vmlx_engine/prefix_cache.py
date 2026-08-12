@@ -5640,9 +5640,16 @@ class BlockAwarePrefixCache:
             budget_pct = 70.0
         ceiling = int(max_ws * (budget_pct / 100.0))
         if active + copy_bytes > ceiling:
-            logger.debug(
-                "reconstruct memo declined: copy %.2fGB on top of active %.2fGB "
-                "would pass the %.0f%% working-set budget (%.2fGB)",
+            # INFO, not debug: this is a SILENT CAP. When it fires the second
+            # pass re-reads the whole prefix from L2 and the user sees a
+            # multi-second stall with nothing in the log to explain it — 21.3s
+            # at 166k tokens on DSV4-Flash, measured. A guard that declines
+            # invisibly also makes any A/B of the memo compare stock to stock.
+            logger.info(
+                "Reconstruct memo DECLINED: copy %.2fGB on top of active %.2fGB "
+                "would pass the %.0f%% working-set budget (%.2fGB); the second "
+                "pass will re-read from L2. Raise VMLX_RECONSTRUCT_MEMO_MAX_WS_PCT "
+                "to allow it.",
                 copy_bytes / (1024**3),
                 active / (1024**3),
                 budget_pct,
@@ -5708,8 +5715,33 @@ class BlockAwarePrefixCache:
         if memo is not None:
             self._reconstruct_memo = None
             if memo_signature is not None and memo[0] == memo_signature:
+                logger.info(
+                    "Reconstruct memo HIT (%d tokens, %d blocks) — second pass "
+                    "skips the replay",
+                    (memo_signature[1] if len(memo_signature) > 1 else 0),
+                    len(memo_signature[0]) if memo_signature else 0,
+                )
                 self._last_reconstruct_memo_hit = True
                 return memo[1]
+            # A retained copy that does not match is the expensive case: the
+            # first pass paid the deepcopy AND the second pass still replays.
+            # It was silent, so a stall could not be attributed without adding
+            # instrumentation after the fact — say which half differs.
+            held_ids, held_tokens = (memo[0] + ((), 0))[:2] if memo[0] else ((), 0)
+            want_ids, want_tokens = (
+                (memo_signature + ((), 0))[:2] if memo_signature else ((), 0)
+            )
+            logger.info(
+                "Reconstruct memo MISS: held %d blocks/%s tokens, asked for "
+                "%d blocks/%s tokens (%s) — second pass will replay",
+                len(held_ids),
+                held_tokens,
+                len(want_ids),
+                want_tokens,
+                "same blocks, different length"
+                if held_ids == want_ids
+                else "different blocks",
+            )
         self._last_reconstruct_memo_hit = False
 
         if not HAS_MLX:
@@ -7016,8 +7048,8 @@ class BlockAwarePrefixCache:
                         )
                     except Exception as memo_err:
                         self._reconstruct_memo = None
-                        logger.debug(
-                            "reconstruct memo skipped (%s); second pass will replay",
+                        logger.info(
+                            "Reconstruct memo FAILED (%s); second pass will replay",
                             memo_err,
                         )
             return reconstructed_caches

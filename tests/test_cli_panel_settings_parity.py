@@ -355,3 +355,91 @@ def test_every_tool_parser_the_dropdown_offers_can_be_selected():
         if value and _canonicalize(value, canonical, aliases) is None
     ]
     assert not dropped, f"dropdown offers tool parsers that cannot stick: {dropped}"
+
+
+FAMILY_NAMES_TS = ROOT / "panel" / "src" / "shared" / "detectedFamilyNames.ts"
+SLOW_TIMEOUTS_TS = ROOT / "panel" / "src" / "shared" / "slowFamilyTimeouts.ts"
+REMOTE_CAPS_TS = ROOT / "panel" / "src" / "shared" / "remoteModelCapabilities.ts"
+
+
+def _engine_to_registry() -> dict[str, str]:
+    block = FAMILY_NAMES_TS.read_text()
+    block = block[block.index("ENGINE_FAMILY_TO_REGISTRY") :]
+    block = block[: block.index("})")]
+    return dict(re.findall(r"^\s*([A-Za-z0-9_]+):\s*'([^']+)'", block, re.M))
+
+
+def test_every_engine_slow_family_reaches_the_panel_timeout_table():
+    """A slow family the engine knows about must survive name normalization.
+
+    The two tables are keyed in different spellings on purpose — the engine
+    uses family_name, the panel uses registry names — so the normalizer is the
+    only thing joining them. Four families were missing from it, and because
+    the LOCAL path never calls it with engine spellings, the gap only appeared
+    on remote sessions: they aborted at the generic 300s while the remote
+    engine served to 900.
+    """
+    from vmlx_engine.cli import _SLOW_FAMILY_TIMEOUTS
+
+    mapping = _engine_to_registry()
+    slow_keys = set(
+        re.findall(
+            r"^\s+'?([A-Za-z0-9_.\-]+)'?:\s*SLOW_FAMILY_TIMEOUT_SECONDS",
+            SLOW_TIMEOUTS_TS.read_text(),
+            re.M,
+        )
+    )
+    assert slow_keys, "could not parse SLOW_FAMILY_TIMEOUTS"
+
+    missed = []
+    for engine_family in _SLOW_FAMILY_TIMEOUTS:
+        registry_name = mapping.get(engine_family, engine_family)
+        if registry_name not in slow_keys:
+            missed.append(f"{engine_family} -> {registry_name}")
+    assert not missed, (
+        "these engine slow families do not reach the panel timeout table, so "
+        f"remote sessions on them abort at the generic timeout: {missed}"
+    )
+
+
+def test_the_family_normalizer_is_not_duplicated_again():
+    """It was copied four times; the fourth copy silently lagged behind."""
+    remote = REMOTE_CAPS_TS.read_text()
+    assert "normalizeDetectedFamilyName" in remote, (
+        "remoteModelCapabilities must use the shared normalizer"
+    )
+    assert "'deepseek_v4'" not in remote, (
+        "remoteModelCapabilities is re-implementing the alias table again"
+    )
+
+
+CHAT_SETTINGS_TSX = (
+    ROOT / "panel" / "src" / "renderer" / "src" / "components" / "chat"
+    / "ChatSettings.tsx"
+)
+
+
+def test_capabilities_emits_every_key_the_remote_panel_reads():
+    """A capability key the panel gates UI on must actually be sent.
+
+    `supports_thinking_budget` had zero occurrences anywhere in vmlx_engine
+    while remoteModelCapabilities.ts read it to decide whether to render Max
+    Thinking Tokens — so on remote sessions the control never appeared for any
+    family that honours a thinking budget. The endpoint docstring promised the
+    key and the family set existed; only the payload line was missing.
+    """
+    server = (ROOT / "vmlx_engine" / "server.py").read_text()
+    remote = REMOTE_CAPS_TS.read_text()
+
+    read_keys = set(re.findall(r"capabilities\??\.\[?'?([a-z_]+)'?\]?", remote))
+    read_keys |= set(re.findall(r"\[['\"]([a-z_]+)['\"]\]", remote))
+    # Only assert on the ones this test is about; the full sweep is future work.
+    for key in ("supports_thinking_budget",):
+        assert f'"{key}"' in server, f"the engine never emits {key!r}"
+        assert key in remote, f"panel no longer reads {key!r} — update this test"
+
+
+def test_thinking_budget_flag_is_sourced_from_the_engine_family_set():
+    """Not a hand-written list: it must follow _THINKING_BUDGET_CAP_FAMILIES."""
+    server = (ROOT / "vmlx_engine" / "server.py").read_text()
+    assert '"supports_thinking_budget": family in _THINKING_BUDGET_CAP_FAMILIES' in server

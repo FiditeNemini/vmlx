@@ -1,4 +1,5 @@
 import { REASONING_EFFORT_LEVELS } from './reasoningEffortPolicy'
+import { normalizeDetectedFamilyName } from './detectedFamilyNames'
 export interface RemoteModelConnection {
   remoteUrl?: string
   remoteApiKey?: string
@@ -81,12 +82,15 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+/**
+ * A fourth private copy of this rule used to live here, and it is exactly the
+ * duplication detectedFamilyNames.ts was created to end. It also silently
+ * lagged behind: it never learned the qwen3.5 / qwen3-next / nemotron-h
+ * spellings, so remote sessions on those families missed their slow-family
+ * timeout entirely.
+ */
 function normalizedFamily(value: unknown): string | undefined {
-  const family = nonEmptyString(value)
-  if (family === 'deepseek_v4') return 'deepseek-v4'
-  if (family === 'zaya1_vl') return 'zaya1-vl'
-  if (family === 'bailing_hybrid') return 'ling'
-  return family
+  return normalizeDetectedFamilyName(nonEmptyString(value))
 }
 
 function parserName(value: unknown): string | undefined {

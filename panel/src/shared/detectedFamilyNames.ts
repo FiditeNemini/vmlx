@@ -14,12 +14,39 @@
  * a family is called.
  */
 
+/**
+ * Engine `family_name` -> panel registry name.
+ *
+ * The engine and the registry do not spell families the same way, and the
+ * registry is not internally consistent about it either: qwen3_5 -> "qwen3.5"
+ * and nemotron_h -> "nemotron-h", but minimax_m3 and openpangu_v2 keep their
+ * underscores because those ARE their registry names.
+ *
+ * The last four entries were missing, which only shows on the REMOTE path
+ * (locally, detectModelConfigFromDir already returns registry names). Measured
+ * consequence: SLOW_FAMILY_TIMEOUTS is keyed on registry names, so a remote
+ * Qwen3.5 / Qwen3.5-MoE / Qwen3-Next / Nemotron-H session missed its 900s
+ * entry and was aborted at the generic 300s while the remote engine — which
+ * keeps its own copy in engine spelling, cli.py _SLOW_FAMILY_TIMEOUTS — served
+ * happily to 900. That is the exact "Request timed out after 300s" symptom
+ * slowFamilyTimeouts.ts documents as fixed.
+ *
+ * Passing an already-normalized registry name through is a no-op: no registry
+ * name collides with an engine spelling.
+ */
+const ENGINE_FAMILY_TO_REGISTRY: Readonly<Record<string, string>> = Object.freeze({
+  deepseek_v4: 'deepseek-v4',
+  zaya1_vl: 'zaya1-vl',
+  bailing_hybrid: 'ling',
+  qwen3_5: 'qwen3.5',
+  qwen3_5_moe: 'qwen3.5-moe',
+  qwen3_next: 'qwen3-next',
+  nemotron_h: 'nemotron-h',
+})
+
 export function normalizeDetectedFamilyName(family?: string): string | undefined {
   if (!family) return undefined
-  if (family === 'deepseek_v4') return 'deepseek-v4'
-  if (family === 'zaya1_vl') return 'zaya1-vl'
-  if (family === 'bailing_hybrid') return 'ling'
-  return family
+  return ENGINE_FAMILY_TO_REGISTRY[family] ?? family
 }
 
 /**

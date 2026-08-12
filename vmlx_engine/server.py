@@ -14124,6 +14124,15 @@ async def model_capabilities(model_id: str) -> dict:
         "supports_tools": bool(tool_parser),
         "tool_parser": tool_parser,
         "supports_thinking": supports_thinking,
+        # The panel gates its Max Thinking Tokens control on this key
+        # (remoteModelCapabilities.ts reads `supports_thinking_budget` /
+        # `thinking_budget_supported`, ChatSettings renders the field only when
+        # one is true). The endpoint's own docstring promised it and the family
+        # set has always existed, but the payload never carried it -- so on any
+        # REMOTE session the control simply never appeared, for every family
+        # that honours a thinking budget. Locally the panel reads its registry
+        # instead, which is why this went unnoticed.
+        "supports_thinking_budget": family in _THINKING_BUDGET_CAP_FAMILIES,
         "supports_instruct_mode": supports_instruct_mode,
         "reasoning_parser": reasoning_parser,
         "think_in_template": think_in_template,

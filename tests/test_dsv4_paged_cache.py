@@ -521,7 +521,11 @@ def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
         Path(__file__).resolve().parents[1]
         / "panel/src/shared/detectedFamilyNames.ts"
     ).read_text()
-    assert "if (family === 'deepseek_v4') return 'deepseek-v4'" in shared
+    # The if-chain became a table when four more engine spellings were added
+    # (qwen3.5 / qwen3.5-moe / qwen3-next / nemotron-h were missing, which is
+    # what left remote sessions on those families at the generic timeout).
+    # Assert the MAPPING, not the syntax that expresses it.
+    assert "deepseek_v4: 'deepseek-v4'" in shared
     for name, source in (("form", form), ("settings", settings), ("sessions", sessions)):
         assert "detectedFamilyNames" in source, (
             f"{name} stopped importing the shared family-alias rule"

@@ -346,6 +346,24 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     showToast('success', t(profile.isDefault ? 'chat.settings.removeDefaultTitle' : 'chat.settings.setDefaultTitle'))
   }
 
+/**
+ * Colour a session status by what it MEANS, not by "is it running".
+ *
+ * This was `status === 'running' ? 'text-primary' : 'text-destructive'`, which
+ * painted loading, sleeping AND stopped in the destructive red reserved for
+ * errors. Seen in a screenshot: "Status: Sleeping" rendered in the same red as
+ * a crash, directly above a composer banner reading "Model sleeping — will
+ * auto-wake on your next message". Red for a state the app itself describes as
+ * normal tells the user something is broken when nothing is.
+ */
+function statusToneClass(status: string): string {
+  if (status === 'running') return 'text-primary'
+  if (status === 'error') return 'text-destructive'
+  // In-flight or intentionally parked: notable, not wrong.
+  if (status === 'loading' || status === 'standby') return 'text-amber-400'
+  return 'text-muted-foreground'
+}
+
   const shortModel = session.modelName || session.modelPath.split('/').pop() || session.modelPath
   const localizedStatus = session.status === 'running'
     ? t('status.running')
@@ -435,7 +453,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
                 )}
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">{t('chat.settings.status')}</span>
-                  <span className={session.status === 'running' ? 'text-primary' : 'text-destructive'}>
+                  <span className={statusToneClass(session.status)}>
                     {localizedStatus}
                   </span>
                 </div>

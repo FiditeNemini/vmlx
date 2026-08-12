@@ -143,6 +143,7 @@ def _apply_turboquant_to_model(model, model_path: str):
         from .turboquant_config import (
             TurboQuantConfig,
             apply_uncalibrated_auto_tq_policy,
+            disable_auto_storage_tq_if_asymmetric,
             make_turboquant_cache,
             resolve_compress_after,
             turboquant_storage_signature,
@@ -297,6 +298,13 @@ def _apply_turboquant_to_model(model, model_path: str):
             layer_types,
         )
         auto_tq["compress_after"] = resolve_compress_after(auto_tq, config)
+        # ASYMMETRY GUARD — this whole branch is an engine-INVENTED policy
+        # (capability-only bundles with no calibrated turboquant block), and
+        # the JANG loader's identical branch already refuses lossy storage
+        # over exact live KV. Without this, weight_format "mlx" stamps
+        # (Nemotron MXFP8/MXFP4) silently kept the warm≠cold drift that
+        # 4ab1d89cd killed everywhere else.
+        auto_tq = disable_auto_storage_tq_if_asymmetric(auto_tq)
         tq_config = TurboQuantConfig.from_jang_config(
             {"turboquant": auto_tq}, n_layers
         )

@@ -483,13 +483,43 @@ def _write_lfm_hybrid_config(path):
     return config
 
 
-def test_standard_qwen_hybrid_tq_patches_attention_cache_only(tmp_path, monkeypatch):
+def test_standard_qwen_hybrid_default_keeps_native_cache_exact(tmp_path, monkeypatch):
+    """The capability-only path now honors the 4ab1d89cd asymmetry guard.
+
+    This auto policy is engine-invented with live encode OFF, so storage TQ
+    would make a cache hit disagree with a recompute (Qwen3.6 measured cold
+    135 / warm 130 → 135/135 disabled). The JANG loader already refused it;
+    the standard path applying it anyway WAS the twin-path drift.
+    """
     from vmlx_engine.utils.tokenizer import _apply_turboquant_to_model
 
     _write_qwen36_hybrid_config(tmp_path)
     model = FakeHybridModel()
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
     monkeypatch.delenv("VMLX_ALLOW_HYBRID_KV_QUANT", raising=False)
+    monkeypatch.delenv("VMLX_MIXED_SWA_STORAGE_TQ", raising=False)
+
+    _apply_turboquant_to_model(model, str(tmp_path))
+
+    cache = model.make_cache()
+    assert [type(slot).__name__ for slot in cache] == [
+        "KVCache",
+        "NativeGatedDeltaState",
+        "KVCache",
+        "NativeGatedDeltaState",
+    ]
+    assert not hasattr(model.make_cache, "_vmlx_hybrid_tq_policy")
+
+
+def test_standard_qwen_hybrid_tq_patches_attention_cache_only(tmp_path, monkeypatch):
+    """Opted-in storage TQ retains the selective attention-KV-only shape."""
+    from vmlx_engine.utils.tokenizer import _apply_turboquant_to_model
+
+    _write_qwen36_hybrid_config(tmp_path)
+    model = FakeHybridModel()
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    monkeypatch.delenv("VMLX_ALLOW_HYBRID_KV_QUANT", raising=False)
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
 
     _apply_turboquant_to_model(model, str(tmp_path))
 
@@ -505,6 +535,30 @@ def test_standard_qwen_hybrid_tq_patches_attention_cache_only(tmp_path, monkeypa
     assert getattr(model.make_cache, "_vmlx_hybrid_tq_companion_layers") == (1, 3)
 
 
+def test_standard_lfm_hybrid_default_keeps_native_cache_exact(tmp_path, monkeypatch):
+    """Same asymmetry guard on the LFM shape of the capability-only path."""
+    from vmlx_engine.utils.tokenizer import _apply_turboquant_to_model
+
+    _write_lfm_hybrid_config(tmp_path)
+    model = FakeLFMModel()
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    monkeypatch.delenv("VMLX_MIXED_SWA_STORAGE_TQ", raising=False)
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+
+    _apply_turboquant_to_model(model, str(tmp_path))
+
+    cache = model.make_cache()
+    assert [type(slot).__name__ for slot in cache] == [
+        "ArraysCache",
+        "KVCache",
+        "ArraysCache",
+        "ArraysCache",
+        "KVCache",
+        "ArraysCache",
+    ]
+    assert not hasattr(model.make_cache, "_vmlx_tq_auto_policy")
+
+
 def test_standard_lfm_hybrid_auto_uses_q4_tq_on_real_kv_slots_only(
     tmp_path, monkeypatch
 ):
@@ -514,6 +568,7 @@ def test_standard_lfm_hybrid_auto_uses_q4_tq_on_real_kv_slots_only(
     model = FakeLFMModel()
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
     monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
 
     _apply_turboquant_to_model(model, str(tmp_path))
 
@@ -981,3 +1036,47 @@ def test_auto_tq_storage_guard_covers_every_auto_policy(monkeypatch):
         )
         assert resolved["compress_after"] == 0, resolved.get("auto_policy")
         assert "storage" in resolved["auto_policy"], resolved["auto_policy"]
+
+
+def test_asymmetry_guard_disables_lossy_storage_and_honors_opt_in(monkeypatch):
+    """The shared guard turns off asymmetric storage TQ and nothing else."""
+    from vmlx_engine.utils.turboquant_config import (
+        disable_auto_storage_tq_if_asymmetric,
+    )
+
+    monkeypatch.delenv("VMLX_MIXED_SWA_STORAGE_TQ", raising=False)
+
+    asymmetric = {"enabled": True, "compress_after": 0, "auto_policy": "x_tq4"}
+    out = disable_auto_storage_tq_if_asymmetric(asymmetric)
+    assert out["enabled"] is False
+    assert out["auto_policy"] == "auto_exact_kv_storage"
+
+    live_encode_on = {"enabled": True, "compress_after": 128, "auto_policy": "x_tq4"}
+    assert disable_auto_storage_tq_if_asymmetric(dict(live_encode_on)) == live_encode_on
+
+    already_off = {"enabled": False, "compress_after": 0, "auto_policy": "x_tq4"}
+    assert disable_auto_storage_tq_if_asymmetric(dict(already_off)) == already_off
+
+    monkeypatch.setenv("VMLX_MIXED_SWA_STORAGE_TQ", "1")
+    opted_in = {"enabled": True, "compress_after": 0, "auto_policy": "x_tq4"}
+    assert disable_auto_storage_tq_if_asymmetric(dict(opted_in)) == opted_in
+
+
+def test_asymmetry_guard_wired_into_both_invented_policy_paths():
+    """BOTH engine-invented TQ paths must route through the shared guard.
+
+    4ab1d89cd added the guard only to the JANG loader, so capability-only
+    bundles (weight_format "mlx" stamps — Nemotron MXFP8/MXFP4) that load
+    through tokenizer._apply_turboquant_to_model kept applying lossy storage
+    over exact live KV: the identical silent warm≠cold drift, on the twin
+    path. Pin the wiring so neither path can quietly drop it again.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "vmlx_engine" / "utils"
+    for name in ("jang_loader.py", "tokenizer.py"):
+        src = (root / name).read_text(encoding="utf-8")
+        assert "disable_auto_storage_tq_if_asymmetric(" in src, (
+            f"{name} no longer routes its engine-invented TQ policy through "
+            f"the shared asymmetry guard"
+        )

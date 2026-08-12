@@ -424,6 +424,46 @@ def resolve_compress_after(tq_cfg: dict, model_config: dict | None = None) -> in
     return 0
 
 
+def disable_auto_storage_tq_if_asymmetric(tq_cfg: dict) -> dict:
+    """Disable an engine-invented TQ policy whose storage would be lossy while
+    live KV stays exact.
+
+    ASYMMETRY GUARD (4ab1d89cd). ``compress_after == 0`` means live encode is
+    OFF, so the KV in RAM is EXACT — but the storage codec still quantizes it,
+    and a restored block comes back lossy. A cache hit then stops equalling a
+    recompute.
+
+    MEASURED on two independent families, temperature 0, same rail, no flips,
+    warm reuse confirmed in every arm:
+      Muse Glimmer 30B  (mixed_swa_..._tq4)   cold 157 / warm 241  DIFFERS
+      Qwen3.6-27B       (qwen_hybrid_..._tq4) cold 135 / warm 130  DIFFERS
+    and with the storage codec disabled both become byte-identical
+    (154/154 and 135/135).
+
+    Callers apply this ONLY to auto-generated policies — a bundle-calibrated
+    ``jang_config.turboquant`` block is the model author's intent and is never
+    overridden. This lives here, not in a loader, because BOTH load paths
+    invent the same policy: the JANG loader and the capability-only path in
+    ``tokenizer._apply_turboquant_to_model`` (weight_format "mlx" bundles such
+    as Nemotron MXFP8/MXFP4 stamps). The guard originally existed only in the
+    JANG loader, so capability-only bundles kept the silent warm≠cold drift.
+    ``VMLX_MIXED_SWA_STORAGE_TQ=1`` restores the compression.
+    """
+    if (
+        int(tq_cfg.get("compress_after", 0) or 0) == 0
+        and tq_cfg.get("enabled", False)
+        and not mixed_swa_storage_tq_opted_in()
+    ):
+        logger.info(
+            "Auto TQ storage disabled for %s: live encode is off, so a lossy "
+            "storage codec would make a cache hit disagree with a recompute",
+            tq_cfg.get("auto_policy", "auto"),
+        )
+        tq_cfg["enabled"] = False
+        tq_cfg["auto_policy"] = "auto_exact_kv_storage"
+    return tq_cfg
+
+
 @dataclass
 class TurboQuantConfig(_JangTurboQuantConfig):
     """TurboQuant configuration including the live-encode threshold.

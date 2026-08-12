@@ -1863,8 +1863,8 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
             TurboQuantConfig,
             apply_mixed_swa_auto_tq_policy,
             apply_uncalibrated_auto_tq_policy,
+            disable_auto_storage_tq_if_asymmetric,
             make_turboquant_cache,
-            mixed_swa_storage_tq_opted_in,
             resolve_compress_after,
             turboquant_storage_signature,
         )
@@ -1985,36 +1985,12 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
                 build_mixed_swa_layer_types(model_config),
             )
     _tq_cfg["compress_after"] = resolve_compress_after(_tq_cfg, model_config)
-    if (
-        _tq_auto_generated
-        and int(_tq_cfg.get("compress_after", 0) or 0) == 0
-        and _tq_cfg.get("enabled", False)
-        and not mixed_swa_storage_tq_opted_in()
-    ):
-        # ASYMMETRY GUARD. compress_after == 0 means live encode is OFF, so the
-        # KV in RAM is EXACT — but the storage codec still quantizes it, and a
-        # restored block comes back lossy. A cache hit then stops equalling a
-        # recompute.
-        #
-        # MEASURED on two independent families, temperature 0, same rail, no
-        # flips, warm reuse confirmed in every arm:
-        #   Muse Glimmer 30B  (mixed_swa_..._tq4)  cold 157 / warm 241  DIFFERS
-        #   Qwen3.6-27B       (qwen_hybrid_..._tq4) cold 135 / warm 130  DIFFERS
-        # and with the storage codec disabled both become byte-identical
-        # (154/154 and 135/135).
-        #
-        # This config is engine-INVENTED — the whole branch only runs when the
-        # bundle shipped no calibrated turboquant block — so nothing here is the
-        # model author's intent. The compression buys L2 footprint and costs
-        # answer stability, which is the wrong trade to make silently.
-        # VMLX_MIXED_SWA_STORAGE_TQ=1 restores it.
-        logger.info(
-            "Auto TQ storage disabled for %s: live encode is off, so a lossy "
-            "storage codec would make a cache hit disagree with a recompute",
-            _tq_cfg.get("auto_policy", "auto"),
-        )
-        _tq_cfg["enabled"] = False
-        _tq_cfg["auto_policy"] = "auto_exact_kv_storage"
+    if _tq_auto_generated:
+        # ASYMMETRY GUARD (shared with the capability-only load path in
+        # tokenizer._apply_turboquant_to_model — see the helper's docstring
+        # for the measured cold/warm evidence). Engine-invented policies only:
+        # a bundle-calibrated turboquant block is the author's intent.
+        _tq_cfg = disable_auto_storage_tq_if_asymmetric(_tq_cfg)
     # Use _tq_cfg (which may be auto-generated defaults) instead of re-reading jang_cfg.
     # This happens only after the real native layer layout is known so hybrid
     # critical layers map to actual KV slots rather than cumulative SSM slots.

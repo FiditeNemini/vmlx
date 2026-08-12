@@ -68,14 +68,42 @@ def _get_available_memory() -> int:
         return 0
 
 
-def _estimate_state_memory(state: Any) -> int:
-    """Estimate memory of a cache state (tuple/list of tensors)."""
-    total = 0
+def _estimate_state_memory(state: Any, _seen: set[int] | None = None) -> int:
+    """Estimate memory of a cache state, recursing through nested containers.
+
+    This was a FLAT one-level scan, so anything whose elements are themselves
+    containers counted as ZERO bytes:
+
+      * QuantizedKVCache extracted state — tuples of (packed, scales, biases)
+      * CacheList sub-caches — a list of per-layer state dicts
+      * DSV4 transport dicts
+
+    Every --kv-cache-quantization entry and every MoE-hybrid entry was therefore
+    invisible to the byte budgets that call this, which is how a cache bounded
+    "by bytes" could still grow without limit.
+
+    Arrays are deduplicated by id() so aliased views (common after a slice or a
+    COW copy) are not counted twice — the sibling estimator in paged_cache.py
+    lacks that and over-reports.
+    """
+    if _seen is None:
+        _seen = set()
+    if state is None:
+        return 0
+    if hasattr(state, "nbytes"):
+        marker = id(state)
+        if marker in _seen:
+            return 0
+        _seen.add(marker)
+        try:
+            return int(state.nbytes)
+        except Exception:  # noqa: BLE001
+            return 0
+    if isinstance(state, dict):
+        return sum(_estimate_state_memory(v, _seen) for v in state.values())
     if isinstance(state, (tuple, list)):
-        for item in state:
-            if item is not None and hasattr(item, "nbytes"):
-                total += item.nbytes
-    return total
+        return sum(_estimate_state_memory(v, _seen) for v in state)
+    return 0
 
 
 def estimate_kv_cache_memory(cache: list[Any]) -> int:

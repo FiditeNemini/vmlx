@@ -974,66 +974,143 @@ async function fetchUrl(url: string, maxLength?: number): Promise<ToolResult> {
   }
 }
 
+interface SearchHit {
+  title: string
+  url: string
+  snippet: string
+}
+
+const SEARCH_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
+function decodeSearchEntities(value: string): string {
+  return (
+    value
+      .replace(/<[^>]+>/g, '')
+      // Numeric entities FIRST and generically. Hand-listing them left
+      // &#039; and &#8211; raw in real Mojeek titles, i.e. the tool fed the
+      // model literal "isn&#039;t" and "&#8211;" -- garbage characters that
+      // then land in the answer.
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
+        String.fromCodePoint(parseInt(hex, 16)),
+      )
+      .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&rsaquo;/g, '>')
+      .replace(/&nbsp;/g, ' ')
+      // &amp; LAST, so "&amp;lt;" does not become a real "<".
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim()
+  )
+}
+
+/** DuckDuckGo's HTML endpoint. Kept as the first attempt; see searchWeb. */
+async function searchDuckDuckGo(query: string, limit: number): Promise<SearchHit[]> {
+  const res = await fetch(
+    `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+    { headers: { 'User-Agent': SEARCH_UA }, signal: AbortSignal.timeout(15000) },
+  )
+  if (!res.ok) throw new Error(`DuckDuckGo returned ${res.status}`)
+  const html = await res.text()
+  const hits: SearchHit[] = []
+  const blocks = html.split(/class="result\s/)
+  for (let i = 1; i < blocks.length && hits.length < limit; i++) {
+    const block = blocks[i]
+    const titleMatch = block.match(/class="result__a"[^>]*>([^<]+)</)
+    const urlMatch =
+      block.match(/class="result__url"[^>]*href="([^"]*)"/) ||
+      block.match(/class="result__a"[^>]*href="([^"]*)"/)
+    const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/)
+    if (!titleMatch || !urlMatch) continue
+    let url = urlMatch[1]
+    const uddg = url.match(/uddg=([^&]+)/)
+    if (uddg) url = decodeURIComponent(uddg[1])
+    hits.push({
+      title: titleMatch[1].trim(),
+      url,
+      snippet: snippetMatch ? decodeSearchEntities(snippetMatch[1]) : '',
+    })
+  }
+  return hits
+}
+
+/** Mojeek: independent index, no API key, and it still answers a plain GET. */
+async function searchMojeek(query: string, limit: number): Promise<SearchHit[]> {
+  const res = await fetch(
+    `https://www.mojeek.com/search?q=${encodeURIComponent(query)}`,
+    { headers: { 'User-Agent': SEARCH_UA }, signal: AbortSignal.timeout(15000) },
+  )
+  if (!res.ok) throw new Error(`Mojeek returned ${res.status}`)
+  const html = await res.text()
+  const hits: SearchHit[] = []
+  // <li class="rN"> … <a class="title" href="URL">TITLE</a> … <p class="s">SNIPPET</p>
+  const blocks = html.split(/<li class="r\d+">/)
+  for (let i = 1; i < blocks.length && hits.length < limit; i++) {
+    const block = blocks[i]
+    const titleMatch = block.match(/class="title"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/)
+    if (!titleMatch) continue
+    const snippetMatch = block.match(/<p class="s">([\s\S]*?)<\/p>/)
+    hits.push({
+      title: decodeSearchEntities(titleMatch[2]),
+      url: titleMatch[1],
+      snippet: snippetMatch ? decodeSearchEntities(snippetMatch[1]) : '',
+    })
+  }
+  return hits
+}
+
 async function ddgSearch(query: string, count?: number): Promise<ToolResult> {
   if (!query) return { content: 'Missing required parameter: query', is_error: true }
   const numResults = Math.min(count || 5, 10)
 
-  // DuckDuckGo HTML search — free, no API key
-  const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`
-  try {
-    const res = await fetch(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      },
-      signal: AbortSignal.timeout(15000)
-    })
+  // Two independent backends, because one of them WILL be blocked.
+  //
+  // MEASURED 2026-08-12 from a normal residential connection: every DuckDuckGo
+  // endpoint returned HTTP 202 with a ~14KB anti-bot interstitial and zero
+  // result markup -- html.duckduckgo.com by GET and POST, lite.duckduckgo.com,
+  // and the instant-answer API (200 with empty Abstract and no RelatedTopics).
+  // Mojeek answered the same query with HTTP 200 and real results.
+  //
+  // 202 is inside the 200-299 range, so `res.ok` was true, the parser found no
+  // results, and the tool reported `No results found for "<query>"` with
+  // is_error FALSE. That is worse than an error: it tells the model the world
+  // has no answer, when in fact the search never ran. A blocked search and an
+  // empty search must never look the same.
+  const attempts: Array<{ name: string; run: () => Promise<SearchHit[]> }> = [
+    { name: 'DuckDuckGo', run: () => searchDuckDuckGo(query, numResults) },
+    { name: 'Mojeek', run: () => searchMojeek(query, numResults) },
+  ]
 
-    if (!res.ok) {
-      return { content: `DuckDuckGo search failed (${res.status})`, is_error: true }
-    }
-
-    const html = await res.text()
-
-    // Parse results from DDG HTML
-    const results: { title: string; url: string; snippet: string }[] = []
-    // DDG HTML wraps each result in <div class="result">
-    const resultBlocks = html.split(/class="result\s/)
-    for (let i = 1; i < resultBlocks.length && results.length < numResults; i++) {
-      const block = resultBlocks[i]
-      // Extract title from <a class="result__a" ...>
-      const titleMatch = block.match(/class="result__a"[^>]*>([^<]+)</)
-      // Extract URL from <a class="result__url" href="...">
-      const urlMatch = block.match(/class="result__url"[^>]*href="([^"]*)"/) ||
-        block.match(/class="result__a"[^>]*href="([^"]*)"/)
-      // Extract snippet from <a class="result__snippet" ...>
-      const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/)
-
-      if (titleMatch && urlMatch) {
-        let url = urlMatch[1]
-        // DDG wraps URLs in a redirect — extract actual URL
-        const uddg = url.match(/uddg=([^&]+)/)
-        if (uddg) url = decodeURIComponent(uddg[1])
-        // Clean snippet: strip HTML tags and entities
-        let snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#x27;/g, "'").trim() : ''
-        results.push({
-          title: titleMatch[1].trim(),
-          url,
-          snippet
-        })
+  const failures: string[] = []
+  for (const attempt of attempts) {
+    try {
+      const hits = await attempt.run()
+      if (hits.length > 0) {
+        const formatted = hits
+          .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+          .join('\n\n')
+        return {
+          content: `${attempt.name}: "${query}" (${hits.length} results)\n\n${formatted}`,
+          is_error: false,
+        }
       }
+      failures.push(`${attempt.name}: responded but returned no parseable results (likely blocked or rate-limited)`)
+    } catch (err: any) {
+      failures.push(`${attempt.name}: ${err?.message || err}`)
     }
+  }
 
-    if (results.length === 0) {
-      return { content: `No results found for "${query}"`, is_error: false }
-    }
-
-    const formatted = results.map((r, i) => {
-      return `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`
-    }).join('\n\n')
-
-    return { content: `DuckDuckGo: "${query}" (${results.length} results)\n\n${formatted}`, is_error: false }
-  } catch (err: any) {
-    return { content: `DuckDuckGo search failed: ${err.message}`, is_error: true }
+  // Every backend failed. Say so, and say WHY, so the model can tell this
+  // apart from a query that genuinely has no matches -- and so the user sees
+  // more than a bare "failed".
+  return {
+    content:
+      `Web search unavailable for "${query}". All backends failed:\n` +
+      failures.map((f) => `  - ${f}`).join('\n'),
+    is_error: true,
   }
 }
 

@@ -174,3 +174,40 @@ def test_xml_dialect_patterns_do_not_swallow_payload_whitespace():
             f"{name} uses the whitespace-swallowing capture again; code "
             f"arguments will lose their first-line indentation"
         )
+
+
+def test_lfm2_keeps_text_written_after_the_tool_call():
+    """Content after <|tool_call_end|> must not be dropped.
+
+    The parser took only `cleaned_output[:start]`, so a model that called a tool
+    and then explained what it did lost the explanation entirely — no error, no
+    log line, the text simply never reached the user.
+    """
+    from vmlx_engine.tool_parsers.lfm2_tool_parser import Lfm2ToolParser
+
+    raw = (
+        "Before.<|tool_call_start|>[get_weather(city='Paris')]"
+        "<|tool_call_end|>After the call."
+    )
+    result = Lfm2ToolParser().extract_tool_calls(raw, None)
+    assert result.tools_called
+    assert result.content is not None
+    assert "Before." in result.content
+    assert "After the call." in result.content, (
+        f"text after the tool call was dropped: {result.content!r}"
+    )
+
+
+def test_lfm2_single_sided_content_is_unchanged():
+    """Only-before and only-after must not gain a spurious separator."""
+    from vmlx_engine.tool_parsers.lfm2_tool_parser import Lfm2ToolParser
+
+    parser = Lfm2ToolParser()
+    before_only = parser.extract_tool_calls(
+        "Only before.<|tool_call_start|>[f()]<|tool_call_end|>", None
+    )
+    assert before_only.content == "Only before."
+    after_only = parser.extract_tool_calls(
+        "<|tool_call_start|>[f()]<|tool_call_end|>Only after.", None
+    )
+    assert after_only.content == "Only after."

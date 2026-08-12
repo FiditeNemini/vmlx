@@ -102,7 +102,13 @@ class Lfm2ToolParser(ToolParser):
                 tool_calls=[],
                 content=self._strip_control_markers(cleaned_output),
             )
-        content = cleaned_output[:start].strip() or None
+        # Keep text on BOTH sides of the call. Taking only [:start] silently
+        # dropped everything the model wrote after <|tool_call_end|> — a model
+        # that calls a tool and then explains what it did lost the explanation
+        # entirely, with no error and nothing in the log.
+        _before = cleaned_output[:start].strip()
+        _after = cleaned_output[end + len(self.TOOL_CALL_END):].strip()
+        content = "\n\n".join(part for part in (_before, _after) if part) or None
         payload = cleaned_output[payload_start:end]
         try:
             tool_calls = self._parse_calls(payload)

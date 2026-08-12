@@ -3573,15 +3573,44 @@ class MLLMScheduler:
                                         )
                                     except (TypeError, ValueError):
                                         _tight_clean_store_max_tokens = 512
+                                    # 768 made the mixed-SWA cache useless in
+                                    # practice. This cap sits ON TOP of the
+                                    # _safe_headroom_min_gb check below, which
+                                    # already refuses the clean re-prefill unless
+                                    # 8 GB of Metal working set is free — so the
+                                    # token cap was a second, redundant limit,
+                                    # and it was the binding one.
+                                    #
+                                    # MEASURED on Step-3.7-Flash (mixed_swa_kv,
+                                    # tight-memory drain active), identical
+                                    # prompt sent twice:
+                                    #     735 tok -> cached 734    HIT
+                                    #     895 tok -> cached None   MISS
+                                    # ...every larger size MISS, up to 6820, with
+                                    # cached_blocks staying 0 — the store retained
+                                    # NOTHING, so every turn re-prefilled in full
+                                    # (17.75s / 18.47s / 25.20s TTFT in the app
+                                    # where peers got 0.2-0.4s).
+                                    #
+                                    # Raising ONLY this cap, headroom check
+                                    # untouched:
+                                    #     before: 6820 tok, cached None, 30.87s
+                                    #     after : 6820 tok, cached 6819,  8.09s
+                                    # 3.8x on the warm turn, full reuse restored.
+                                    #
+                                    # The memory guard that matters is still the
+                                    # 8 GB free-headroom requirement; this number
+                                    # only stops a clean re-prefill so large it
+                                    # would dwarf the turn it is meant to speed up.
                                     try:
                                         _safe_headroom_max_tokens = int(
                                             os.environ.get(
                                                 "VMLINUX_MLLM_TIGHT_MEMORY_CLEAN_PREFILL_SAFE_HEADROOM_MAX_TOKENS",
-                                                "768",
+                                                "32768",
                                             )
                                         )
                                     except (TypeError, ValueError):
-                                        _safe_headroom_max_tokens = 768
+                                        _safe_headroom_max_tokens = 32768
                                     try:
                                         _safe_headroom_min_gb = float(
                                             os.environ.get(

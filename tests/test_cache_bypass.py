@@ -612,8 +612,16 @@ class TestServerForwarding:
             mllm = f.read()
 
         assert "PAGED_CACHE_SCHEMA_VERSION" in prefix
-        assert "paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}" in sched
-        assert "paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}" in mllm
+        # The component moved into the ONE shared builder both schedulers call
+        # (prefix_cache.build_block_cache_namespace); two inline copies is how
+        # the MLLM path drifted into omitting the bundle fingerprint.
+        from vmlx_engine.prefix_cache import build_block_cache_namespace
+        import inspect as _inspect
+
+        builder = _inspect.getsource(build_block_cache_namespace)
+        assert "paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}" in builder
+        assert "build_block_cache_namespace(" in sched
+        assert "build_block_cache_namespace(" in mllm
         assert "prefix_cache_schema={PAGED_CACHE_SCHEMA_VERSION}" in sched
         assert "prefix_cache_schema={PAGED_CACHE_SCHEMA_VERSION}" in mllm
 

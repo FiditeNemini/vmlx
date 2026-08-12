@@ -5827,48 +5827,54 @@ class TestM8UsageOnError:
 class TestC3BlockDiskCacheQuantScoping:
     """C3 extension: Block-level disk cache must also scope by quantization config."""
 
+    # Both schedulers now derive the scope key from ONE builder
+    # (prefix_cache.build_block_cache_namespace). Keeping two inline copies is
+    # what let the MLLM path drift into omitting the bundle fingerprint, so
+    # these assert the shared recipe plus each caller's inputs.
+
+    def test_shared_namespace_builder_includes_quant(self):
+        import inspect
+        from vmlx_engine.prefix_cache import build_block_cache_namespace
+
+        builder = inspect.getsource(build_block_cache_namespace)
+        assert 'f"{model_path}:quant={quant_tag}"' in builder, (
+            "Block disk cache hash must include quantization in scope key"
+        )
+        assert 'f":tq_native={tq_native_tag}"' in builder, (
+            "Block disk cache hash must separate native TQ Auto from explicit Off"
+        )
+
     def test_scheduler_block_cache_includes_quant(self):
         import inspect
         from vmlx_engine.scheduler import Scheduler
 
         source = inspect.getsource(Scheduler.__init__)
-        # Anchor on the owning block-store scope key, not the first family
-        # policy that happens to mention enable_block_disk_cache. Typed cache
-        # guards may legitimately appear much earlier in __init__.
-        start = source.index("block_scope_key = (")
-        block_section = source[start : start + 500]
-        assert 'f"{self.config.model_path}:quant={quant_tag}"' in block_section, (
-            "Block disk cache hash must include quantization in scope key"
-        )
-        assert 'f":tq_native={tq_native_tag}"' in block_section, (
-            "Block disk cache hash must separate native TQ Auto from explicit Off"
-        )
+        start = source.index("block_scope_key = build_block_cache_namespace(")
+        block_section = source[start : start + 700]
+        assert "quant_tag=quant_tag" in block_section
+        assert "tq_native_tag=tq_native_tag" in block_section
 
     def test_mllm_scheduler_block_cache_includes_quant(self):
         import inspect
         from vmlx_engine.mllm_scheduler import MLLMScheduler
 
         source = inspect.getsource(MLLMScheduler.__init__)
-        # Anchor on the owning block-store scope key. Hybrid disk-only policy
-        # now mentions enable_block_disk_cache before the cache constructor.
-        start = source.index("block_scope_key = (")
-        block_section = source[start : start + 500]
-        assert 'f"{self.config.model_path}:quant={quant_tag}"' in block_section, (
-            "MLLM block disk cache hash must include quantization in scope key"
-        )
-        assert 'f":tq_native={tq_native_tag}"' in block_section, (
-            "MLLM disk cache hashes must separate native TQ Auto from explicit Off"
-        )
+        start = source.index("block_scope_key = build_block_cache_namespace(")
+        block_section = source[start : start + 700]
+        assert "quant_tag=quant_tag" in block_section
+        assert "tq_native_tag=tq_native_tag" in block_section
+        # The whole reason the builder was extracted: this path used to omit it.
+        assert "model=self.model" in block_section
 
     def test_prompt_cache_scopes_include_native_tq_mode(self):
         import inspect
         from vmlx_engine.mllm_scheduler import MLLMScheduler
         from vmlx_engine.scheduler import Scheduler
 
-        assert 'f":tq_native={tq_native_tag}"' in inspect.getsource(
+        assert "tq_native_tag=tq_native_tag" in inspect.getsource(
             Scheduler.__init__
         )
-        assert 'f":tq_native={tq_native_tag}"' in inspect.getsource(
+        assert "tq_native_tag=tq_native_tag" in inspect.getsource(
             MLLMScheduler.__init__
         )
 

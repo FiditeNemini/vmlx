@@ -30,17 +30,29 @@ def test_ttft_ewma_seeds_first_sample_before_smoothing():
 
 
 def test_scheduler_block_l2_scope_uses_loaded_bundle_cache_identity():
+    """The scope key must bind to the loaded BUNDLE, not just its path.
+
+    The construction moved into ``prefix_cache.build_block_cache_namespace`` so
+    the MLLM scheduler could stop keeping a second, weaker copy of it (that one
+    omitted ``bundle=`` entirely, so an in-place VLM swap replayed stale KV).
+    This asserts both halves: the scheduler passes the loaded model and its
+    quantization identity, and the shared builder folds them into the key.
+    """
     from vmlx_engine.scheduler import Scheduler
+    from vmlx_engine.prefix_cache import build_block_cache_namespace
 
     source = inspect.getsource(Scheduler.__init__)
-    start = source.index("bundle_cache_key = compute_model_cache_key(")
-    block_scope = source[start : start + 900]
+    start = source.index("block_scope_key = build_block_cache_namespace(")
+    call = source[start : start + 900]
 
-    assert "self.model" in block_scope
-    assert "model_path=self.config.model_path" in block_scope
-    assert "smelt_enabled=self.config.smelt_enabled" in block_scope
-    assert "kv_quant_bits=self._kv_cache_bits" in block_scope
-    assert 'f":bundle={bundle_cache_key}"' in block_scope
+    assert "model=self.model" in call
+    assert "model_path=self.config.model_path" in call
+    assert "smelt_enabled=self.config.smelt_enabled" in call
+    assert "kv_quant_bits=self._kv_cache_bits" in call
+
+    builder = inspect.getsource(build_block_cache_namespace)
+    assert "compute_model_cache_key(" in builder
+    assert 'f":bundle={bundle_cache_key}"' in builder
 
 
 def test_model_cache_identity_changes_with_config_and_weight_index(tmp_path):

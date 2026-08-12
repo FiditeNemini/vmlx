@@ -651,12 +651,25 @@ class MLLMScheduler:
                             if self._tq_active
                             else "off"
                         )
-                        from .prefix_cache import PAGED_CACHE_SCHEMA_VERSION
-                        block_scope_key = (
-                            f"{self.config.model_path}:quant={quant_tag}"
-                            f":tq_native={tq_native_tag}"
-                            f":paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
-                            f":{runtime_cache_fingerprint()}"
+                        from .prefix_cache import build_block_cache_namespace
+                        # ONE recipe, shared with the text scheduler. This used
+                        # to be a second, weaker copy: no bundle= weight
+                        # fingerprint, no zaya scope, no looped identity — so an
+                        # in-place VLM bundle swap kept the same namespace and
+                        # replayed the old weights' KV.
+                        block_scope_key = build_block_cache_namespace(
+                            model=self.model,
+                            model_path=self.config.model_path,
+                            quant_tag=quant_tag,
+                            tq_native_tag=tq_native_tag,
+                            tq_enabled=(
+                                self._tq_active and not self._uses_zaya_cache
+                            ),
+                            zaya_scope=(
+                                ":zaya_cache_schema=zaya_cca_v1"
+                                if self._uses_zaya_cache
+                                else ""
+                            ),
                         )
                         model_hash = hashlib.sha256(
                             block_scope_key.encode()
@@ -666,9 +679,18 @@ class MLLMScheduler:
                         cache_dir = os.path.join(cache_root, "default")
                     try:
                         from .block_disk_store import BlockDiskStore
+                        from .prefix_cache import expected_cache_layer_count
+                        # Without expected_num_layers the wrong-model record
+                        # validator is DISARMED (block_disk_store treats None as
+                        # "skip the check"). The text path has always passed it;
+                        # this path did not.
+                        _lang = getattr(self.model, "language_model", self.model)
                         block_disk_store = BlockDiskStore(
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
+                            expected_num_layers=expected_cache_layer_count(
+                                _lang, getattr(self, "_hybrid_num_layers", None)
+                            ),
                             global_cache_root=cache_root,
                             allow_legacy_hashed_namespaces=(
                                 _default_block_cache_root

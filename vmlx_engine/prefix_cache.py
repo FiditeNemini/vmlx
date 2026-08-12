@@ -216,6 +216,90 @@ def looped_cache_identity_scope(model: Any) -> str:
     return ":".join(_looped_cache_identity_parts(model))
 
 
+def expected_cache_layer_count(model, hybrid_num_layers=None):
+    """Number of cache-BEARING layers, for the L2 wrong-model validator.
+
+    Not ``num_hidden_layers``: some hybrids have blocks that own no cache state
+    (Nemotron-H is the live example, 52 blocks but 29 cache entries), so a
+    validator comparing against the raw count rejects correct records.
+
+    Shared because omitting it is silent. ``BlockDiskStore`` treats
+    ``expected_num_layers=None`` as "skip the check", and the MLLM scheduler
+    constructed its store without the argument — so the one validator that
+    catches a wrong-model record was disarmed on exactly the path whose
+    namespace was also the weaker one.
+    """
+    if hybrid_num_layers:
+        return int(hybrid_num_layers)
+    if hasattr(model, "make_cache"):
+        try:
+            cache = model.make_cache() or []
+            if len(cache) > 0:
+                return len(cache)
+        except Exception:
+            pass
+    for _attr in ("args", "config"):
+        _cfg = getattr(model, _attr, None)
+        if _cfg:
+            _ln = getattr(_cfg, "num_hidden_layers", 0)
+            if _ln:
+                return int(_ln)
+    return None
+
+
+def build_block_cache_namespace(
+    *,
+    model,
+    model_path: str,
+    quant_tag: str,
+    tq_native_tag: str,
+    smelt_enabled: bool = False,
+    smelt_pct=None,
+    tq_enabled: bool = False,
+    kv_quant_bits=None,
+    dsv4_scope: str = "",
+    zaya_scope: str = "",
+) -> str:
+    """The ONE recipe for an L2 block-cache namespace.
+
+    Block hashes are tokens+parent only (``paged_cache.py``), so model identity
+    lives ENTIRELY in this namespace. Anything omitted here is a way for one
+    model's KV to be served to another.
+
+    It existed twice. The text scheduler's copy grew a ``bundle=`` weight/config
+    fingerprint precisely so an in-place bundle replacement could not refault
+    stale tensors; the MLLM scheduler's copy never did, and also constructed its
+    BlockDiskStore without ``expected_num_layers``, which disarms the
+    wrong-model record validator (``block_disk_store.py`` treats None as "skip
+    the check"). So re-quantizing a VLM bundle in place -- same path, new
+    weights, which is the canonical-swap workflow -- kept the same namespace and
+    replayed KV computed by the old weights. The per-record fingerprint does not
+    save it: that covers RUNTIME drift, not MODEL drift.
+
+    Callers pass their own dsv4/zaya scopes because those describe cache
+    SCHEMA, not identity, and only one family sets each.
+    """
+    bundle_cache_key = compute_model_cache_key(
+        model,
+        model_path=model_path,
+        smelt_enabled=smelt_enabled,
+        smelt_pct=smelt_pct,
+        tq_enabled=tq_enabled,
+        kv_quant_bits=kv_quant_bits,
+    )
+    scope = (
+        f"{model_path}:quant={quant_tag}"
+        f":tq_native={tq_native_tag}"
+        f":bundle={bundle_cache_key}"
+        f":paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
+        f":{runtime_cache_fingerprint()}"
+        f"{dsv4_scope}"
+        f"{zaya_scope}"
+    )
+    looped_scope = looped_cache_identity_scope(model)
+    return f"{scope}:{looped_scope}" if looped_scope else scope
+
+
 def compute_model_cache_key(
     model: Any,
     model_path: Optional[str] = None,

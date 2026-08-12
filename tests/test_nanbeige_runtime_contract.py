@@ -142,7 +142,16 @@ def test_nanbeige_cache_identity_includes_validated_loop_layout_without_paths():
         "looped_cache_shape=22x2=44",
     ]
     scheduler_source = inspect.getsource(Scheduler.__init__)
-    assert "block_scope_key = _append_looped_cache_identity_scope(" in scheduler_source
+    # The looped-model identity is now folded into the shared namespace builder
+    # rather than appended by each scheduler, so BOTH the text and the VLM path
+    # get it (the VLM path previously did not).
+    from vmlx_engine.prefix_cache import build_block_cache_namespace
+    import inspect as _inspect
+
+    assert "build_block_cache_namespace(" in scheduler_source
+    assert "looped_cache_identity_scope(model)" in _inspect.getsource(
+        build_block_cache_namespace
+    )
     assert "scope_key = _append_looped_cache_identity_scope(" in scheduler_source
 
 

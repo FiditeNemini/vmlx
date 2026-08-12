@@ -40,6 +40,8 @@ from .prefix_cache import (
     DSV4_APPEND_SAFE_CHECKPOINT_POLICY,
     PAGED_CACHE_SCHEMA_VERSION,
     PrefixCacheManager,
+    build_block_cache_namespace,
+    expected_cache_layer_count,
     compute_model_cache_key,
     looped_cache_identity_scope,
     runtime_cache_fingerprint,
@@ -1174,9 +1176,11 @@ class Scheduler:
                         # loader/cache representation); block L2 must use the
                         # same identity so an in-place bundle replacement
                         # cannot refault stale tensors from the old model.
-                        bundle_cache_key = compute_model_cache_key(
-                            self.model,
+                        block_scope_key = build_block_cache_namespace(
+                            model=self.model,
                             model_path=self.config.model_path,
+                            quant_tag=quant_tag,
+                            tq_native_tag=tq_native_tag,
                             smelt_enabled=self.config.smelt_enabled,
                             smelt_pct=self.config.smelt_pct,
                             tq_enabled=(
@@ -1185,19 +1189,8 @@ class Scheduler:
                                 and not self._uses_zaya_cache
                             ),
                             kv_quant_bits=self._kv_cache_bits,
-                        )
-                        block_scope_key = (
-                            f"{self.config.model_path}:quant={quant_tag}"
-                            f":tq_native={tq_native_tag}"
-                            f":bundle={bundle_cache_key}"
-                            f":paged_cache_schema={PAGED_CACHE_SCHEMA_VERSION}"
-                            f":{runtime_cache_fingerprint()}"
-                            f"{dsv4_scope}"
-                            f"{zaya_scope}"
-                        )
-                        block_scope_key = _append_looped_cache_identity_scope(
-                            block_scope_key,
-                            self.model,
+                            dsv4_scope=dsv4_scope,
+                            zaya_scope=zaya_scope,
                         )
                         model_hash = hashlib.sha256(
                             block_scope_key.encode()
@@ -1741,22 +1734,9 @@ class Scheduler:
         29 Mamba/attention cache entries). L2/paged validators must compare
         against the cache contract, not raw ``num_hidden_layers``.
         """
-        if getattr(self, "_hybrid_num_layers", None):
-            return int(self._hybrid_num_layers)
-        if hasattr(self.model, "make_cache"):
-            try:
-                cache = self.model.make_cache() or []
-                if len(cache) > 0:
-                    return len(cache)
-            except Exception:
-                pass
-        for _attr in ("args", "config"):
-            _cfg = getattr(self.model, _attr, None)
-            if _cfg:
-                _ln = getattr(_cfg, "num_hidden_layers", 0)
-                if _ln:
-                    return int(_ln)
-        return None
+        return expected_cache_layer_count(
+            self.model, getattr(self, "_hybrid_num_layers", None)
+        )
 
     def _detect_mla(self) -> bool:
         """Detect Multi-head Latent Attention (compressed-latent KV).

@@ -21924,17 +21924,34 @@ async def _stream_with_keepalive(
                             total_timeout,
                         )
                         last_progress = progress
+                        # Real evidence clears the ambiguity budget, so a later
+                        # unreadable stretch gets the full grace again.
+                        unknown_progress_windows = 0
                         start = time.monotonic()
                     elif (
                         progress_aware
-                        and progress is None
+                        and not progress  # None OR 0 — see below
                         and unknown_progress_windows < _UNKNOWN_PROGRESS_GRACE_WINDOWS
                     ):
-                        # The probe could not tell us anything, so silence here
-                        # is genuinely ambiguous: a wedged request and a
-                        # 250k-token prefill look identical from out here. Under
-                        # the server default, spend a bounded grace rather than
-                        # destroying work that may be nearly finished.
+                        # ZERO IS ALSO "UNKNOWN", and this is the case that
+                        # actually happens. `Scheduler.request_progress` sums
+                        # `num_computed_tokens + total_output_tokens`, and
+                        # `num_computed_tokens` is incremented in exactly one
+                        # place — `Request.append_output_token` — so it counts
+                        # OUTPUT tokens only. Nothing advances it during prefill.
+                        # A registered request that is prefilling healthily
+                        # therefore reports 0, not None.
+                        #
+                        # Gating this grace on `progress is None` alone left the
+                        # 900s kill exactly as it was for every prefill, which is
+                        # the only phase long enough to hit it: `0 > 0` fails the
+                        # branch above, `0 is not None` failed this one, and the
+                        # request died at the first window. The DSV4-Flash turn
+                        # this was written for would have died identically.
+                        #
+                        # So treat "no positive evidence" as ambiguous however it
+                        # is spelled. A wedged request still dies, just after a
+                        # bounded number of windows instead of one.
                         unknown_progress_windows += 1
                         logger.warning(
                             "Stream %.1fs window elapsed with no engine progress "

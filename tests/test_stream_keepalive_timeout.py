@@ -180,3 +180,78 @@ async def test_unknown_progress_grace_is_bounded():
                 progress_probe=lambda: None,
             )
         )
+
+
+@pytest.mark.asyncio
+async def test_a_prefilling_request_reports_zero_and_must_not_be_killed():
+    """ZERO is the reading that actually happens, and it meant "wedged".
+
+    `Scheduler.request_progress` sums `num_computed_tokens + total_output_tokens`,
+    and `num_computed_tokens` is incremented in exactly one place —
+    `Request.append_output_token` — so it counts OUTPUT tokens only. Nothing
+    advances it during prefill. A registered request that is prefilling
+    healthily therefore reports 0.
+
+    The first version of this guard gated its grace on `progress is None`, so
+    every long prefill still died at the first window: `0 > 0` fails the
+    progressing branch and `0 is not None` failed the grace. The DSV4-Flash turn
+    the guard was written for would have died exactly as before, and this file's
+    other tests all passed because they used a probe returning None.
+    """
+
+    async def slow_prefill_then_answer():
+        await asyncio.sleep(0.12)
+        yield "answer"
+
+    items = await _drain(
+        _stream_with_keepalive(
+            slow_prefill_then_answer(),
+            interval=0.01,
+            total_timeout=0.05,
+            progress_probe=lambda: 0,
+        )
+    )
+    assert items == ["answer"]
+
+
+@pytest.mark.asyncio
+async def test_zero_progress_grace_is_still_bounded():
+    """Treating 0 as unknown must not make a wedged request immortal."""
+
+    async def wedged():
+        await asyncio.sleep(30)
+        yield "never"
+
+    with pytest.raises(TimeoutError):
+        await _drain(
+            _stream_with_keepalive(
+                wedged(),
+                interval=0.005,
+                total_timeout=0.02,
+                progress_probe=lambda: 0,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_real_progress_refills_the_ambiguity_budget():
+    """A readable stretch clears the grace, so a later blind one gets it back."""
+    # Windows land at ~0.03s each. Readings: two blind (grace 1, 2), then a
+    # real one that must RESET the budget, then two more blind ones. Without the
+    # reset the third blind window is the 3rd overall and the stream dies before
+    # the item at 0.14s.
+    readings = iter([0, 0, 10, 0, 0, 0])
+
+    async def eventually():
+        await asyncio.sleep(0.14)
+        yield "done"
+
+    items = await _drain(
+        _stream_with_keepalive(
+            eventually(),
+            interval=0.005,
+            total_timeout=0.03,
+            progress_probe=lambda: next(readings, 0),
+        )
+    )
+    assert items == ["done"]

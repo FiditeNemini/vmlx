@@ -582,3 +582,21 @@ def test_idle_rederive_skips_when_complete_companion_already_stored():
     assert scheduler._ssm_rederive_queue == []
     assert scheduler.has_idle_tasks() is False
     assert scheduler._ssm_rederive_task_queued is False
+
+
+def test_prompt_only_prefill_mirrors_the_live_prefill_step():
+    """The clean re-derive must chunk with the SAME step the live prefill
+    uses. SSM scan numerics re-associate at chunk boundaries (measured on
+    Lightning 30B: dense attention byte-identical chunked vs one-shot, SSM
+    slots diverge up to |1.45| through depth), so a companion is
+    byte-comparable to a cold prefill only under identical chunking — the
+    old hardcoded 2048 silently diverged whenever prefill_step_size was
+    overridden."""
+    import inspect
+
+    src = inspect.getsource(Scheduler._prefill_for_prompt_only_cache)
+    assert '"prefill_step_size", 2048' in src
+    assert "chunk_size = 2048" not in src, (
+        "non-DSV4 re-derive chunking is hardcoded again; it must mirror "
+        "config.prefill_step_size like every live prefill site"
+    )

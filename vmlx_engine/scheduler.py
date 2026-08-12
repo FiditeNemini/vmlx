@@ -2562,6 +2562,17 @@ class Scheduler:
             # same architecture-aligned policy as DSV4BatchGenerator; the old
             # single-shot exception timed out at long context and diverged from
             # the actual request path.
+            #
+            # The non-DSV4 branch mirrors the live prefill step for the same
+            # reason. Chunking is mechanically safe (measured on Lightning
+            # 30B nemotron_h, 4600 tokens: layer-1 diffs start at 1e-6, no
+            # uninitialised-state garbage; dense attention is byte-identical
+            # chunked vs one-shot) — but SSM scan numerics re-associate at
+            # chunk boundaries and amplify through depth (worst |diff| 1.45
+            # vs one-shot). A companion is byte-comparable to a cold prefill
+            # ONLY when derived with the SAME step the live path uses, so a
+            # hardcoded 2048 silently diverged whenever the user overrode
+            # prefill_step_size.
             if self._uses_dsv4_cache:
                 from .utils.dsv4_batch_generator import (
                     dsv4_effective_prefill_step,
@@ -2577,7 +2588,15 @@ class Scheduler:
                     single_shot=single_shot,
                 )
             else:
-                chunk_size = 2048
+                chunk_size = max(
+                    1,
+                    int(
+                        getattr(
+                            getattr(self, "config", None), "prefill_step_size", 2048
+                        )
+                        or 2048
+                    ),
+                )
             for start in range(0, len(prompt_tokens), chunk_size):
                 if should_stop is not None and should_stop():
                     del fresh_cache

@@ -14036,7 +14036,15 @@ class TestTurboQuantKVTelemetry:
         assert "completion_batch_size: int = 512" in config_models
         assert "max_blocks: int = 1000" in config_models
         assert "defaults to 5" not in sessions_source
-        assert "default: 256" not in cli_source
+        # This guarded a stale "default: 256" in the --max-num-seqs help, added
+        # alongside its default=64 change. As a whole-file substring it also
+        # caught unrelated flags that legitimately default to 256 (the Flash MoE
+        # slot bank, aligned to the app's 256), so scope it to the flag it was
+        # always about.
+        _mns = cli_source.index('"--max-num-seqs"')
+        assert "default: 256" not in cli_source[_mns : _mns + 800], (
+            "--max-num-seqs help claims a stale 256 default"
+        )
         assert "backend default 8" not in settings_flow_source
         assert "total_tokens_on_disk" in cache_panel_source
         assert "health.cache" in Path(

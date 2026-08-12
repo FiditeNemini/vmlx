@@ -858,7 +858,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
               min={16}
               max={1024}
               step={16}
-              defaultValue={64}
+              defaultValue={DEFAULT_CONFIG.flashMoeSlotBank}
             />
             <SliderField
               label="I/O Workers"

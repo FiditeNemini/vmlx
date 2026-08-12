@@ -24,6 +24,15 @@ DSV4_MAX_CACHE_BLOCKS = 4097  # 4096 data blocks + reserved null block
 # by a flat block count, or the same build reuses differently depending on
 # whether it was started by the app or from the CLI.
 GENERIC_INDEX_TARGET_TOKENS = 262144
+
+# Per-family request timeouts, mirroring sessions.ts. These families are slow
+# enough that the generic 300s cuts long reasoning off mid-flight.
+DSV4_DEFAULT_TIMEOUT_SECONDS = 900
+_SLOW_FAMILY_TIMEOUTS = {
+    "deepseek_v4": DSV4_DEFAULT_TIMEOUT_SECONDS,
+    "minimax_m3": 900,
+    "openpangu_v2": 900,
+}
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
 
@@ -126,10 +135,44 @@ def _bundle_declares_mxtq_jangtq(model_path: str | None) -> bool:
     return any(_declares_mxtq(config) for config in configs)
 
 
+# One definition of "is this an affine bundle", because it was written twice and
+# both copies read only the OLD schema key. Two generations are in the wild:
+# CRACK bundles set format="jang"; newer jangq-ai bundles omit "format" and set
+# weight_format="jang_affine" with quantization.mode="affine". Reading only
+# "format" made both checks silently False for every new-schema bundle.
+#
+# Match exact tokens, never substrings: weight_format is also where mxfp4,
+# mxfp8, mxtq and mlx live, and none of those are affine layouts.
+_JANG_AFFINE_TOKENS = frozenset({"affine", "jang", "jjqf", "mxq", "jang_affine"})
+
+
+def jang_config_is_affine(jang_cfg: dict) -> bool:
+    """True when a parsed jang_config.json describes an affine weight layout."""
+    if not isinstance(jang_cfg, dict):
+        return False
+    quantization = jang_cfg.get("quantization")
+    candidates = (
+        jang_cfg.get("format"),
+        jang_cfg.get("weight_format"),
+        (quantization or {}).get("mode") if isinstance(quantization, dict) else None,
+    )
+    return any(
+        str(value or "").lower() in _JANG_AFFINE_TOKENS for value in candidates
+    )
+
+
 def _bundle_is_jang_affine(model_path: str | None) -> bool:
-    """Return true for JANG-affine bundles (jang_config format in the affine
-    family: affine/jang/jjqf/mxq). These load to MLX-native QuantizedLinear and
-    carry aggressively quantized weights, so they share the JANGTQ q8-KV policy.
+    """Return true for JANG-affine bundles.
+
+    Affine is a WEIGHT format, and so is JANGTQ/mxtq — they are siblings, not
+    the same thing, and mxtq must NOT match here. What affine bundles share
+    with JANGTQ bundles is the q8 KV-CACHE policy, which is a property of the
+    cache (TQ encoding of KV) and entirely separate from how the weights are
+    quantized. Keep the two ideas apart when reading this: the check is about
+    the weight layout, the consequence is about the cache.
+
+    Getting it wrong is not cosmetic: a new-schema affine bundle was being
+    handed the wrong KV cache policy because this returned False for it.
     """
     if not model_path:
         return False
@@ -140,8 +183,7 @@ def _bundle_is_jang_affine(model_path: str | None) -> bool:
         cfg_path = Path(model_path).expanduser() / "jang_config.json"
         if not cfg_path.is_file():
             return False
-        fmt = str(json.loads(cfg_path.read_text()).get("format", "")).lower()
-        return fmt in {"affine", "jang", "jjqf", "mxq"}
+        return jang_config_is_affine(json.loads(cfg_path.read_text()))
     except Exception:
         return False
 
@@ -1303,6 +1345,27 @@ def serve_command(args):
                         _generic_block_size,
                     )
 
+        # Slow families need a longer request timeout, and until now that only
+        # existed panel-side (effectiveSessionTimeoutSeconds in sessions.ts), so
+        # a CLI-launched DSV4 / MiniMax-M3 / openPangu killed long requests at
+        # 5 minutes mid-reasoning while the app allowed 15. Same product
+        # default, two surfaces, one of them missing it.
+        if (
+            not getattr(args, "timeout_explicit", False)
+            and (_is_dsv4_model or _mc.family_name in _SLOW_FAMILY_TIMEOUTS)
+        ):
+            _slow_timeout = _SLOW_FAMILY_TIMEOUTS.get(
+                _mc.family_name, DSV4_DEFAULT_TIMEOUT_SECONDS
+            )
+            if float(getattr(args, "timeout", 0) or 0) < _slow_timeout:
+                _old_timeout = float(getattr(args, "timeout", 0) or 0)
+                args.timeout = float(_slow_timeout)
+                logger.info(
+                    "timeout %.0fs -> %.0fs for slow family=%s (matches the app "
+                    "default; pass --timeout to override).",
+                    _old_timeout, _slow_timeout, _mc.family_name,
+                )
+
         if _mc.family_name != "unknown":
             # Auto-apply tool parser
             if (
@@ -1337,15 +1400,38 @@ def serve_command(args):
             # healthy at this family. JANG affine layouts (format: affine/jang/jjqf/mxq)
             # use MLX native QuantizedLinear post-load — fully compile-traceable.
             # DSV4/M3 stay hard-disabled above (path-dependent caches break tracing).
-            if not getattr(args, "enable_jit", False):
+            if not getattr(args, "enable_jit", False) and not getattr(
+                args, "disable_jit", False
+            ):
                 try:
                     from pathlib import Path as _Path
                     _jang_cfg_path = _Path(args.model) / "jang_config.json"
                     if _jang_cfg_path.is_file():
                         import json as _json
                         _jcfg = _json.loads(_jang_cfg_path.read_text())
-                        _fmt = str(_jcfg.get("format", "")).lower()
-                        _is_affine = _fmt in {"affine", "jang", "jjqf", "mxq"}
+                        # Two bundle schema generations are in the wild and only
+                        # the older one was read here. CRACK bundles write
+                        # format="jang"; newer jangq-ai bundles omit "format"
+                        # entirely and write weight_format="jang_affine" with
+                        # quantization.mode="affine". Reading only "format"
+                        # meant _is_affine was False for every new-schema
+                        # bundle, so the JANG-affine JIT default silently never
+                        # applied to them — MEASURED across the model drive:
+                        # all five gemma-4-*-qat-JANG_4M bundles and Nanbeige
+                        # missed it, while the CRACK bundles got it.
+                        #
+                        # Match on exact tokens, never a substring: weight_format
+                        # is also where mxfp4/mxfp8/mxtq/mlx live, and those are
+                        # NOT affine layouts.
+                        _is_affine = jang_config_is_affine(_jcfg)
+                        _fmt = (
+                            str(_jcfg.get("format", "")).lower()
+                            or str(_jcfg.get("weight_format", "")).lower()
+                            or str(
+                                (_jcfg.get("quantization") or {}).get("mode", "")
+                            ).lower()
+                            or "unknown"
+                        )
                         # Family-level exclusions (already hard-disabled JIT above
                         # for DSV4/M3, but be defensive: never default-on for them).
                         _excluded_family = _mc.family_name in {
@@ -1381,7 +1467,7 @@ def serve_command(args):
                             logger.info(
                                 "JANG affine model detected (format=%s, family=%s) — "
                                 "defaulting --enable-jit ON for mx.compile decode speedup. "
-                                "Disable with explicit --enable-jit=0 or env "
+                                "Disable with --no-jit or env "
                                 "VMLX_DISABLE_JANG_AFFINE_JIT_DEFAULT=1.",
                                 _fmt, _mc.family_name,
                             )
@@ -1803,7 +1889,7 @@ def serve_command(args):
         # on SSD and promotes them transiently for reconstruction.
         if args.use_paged_cache and (
             getattr(args, "cache_memory_mb", None)
-            or getattr(args, "cache_memory_percent", 0) != 0.20
+            or getattr(args, "cache_memory_percent_explicit", False)
         ):
             logger.info(
                 "Paged cache: --cache-memory-mb/--cache-memory-percent set the "
@@ -1938,7 +2024,14 @@ def serve_command(args):
     allowed_origins = getattr(args, 'allowed_origins', '*')
     server._allowed_origins = allowed_origins
 
-    # Configure JIT compilation
+    # Configure JIT compilation. --no-jit is the final word: several policy
+    # blocks above can turn enable_jit ON by themselves (the JANG-affine
+    # default in particular), so an explicit user "off" has to be applied last
+    # or it is silently overridden — which is exactly what made the app's JIT
+    # toggle inert on affine bundles.
+    if getattr(args, 'disable_jit', False) and getattr(args, 'enable_jit', False):
+        args.enable_jit = False
+        logger.info("JIT compilation forced OFF by --no-jit.")
     server._enable_jit = getattr(args, 'enable_jit', False)
 
     if getattr(args, 'prefill_keep_alloc', False):
@@ -2782,10 +2875,10 @@ Examples:
     serve_parser.add_argument(
         "--cache-memory-percent",
         type=float,
-        default=0.20,
+        default=0.15,
         help="Fraction of available unified memory to use for prefix cache when auto-detecting. "
-             "Only used when --cache-memory-mb is not set. Value is a decimal: 0.20 = 20%%. "
-             "Example: 0.50 for half of RAM. (default: 0.20)",
+             "Only used when --cache-memory-mb is not set. Value is a decimal: 0.15 = 15%%. "
+             "Example: 0.50 for half of RAM. (default: 0.15, matching the app)",
     )
     serve_parser.add_argument(
         "--no-memory-aware-cache",
@@ -3009,8 +3102,8 @@ Examples:
     serve_parser.add_argument(
         "--flash-moe-slot-bank",
         type=int,
-        default=64,
-        help="Number of expert weight sets to cache in RAM (default: 64). "
+        default=256,
+        help="Number of expert weight sets to cache in RAM (default: 256, matching the app). "
              "Higher = more cache hits but more RAM usage.",
     )
     serve_parser.add_argument(
@@ -3342,6 +3435,16 @@ Examples:
              "This fuses Metal operations for faster inference after a one-time warmup. "
              "May not work with all models. Falls back gracefully if compilation fails.",
     )
+    serve_parser.add_argument(
+        "--no-jit",
+        dest="disable_jit",
+        action="store_true",
+        default=False,
+        help="Force JIT compilation OFF, overriding the automatic default. "
+             "JANG affine bundles turn JIT on by themselves when --enable-jit is "
+             "absent, so 'not passing --enable-jit' is NOT a way to disable it — "
+             "this flag is. Use it to A/B a suspected mx.compile problem.",
+    )
 
     # Speculative decoding options
     serve_parser.add_argument(
@@ -3483,8 +3586,11 @@ Examples:
     bench_parser.add_argument(
         "--cache-memory-percent",
         type=float,
-        default=0.20,
-        help="Fraction of available RAM for cache if auto-detecting (default: 0.20)",
+        default=0.15,
+        help="Fraction of available RAM for cache if auto-detecting (default: 0.15). "
+             "Kept equal to serve: benchmarking under different cache defaults "
+             "than the server actually uses produces numbers that do not "
+             "describe serving.",
     )
     bench_parser.add_argument(
         "--no-memory-aware-cache",
@@ -3610,8 +3716,9 @@ Examples:
     bench_parser.add_argument(
         "--flash-moe-slot-bank",
         type=int,
-        default=64,
-        help="Flash MoE slot bank size (default: 64)",
+        default=256,
+        help="Flash MoE slot bank size (default: 256). Kept equal to serve so a "
+             "benchmark measures the shipped expert-cache size.",
     )
 
     # Detokenizer benchmark
@@ -3780,6 +3887,13 @@ Examples:
 
     if args.command == "serve":
         args.max_tokens_explicit = _argv_has_option(sys.argv[1:], "--max-tokens")
+        # Track these the same way rather than comparing against the default
+        # value: a magic-number sentinel silently breaks the moment the default
+        # changes, and --cache-memory-percent's default is changing here.
+        args.timeout_explicit = _argv_has_option(sys.argv[1:], "--timeout")
+        args.cache_memory_percent_explicit = _argv_has_option(
+            sys.argv[1:], "--cache-memory-percent"
+        )
         serve_command(args)
     elif args.command == "bench":
         bench_command(args)

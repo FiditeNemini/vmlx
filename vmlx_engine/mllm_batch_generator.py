@@ -1681,6 +1681,23 @@ _HYBRID_ADAPTIVE_CHUNK = os.environ.get(
 
 _HYBRID_MIN_CHUNK = max(1, int(os.environ.get("VMLX_HYBRID_MIN_CHUNK", "64") or 64))
 
+# Drain the generation stream before each per-chunk clear_cache.
+#
+# DEFAULT OFF — this was tried against the hybrid retention and MEASURED to do
+# NOTHING. The theory was that clear_cache reclaims nothing because the dead
+# buffers are still "active" until the runtime catches up on a stream that is
+# never synchronized. With the drain ON the curve was byte-identical: base
+# 87.46GB / peak 104.41GB at chunk 46, exactly as without it. The flag value was
+# confirmed True in the serving process first, so this is a real negative and
+# not a guard that silently declined.
+#
+# Kept behind a flag rather than deleted because the reasoning is sound for
+# other allocation shapes and it costs one synchronize per chunk to re-test.
+# Do NOT turn it on as a fix without new evidence.
+_HYBRID_PREFILL_DRAIN = os.environ.get(
+    "VMLX_HYBRID_PREFILL_DRAIN", "0"
+).strip().lower() not in {"0", "false", "no", "off"}
+
 _HYBRID_PREFILL_MEM_TRACE = os.environ.get(
     "VMLX_HYBRID_PREFILL_MEM_TRACE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -6438,6 +6455,45 @@ class MLLMBatchGenerator:
                         ):
                             ssm_captured_boundaries.add(processed)
                     if not _prefill_keep_alloc:
+                        # Drain the generation stream BEFORE clearing.
+                        #
+                        # clear_cache() only returns buffers the runtime has
+                        # already freed. This prefill runs inside
+                        # `with mx.stream(MLLMBatchGenerator._stream)`, and
+                        # _materialize_prefill_cache_state evals only the CACHE
+                        # arrays — it blocks until those outputs exist, but the
+                        # dead buffers from the chunk stay "active" until the
+                        # runtime catches up, so clear_cache had nothing to
+                        # reclaim and the garbage accumulated across chunks.
+                        #
+                        # MEASURED why this matters: KVCache.update_and_fetch
+                        # grows by mx.concatenate, and with step=256 dividing a
+                        # 2048-token chunk exactly, EVERY chunk reallocates
+                        # every attention layer's full K and V. At 92k context
+                        # that turns ~6GB of KV into garbage per chunk — which
+                        # is exactly the ~5.9GB per chunk observed, against a
+                        # legitimate increment of 0.125GiB (16 attention layers
+                        # x 4 kv_heads x 256 head_dim x 2048 x 2 x 2B). 47x.
+                        #
+                        # The engine already knew this shape: the tight-memory
+                        # drain above pairs synchronize+clear for the same
+                        # reason. It just was never applied inside this loop.
+                        if _HYBRID_PREFILL_DRAIN:
+                            try:
+                                if MLLMBatchGenerator._stream is not None:
+                                    try:
+                                        mx.synchronize(MLLMBatchGenerator._stream)
+                                    except RuntimeError as _sync_exc:
+                                        # Shutdown/thread-handoff can leave the
+                                        # stream handle stale; a bare
+                                        # synchronize still drains pending work.
+                                        if "There is no Stream" not in str(_sync_exc):
+                                            raise
+                                        mx.synchronize()
+                                else:
+                                    mx.synchronize()
+                            except Exception:  # noqa: BLE001
+                                pass
                         mx.clear_cache()
                     if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
                         # Attribute the growth to actual cache slots instead of

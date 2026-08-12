@@ -534,6 +534,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--ssm-state-cache-size',
   '--ssm-state-cache-mb',
   '--enable-jit',
+  '--no-jit',
   '--no-memory-aware-cache',
   '--prefix-cache-size',
   '--prefix-cache-max-bytes',
@@ -612,6 +613,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--ssm-state-cache-size',
   '--ssm-state-cache-mb',
   '--enable-jit',
+  '--no-jit',
   '--no-memory-aware-cache',
   '--prefix-cache-size',
   '--prefix-cache-max-bytes',
@@ -4588,8 +4590,13 @@ export class SessionManager extends EventEmitter {
     // engine resolves model defaults, and chat/API requests carry explicit
     // enable_thinking per request.
 
-    // JIT compilation
+    // JIT compilation. Emitting nothing when the user turns JIT off is NOT the
+    // same as off: the engine turns JIT on by itself for JANG-affine bundles
+    // whenever --enable-jit is absent, so an unchecked box left JIT running and
+    // the toggle was inert on exactly the models it mattered for. --no-jit is
+    // the explicit off the engine now honours last.
     if (effectiveEnableJit) args.push('--enable-jit')
+    else args.push('--no-jit')
 
     // Nemotron-Omni multimodal backend selector. Default stage1 (correct).
     // stage2 = native MLX RADIO + Parakeet, ~15-21x faster encoders + 82

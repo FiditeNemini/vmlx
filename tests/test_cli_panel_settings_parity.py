@@ -74,3 +74,73 @@ def test_step3p7_is_paged_exempt_like_the_panel_requires():
         "panel no longer declares the step3p7 paged-required subtype; "
         "re-check whether the CLI exemption is still correct"
     )
+
+
+def _serve_arg_default(flag: str):
+    """Read a serve-subparser default straight out of cli.py source."""
+    src = CLI.read_text(encoding="utf-8")
+    i = src.index(f'"{flag}"')
+    window = src[i : i + 600]
+    m = re.search(r"default=([0-9.]+)", window)
+    assert m, f"no default found for {flag}"
+    return float(m.group(1))
+
+
+def test_cache_memory_percent_matches_the_app():
+    """CLI 0.20 vs app 15 meant app engines evicted ~25% earlier on the same model."""
+    assert _serve_arg_default("--cache-memory-percent") == pytest.approx(0.15)
+    panel = (
+        ROOT / "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx"
+    ).read_text(encoding="utf-8")
+    m = re.search(r"cacheMemoryPercent:\s*(\d+)", panel)
+    assert m and int(m.group(1)) == 15
+
+
+def test_flash_moe_slot_bank_matches_the_app_and_itself():
+    """CLI 64 vs app 256 is a 4x smaller expert cache on a CLI launch.
+
+    The panel also disagreed with ITSELF: the slider's reset marker was a
+    hardcoded 64 while DEFAULT_CONFIG was 256, so clicking reset on a fresh
+    session silently quartered it.
+    """
+    assert _serve_arg_default("--flash-moe-slot-bank") == 256
+    form = (
+        ROOT / "panel/src/renderer/src/components/sessions/SessionConfigForm.tsx"
+    ).read_text(encoding="utf-8")
+    m = re.search(r"flashMoeSlotBank:\s*(\d+)", form)
+    assert m and int(m.group(1)) == 256
+    assert "defaultValue={64}" not in form, (
+        "the slot-bank slider reset marker is hardcoded again; it must track "
+        "DEFAULT_CONFIG or reset will disagree with the session default"
+    )
+
+
+def test_slow_families_get_the_app_timeout():
+    """900s for DSV4/M3/openPangu existed only panel-side; CLI killed at 300s."""
+    from vmlx_engine.cli import _SLOW_FAMILY_TIMEOUTS
+
+    assert set(_SLOW_FAMILY_TIMEOUTS) == {"deepseek_v4", "minimax_m3", "openpangu_v2"}
+    assert all(v == 900 for v in _SLOW_FAMILY_TIMEOUTS.values())
+    sessions = SESSIONS.read_text(encoding="utf-8")
+    for const in (
+        "DSV4_DEFAULT_TIMEOUT_SECONDS = 900",
+        "MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900",
+    ):
+        assert const in sessions, f"panel no longer defines {const}"
+
+
+def test_jit_has_an_explicit_off_switch():
+    """Not passing --enable-jit is NOT off: affine bundles enable it themselves.
+
+    That made the app's JIT checkbox inert on exactly the models it mattered
+    for. The engine also advised '--enable-jit=0', which argparse store_true
+    cannot parse, so the documented escape hatch did not exist either.
+    """
+    src = CLI.read_text(encoding="utf-8")
+    assert '"--no-jit"' in src
+    assert "--enable-jit=0" not in src, "the unusable flag form is documented again"
+    sessions = SESSIONS.read_text(encoding="utf-8")
+    assert "args.push('--no-jit')" in sessions, (
+        "panel emits nothing when JIT is unchecked, which the engine reads as "
+        "'use the affine default' rather than 'off'"
+    )

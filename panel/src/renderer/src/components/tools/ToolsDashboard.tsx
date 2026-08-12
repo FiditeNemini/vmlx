@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Search, Stethoscope, ArrowRightLeft, Eye, Play, HardDrive, RefreshCw } from 'lucide-react'
 import { useTranslation } from '../../i18n'
+import { compactQuantizationBadgeLabel } from '../../lib/quantizationBadge'
 
 interface LocalModel {
   id: string
@@ -183,8 +184,18 @@ function ModelCard({ model, onInspect, onDiagnose, onConvert, onServe }: {
           <div className="flex items-center gap-2">
             <p className="text-sm font-medium truncate">{model.name}</p>
             {model.quantization && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary flex-shrink-0">
-                {model.quantization}
+              // Compact it, the way SessionCard already does. DSV4-Flash's
+              // label is 90 characters -- "JANG_2L_GS64_ProjLayerBits_Ggs64-
+              // Dgs32-Ugs64_Attn8g64_Tok8g64_NoMTP_AWQ_DiagImatrix_QAT_GPTQ" --
+              // and rendering it raw made that one row dwarf every other,
+              // pushing the size to the far edge. flex-shrink-0 meant it could
+              // not even shrink. The full value stays in the tooltip.
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary flex-shrink-0"
+                title={model.quantization}
+                aria-label={`Quantization: ${model.quantization}`}
+              >
+                {compactQuantizationBadgeLabel(model.quantization)}
               </span>
             )}
             {model.size && (

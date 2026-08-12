@@ -296,9 +296,27 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if not delta_text:
             return None
 
-        # Skip if delta is just the special tokens themselves
+        # A delta that is ONLY a marker still carries whitespace around it, and
+        # that whitespace is real answer text. Returning None dropped it: a
+        # chunking where one delta is exactly "\n<think>" streamed "IntroAnswer"
+        # where the one-shot path returned "Intro\n\nAnswer" — the paragraph
+        # break before a mid-answer think block simply vanished. Character-wise
+        # streaming never produces such a delta, which is why the fidelity suite
+        # did not catch it.
+        #
+        # The whitespace BEFORE an opening marker belongs to the rail that was
+        # active before it (content), so emit it rather than swallowing it.
         stripped_delta = delta_text.strip()
         if stripped_delta == self.start_token:
+            leading = delta_text[: delta_text.index(self.start_token)]
+            # This parser is stateless — the rail is derived from the text, so
+            # "already reasoning" is an unclosed start token in what came before.
+            already_reasoning = (
+                self.start_token in previous_text
+                and self.end_token not in previous_text
+            )
+            if leading and not already_reasoning:
+                return DeltaMessage(content=leading)
             return None
         if stripped_delta == self.end_token:
             return None

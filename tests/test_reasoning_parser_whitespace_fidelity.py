@@ -207,3 +207,34 @@ def test_gemma4_visible_prefix_before_thought_channel_streams_monotonically():
             f"streaming/one-shot disagree for {raw!r}: "
             f"{streamed!r} vs {str(one_text)!r}"
         )
+
+
+def test_marker_only_delta_keeps_its_leading_whitespace():
+    """A delta that is ONLY a marker still carries real answer whitespace.
+
+    The parser returned None for any delta whose strip() equalled a marker, so a
+    chunking where one delta is exactly "\\n<think>" lost the newline: "Intro"
+    streamed straight into "Answer". Character-wise streaming never produces
+    such a delta, which is why the 199-case suite did not catch it — the gap was
+    the CHUNKING, not the body.
+
+    Only the leading whitespace of an OPENING marker is asserted here; the
+    remaining "\\n" before the answer is a separate defect (the .lstrip() on the
+    post-close transition) and is still open.
+    """
+    from vmlx_engine.reasoning import get_parser
+
+    parser_cls = get_parser("qwen3")
+    parser = parser_cls()
+    previous = ""
+    parts = []
+    for chunk in ["Intro", "\n<think>", "r", "</think>", "\nAnswer"]:
+        current = previous + chunk
+        delta = parser.extract_reasoning_streaming(previous, current, chunk)
+        if delta is not None and getattr(delta, "content", None):
+            parts.append(delta.content)
+        previous = current
+    streamed = "".join(parts)
+    assert streamed.startswith("Intro\n"), (
+        f"newline before the think block was swallowed: {streamed!r}"
+    )

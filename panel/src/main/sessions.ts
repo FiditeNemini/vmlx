@@ -2,7 +2,7 @@ import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
 import { powerSaveBlocker } from 'electron'
 import { EventEmitter } from 'events'
-import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
+import { existsSync, readdirSync, readFileSync } from 'fs'
 import { createServer } from 'net'
 import { homedir, totalmem, freemem } from 'os'
 import { join, basename, dirname } from 'path'
@@ -43,7 +43,9 @@ import {
   validateModelBundleDirectory,
 } from './session-model-path'
 import {
+  estimateModelFileBytes,
   estimateModelLaunchResidentBytes,
+  formatGb,
   launchResidentProfileForModel,
   estimateMacReclaimableMemoryBytes,
   effectiveLaunchAvailableBytes,
@@ -1290,28 +1292,10 @@ export function connectHost(host: string): string {
   return host === '0.0.0.0' ? '127.0.0.1' : host
 }
 
-/** Estimate model file bytes from local model files. Returns 0 if unknown. */
-function estimateModelFileBytes(modelPath: string): number {
-  try {
-    const entries = readdirSync(modelPath, { withFileTypes: true })
-    let totalBytes = 0
-    for (const entry of entries) {
-      const fullPath = join(modelPath, entry.name)
-      if (entry.isDirectory()) {
-        totalBytes += estimateModelFileBytes(fullPath)
-      } else if (entry.isFile()) {
-        totalBytes += statSync(fullPath).size
-      }
-    }
-    return totalBytes
-  } catch (_) {
-    return 0
-  }
-}
-
-function formatGb(bytes: number): string {
-  return (bytes / 1e9).toFixed(1)
-}
+// estimateModelFileBytes and formatGb are imported from ./modelLaunchMemory —
+// this file used to carry byte-identical private copies (a #46 consolidation
+// target). Keeping one definition means the recursive counter and the GB
+// formatter can never drift between the admission preflight and the load bar.
 
 /**
  * Resolve .local (mDNS/Bonjour) hostnames to IPv4 before fetch.

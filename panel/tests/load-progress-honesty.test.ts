@@ -18,11 +18,18 @@ describe('load progress honesty', () => {
   })
 
   it('scans nested model files instead of only top-level safetensors shards', () => {
-    const source = read('src/main/sessions.ts')
+    // The recursive counter now lives in the shared modelLaunchMemory module
+    // (sessions.ts imports it — the byte-identical private copy was removed to
+    // stop the admission preflight and the load bar drifting apart).
+    const source = read('src/main/modelLaunchMemory.ts')
 
     expect(source).toContain('withFileTypes: true')
     expect(source).toContain('entry.isDirectory()')
     expect(source).toContain('estimateModelFileBytes(fullPath)')
+    // sessions.ts must consume it, not redefine it.
+    const sessions = read('src/main/sessions.ts')
+    expect(sessions).toContain("estimateModelFileBytes,\n")
+    expect(sessions).not.toContain('function estimateModelFileBytes(')
   })
 
   it('preserves model-size metadata when later phase updates arrive', () => {

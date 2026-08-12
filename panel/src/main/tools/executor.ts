@@ -111,15 +111,46 @@ function describeUnusableWorkingDir(workingDir: string): string | null {
   return null
 }
 
+/**
+ * Tools that never touch the filesystem, and so must not be blocked by a
+ * missing working directory.
+ *
+ * MEASURED live: with no valid working directory configured, a web search came
+ * back "The configured working directory does not exist" — twice — and the
+ * model correctly concluded it could not answer. Searching the web does not
+ * need a folder. Neither does fetching a URL, reading the clock, counting
+ * tokens, or reading the clipboard. The precondition below exists so FILE
+ * tools fail with a nameable cause instead of a raw ENOENT from resolvePath;
+ * applying it to everything turned one misconfiguration into a dead toolbox.
+ *
+ * Derived from the dispatch table: these are exactly the cases that do not
+ * pass `workingDir` to their implementation. A test pins that correspondence,
+ * so adding a filesystem tool here fails rather than silently skipping its
+ * precondition.
+ */
+const WORKING_DIR_INDEPENDENT_TOOLS: ReadonlySet<string> = new Set([
+  'ddg_search',
+  'web_search',
+  'fetch_url',
+  'run_applescript',
+  'get_process_output',
+  'count_tokens',
+  'clipboard_read',
+  'clipboard_write',
+  'get_current_datetime',
+])
+
 export async function executeBuiltinTool(
   toolName: string,
   args: Record<string, any>,
   workingDir: string,
   maxResultChars?: number
 ): Promise<ToolResult> {
-  const workingDirProblem = describeUnusableWorkingDir(workingDir)
-  if (workingDirProblem) {
-    return { content: workingDirProblem, is_error: true }
+  if (!WORKING_DIR_INDEPENDENT_TOOLS.has(toolName)) {
+    const workingDirProblem = describeUnusableWorkingDir(workingDir)
+    if (workingDirProblem) {
+      return { content: workingDirProblem, is_error: true }
+    }
   }
   try {
     let result: ToolResult

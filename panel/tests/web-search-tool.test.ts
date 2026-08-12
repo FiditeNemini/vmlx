@@ -72,3 +72,48 @@ describe('web search failure reporting', () => {
     expect(executor).toContain('is_error: true')
   })
 })
+
+/**
+ * A missing working directory must not disable tools that never use one.
+ *
+ * MEASURED live: with no valid working directory, a web search returned
+ * "The configured working directory does not exist" twice and the model gave
+ * up. The precondition exists so FILE tools fail with a nameable cause instead
+ * of a raw ENOENT out of resolvePath — applying it to every tool turned one
+ * misconfiguration into a dead toolbox.
+ */
+describe('working-directory precondition scope', () => {
+  const dispatch = (() => {
+    const start = executor.indexOf('export async function executeBuiltinTool(')
+    return executor.slice(start, executor.indexOf('\n}\n', start))
+  })()
+
+  /** Tools whose implementation is not handed `workingDir`. */
+  const dispatchIndependent = new Set(
+    [...dispatch.matchAll(/case '([a-z_0-9]+)':\s*\n\s*result = (?:await )?\w+\(([^;]*)\);/g)]
+      .filter(([, , argstr]) => !argstr.includes('workingDir'))
+      .map(([, name]) => name),
+  )
+
+  /** The set the guard actually consults. */
+  const declared = new Set(
+    (executor
+      .slice(executor.indexOf('WORKING_DIR_INDEPENDENT_TOOLS: ReadonlySet<string> = new Set(['))
+      .split('])')[0]
+      .match(/'([a-z_0-9]+)'/g) || []).map((s) => s.replace(/'/g, '')),
+  )
+
+  it('exempts exactly the tools that never receive workingDir', () => {
+    expect([...declared].sort()).toEqual([...dispatchIndependent].sort())
+  })
+
+  it('never exempts a filesystem tool', () => {
+    for (const fsTool of ['read_file', 'write_file', 'run_command', 'git', 'list_directory']) {
+      expect(declared.has(fsTool)).toBe(false)
+    }
+  })
+
+  it('guards the precondition on that set rather than running it always', () => {
+    expect(dispatch).toContain('if (!WORKING_DIR_INDEPENDENT_TOOLS.has(toolName)) {')
+  })
+})

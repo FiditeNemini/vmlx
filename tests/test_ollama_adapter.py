@@ -108,6 +108,114 @@ def test_ollama_chat_translates_video_and_audio_extensions():
     }]
 
 
+def test_ollama_generate_images_agree_with_chat_translation():
+    """/api/generate takes `images` as a TOP-LEVEL base64 array alongside
+    `prompt`. It must produce the exact same internal multimodal message
+    /api/chat produces for the equivalent per-message request — previously
+    the array was silently dropped and vision requests became text-only."""
+    from vmlx_engine.api.models import ChatCompletionRequest
+    from vmlx_engine.api.ollama_adapter import (
+        ollama_chat_to_openai,
+        ollama_generate_to_openai_chat,
+    )
+
+    raw_b64 = "aW1hZ2U="  # raw base64, NOT a data URL — Ollama's convention
+    data_url = "data:image/jpeg;base64,/9j/4AAQ"
+    gen_req = ollama_generate_to_openai_chat(
+        {
+            "model": "qwen-vl",
+            "system": "Be terse.",
+            "prompt": "What is in this picture?",
+            "images": [raw_b64, data_url],
+        }
+    )
+    chat_req = ollama_chat_to_openai(
+        {
+            "model": "qwen-vl",
+            "messages": [
+                {"role": "system", "content": "Be terse."},
+                {
+                    "role": "user",
+                    "content": "What is in this picture?",
+                    "images": [raw_b64, data_url],
+                },
+            ],
+        }
+    )
+
+    # The regression that matters: both Ollama entry points must agree.
+    assert gen_req["messages"] == chat_req["messages"]
+    # And the media must actually be present in the shared shape: raw base64
+    # gets the data-URL prefix, existing data URLs pass through untouched.
+    assert gen_req["messages"][-1]["content"] == [
+        {"type": "text", "text": "What is in this picture?"},
+        {"type": "image_url", "image_url": {
+            "url": f"data:image/png;base64,{raw_b64}",
+        }},
+        {"type": "image_url", "image_url": {"url": data_url}},
+    ]
+    # The converted request must still validate as a chat request end-to-end.
+    ChatCompletionRequest.model_validate(gen_req)
+
+    # Bare-string leniency mirrors /api/chat's per-message coercion.
+    bare = ollama_generate_to_openai_chat(
+        {"model": "qwen-vl", "prompt": "look", "images": raw_b64}
+    )
+    assert bare["messages"] == ollama_chat_to_openai(
+        {
+            "model": "qwen-vl",
+            "messages": [{"role": "user", "content": "look", "images": raw_b64}],
+        }
+    )["messages"]
+
+
+def test_ollama_generate_without_images_keeps_plain_string_prompt():
+    """No `images` key (or an explicitly empty array — /api/chat's "no media"
+    contract) must leave the prompt as a plain string: no content-part
+    wrapping that would change a text-only prompt's tokenization."""
+    from vmlx_engine.api.ollama_adapter import ollama_generate_to_openai_chat
+
+    req = ollama_generate_to_openai_chat({"model": "hy3", "prompt": "hi"})
+    assert req["messages"] == [{"role": "user", "content": "hi"}]
+
+    req_empty = ollama_generate_to_openai_chat(
+        {"model": "hy3", "prompt": "hi", "images": []}
+    )
+    assert req_empty["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_ollama_generate_malformed_images_agree_with_chat_handling():
+    """/api/chat does not validate base64: strings pass through (raw base64
+    is data-URL prefixed, the downstream content-part decoder surfaces the
+    malformed payload) and non-string entries are skipped. /api/generate
+    must do exactly the same — no second convention, no adapter-level
+    validation, no exception."""
+    from vmlx_engine.api.ollama_adapter import (
+        ollama_chat_to_openai,
+        ollama_generate_to_openai_chat,
+    )
+
+    malformed = ["%%%not-base64%%%", "", 42, None, "data:image/jpeg;base64,///"]
+    gen_req = ollama_generate_to_openai_chat(
+        {"model": "vl", "prompt": "look", "images": malformed}
+    )
+    chat_req = ollama_chat_to_openai(
+        {
+            "model": "vl",
+            "messages": [{"role": "user", "content": "look", "images": malformed}],
+        }
+    )
+
+    assert gen_req["messages"] == chat_req["messages"]
+    parts = gen_req["messages"][-1]["content"]
+    assert parts[0] == {"type": "text", "text": "look"}
+    assert [p["image_url"]["url"] for p in parts[1:]] == [
+        "data:image/png;base64,%%%not-base64%%%",
+        "data:image/png;base64,",
+        "data:image/jpeg;base64,///",
+    ]
+
+
 def test_ollama_chat_normalizes_private_thinking_before_text_and_media_history():
     from vmlx_engine.api.ollama_adapter import ollama_chat_to_openai
 

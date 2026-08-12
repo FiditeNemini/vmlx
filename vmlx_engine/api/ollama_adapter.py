@@ -135,6 +135,61 @@ def _apply_ollama_seed(body: dict, opts: dict, req: dict[str, Any]) -> None:
         req["seed"] = value
 
 
+def _ollama_media_content_parts(source: dict, text: str) -> list[dict] | None:
+    """Translate Ollama-convention media arrays into OpenAI content parts.
+
+    ``source`` is any dict carrying Ollama-style ``images`` (plus the vMLX
+    ``videos``/``audio``/``audios`` extensions): a chat *message* for
+    /api/chat, or the top-level request *body* for /api/generate, where
+    Ollama places ``images`` alongside ``prompt``. Both Ollama entry points
+    go through this one helper so they cannot drift apart.
+
+    Returns None when the source carries no media so callers can leave a
+    plain-string prompt untouched (identical tokenization). Base64 payloads
+    are not validated here — exactly like /api/chat, strings pass through
+    (raw base64 gets a data-URL prefix; existing ``data:`` URLs are kept)
+    and the downstream content-part decoder surfaces malformed data.
+    Non-string entries are skipped.
+    """
+    images = source.get("images")
+    videos = source.get("videos")
+    audio = source.get("audio", source.get("audios"))
+    if isinstance(images, str):
+        images = [images]
+    if isinstance(videos, str):
+        videos = [videos]
+    if isinstance(audio, str):
+        audio = [audio]
+    if not images and not videos and not audio:
+        return None
+    parts: list[dict] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    for img in images or []:
+        if not isinstance(img, str):
+            continue
+        # Ollama accepts either raw base64 or a data URL — normalize
+        # to data URL so the OpenAI content_part handler (which
+        # inspects the dataUrl mime prefix) can decode.
+        url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
+        parts.append({"type": "image_url", "image_url": {"url": url}})
+    for video in videos or []:
+        if not isinstance(video, str):
+            continue
+        url = video if video.startswith("data:") else f"data:video/mp4;base64,{video}"
+        parts.append({"type": "video_url", "video_url": {"url": url}})
+    for audio_item in audio or []:
+        if not isinstance(audio_item, str):
+            continue
+        url = (
+            audio_item
+            if audio_item.startswith("data:")
+            else f"data:audio/wav;base64,{audio_item}"
+        )
+        parts.append({"type": "audio_url", "audio_url": {"url": url}})
+    return parts
+
+
 def ollama_chat_to_openai(body: dict) -> dict:
     """Convert Ollama /api/chat request to OpenAI /v1/chat/completions."""
     opts = body.get("options", {})
@@ -175,46 +230,10 @@ def ollama_chat_to_openai(body: dict) -> dict:
             ):
                 normalized_msg["reasoning_content"] = thinking
         msg = normalized_msg
-        images = msg.get("images") if isinstance(msg, dict) else None
-        videos = msg.get("videos") if isinstance(msg, dict) else None
-        audio = (
-            msg.get("audio", msg.get("audios")) if isinstance(msg, dict) else None
-        )
-        if isinstance(images, str):
-            images = [images]
-        if isinstance(videos, str):
-            videos = [videos]
-        if isinstance(audio, str):
-            audio = [audio]
-        if not images and not videos and not audio:
+        parts = _ollama_media_content_parts(msg, msg.get("content", "") or "")
+        if parts is None:
             translated_messages.append(msg)
             continue
-        text = msg.get("content", "") or ""
-        parts: list[dict] = []
-        if text:
-            parts.append({"type": "text", "text": text})
-        for img in images or []:
-            if not isinstance(img, str):
-                continue
-            # Ollama accepts either raw base64 or a data URL — normalize
-            # to data URL so the OpenAI content_part handler (which
-            # inspects the dataUrl mime prefix) can decode.
-            url = img if img.startswith("data:") else f"data:image/png;base64,{img}"
-            parts.append({"type": "image_url", "image_url": {"url": url}})
-        for video in videos or []:
-            if not isinstance(video, str):
-                continue
-            url = video if video.startswith("data:") else f"data:video/mp4;base64,{video}"
-            parts.append({"type": "video_url", "video_url": {"url": url}})
-        for audio_item in audio or []:
-            if not isinstance(audio_item, str):
-                continue
-            url = (
-                audio_item
-                if audio_item.startswith("data:")
-                else f"data:audio/wav;base64,{audio_item}"
-            )
-            parts.append({"type": "audio_url", "audio_url": {"url": url}})
         new_msg = {
             k: v
             for k, v in msg.items()
@@ -279,7 +298,15 @@ def ollama_chat_to_openai(body: dict) -> dict:
 
 
 def ollama_generate_to_openai(body: dict) -> dict:
-    """Convert Ollama /api/generate request to OpenAI /v1/completions."""
+    """Convert Ollama /api/generate request to OpenAI /v1/completions.
+
+    Used only for ``raw: true`` requests (server.py routes the templated
+    default through :func:`ollama_generate_to_openai_chat`). The internal
+    target, ``CompletionRequest``, is text-only — ``prompt: str | list[str]``
+    with no content-part carrier — so top-level ``images`` cannot be
+    delivered on this path today. Rejecting them loudly (or rerouting) is a
+    server.py/models.py decision, not an adapter translation.
+    """
     opts = body.get("options", {})
     req: dict[str, Any] = {
         "model": body.get("model", "default"),
@@ -324,7 +351,18 @@ def ollama_generate_to_openai_chat(body: dict) -> dict:
     system = body.get("system")
     if isinstance(system, str) and system:
         messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": body.get("prompt", "") or ""})
+    prompt = body.get("prompt", "") or ""
+    # Ollama's /api/generate carries media as TOP-LEVEL arrays alongside
+    # `prompt` (`images: [<base64>, ...]`), unlike /api/chat's per-message
+    # convention. Translate through the same helper as /api/chat so both
+    # Ollama entry points produce the identical multimodal content-part
+    # shape. Previously the array was silently dropped: a vision request
+    # became text-only and the model answered about nothing, with no error.
+    media_parts = _ollama_media_content_parts(body, prompt)
+    if media_parts is None:
+        messages.append({"role": "user", "content": prompt})
+    else:
+        messages.append({"role": "user", "content": media_parts})
 
     req: dict[str, Any] = {
         "model": body.get("model", "default"),

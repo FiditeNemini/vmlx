@@ -82,3 +82,35 @@ def test_scheduler_publishes_a_skip_even_with_no_engagement():
         "model that never engaged reports nothing and the reason cannot reach "
         "the UI"
     )
+
+
+def test_server_mtp_support_agrees_with_the_runtime_set():
+    """The server's fallback list must not advertise families the runtime rejects.
+
+    server.py carried its own ten-family _JANGMTP_SUPPORTED_FAMILIES including
+    gemma4, nemotron_h and minimax — none of which the native MTP runtime
+    serves. It is reached only when inspect_native_mtp_bundle raises, but on
+    that path it would have reported MTP supported for models that silently run
+    autoregressive. It now defers to native_mtp's set, which is the only list
+    that governs engagement.
+    """
+    from vmlx_engine.native_mtp import _RUNTIME_SUPPORTED_FAMILIES
+    from vmlx_engine.server import _bundle_mtp_runtime_supported
+
+    for family in sorted(_RUNTIME_SUPPORTED_FAMILIES):
+        assert _bundle_mtp_runtime_supported(family), (
+            f"{family} is runtime-supported but the server says otherwise"
+        )
+    for family in ("nemotron_h", "gemma4", "minimax", "zaya"):
+        assert not _bundle_mtp_runtime_supported(family), (
+            f"the server advertises MTP for {family}, which the runtime rejects"
+        )
+
+
+def test_no_dead_alias_in_the_jangmtp_map():
+    """An alias that can never fire reads as coverage while doing nothing."""
+    from vmlx_engine.server import _JANGMTP_FAMILY_ALIAS
+
+    assert "mininax" not in _JANGMTP_FAMILY_ALIAS, (
+        "the 'mininax' typo alias is back; it never matched a real family"
+    )

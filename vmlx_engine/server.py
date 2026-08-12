@@ -8808,7 +8808,12 @@ _JANGMTP_FAMILY_ALIAS = {
     "qwen3_5_moe_text": "qwen3_5_moe",
     "hy3": "hy_v3",
     "zaya_vl": "zaya1_vl",
-    "mininax": "minimax",
+    # "mininax" was here as an alias for "minimax" — a typo introduced whole
+    # in b4a06b876 that never fired, because the key never occurs as a real
+    # family name. Corrected rather than kept: an alias map that silently does
+    # nothing is worse than no alias, since it reads as coverage.
+    "minimax_m2": "minimax",
+    "minimax_m2_5": "minimax",
 }
 
 _JANGMTP_SUPPORTED_FAMILIES: set[str] = {
@@ -8853,9 +8858,25 @@ def _bundle_mtp_family(bundle_path: str | None) -> str | None:
 
 
 def _bundle_mtp_runtime_supported(family: str | None) -> bool:
+    """Is this family actually served by the native MTP runtime?
+
+    Defers to native_mtp's set, which is the ONLY list that governs engagement
+    at runtime. The local _JANGMTP_SUPPORTED_FAMILIES literal below listed ten
+    families — including gemma4, nemotron_h and minimax — that the live runtime
+    rejects, so on the one path that reaches it (inspect_native_mtp_bundle
+    raising) it would have reported MTP supported for models that silently run
+    autoregressive. Kept only as a last-resort fallback so behaviour on that
+    path does not become "unsupported for everything".
+    """
     if not family:
         return False
-    return _normalize_jangmtp_family(family) in _JANGMTP_SUPPORTED_FAMILIES
+    normalized = _normalize_jangmtp_family(family)
+    try:
+        from .native_mtp import _RUNTIME_SUPPORTED_FAMILIES
+
+        return normalized in _RUNTIME_SUPPORTED_FAMILIES
+    except Exception:  # noqa: BLE001
+        return normalized in _JANGMTP_SUPPORTED_FAMILIES
 
 
 def _model_mtp_status(bundle_path: str | None) -> dict:

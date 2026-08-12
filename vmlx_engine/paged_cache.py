@@ -762,6 +762,7 @@ class PagedCacheManager:
         disk_store: "Optional[Any]" = None,
         max_resident_bytes: int = 0,
         disk_only: bool = False,
+        frugal: bool = False,
     ):
         if block_size < 1:
             raise ValueError(f"block_size must be >= 1, got {block_size}")
@@ -792,12 +793,22 @@ class PagedCacheManager:
             "no",
             "off",
         )
-        self.paged_frugal = self.disk_only or frugal_requested
+        # `frugal=True` is also how a caller says "the user asked for a zero-byte
+        # RAM cache". Without it that request lands on the sentinel documented
+        # below, where 0 means UNBOUNDED — so asking for the smallest possible
+        # cache produced the largest possible one.
+        frugal_config = bool(frugal)
+        self.paged_frugal = self.disk_only or frugal_requested or frugal_config
+        # Report WHICH of the three reasons is in force, not just that one is:
+        # on /health and the cache pill, "why is my RAM mirror off" is the
+        # question being asked, and "frugal" alone does not answer it.
         self.ram_mirror_policy = (
             "disk_only"
             if self.disk_only
             else "frugal_env"
             if frugal_requested
+            else "frugal_config"
+            if frugal_config
             else "resident"
         )
         # RAM byte ceiling for the in-RAM block KV mirror. 0 = unbounded (legacy

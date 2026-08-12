@@ -1285,6 +1285,24 @@ class Scheduler:
                         max_memory_percent=self.config.cache_memory_percent,
                     ).compute_memory_limit()
                 )
+                # An explicit `--cache-memory-mb 0` asks for NO resident cache.
+                # PagedCacheManager reads max_resident_bytes=0 as the legacy
+                # "unbounded" sentinel, so that request used to buy the exact
+                # opposite: no byte ceiling, and every gated enforce_byte_budget
+                # call site skipped. The same 0 already means "store nothing" to
+                # MemoryAwarePrefixCache, so one flag had opposite meanings per
+                # tier. Route it to the frugal policy, which is what "no RAM
+                # payloads" already means here.
+                _explicit_zero_cache = (
+                    not _block_disk_only
+                    and self.config.cache_memory_mb is not None
+                    and int(self.config.cache_memory_mb) == 0
+                )
+                if _explicit_zero_cache:
+                    logger.info(
+                        "cache-memory-mb=0 requested: paged RAM payloads "
+                        "disabled (frugal); blocks restore transiently."
+                    )
                 try:
                     self.paged_cache_manager = PagedCacheManager(
                         block_size=self.config.paged_cache_block_size,
@@ -1292,6 +1310,7 @@ class Scheduler:
                         disk_store=block_disk_store,
                         max_resident_bytes=_paged_resident_budget,
                         disk_only=_block_disk_only,
+                        frugal=_explicit_zero_cache,
                     )
                     if _block_disk_only:
                         logger.info(

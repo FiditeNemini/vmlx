@@ -282,3 +282,76 @@ def test_registry_rows_no_longer_carry_their_own_thinking_budget_flag():
     assert not re.search(r"supportsThinkingBudget:\s*(?:true|false)", src), (
         "a registerFamily row grew its own supportsThinkingBudget literal back"
     )
+
+
+TOOL_ALIASES_TS = ROOT / "panel" / "src" / "shared" / "toolParserAliases.ts"
+MODEL_REGISTRY_TS = ROOT / "panel" / "src" / "main" / "model-config-registry.ts"
+SESSION_FORM_TSX = (
+    ROOT / "panel" / "src" / "renderer" / "src" / "components" / "sessions"
+    / "SessionConfigForm.tsx"
+)
+
+
+def _panel_tool_parser_names() -> tuple[set[str], dict[str, str]]:
+    """The canonical set and the alias map, read out of the shared TS module."""
+    source = TOOL_ALIASES_TS.read_text()
+    canonical_block = source[source.index("TOOL_PARSERS_FOR_CLI"):]
+    canonical_block = canonical_block[: canonical_block.index("])")]
+    canonical = set(re.findall(r"^\s*'([A-Za-z0-9_.]+)',", canonical_block, re.M))
+    alias_block = source[source.index("TOOL_PARSER_CANONICAL_ALIASES"):]
+    alias_block = alias_block[: alias_block.index("\n}")]
+    aliases = dict(re.findall(r"^\s*([A-Za-z0-9_]+):\s*'([A-Za-z0-9_.]+)'", alias_block, re.M))
+    return canonical, aliases
+
+
+def _canonicalize(name: str, canonical: set[str], aliases: dict[str, str]) -> str | None:
+    """Mirror of canonicalizeToolParserId in toolParserAliases.ts."""
+    if not name or name in ("auto", "none"):
+        return name
+    resolved = aliases.get(name, name)
+    return resolved if resolved in canonical else None
+
+
+def test_panel_tool_parser_names_are_all_engine_registered():
+    """The app must never pass a --tool-call-parser the engine would reject."""
+    from vmlx_engine.tool_parsers import ToolParserManager
+
+    registered = set(ToolParserManager.list_registered())
+    canonical, aliases = _panel_tool_parser_names()
+    unknown = sorted((canonical | set(aliases)) - registered)
+    assert not unknown, f"panel offers tool parsers the engine does not register: {unknown}"
+
+
+def test_every_family_the_panel_detects_keeps_its_tool_parser():
+    """A parser the panel STAMPS must survive canonicalization.
+
+    When it does not, `canonicalizeToolParserId` returns undefined and
+    toolLaunchArgs emits neither --tool-call-parser nor
+    --enable-auto-tool-choice -- so the family silently loses tool calling in
+    the app while the identical `vmlx serve --tool-call-parser <name>` works.
+    Muse Glimmer shipped that way: the registry stamped 'atem', the dropdown
+    offered 'atem', and 'atem' was absent from the canonical set.
+    """
+    canonical, aliases = _panel_tool_parser_names()
+    dropped = []
+    for family, body in re.findall(
+        r"registerFamily\('([^']+)',\s*\{([^}]*)\}", MODEL_REGISTRY_TS.read_text()
+    ):
+        stamped = re.search(r"toolParser:\s*'([^']+)'", body)
+        if stamped and _canonicalize(stamped.group(1), canonical, aliases) is None:
+            dropped.append((family, stamped.group(1)))
+    assert not dropped, f"families whose tool parser is silently dropped at launch: {dropped}"
+
+
+def test_every_tool_parser_the_dropdown_offers_can_be_selected():
+    """An option a user can pick must not be discarded on the way to the engine."""
+    source = SESSION_FORM_TSX.read_text()
+    block = source[source.index("const TOOL_PARSER_OPTIONS"):]
+    block = block[: block.index("\n]\n")]
+    canonical, aliases = _panel_tool_parser_names()
+    dropped = [
+        value
+        for value in re.findall(r"value:\s*'([^']*)'", block)
+        if value and _canonicalize(value, canonical, aliases) is None
+    ]
+    assert not dropped, f"dropdown offers tool parsers that cannot stick: {dropped}"

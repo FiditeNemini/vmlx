@@ -53,7 +53,39 @@ describe('panel health tolerance vs engine patience', () => {
 
   it('sessions.ts uses the shared helper, not its own arithmetic', () => {
     const source = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf-8')
-    expect(source).toContain('healthFailureToleranceCount(cfg.timeout)')
+    expect(source).toContain('healthFailureToleranceCount(')
     expect(source).not.toContain('Math.ceil(cfg.timeout / 5)')
+  })
+})
+
+/**
+ * The regression that made the fix above only half-work: the health poll read
+ * `config.timeout`, but that is not what the engine was given. Slow families
+ * keep the generic 300 in storage and are lifted to 900 at launch, so the poll
+ * was scaling its patience from a number the engine never saw — for exactly
+ * the families whose prefills run longest.
+ */
+describe('health tolerance resolves the family timeout, not the stored one', () => {
+  const source = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf-8')
+
+  it('the poll and the --timeout arg call the same resolver', () => {
+    expect(source).toContain('healthFailureToleranceCount(resolvedEngineTimeoutSeconds(cfg))')
+    expect(source).toContain("args.push('--timeout', resolvedEngineTimeoutSeconds(config).toString())")
+    expect(source).not.toContain('healthFailureToleranceCount(cfg.timeout)')
+  })
+
+  it('every slow family is more patient than the generic default', async () => {
+    const { SLOW_FAMILY_TIMEOUTS, GENERIC_DEFAULT_TIMEOUT_SECONDS, resolveSlowFamilyTimeoutSeconds } =
+      await import('../src/shared/slowFamilyTimeouts')
+    const generic = healthFailureToleranceCount(GENERIC_DEFAULT_TIMEOUT_SECONDS)
+    for (const family of Object.keys(SLOW_FAMILY_TIMEOUTS)) {
+      // a session still on the generic stored value, as these families are
+      const resolved = resolveSlowFamilyTimeoutSeconds(GENERIC_DEFAULT_TIMEOUT_SECONDS, family)
+      expect(resolved).toBe(SLOW_FAMILY_TIMEOUTS[family])
+      expect(healthFailureToleranceCount(resolved)).toBeGreaterThan(generic)
+      // and it must still cover the engine's full patience for that timeout
+      expect(healthFailureToleranceCount(resolved) * HEALTH_POLL_INTERVAL_SECONDS)
+        .toBeGreaterThanOrEqual(resolved * (1 + ENGINE_UNKNOWN_PROGRESS_GRACE_WINDOWS))
+    }
   })
 })

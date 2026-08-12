@@ -1,6 +1,13 @@
 const TOOL_PARSER_CANONICAL_ALIASES: Record<string, string> = {
   deepseek_v4: 'dsml',
   hy_v3: 'hunyuan',
+  // Muse Glimmer's parser registers under all three names in the engine
+  // (atem_tool_parser.py: register_module(["atem", "muse_glimmer", "muse"])).
+  muse: 'atem',
+  muse_glimmer: 'atem',
+  // Zaya likewise registers "zaya"/"zyphra" alongside "zaya_xml".
+  zaya: 'zaya_xml',
+  zyphra: 'zaya_xml',
 }
 
 export const TOOL_PARSERS_FOR_CLI = new Set([
@@ -45,6 +52,16 @@ export const TOOL_PARSERS_FOR_CLI = new Set([
   'gemma4',
   'tencent',
   'openpangu_v2',
+  // A name missing here is not a no-op: canonicalizeToolParserId returns
+  // undefined and toolLaunchArgs then emits NEITHER --tool-call-parser NOR
+  // --enable-auto-tool-choice, so the family loses tool calling entirely when
+  // launched from the app while `vmlx serve --tool-call-parser <name>` works.
+  // That is how Muse Glimmer shipped with dead tool calling in the app: the
+  // panel's own registry stamps toolParser:'atem' and the dropdown offers it,
+  // but 'atem' was absent here so the choice could not even stick.
+  'atem',
+  'poolside_v1',
+  'mimo_xml_function',
 ])
 
 export function canonicalizeToolParserId(

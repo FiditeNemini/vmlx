@@ -242,6 +242,36 @@ function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: 
   return resolveSlowFamilyTimeoutSeconds(configured, normalizeDetectedFamilyName(family))
 }
 
+/**
+ * The timeout the ENGINE was actually given for this session.
+ *
+ * `config.timeout` is NOT that number. The slow families (hybrid SSM, DSV4,
+ * MiniMax-M3, openPangu) keep the generic 300 in their stored config and get
+ * lifted to 900 at launch by the table above, so any consumer that reads
+ * `config.timeout` directly is reasoning about a value the engine never saw.
+ *
+ * That is exactly how the health poll came to kill sessions the engine was
+ * still working on: it scaled its patience from the stored 300 while the
+ * engine had been handed 900. Resolving the family requires the model
+ * directory, which is why this lives next to the launcher rather than in the
+ * shared module — but it is one function, and both the `--timeout` argument
+ * and the health poll now call it.
+ */
+function resolvedEngineTimeoutSeconds(config: Partial<ServerConfig>): number {
+  let detectedFamily: string | undefined
+  try {
+    detectedFamily = normalizeDetectedFamilyName(
+      detectModelConfigFromDir(config.modelPath ?? '').family,
+    )
+  } catch (_) {
+    detectedFamily = undefined
+  }
+  const effectiveFamily = normalizeDetectedFamilyName(
+    resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
+  )
+  return effectiveSessionTimeoutSeconds(config, effectiveFamily)
+}
+
 
 
 
@@ -3940,7 +3970,10 @@ export class SessionManager extends EventEmitter {
     if (session) {
       try {
         const cfg = JSON.parse(session.config)
-        maxFails = healthFailureToleranceCount(cfg.timeout)
+        // NOT cfg.timeout — the slow families store 300 and are launched with
+        // 900, so reading the stored value made this 3x less patient than the
+        // engine for exactly the families whose prefills run longest.
+        maxFails = healthFailureToleranceCount(resolvedEngineTimeoutSeconds(cfg))
       } catch (_) { }
     }
 
@@ -4085,7 +4118,7 @@ export class SessionManager extends EventEmitter {
     // Server settings — always pass explicitly (both text and image)
     args.push('--host', config.host)
     args.push('--port', config.port.toString())
-    args.push('--timeout', effectiveSessionTimeoutSeconds(config, effectiveFamily).toString())
+    args.push('--timeout', resolvedEngineTimeoutSeconds(config).toString())
 
     const rateLimit = finitePositiveInteger(config.rateLimit)
     if (rateLimit != null) args.push('--rate-limit', rateLimit.toString())

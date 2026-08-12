@@ -608,23 +608,37 @@ def estimate_memory_gb(info: ModelInfo, bits: int = 16) -> float:
     # Base: params * bits / 8 bytes
     base_gb = info.param_count_billions * bits / 8
 
-    # Overhead factor varies by model type:
-    # - MoE (10%): KV cache is small relative to the large number of expert
-    #   weights that dominate memory; fewer active parameters per token means
-    #   smaller activation footprint.
-    # - VLM (25%): Vision encoder allocates additional buffers for image
-    #   patch embeddings and cross-attention KV cache on top of the language
-    #   model's own KV cache.
-    # - Dense (20%): Standard overhead for activations, KV cache bootstrap,
-    #   and framework bookkeeping.
-    if info.is_moe:
-        overhead = 1.10
-    elif info.is_mllm:
-        overhead = 1.25
-    else:
-        overhead = 1.20
+    # Residency is a property of the FAMILY'S LOADER, not of MoE-ness or of
+    # having a vision tower. Measured with vmmap 2026-08-11: ordinary loads COPY
+    # every weight into dirty Metal buffers, so resident lands at roughly
+    # weightBytes + a fixed ~2 GB, whatever the quant format (MM2.7 measured
+    # 0.96x). Only expert-STREAMING families stay below their weight size —
+    # DSV4-Flash ~0.26x, MiniMax-M3 ~0.80x — and both of those happen to be MoE,
+    # which is what made "MoE is cheaper" look true.
+    #
+    # The previous rule read the wrong signal from that coincidence: it gave
+    # every MoE the LOWEST multiplier (1.10) and dense the highest (1.20), so a
+    # fully-resident MoE was under-estimated while a plain dense model was
+    # over-estimated, and the fixed overhead was modelled as a percentage that
+    # vanishes on small models and explodes on large ones. The three numbers had
+    # mechanistic stories and no measurements behind them.
+    #
+    # This mirrors panel/src/main/modelLaunchMemory.ts, which does the same job
+    # from vmmap receipts. Keep the two in step: that file is the one with the
+    # measurement history.
+    _STREAMING_RESIDENT_RATIOS = {
+        "deepseek_v4": 0.7,
+        "minimax_m3": 0.85,
+    }
+    _FIXED_OVERHEAD_GB = 2.0
 
-    return base_gb * overhead
+    model_type = (info.model_type or "").lower()
+    ratio = 1.0
+    for prefix, value in _STREAMING_RESIDENT_RATIOS.items():
+        if model_type.startswith(prefix):
+            ratio = value
+            break
+    return base_gb * ratio + _FIXED_OVERHEAD_GB
 
 
 def estimate_conversion_memory_gb(info: ModelInfo, target_bits: int) -> float:

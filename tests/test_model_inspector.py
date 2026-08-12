@@ -683,3 +683,84 @@ class TestDefaultOutputName:
         for bits in [2, 3, 4, 6, 8]:
             result = _default_output_name("org/model", bits)
             assert result == f"model-vmlx-{bits}bit"
+
+
+class TestMemoryEstimateMatchesTheMeasuredResidencyModel:
+    """`vmlx info` sized memory by MoE-ness; residency follows the LOADER.
+
+    Measured with vmmap 2026-08-11 and recorded in
+    panel/src/main/modelLaunchMemory.ts: ordinary loads COPY every weight into
+    dirty Metal buffers, so resident lands near weightBytes plus a fixed ~2 GB
+    whatever the quant format (MM2.7 measured 0.96x). Only expert-STREAMING
+    families stay below their weight size — DSV4-Flash ~0.26x, MiniMax-M3
+    ~0.80x — and both happen to be MoE, which is what made "MoE is cheaper"
+    look true.
+
+    The old rule read that coincidence backwards: every MoE got the LOWEST
+    multiplier (1.10) and dense the highest (1.20), so a fully-resident MoE was
+    under-estimated and a plain dense model over-estimated, while the fixed
+    overhead was modelled as a percentage that vanishes on small models and
+    explodes on large ones. For a 671B model at 4-bit the old rule returned
+    402.6 GB against 236.8 GB now.
+    """
+
+    def _info(self, model_type: str, params: float):
+        from vmlx_engine.utils.model_inspector import ModelInfo
+
+        return ModelInfo(
+            model_path="x",
+            model_type=model_type,
+            architecture="A",
+            param_count_billions=params,
+        )
+
+    def test_ordinary_families_land_near_weight_bytes_plus_fixed_overhead(self):
+        from vmlx_engine.utils.model_inspector import estimate_memory_gb
+
+        for model_type in ("llama", "qwen3_moe", "gemma4"):
+            got = estimate_memory_gb(self._info(model_type, 30.0), 4)
+            assert got == 30.0 * 4 / 8 + 2.0, (
+                f"{model_type} no longer uses the measured "
+                "weight-bytes-plus-fixed-overhead model"
+            )
+
+    def test_moe_ness_alone_no_longer_changes_the_estimate(self):
+        """A resident MoE costs what a dense model of the same size costs."""
+        from vmlx_engine.utils.model_inspector import estimate_memory_gb
+
+        assert estimate_memory_gb(self._info("qwen3_moe", 30.0), 4) == (
+            estimate_memory_gb(self._info("llama", 30.0), 4)
+        )
+
+    def test_expert_streaming_families_stay_below_their_weights(self):
+        from vmlx_engine.utils.model_inspector import estimate_memory_gb
+
+        base = 671.0 * 4 / 8
+        dsv4 = estimate_memory_gb(self._info("deepseek_v4", 671.0), 4)
+        assert dsv4 < base, "DSV4 must estimate BELOW its weight size"
+        assert dsv4 == base * 0.7 + 2.0
+
+        m3_base = 230.0 * 4 / 8
+        m3 = estimate_memory_gb(self._info("minimax_m3", 230.0), 4)
+        assert m3 == m3_base * 0.85 + 2.0
+
+    def test_the_ratios_agree_with_the_panel_that_measured_them(self):
+        """Two surfaces, one measurement history — keep them in step."""
+        from pathlib import Path
+
+        panel = (
+            Path(__file__).resolve().parents[1]
+            / "panel/src/main/modelLaunchMemory.ts"
+        ).read_text(encoding="utf-8")
+        inspector = (
+            Path(__file__).resolve().parents[1]
+            / "vmlx_engine/utils/model_inspector.py"
+        ).read_text(encoding="utf-8")
+
+        for family, ratio in (("deepseek_v4", "0.7"), ("minimax_m3", "0.85")):
+            assert f"ratio: {ratio}" in panel, (
+                f"panel changed the measured {family} residency ratio"
+            )
+            assert f'"{family}": {ratio}' in inspector, (
+                f"model_inspector no longer carries the measured {family} ratio"
+            )

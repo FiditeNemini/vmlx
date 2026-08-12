@@ -292,7 +292,22 @@ class Qwen3_5GatedDeltaNet(nn.Module):
                 mixed_qkv = mx.where(mask[..., None], mixed_qkv, 0)
         conv_input = mx.concatenate([conv_state, mixed_qkv], axis=1)
         if cache is not None:
-            cache[0] = conv_input[:, -(self.conv_kernel_size - 1) :]
+            # mx.contiguous, not a bare slice. A slice is a VIEW: it pins the
+            # whole conv_input parent — (B, S+kernel-1, 8192) — for as long as
+            # the cache entry lives, so ~34MB per layer is held to keep ~0.05MB
+            # of state. Across 48 layers that is ~1.6GB of steady floor.
+            #
+            # It is a floor rather than a leak (one parent per layer, replaced
+            # each chunk and released at the first decode step), which is why
+            # the per-slot trace never showed it: `.nbytes` reports the VIEW
+            # size, not the parent it holds alive.
+            #
+            # Every sibling capture site already does this — the MTP patch at
+            # patches/mlx_lm_mtp/qwen35_model.py:270, the boundary captures in
+            # mllm_batch_generator, and upstream mlx_lm. This vendored VLM copy
+            # was the straggler, and it is the live path for Qwen3.5/3.6-VL
+            # loads that go through mlx_vlm_compat without the MTP patch.
+            cache[0] = mx.contiguous(conv_input[:, -(self.conv_kernel_size - 1) :])
         conv_out = nn.silu(self.conv1d(conv_input))
 
         q, k, v = [

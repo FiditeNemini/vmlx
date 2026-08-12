@@ -42,6 +42,12 @@ _MIN_MEMORY_BYTES = 100 * _BYTES_PER_MB  # Minimum 100MB
 # Last-resort ceiling, used only when the OS cannot tell us the real one.
 _FALLBACK_CACHE_CEILING_BYTES = 32 * 1024 * 1024 * 1024
 
+# Floor for the residency-adjusted ceiling. Subtracting live Metal residency
+# from the working-set limit can legitimately approach zero on a machine whose
+# model nearly fills the GPU budget, and a zero ceiling would silently turn
+# caching off rather than merely shrink it.
+_MIN_CACHE_CEILING_BYTES = 512 * _BYTES_PER_MB
+
 
 def _resolve_cache_memory_ceiling_bytes() -> int:
     """The largest cache this machine may hold, from the OS rather than a guess.
@@ -56,15 +62,33 @@ def _resolve_cache_memory_ceiling_bytes() -> int:
 
     MLX reports the same bound the loader already trusts. Use it; fall back to
     the old constant only when it cannot be read (non-Darwin, MLX missing).
+
+    SUBTRACT WHAT METAL ALREADY HOLDS. The MLX number is the working-set limit
+    for EVERYTHING on the GPU — model weights included — not a cache allowance.
+    Returning it whole let an explicit ``--cache-memory-mb 65536`` authorize a
+    64 GB resident cache on top of an 80 GB resident model against a ~115 GB
+    ceiling, and this value becomes the paged cache's ``max_resident_bytes``
+    (scheduler.py, ``_paged_resident_budget``), which is the default tier. The
+    pressure check that would claw it back only runs every
+    ``_PRESSURE_CHECK_INTERVAL`` seconds, so the over-commit has a real window
+    in which to OOM.
+
+    ``active`` is read once, when the cache is constructed. If the model is
+    already resident by then this is the true headroom; if it is not, ``active``
+    is near zero and the result degrades to the previous behaviour rather than
+    to something smaller — so this never clips harder than before.
     """
     try:
         import mlx.core as mx
 
         from .utils.memory_limits import get_effective_metal_working_set_bytes
 
-        _active, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+        active_bytes, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
         if max_ws_bytes and max_ws_bytes > 0:
-            return int(max_ws_bytes)
+            headroom = int(max_ws_bytes) - max(0, int(active_bytes or 0))
+            # Never return a ceiling so small it cannot hold anything; a bad or
+            # transiently huge `active` reading must not disable caching.
+            return max(headroom, _MIN_CACHE_CEILING_BYTES)
     except Exception:
         pass
     return _FALLBACK_CACHE_CEILING_BYTES

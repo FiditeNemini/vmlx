@@ -43,7 +43,11 @@ class NemotronToolParser(ToolParser):
 
     # Pattern to extract parameters
     PARAM_PATTERN = re.compile(
-        r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>",
+        # Strip at most ONE framing newline per side. `\s*` ate the payload's
+        # own leading indentation, so a code argument came back with its first
+        # line unindented and later lines intact — a SyntaxError once written
+        # to disk. Same defect as the qwen dialect (9df8c1660).
+        r"<parameter=([^>]+)>[ \t]*\n?(.*?)\n?[ \t]*</parameter>",
         re.DOTALL,
     )
 
@@ -87,10 +91,12 @@ class NemotronToolParser(ToolParser):
                 arguments = {}
                 for param_name, param_value in params:
                     # Try to parse value as JSON (for nested objects)
+                    # Strip only to TEST for JSON; the string result keeps the
+                    # payload's whitespace so code arguments stay valid.
                     try:
                         arguments[param_name.strip()] = json.loads(param_value.strip())
                     except json.JSONDecodeError:
-                        arguments[param_name.strip()] = param_value.strip()
+                        arguments[param_name.strip()] = param_value
 
                 tool_calls.append(
                     {

@@ -55,7 +55,11 @@ class Step3p5ToolParser(ToolParser):
 
     # Pattern to extract <parameter=name>value</parameter>
     PARAM_PATTERN = re.compile(
-        r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>",
+        # Strip at most ONE framing newline per side. `\s*` ate the payload's
+        # own leading indentation, so a code argument came back with its first
+        # line unindented and later lines intact — a SyntaxError once written
+        # to disk. Same defect as the qwen dialect (9df8c1660).
+        r"<parameter=([^>]+)>[ \t]*\n?(.*?)\n?[ \t]*</parameter>",
         re.DOTALL,
     )
 

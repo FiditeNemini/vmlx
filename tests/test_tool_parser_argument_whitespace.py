@@ -137,3 +137,40 @@ def test_qwen_json_scalar_still_coerces_despite_whitespace():
     result = QwenToolParser().extract_tool_calls(raw, None)
     value = _json.loads(result.tool_calls[0]["arguments"])["count"]
     assert value == 42 and isinstance(value, int)
+
+
+def test_nemotron_xml_parameter_keeps_first_line_indentation():
+    """Same two-strip defect as the qwen dialect, same fix (9df8c1660)."""
+    import json as _json
+
+    from vmlx_engine.tool_parsers.nemotron_tool_parser import NemotronToolParser
+
+    raw = (
+        "<TOOLCALL>\n<function=write_file>\n"
+        f"<parameter=code>\n{INDENTED_CODE_ARG}\n</parameter>\n"
+        "</function>\n</TOOLCALL>"
+    )
+    result = NemotronToolParser().extract_tool_calls(raw, None)
+    assert result.tools_called
+    got = _json.loads(result.tool_calls[0]["arguments"])["code"]
+    assert got == INDENTED_CODE_ARG, f"nemotron lost indentation: {got!r}"
+
+
+def test_xml_dialect_patterns_do_not_swallow_payload_whitespace():
+    """Pin the pattern shape across every dialect that shares it.
+
+    A `\\s*(.*?)\\s*` capture cannot distinguish XML framing from the payload's
+    own indentation. Any dialect using it will silently corrupt code arguments,
+    so assert the framing-newline form directly — the runtime check above only
+    covers the two dialects with an easy call shape.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "vmlx_engine" / "tool_parsers"
+    for name in ("qwen_tool_parser", "nemotron_tool_parser", "step3p5_tool_parser"):
+        src = (root / f"{name}.py").read_text(encoding="utf-8")
+        assert r"</parameter>" in src
+        assert r">\s*(.*?)\s*</parameter>" not in src, (
+            f"{name} uses the whitespace-swallowing capture again; code "
+            f"arguments will lose their first-line indentation"
+        )

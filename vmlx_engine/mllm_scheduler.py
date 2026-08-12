@@ -851,8 +851,13 @@ class MLLMScheduler:
                     # A BYTE budget, not just an entry count.
                     #
                     # This path passed only max_entries, so the cache was bounded
-                    # at 100 ENTRIES with no byte bound at all (the LLM path in
-                    # scheduler.py has always passed max_bytes). During one long
+                    # at 100 ENTRIES with no byte bound at all. (An earlier
+                    # version of this comment claimed "the LLM path in
+                    # scheduler.py has always passed max_bytes" — that was WRONG
+                    # and it hid the same hole there for longer: scheduler.py
+                    # passes the PARAMETER, but SchedulerConfig defaults
+                    # prefix_cache_max_bytes to None, so the value was unbounded
+                    # too. Both paths now derive a budget.) During one long
                     # COLD prefill each chunk stores a snapshot holding a full KV
                     # copy — ~5GB at 90k context — so ~50 chunks accumulated ~70GB
                     # and byte eviction never ran because max_bytes was None.

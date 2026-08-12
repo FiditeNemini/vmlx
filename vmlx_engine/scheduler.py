@@ -25,6 +25,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
+from .mllm_scheduler import _resolve_prefix_cache_byte_budget
+
+
 from mlx_lm.generate import BatchGenerator, generation_stream
 from .sampling import make_minimax_m3_sampler, make_sampler
 from .block_disk_store import BlockDiskStore
@@ -1382,7 +1385,12 @@ class Scheduler:
                 self.prefix_cache = PrefixCacheManager(
                     model=model,
                     max_entries=self.config.prefix_cache_size,
-                    max_bytes=self.config.prefix_cache_max_bytes,
+                    # Derive when unset. SchedulerConfig defaults
+                    # prefix_cache_max_bytes to None, so passing it straight
+                    # through left this cache bounded by ENTRY COUNT only —
+                    # 100 whole-KV snapshots, which at 90k context is hundreds
+                    # of GB. Same hole the MLLM path had; same derivation.
+                    max_bytes=_resolve_prefix_cache_byte_budget(self.config),
                     model_path=self.config.model_path,
                     smelt_enabled=self.config.smelt_enabled,
                     smelt_pct=self.config.smelt_pct,

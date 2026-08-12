@@ -3495,7 +3495,23 @@ export class SessionManager extends EventEmitter {
             // Only count as truly healthy if the model is loaded (status: "healthy")
             // The server returns "no_model" while still loading in lifespan()
             const modelReady = data.status === 'healthy'
-            if (isStandby) {
+            if (isStandby && session.status === 'loading') {
+              // Wake failed — server reverted to standby but DB says loading.
+              // Sync DB back to standby so the user can retry.
+              //
+              // This test MUST come before the general isStandby branch. It
+              // used to sit third in the chain, after `if (isStandby)` had
+              // already swallowed every standby reply, so it was unreachable:
+              // a failed wake left the session pinned at status 'loading'
+              // forever, with the progress bar frozen mid-fill. It never
+              // errored either, because the branch it fell into deletes the
+              // fail counter — so nothing could ever time the session out.
+              const depth = data.status === 'standby_deep' ? 'deep' : 'soft'
+              this.failCounts.delete(session.id)
+              db.updateSession(session.id, { status: 'standby', standbyDepth: depth })
+              this.emit('session:standby', { sessionId: session.id, depth })
+              this.pushLog(session.id, `[Wake] Model reload failed — reverted to ${depth} sleep`)
+            } else if (isStandby) {
               // Server is in standby — keep session alive, don't fail-count
               this.failCounts.delete(session.id)
             } else if (modelReady) {
@@ -3534,13 +3550,6 @@ export class SessionManager extends EventEmitter {
               if (sched && ((sched.num_running || 0) > 0 || (sched.num_waiting || 0) > 0)) {
                 this.lastRequestAt.set(session.id, Date.now())
               }
-            } else if (isStandby && session.status === 'loading') {
-              // Wake failed — server reverted to standby but DB says loading.
-              // Sync DB back to standby so user can retry.
-              const depth = data.status === 'standby_deep' ? 'deep' : 'soft'
-              db.updateSession(session.id, { status: 'standby', standbyDepth: depth })
-              this.emit('session:standby', { sessionId: session.id, depth })
-              this.pushLog(session.id, `[Wake] Model reload failed — reverted to ${depth} sleep`)
             } else if (session.status === 'loading') {
               // Server is up but model not loaded yet — update progress bar
               // to show we're past server startup, now waiting for model

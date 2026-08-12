@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process'
-import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
+import { readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 
 /** Estimate local model file bytes recursively. Returns 0 if unknown. */
@@ -21,46 +21,51 @@ export function estimateModelFileBytes(modelPath: string): number {
   }
 }
 
-/** Conservative full-resident estimate for non-mmap bundles. */
-export function estimateModelMemory(modelPath: string): number {
-  const fileBytes = estimateModelFileBytes(modelPath)
-  if (fileBytes <= 0) return 0
-  return Math.round(fileBytes * 1.3)
+/**
+ * Launch residency is a property of the FAMILY's loader, not of the weight
+ * format. Measured (vmmap + RSS, 2026-08-11 and 2026-07-12 live loads):
+ *
+ *  - Every ordinary load COPIES weights into dirty Metal buffers. vmmap on a
+ *    3.09 GB affine bundle right after load: mapped-file resident 400 KB,
+ *    IOAccelerator(graphics) 2.9 GB dirty. Affine/MXTQ/MXFP8/plain all
+ *    measured resident ≈ fileBytes + ~0.9 GB process overhead; MM2.7 (86 GB
+ *    MoE) measured 0.96×. Dirty Metal memory is NOT evictable — the old
+ *    "lazy mmap, ~70% resident" model under-admitted these by ~45%.
+ *  - deepseek_v4 flash MoE streams experts from SSD on demand: 96 GB bundle
+ *    measured ~25 GB resident. 0.7 is kept as the conservative bound.
+ *  - minimax_m3* manages expert residency (F128): 84 GB measured 67 GB
+ *    resident (0.80×); 0.85 keeps a margin.
+ */
+export const MODEL_LAUNCH_FIXED_OVERHEAD_BYTES = 2e9
+
+export interface LaunchResidentProfile {
+  /** Fraction of file bytes resident after load completes. */
+  ratio: number
+  /** True when the loader keeps weights on SSD and streams them on demand. */
+  streamsWeights: boolean
 }
 
-export const JANG_MMAP_LAUNCH_RESIDENT_RATIO = 0.7
+export function launchResidentProfileForModelType(modelType: string): LaunchResidentProfile {
+  const type = String(modelType || '').toLowerCase()
+  if (type.startsWith('deepseek_v4')) return { ratio: 0.7, streamsWeights: true }
+  if (type.startsWith('minimax_m3')) return { ratio: 0.85, streamsWeights: true }
+  return { ratio: 1.0, streamsWeights: false }
+}
 
-export function isLazyMmapJangBundle(modelPath: string): boolean {
+export function launchResidentProfileForModel(modelPath: string): LaunchResidentProfile {
   try {
-    if (existsSync(join(modelPath, 'jang_config.json'))) return true
     const config = JSON.parse(readFileSync(join(modelPath, 'config.json'), 'utf8'))
-    const weightFormat = String(config?.weight_format || config?.quantization?.format || '').toLowerCase()
-    if (['jang', 'jangtq', 'mxtq', 'affine', 'jjqf', 'mxq'].includes(weightFormat)) return true
+    return launchResidentProfileForModelType(String(config?.model_type || ''))
   } catch (_) {
-    // Fall through to extension check below.
-  }
-
-  try {
-    const entries = readdirSync(modelPath, { withFileTypes: true })
-    return entries.some(entry =>
-      entry.isFile() &&
-      (entry.name.endsWith('.jang.safetensors') ||
-        entry.name.endsWith('.mxtq.safetensors') ||
-        entry.name.endsWith('.mxq.safetensors') ||
-        entry.name.endsWith('.jjqf.safetensors'))
-    )
-  } catch (_) {
-    return false
+    return { ratio: 1.0, streamsWeights: false }
   }
 }
 
 export function estimateModelLaunchResidentBytes(modelPath: string, modelFileBytes: number, totalBytes: number): number {
   if (modelFileBytes <= 0) return 0
-  if (isLazyMmapJangBundle(modelPath)) {
-    const mmapResidentBytes = Math.round(modelFileBytes * JANG_MMAP_LAUNCH_RESIDENT_RATIO)
-    return totalBytes > 0 ? Math.min(mmapResidentBytes, totalBytes) : mmapResidentBytes
-  }
-  return Math.round(modelFileBytes * 1.3)
+  const { ratio } = launchResidentProfileForModel(modelPath)
+  const residentBytes = Math.round(modelFileBytes * ratio) + MODEL_LAUNCH_FIXED_OVERHEAD_BYTES
+  return totalBytes > 0 ? Math.min(residentBytes, totalBytes) : residentBytes
 }
 
 export function formatGb(bytes: number): string {
@@ -72,7 +77,6 @@ export const UNSAFE_MODEL_LAUNCH_OVERRIDE_ENV = 'VMLX_ALLOW_UNSAFE_MODEL_LAUNCH'
 export const UNSAFE_MODEL_LAUNCH_LEGACY_OVERRIDE_ENV = 'VMLINUX_ALLOW_UNSAFE_MODEL_LAUNCH'
 
 export interface LaunchAdmissionOptions {
-  lazyMmap?: boolean
   reclaimableBytes?: number
   totalBytes?: number
 }
@@ -105,7 +109,12 @@ export function effectiveLaunchAvailableBytes(
   availableBytes: number,
   options: LaunchAdmissionOptions = {},
 ): number {
-  if (!options.lazyMmap || availableBytes <= 0) return availableBytes
+  // Clean page-cache pages are droppable no matter what kind of allocation is
+  // asking — this credit used to be gated on the (refuted) lazy-mmap JANG
+  // theory, but freemem() under-counting reclaimable cache applies to every
+  // launch equally. Keep the credit bounded so a hot file cache can't talk the
+  // preflight into admitting a model the box can't actually hold.
+  if (availableBytes <= 0) return availableBytes
   const reclaimableBytes = Math.max(0, options.reclaimableBytes || 0)
   if (reclaimableBytes <= 0) return availableBytes
   const totalBytes = Math.max(0, options.totalBytes || 0)

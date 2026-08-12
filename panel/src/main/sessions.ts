@@ -44,7 +44,7 @@ import {
 } from './session-model-path'
 import {
   estimateModelLaunchResidentBytes,
-  isLazyMmapJangBundle,
+  launchResidentProfileForModel,
   estimateMacReclaimableMemoryBytes,
   effectiveLaunchAvailableBytes,
 } from './modelLaunchMemory'
@@ -1466,6 +1466,7 @@ export class SessionManager extends EventEmitter {
   private loadProgressState = new Map<string, number>()
   private loadProgressMeta = new Map<string, {
     modelBytes?: number;
+    expectedResidentBytes?: number;
     lazyResident?: boolean;
     residentMb?: number;
     residentPercent?: number;
@@ -1510,6 +1511,17 @@ export class SessionManager extends EventEmitter {
     this.stopLoadResidentMonitor(sessionId)
     if (!pid || modelBytes <= 0) return
 
+    // Normalize progress against what THIS family actually keeps resident:
+    // ordinary loads copy every weight into Metal (expected ≈ file bytes), so
+    // the bar tracks the real copy; expert-streaming families (DSV4-Flash,
+    // MM3) plateau far below file size, and dividing by file bytes would
+    // freeze their bar at ~30% for the whole load.
+    const storedMeta = this.loadProgressMeta.get(sessionId)
+    const expectedResidentBytes = storedMeta?.expectedResidentBytes && storedMeta.expectedResidentBytes > 0
+      ? storedMeta.expectedResidentBytes
+      : modelBytes
+    const streamsWeights = storedMeta?.lazyResident === true
+
     const tick = () => {
       const session = db.getSession(sessionId)
       if (!session || session.status !== 'loading') {
@@ -1519,14 +1531,14 @@ export class SessionManager extends EventEmitter {
       const residentBytes = this.readProcessGroupResidentBytes(pid)
       if (residentBytes <= 0) return
 
-      const residentPercent = Math.min(100, Math.max(0, (residentBytes / modelBytes) * 100))
+      const residentPercent = Math.min(100, Math.max(0, (residentBytes / expectedResidentBytes) * 100))
       const residentProgress = Math.min(90, Math.max(5, Math.round(25 + residentPercent * 0.60)))
       const current = this.loadProgressState.get(sessionId) ?? 0
       const progress = Math.max(current, residentProgress)
       const meta = {
         ...(this.loadProgressMeta.get(sessionId) || {}),
         modelBytes,
-        lazyResident: true,
+        expectedResidentBytes,
         residentMb: Math.round((residentBytes / 1048576) * 10) / 10,
         residentPercent: Math.round(residentPercent * 10) / 10,
       }
@@ -1534,7 +1546,9 @@ export class SessionManager extends EventEmitter {
       this.loadProgressState.set(sessionId, progress)
       this.emit('session:loadProgress', {
         sessionId,
-        label: `Resident RAM ${formatGb(residentBytes)} / ${formatGb(modelBytes)} GB`,
+        label: streamsWeights
+          ? `Resident RAM ${formatGb(residentBytes)} GB (weights stream from SSD; bundle ${formatGb(modelBytes)} GB)`
+          : `Loading weights into RAM ${formatGb(residentBytes)} / ~${formatGb(expectedResidentBytes)} GB`,
         progress,
         ...meta,
       })
@@ -2418,20 +2432,20 @@ export class SessionManager extends EventEmitter {
     }
 
     // Memory estimation: warn if model is too large for available RAM.
-    // JANG bundles are lazy-mmap — only ~70% resident at launch and the OS reclaims
-    // file-cache pages to back the mmap — so use the mmap-aware resident estimate
-    // (×0.7 for JANG, ×1.3 only for non-mmap) plus a bounded reclaimable allowance
-    // on top of freemem(). The old disk×1.3 + raw-freemem() path over-estimated
-    // ~2× and under-counted available RAM, producing false "won't fit" warnings on
-    // models that load fine (DSV4-Flash / MM3 JANGTQ load at ~67 GB resident, not
-    // the ~110–136 GB the heuristic showed).
+    // Residency is a property of the FAMILY's loader, not the weight format
+    // (measured 2026-08-11, vmmap): ordinary loads COPY weights into dirty
+    // Metal buffers — resident ≈ fileBytes + ~2 GB regardless of
+    // affine/mxtq/mxfp8/plain (MM2.7 measured 0.96×). Only expert-streaming
+    // families stay below file size (DSV4-Flash ~0.26×, MM3 ~0.80×). The old
+    // "JANG = lazy mmap ×0.7" model under-admitted full-resident bundles by
+    // ~45% while its ×1.3 arm over-refused big plain bundles. freemem() still
+    // under-counts droppable page cache, so a bounded reclaimable credit is
+    // applied for every launch.
     const modelFileBytes = estimateModelFileBytes(config.modelPath)
     const totalBytes = totalmem()
     const modelSizeBytes = estimateModelLaunchResidentBytes(config.modelPath, modelFileBytes, totalBytes)
     if (modelSizeBytes > 0) {
-      const lazyMmap = isLazyMmapJangBundle(config.modelPath)
       const availableBytes = effectiveLaunchAvailableBytes(freemem(), {
-        lazyMmap,
         reclaimableBytes: estimateMacReclaimableMemoryBytes(),
         totalBytes,
       })
@@ -2474,7 +2488,12 @@ export class SessionManager extends EventEmitter {
     this.loadProgressMeta.delete(sessionId)
     this.stopLoadResidentMonitor(sessionId)
     if (modelFileBytes > 0) {
-      const meta = { modelBytes: modelFileBytes, lazyResident: true }
+      const residentProfile = launchResidentProfileForModel(config.modelPath)
+      const meta = {
+        modelBytes: modelFileBytes,
+        expectedResidentBytes: Math.round(modelFileBytes * residentProfile.ratio),
+        lazyResident: residentProfile.streamsWeights,
+      }
       this.loadProgressMeta.set(sessionId, meta)
       this.loadProgressState.set(sessionId, 2)
       this.emit('session:loadProgress', {
@@ -3812,7 +3831,14 @@ export class SessionManager extends EventEmitter {
         this.loadProgressState.delete(sessionId)  // Reset progress for fresh wake
         this.loadProgressMeta.delete(sessionId)
         const modelFileBytes = estimateModelFileBytes(session.modelPath)
-        const meta = modelFileBytes > 0 ? { modelBytes: modelFileBytes, lazyResident: true } : {}
+        const wakeProfile = launchResidentProfileForModel(session.modelPath)
+        const meta = modelFileBytes > 0
+          ? {
+              modelBytes: modelFileBytes,
+              expectedResidentBytes: Math.round(modelFileBytes * wakeProfile.ratio),
+              lazyResident: wakeProfile.streamsWeights,
+            }
+          : {}
         if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
         this.emit('session:loadProgress', { sessionId, label: 'Waking from sleep...', progress: 50, ...meta })
         if (session.pid && modelFileBytes > 0) {

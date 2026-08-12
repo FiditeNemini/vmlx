@@ -20,6 +20,7 @@ export interface LoadProgress {
   label: string
   progress: number
   modelBytes?: number
+  expectedResidentBytes?: number
   lazyResident?: boolean
   residentMb?: number
   residentPercent?: number
@@ -103,6 +104,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
             label: data.label,
             progress: data.progress,
             ...(data.modelBytes != null ? { modelBytes: data.modelBytes } : {}),
+            ...(data.expectedResidentBytes != null ? { expectedResidentBytes: data.expectedResidentBytes } : {}),
             ...(data.lazyResident != null ? { lazyResident: data.lazyResident } : {}),
             ...(data.residentMb != null ? { residentMb: data.residentMb } : {}),
             ...(data.residentPercent != null ? { residentPercent: data.residentPercent } : {}),

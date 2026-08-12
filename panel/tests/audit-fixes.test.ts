@@ -984,7 +984,7 @@ describe('JANG safetensors file extension matching', () => {
     expect(hasSafetensors && hasConfig).toBe(true)
   })
 
-  it('estimateModelMemory includes JANG files', () => {
+  it('model file byte counting includes JANG files', () => {
     const files = ['model-00001.jang.safetensors', 'model-00002.jang.safetensors']
     const counted = files.filter(f => f.endsWith('.safetensors'))
     expect(counted).toHaveLength(2)

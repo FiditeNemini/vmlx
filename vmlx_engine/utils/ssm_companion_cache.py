@@ -88,6 +88,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mlx.core as mx
 
+from ..model_configs import NEMOTRON_H_MODEL_TYPES
+
 # Local alias for the mlx materialization routine. Keeping it under a
 # different name keeps automated security scanners happy (they otherwise
 # flag any literal `eval(` substring even when it's the perfectly safe
@@ -1020,8 +1022,7 @@ _HYBRID_MODEL_TYPES = frozenset({
     # cumulative state alongside normal attention KV. Keep DSV4/ZAYA out of
     # this list: they have dedicated typed cache contracts and must not route
     # through the generic SSM companion path.
-    "nemotron_h",
-    "nemotron_h_v2",
+    *NEMOTRON_H_MODEL_TYPES,
     "qwen3_next",
     "bailing_hybrid",
     "bailing_moe_v2_5",

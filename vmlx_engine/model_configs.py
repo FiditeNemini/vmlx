@@ -11,6 +11,18 @@ Must stay in sync with panel/src/main/model-config-registry.ts (TypeScript side)
 
 from .model_config_registry import ModelConfig, ModelConfigRegistry
 
+# Every model_type spelling of the Nemotron-H family. nemotron_h_v2 is
+# NVIDIA's newer Nemotron-H v2 model_type alias — same hybrid SSM+attention
+# architecture as nemotron_h, so every model_type gate in the engine must
+# treat the spellings identically. Before this constant existed the registry
+# declared the alias but four load-path gates (tokenizer fallback,
+# quant-config sanitize + non-strict load, latent-MoE detection, switch_mlp
+# fc1/fc2 rename) matched only the literal "nemotron_h", so a v2 bundle
+# silently took a divergent load path — up to running on dropped expert
+# weights. Membership checks and the registry row below both derive from
+# this tuple; never spell the set out inline again.
+NEMOTRON_H_MODEL_TYPES = ("nemotron_h", "nemotron_h_v2")
+
 HARMONY_CHAT_TEMPLATE = """\
 {%- if tools %}
     {{- '<|start|>system<|message|>' }}
@@ -1172,9 +1184,7 @@ def register_all(registry=None):
     _register(
         ModelConfig(
             family_name="nemotron_h",
-            # nemotron_h_v2 is the newer NVIDIA Nemotron-H v2 model_type
-            # alias; same hybrid SSM+attention architecture as nemotron_h.
-            model_types=["nemotron_h", "nemotron_h_v2"],
+            model_types=list(NEMOTRON_H_MODEL_TYPES),
             cache_type="hybrid",
             cache_subtype="nemotron_h_ssm_attention",
             eos_tokens=["<|im_end|>"],

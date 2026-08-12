@@ -25,6 +25,7 @@ from typing import Any, Optional
 
 import mlx.core as mx
 import numpy as np
+from ..model_configs import NEMOTRON_H_MODEL_TYPES
 from .memory_limits import get_effective_metal_working_set_bytes
 
 logger = logging.getLogger(__name__)
@@ -2939,7 +2940,13 @@ def _load_jang_v2(
         _openpangu_expected_names = {
             name for name, _ in tree_flatten(model.parameters())
         }
-    _needs_fc_rename = _model_type in ("nemotron_h", "nemotron")
+    # NEMOTRON_H_MODEL_TYPES, not a literal: with strict=False a missed
+    # rename does not error — matching only "nemotron_h" here would leave a
+    # v2 bundle's switch_mlp.up_proj/down_proj weights silently dropped and
+    # the experts running on random init.
+    _needs_fc_rename = (
+        _model_type == "nemotron" or _model_type in NEMOTRON_H_MODEL_TYPES
+    )
     # Gate dequant needed for any MoE model with quantized gate weights (MoEGate is
     # nn.Module not nn.Linear, so nn.quantize skips it but JANG still quantizes raw weights).
     # Applies to: nemotron_h, nemotron, mistral4, deepseek_v3, deepseek_v2, etc.

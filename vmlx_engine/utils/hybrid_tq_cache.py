@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from ..model_configs import NEMOTRON_H_MODEL_TYPES
+
 
 QWEN_HYBRID_MODEL_TYPES = frozenset(
     {
@@ -21,12 +23,7 @@ QWEN_HYBRID_MODEL_TYPES = frozenset(
 # hybrid architecture and is classified explicitly below.
 QWEN36_HYBRID_MODEL_TYPES = QWEN_HYBRID_MODEL_TYPES
 
-NEMOTRON_OMNI_HYBRID_MODEL_TYPES = frozenset(
-    {
-        "nemotron_h",
-        "nemotron_h_v2",
-    }
-)
+NEMOTRON_OMNI_HYBRID_MODEL_TYPES = frozenset(NEMOTRON_H_MODEL_TYPES)
 
 LFM_HYBRID_MODEL_TYPES = frozenset(
     {

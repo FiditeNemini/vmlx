@@ -27,6 +27,7 @@ from mlx_lm.models.cache import TokenBuffer
 from .mamba_cache import _should_capture_generation_logprobs
 from .memory_limits import get_effective_metal_working_set_bytes
 from .prefill_admission import (
+    prefill_keep_alloc_enabled as _prefill_keep_alloc_enabled,
     prefill_valve_check as _prefill_valve_check,
     prefill_valve_enabled as _prefill_valve_enabled,
     prefill_valve_min_margin_bytes as _prefill_valve_min_margin_bytes,
@@ -470,10 +471,7 @@ class SingleBatchGenerator:
     def _prefill(self, tokens: list[int], req: _Request) -> None:
         if not tokens:
             return
-        _prefill_keep_alloc = os.environ.get(
-            "VMLINUX_PREFILL_KEEP_ALLOC",
-            os.environ.get("VMLX_PREFILL_KEEP_ALLOC", ""),
-        ).lower() in {"1", "true", "yes", "on"}
+        _prefill_keep_alloc = _prefill_keep_alloc_enabled()
         # Admission control. DSV4 has had a prefill valve for a while — it
         # projects the next chunk's peak and rejects BEFORE submitting GPU work,
         # because discovering the limit by failing can take the process with it.
@@ -767,10 +765,7 @@ class SingleBatchGenerator:
             else max(1, int(self.prefill_step_size or len(tokens) or 1))
         )
         pos = 0
-        _prefill_keep_alloc = os.environ.get(
-            "VMLINUX_PREFILL_KEEP_ALLOC",
-            os.environ.get("VMLX_PREFILL_KEEP_ALLOC", ""),
-        ).lower() in {"1", "true", "yes", "on"}
+        _prefill_keep_alloc = _prefill_keep_alloc_enabled()
         with self._stream_context():
             while len(tokens) - pos > step:
                 n = min(step, len(tokens) - pos)

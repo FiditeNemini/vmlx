@@ -3315,64 +3315,22 @@ Examples:
              "unknown family name and the engine still honors it with a kv "
              "cache + a warning. Example: --model-family qwen3",
     )
+    # Choices come from the live ToolParserManager registry — the same names
+    # (aliases included, they register as first-class names) that server.py
+    # resolves at request time. A hand-maintained list here drifted behind the
+    # registry and rejected parsers that exist and work (muse_glimmer/muse,
+    # zaya/zyphra, mimo_xml_function, poolside_v1), so `--tool-call-parser
+    # muse` failed at argparse for a registered parser. "none" is a CLI-only
+    # sentinel (explicit disable) with no registry entry; "auto" is registered
+    # but kept first so the two control values lead the help text.
+    from .tool_parsers import ToolParserManager
+
     serve_parser.add_argument(
         "--tool-call-parser",
         type=str,
         default=None,
-        choices=[
-            "auto",
-            "none",
-            # Primary names
-            "mistral",
-            "qwen",
-            "llama",
-            "hermes",
-            "deepseek",
-            "kimi",
-            "lfm2",
-            "granite",
-            "nemotron",
-            "minimax",
-            "xlam",
-            "functionary",
-            "glm47",
-            "step3p5",
-            "gemma3",
-            "gemma3n",
-            "xml_function",
-            # DeepSeek V4 DSML format (<｜DSML｜invoke name="…">)
-            "dsml",
-            "deepseek_v4",
-            # Family-specific XML tool formats.
-            "zaya_xml",
-            "hunyuan",
-            # openPangu-2.0 JSON-list-in-special-token format.
-            "openpangu",
-            # Muse Glimmer ATEM (<atem:invoke name=…><atem:parameter name=…>).
-            "atem",
-            # Aliases (map to same parsers)
-            "generic",
-            "qwen3",
-            "llama3",
-            "llama4",
-            "nous",
-            "deepseek_v3",
-            "deepseek_r1",
-            "kimi_k2",
-            "moonshot",
-            "liquid",
-            "granite3",
-            "nemotron3",
-            "minimax_m2",
-            "minimax_m3",
-            "meetkai",
-            "stepfun",
-            "glm4",
-            "gemma4",
-            "hy_v3",
-            "tencent",
-            "openpangu_v2",
-        ],
+        choices=["auto", "none"]
+        + [n for n in ToolParserManager.list_registered() if n != "auto"],
         help="Which format to use for parsing tool calls from model output. Must match your "
              "model's training format. Common choices: 'qwen' for Qwen models, 'llama' for "
              "Llama 3+, 'hermes' for Hermes/NousResearch, 'mistral' for Mistral. "

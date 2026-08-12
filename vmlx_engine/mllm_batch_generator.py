@@ -1652,6 +1652,7 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 from .utils.memory_limits import get_effective_metal_working_set_bytes
 from .utils.prefill_admission import (
     hybrid_chunk_valve_check,
+    prefill_keep_alloc_enabled,
     prefill_valve_enabled,
     prefill_valve_min_margin_bytes,
 )
@@ -6166,7 +6167,7 @@ class MLLMBatchGenerator:
                             _processed_prefix = _prefix_end
                             if (
                                 _tight_text_prefill_step_size < self.prefill_step_size
-                                and not os.environ.get("VMLX_PREFILL_KEEP_ALLOC")
+                                and not prefill_keep_alloc_enabled()
                             ):
                                 mx.clear_cache()
                     output = lm(
@@ -6242,9 +6243,7 @@ class MLLMBatchGenerator:
                 _prefill_valve_min_margin = prefill_valve_min_margin_bytes()
                 _max_active_seen = 0
                 _adaptive_chunk_cap = _tight_text_prefill_step_size
-                _prefill_keep_alloc = os.environ.get(
-                    "VMLX_PREFILL_KEEP_ALLOC", ""
-                ).lower() in {"1", "true", "yes", "on"}
+                _prefill_keep_alloc = prefill_keep_alloc_enabled()
                 # Pre-size the KV slots for the WHOLE span before chunking.
                 #
                 # KVCache grows by mx.concatenate whenever offset would exceed

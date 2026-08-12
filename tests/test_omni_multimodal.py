@@ -85,6 +85,21 @@ def test_omni_component_status_requires_radio_parakeet_and_projector(tmp_path):
     assert is_omni_multimodal_bundle(bundle) is True
 
 
+def test_omni_component_status_accepts_nemotron_h_v2_spelling(tmp_path):
+    # nemotron_h_v2 is the same hybrid architecture; a v2 bundle carrying the
+    # full RADIO/Parakeet sidecar set must not be rejected on the model_type
+    # alias alone (the requirements row used to compare against the literal
+    # "nemotron_h").
+    bundle = _write_omni_bundle(tmp_path / "omni", model_type="nemotron_h_v2")
+
+    status = omni_multimodal_component_status(bundle)
+
+    assert status["config_model_type"] == "nemotron_h_v2"
+    assert status["bundle_compatible"] is True
+    assert status["missing"] == []
+    assert is_omni_multimodal_bundle(bundle) is True
+
+
 def test_omni_component_status_omits_video_without_runtime_bridge(tmp_path):
     bundle = _write_omni_bundle(tmp_path / "omni", video_preprocessor=False)
 

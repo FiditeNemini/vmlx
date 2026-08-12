@@ -47,6 +47,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .model_configs import NEMOTRON_H_MODEL_TYPES
+
 logger = logging.getLogger(__name__)
 
 # Supported content-part types per OpenAI chat schema (+ vMLX extension for video).
@@ -220,7 +222,7 @@ def omni_multimodal_component_status(model_path: str | Path) -> dict[str, Any]:
     """Inspect whether a Nemotron-Omni bundle has its media components.
 
     Checks are intentionally header/config-only:
-      1. ``config.json`` exists and ``model_type == "nemotron_h"``
+      1. ``config.json`` exists and ``model_type`` is a Nemotron-H spelling
       2. ``config_omni.json`` exists alongside (carries the NVLM/parakeet wrapper
          metadata that ``OmniChat`` reads)
       3. ``configuration_radio.py`` exists for the RADIO vision config
@@ -300,7 +302,11 @@ def omni_multimodal_component_status(model_path: str | Path) -> dict[str, Any]:
         if status["has_parakeet_weights"]:
             status["modalities"].append("audio")
         requirements = {
-            "model_type=nemotron_h": status["config_model_type"] == "nemotron_h",
+            # Either family spelling — nemotron_h_v2 is the same hybrid
+            # architecture, and an Omni v2 bundle carrying the full RADIO/
+            # Parakeet sidecar set must not be rejected on the alias alone.
+            "model_type=nemotron_h": status["config_model_type"]
+            in NEMOTRON_H_MODEL_TYPES,
             "sound_config.model_type=parakeet": status["sound_config_model_type"] == "parakeet",
             "radio weights": status["has_radio_weights"],
             "parakeet weights": status["has_parakeet_weights"],

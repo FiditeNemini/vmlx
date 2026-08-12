@@ -441,3 +441,97 @@ class TestNemotronLatentMoePatch:
 
         assert sanitized is None
         assert removed == []
+
+
+class TestServeToolCallParserChoices:
+    """--tool-call-parser choices must come from the ToolParserManager registry.
+
+    A hand-maintained choices list drifted behind the registry and rejected
+    parsers that exist and work (muse_glimmer/muse, zaya/zyphra,
+    mimo_xml_function, poolside_v1) while server.py's equivalent flag accepted
+    them — `--tool-call-parser muse` failed at argparse for a registered
+    parser.
+    """
+
+    def _parse_serve(self, parser_name):
+        """Run main() up to the serve dispatch, capturing the parsed args."""
+        from vmlx_engine.cli import main
+
+        captured = {}
+
+        def _capture(args):
+            captured["args"] = args
+
+        argv = [
+            "vmlx-engine",
+            "serve",
+            "some-model",
+            "--tool-call-parser",
+            parser_name,
+        ]
+        with patch("vmlx_engine.cli.serve_command", _capture):
+            with patch("sys.argv", argv):
+                main()
+        return captured["args"]
+
+    def test_every_registered_parser_is_a_valid_choice(self):
+        from vmlx_engine.tool_parsers import ToolParserManager
+
+        for name in ToolParserManager.list_registered():
+            args = self._parse_serve(name)
+            assert args.tool_call_parser == name
+
+    def test_previously_rejected_registered_parsers_are_accepted(self):
+        # The exact names the stale hand list omitted.
+        for name in (
+            "muse_glimmer",
+            "muse",
+            "zaya",
+            "zyphra",
+            "mimo_xml_function",
+            "poolside_v1",
+        ):
+            args = self._parse_serve(name)
+            assert args.tool_call_parser == name
+
+    def test_cli_only_sentinels_remain_accepted(self):
+        for name in ("auto", "none"):
+            args = self._parse_serve(name)
+            assert args.tool_call_parser == name
+
+    def test_previous_hand_list_stays_accepted(self):
+        """Backcompat pin: every name the old hand list advertised must stay
+        valid, so registry-derived choices can never orphan a saved setting."""
+        legacy = [
+            "mistral", "qwen", "llama", "hermes", "deepseek", "kimi", "lfm2",
+            "granite", "nemotron", "minimax", "xlam", "functionary", "glm47",
+            "step3p5", "gemma3", "gemma3n", "xml_function", "dsml",
+            "deepseek_v4", "zaya_xml", "hunyuan", "openpangu", "atem",
+            "generic", "qwen3", "llama3", "llama4", "nous", "deepseek_v3",
+            "deepseek_r1", "kimi_k2", "moonshot", "liquid", "granite3",
+            "nemotron3", "minimax_m2", "minimax_m3", "meetkai", "stepfun",
+            "glm4", "gemma4", "hy_v3", "tencent", "openpangu_v2",
+        ]
+        from vmlx_engine.tool_parsers import ToolParserManager
+
+        registered = set(ToolParserManager.list_registered())
+        missing = sorted(set(legacy) - registered)
+        assert missing == [], (
+            f"legacy CLI choices no longer registered: {missing} — the CLI "
+            "would silently stop advertising a parser users may have saved"
+        )
+
+    def test_unknown_parser_is_still_rejected(self):
+        from vmlx_engine.cli import main
+
+        argv = [
+            "vmlx-engine",
+            "serve",
+            "some-model",
+            "--tool-call-parser",
+            "not_a_parser",
+        ]
+        with pytest.raises(SystemExit):
+            with patch("vmlx_engine.cli.serve_command", lambda args: None):
+                with patch("sys.argv", argv):
+                    main()

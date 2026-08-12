@@ -605,7 +605,23 @@ def test_decode_speed_gate_declared_parsers_are_cli_choices():
             continue
         for keyword in node.keywords:
             if keyword.arg == "choices":
-                tool_choices = set(ast.literal_eval(keyword.value))
+                try:
+                    tool_choices = set(ast.literal_eval(keyword.value))
+                except ValueError:
+                    # The CLI now derives choices from the ToolParserManager
+                    # registry at parse time (the old hand list drifted and
+                    # rejected registered parsers), so the AST node is an
+                    # expression, not a literal. Resolve the same names the
+                    # CLI resolves; a literal list here would mean someone
+                    # reverted to hand-maintained choices, and the eval above
+                    # keeps checking that case.
+                    from vmlx_engine.tool_parsers import ToolParserManager
+
+                    tool_choices = {
+                        "auto",
+                        "none",
+                        *ToolParserManager.list_registered(),
+                    }
                 break
 
     assert tool_choices is not None

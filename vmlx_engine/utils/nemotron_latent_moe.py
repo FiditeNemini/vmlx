@@ -227,10 +227,16 @@ def needs_latent_moe_patch(model_path: str) -> bool:
         with open(config_path) as f:
             config = json.load(f)
 
-        # Only nemotron_h has MoE blocks that need LatentMoE patching.
-        # Plain "nemotron" is a dense LLaMA-like model with no MoE.
+        # Only the nemotron_h family has MoE blocks that need LatentMoE
+        # patching. Plain "nemotron" is a dense LLaMA-like model with no MoE.
+        # Both family spellings via NEMOTRON_H_MODEL_TYPES: matching only the
+        # literal "nemotron_h" left v2 LatentMoE bundles unpatched, which
+        # crashes at first inference with "[gather_qmm] Last dimension ...
+        # does not match the expanded quantized matrix".
+        from ..model_configs import NEMOTRON_H_MODEL_TYPES
+
         return (
-            config.get("model_type") == "nemotron_h"
+            config.get("model_type") in NEMOTRON_H_MODEL_TYPES
             and config.get("moe_latent_size") is not None
         )
     except Exception:

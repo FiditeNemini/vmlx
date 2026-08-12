@@ -37,9 +37,13 @@ def test_chunk_loop_hoists_all_tokens_tolist():
 
 
 def test_chunk_loop_env_gates_clear_cache():
+    # Both MLLM sites must route through the shared prefill_admission helper
+    # and never read the env directly again: when they read it themselves,
+    # they read only VMLX_PREFILL_KEEP_ALLOC, so the VMLINUX_ spelling toggled
+    # the text generator but silently not the MLLM one.
     src = _mllm_source()
-    assert "VMLX_PREFILL_KEEP_ALLOC" in src
-    assert "_prefill_keep_alloc" in src
+    assert "prefill_keep_alloc_enabled()" in src
+    assert "PREFILL_KEEP_ALLOC" not in src
     assert "if not _prefill_keep_alloc:" in src
 
 
@@ -47,9 +51,9 @@ def test_single_batch_prefill_loop_env_gates_clear_cache():
     import vmlx_engine.utils.single_batch_generator as mod
 
     src = inspect.getsource(mod.SingleBatchGenerator._prefill)
-    assert "VMLX_PREFILL_KEEP_ALLOC" in src
-    assert "_prefill_keep_alloc" in src
-    assert "if not _prefill_keep_alloc:" in src
+    assert "_prefill_keep_alloc_enabled()" in src
+    assert "PREFILL_KEEP_ALLOC" not in src
+    assert "if not _prefill_keep_alloc" in src
 
 
 def test_cli_flag_propagates_to_env():
@@ -62,13 +66,37 @@ def test_cli_flag_propagates_to_env():
 
 
 def test_prefill_keep_alloc_env_off_by_default(monkeypatch):
+    from vmlx_engine.utils.prefill_admission import prefill_keep_alloc_enabled
+
+    monkeypatch.delenv("VMLINUX_PREFILL_KEEP_ALLOC", raising=False)
     monkeypatch.delenv("VMLX_PREFILL_KEEP_ALLOC", raising=False)
-    assert os.environ.get("VMLX_PREFILL_KEEP_ALLOC", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    assert prefill_keep_alloc_enabled() is False
+
+
+def test_prefill_keep_alloc_helper_accepts_both_env_spellings(monkeypatch):
+    from vmlx_engine.utils.prefill_admission import prefill_keep_alloc_enabled
+
+    monkeypatch.setenv("VMLINUX_PREFILL_KEEP_ALLOC", "1")
+    monkeypatch.delenv("VMLX_PREFILL_KEEP_ALLOC", raising=False)
+    assert prefill_keep_alloc_enabled() is True
+
+    monkeypatch.delenv("VMLINUX_PREFILL_KEEP_ALLOC", raising=False)
+    monkeypatch.setenv("VMLX_PREFILL_KEEP_ALLOC", "true")
+    assert prefill_keep_alloc_enabled() is True
+
+    # VMLINUX_ wins when both are set (the original text-path precedence).
+    monkeypatch.setenv("VMLINUX_PREFILL_KEEP_ALLOC", "0")
+    monkeypatch.setenv("VMLX_PREFILL_KEEP_ALLOC", "1")
+    assert prefill_keep_alloc_enabled() is False
+
+
+def test_prefill_keep_alloc_helper_parses_booleans_not_truthiness(monkeypatch):
+    # One MLLM site used raw string truthiness, so "0" KEPT allocations there.
+    from vmlx_engine.utils.prefill_admission import prefill_keep_alloc_enabled
+
+    monkeypatch.delenv("VMLINUX_PREFILL_KEEP_ALLOC", raising=False)
+    monkeypatch.setenv("VMLX_PREFILL_KEEP_ALLOC", "0")
+    assert prefill_keep_alloc_enabled() is False
 
 
 def test_boundary_pointer_advances_past_captured():

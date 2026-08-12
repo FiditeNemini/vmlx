@@ -84,6 +84,26 @@ def prefill_valve_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
+def prefill_keep_alloc_enabled() -> bool:
+    """Skip mx.clear_cache() between prefill chunks; OFF by default.
+
+    ONE reader for every generator. Before this helper the two generators
+    disagreed: single_batch_generator read VMLINUX_PREFILL_KEEP_ALLOC with a
+    VMLX_ fallback while mllm_batch_generator read only VMLX_, so the
+    VMLINUX_ spelling toggled the text path but silently not the MLLM path.
+    (cli.py --prefill-keep-alloc sets the VMLX_ spelling, so only direct env
+    users hit the divergence.) One MLLM site also tested raw string
+    truthiness, which made VMLX_PREFILL_KEEP_ALLOC=0 KEEP allocations there;
+    the parsed-boolean contract below is the one every other site already
+    used. VMLINUX_ wins when both are set, matching the original text path.
+    """
+    raw = os.environ.get(
+        "VMLINUX_PREFILL_KEEP_ALLOC",
+        os.environ.get("VMLX_PREFILL_KEEP_ALLOC", ""),
+    )
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def prefill_valve_min_margin_bytes(default_gb: float = 2.0) -> int:
     """Transient-headroom floor used before any per-chunk peak is observed.
 

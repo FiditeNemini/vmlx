@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from ..model_configs import NEMOTRON_H_MODEL_TYPES
+
 logger = logging.getLogger("vmlx_engine")
 
 
@@ -368,7 +370,12 @@ def inspect_model(model_path: str) -> ModelInfo:
     n_routed_experts = _cfg("n_routed_experts") or _cfg("num_local_experts")
     num_experts_per_tok = _cfg("num_experts_per_tok")
     moe_latent_size = _cfg("moe_latent_size")
-    needs_latent_moe = model_type == "nemotron_h" and moe_latent_size is not None
+    # NEMOTRON_H_MODEL_TYPES, not the literal "nemotron_h": the v2 spelling
+    # has the same LatentMoE layout, and missing it here hid the LatentMoE
+    # line from doctor/info and skipped the convert-time patch for v2 bundles.
+    needs_latent_moe = (
+        model_type in NEMOTRON_H_MODEL_TYPES and moe_latent_size is not None
+    )
 
     # Hybrid (Mamba + attention)
     hybrid_pattern = config.get("hybrid_override_pattern")
@@ -490,7 +497,7 @@ def _estimate_param_count(config: dict) -> float:
     # Determine expert projection count:
     # - Nemotron-H uses SwitchMLP (2 projections: fc1 + fc2, ReLU² activation)
     # - Most other MoE models use SwitchGLU (3 projections: gate + up + down)
-    uses_switch_mlp = model_type in ("nemotron_h", "nemotron")
+    uses_switch_mlp = model_type == "nemotron" or model_type in NEMOTRON_H_MODEL_TYPES
     expert_proj_count = 2 if uses_switch_mlp else 3
 
     # Dense MLP projection count:

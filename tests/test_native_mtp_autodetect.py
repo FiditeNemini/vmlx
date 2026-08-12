@@ -3614,3 +3614,52 @@ class TestNativeMtpAutodetect:
         assert [output.new_text for output in outputs] == ["A", "BC"]
         assert outputs[-1].output_token_ids == [0, 1, 2]
         assert scheduler.running["burst-prefix"]._gen_prefix_tokens == []
+
+
+class TestNativeMtpKillSwitchEnvSpellings:
+    """The runtime kill switch must honor BOTH env prefixes.
+
+    Every sibling knob in native_mtp.py (FORCE, DEPTH, USE_TUNING) reads the
+    VMLINUX_/VMLX_ pair via _env_enabled/_env_disabled, and
+    mtp_runtime_common.py documents ("VMLINUX_NATIVE_MTP", "VMLX_NATIVE_MTP")
+    as the intended pair — but the gate itself read only VMLINUX_NATIVE_MTP,
+    so VMLX_NATIVE_MTP=0 was a silent no-op.
+    """
+
+    def test_vmlx_spelling_disables_runtime_gate(self, monkeypatch):
+        from vmlx_engine.native_mtp import _runtime_enabled_by_env
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+        monkeypatch.setenv("VMLX_NATIVE_MTP", "0")
+
+        assert _runtime_enabled_by_env() is False
+
+    def test_vmlinux_spelling_still_disables_runtime_gate(self, monkeypatch):
+        from vmlx_engine.native_mtp import _runtime_enabled_by_env
+
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP", "0")
+        monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
+
+        assert _runtime_enabled_by_env() is False
+
+    def test_unset_defaults_to_enabled(self, monkeypatch):
+        from vmlx_engine.native_mtp import _runtime_enabled_by_env
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
+
+        assert _runtime_enabled_by_env() is True
+
+    def test_vmlx_spelling_reports_runtime_disabled_in_inspection(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+        _write_qwen36_jang_mtp_bundle(tmp_path)
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+        monkeypatch.setenv("VMLX_NATIVE_MTP", "0")
+
+        status = inspect_native_mtp_bundle(tmp_path)
+
+        assert status["status"] == "runtime_disabled"
+        assert status["runtime_available"] is False

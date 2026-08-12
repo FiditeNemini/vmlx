@@ -292,7 +292,9 @@ def _eagle3_native_mtp_status(
         runtime_reason = "metadata_inconsistent"
     elif not runtime_env_enabled:
         status = "runtime_disabled"
-        runtime_reason = "VMLINUX_NATIVE_MTP disables native MTP runtime"
+        runtime_reason = (
+            "VMLINUX_NATIVE_MTP/VMLX_NATIVE_MTP disables native MTP runtime"
+        )
     else:
         status = "weights_present_runtime_unwired"
         runtime_reason = (
@@ -457,7 +459,11 @@ def bundle_index_mtp_layer_count(bundle_path: str | Path | None) -> int | None:
 
 
 def _runtime_enabled_by_env() -> bool:
-    return os.environ.get("VMLINUX_NATIVE_MTP", "1") not in _DISABLE_ENV_VALUES
+    # The kill switch must read BOTH prefixes like every other knob in this
+    # file (FORCE/DEPTH/USE_TUNING all go through _env_enabled/_env_disabled
+    # pairs, and mtp_runtime_common.py documents the pair). Reading only
+    # VMLINUX_NATIVE_MTP made VMLX_NATIVE_MTP=0 a silent no-op.
+    return not _env_disabled("VMLINUX_NATIVE_MTP", "VMLX_NATIVE_MTP")
 
 
 def _env_enabled(*names: str) -> bool:
@@ -778,7 +784,9 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         )
     elif artifact_available and runtime_supported and not runtime_env_enabled:
         status = "runtime_disabled"
-        runtime_reason = "VMLINUX_NATIVE_MTP disables native MTP runtime"
+        runtime_reason = (
+            "VMLINUX_NATIVE_MTP/VMLX_NATIVE_MTP disables native MTP runtime"
+        )
     elif artifact_available and runtime_supported and runtime_validation_block_reason:
         status = "runtime_validation_blocked"
         runtime_reason = runtime_validation_block_reason

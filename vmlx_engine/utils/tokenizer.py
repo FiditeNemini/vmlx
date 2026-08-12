@@ -15,6 +15,7 @@ import os
 import importlib
 from pathlib import Path
 
+from ..model_configs import NEMOTRON_H_MODEL_TYPES
 from .chat_templates import DEFAULT_CHATML_TEMPLATE, NEMOTRON_CHAT_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def _sanitize_nemotron_quantization_config_for_load(config: dict) -> tuple[dict 
     those entries make upstream call ``nn.quantize`` on a module that has no
     ``to_quantized`` method and startup fails before weights are loaded.
     """
-    if str(config.get("model_type", "")).lower() not in {"nemotron_h", "nemotron_h_v2"}:
+    if str(config.get("model_type", "")).lower() not in NEMOTRON_H_MODEL_TYPES:
         return None, []
 
     quantization = config.get("quantization")
@@ -521,7 +522,10 @@ def _needs_tokenizer_fallback(model_name: str) -> bool:
                 f"skipping tokenizer fallback for {model_name}"
             )
             return False
-        if model_type in ("nemotron", "nemotron_h"):
+        # NEMOTRON_H_MODEL_TYPES, not a literal: matching only "nemotron_h"
+        # here demoted v2 bundles from this authoritative config.json answer
+        # to the registry/name-heuristic fallbacks below.
+        if model_type == "nemotron" or model_type in NEMOTRON_H_MODEL_TYPES:
             return True
 
     # 2. Try registry (name-based pattern matching)
@@ -1329,7 +1333,7 @@ def _load_with_tokenizer_fallback(model_name: str, lazy: bool = False):
         cfg_path = Path(model_path) / "config.json"
         if cfg_path.is_file():
             _cfg = json.loads(cfg_path.read_text())
-            if _cfg.get("model_type") == "nemotron_h":
+            if _cfg.get("model_type") in NEMOTRON_H_MODEL_TYPES:
                 _load_strict = False
                 _model_config_override, _removed_gate_quant = (
                     _sanitize_nemotron_quantization_config_for_load(_cfg)

@@ -278,6 +278,29 @@ vmlx_engine/**/STATUS.md
 vmlx_engine/**/NOTES.md
 .agents/
 AGENTS.md
+
+# Ad-hoc live-UI CDP driver scripts. Every debugging session writes a few of
+# these into panel/scripts/; 75 had accumulated untracked on the box, one
+# `git add -A` away from landing in a public repo. Ignore the directory's
+# .cjs by default and allow-list the real build/release/driver scripts, so
+# tomorrow's throwaway probe is ignored without another .gitignore edit.
+panel/scripts/*.cjs
+!panel/scripts/electron-builder-after-all-artifact-build.cjs
+!panel/scripts/electron-builder-after-pack.cjs
+!panel/scripts/electron-builder-before-pack.cjs
+!panel/scripts/leakprobe.cjs
+!panel/scripts/r21drv.cjs
+!panel/scripts/release-python-action.cjs
+!panel/scripts/uidrv.cjs
+
+# Probe/scratch dumps and local backups at the repo root (d4.txt, x.txt,
+# ternary_*_731.txt, dsv4_ui_tool_probe.txt, .pre161-backup/ …). No tracked
+# file matches these, so the rules cannot hide real source.
+/*.txt
+*_probe*.txt
+*-backup/
+.pre*-backup/
+nohup.out
 docs/*.md
 !docs/ARCHITECTURE.md
 !docs/index.md

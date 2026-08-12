@@ -38,6 +38,36 @@ logger = logging.getLogger(__name__)
 _BYTES_PER_MB = 1024 * 1024
 _DEFAULT_MEMORY_PERCENT = 0.20  # 20% of available RAM
 _MIN_MEMORY_BYTES = 100 * _BYTES_PER_MB  # Minimum 100MB
+
+# Last-resort ceiling, used only when the OS cannot tell us the real one.
+_FALLBACK_CACHE_CEILING_BYTES = 32 * 1024 * 1024 * 1024
+
+
+def _resolve_cache_memory_ceiling_bytes() -> int:
+    """The largest cache this machine may hold, from the OS rather than a guess.
+
+    This was a flat 32 GB with the comment "Metal GPU doesn't get 100% of system
+    RAM" — true in general, but the number was invented and it silently reduced
+    an explicit ``--cache-memory-mb``. On a 128 GB machine whose owner has raised
+    ``iogpu.wired_limit_mb`` it also contradicts a standing rule this repo
+    already records elsewhere (cli.py `_install_jangtq_wired_limit_from_sysctl`):
+    the user's sysctl is authoritative, and a hardcoded default that clips below
+    it is a bug, not a safety feature.
+
+    MLX reports the same bound the loader already trusts. Use it; fall back to
+    the old constant only when it cannot be read (non-Darwin, MLX missing).
+    """
+    try:
+        import mlx.core as mx
+
+        from .utils.memory_limits import get_effective_metal_working_set_bytes
+
+        _active, max_ws_bytes = get_effective_metal_working_set_bytes(mx)
+        if max_ws_bytes and max_ws_bytes > 0:
+            return int(max_ws_bytes)
+    except Exception:
+        pass
+    return _FALLBACK_CACHE_CEILING_BYTES
 _MAX_ENTRIES_FALLBACK = 50  # Fallback if memory detection fails
 _PRESSURE_CHECK_INTERVAL = 60.0  # Seconds between memory pressure checks
 _PRESSURE_THRESHOLD = 0.20  # Reduce budget when <20% of total RAM available
@@ -224,13 +254,22 @@ class MemoryCacheConfig:
         Returns:
             Memory limit in bytes.
         """
-        # 32GB hard cap — Metal GPU doesn't get 100% of system RAM
-        max_cache_bytes = 32 * 1024 * 1024 * 1024
+        max_cache_bytes = _resolve_cache_memory_ceiling_bytes()
 
         if self.max_memory_mb is not None:
-            # Explicit MB setting capped at 32GB for safety, but no minimum floor
-            # (user/test may intentionally set a very small cache)
+            # No minimum floor — a user or test may intentionally set a very
+            # small cache. But an explicit value must never be reduced in
+            # silence: the user asked for a number and the engine would have
+            # gone on reporting a different one.
             limit = self.max_memory_mb * _BYTES_PER_MB
+            if limit > max_cache_bytes:
+                logger.warning(
+                    "Requested cache memory %.1f GB exceeds this machine's "
+                    "Metal working-set ceiling of %.1f GB; using the ceiling. "
+                    "Raise it with `sudo sysctl iogpu.wired_limit_mb=<MB>`.",
+                    limit / 1e9,
+                    max_cache_bytes / 1e9,
+                )
             return min(limit, max_cache_bytes)
 
         available = _get_available_memory()

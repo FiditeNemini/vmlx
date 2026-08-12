@@ -84,6 +84,7 @@ def _register_builtin_parsers():
     from .think_xml_parser import ThinkXmlReasoningParser
     from .minimax_m3_parser import MiniMaxM3ReasoningParser
     from .muse_glimmer_parser import MuseGlimmerReasoningParser
+    from .inkling_parser import InklingReasoningParser
 
     register_parser("qwen3", Qwen3ReasoningParser)
     register_parser("deepseek_r1", DeepSeekR1ReasoningParser)
@@ -98,6 +99,11 @@ def _register_builtin_parsers():
     register_parser("think_xml", ThinkXmlReasoningParser)
     # GPT-OSS / GLM-4.7-Flash / Harmony protocol (<|channel|>analysis/final)
     register_parser("openai_gptoss", GptOssReasoningParser)
+    # Inkling is CHANNEL-SWITCHED, not tag-delimited: <|content_thinking|> and
+    # <|content_text|> are openers that change which channel later text belongs
+    # to, with no closer for thinking. Registering it on any think-tag parser
+    # would mis-split every response.
+    register_parser("inkling", InklingReasoningParser)
     # Mistral 4 uses [THINK]...[/THINK] tokens for reasoning
     register_parser("mistral", MistralReasoningParser)
     # Gemma 4 uses <|channel>thought...<channel|> for reasoning

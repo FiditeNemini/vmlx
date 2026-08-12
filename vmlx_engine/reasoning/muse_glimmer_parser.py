@@ -28,7 +28,7 @@ Two details that follow from the bundle's own contract:
 
 import re
 
-from .base import DeltaMessage, ReasoningParser
+from .base import DeltaMessage, ReasoningParser, marker_prefix_hold_length
 
 _START_TAG = "<|start|>"
 _MESSAGE_TAG = "<|message|>"
@@ -175,8 +175,6 @@ def _stable_length(text: str) -> int:
     has to be provably transient: a marker prefix always resolves on the next
     character, and a header region always ends at its ``<|message|>``.
     """
-    hold = 0
-
     # 1. A trailing PROPER PREFIX of a MARKER: "<", "<|", "<|mess", ...
     #    Every marker starts with "<", which is vanishingly rare in prose, so
     #    holding these costs one delta and drops nothing in practice.
@@ -190,11 +188,7 @@ def _stable_length(text: str) -> int:
     #    only what was already emitted) those characters were LOST from the
     #    user's view. Every earlier test ended in punctuation or a marker,
     #    which is exactly the set that hides this.
-    for opener in _ALL_MARKERS:
-        for size in range(len(opener) - 1, 0, -1):
-            if text.endswith(opener[:size]):
-                hold = max(hold, size)
-                break
+    hold = marker_prefix_hold_length(text, _ALL_MARKERS)
 
 
     # 2. A header that has OPENED but not yet reached its <|message|>. The

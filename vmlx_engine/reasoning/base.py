@@ -33,6 +33,33 @@ class DeltaMessage:
         return self.reasoning
 
 
+def marker_prefix_hold_length(text: str, markers) -> int:
+    """How many trailing characters of ``text`` might still grow into a marker.
+
+    Streaming hands a parser the message a few characters at a time, so a
+    marker like ``<|content_text|>`` arrives in pieces. Classifying a piece is
+    unrecoverable: the streaming parsers here emit with monotonic counters, so a
+    character published from a half-arrived marker can never be taken back. Live
+    in the app that surfaced as ``to=self`` and a bare ``<|message|`` printed as
+    answer text.
+
+    HOLD ONLY WHAT YOU CAN AFFORD TO LOSE. There is no finish hook in the parser
+    contract and the server's terminal chunk reuses only what was already
+    emitted, so anything still held when generation stops is dropped from the
+    user's view. A marker prefix always resolves on the next character, which is
+    what makes holding it provably transient — that is why this holds only
+    marker prefixes and nothing word-shaped. Holding word-shaped openers
+    globally truncated any reply ending in a letter run.
+    """
+    hold = 0
+    for marker in markers:
+        for size in range(len(marker) - 1, 0, -1):
+            if text.endswith(marker[:size]):
+                hold = max(hold, size)
+                break
+    return hold
+
+
 class ReasoningParser(ABC):
     """
     Abstract base class for reasoning content extraction.

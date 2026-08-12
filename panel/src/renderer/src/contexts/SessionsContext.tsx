@@ -17,7 +17,15 @@ export interface SessionSummary {
 }
 
 export interface LoadProgress {
+  /** English text from the main process, used as the i18n fallback. */
   label: string
+  /**
+   * i18n key for the SAME text. The main process derives these labels from
+   * engine log lines and has no locale catalog of its own, so it ships both and
+   * the renderer resolves the key. Optional so an older main process still
+   * renders (the label is then used verbatim, exactly as before).
+   */
+  labelKey?: string
   progress: number
   modelBytes?: number
   expectedResidentBytes?: number

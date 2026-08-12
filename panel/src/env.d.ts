@@ -692,6 +692,7 @@ declare global {
           callback: (data: {
             sessionId: string;
             label: string;
+            labelKey?: string;
             progress: number;
           }) => void,
         ) => () => void;

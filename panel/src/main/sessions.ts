@@ -1304,49 +1304,58 @@ export class SessionManager extends EventEmitter {
   }
 
   // Loading progress patterns — matched against engine stdout/stderr to detect loading phase
-  private static readonly LOAD_PROGRESS_PATTERNS: Array<{ pattern: RegExp; label: string; progress: number }> = [
-    { pattern: /Loading model:/, label: 'Initializing...', progress: 5 },
+  private static readonly LOAD_PROGRESS_PATTERNS: Array<{
+    pattern: RegExp
+    /** English text, kept so engine logs and older renderers still read. */
+    label: string
+    /** i18n key for the SAME text. The main process cannot translate — it has
+     *  no locale catalog — so it ships both and the renderer resolves the key,
+     *  falling back to `label` when a locale is missing the entry. */
+    labelKey: string
+    progress: number
+  }> = [
+    { pattern: /Loading model:/, label: 'Initializing...', labelKey: 'sessions.loadProgress.initializing', progress: 5 },
     // Phase 1: Process startup + config (0-25%)
     // For BatchedEngine, these fire BEFORE actual model loading (lifespan phase).
     // Keep progress low so real loading patterns (Phase 2) can advance the bar.
-    { pattern: /System memory before load/, label: 'Checking memory...', progress: 5 },
-    { pattern: /Loading model with (?:Simple|Batched)Engine/, label: 'Creating engine...', progress: 8 },
-    { pattern: /\bmodel loaded \(batched mode\)/i, label: 'Starting server...', progress: 10 },
-    { pattern: /Metal GPU memory after load/, label: 'Server initializing...', progress: 12 },
-    { pattern: /Native tool format enabled/, label: 'Configuring tools...', progress: 14 },
-    { pattern: /Default max tokens:/, label: 'Configuring limits...', progress: 16 },
-    { pattern: /Uvicorn running on/, label: 'Server started, loading model...', progress: 20 },
-    { pattern: /Waiting for application startup/, label: 'Starting model runtime...', progress: 22 },
+    { pattern: /System memory before load/, label: 'Checking memory...', labelKey: 'sessions.loadProgress.checkingMemory', progress: 5 },
+    { pattern: /Loading model with (?:Simple|Batched)Engine/, label: 'Creating engine...', labelKey: 'sessions.loadProgress.creatingEngine', progress: 8 },
+    { pattern: /\bmodel loaded \(batched mode\)/i, label: 'Starting server...', labelKey: 'sessions.loadProgress.startingServer', progress: 10 },
+    { pattern: /Metal GPU memory after load/, label: 'Server initializing...', labelKey: 'sessions.loadProgress.serverInitializing', progress: 12 },
+    { pattern: /Native tool format enabled/, label: 'Configuring tools...', labelKey: 'sessions.loadProgress.configuringTools', progress: 14 },
+    { pattern: /Default max tokens:/, label: 'Configuring limits...', labelKey: 'sessions.loadProgress.configuringLimits', progress: 16 },
+    { pattern: /Uvicorn running on/, label: 'Server started, loading model...', labelKey: 'sessions.loadProgress.serverStartedLoadingModel', progress: 20 },
+    { pattern: /Waiting for application startup/, label: 'Starting model runtime...', labelKey: 'sessions.loadProgress.startingModelRuntime', progress: 22 },
 
     // Phase 2: Actual model loading (25-85%)
     // For BatchedEngine these fire DURING lifespan() (after Uvicorn starts).
     // For SimpleEngine these fire DURING load_model() (before Uvicorn starts).
-    { pattern: /JANG v2 detected/, label: 'Loading JANG weights...', progress: 30 },
-    { pattern: /Loading JANG v1 VLM:/, label: 'Loading JANG VL model...', progress: 30 },
-    { pattern: /Loading MLLM:/, label: 'Loading vision model...', progress: 30 },
-    { pattern: /Loading image model:/, label: 'Loading image model...', progress: 30 },
-    { pattern: /Loading JANG VL model:/, label: 'Loading JANG VL...', progress: 30 },
-    { pattern: /Loading \d+ safetensors shards/, label: 'Loading weights...', progress: 40 },
-    { pattern: /Split kv_b_proj layer/, label: 'Processing MLA layers...', progress: 50 },
-    { pattern: /bfloat16 enabled/, label: 'Converting to bfloat16...', progress: 55 },
-    { pattern: /JANG v[12].{0,10}loaded in/, label: 'Weights loaded', progress: 65 },
-    { pattern: /Model loaded successfully/, label: 'Model loaded', progress: 65 },
-    { pattern: /MLLM loaded successfully/, label: 'Vision model loaded', progress: 65 },
-    { pattern: /JANG VL model loaded/, label: 'JANG VL loaded', progress: 65 },
-    { pattern: /Image model loaded in/, label: 'Image model loaded', progress: 65 },
+    { pattern: /JANG v2 detected/, label: 'Loading JANG weights...', labelKey: 'sessions.loadProgress.loadingJangWeights', progress: 30 },
+    { pattern: /Loading JANG v1 VLM:/, label: 'Loading JANG VL model...', labelKey: 'sessions.loadProgress.loadingJangVlModel', progress: 30 },
+    { pattern: /Loading MLLM:/, label: 'Loading vision model...', labelKey: 'sessions.loadProgress.loadingVisionModel', progress: 30 },
+    { pattern: /Loading image model:/, label: 'Loading image model...', labelKey: 'sessions.loadProgress.loadingImageModel', progress: 30 },
+    { pattern: /Loading JANG VL model:/, label: 'Loading JANG VL...', labelKey: 'sessions.loadProgress.loadingJangVl', progress: 30 },
+    { pattern: /Loading \d+ safetensors shards/, label: 'Loading weights...', labelKey: 'sessions.loadProgress.loadingWeights', progress: 40 },
+    { pattern: /Split kv_b_proj layer/, label: 'Processing MLA layers...', labelKey: 'sessions.loadProgress.processingMlaLayers', progress: 50 },
+    { pattern: /bfloat16 enabled/, label: 'Converting to bfloat16...', labelKey: 'sessions.loadProgress.convertingToBfloat16', progress: 55 },
+    { pattern: /JANG v[12].{0,10}loaded in/, label: 'Weights loaded', labelKey: 'sessions.loadProgress.weightsLoaded', progress: 65 },
+    { pattern: /Model loaded successfully/, label: 'Model loaded', labelKey: 'sessions.loadProgress.modelLoaded', progress: 65 },
+    { pattern: /MLLM loaded successfully/, label: 'Vision model loaded', labelKey: 'sessions.loadProgress.visionModelLoaded', progress: 65 },
+    { pattern: /JANG VL model loaded/, label: 'JANG VL loaded', labelKey: 'sessions.loadProgress.jangVlLoaded', progress: 65 },
+    { pattern: /Image model loaded in/, label: 'Image model loaded', labelKey: 'sessions.loadProgress.imageModelLoaded', progress: 65 },
 
     // Phase 3: Post-load config (85-92%)
     // SimpleEngine: fires during load_model(). BatchedEngine: fires during lifespan().
-    { pattern: /\bmodel loaded \(simple mode\)/i, label: 'Engine ready', progress: 70 },
-    { pattern: /Saved \d+\/\d+ layer weights to SSD/, label: 'Saving weights to SSD...', progress: 72 },
-    { pattern: /SSD weight index:/, label: 'Building weight index...', progress: 73 },
-    { pattern: /SSD per-layer weight recycling configured/, label: 'SSD streaming ready', progress: 74 },
-    { pattern: /KV cache quantization/, label: 'Setting up KV cache...', progress: 78 },
-    { pattern: /(?:Chat template loaded|Applied custom chat template)/, label: 'Loading chat template...', progress: 80 },
-    { pattern: /PagedCacheManager initialized/, label: 'Configuring cache...', progress: 82 },
-    { pattern: /Scheduler (?:initialized|started)/, label: 'Starting scheduler...', progress: 85 },
-    { pattern: /BatchedEngine loaded/, label: 'Engine ready', progress: 88 },
-    { pattern: /Application startup complete/, label: 'Almost ready...', progress: 92 },
+    { pattern: /\bmodel loaded \(simple mode\)/i, label: 'Engine ready', labelKey: 'sessions.loadProgress.engineReady', progress: 70 },
+    { pattern: /Saved \d+\/\d+ layer weights to SSD/, label: 'Saving weights to SSD...', labelKey: 'sessions.loadProgress.savingWeightsToSsd', progress: 72 },
+    { pattern: /SSD weight index:/, label: 'Building weight index...', labelKey: 'sessions.loadProgress.buildingWeightIndex', progress: 73 },
+    { pattern: /SSD per-layer weight recycling configured/, label: 'SSD streaming ready', labelKey: 'sessions.loadProgress.ssdStreamingReady', progress: 74 },
+    { pattern: /KV cache quantization/, label: 'Setting up KV cache...', labelKey: 'sessions.loadProgress.settingUpKvCache', progress: 78 },
+    { pattern: /(?:Chat template loaded|Applied custom chat template)/, label: 'Loading chat template...', labelKey: 'sessions.loadProgress.loadingChatTemplate', progress: 80 },
+    { pattern: /PagedCacheManager initialized/, label: 'Configuring cache...', labelKey: 'sessions.loadProgress.configuringCache', progress: 82 },
+    { pattern: /Scheduler (?:initialized|started)/, label: 'Starting scheduler...', labelKey: 'sessions.loadProgress.startingScheduler', progress: 85 },
+    { pattern: /BatchedEngine loaded/, label: 'Engine ready', labelKey: 'sessions.loadProgress.engineReady', progress: 88 },
+    { pattern: /Application startup complete/, label: 'Almost ready...', labelKey: 'sessions.loadProgress.almostReady', progress: 92 },
   ]
 
   // Track last emitted progress per session to avoid duplicate events
@@ -1447,7 +1456,7 @@ export class SessionManager extends EventEmitter {
 
   /** Check a log line for loading progress and emit event if phase advanced */
   private checkLoadProgress(sessionId: string, text: string): void {
-    for (const { pattern, label, progress } of SessionManager.LOAD_PROGRESS_PATTERNS) {
+    for (const { pattern, label, labelKey, progress } of SessionManager.LOAD_PROGRESS_PATTERNS) {
       if (pattern.test(text)) {
         const current = this.loadProgressState.get(sessionId) ?? 0
         if (progress > current) {
@@ -1455,6 +1464,7 @@ export class SessionManager extends EventEmitter {
           this.emit('session:loadProgress', {
             sessionId,
             label,
+            labelKey,
             progress,
             ...(this.loadProgressMeta.get(sessionId) || {}),
           })

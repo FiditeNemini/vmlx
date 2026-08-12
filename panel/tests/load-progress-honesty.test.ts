@@ -61,3 +61,43 @@ describe('load progress honesty', () => {
     expect(view).toContain('Resident RAM:')
   })
 })
+
+describe('load-progress labels can reach the locale catalogs', () => {
+  const sessions = readFileSync(
+    join(repo, 'src/main/sessions.ts'),
+    'utf8',
+  )
+  const card = readFileSync(
+    join(repo, 'src/renderer/src/components/sessions/SessionCard.tsx'),
+    'utf8',
+  )
+
+  it('every progress pattern ships an i18n key beside its English text', () => {
+    // These 32 labels live in the MAIN process, which has no locale catalog:
+    // they are derived from engine log lines and delivered to the renderer as
+    // DATA. SessionCard rendered `progress.label` verbatim, so the renderer's
+    // i18n could never reach them and they stayed English in all five locales.
+    const start = sessions.indexOf('LOAD_PROGRESS_PATTERNS')
+    const block = sessions.slice(start, sessions.indexOf('\n  ]', start))
+    const labels = block.match(/label: '/g) || []
+    const keys = block.match(/labelKey: 'sessions\.loadProgress\./g) || []
+    expect(labels.length).toBeGreaterThan(20)
+    expect(keys.length).toBe(labels.length)
+  })
+
+  it('the renderer resolves the key and falls back to the English text', () => {
+    expect(card).toContain('progress.labelKey')
+    expect(card).toContain('defaultValue: progress.label')
+    // The fallback is what makes this safe to land before the locale entries
+    // exist, and what keeps an older main process rendering correctly.
+    expect(card).not.toMatch(/\{progress\.label\}\s*\(\{progress\.progress\}%\)/)
+  })
+
+  it('labelKey is optional on the wire so an older main process still renders', () => {
+    const context = readFileSync(
+      join(repo, 'src/renderer/src/contexts/SessionsContext.tsx'),
+      'utf8',
+    )
+    expect(context).toContain('labelKey?: string')
+  })
+})

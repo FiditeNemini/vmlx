@@ -232,7 +232,13 @@ export function SessionCard({
           {progress && (
             <div className="mt-1 space-y-0.5">
               <p className="text-[10px] text-muted-foreground">
-                {progress.label} ({progress.progress}%)
+                {/* The main process has no locale catalog, so it ships an i18n key
+                    beside the English text; resolve the key and fall back to the
+                    literal so a locale missing the entry still reads correctly. */}
+                {progress.labelKey
+                  ? t(progress.labelKey, { defaultValue: progress.label })
+                  : progress.label}{' '}
+                ({progress.progress}%)
               </p>
               {formatModelBytes(progress.modelBytes) && (
                 <p className="text-[10px] text-muted-foreground/80">

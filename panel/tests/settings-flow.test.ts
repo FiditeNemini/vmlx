@@ -11,6 +11,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import { resolveCacheLaunchPolicy } from '../src/shared/cacheControlPolicy'
+import { SLOW_FAMILY_TIMEOUTS } from '../src/shared/slowFamilyTimeouts'
 import { buildMcpPolicyArgs } from '../src/shared/mcpPolicy'
 import {
     applyLagunaJitDefaultEnvironment,
@@ -2772,13 +2773,24 @@ describe('Default IP and New Settings', () => {
         const createSession = source.indexOf('db.createSession(session)', defaultConfigStart)
         const adoptCreateBlock = source.slice(defaultConfigStart, createSession)
 
-        expect(source).toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900')
+        // The 900 itself belongs to the shared table, not to sessions.ts — see
+        // src/shared/slowFamilyTimeouts.ts. sessions.ts may name the constant
+        // (the persist path reads better that way) but must SOURCE it, so that
+        // what gets written into config and what gets resolved at launch can
+        // never disagree.
+        expect(source).toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = SLOW_FAMILY_TIMEOUTS.minimax_m3')
+        expect(SLOW_FAMILY_TIMEOUTS.minimax_m3).toBe(900)
+        expect(source).not.toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900')
         expect(source).not.toContain('MINIMAX_M3_DEFAULT_MAX_OUTPUT_TOKENS')
         expect(familyBlock).toContain('config.timeout = MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS')
         expect(familyBlock).toContain('config.maxTokens = 0')
         expect(familyBlock).toContain('LEGACY_GENERIC_MAX_OUTPUT_TOKENS.has(Number(config.maxTokens))')
-        expect(adoptCreateBlock).toContain("detectedFamily === 'minimax_m3'")
-        expect(adoptCreateBlock).toContain('MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS')
+        // Adoption used to hand-roll a two-family timeout ternary here, so an
+        // adopted openpangu_v2 / qwen3.5 / qwen3-next / nemotron-h session
+        // persisted 300 while the same model created normally persisted 900.
+        // It must ask the shared table, which knows all seven.
+        expect(adoptCreateBlock).toContain('timeout: resolveSlowFamilyTimeoutSeconds(undefined, detectedFamily)')
+        expect(adoptCreateBlock).not.toContain("detectedFamily === 'minimax_m3'")
         expect(adoptCreateBlock).toContain('maxTokens: 0')
     })
 
@@ -3070,6 +3082,34 @@ describe('Default IP and New Settings', () => {
         expect(block).toContain('config.usePagedCache === true')
         expect(block).toContain('config.enableBlockDiskCache === true')
         expect(block).toContain("config.kvCacheQuantization === 'none'")
+    })
+
+    it('cache-shape gating rules exist once, shared by the argv builder and the CLI preview', () => {
+        // sessions.ts BUILDS the engine argv; SessionSettings.tsx PREVIEWS it and
+        // enables/disables the matching toggles from the same predicates. While
+        // each kept a private copy, a divergence was invisible until launch: the
+        // preview could offer an SSD-only tier the launcher never passes, or grey
+        // out a toggle for a shape that supports it.
+        const shared = readFileSync('src/shared/cacheTypeCapabilities.ts', 'utf8')
+        for (const rule of [
+            'cacheTypeRequiresPaged',
+            'cacheSubtypeRequiresPaged',
+            'cacheTypeSupportsBlockDiskOnly',
+            'cacheSubtypeSupportsBlockDiskOnly',
+        ]) {
+            expect(shared).toContain(`export function ${rule}(`)
+            for (const consumer of [
+                'src/main/sessions.ts',
+                'src/renderer/src/components/sessions/SessionSettings.tsx',
+            ]) {
+                const source = readFileSync(consumer, 'utf8')
+                expect(source).toContain(rule)
+                expect(source).not.toContain(`function ${rule}(`)
+                expect(source).toMatch(
+                    new RegExp(`import \\{[^}]*${rule}[^}]*\\} from '[^']*shared/cacheTypeCapabilities'`),
+                )
+            }
+        }
     })
 
     it('ZAYA sessions keep the qwen3 reasoning parser and model-owned no-thinking default', () => {

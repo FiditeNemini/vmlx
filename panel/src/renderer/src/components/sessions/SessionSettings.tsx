@@ -25,6 +25,12 @@ import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
 } from '../../../../shared/sessionGenerationDefaults'
+import {
+  cacheTypeRequiresPaged,
+  cacheSubtypeRequiresPaged,
+  cacheTypeSupportsBlockDiskOnly,
+  cacheSubtypeSupportsBlockDiskOnly,
+} from '../../../../shared/cacheTypeCapabilities'
 
 interface Session {
   id: string
@@ -46,21 +52,9 @@ interface SessionSettingsProps {
 
 
 
-function cacheTypeRequiresPaged(cacheType?: string): boolean {
-  return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
-}
 
-function cacheSubtypeRequiresPaged(cacheSubtype?: string): boolean {
-  return cacheSubtype === 'step3p7_full_sliding_kv' || cacheSubtype === 'mixed_swa_kv'
-}
 
-function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
-  return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
-}
 
-function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
-  return cacheSubtype === 'mixed_swa_kv' || cacheSubtype === 'step3p7_full_sliding_kv'
-}
 
 // The CLI preview must show what launch ACTUALLY passes. It knew only
 // deepseek-v4, so it displayed --timeout 300 for six of the seven slow families

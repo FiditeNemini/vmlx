@@ -67,8 +67,18 @@ import {
   verifyBundledEngineOnFilesystem,
 } from './engine-manager'
 import { app as electronApp } from 'electron'
-import { resolveSlowFamilyTimeoutSeconds } from '../shared/slowFamilyTimeouts'
+import {
+  GENERIC_DEFAULT_TIMEOUT_SECONDS,
+  SLOW_FAMILY_TIMEOUTS,
+  resolveSlowFamilyTimeoutSeconds,
+} from '../shared/slowFamilyTimeouts'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../shared/detectedFamilyNames'
+import {
+  cacheTypeRequiresPaged,
+  cacheSubtypeRequiresPaged,
+  cacheTypeSupportsBlockDiskOnly,
+  cacheSubtypeSupportsBlockDiskOnly,
+} from '../shared/cacheTypeCapabilities'
 
 /** Result of findEnginePath: either bundled Python or a system binary */
 type EnginePath =
@@ -170,21 +180,9 @@ function canAdoptExistingLocalEngine(modelPath: string): boolean {
   }
 }
 
-function cacheTypeRequiresPaged(cacheType?: string): boolean {
-  return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
-}
 
-function cacheTypeSupportsBlockDiskOnly(cacheType?: string): boolean {
-  return cacheType === 'hybrid' || cacheType === 'mamba' || cacheType === 'rotating_kv'
-}
 
-function cacheSubtypeRequiresPaged(cacheSubtype?: string): boolean {
-  return cacheSubtype === 'step3p7_full_sliding_kv' || cacheSubtype === 'mixed_swa_kv'
-}
 
-function cacheSubtypeSupportsBlockDiskOnly(cacheSubtype?: string): boolean {
-  return cacheSubtype === 'mixed_swa_kv' || cacheSubtype === 'step3p7_full_sliding_kv'
-}
 
 const DSV4_PAGED_CACHE_BLOCK_SIZE = 256
 const DSV4_MAX_CACHE_BLOCKS = 4097 // 4096 data blocks + reserved null block = 1,048,576 tokens
@@ -209,28 +207,27 @@ function indexBlocksForCapacity(
   // +1 for the reserved null block, matching DSV4_MAX_CACHE_BLOCKS' accounting.
   return Math.ceil(targetTokens / size) + 1
 }
-const GENERIC_DEFAULT_TIMEOUT_SECONDS = 300
-const DSV4_DEFAULT_TIMEOUT_SECONDS = 900
-const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = 900
+// These four numbers are the shared table's, not this file's. They are named
+// here only because the family-startup-defaults writers below PERSIST a value
+// into config.timeout (as opposed to resolving one), and a named constant reads
+// better at those call sites than a table lookup. Sourcing them from the table
+// keeps "what gets written" and "what gets resolved" from ever disagreeing.
+const DSV4_DEFAULT_TIMEOUT_SECONDS = SLOW_FAMILY_TIMEOUTS['deepseek-v4']
+const MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS = SLOW_FAMILY_TIMEOUTS.minimax_m3
 // openPangu-2.0-Flash: 92B MoE, typically 2-3 bit JANG — slow prefill/decode.
-const OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS = 900
+const OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS = SLOW_FAMILY_TIMEOUTS.openpangu_v2
 
 function effectiveSessionTimeoutSeconds(config: Partial<ServerConfig>, family?: string): number {
   const configured = config.timeout
   if (configured != null && configured <= 0) return 86400
-  const normalizedFamily = normalizeDetectedFamilyName(family)
-  if (normalizedFamily === 'deepseek-v4' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
-    return DSV4_DEFAULT_TIMEOUT_SECONDS
-  }
-  if (normalizedFamily === 'minimax_m3' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
-    return MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS
-  }
-  if (normalizedFamily === 'openpangu_v2' && (configured == null || configured === GENERIC_DEFAULT_TIMEOUT_SECONDS)) {
-    return OPENPANGU_V2_DEFAULT_TIMEOUT_SECONDS
-  }
   // Shared table — see panel/src/shared/slowFamilyTimeouts.ts for why this rule
-  // may only exist once.
-  return resolveSlowFamilyTimeoutSeconds(configured, normalizedFamily)
+  // may only exist once. Three hand-written pre-checks (deepseek-v4,
+  // minimax_m3, openpangu_v2) used to sit above this call. They returned the
+  // same numbers the table does, so they were not a live bug — but they shadowed
+  // it: raising any of those three in the shared table would have moved the
+  // Settings CLI preview and left the launcher on the old value, re-creating
+  // the exact preview-lies-about-launch defect the table was introduced to end.
+  return resolveSlowFamilyTimeoutSeconds(configured, normalizeDetectedFamilyName(family))
 }
 
 function finitePositiveNumber(value: unknown): number | undefined {
@@ -3212,11 +3209,14 @@ export class SessionManager extends EventEmitter {
           modelPath: proc.modelPath,
           host: '127.0.0.1',
           port: proc.port,
-          timeout: detectedFamily === 'deepseek-v4'
-            ? DSV4_DEFAULT_TIMEOUT_SECONDS
-            : detectedFamily === 'minimax_m3'
-              ? MINIMAX_M3_DEFAULT_TIMEOUT_SECONDS
-              : GENERIC_DEFAULT_TIMEOUT_SECONDS,
+          // Adopting an already-running engine used to hand-roll this as a
+          // two-family ternary (deepseek-v4 / minimax_m3), so an adopted
+          // openpangu_v2, qwen3.5, qwen3.5-moe, qwen3-next or nemotron-h
+          // session persisted timeout=300 while the same model created through
+          // the normal path persisted 900 — the same model showing two
+          // different numbers in Settings depending on how the session came to
+          // exist. Ask the shared table instead; it knows all seven.
+          timeout: resolveSlowFamilyTimeoutSeconds(undefined, detectedFamily),
           maxNumSeqs: 1,
           prefillBatchSize: 512,
           prefillStepSize: 2048,

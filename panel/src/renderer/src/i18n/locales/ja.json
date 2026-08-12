@@ -101,7 +101,40 @@
       "quickStart": "クイックスタート"
     },
     "copy": "コピー",
-    "copied": "コピーしました"
+    "copied": "コピーしました",
+    "portRange": "ポートは1024〜65535である必要があります",
+    "changePortFailed": "ポートを変更できませんでした",
+    "changeHostFailed": "ホストを変更できませんでした",
+    "changeSingleModelFailed": "単一モデルモードを変更できませんでした",
+    "codingTools": {
+      "title": "コーディングツール連携",
+      "subtitle": "ローカルモデルをコーディングエージェントに接続 — ワンクリックまたは手動設定",
+      "refreshTitle": "状態を更新",
+      "installSuccess": "インストールに成功しました",
+      "installFailed": "インストールに失敗しました",
+      "added": "{model} を追加しました",
+      "configFailed": "設定に失敗しました",
+      "removed": "{label} を削除しました",
+      "removeFailed": "削除に失敗しました",
+      "claudeCodeDesc": "Anthropic製コーディングCLI",
+      "codexDesc": "OpenAI製コーディングエージェント",
+      "opencodeDesc": "ターミナル用コーディングアシスタント",
+      "openclawDesc": "AIエージェントフレームワーク",
+      "install": "インストール",
+      "installed": "インストール済み",
+      "autoConfigure": "自動設定",
+      "autoConfigureTitle": "{model} 用に {tool} を自動設定",
+      "manualSetup": "手動セットアップ",
+      "removeEntryTitle": "このエントリを設定から削除",
+      "removeAllEntries": "MLX Studioのエントリをすべて削除",
+      "installStep": "1. {tool} をインストール",
+      "editConfigFile": "設定ファイルを編集",
+      "appendToFile": "これをファイルに追記してください:",
+      "mergeIntoFile": "これをファイルにマージしてください:",
+      "copyFilePath": "ファイルパスをコピー",
+      "copyConfig": "設定をコピー",
+      "startServerHint": "モデルサーバーを起動すると、設定ボタンと手動セットアップ手順が有効になります"
+    }
   },
   "endpoints": {
     "title": "エンドポイント",
@@ -148,7 +181,23 @@
     "cancelChatEndpoint": "チャット補完ストリームをキャンセル",
     "cancelResponsesEndpoint": "Responses ストリームをキャンセル",
     "cancelCompletionsEndpoint": "テキスト補完ストリームをキャンセル",
-    "healthEndpoint": "ヘルスチェック — モデル状態、メモリ、MCP 情報"
+    "healthEndpoint": "ヘルスチェック — モデル状態、メモリ、MCP 情報",
+    "messagesApi": "Messages API",
+    "chatGenerate": "チャットと生成",
+    "modelsInfo": "モデルと情報",
+    "liveness": "死活監視",
+    "modelInfoDesc": "モデル情報",
+    "ollamaChatDesc": "Ollama互換エンドポイント — ollama CLIや任意のOllamaクライアントで使用できます。応答はNDJSONストリーミングです。",
+    "modelsEmbeddingsDesc": "モデル情報と埋め込み",
+    "ollamaLivenessDesc": "Ollama互換性チェック",
+    "createMessageEndpoint": "メッセージを作成（ストリーミングまたは非ストリーミング）",
+    "healthCheckEndpoint": "ヘルスチェック",
+    "ollamaChatEndpoint": "チャット補完（NDJSONストリーミング）",
+    "ollamaGenerateEndpoint": "テキスト生成（NDJSONストリーミング）",
+    "showModelEndpoint": "モデルの詳細を表示",
+    "ollamaEmbeddingsEndpoint": "埋め込みを生成",
+    "ollamaEmbedAliasEndpoint": "埋め込みを生成（エイリアス）",
+    "livenessCheckEndpoint": "死活チェック — \"vMLX Gateway is running\" を返します"
   },
   "snippets": {
     "quickStart": "クイックスタート"
@@ -269,7 +318,10 @@
         "modelNotRunningBody": "メッセージを送信する前にモデルを起動してください。",
         "messageFailedTitle": "メッセージに失敗しました",
         "unknownError": "不明なエラー",
-        "failedToStart": "起動に失敗しました"
+        "failedToStart": "起動に失敗しました",
+        "connectionLost": "サーバーとの接続が失われました。モデルサーバーがクラッシュまたは停止した可能性があります。セッションを再起動してみてください。",
+        "regenerateFailedTitle": "再生成に失敗しました",
+        "regenerateFailedBody": "前の応答を置き換えられませんでした。"
       }
     },
     "quickStart": {
@@ -319,7 +371,8 @@
       "today": "今日",
       "yesterday": "昨日",
       "daysAgo": "{n}日前",
-      "noChatsYet": "チャットはまだありません"
+      "noChatsYet": "チャットはまだありません",
+      "clearAllTitle": "{scope}を削除"
     },
     "settings": {
       "header": "チャット設定",
@@ -443,7 +496,10 @@
       "braveWithKey": "API キーによるプレミアム Web 検索",
       "braveNoKey": "API キーが必要 — 下に入力してください",
       "braveKeyPlaceholder": "Brave Search API キー...",
-      "braveGetKey": "無料 API キーを取得 →"
+      "braveGetKey": "無料 API キーを取得 →",
+      "reviewSaved": "保存されたチャット設定を確認してください",
+      "modelDefaultWithValue": "{value}（モデルの既定値）",
+      "exactValueAria": "{label} の正確な値"
     },
     "input": {
       "dropOverlay": "画像、動画、音声、またはテキストファイルをドロップして添付",
@@ -451,7 +507,8 @@
       "placeholderDefault": "メッセージ...",
       "attachTitle": "画像、動画、音声、またはテキストファイルを添付",
       "stopTitle": "生成を停止 (Esc)",
-      "sendTitle": "メッセージを送信 (Enter)"
+      "sendTitle": "メッセージを送信 (Enter)",
+      "textAttachment": "テキスト"
     },
     "bubble": {
       "codeDefaultLang": "コード",
@@ -564,7 +621,10 @@
       "usableTwin": "同じモデルの別のセッションに利用可能なパスがあります。",
       "repointModelPath": "モデルパスを再指定",
       "removeSession": "セッションを削除",
-      "pidLabel": "PID {pid}"
+      "pidLabel": "PID {pid}",
+      "modelFiles": "モデルファイル:",
+      "residentRam": "常駐RAM:",
+      "lazyResidentNote": " — エキスパート重みはSSDからストリーミングされ、常駐RAMはバンドルサイズを下回ります"
     },
     "config": {
       "serverSettings": "サーバー設定",
@@ -934,7 +994,8 @@
       "additionalArgsTooltip": "serve コマンドに追加される生のコマンドライン引数。上の UI に公開されていないフラグに使用してください。例: --log-level DEBUG。引数は空白で分割され、そのまま CLI に渡されます。",
       "metalWiredLimitHelp": "大きなモデルで Metal のメモリ不足、SIGKILL、カーネルパニックの恐れがある場合、macOS の Metal ワイヤードメモリ上限の調整が必要になることがあります。大容量メモリの Mac の例: {{command}}。物理 RAM と同じ値にはせず、OS・WindowServer・アプリ用の余裕を残してください。128GB の Mac では通常 128000 MB より 115000〜120000 MB のほうが安全です。このコマンドには管理者パスワードが必要で、再起動すると元に戻ります。",
       "pagedCacheCapacity": "実効インメモリキャッシュ容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン",
-      "pagedCacheMemoryIgnored": "インメモリページドキャッシュが有効な間、キャッシュ TTL は適用されません。キャッシュメモリ上限／キャッシュメモリ % は Apple ユニファイドメモリの L1 使用量を制限し、最大キャッシュブロック数とブロックサイズがトークン容量を制限します。"
+      "pagedCacheMemoryIgnored": "インメモリページドキャッシュが有効な間、キャッシュ TTL は適用されません。キャッシュメモリ上限／キャッシュメモリ % は Apple ユニファイドメモリの L1 使用量を制限し、最大キャッシュブロック数とブロックサイズがトークン容量を制限します。",
+      "blockDiskCapacity": "実効 SSD ブロックインデックス容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン"
     },
     "create": {
       "title": "セッションを作成",
@@ -979,7 +1040,15 @@
       "apiKeyOptional": "API キー(省略可)",
       "modelLabel": "モデル",
       "imageServerEditHint": "画像サーバーはプロンプトで画像を編集するための /v1/images/edits エンドポイントを公開します。Image タブまたは任意の API クライアントを使用してください。",
-      "imageServerGenHint": "画像サーバーは /v1/images/generations エンドポイント (OpenAI 互換) を公開します。Image タブまたは任意の API クライアントで画像を生成できます。"
+      "imageServerGenHint": "画像サーバーは /v1/images/generations エンドポイント (OpenAI 互換) を公開します。Image タブまたは任意の API クライアントで画像を生成できます。",
+      "engineNotFound": "推論エンジンが見つかりません。vMLXを再起動して初回セットアップを実行するか、手動でインストールしてください:",
+      "creatingSession": "セッションを作成中...",
+      "sessionCreated": "セッションを作成しました: {id}",
+      "serverReady": "サーバーの準備ができました!",
+      "connectRemoteFailed": "リモートエンドポイントに接続できませんでした",
+      "addDirectoryFailed": "ディレクトリを追加できませんでした",
+      "deleteModelConfirm": "\"{label}\" をディスクから削除しますか?\n\nパス: {path}\n\nダウンロード済みファイルが完全に削除されます。このモデルを使用中のセッションは先に停止されます。",
+      "deleteModelTitle": "{name} をディスクから削除"
     },
     "dashboard": {
       "defaultTitle": "セッション",
@@ -1089,7 +1158,8 @@
         "failedToStartChat": "チャットの作成に失敗しました",
         "failedToStopServer": "サーバーの停止に失敗しました",
         "failedToStartServer": "サーバーの開始に失敗しました"
-      }
+      },
+      "defaultChatTitle": "チャット {date}"
     },
     "benchmark": {
       "headerTest": "テスト",
@@ -1098,7 +1168,10 @@
       "headerTime": "時間",
       "rowAverage": "平均",
       "sessionMustBeRunning": "ベンチマークを実行するにはセッションが実行中である必要があります。",
-      "flushCacheFirst": "先にキャッシュをフラッシュ"
+      "flushCacheFirst": "先にキャッシュをフラッシュ",
+      "failed": "ベンチマークに失敗しました",
+      "running": "実行中...",
+      "history": "履歴（{n}）"
     },
     "cache": {
       "prefixCache": "プレフィックスキャッシュ",
@@ -1236,7 +1309,16 @@
       "filterPlaceholder": "ログを絞り込み...",
       "exportTitle": "ログをエクスポート",
       "clearTitle": "ログをクリア",
-      "paused": "一時停止"
+      "paused": "一時停止",
+      "resumeTitle": "ライブログを再開",
+      "pauseTitle": "ライブログを一時停止",
+      "lineCount": "{n} 行",
+      "totalCount": "（合計 {n}）",
+      "notConnected": "未接続",
+      "serverNotRunning": "サーバーが起動していません",
+      "noOutputYet": "まだログ出力はありません...",
+      "connectToSee": "接続すると接続ログが表示されます",
+      "startToSee": "サーバーを起動するとログが表示されます"
     },
     "perf": {
       "engine": "エンジン",
@@ -1318,7 +1400,10 @@
       "default": "デフォルト",
       "custom": "カスタム",
       "removeTitle": "ディレクトリを削除",
-      "placeholder": "パスを入力するか参照..."
+      "placeholder": "パスを入力するか参照...",
+      "builtIn": "組み込み",
+      "add": "追加",
+      "browse": "参照..."
     },
     "embed": {
       "model": "エンベディングモデル",
@@ -1352,7 +1437,17 @@
       "embeddingModel": "埋め込みモデル",
       "textA": "テキスト A",
       "cosineSimilarity": "コサイン類似度",
-      "embeddingPreview": "埋め込みプレビュー"
+      "embeddingPreview": "埋め込みプレビュー",
+      "failed": "埋め込みに失敗しました",
+      "textAPlaceholder": "埋め込むテキストを入力...",
+      "textB": "テキストB（任意 — 類似度用）",
+      "textBPlaceholder": "比較する2つ目のテキストを入力...",
+      "embedding": "埋め込み中...",
+      "embedAndCompare": "埋め込みと比較",
+      "generate": "埋め込みを生成",
+      "verySimilar": "非常に類似",
+      "somewhatSimilar": "やや類似",
+      "different": "異なる"
     },
     "performance": {
       "sessionMustBeRunning": "パフォーマンスを監視するにはセッションが実行中である必要があります。",
@@ -1423,11 +1518,50 @@
       "ssmResidentMemory": "SSM 常駐メモリ",
       "memActive": "アクティブ",
       "memPeak": "ピーク"
+    },
+    "context": {
+      "startTimedOut": "セッションの起動がタイムアウトしました",
+      "startTimedOut5m": "セッションの起動が5分でタイムアウトしました",
+      "createFailed": "セッションを作成できませんでした",
+      "createdNotFound": "セッションは作成されましたが見つかりません",
+      "sessionFailedToStart": "セッションの起動に失敗しました"
+    },
+    "drawer": {
+      "restartedToast": "新しい設定で再起動しました。",
+      "savedRemote": "保存しました。次のリクエストから適用されます。",
+      "savedRestartToApply": "保存しました。適用するには再起動してください（{keys}）。",
+      "stopping": "停止中...",
+      "startingWithNewSettings": "新しい設定で起動中...",
+      "timeoutTooltip": "リモートサーバーからの応答を待つ最大時間。遅いモデル、長い生成、高遅延の接続では増やしてください。既定は300秒（5分）。"
+    },
+    "distributed": {
+      "clusterNodes": "クラスターノード",
+      "scanning": "スキャン中...",
+      "scanForNodes": "ノードをスキャン",
+      "addManual": "手動で追加",
+      "scanFailed": "スキャンに失敗しました",
+      "addNodeFailed": "ノードを追加できませんでした",
+      "ipPlaceholder": "IPアドレス（例: 192.168.1.50）",
+      "noNodes": "まだノードが見つかっていません。他のMacでワーカーを起動し、「ノードをスキャン」をクリックしてください。",
+      "coordinator": "コーディネーター",
+      "layersRange": "レイヤー {from}-{to}",
+      "removeFromCluster": "クラスターから削除"
     }
   },
   "image": {
     "tab": {
-      "dismissError": "閉じる"
+      "dismissError": "閉じる",
+      "serverError": "サーバーエラー",
+      "gatedDownloadError": "モデルのダウンロードに失敗しました — 認証が必要です。サーバータブ > ダウンロードセクションでHuggingFaceトークンを追加し、huggingface.coでモデルのライセンスに同意してください。元のエラー: {error}",
+      "uploadSourceFirst": "編集する前に元画像をアップロードしてください。",
+      "createSessionFailed": "画像セッションを作成できませんでした",
+      "editFailed": "編集に失敗しました",
+      "generationFailed": "生成に失敗しました",
+      "startModelForLogs": "画像モデルを起動するとサーバーログが表示されます",
+      "iterateLoadFailedDeleted": "反復用の画像を読み込めませんでした — ファイルが削除された可能性があります",
+      "iterateLoadFailed": "反復用の画像を読み込めませんでした",
+      "deleteFailed": "画像を削除できませんでした: {error}",
+      "deleteFailedPlain": "画像を削除できませんでした"
     },
     "picker": {
       "title": "画像サーバーを開始",
@@ -1469,7 +1603,26 @@
       "apiKey": "API キー",
       "logLevel": "ログレベル",
       "startServer": "サーバーを起動",
-      "viewDownloads": "ダウンロードを表示"
+      "viewDownloads": "ダウンロードを表示",
+      "quant4Desc": "最速・最小メモリ",
+      "quant8Desc": "より高品質",
+      "quantFullDesc": "最高品質・最大メモリ",
+      "incompleteAfterDownload": "ダウンロードは完了しましたが、モデルが不完全です: {missing}",
+      "gatedTokenRequired": "このモデルにはHuggingFaceトークンが必要です。サーバータブ > ダウンロードセクションでHFトークンを追加し、huggingface.coでモデルのライセンスに同意してください。",
+      "chooseModelBelow": "下からモデルを選ぶか、ローカルモデルを参照してください。",
+      "genStrong": "生成:",
+      "genHintBody": "Schnellは最速（4ステップ）、Devは最高品質です。4ビットは約6GB、フルは約24GB使用します。RAM 16GBの場合はSchnellまたはKlein 4Bを4ビットで使ってください。",
+      "editStrong": "編集:",
+      "editHintBody": "フル精度のみ — 量子化した編集モデルは使い物にならない結果を生みます。モデルにより24-54 GBが必要です。",
+      "editModelsIntro": "写真とテキストプロンプトを送信して、画像の編集・インペイント・変換ができます。最高品質のためフル精度のみ。編集モデルは今後追加予定です。",
+      "serverTabDownloadStrong": "サーバータブ > ダウンロード",
+      "sectionSuffix": "セクション。",
+      "redownloadHint": "モデルを再ダウンロードしてすべてのファイルを取得してください。そうしないとサーバーが取得を試みたまま固まります。",
+      "checkingButton": "確認中...",
+      "downloadNote": "モデルはHuggingFaceからダウンロードされます（モデルと量子化により約6-24 GB）。",
+      "youMayNeedTo": "必要に応じて",
+      "setHfTokenLink": "HFトークンを設定",
+      "andAcceptThe": "し、次のライセンスに同意してください:"
     },
     "prompt": {
       "variationLabel": "バリエーション",
@@ -1484,7 +1637,28 @@
       "cancel": "キャンセル",
       "promptLabel": "プロンプト:",
       "variationOfLabel": "バリエーション元:",
-      "variationNewSeed": "(新しいシード)"
+      "variationNewSeed": "(新しいシード)",
+      "strengthValue": "強度 {value}",
+      "sourceInpainting": "インペインティング用の元画像",
+      "sourceInstructionEdit": "指示ベース編集用の元画像",
+      "maskApplied": "（マスク適用済み）",
+      "editMask": "マスクを編集",
+      "paintMask": "マスクを描く",
+      "stepsTip": "ノイズ除去ステップ数。多いほど高品質ですが遅くなります。Schnell/Z-Image: 4、Dev: 20、Qwen Edit: 28。",
+      "sizeTip": "出力画像のサイズ。16の倍数である必要があります。大きいほどVRAM消費が増え遅くなります。1024x1024が標準です。",
+      "guidanceTip": "クラシファイアフリーガイダンスのスケール。高いほどプロンプトに忠実になりますが創造性は下がります。Fluxモデルは3-5、その他は7-12。",
+      "strengthEditTip": "元画像をどれだけ変更するか。0 = 変更なし、1 = 完全に新規。編集では0.6-0.8が適しています。",
+      "strengthVariationTip": "バリエーションが元とどれだけ異なるか。0 = 同一、1 = 完全に別物。バリエーションでは0.7-0.9が適しています。",
+      "imageCount": "x{n} 枚",
+      "placeholderWaiting": "サーバーの起動を待っています...",
+      "placeholderVariation": "次のバリエーション用にプロンプトを追加（空欄でランダムなバリエーション）...",
+      "placeholderNeedSource": "上で元画像をアップロードしてから、編集内容を記述してください...",
+      "placeholderNeedMask": "まずマスクを描いてから（上の「マスクを描く」をクリック）、塗りつぶす内容を記述してください...",
+      "placeholderEdit": "適用する編集内容を記述してください（例:「空を紫にして」）...",
+      "placeholderGenerate": "生成したい画像を記述してください...",
+      "vary": "バリエーション",
+      "edit": "編集",
+      "generate": "生成"
     },
     "settings": {
       "steps": "ステップ数",
@@ -1510,7 +1684,14 @@
       "portLabel": "ポート: 自動割り当て",
       "hostLocalhost": "ホスト: 127.0.0.1 (localhost)",
       "portAutoAssigned": "ポート: 自動割り当て",
-      "serverManagedAutomatically": "画像モデルではサーバー設定が自動的に管理されます。"
+      "serverManagedAutomatically": "画像モデルではサーバー設定が自動的に管理されます。",
+      "editSettings": "編集設定",
+      "generationSettings": "生成設定",
+      "negativeHelpBody": "画像に含めたくない要素を記述します。よくあるアーティファクトの回避に有効です。例:",
+      "negativeHelpExample": "「ぼやけ、低品質、文字、透かし、変形した手」",
+      "advanced": "詳細設定",
+      "server": "サーバー",
+      "modelLine": "モデル: {model}"
     },
     "topbar": {
       "historyTitle": "履歴を表示",
@@ -1520,7 +1701,14 @@
       "imageGenBadge": "画像生成",
       "logsTitle": "ログ",
       "settingsTitle": "設定",
-      "retryTitle": "再試行"
+      "retryTitle": "再試行",
+      "noModelSelected": "モデルが選択されていません",
+      "cannotSwitchTitle": "生成中は切り替えできません",
+      "switchModelTitle": "モデルを切り替え",
+      "runningOnPort": ":{port} で実行中",
+      "cancelLoadingTitle": "読み込みをキャンセル",
+      "stopServerTitle": "サーバーを停止",
+      "quantFull": "フル"
     },
     "gallery": {
       "deleteConfirm": "この画像を削除しますか?ファイルは完全に削除されます。",
@@ -1532,7 +1720,21 @@
       "copyPromptTitle": "この画像の生成に使用したプロンプトをコピー",
       "copyPromptAria": "プロンプトをコピー",
       "deleteTitle": "この画像をギャラリーから削除",
-      "deleteAria": "画像を削除"
+      "deleteAria": "画像を削除",
+      "emptyEditTitle": "最初の画像を編集しましょう",
+      "emptyGenTitle": "最初の画像を生成しましょう",
+      "emptyEditBody": "元画像をアップロードし、下にプロンプトを入力すると、選択したモデルで編集できます。",
+      "emptyGenBody": "下にプロンプトを入力して「生成」をクリックすると、選択したモデルで画像を作成できます。",
+      "loadFailed": "読み込みに失敗しました",
+      "variationBadge": "バリエーション",
+      "originalLabel": "オリジナル",
+      "varBadge": "変",
+      "stepsCount": "{n} ステップ",
+      "iterate": "繰り返す",
+      "save": "保存",
+      "promptButton": "プロンプト",
+      "editing": "編集中",
+      "generating": "生成中"
     },
     "history": {
       "title": "履歴",
@@ -1540,7 +1742,13 @@
       "hideTitle": "サイドバーを隠す",
       "empty": "生成がありません",
       "editBadge": "編集",
-      "genBadge": "生成"
+      "genBadge": "生成",
+      "confirmDeleteTitle": "もう一度クリックして確認",
+      "deleteTitle": "セッションを削除",
+      "deleteConfirmShort": "削除?",
+      "justNow": "たった今",
+      "minutesAgo": "{n}分前",
+      "hoursAgo": "{n}時間前"
     },
     "mask": {
       "paintTitle": "マスクをペイント(白 = 編集する領域)",
@@ -1552,7 +1760,9 @@
       "clearTitle": "マスク全体をクリア",
       "applyTitle": "マスクを適用して編集",
       "cancelTitle": "マスクペイントをキャンセル",
-      "emptyError": "適用する前にマスク領域をペイントまたは描画してください。"
+      "emptyError": "適用する前にマスク領域をペイントまたは描画してください。",
+      "apply": "適用",
+      "helpText": "編集したい領域を塗ってください（赤で表示）。モデルは塗られた領域のみを塗りつぶし/置き換えます。"
     },
     "topBar": {
       "imageGeneration": "画像生成",
@@ -1678,7 +1888,8 @@
       "almostReady": "もうすぐ準備完了...",
       "connected": "接続済み",
       "modelReady": "モデル準備完了",
-      "wakingFromSleep": "スリープから復帰中..."
+      "wakingFromSleep": "スリープから復帰中...",
+      "ready": "準備完了"
     }
   },
   "tools": {
@@ -1714,7 +1925,11 @@
       "hfToQuantizedMlx": "HF から量子化 MLX へ",
       "runHealthChecks": "ヘルスチェックを実行",
       "viewMetadata": "メタデータを表示",
-      "scanningForModels": "モデルを検索中..."
+      "scanningForModels": "モデルを検索中...",
+      "mlxModelsCount": "MLXモデル（{n}）",
+      "noMatch": "検索に一致するモデルがありません",
+      "noLocalModels": "ローカルモデルが見つかりません",
+      "emptyHint": "サーバータブからモデルをダウンロードするか、変換機能でHuggingFaceモデルを量子化してください"
     },
     "converter": {
       "title": "モデルコンバーター",
@@ -1773,7 +1988,20 @@
       "outputDirectory": "出力ディレクトリ",
       "leaveEmptyAutoName": "空欄にすると名前を自動生成します",
       "cancelConversion": "変換をキャンセル",
-      "serveModel": "モデルを提供"
+      "serveModel": "モデルを提供",
+      "presetBalancedLabel": "バランス（4ビット）",
+      "presetBalancedDesc": "品質とサイズのバランスが良い — 推奨",
+      "presetQualityLabel": "高品質（8ビット）",
+      "presetQualityDesc": "サイズは大きいが高品質",
+      "presetCompactLabel": "コンパクト（3ビット）",
+      "presetCompactDesc": "最小サイズ、多少の品質低下あり",
+      "quantizingLayer": "レイヤーを量子化中 {current}/{total}",
+      "calibrating": "キャリブレーション中...",
+      "quantizing": "量子化中...",
+      "savingWeights": "重みを保存中...",
+      "verifyingOutput": "出力を検証中...",
+      "converting": "変換中...",
+      "compatNoteFor": "{type} の互換性に関する注意"
     },
     "doctor": {
       "title": "モデルドクター",
@@ -1793,7 +2021,13 @@
       "modelInspector": "モデルインスペクタ",
       "viewMetadataDesc": "config.json からモデルの詳細メタデータを表示",
       "modelPathOrId": "モデルパスまたは HuggingFace ID",
-      "modelInformation": "モデル情報"
+      "modelInformation": "モデル情報",
+      "failed": "モデルを検査できませんでした"
+    },
+    "logViewer": {
+      "outputLog": "出力ログ",
+      "verboseOutput": "詳細出力",
+      "lineCount": "（{n} 行）"
     }
   },
   "convert": {

@@ -101,7 +101,40 @@
       "quickStart": "빠른 시작"
     },
     "copy": "복사",
-    "copied": "복사됨"
+    "copied": "복사됨",
+    "portRange": "포트는 1024-65535 사이여야 합니다",
+    "changePortFailed": "포트를 변경하지 못했습니다",
+    "changeHostFailed": "호스트를 변경하지 못했습니다",
+    "changeSingleModelFailed": "단일 모델 모드를 변경하지 못했습니다",
+    "codingTools": {
+      "title": "코딩 도구 연동",
+      "subtitle": "로컬 모델을 코딩 에이전트에 연결 — 원클릭 또는 수동 설정",
+      "refreshTitle": "상태 새로 고침",
+      "installSuccess": "설치되었습니다",
+      "installFailed": "설치 실패",
+      "added": "{model}을(를) 추가했습니다",
+      "configFailed": "설정 실패",
+      "removed": "{label}을(를) 제거했습니다",
+      "removeFailed": "제거 실패",
+      "claudeCodeDesc": "Anthropic 코딩 CLI",
+      "codexDesc": "OpenAI 코딩 에이전트",
+      "opencodeDesc": "터미널 코딩 어시스턴트",
+      "openclawDesc": "AI 에이전트 프레임워크",
+      "install": "설치",
+      "installed": "설치됨",
+      "autoConfigure": "자동 구성",
+      "autoConfigureTitle": "{model}용 {tool} 자동 구성",
+      "manualSetup": "수동 설정",
+      "removeEntryTitle": "구성에서 이 항목 제거",
+      "removeAllEntries": "모든 MLX Studio 항목 제거",
+      "installStep": "1. {tool} 설치",
+      "editConfigFile": "구성 파일 편집",
+      "appendToFile": "파일에 다음을 추가하세요:",
+      "mergeIntoFile": "파일에 다음을 병합하세요:",
+      "copyFilePath": "파일 경로 복사",
+      "copyConfig": "구성 복사",
+      "startServerHint": "모델 서버를 시작하면 구성 버튼과 수동 설정 안내가 활성화됩니다"
+    }
   },
   "endpoints": {
     "title": "엔드포인트",
@@ -148,7 +181,23 @@
     "cancelChatEndpoint": "채팅 완성 스트림 취소",
     "cancelResponsesEndpoint": "응답 스트림 취소",
     "cancelCompletionsEndpoint": "텍스트 완성 스트림 취소",
-    "healthEndpoint": "헬스 체크 — 모델 상태, 메모리, MCP 정보"
+    "healthEndpoint": "헬스 체크 — 모델 상태, 메모리, MCP 정보",
+    "messagesApi": "Messages API",
+    "chatGenerate": "채팅 및 생성",
+    "modelsInfo": "모델 및 정보",
+    "liveness": "활성 상태",
+    "modelInfoDesc": "모델 정보",
+    "ollamaChatDesc": "Ollama 호환 엔드포인트 — ollama CLI 또는 모든 Ollama 클라이언트에서 사용할 수 있습니다. 응답은 NDJSON 스트리밍을 사용합니다.",
+    "modelsEmbeddingsDesc": "모델 정보 및 임베딩",
+    "ollamaLivenessDesc": "Ollama 호환성 확인",
+    "createMessageEndpoint": "메시지 생성 (스트리밍 또는 비스트리밍)",
+    "healthCheckEndpoint": "상태 확인",
+    "ollamaChatEndpoint": "채팅 완성 (NDJSON 스트리밍)",
+    "ollamaGenerateEndpoint": "텍스트 생성 (NDJSON 스트리밍)",
+    "showModelEndpoint": "모델 세부 정보 표시",
+    "ollamaEmbeddingsEndpoint": "임베딩 생성",
+    "ollamaEmbedAliasEndpoint": "임베딩 생성 (별칭)",
+    "livenessCheckEndpoint": "활성 상태 확인 — \"vMLX Gateway is running\"을 반환합니다"
   },
   "snippets": {
     "quickStart": "빠른 시작"
@@ -269,7 +318,10 @@
         "modelNotRunningBody": "메시지를 보내기 전에 모델을 시작하세요.",
         "messageFailedTitle": "메시지 실패",
         "unknownError": "알 수 없는 오류",
-        "failedToStart": "시작 실패"
+        "failedToStart": "시작 실패",
+        "connectionLost": "서버 연결이 끊어졌습니다. 모델 서버가 중단되었거나 중지되었을 수 있습니다. 세션을 다시 시작해 보세요.",
+        "regenerateFailedTitle": "재생성 실패",
+        "regenerateFailedBody": "이전 응답을 교체할 수 없습니다."
       }
     },
     "quickStart": {
@@ -319,7 +371,8 @@
       "today": "오늘",
       "yesterday": "어제",
       "daysAgo": "{n}일 전",
-      "noChatsYet": "아직 채팅이 없습니다"
+      "noChatsYet": "아직 채팅이 없습니다",
+      "clearAllTitle": "{scope} 삭제"
     },
     "settings": {
       "header": "채팅 설정",
@@ -443,7 +496,10 @@
       "braveWithKey": "API 키를 사용한 프리미엄 웹 검색",
       "braveNoKey": "API 키 필요 — 아래에 입력하세요",
       "braveKeyPlaceholder": "Brave Search API 키...",
-      "braveGetKey": "무료 API 키 받기 →"
+      "braveGetKey": "무료 API 키 받기 →",
+      "reviewSaved": "저장된 채팅 설정을 확인하세요",
+      "modelDefaultWithValue": "{value} (모델 기본값)",
+      "exactValueAria": "{label} 정확한 값"
     },
     "input": {
       "dropOverlay": "이미지, 비디오, 오디오 또는 텍스트 파일을 드래그하여 첨부",
@@ -451,7 +507,8 @@
       "placeholderDefault": "메시지...",
       "attachTitle": "이미지, 비디오, 오디오 또는 텍스트 파일 첨부",
       "stopTitle": "생성 중지 (Esc)",
-      "sendTitle": "메시지 전송 (Enter)"
+      "sendTitle": "메시지 전송 (Enter)",
+      "textAttachment": "텍스트"
     },
     "bubble": {
       "codeDefaultLang": "코드",
@@ -564,7 +621,10 @@
       "usableTwin": "동일한 모델의 다른 세션에 사용 가능한 경로가 있습니다.",
       "repointModelPath": "모델 경로 다시 지정",
       "removeSession": "세션 제거",
-      "pidLabel": "PID {pid}"
+      "pidLabel": "PID {pid}",
+      "modelFiles": "모델 파일:",
+      "residentRam": "상주 RAM:",
+      "lazyResidentNote": " — 전문가 가중치는 SSD에서 스트리밍되며 상주 RAM은 번들 크기 이하로 유지됩니다"
     },
     "config": {
       "serverSettings": "서버 설정",
@@ -934,7 +994,8 @@
       "additionalArgsTooltip": "serve 명령에 추가되는 원시 명령줄 인수입니다. 위 UI에 노출되지 않은 플래그에 사용하세요. 예: --log-level DEBUG. 인수는 공백으로 분할되어 CLI에 직접 전달됩니다.",
       "metalWiredLimitHelp": "대용량 모델에서 Metal 메모리 부족, SIGKILL 또는 커널 패닉 위험이 발생하면 macOS의 Metal 고정 메모리 한도를 조정해야 할 수 있습니다. 메모리가 큰 Mac 예시: {{command}}. 물리 RAM과 같은 값으로 설정하지 말고 OS/WindowServer/앱 여유를 남기세요. 128GB Mac에서는 보통 128000 MB보다 115000~120000 MB가 더 안전합니다. 이 명령은 관리자 암호가 필요하며 재부팅하면 초기화됩니다.",
       "pagedCacheCapacity": "실효 메모리 내 캐시 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
-      "pagedCacheMemoryIgnored": "메모리 내 페이지 캐시가 켜져 있는 동안에는 캐시 TTL이 적용되지 않습니다. 캐시 메모리 제한 / 캐시 메모리 %는 Apple 통합 메모리의 L1 사용량을 제한하고, 최대 캐시 블록 수와 블록 크기가 토큰 용량을 제한합니다."
+      "pagedCacheMemoryIgnored": "메모리 내 페이지 캐시가 켜져 있는 동안에는 캐시 TTL이 적용되지 않습니다. 캐시 메모리 제한 / 캐시 메모리 %는 Apple 통합 메모리의 L1 사용량을 제한하고, 최대 캐시 블록 수와 블록 크기가 토큰 용량을 제한합니다.",
+      "blockDiskCapacity": "실효 SSD 블록 인덱스 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰"
     },
     "create": {
       "title": "세션 생성",
@@ -979,7 +1040,15 @@
       "apiKeyOptional": "API 키 (선택 사항)",
       "modelLabel": "모델",
       "imageServerEditHint": "이미지 서버는 프롬프트로 이미지를 편집하기 위한 /v1/images/edits 엔드포인트를 제공합니다. 이미지 탭이나 API 클라이언트를 사용하세요.",
-      "imageServerGenHint": "이미지 서버는 /v1/images/generations 엔드포인트 (OpenAI 호환)를 제공합니다. 이미지를 생성하려면 이미지 탭이나 API 클라이언트를 사용하세요."
+      "imageServerGenHint": "이미지 서버는 /v1/images/generations 엔드포인트 (OpenAI 호환)를 제공합니다. 이미지를 생성하려면 이미지 탭이나 API 클라이언트를 사용하세요.",
+      "engineNotFound": "추론 엔진을 찾을 수 없습니다. vMLX를 다시 시작하여 초기 설정을 실행하거나 수동으로 설치하세요:",
+      "creatingSession": "세션 생성 중...",
+      "sessionCreated": "세션이 생성되었습니다: {id}",
+      "serverReady": "서버가 준비되었습니다!",
+      "connectRemoteFailed": "원격 엔드포인트에 연결하지 못했습니다",
+      "addDirectoryFailed": "디렉터리를 추가하지 못했습니다",
+      "deleteModelConfirm": "\"{label}\"을(를) 디스크에서 삭제하시겠습니까?\n\n경로: {path}\n\n다운로드한 파일이 영구적으로 제거됩니다. 이 모델을 사용 중인 세션은 먼저 중지됩니다.",
+      "deleteModelTitle": "{name}을(를) 디스크에서 삭제"
     },
     "dashboard": {
       "defaultTitle": "세션",
@@ -1089,7 +1158,8 @@
         "failedToStartChat": "채팅 생성 실패",
         "failedToStopServer": "서버 중지 실패",
         "failedToStartServer": "서버 시작 실패"
-      }
+      },
+      "defaultChatTitle": "채팅 {date}"
     },
     "benchmark": {
       "headerTest": "테스트",
@@ -1098,7 +1168,10 @@
       "headerTime": "시간",
       "rowAverage": "평균",
       "sessionMustBeRunning": "벤치마크를 실행하려면 세션이 실행 중이어야 합니다.",
-      "flushCacheFirst": "먼저 캐시 비우기"
+      "flushCacheFirst": "먼저 캐시 비우기",
+      "failed": "벤치마크 실패",
+      "running": "실행 중...",
+      "history": "기록 ({n})"
     },
     "cache": {
       "prefixCache": "프리픽스 캐시",
@@ -1236,7 +1309,16 @@
       "filterPlaceholder": "로그 필터링...",
       "exportTitle": "로그 내보내기",
       "clearTitle": "로그 지우기",
-      "paused": "일시 중지됨"
+      "paused": "일시 중지됨",
+      "resumeTitle": "실시간 로그 재개",
+      "pauseTitle": "실시간 로그 일시중지",
+      "lineCount": "{n}줄",
+      "totalCount": "(총 {n})",
+      "notConnected": "연결되지 않음",
+      "serverNotRunning": "서버가 실행 중이 아님",
+      "noOutputYet": "아직 로그 출력이 없습니다...",
+      "connectToSee": "연결하면 연결 로그가 표시됩니다",
+      "startToSee": "서버를 시작하면 로그가 표시됩니다"
     },
     "perf": {
       "engine": "엔진",
@@ -1318,7 +1400,10 @@
       "default": "기본",
       "custom": "사용자 정의",
       "removeTitle": "디렉토리 제거",
-      "placeholder": "경로를 입력하거나 찾아보세요..."
+      "placeholder": "경로를 입력하거나 찾아보세요...",
+      "builtIn": "기본 제공",
+      "add": "추가",
+      "browse": "찾아보기..."
     },
     "embed": {
       "model": "임베딩 모델",
@@ -1352,7 +1437,17 @@
       "embeddingModel": "임베딩 모델",
       "textA": "텍스트 A",
       "cosineSimilarity": "코사인 유사도",
-      "embeddingPreview": "임베딩 미리보기"
+      "embeddingPreview": "임베딩 미리보기",
+      "failed": "임베딩 실패",
+      "textAPlaceholder": "임베딩할 텍스트를 입력하세요...",
+      "textB": "텍스트 B (선택 — 유사도 비교용)",
+      "textBPlaceholder": "비교할 두 번째 텍스트를 입력하세요...",
+      "embedding": "임베딩 중...",
+      "embedAndCompare": "임베딩 및 비교",
+      "generate": "임베딩 생성",
+      "verySimilar": "매우 유사",
+      "somewhatSimilar": "다소 유사",
+      "different": "상이함"
     },
     "performance": {
       "sessionMustBeRunning": "성능을 모니터링하려면 세션이 실행 중이어야 합니다.",
@@ -1423,11 +1518,50 @@
       "ssmResidentMemory": "SSM 상주 메모리",
       "memActive": "활성",
       "memPeak": "피크"
+    },
+    "context": {
+      "startTimedOut": "세션 시작 시간이 초과되었습니다",
+      "startTimedOut5m": "세션 시작이 5분 후 시간 초과되었습니다",
+      "createFailed": "세션을 생성하지 못했습니다",
+      "createdNotFound": "세션이 생성되었지만 찾을 수 없습니다",
+      "sessionFailedToStart": "세션을 시작하지 못했습니다"
+    },
+    "drawer": {
+      "restartedToast": "새 설정으로 다시 시작되었습니다.",
+      "savedRemote": "저장되었습니다. 다음 요청부터 적용됩니다.",
+      "savedRestartToApply": "저장되었습니다. 적용하려면 다시 시작하세요 ({keys}).",
+      "stopping": "중지 중...",
+      "startingWithNewSettings": "새 설정으로 시작 중...",
+      "timeoutTooltip": "원격 서버의 응답을 기다리는 최대 시간입니다. 느린 모델, 긴 생성, 지연이 큰 연결에서는 늘리세요. 기본값 300초(5분)."
+    },
+    "distributed": {
+      "clusterNodes": "클러스터 노드",
+      "scanning": "스캔 중...",
+      "scanForNodes": "노드 검색",
+      "addManual": "수동 추가",
+      "scanFailed": "스캔 실패",
+      "addNodeFailed": "노드를 추가하지 못했습니다",
+      "ipPlaceholder": "IP 주소 (예: 192.168.1.50)",
+      "noNodes": "아직 발견된 노드가 없습니다. 다른 Mac에서 워커를 시작한 후 \"노드 검색\"을 클릭하세요.",
+      "coordinator": "코디네이터",
+      "layersRange": "레이어 {from}-{to}",
+      "removeFromCluster": "클러스터에서 제거"
     }
   },
   "image": {
     "tab": {
-      "dismissError": "닫기"
+      "dismissError": "닫기",
+      "serverError": "서버 오류",
+      "gatedDownloadError": "모델 다운로드 실패 — 인증이 필요합니다. 서버 탭 > 다운로드 섹션에서 HuggingFace 토큰을 추가한 다음 huggingface.co에서 모델 라이선스에 동의하세요. 원본 오류: {error}",
+      "uploadSourceFirst": "편집하기 전에 원본 이미지를 업로드하세요.",
+      "createSessionFailed": "이미지 세션을 생성하지 못했습니다",
+      "editFailed": "편집 실패",
+      "generationFailed": "생성 실패",
+      "startModelForLogs": "이미지 모델을 시작하면 서버 로그를 볼 수 있습니다",
+      "iterateLoadFailedDeleted": "반복 작업용 이미지를 불러오지 못했습니다 — 파일이 삭제되었을 수 있습니다",
+      "iterateLoadFailed": "반복 작업용 이미지를 불러오지 못했습니다",
+      "deleteFailed": "이미지를 삭제하지 못했습니다: {error}",
+      "deleteFailedPlain": "이미지를 삭제하지 못했습니다"
     },
     "picker": {
       "title": "이미지 서버 시작",
@@ -1469,7 +1603,26 @@
       "apiKey": "API 키",
       "logLevel": "로그 수준",
       "startServer": "서버 시작",
-      "viewDownloads": "다운로드 보기"
+      "viewDownloads": "다운로드 보기",
+      "quant4Desc": "가장 빠르고 메모리 사용 최소",
+      "quant8Desc": "더 나은 품질",
+      "quantFullDesc": "최고 품질, 메모리 사용 최대",
+      "incompleteAfterDownload": "다운로드가 완료되었지만 모델이 불완전합니다: {missing}",
+      "gatedTokenRequired": "이 모델에는 HuggingFace 토큰이 필요합니다. 서버 탭 > 다운로드 섹션에서 HF 토큰을 추가한 다음 huggingface.co에서 모델 라이선스에 동의하세요.",
+      "chooseModelBelow": "아래에서 모델을 선택하거나 로컬 모델을 찾아보세요.",
+      "genStrong": "생성:",
+      "genHintBody": "Schnell이 가장 빠르고(4스텝), Dev가 품질이 가장 좋습니다. 4비트는 약 6GB, 전체는 약 24GB를 사용합니다. 16GB RAM에서는 Schnell 또는 Klein 4B를 4비트로 사용하세요.",
+      "editStrong": "편집:",
+      "editHintBody": "전체 정밀도 전용 — 양자화된 편집 모델은 쓸 수 없는 결과를 냅니다. 모델에 따라 24-54GB가 필요합니다.",
+      "editModelsIntro": "사진과 텍스트 프롬프트를 제출하여 이미지를 편집, 인페인팅, 변환하세요. 최고 품질을 위해 전체 정밀도만 지원합니다. 더 많은 편집 모델이 곧 추가됩니다.",
+      "serverTabDownloadStrong": "서버 탭 > 다운로드",
+      "sectionSuffix": "섹션에서.",
+      "redownloadHint": "모델을 다시 다운로드하여 모든 파일을 받으세요. 그렇지 않으면 서버가 파일을 가져오려다 멈춥니다.",
+      "checkingButton": "확인 중...",
+      "downloadNote": "모델은 HuggingFace에서 다운로드됩니다(모델과 양자화에 따라 약 6-24GB).",
+      "youMayNeedTo": "필요할 수 있습니다:",
+      "setHfTokenLink": "HF 토큰 설정",
+      "andAcceptThe": "및 다음 라이선스에 동의하세요:"
     },
     "prompt": {
       "variationLabel": "변형",
@@ -1484,7 +1637,28 @@
       "cancel": "취소",
       "promptLabel": "프롬프트:",
       "variationOfLabel": "다음의 변형:",
-      "variationNewSeed": "(새 시드)"
+      "variationNewSeed": "(새 시드)",
+      "strengthValue": "강도 {value}",
+      "sourceInpainting": "인페인팅용 원본 이미지",
+      "sourceInstructionEdit": "지시 기반 편집용 원본 이미지",
+      "maskApplied": "(마스크 적용됨)",
+      "editMask": "마스크 편집",
+      "paintMask": "마스크 그리기",
+      "stepsTip": "노이즈 제거 스텝 수입니다. 많을수록 품질이 좋지만 느려집니다. Schnell/Z-Image: 4스텝, Dev: 20스텝, Qwen Edit: 28스텝.",
+      "sizeTip": "출력 이미지 크기입니다. 16의 배수여야 합니다. 클수록 VRAM을 더 쓰고 느려집니다. 1024x1024가 표준입니다.",
+      "guidanceTip": "클래시파이어 프리 가이던스 스케일입니다. 높을수록 프롬프트를 잘 따르지만 창의성이 줄어듭니다. Flux 모델은 3-5, 기타 모델은 7-12.",
+      "strengthEditTip": "원본 이미지를 얼마나 바꿀지 정합니다. 0 = 변화 없음, 1 = 완전히 새로움. 편집에는 0.6-0.8이 적당합니다.",
+      "strengthVariationTip": "변형이 원본과 얼마나 다를지 정합니다. 0 = 동일, 1 = 완전히 다름. 변형에는 0.7-0.9가 적당합니다.",
+      "imageCount": "x{n}장",
+      "placeholderWaiting": "서버 시작을 기다리는 중...",
+      "placeholderVariation": "다음 변형을 위한 프롬프트를 추가하세요 (비워 두면 무작위 변형)...",
+      "placeholderNeedSource": "위에서 원본 이미지를 업로드한 다음 편집 내용을 설명하세요...",
+      "placeholderNeedMask": "먼저 마스크를 그린 다음(위의 \"마스크 그리기\" 클릭) 채울 내용을 설명하세요...",
+      "placeholderEdit": "적용할 편집을 설명하세요 (예: \"하늘을 보라색으로\")...",
+      "placeholderGenerate": "생성할 이미지를 설명하세요...",
+      "vary": "변형",
+      "edit": "편집",
+      "generate": "생성"
     },
     "settings": {
       "steps": "단계",
@@ -1510,7 +1684,14 @@
       "portLabel": "포트: 자동 할당됨",
       "hostLocalhost": "호스트: 127.0.0.1 (localhost)",
       "portAutoAssigned": "포트: 자동 할당",
-      "serverManagedAutomatically": "이미지 모델은 서버 설정이 자동으로 관리됩니다."
+      "serverManagedAutomatically": "이미지 모델은 서버 설정이 자동으로 관리됩니다.",
+      "editSettings": "편집 설정",
+      "generationSettings": "생성 설정",
+      "negativeHelpBody": "이미지에 원하지 않는 요소를 설명하세요. 흔한 아티팩트를 피하는 데 유용합니다. 예:",
+      "negativeHelpExample": "\"흐릿함, 저품질, 텍스트, 워터마크, 변형된 손\"",
+      "advanced": "고급",
+      "server": "서버",
+      "modelLine": "모델: {model}"
     },
     "topbar": {
       "historyTitle": "기록 표시",
@@ -1520,7 +1701,14 @@
       "imageGenBadge": "이미지 생성",
       "logsTitle": "로그",
       "settingsTitle": "설정",
-      "retryTitle": "다시 시도"
+      "retryTitle": "다시 시도",
+      "noModelSelected": "선택된 모델 없음",
+      "cannotSwitchTitle": "생성 중에는 전환할 수 없습니다",
+      "switchModelTitle": "모델 전환",
+      "runningOnPort": ":{port}에서 실행 중",
+      "cancelLoadingTitle": "로딩 취소",
+      "stopServerTitle": "서버 중지",
+      "quantFull": "전체"
     },
     "gallery": {
       "deleteConfirm": "이 이미지를 삭제하시겠습니까? 파일이 영구적으로 제거됩니다.",
@@ -1532,7 +1720,21 @@
       "copyPromptTitle": "이 이미지를 생성하는 데 사용된 프롬프트 복사",
       "copyPromptAria": "프롬프트 복사",
       "deleteTitle": "갤러리에서 이 이미지 삭제",
-      "deleteAria": "이미지 삭제"
+      "deleteAria": "이미지 삭제",
+      "emptyEditTitle": "첫 이미지를 편집해 보세요",
+      "emptyGenTitle": "첫 이미지를 생성해 보세요",
+      "emptyEditBody": "원본 이미지를 업로드하고 아래에 프롬프트를 입력하면 선택한 모델로 편집할 수 있습니다.",
+      "emptyGenBody": "아래에 프롬프트를 입력하고 생성을 클릭하면 선택한 모델로 이미지를 만들 수 있습니다.",
+      "loadFailed": "불러오기 실패",
+      "variationBadge": "변형",
+      "originalLabel": "원본",
+      "varBadge": "변형",
+      "stepsCount": "{n} 스텝",
+      "iterate": "반복",
+      "save": "저장",
+      "promptButton": "프롬프트",
+      "editing": "편집 중",
+      "generating": "생성 중"
     },
     "history": {
       "title": "기록",
@@ -1540,7 +1742,13 @@
       "hideTitle": "사이드바 숨기기",
       "empty": "생성이 없습니다",
       "editBadge": "편집",
-      "genBadge": "생성"
+      "genBadge": "생성",
+      "confirmDeleteTitle": "다시 클릭하여 확인",
+      "deleteTitle": "세션 삭제",
+      "deleteConfirmShort": "삭제?",
+      "justNow": "방금 전",
+      "minutesAgo": "{n}분 전",
+      "hoursAgo": "{n}시간 전"
     },
     "mask": {
       "paintTitle": "마스크 칠하기 (흰색 = 편집할 영역)",
@@ -1552,7 +1760,9 @@
       "clearTitle": "마스크 전체 지우기",
       "applyTitle": "마스크 적용 및 편집",
       "cancelTitle": "마스크 칠하기 취소",
-      "emptyError": "적용하기 전에 마스크 영역을 칠하거나 그려 주세요."
+      "emptyError": "적용하기 전에 마스크 영역을 칠하거나 그려 주세요.",
+      "apply": "적용",
+      "helpText": "편집할 영역을 칠하세요(빨간색으로 표시). 모델은 칠한 영역만 채우거나 교체합니다."
     },
     "topBar": {
       "imageGeneration": "이미지 생성",
@@ -1678,7 +1888,8 @@
       "almostReady": "거의 준비됨...",
       "connected": "연결됨",
       "modelReady": "모델 준비 완료",
-      "wakingFromSleep": "휴면에서 깨어나는 중..."
+      "wakingFromSleep": "휴면에서 깨어나는 중...",
+      "ready": "준비 완료"
     }
   },
   "tools": {
@@ -1714,7 +1925,11 @@
       "hfToQuantizedMlx": "HF에서 양자화 MLX로",
       "runHealthChecks": "상태 점검 실행",
       "viewMetadata": "메타데이터 보기",
-      "scanningForModels": "모델을 검색하는 중..."
+      "scanningForModels": "모델을 검색하는 중...",
+      "mlxModelsCount": "MLX 모델 ({n})",
+      "noMatch": "검색과 일치하는 모델이 없습니다",
+      "noLocalModels": "로컬 모델을 찾을 수 없습니다",
+      "emptyHint": "서버 탭에서 모델을 다운로드하거나 변환 기능으로 HuggingFace 모델을 양자화하세요"
     },
     "converter": {
       "title": "모델 변환기",
@@ -1773,7 +1988,20 @@
       "outputDirectory": "출력 디렉터리",
       "leaveEmptyAutoName": "비워 두면 이름이 자동 생성됩니다",
       "cancelConversion": "변환 취소",
-      "serveModel": "모델 서빙"
+      "serveModel": "모델 서빙",
+      "presetBalancedLabel": "균형 (4비트)",
+      "presetBalancedDesc": "품질/크기 균형이 좋음 — 권장",
+      "presetQualityLabel": "품질 (8비트)",
+      "presetQualityDesc": "용량은 크지만 품질이 더 좋음",
+      "presetCompactLabel": "컴팩트 (3비트)",
+      "presetCompactDesc": "가장 작지만 품질이 다소 저하됨",
+      "quantizingLayer": "레이어 양자화 중 {current}/{total}",
+      "calibrating": "보정 중...",
+      "quantizing": "양자화 중...",
+      "savingWeights": "가중치 저장 중...",
+      "verifyingOutput": "출력 검증 중...",
+      "converting": "변환 중...",
+      "compatNoteFor": "{type} 호환성 참고 사항"
     },
     "doctor": {
       "title": "모델 Doctor",
@@ -1793,7 +2021,13 @@
       "modelInspector": "모델 인스펙터",
       "viewMetadataDesc": "config.json에서 상세 모델 메타데이터 보기",
       "modelPathOrId": "모델 경로 또는 HuggingFace ID",
-      "modelInformation": "모델 정보"
+      "modelInformation": "모델 정보",
+      "failed": "모델을 검사하지 못했습니다"
+    },
+    "logViewer": {
+      "outputLog": "출력 로그",
+      "verboseOutput": "상세 출력",
+      "lineCount": "({n}줄)"
     }
   },
   "convert": {

@@ -1942,7 +1942,12 @@ describe('Generation Defaults', () => {
         const chatSettings = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
         const chatIpc = readFileSync('src/main/ipc/chat.ts', 'utf8')
         expect(chatSettings).toContain("onChange={v => update('maxTokens', v)}")
-        expect(chatSettings).toContain('model default')
+        // The "(model default)" placeholder copy moved behind t() in the i18n
+        // pass. The invariant is unchanged — the field must advertise the model
+        // default — so pin the key wiring AND the English copy it resolves to.
+        const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8')
+        expect(chatSettings).toContain("t('chat.settings.modelDefaultWithValue', { value: displayedModelDefaults.maxTokens })")
+        expect(enLocale).toContain('"modelDefaultWithValue": "{value} (model default)"')
         expect(chatSettings).not.toContain('next.maxTokens = Math.max')
         expect(chatSettings).not.toContain('4096')
         expect(chatIpc).toContain('dsv4OutputBudget(')
@@ -4893,5 +4898,40 @@ describe('Settings → CLI Round-Trip Completeness', () => {
             noMemoryAwareCache: false,
         })
         expect(withoutPaged.replace(/\s*\\\n\s*/g, ' ')).toContain('--cache-ttl-minutes')
+    })
+})
+
+describe('block-disk-only capacity label', () => {
+    it('selects a separate key instead of patching the localized sentence', () => {
+        const fs = require('fs')
+        const form = fs.readFileSync(
+            'src/renderer/src/components/sessions/SessionConfigForm.tsx',
+            'utf-8',
+        )
+        // This was `effectivePagedCapacityText.replace('Effective in-memory cache
+        // capacity', 'Effective SSD block-index capacity')`. String surgery on a
+        // translated sentence is a NO-OP in every non-English locale, so
+        // block-disk-only mode mislabelled the SSD block index as in-memory RAM
+        // capacity everywhere except English.
+        expect(form).not.toContain("replace('Effective in-memory cache capacity'")
+        expect(form).toContain("t('sessions.config.blockDiskCapacity'")
+        expect(form).toContain('effectiveBlockDiskCapacityText')
+        expect(form).toContain('blockDiskOnly')
+
+        // Both variants must exist in every catalog, and must differ — one names
+        // RAM, the other the SSD block index.
+        for (const locale of ['en', 'es', 'ja', 'ko', 'zh']) {
+            const catalog = JSON.parse(
+                fs.readFileSync(`src/renderer/src/i18n/locales/${locale}.json`, 'utf-8'),
+            )
+            const config = catalog.sessions.config
+            expect(typeof config.pagedCacheCapacity).toBe('string')
+            expect(typeof config.blockDiskCapacity).toBe('string')
+            expect(config.blockDiskCapacity).not.toBe(config.pagedCacheCapacity)
+            // Same interpolation contract, so the numbers render either way.
+            for (const placeholder of ['{{blockSize}}', '{{usableBlocks}}', '{{maxBlocks}}', '{{tokens}}']) {
+                expect(config.blockDiskCapacity).toContain(placeholder)
+            }
+        }
     })
 })

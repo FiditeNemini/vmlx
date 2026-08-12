@@ -101,7 +101,40 @@
       "quickStart": "快速开始"
     },
     "copy": "复制",
-    "copied": "已复制"
+    "copied": "已复制",
+    "portRange": "端口必须在 1024-65535 之间",
+    "changePortFailed": "更改端口失败",
+    "changeHostFailed": "更改主机失败",
+    "changeSingleModelFailed": "更改单模型模式失败",
+    "codingTools": {
+      "title": "编码工具集成",
+      "subtitle": "将本地模型连接到编码代理 — 一键或手动配置",
+      "refreshTitle": "刷新状态",
+      "installSuccess": "安装成功",
+      "installFailed": "安装失败",
+      "added": "已添加 {model}",
+      "configFailed": "配置失败",
+      "removed": "已移除 {label}",
+      "removeFailed": "移除失败",
+      "claudeCodeDesc": "Anthropic 编码 CLI",
+      "codexDesc": "OpenAI 编码代理",
+      "opencodeDesc": "终端编码助手",
+      "openclawDesc": "AI 代理框架",
+      "install": "安装",
+      "installed": "已安装",
+      "autoConfigure": "自动配置",
+      "autoConfigureTitle": "为 {model} 自动配置 {tool}",
+      "manualSetup": "手动设置",
+      "removeEntryTitle": "从配置中移除此条目",
+      "removeAllEntries": "移除所有 MLX Studio 条目",
+      "installStep": "1. 安装 {tool}",
+      "editConfigFile": "编辑配置文件",
+      "appendToFile": "将以下内容追加到文件：",
+      "mergeIntoFile": "将以下内容合并到文件：",
+      "copyFilePath": "复制文件路径",
+      "copyConfig": "复制配置",
+      "startServerHint": "启动模型服务器以启用配置按钮和手动设置说明"
+    }
   },
   "endpoints": {
     "title": "端点",
@@ -148,7 +181,23 @@
     "cancelChatEndpoint": "取消一个聊天补全流",
     "cancelResponsesEndpoint": "取消一个 responses 流",
     "cancelCompletionsEndpoint": "取消一个文本补全流",
-    "healthEndpoint": "健康检查 — 模型状态、内存、MCP 信息"
+    "healthEndpoint": "健康检查 — 模型状态、内存、MCP 信息",
+    "messagesApi": "Messages API",
+    "chatGenerate": "聊天与生成",
+    "modelsInfo": "模型与信息",
+    "liveness": "存活检测",
+    "modelInfoDesc": "模型信息",
+    "ollamaChatDesc": "Ollama 兼容端点 — 可与 ollama CLI 或任何 Ollama 客户端配合使用。响应使用 NDJSON 流式传输。",
+    "modelsEmbeddingsDesc": "模型信息与嵌入",
+    "ollamaLivenessDesc": "Ollama 兼容性检查",
+    "createMessageEndpoint": "创建消息（流式或非流式）",
+    "healthCheckEndpoint": "健康检查",
+    "ollamaChatEndpoint": "聊天补全（NDJSON 流式）",
+    "ollamaGenerateEndpoint": "文本生成（NDJSON 流式）",
+    "showModelEndpoint": "显示模型详情",
+    "ollamaEmbeddingsEndpoint": "生成嵌入",
+    "ollamaEmbedAliasEndpoint": "生成嵌入（别名）",
+    "livenessCheckEndpoint": "存活检查 — 返回 \"vMLX Gateway is running\""
   },
   "snippets": {
     "quickStart": "快速开始"
@@ -269,7 +318,10 @@
         "modelNotRunningBody": "请先启动模型再发送消息。",
         "messageFailedTitle": "消息失败",
         "unknownError": "未知错误",
-        "failedToStart": "启动失败"
+        "failedToStart": "启动失败",
+        "connectionLost": "与服务器的连接已断开。模型服务器可能已崩溃或停止。请尝试重启会话。",
+        "regenerateFailedTitle": "重新生成失败",
+        "regenerateFailedBody": "无法替换上一个回复。"
       }
     },
     "quickStart": {
@@ -319,7 +371,8 @@
       "today": "今天",
       "yesterday": "昨天",
       "daysAgo": "{n}天前",
-      "noChatsYet": "还没有聊天"
+      "noChatsYet": "还没有聊天",
+      "clearAllTitle": "删除{scope}"
     },
     "settings": {
       "header": "聊天设置",
@@ -443,7 +496,10 @@
       "braveWithKey": "使用 API 密钥的高级网络搜索",
       "braveNoKey": "需要 API 密钥 — 请在下方输入",
       "braveKeyPlaceholder": "Brave Search API 密钥...",
-      "braveGetKey": "获取免费 API 密钥 →"
+      "braveGetKey": "获取免费 API 密钥 →",
+      "reviewSaved": "请检查已保存的聊天设置",
+      "modelDefaultWithValue": "{value}（模型默认值）",
+      "exactValueAria": "{label} 精确值"
     },
     "input": {
       "dropOverlay": "拖放图像、视频、音频或文本文件以附加",
@@ -451,7 +507,8 @@
       "placeholderDefault": "消息...",
       "attachTitle": "附加图像、视频、音频或文本文件",
       "stopTitle": "停止生成 (Esc)",
-      "sendTitle": "发送消息 (Enter)"
+      "sendTitle": "发送消息 (Enter)",
+      "textAttachment": "文本"
     },
     "bubble": {
       "codeDefaultLang": "代码",
@@ -564,7 +621,10 @@
       "usableTwin": "同一模型的另一个会话具有可用路径。",
       "repointModelPath": "重新指定模型路径",
       "removeSession": "移除会话",
-      "pidLabel": "PID {pid}"
+      "pidLabel": "PID {pid}",
+      "modelFiles": "模型文件:",
+      "residentRam": "常驻内存:",
+      "lazyResidentNote": " — 专家权重从 SSD 流式加载；常驻内存保持在包体大小以下"
     },
     "config": {
       "serverSettings": "服务器设置",
@@ -934,7 +994,8 @@
       "additionalArgsTooltip": "附加到 serve 命令的原始命令行参数。用于上方 UI 未公开的标志。示例：--log-level DEBUG。参数按空白拆分并直接传递给 CLI。",
       "metalWiredLimitHelp": "如果大模型出现 Metal 内存不足、SIGKILL 或内核崩溃风险，macOS 可能需要调整 Metal 常驻内存上限。大内存 Mac 示例：{{command}}。不要将其设为与物理内存相同；请为系统、WindowServer 和应用留出余量。在 128GB 的 Mac 上，115000-120000 MB 通常比 128000 MB 更安全。该命令需要管理员密码，重启后会重置。",
       "pagedCacheCapacity": "有效内存缓存容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
-      "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。"
+      "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。",
+      "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token"
     },
     "create": {
       "title": "创建会话",
@@ -979,7 +1040,15 @@
       "apiKeyOptional": "API 密钥 (可选)",
       "modelLabel": "模型",
       "imageServerEditHint": "图像服务器提供 /v1/images/edits 端点,用于通过提示词编辑图像。请使用 Image 标签页或任意 API 客户端。",
-      "imageServerGenHint": "图像服务器提供 /v1/images/generations 端点 (OpenAI 兼容)。请使用 Image 标签页或任意 API 客户端来生成图像。"
+      "imageServerGenHint": "图像服务器提供 /v1/images/generations 端点 (OpenAI 兼容)。请使用 Image 标签页或任意 API 客户端来生成图像。",
+      "engineNotFound": "未找到推理引擎。请重启 vMLX 以运行首次设置，或手动安装:",
+      "creatingSession": "正在创建会话...",
+      "sessionCreated": "会话已创建: {id}",
+      "serverReady": "服务器已就绪!",
+      "connectRemoteFailed": "无法连接到远程端点",
+      "addDirectoryFailed": "添加目录失败",
+      "deleteModelConfirm": "从磁盘删除 \"{label}\"?\n\n路径: {path}\n\n这将永久删除已下载的文件。使用此模型的任何运行中会话将先被停止。",
+      "deleteModelTitle": "从磁盘删除 {name}"
     },
     "dashboard": {
       "defaultTitle": "会话",
@@ -1089,7 +1158,8 @@
         "failedToStartChat": "创建聊天失败",
         "failedToStopServer": "停止服务器失败",
         "failedToStartServer": "启动服务器失败"
-      }
+      },
+      "defaultChatTitle": "聊天 {date}"
     },
     "benchmark": {
       "headerTest": "测试",
@@ -1098,7 +1168,10 @@
       "headerTime": "时间",
       "rowAverage": "平均",
       "sessionMustBeRunning": "会话必须正在运行才能进行基准测试。",
-      "flushCacheFirst": "先清空缓存"
+      "flushCacheFirst": "先清空缓存",
+      "failed": "基准测试失败",
+      "running": "运行中...",
+      "history": "历史（{n}）"
     },
     "cache": {
       "prefixCache": "前缀缓存",
@@ -1236,7 +1309,16 @@
       "filterPlaceholder": "筛选日志...",
       "exportTitle": "导出日志",
       "clearTitle": "清除日志",
-      "paused": "已暂停"
+      "paused": "已暂停",
+      "resumeTitle": "恢复实时日志",
+      "pauseTitle": "暂停实时日志",
+      "lineCount": "{n} 行",
+      "totalCount": "（共 {n}）",
+      "notConnected": "未连接",
+      "serverNotRunning": "服务器未运行",
+      "noOutputYet": "暂无日志输出...",
+      "connectToSee": "连接后可查看连接日志",
+      "startToSee": "启动服务器以查看日志"
     },
     "perf": {
       "engine": "引擎",
@@ -1318,7 +1400,10 @@
       "default": "默认",
       "custom": "自定义",
       "removeTitle": "移除目录",
-      "placeholder": "输入路径或浏览..."
+      "placeholder": "输入路径或浏览...",
+      "builtIn": "内置",
+      "add": "添加",
+      "browse": "浏览..."
     },
     "embed": {
       "model": "嵌入模型",
@@ -1352,7 +1437,17 @@
       "embeddingModel": "嵌入模型",
       "textA": "文本 A",
       "cosineSimilarity": "余弦相似度",
-      "embeddingPreview": "嵌入预览"
+      "embeddingPreview": "嵌入预览",
+      "failed": "嵌入失败",
+      "textAPlaceholder": "输入要嵌入的文本...",
+      "textB": "文本 B（可选 — 用于相似度）",
+      "textBPlaceholder": "输入要比较的第二段文本...",
+      "embedding": "嵌入中...",
+      "embedAndCompare": "嵌入并比较",
+      "generate": "生成嵌入",
+      "verySimilar": "非常相似",
+      "somewhatSimilar": "较为相似",
+      "different": "不同"
     },
     "performance": {
       "sessionMustBeRunning": "会话必须正在运行才能监控性能。",
@@ -1423,11 +1518,50 @@
       "ssmResidentMemory": "SSM 驻留内存",
       "memActive": "活跃",
       "memPeak": "峰值"
+    },
+    "context": {
+      "startTimedOut": "会话启动超时",
+      "startTimedOut5m": "会话启动在 5 分钟后超时",
+      "createFailed": "创建会话失败",
+      "createdNotFound": "会话已创建但未找到",
+      "sessionFailedToStart": "会话启动失败"
+    },
+    "drawer": {
+      "restartedToast": "已使用新设置重启。",
+      "savedRemote": "已保存。将应用于下一个请求。",
+      "savedRestartToApply": "已保存。重启后生效（{keys}）。",
+      "stopping": "正在停止...",
+      "startingWithNewSettings": "正在使用新设置启动...",
+      "timeoutTooltip": "等待远程服务器响应的最长时间。对于较慢的模型、较长的生成或高延迟连接，请增大该值。默认 300 秒（5 分钟）。"
+    },
+    "distributed": {
+      "clusterNodes": "集群节点",
+      "scanning": "扫描中...",
+      "scanForNodes": "扫描节点",
+      "addManual": "手动添加",
+      "scanFailed": "扫描失败",
+      "addNodeFailed": "添加节点失败",
+      "ipPlaceholder": "IP 地址（例如 192.168.1.50）",
+      "noNodes": "尚未发现节点。请在其他 Mac 上启动 worker，然后点击\"扫描节点\"。",
+      "coordinator": "协调器",
+      "layersRange": "层 {from}-{to}",
+      "removeFromCluster": "从集群中移除"
     }
   },
   "image": {
     "tab": {
-      "dismissError": "关闭"
+      "dismissError": "关闭",
+      "serverError": "服务器错误",
+      "gatedDownloadError": "模型下载失败 — 需要身份验证。请前往服务器标签页 > 下载部分添加你的 HuggingFace 令牌，然后在 huggingface.co 上接受模型许可。原始错误：{error}",
+      "uploadSourceFirst": "编辑前请先上传源图片。",
+      "createSessionFailed": "创建图片会话失败",
+      "editFailed": "编辑失败",
+      "generationFailed": "生成失败",
+      "startModelForLogs": "启动图片模型以查看服务器日志",
+      "iterateLoadFailedDeleted": "无法加载用于迭代的图片 — 文件可能已被删除",
+      "iterateLoadFailed": "无法加载用于迭代的图片",
+      "deleteFailed": "删除图片失败：{error}",
+      "deleteFailedPlain": "删除图片失败"
     },
     "picker": {
       "title": "启动图像服务器",
@@ -1469,7 +1603,26 @@
       "apiKey": "API 密钥",
       "logLevel": "日志级别",
       "startServer": "启动服务器",
-      "viewDownloads": "查看下载"
+      "viewDownloads": "查看下载",
+      "quant4Desc": "最快，内存占用最低",
+      "quant8Desc": "质量更好",
+      "quantFullDesc": "质量最佳，内存占用最高",
+      "incompleteAfterDownload": "下载已完成，但模型不完整：{missing}",
+      "gatedTokenRequired": "此模型需要 HuggingFace 令牌。请前往服务器标签页 > 下载部分添加你的 HF 令牌，然后在 huggingface.co 上接受模型许可。",
+      "chooseModelBelow": "在下方选择一个模型，或浏览本地模型。",
+      "genStrong": "生成：",
+      "genHintBody": "Schnell 最快（4 步），Dev 质量最高。4 位约占 6GB，完整版约 24GB。16GB 内存建议使用 4 位的 Schnell 或 Klein 4B。",
+      "editStrong": "编辑：",
+      "editHintBody": "仅支持全精度 — 量化的编辑模型会产生不可用的结果。视模型需要 24-54 GB。",
+      "editModelsIntro": "提交照片 + 文字提示词即可编辑、修复或变换图片。为保证最佳质量仅支持全精度。更多编辑模型即将推出。",
+      "serverTabDownloadStrong": "服务器标签页 > 下载",
+      "sectionSuffix": "部分。",
+      "redownloadHint": "请重新下载模型以获取所有文件，否则服务器会在尝试获取时挂起。",
+      "checkingButton": "检查中...",
+      "downloadNote": "模型从 HuggingFace 下载（视模型和量化方式约 6-24 GB）。",
+      "youMayNeedTo": "你可能需要",
+      "setHfTokenLink": "设置 HF 令牌",
+      "andAcceptThe": "并接受"
     },
     "prompt": {
       "variationLabel": "变体",
@@ -1484,7 +1637,28 @@
       "cancel": "取消",
       "promptLabel": "提示词:",
       "variationOfLabel": "变体来自:",
-      "variationNewSeed": "(新种子)"
+      "variationNewSeed": "(新种子)",
+      "strengthValue": "强度 {value}",
+      "sourceInpainting": "用于修复填充的源图片",
+      "sourceInstructionEdit": "用于指令编辑的源图片",
+      "maskApplied": "（已应用蒙版）",
+      "editMask": "编辑蒙版",
+      "paintMask": "绘制蒙版",
+      "stepsTip": "去噪步数。步数越多质量越高但速度越慢。Schnell/Z-Image：4 步。Dev：20 步。Qwen Edit：28 步。",
+      "sizeTip": "输出图片尺寸。必须是 16 的倍数。越大占用显存越多且越慢。1024x1024 为标准尺寸。",
+      "guidanceTip": "无分类器引导系数。越高越贴合提示词，但创意自由度越低。Flux 模型建议 3-5，其他模型 7-12。",
+      "strengthEditTip": "改变源图片的程度。0 = 不变，1 = 完全重绘。编辑时 0.6-0.8 效果较好。",
+      "strengthVariationTip": "变体与原图的差异程度。0 = 相同，1 = 完全不同。变体建议 0.7-0.9。",
+      "imageCount": "x{n} 张",
+      "placeholderWaiting": "正在等待服务器启动...",
+      "placeholderVariation": "为下一个变体添加提示词（留空则随机变化）...",
+      "placeholderNeedSource": "先在上方上传源图片，然后描述你的编辑...",
+      "placeholderNeedMask": "先绘制蒙版（点击上方\"绘制蒙版\"），然后描述要填充的内容...",
+      "placeholderEdit": "描述要应用的编辑（例如\"把天空变成紫色\"）...",
+      "placeholderGenerate": "描述你想生成的图片...",
+      "vary": "变体",
+      "edit": "编辑",
+      "generate": "生成"
     },
     "settings": {
       "steps": "步数",
@@ -1510,7 +1684,14 @@
       "portLabel": "端口: 自动分配",
       "hostLocalhost": "主机：127.0.0.1 (localhost)",
       "portAutoAssigned": "端口：自动分配",
-      "serverManagedAutomatically": "图像模型的服务器设置由系统自动管理。"
+      "serverManagedAutomatically": "图像模型的服务器设置由系统自动管理。",
+      "editSettings": "编辑设置",
+      "generationSettings": "生成设置",
+      "negativeHelpBody": "描述你不希望出现在图片中的内容。有助于避免常见瑕疵。例如：",
+      "negativeHelpExample": "\"模糊、低质量、文字、水印、变形的手\"",
+      "advanced": "高级",
+      "server": "服务器",
+      "modelLine": "模型：{model}"
     },
     "topbar": {
       "historyTitle": "显示历史",
@@ -1520,7 +1701,14 @@
       "imageGenBadge": "图像生成",
       "logsTitle": "日志",
       "settingsTitle": "设置",
-      "retryTitle": "重试"
+      "retryTitle": "重试",
+      "noModelSelected": "未选择模型",
+      "cannotSwitchTitle": "生成过程中无法切换",
+      "switchModelTitle": "切换模型",
+      "runningOnPort": "运行于 :{port}",
+      "cancelLoadingTitle": "取消加载",
+      "stopServerTitle": "停止服务器",
+      "quantFull": "完整"
     },
     "gallery": {
       "deleteConfirm": "删除此图像?该文件将被永久移除。",
@@ -1532,7 +1720,21 @@
       "copyPromptTitle": "复制用于生成该图像的提示词",
       "copyPromptAria": "复制提示词",
       "deleteTitle": "从画廊中删除此图像",
-      "deleteAria": "删除图像"
+      "deleteAria": "删除图像",
+      "emptyEditTitle": "编辑你的第一张图片",
+      "emptyGenTitle": "生成你的第一张图片",
+      "emptyEditBody": "上传源图片并在下方输入提示词，即可使用所选模型进行编辑。",
+      "emptyGenBody": "在下方输入提示词并点击生成，即可使用所选模型创建图片。",
+      "loadFailed": "加载失败",
+      "variationBadge": "变体",
+      "originalLabel": "原图",
+      "varBadge": "变体",
+      "stepsCount": "{n} 步",
+      "iterate": "迭代",
+      "save": "保存",
+      "promptButton": "提示词",
+      "editing": "编辑中",
+      "generating": "生成中"
     },
     "history": {
       "title": "历史",
@@ -1540,7 +1742,13 @@
       "hideTitle": "隐藏侧边栏",
       "empty": "暂无生成",
       "editBadge": "编辑",
-      "genBadge": "生成"
+      "genBadge": "生成",
+      "confirmDeleteTitle": "再次点击以确认",
+      "deleteTitle": "删除会话",
+      "deleteConfirmShort": "删除？",
+      "justNow": "刚刚",
+      "minutesAgo": "{n} 分钟前",
+      "hoursAgo": "{n} 小时前"
     },
     "mask": {
       "paintTitle": "绘制蒙版 (白色 = 要编辑的区域)",
@@ -1552,7 +1760,9 @@
       "clearTitle": "清除整个蒙版",
       "applyTitle": "应用蒙版并编辑",
       "cancelTitle": "取消蒙版绘制",
-      "emptyError": "请先绘制或框选蒙版区域，然后再应用。"
+      "emptyError": "请先绘制或框选蒙版区域，然后再应用。",
+      "apply": "应用",
+      "helpText": "在要编辑的区域上涂抹（以红色显示）。模型只会填充/替换涂抹过的区域。"
     },
     "topBar": {
       "imageGeneration": "图像生成",
@@ -1678,7 +1888,8 @@
       "almostReady": "即将就绪...",
       "connected": "已连接",
       "modelReady": "模型就绪",
-      "wakingFromSleep": "从休眠唤醒中..."
+      "wakingFromSleep": "从休眠唤醒中...",
+      "ready": "就绪"
     }
   },
   "tools": {
@@ -1714,7 +1925,11 @@
       "hfToQuantizedMlx": "从 HF 转为量化 MLX",
       "runHealthChecks": "运行健康检查",
       "viewMetadata": "查看元数据",
-      "scanningForModels": "正在扫描模型..."
+      "scanningForModels": "正在扫描模型...",
+      "mlxModelsCount": "MLX 模型（{n}）",
+      "noMatch": "没有符合搜索条件的模型",
+      "noLocalModels": "未找到本地模型",
+      "emptyHint": "从服务器标签页下载模型，或使用转换功能量化 HuggingFace 模型"
     },
     "converter": {
       "title": "模型转换器",
@@ -1773,7 +1988,20 @@
       "outputDirectory": "输出目录",
       "leaveEmptyAutoName": "留空则自动生成名称",
       "cancelConversion": "取消转换",
-      "serveModel": "启动模型服务"
+      "serveModel": "启动模型服务",
+      "presetBalancedLabel": "均衡（4 位）",
+      "presetBalancedDesc": "质量/大小平衡良好 — 推荐",
+      "presetQualityLabel": "高质量（8 位）",
+      "presetQualityDesc": "体积更大但质量更好",
+      "presetCompactLabel": "紧凑（3 位）",
+      "presetCompactDesc": "体积最小，质量略有损失",
+      "quantizingLayer": "正在量化层 {current}/{total}",
+      "calibrating": "校准中...",
+      "quantizing": "量化中...",
+      "savingWeights": "正在保存权重...",
+      "verifyingOutput": "正在验证输出...",
+      "converting": "转换中...",
+      "compatNoteFor": "{type} 兼容性说明"
     },
     "doctor": {
       "title": "模型诊断",
@@ -1793,7 +2021,13 @@
       "modelInspector": "模型检查器",
       "viewMetadataDesc": "从 config.json 查看详细的模型元数据",
       "modelPathOrId": "模型路径或 HuggingFace ID",
-      "modelInformation": "模型信息"
+      "modelInformation": "模型信息",
+      "failed": "检查模型失败"
+    },
+    "logViewer": {
+      "outputLog": "输出日志",
+      "verboseOutput": "详细输出",
+      "lineCount": "（{n} 行）"
     }
   },
   "convert": {

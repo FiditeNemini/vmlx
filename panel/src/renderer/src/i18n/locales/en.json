@@ -101,7 +101,40 @@
       "quickStart": "Quick Start"
     },
     "copy": "Copy",
-    "copied": "Copied"
+    "copied": "Copied",
+    "portRange": "Port must be 1024-65535",
+    "changePortFailed": "Failed to change port",
+    "changeHostFailed": "Failed to change host",
+    "changeSingleModelFailed": "Failed to change single model mode",
+    "codingTools": {
+      "title": "Coding Tool Integration",
+      "subtitle": "Connect your local model to coding agents — one-click or manual config",
+      "refreshTitle": "Refresh status",
+      "installSuccess": "Installed successfully",
+      "installFailed": "Install failed",
+      "added": "Added {model}",
+      "configFailed": "Config failed",
+      "removed": "Removed {label}",
+      "removeFailed": "Remove failed",
+      "claudeCodeDesc": "Anthropic CLI for coding",
+      "codexDesc": "OpenAI coding agent",
+      "opencodeDesc": "Terminal coding assistant",
+      "openclawDesc": "AI agent framework",
+      "install": "Install",
+      "installed": "Installed",
+      "autoConfigure": "Auto-Configure",
+      "autoConfigureTitle": "Auto-configure {tool} for {model}",
+      "manualSetup": "Manual Setup",
+      "removeEntryTitle": "Remove this entry from config",
+      "removeAllEntries": "Remove all MLX Studio entries",
+      "installStep": "1. Install {tool}",
+      "editConfigFile": "Edit config file",
+      "appendToFile": "Append this to the file:",
+      "mergeIntoFile": "Merge this into the file:",
+      "copyFilePath": "Copy file path",
+      "copyConfig": "Copy config",
+      "startServerHint": "Start a model server to enable configuration buttons and manual setup instructions"
+    }
   },
   "endpoints": {
     "title": "Endpoints",
@@ -148,7 +181,23 @@
     "cancelChatEndpoint": "Cancel a chat completion stream",
     "cancelResponsesEndpoint": "Cancel a responses stream",
     "cancelCompletionsEndpoint": "Cancel a text completion stream",
-    "healthEndpoint": "Health check — model status, memory, MCP info"
+    "healthEndpoint": "Health check — model status, memory, MCP info",
+    "messagesApi": "Messages API",
+    "chatGenerate": "Chat & Generate",
+    "modelsInfo": "Models & Info",
+    "liveness": "Liveness",
+    "modelInfoDesc": "Model information",
+    "ollamaChatDesc": "Ollama-compatible endpoints — use with ollama CLI or any Ollama client. Responses use NDJSON streaming.",
+    "modelsEmbeddingsDesc": "Model information and embeddings",
+    "ollamaLivenessDesc": "Ollama compatibility check",
+    "createMessageEndpoint": "Create a message (streaming or non-streaming)",
+    "healthCheckEndpoint": "Health check",
+    "ollamaChatEndpoint": "Chat completion (NDJSON streaming)",
+    "ollamaGenerateEndpoint": "Text generation (NDJSON streaming)",
+    "showModelEndpoint": "Show model details",
+    "ollamaEmbeddingsEndpoint": "Generate embeddings",
+    "ollamaEmbedAliasEndpoint": "Generate embeddings (alias)",
+    "livenessCheckEndpoint": "Liveness check — returns \"vMLX Gateway is running\""
   },
   "snippets": {
     "quickStart": "Quick Start"
@@ -269,7 +318,10 @@
         "modelNotRunningBody": "Start the model before sending a message.",
         "messageFailedTitle": "Message failed",
         "unknownError": "Unknown error",
-        "failedToStart": "Failed to start"
+        "failedToStart": "Failed to start",
+        "connectionLost": "Server connection lost. The model server may have crashed or stopped. Try restarting the session.",
+        "regenerateFailedTitle": "Regenerate failed",
+        "regenerateFailedBody": "Could not replace the previous response."
       }
     },
     "quickStart": {
@@ -319,7 +371,8 @@
       "today": "Today",
       "yesterday": "Yesterday",
       "daysAgo": "{n}d ago",
-      "noChatsYet": "No chats yet"
+      "noChatsYet": "No chats yet",
+      "clearAllTitle": "Delete {scope}"
     },
     "settings": {
       "header": "Chat Settings",
@@ -443,7 +496,10 @@
       "braveWithKey": "premium web search with API key",
       "braveNoKey": "requires API key — enter below",
       "braveKeyPlaceholder": "Brave Search API key...",
-      "braveGetKey": "Get a free API key →"
+      "braveGetKey": "Get a free API key →",
+      "reviewSaved": "Review saved chat settings",
+      "modelDefaultWithValue": "{value} (model default)",
+      "exactValueAria": "{label} exact value"
     },
     "input": {
       "dropOverlay": "Drop image, video, audio, or text file to attach",
@@ -451,7 +507,8 @@
       "placeholderDefault": "Message...",
       "attachTitle": "Attach image, video, audio, or text file",
       "stopTitle": "Stop generating (Esc)",
-      "sendTitle": "Send message (Enter)"
+      "sendTitle": "Send message (Enter)",
+      "textAttachment": "Text"
     },
     "bubble": {
       "codeDefaultLang": "code",
@@ -564,7 +621,10 @@
       "usableTwin": "A session for the same model has an available path.",
       "repointModelPath": "Repoint model path",
       "removeSession": "Remove session",
-      "pidLabel": "PID {pid}"
+      "pidLabel": "PID {pid}",
+      "modelFiles": "Model files:",
+      "residentRam": "Resident RAM:",
+      "lazyResidentNote": " — expert weights stream from SSD; resident RAM stays below bundle size"
     },
     "config": {
       "serverSettings": "Server Settings",
@@ -934,7 +994,8 @@
       "additionalArgsTooltip": "Raw command-line arguments appended to the serve command. Use this for flags not exposed in the UI above. Example: --log-level DEBUG. Arguments are split by whitespace and passed directly to the CLI.",
       "metalWiredLimitHelp": "If a large model hits Metal OOM, SIGKILL, or kernel-panic risk, macOS may need a tuned Metal wired-memory limit. Example for large-memory Macs: {{command}}. Do not set it equal to physical RAM; leave OS/WindowServer/app headroom. On 128GB Macs, 115000-120000 MB is usually safer than 128000 MB. The command requires an admin password and resets after reboot.",
       "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
-      "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity."
+      "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
+      "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens"
     },
     "create": {
       "title": "Create Session",
@@ -979,7 +1040,15 @@
       "apiKeyOptional": "API Key (optional)",
       "modelLabel": "Model",
       "imageServerEditHint": "The image server exposes a /v1/images/edits endpoint for editing images with prompts. Use the Image tab or any API client.",
-      "imageServerGenHint": "The image server exposes a /v1/images/generations endpoint (OpenAI-compatible). Use the Image tab or any API client to generate images."
+      "imageServerGenHint": "The image server exposes a /v1/images/generations endpoint (OpenAI-compatible). Use the Image tab or any API client to generate images.",
+      "engineNotFound": "Inference engine not found. Restart vMLX to run first-time setup, or install manually:",
+      "creatingSession": "Creating session...",
+      "sessionCreated": "Session created: {id}",
+      "serverReady": "Server is ready!",
+      "connectRemoteFailed": "Failed to connect to remote endpoint",
+      "addDirectoryFailed": "Failed to add directory",
+      "deleteModelConfirm": "Delete \"{label}\" from disk?\n\nPath: {path}\n\nThis removes the downloaded files permanently. Any running session using this model will be stopped first.",
+      "deleteModelTitle": "Delete {name} from disk"
     },
     "dashboard": {
       "defaultTitle": "Sessions",
@@ -1089,7 +1158,8 @@
         "failedToStartChat": "Failed to create chat",
         "failedToStopServer": "Failed to stop server",
         "failedToStartServer": "Failed to start server"
-      }
+      },
+      "defaultChatTitle": "Chat {date}"
     },
     "benchmark": {
       "headerTest": "Test",
@@ -1098,7 +1168,10 @@
       "headerTime": "Time",
       "rowAverage": "Average",
       "sessionMustBeRunning": "Session must be running to benchmark.",
-      "flushCacheFirst": "Flush cache first"
+      "flushCacheFirst": "Flush cache first",
+      "failed": "Benchmark failed",
+      "running": "Running...",
+      "history": "History ({n})"
     },
     "cache": {
       "prefixCache": "Prefix Cache",
@@ -1236,7 +1309,16 @@
       "filterPlaceholder": "Filter logs...",
       "exportTitle": "Export logs",
       "clearTitle": "Clear logs",
-      "paused": "PAUSED"
+      "paused": "PAUSED",
+      "resumeTitle": "Resume live logs",
+      "pauseTitle": "Pause live logs",
+      "lineCount": "{n} lines",
+      "totalCount": "({n} total)",
+      "notConnected": "Not connected",
+      "serverNotRunning": "Server not running",
+      "noOutputYet": "No log output yet...",
+      "connectToSee": "Connect to see connection logs",
+      "startToSee": "Start the server to see logs"
     },
     "perf": {
       "engine": "Engine",
@@ -1318,7 +1400,10 @@
       "default": "Default",
       "custom": "Custom",
       "removeTitle": "Remove directory",
-      "placeholder": "Enter path or browse..."
+      "placeholder": "Enter path or browse...",
+      "builtIn": "built-in",
+      "add": "Add",
+      "browse": "Browse..."
     },
     "embed": {
       "model": "Embedding Model",
@@ -1352,7 +1437,17 @@
       "embeddingModel": "Embedding Model",
       "textA": "Text A",
       "cosineSimilarity": "Cosine Similarity",
-      "embeddingPreview": "Embedding Preview"
+      "embeddingPreview": "Embedding Preview",
+      "failed": "Embedding failed",
+      "textAPlaceholder": "Enter text to embed...",
+      "textB": "Text B (optional — for similarity)",
+      "textBPlaceholder": "Enter second text to compare...",
+      "embedding": "Embedding...",
+      "embedAndCompare": "Embed & Compare",
+      "generate": "Generate Embedding",
+      "verySimilar": "Very Similar",
+      "somewhatSimilar": "Somewhat Similar",
+      "different": "Different"
     },
     "performance": {
       "sessionMustBeRunning": "Session must be running to monitor performance.",
@@ -1423,11 +1518,50 @@
       "ssmResidentMemory": "SSM Resident Memory",
       "memActive": "Active",
       "memPeak": "Peak"
+    },
+    "context": {
+      "startTimedOut": "Session start timed out",
+      "startTimedOut5m": "Session start timed out after 5m",
+      "createFailed": "Failed to create session",
+      "createdNotFound": "Session created but not found",
+      "sessionFailedToStart": "Session failed to start"
+    },
+    "drawer": {
+      "restartedToast": "Restarted with new settings.",
+      "savedRemote": "Saved. Applies to next request.",
+      "savedRestartToApply": "Saved. Restart to apply ({keys}).",
+      "stopping": "Stopping...",
+      "startingWithNewSettings": "Starting with new settings...",
+      "timeoutTooltip": "Maximum time to wait for a response from the remote server before timing out. Increase this for slow models, long generations, or high-latency connections. Default 300s (5 minutes)."
+    },
+    "distributed": {
+      "clusterNodes": "Cluster Nodes",
+      "scanning": "Scanning...",
+      "scanForNodes": "Scan for Nodes",
+      "addManual": "Add Manual",
+      "scanFailed": "Scan failed",
+      "addNodeFailed": "Failed to add node",
+      "ipPlaceholder": "IP address (e.g. 192.168.1.50)",
+      "noNodes": "No nodes discovered yet. Start workers on other Macs, then click \"Scan for Nodes\".",
+      "coordinator": "Coordinator",
+      "layersRange": "Layers {from}-{to}",
+      "removeFromCluster": "Remove from cluster"
     }
   },
   "image": {
     "tab": {
-      "dismissError": "Dismiss"
+      "dismissError": "Dismiss",
+      "serverError": "Server error",
+      "gatedDownloadError": "Model download failed — authentication required. Go to the Server tab > Download section and add your HuggingFace token, then accept the model license on huggingface.co. Original error: {error}",
+      "uploadSourceFirst": "Upload a source image before editing.",
+      "createSessionFailed": "Failed to create image session",
+      "editFailed": "Edit failed",
+      "generationFailed": "Generation failed",
+      "startModelForLogs": "Start an image model to view server logs",
+      "iterateLoadFailedDeleted": "Failed to load image for iteration — file may have been deleted",
+      "iterateLoadFailed": "Failed to load image for iteration",
+      "deleteFailed": "Failed to delete image: {error}",
+      "deleteFailedPlain": "Failed to delete image"
     },
     "picker": {
       "title": "Start Image Server",
@@ -1469,7 +1603,26 @@
       "apiKey": "API Key",
       "logLevel": "Log Level",
       "startServer": "Start Server",
-      "viewDownloads": "View Downloads"
+      "viewDownloads": "View Downloads",
+      "quant4Desc": "Fastest, lowest memory",
+      "quant8Desc": "Better quality",
+      "quantFullDesc": "Best quality, most memory",
+      "incompleteAfterDownload": "Download completed but model is incomplete: {missing}",
+      "gatedTokenRequired": "This model requires a HuggingFace token. Go to the Server tab > Download section and add your HF token, then accept the model license at huggingface.co.",
+      "chooseModelBelow": "Choose a model below or browse for a local model.",
+      "genStrong": "Generation:",
+      "genHintBody": "Schnell is fastest (4 steps), Dev is highest quality. 4-bit uses ~6GB, Full ~24GB. For 16GB RAM, use Schnell or Klein 4B at 4-bit.",
+      "editStrong": "Editing:",
+      "editHintBody": "Full precision only — quantized edit models produce unusable results. Requires 24-54 GB depending on model.",
+      "editModelsIntro": "Submit a photo + text prompt to edit, inpaint, or transform images. Full precision only for best quality. More editing models coming soon.",
+      "serverTabDownloadStrong": "Server tab > Download",
+      "sectionSuffix": "section.",
+      "redownloadHint": "Re-download the model to get all files, or the server will hang trying to fetch them.",
+      "checkingButton": "Checking...",
+      "downloadNote": "Models are downloaded from HuggingFace (~6-24 GB depending on model and quantization).",
+      "youMayNeedTo": "You may need to",
+      "setHfTokenLink": "set an HF token",
+      "andAcceptThe": "and accept the"
     },
     "prompt": {
       "variationLabel": "Variation",
@@ -1484,7 +1637,28 @@
       "cancel": "Cancel",
       "promptLabel": "Prompt:",
       "variationOfLabel": "Variation of:",
-      "variationNewSeed": "(new seed)"
+      "variationNewSeed": "(new seed)",
+      "strengthValue": "strength {value}",
+      "sourceInpainting": "Source image for inpainting",
+      "sourceInstructionEdit": "Source image for instruction-based editing",
+      "maskApplied": "(mask applied)",
+      "editMask": "Edit Mask",
+      "paintMask": "Paint Mask",
+      "stepsTip": "Number of denoising steps. More steps = higher quality but slower. Schnell/Z-Image: 4 steps. Dev: 20 steps. Qwen Edit: 28 steps.",
+      "sizeTip": "Output image dimensions. Must be multiples of 16. Larger = more VRAM and slower. 1024x1024 is standard.",
+      "guidanceTip": "Classifier-free guidance scale. Higher = more prompt adherence but less creative freedom. 3-5 for Flux models, 7-12 for other models.",
+      "strengthEditTip": "How much to change the source image. 0 = no change, 1 = completely new. For edits, 0.6-0.8 works well.",
+      "strengthVariationTip": "How much the variation differs from the original. 0 = identical, 1 = completely different. For variations, 0.7-0.9 works well.",
+      "imageCount": "x{n} images",
+      "placeholderWaiting": "Waiting for server to start...",
+      "placeholderVariation": "Add to prompt for next variation (or leave empty for random variation)...",
+      "placeholderNeedSource": "Upload a source image above, then describe your edit...",
+      "placeholderNeedMask": "Paint a mask first (click \"Paint Mask\" above), then describe what to fill...",
+      "placeholderEdit": "Describe the edit to apply (e.g., \"make the sky purple\")...",
+      "placeholderGenerate": "Describe the image you want to generate...",
+      "vary": "Vary",
+      "edit": "Edit",
+      "generate": "Generate"
     },
     "settings": {
       "steps": "Steps",
@@ -1510,7 +1684,14 @@
       "portLabel": "Port: auto-assigned",
       "hostLocalhost": "Host: 127.0.0.1 (localhost)",
       "portAutoAssigned": "Port: auto-assigned",
-      "serverManagedAutomatically": "Server settings are managed automatically for image models."
+      "serverManagedAutomatically": "Server settings are managed automatically for image models.",
+      "editSettings": "Edit Settings",
+      "generationSettings": "Generation Settings",
+      "negativeHelpBody": "Describe what you don't want in the image. Useful for avoiding common artifacts. Example:",
+      "negativeHelpExample": "\"blurry, low quality, text, watermark, deformed hands\"",
+      "advanced": "Advanced",
+      "server": "Server",
+      "modelLine": "Model: {model}"
     },
     "topbar": {
       "historyTitle": "Show history",
@@ -1520,7 +1701,14 @@
       "imageGenBadge": "Image Gen",
       "logsTitle": "Logs",
       "settingsTitle": "Settings",
-      "retryTitle": "Retry"
+      "retryTitle": "Retry",
+      "noModelSelected": "No model selected",
+      "cannotSwitchTitle": "Cannot switch while generating",
+      "switchModelTitle": "Switch model",
+      "runningOnPort": "Running on :{port}",
+      "cancelLoadingTitle": "Cancel loading",
+      "stopServerTitle": "Stop server",
+      "quantFull": "Full"
     },
     "gallery": {
       "deleteConfirm": "Delete this image? The file will be removed permanently.",
@@ -1532,7 +1720,21 @@
       "copyPromptTitle": "Copy the prompt used to generate this image",
       "copyPromptAria": "Copy prompt",
       "deleteTitle": "Delete this image from the gallery",
-      "deleteAria": "Delete image"
+      "deleteAria": "Delete image",
+      "emptyEditTitle": "Edit your first image",
+      "emptyGenTitle": "Generate your first image",
+      "emptyEditBody": "Upload a source image and type a prompt below to edit it with the selected model.",
+      "emptyGenBody": "Type a prompt below and click Generate to create an image with the selected model.",
+      "loadFailed": "Failed to load",
+      "variationBadge": "Variation",
+      "originalLabel": "Original",
+      "varBadge": "Var",
+      "stepsCount": "{n} steps",
+      "iterate": "Iterate",
+      "save": "Save",
+      "promptButton": "Prompt",
+      "editing": "Editing",
+      "generating": "Generating"
     },
     "history": {
       "title": "History",
@@ -1540,7 +1742,13 @@
       "hideTitle": "Hide sidebar",
       "empty": "No generations yet",
       "editBadge": "Edit",
-      "genBadge": "Gen"
+      "genBadge": "Gen",
+      "confirmDeleteTitle": "Click again to confirm",
+      "deleteTitle": "Delete session",
+      "deleteConfirmShort": "Delete?",
+      "justNow": "Just now",
+      "minutesAgo": "{n}m ago",
+      "hoursAgo": "{n}h ago"
     },
     "mask": {
       "paintTitle": "Paint mask (white = area to edit)",
@@ -1552,7 +1760,9 @@
       "clearTitle": "Clear entire mask",
       "applyTitle": "Apply mask and edit",
       "cancelTitle": "Cancel mask painting",
-      "emptyError": "Paint or draw a mask area before applying."
+      "emptyError": "Paint or draw a mask area before applying.",
+      "apply": "Apply",
+      "helpText": "Paint over areas you want to edit (shown in red). The model will fill/replace only the painted areas."
     },
     "topBar": {
       "imageGeneration": "Image Generation",
@@ -1678,7 +1888,8 @@
       "almostReady": "Almost ready...",
       "connected": "Connected",
       "modelReady": "Model ready",
-      "wakingFromSleep": "Waking from sleep..."
+      "wakingFromSleep": "Waking from sleep...",
+      "ready": "Ready"
     }
   },
   "tools": {
@@ -1714,7 +1925,11 @@
       "hfToQuantizedMlx": "HF to quantized MLX",
       "runHealthChecks": "Run health checks",
       "viewMetadata": "View metadata",
-      "scanningForModels": "Scanning for models..."
+      "scanningForModels": "Scanning for models...",
+      "mlxModelsCount": "MLX Models ({n})",
+      "noMatch": "No models match your search",
+      "noLocalModels": "No local models found",
+      "emptyHint": "Download models from the Server tab, or use Convert to quantize a HuggingFace model"
     },
     "converter": {
       "title": "Model Converter",
@@ -1773,7 +1988,20 @@
       "outputDirectory": "Output Directory",
       "leaveEmptyAutoName": "Leave empty for auto-generated name",
       "cancelConversion": "Cancel Conversion",
-      "serveModel": "Serve Model"
+      "serveModel": "Serve Model",
+      "presetBalancedLabel": "Balanced (4-bit)",
+      "presetBalancedDesc": "Good quality/size tradeoff — recommended",
+      "presetQualityLabel": "Quality (8-bit)",
+      "presetQualityDesc": "Larger but better quality",
+      "presetCompactLabel": "Compact (3-bit)",
+      "presetCompactDesc": "Smallest, some quality loss",
+      "quantizingLayer": "Quantizing layer {current}/{total}",
+      "calibrating": "Calibrating...",
+      "quantizing": "Quantizing...",
+      "savingWeights": "Saving weights...",
+      "verifyingOutput": "Verifying output...",
+      "converting": "Converting...",
+      "compatNoteFor": "Compatibility note for {type}"
     },
     "doctor": {
       "title": "Model Doctor",
@@ -1793,7 +2021,13 @@
       "modelInspector": "Model Inspector",
       "viewMetadataDesc": "View detailed model metadata from config.json",
       "modelPathOrId": "Model Path or HuggingFace ID",
-      "modelInformation": "Model Information"
+      "modelInformation": "Model Information",
+      "failed": "Failed to inspect model"
+    },
+    "logViewer": {
+      "outputLog": "Output Log",
+      "verboseOutput": "Verbose Output",
+      "lineCount": "({n} lines)"
     }
   },
   "convert": {

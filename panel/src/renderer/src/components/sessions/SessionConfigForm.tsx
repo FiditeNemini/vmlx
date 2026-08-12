@@ -445,6 +445,17 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     maxBlocks: pagedCapacity.maxBlocks,
     tokens: pagedCapacity.capacityTokens.toLocaleString(),
   })
+  // A SEPARATE key, not string surgery on the localized sentence. The previous
+  // version took the paged text above and swapped the English phrase naming
+  // in-memory capacity for one naming the SSD block index. That is a no-op in
+  // every non-English locale, so block-disk-only mode mislabelled the SSD block
+  // index as RAM capacity everywhere except English.
+  const effectiveBlockDiskCapacityText = t('sessions.config.blockDiskCapacity', {
+    blockSize: pagedCapacity.blockSize,
+    usableBlocks: pagedCapacity.usableBlocks,
+    maxBlocks: pagedCapacity.maxBlocks,
+    tokens: pagedCapacity.capacityTokens.toLocaleString(),
+  })
   const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')
   const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache
   // openPangu's typed snapshot stays full precision and explicitly opts out of
@@ -1062,7 +1073,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {(effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
           <>
             <InfoNote text={blockDiskOnly
-              ? effectivePagedCapacityText.replace('Effective in-memory cache capacity', 'Effective SSD block-index capacity')
+              ? effectiveBlockDiskCapacityText
               : effectivePagedCapacityText} />
             <SliderField
               label={t('sessions.config.blockSizeTokens')}

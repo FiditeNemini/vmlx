@@ -13,6 +13,7 @@ Covers:
 """
 
 import json
+import re
 
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -852,7 +853,17 @@ class TestMLLMSchedulerConfigParity:
         config = MLLMSchedulerConfig()
         assert config.use_memory_aware_cache is True
         assert config.cache_memory_mb is None
-        assert config.cache_memory_percent == 0.20
+        # 0.15, matching the CLI --cache-memory-percent default and the app's
+        # cacheMemoryPercent: 15. This class is named ConfigParity, so assert
+        # the parity rather than a frozen literal — the MLLM default sat at
+        # 0.20 while both other surfaces said 15, which is the divergence this
+        # test exists to catch.
+        _cli = Path(__file__).resolve().parents[1] / "vmlx_engine" / "cli.py"
+        _src = _cli.read_text(encoding="utf-8")
+        _i = _src.index('"--cache-memory-percent"')
+        _m = re.search(r"default=([0-9.]+)", _src[_i : _i + 400])
+        assert _m, "could not read the CLI --cache-memory-percent default"
+        assert config.cache_memory_percent == float(_m.group(1))
         assert config.cache_ttl_minutes == 0
 
     def test_legacy_prefix_cache_field(self):

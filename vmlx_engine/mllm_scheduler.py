@@ -224,6 +224,40 @@ def resolve_mllm_index_blocks(
     return max_cache_blocks * (reference_block_size // block_size)
 
 
+
+def _resolve_prefix_cache_byte_budget(config: Any) -> Optional[int]:
+    """Byte ceiling for the legacy prefix cache, derived when not set explicitly.
+
+    An entry-count bound alone does not bound MEMORY: entries on this path are
+    whole-KV snapshots whose size grows with context, so 100 entries at 90k
+    context is hundreds of GB. An explicit --prefix-cache-max-bytes wins;
+    otherwise fall back to the same RAM fraction the memory-aware cache uses
+    (--cache-memory-mb / --cache-memory-percent), because that is already the
+    user's stated answer to "how much RAM may caching take".
+
+    Returns None only when nothing at all is configured, preserving the old
+    unbounded behaviour rather than inventing a limit.
+    """
+    explicit = getattr(config, "prefix_cache_max_bytes", None)
+    if explicit:
+        return int(explicit)
+    mb = getattr(config, "cache_memory_mb", None)
+    if mb:
+        return int(mb) * 1024 * 1024
+    percent = getattr(config, "cache_memory_percent", None)
+    if not percent or percent <= 0:
+        return None
+    try:
+        import psutil
+
+        available = int(psutil.virtual_memory().total)
+    except Exception:  # noqa: BLE001
+        return None
+    if available <= 0:
+        return None
+    return max(1024**3, int(available * float(percent)))
+
+
 @dataclass
 class MLLMSchedulerConfig:
     """Configuration for MLLM scheduler.
@@ -276,7 +310,7 @@ class MLLMSchedulerConfig:
     # Memory-aware cache settings (L1, recommended for large models)
     use_memory_aware_cache: bool = True  # Use memory-based eviction
     cache_memory_mb: Optional[int] = None  # None = auto-detect (cache_memory_percent of RAM)
-    cache_memory_percent: float = 0.20  # Fraction of available RAM if auto-detecting
+    cache_memory_percent: float = 0.15  # Fraction of available RAM if auto-detecting (matches CLI + app)
     cache_ttl_minutes: float = 0  # Cache entry TTL in minutes (0 = no expiration)
 
     # Legacy entry-count prefix cache (fallback when paged+memory-aware both off)
@@ -814,12 +848,34 @@ class MLLMScheduler:
                 # Legacy entry-count prefix cache
                 try:
                     from .prefix_cache import PrefixCacheManager
+                    # A BYTE budget, not just an entry count.
+                    #
+                    # This path passed only max_entries, so the cache was bounded
+                    # at 100 ENTRIES with no byte bound at all (the LLM path in
+                    # scheduler.py has always passed max_bytes). During one long
+                    # COLD prefill each chunk stores a snapshot holding a full KV
+                    # copy — ~5GB at 90k context — so ~50 chunks accumulated ~70GB
+                    # and byte eviction never ran because max_bytes was None.
+                    #
+                    # MEASURED on Qwen3.6-27B with a 101,502-token prompt: with
+                    # the prefix cache ON the prefill hit 93.48GB and had to be
+                    # declined; with --disable-prefix-cache the identical run
+                    # completed in 204.3s at a 63-65GB peak. Same paging, same
+                    # everything else.
+                    _pc_max_bytes = _resolve_prefix_cache_byte_budget(self.config)
                     self.prefix_cache = PrefixCacheManager(
                         model=lang_model,
                         max_entries=self.config.prefix_cache_size,
+                        max_bytes=_pc_max_bytes,
                     )
                     logger.info(
-                        f"VLM prefix cache enabled: max_entries={self.config.prefix_cache_size}"
+                        "VLM prefix cache enabled: max_entries=%s max_bytes=%s",
+                        self.config.prefix_cache_size,
+                        (
+                            f"{_pc_max_bytes / (1024**3):.1f}GB"
+                            if _pc_max_bytes
+                            else "unbounded"
+                        ),
                     )
                 except Exception as e:
                     logger.warning(f"VLM prefix cache init failed: {e}")

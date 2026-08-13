@@ -384,7 +384,6 @@ def project_peak_affine(
 def span_admission_check(
     max_ws_bytes: int,
     peak_model: "tuple[float, float] | None",
-    largest_observed_peak_bytes: int,
     final_context: int,
     *,
     fresh_tokens: int,
@@ -429,9 +428,16 @@ def span_admission_check(
     # range, defer to the per-chunk valve rather than guess.
     if fitted_max_context > 0 and final_context > fitted_max_context * max_extrapolation:
         return
-    projected = project_peak_affine(
-        intercept, slope, final_context, floor_bytes=largest_observed_peak_bytes
-    )
+    # NO historical floor. Flooring this span's projection at a PREVIOUS span's
+    # observed peak imports that span's baseline, and mx.get_peak_memory() is
+    # global absolute active memory — it includes whatever else was resident at
+    # the time. Independent review caught the false rejection this produces:
+    # against the committed measured row the per-chunk valve projects 106.17GiB
+    # and RUNS the chunk (limit 107.52GiB), while a 104.41GiB historical floor
+    # carried into this check projects 114.85GiB and rejects the same work.
+    # Rejecting a span the device would have served is the failure this valve
+    # must never cause, so the fit alone decides.
+    projected = project_peak_affine(intercept, slope, final_context)
     if projected <= 0:
         return
     padded = int(projected * safety)

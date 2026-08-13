@@ -6358,7 +6358,6 @@ class MLLMBatchGenerator:
                         span_admission_check(
                             _span_max_ws,
                             self._span_peak_model,
-                            self._span_largest_peak,
                             int(getattr(request, "_cached_tokens", 0) or 0) + seq_len,
                             fresh_tokens=seq_len,
                             model_label="hybrid prefill",
@@ -6742,19 +6741,25 @@ class MLLMBatchGenerator:
                 #   OFF  decode 22.21 t/s  TTFT 31.73s  total 85.76s  (fired 0x)
                 #   ON   decode 24.77 t/s  TTFT 39.74s  total 88.19s  (fired 1x)
                 #
-                # Decode rate improves ~11%, but TTFT rises ~8s and TOTAL WALL
-                # CLOCK GETS WORSE. The allocation is not eliminated, only moved:
-                # the first decode token now pays one growth sized to the whole
-                # output instead of twelve spread through the generation, and
-                # mx.concatenate copies the entire existing 27k-token buffer
-                # either way. Judging this on decode t/s alone would have shipped
-                # a regression — the same shape as the fp16 indexer that was 2.26x
-                # in isolation and -22% end to end.
+                # Decode rate improves ~11% and TOTAL WALL CLOCK GETS WORSE, so
+                # this stays off. Judging it on decode t/s alone would have
+                # shipped a regression as a speedup — the same shape as the fp16
+                # indexer that was 2.26x in isolation and -22% end to end.
                 #
-                # Caveat, stated honestly: one run per arm, and the 2.4s total
-                # delta is ~2.8% so it is within plausible run-to-run noise. The
-                # 8s TTFT rise is not. Re-run both arms several times before
-                # concluding anything stronger than "no demonstrated win".
+                # Mechanically the saving is real but smaller than it looks. At
+                # a 256-token step, 1200 output tokens means OFF pays about
+                # ceil(1199/256) = 5 growths, not twelve, each copying a buffer
+                # that starts at the full 27k prompt and grows; ON pays one.
+                # So presizing does eliminate the later copies rather than merely
+                # relocating identical work, which is consistent with the decode
+                # gain. What it cannot explain is the 8s TTFT rise.
+                #
+                # Caveat, stated honestly and NOT to be quoted as a result: this
+                # is ONE run per arm. The 2.4s total delta is ~2.8%, inside
+                # plausible run-to-run noise, and a single sample cannot
+                # establish the TTFT rise as signal either. The only defensible
+                # claim is "no demonstrated win". Re-run both arms several times
+                # before concluding anything stronger.
                 # VMLX_DECODE_KV_PRESIZE=1 enables it for that experiment.
                 if os.environ.get("VMLX_DECODE_KV_PRESIZE", "0").strip().lower() in {
                     "1", "true", "yes", "on"

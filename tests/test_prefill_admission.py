@@ -276,7 +276,6 @@ class TestSpanAdmission:
             span_admission_check(
                 max_ws_bytes=107 * GIB,
                 peak_model=model,
-                largest_observed_peak_bytes=int(94.3 * GIB),
                 final_context=100_935,
                 fresh_tokens=67_292,
                 model_label="qwen3_5",
@@ -299,7 +298,6 @@ class TestSpanAdmission:
         span_admission_check(
             max_ws_bytes=107 * GIB,
             peak_model=model,
-            largest_observed_peak_bytes=int(26.0 * GIB),
             final_context=50_000,
             fresh_tokens=30_000,
             model_label="qwen3_5",
@@ -319,7 +317,6 @@ class TestSpanAdmission:
             span_admission_check(
                 max_ws_bytes=limit,
                 peak_model=model,
-                largest_observed_peak_bytes=0,
                 final_context=100_000,
                 fresh_tokens=99_000,
             )
@@ -371,7 +368,6 @@ class TestSpanAdmission:
             span_admission_check(
                 max_ws_bytes=107 * GIB,
                 peak_model=model,
-                largest_observed_peak_bytes=int(40.0 * GIB),
                 final_context=500_000,
                 fresh_tokens=480_000,
                 fitted_max_context=0,  # unknown range = old behaviour
@@ -380,7 +376,6 @@ class TestSpanAdmission:
         span_admission_check(
             max_ws_bytes=107 * GIB,
             peak_model=model,
-            largest_observed_peak_bytes=int(40.0 * GIB),
             final_context=500_000,
             fresh_tokens=480_000,
             fitted_max_context=20_000,
@@ -390,7 +385,6 @@ class TestSpanAdmission:
             span_admission_check(
                 max_ws_bytes=107 * GIB,
                 peak_model=model,
-                largest_observed_peak_bytes=int(40.0 * GIB),
                 final_context=70_000,
                 fresh_tokens=50_000,
                 fitted_max_context=20_000,

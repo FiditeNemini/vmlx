@@ -71,6 +71,16 @@ def main():
         time.sleep(2.5)  # settle: turn N's write-back must not collide with N+1
         hit, hit_u = _turn(port, model, prompt)
         cached = (hit_u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        cold_cached = (cold_u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+        if int(cold_cached) > 0:
+            # The baseline arm restored something, so it is not a cold prefill and
+            # the comparison is void. Prompts here use distinct leading text to
+            # avoid sharing a prefix, but never assume that held -- an
+            # impossibly-cheap "cold" turn has inverted this diagnosis before.
+            print("  [%s] SKIP — baseline was NOT cold (cached=%s), comparison void"
+                  % (name, cold_cached))
+            skipped += 1
+            continue
         if int(cached) <= 0:
             print("  [%s] SKIP — no reuse (cached=%s), proves nothing" % (name, cached))
             skipped += 1

@@ -317,14 +317,28 @@ def _apply_jangtq_mpp_nax_policy(args, logger):
     return mode
 
 
-# Families MEASURED to answer differently on a prefix-cache HIT at temperature
-# 0. This is an empirical list, not a class predicate: every attempt to state
-# the rule mechanically has been refuted by measurement (stored quantization,
-# prefill chunking, chunked-vs-one-pass state divergence, missing N-1 snapshot
-# machinery, "carries recurrent/SSM state", and the cache tier itself). Qwen3.6
-# restores SSM state and is byte-exact; LFM2 drifts on BOTH the paged and the
-# block-disk tier, and gives two DIFFERENT wrong answers. So membership here is
-# decided one family at a time, by running the A/B.
+# 🚨 ABSENCE FROM THIS LIST IS NOT EXEMPTION. A prefix-cache hit can change the
+# answer on EVERY family measured; only the RATE differs. Measured over six
+# distinct prompts each: Nanbeige4.2-3B 5/6, ZAYA-8B 1/6, DSV4-Flash 0/6,
+# gemma-4-E4B 0/6, Laguna-S 0/6. An earlier per-family "EXACT vs DIVERGES" map
+# built from ONE prompt each was retracted — it sent several rounds of work
+# hunting an architectural difference between two groups that do not exist.
+# Muse reproduces the retraction directly: byte-exact on a short prompt,
+# divergent at ~1.4k tokens. Report a RATE, never a label.
+#
+# The mechanism is understood and is not family-specific: a warm turn computes
+# the last unmatched token plus the generation prompt as a SMALL forward on a
+# restored base, where a cold turn computes them inside ONE large prefill. FP
+# reductions are not shape-invariant, so the tail K/V differ slightly and an
+# argmax flip follows wherever that perturbation lands on a near-tie. Whether
+# it lands is prompt- and generation-dependent. Bit-identity would require
+# recomputing all N tokens, i.e. not caching.
+#
+# So this list is NOT a theory of which architectures are affected. It is a
+# convenience: families whose measured rate was high enough that an operator
+# hitting reproducible answer instability is likely to be looking at one of
+# them. The first-class, user-facing lever is the Enable Prefix Cache toggle,
+# which states the cost in the UI; this env switch is the CLI equivalent.
 #
 # Entry requirement: a temperature-0 cold-vs-hit A/B on this box with a
 # NON-ZERO ``cached=`` on the hit arm. A run that reused nothing compares two
@@ -384,12 +398,11 @@ def _disable_drifting_prefix_reuse(args, logger, family_label: str) -> bool:
     tokens reused) and gemma-4-E4B are byte-identical under the same harness, so
     it is not the harness and not path-dependence in general.
 
-    Third control, added after the fact: Qwen3.6-27B-JANG_4M is
-    byte-identical on an 18-token `block-disk+ssm` hit. So the mechanism is
-    NOT simply "carries recurrent/SSM state" — Qwen3.6 restores SSM state and
-    is exact. WHICH families drift is therefore an empirical question; the
-    answer lives in `_DRIFT_ON_HIT_FAMILY_NAMES` / `_DRIFT_ON_HIT_CACHE_SUBTYPES`
-    above, with the entry requirement stated there.
+    ⚠️ Those are single-prompt samples. Measured over six prompts each, the
+    rates are Nanbeige 5/6, ZAYA 1/6, DSV4 0/6 — so a family absent from the
+    list is NOT exempt, and a family present is not always affected. See the
+    note on `_DRIFT_ON_HIT_FAMILY_NAMES` above for the retraction and the
+    mechanism.
 
     ``single_batch_generator._cold_prefill_tail_split`` records the same
     phenomenon for Nemotron and Step-3.7 — "Recurrent state and rotating ring

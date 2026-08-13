@@ -226,17 +226,48 @@ class TestDriftSetMembership:
 
     @pytest.mark.parametrize(
         "family",
-        # Each of these was MEASURED byte-exact on a hit with non-zero reuse.
-        # DSV4 is the strongest: 1,792 tokens reused and still identical.
-        # Names resolved by running the registry against the real bundles on
-        # the box, not recalled: "openpangu_v2" (not "openpangu") and
-        # "qwen3_5" (not "qwen3.6") are the strings the gate would compare.
+        # NOT "families that are exact" — no family is. These are families the
+        # gate does not name, so the switch must leave them alone. Names
+        # resolved by running the registry against the real bundles, not
+        # recalled: "openpangu_v2" (not "openpangu"), "qwen3_5" (not "qwen3.6").
         ["deepseek_v4", "gemma4", "qwen3_5", "laguna", "nanbeige", "openpangu_v2"],
     )
-    def test_exact_family_is_not_in_the_set(self, family):
+    def test_unnamed_family_is_left_alone(self, family):
         from vmlx_engine.cli import _family_drifts_on_cache_hit
 
         assert _family_drifts_on_cache_hit(SimpleNamespace(family_name=family)) is False
+
+    def test_the_list_is_not_a_claim_of_exemption(self):
+        """The retraction, pinned so it cannot quietly regress.
+
+        An earlier per-family "EXACT vs DIVERGES" map was built from ONE prompt
+        per family and treated as an architectural property. Over six prompts
+        the classification collapses: **Nanbeige is 5/6 — the worst measured —
+        and it is NOT in this list**, while ZAYA, which is, comes in at 1/6.
+
+        A cache hit can change the answer on every family measured; only the
+        rate differs. The mechanism (a tail recompute at a different batch
+        shape flipping an argmax on a near-tie) is prompt- and
+        generation-dependent, not architectural. Today's Muse run reproduced
+        exactly that: byte-exact on a short prompt, divergent at ~1.4k tokens.
+
+        So the source must not describe absence from the list as exemption.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
+        assert "ABSENCE FROM THIS LIST IS NOT EXEMPTION" in src
+        # The measured rates are the evidence; keep them next to the list.
+        assert "Nanbeige4.2-3B 5/6" in src
+        assert "Report a RATE, never a label." in src
+
+        from vmlx_engine.cli import _family_drifts_on_cache_hit
+
+        # The concrete embarrassment: the worst-measured family is not named.
+        assert (
+            _family_drifts_on_cache_hit(SimpleNamespace(family_name="nanbeige"))
+            is False
+        )
 
     def test_subtype_alone_is_enough(self):
         # Nemotron-Omni-Nano-JANGTQ is a DIFFERENT bundle from

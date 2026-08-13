@@ -1579,6 +1579,35 @@ function resolveJangMultimodal(jangCfg: any, parsedConfig: any, modelPath: strin
  * This is the authoritative way. We no longer guess based on folder name/regex.
  * Also reads max_position_embeddings for context length detection.
  */
+
+/** Does THIS BUNDLE's chat template read `enable_thinking`?
+ *
+ * Per-bundle, because the answer is not uniform within a family: measured on
+ * disk, MiniMax-M2.7-JANG_K-CRACK READS the kwarg while
+ * MiniMax-M2.7-Small-JANGTQ does not. A family-level flag is wrong for one of
+ * them either way, so the bundle's own template is the oracle and it overrides
+ * the registry default.
+ *
+ * Returns undefined when there is no template to read — unknown must not be
+ * treated as "does not honour it", or a control would be hidden on missing
+ * data rather than on evidence.
+ */
+function bundleReadsEnableThinking(modelPath: string): boolean | undefined {
+  let sawTemplate = false
+  for (const name of ['chat_template.jinja', 'tokenizer_config.json']) {
+    const file = join(modelPath, name)
+    if (!existsSync(file)) continue
+    try {
+      const text = readFileSync(file, 'utf-8')
+      sawTemplate = true
+      if (text.includes('enable_thinking')) return true
+    } catch {
+      // unreadable file tells us nothing; fall through to "unknown"
+    }
+  }
+  return sawTemplate ? false : undefined
+}
+
 export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
   try {
     // HF repo id fallback: if `modelPath` isn't a local directory, try
@@ -1650,6 +1679,17 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
           if (config) {
             let detected = configToDetected(familyName, config)
             detected.maxContextLength = maxContextLength
+            // The BUNDLE's own template outranks the registry default for the
+            // thinking-toggle capability: the answer is not uniform within a
+            // family. Measured on disk, MiniMax-M2.7-JANG_K-CRACK READS
+            // enable_thinking while MiniMax-M2.7-Small-JANGTQ does not, so a
+            // family-level flag is wrong for one of them either way. Unknown
+            // (no template on disk) keeps the registry value — a control must
+            // be hidden on evidence, never on missing data.
+            {
+              const readsIt = bundleReadsEnableThinking(modelPath)
+              if (readsIt !== undefined) detected.honorsEnableThinking = readsIt
+            }
             if (configMarksTurboQuant(parsed)) {
               detected.isTurboQuant = true
             }

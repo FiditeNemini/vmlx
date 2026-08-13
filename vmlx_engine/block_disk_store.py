@@ -297,6 +297,15 @@ class BlockDiskStore:
         # read or validate it" — and those need opposite fixes. MEASURED a
         # session with 0 hits against 72 misses where the reason was
         # indistinguishable from the counters alone.
+        # WHY a block was never written. The read side proved every L2 miss is
+        # "absent" — the blocks were never stored — so the write path is where
+        # the answer lives. `full` on a FAST family is the known ~33%-drop
+        # defect: admission timeout is 0 for non-path-dependent families.
+        self.write_drop_reasons: dict = {
+            "full": 0,            # FIFO at capacity and admission timeout expired
+            "quiescing": 0,       # store closing / admission shut
+            "writer_stopped": 0,  # writer thread not alive
+        }
         self.disk_miss_reasons: dict = {
             "absent": 0,          # no index entry / no payload on disk
             "load_failed": 0,     # worker-owned read raised
@@ -1799,6 +1808,9 @@ class BlockDiskStore:
             )
         self._release_pending_write_bytes(reserved_bytes)
         self._write_fence_queue_result(fence_id, dropped=True)
+        with self._stats_lock:
+            if enqueue_result in self.write_drop_reasons:
+                self.write_drop_reasons[enqueue_result] += 1
         if enqueue_result == "full":
             logger.warning("BlockDiskStore write queue full (1000), dropping block write")
         else:
@@ -2848,6 +2860,7 @@ class BlockDiskStore:
                 # Per-reason breakdown: a bare miss count cannot separate
                 # "never stored" from "stored but unreadable/invalid".
                 "disk_miss_reasons": dict(self.disk_miss_reasons),
+                "write_drop_reasons": dict(self.write_drop_reasons),
                 "disk_writes": self.disk_writes,
                 "disk_evictions": self.disk_evictions,
                 "tq_native_writes": self.tq_native_writes,

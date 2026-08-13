@@ -599,3 +599,49 @@ class TestBlockDiskMissReasons:
             and "_note_miss" not in "\n".join(lines[i + 1:i + 3])
         ]
         assert not unattributed, f"disk_misses incremented with no reason at lines {unattributed}"
+
+
+class TestBlockDiskWriteDropReasons:
+    """Why a block was never WRITTEN — the other half of the L2 story.
+
+    Live telemetry proved every L2 miss is "absent" (blocks never stored), so
+    the write path is where the answer lives. `full` on a fast family is the
+    known ~33%-drop defect: the admission timeout is 0 for non-path-dependent
+    families, so a momentarily full FIFO drops the block outright.
+    """
+
+    def test_reasons_match_the_admission_outcomes(self):
+        """Every non-success outcome the admission helper can return must have
+        a bucket, or a drop would be counted nowhere."""
+        import inspect
+        import re
+
+        from vmlx_engine import block_disk_store
+
+        src = inspect.getsource(block_disk_store)
+        # Outcomes returned by the queue-admission helpers.
+        returned = set(re.findall(r'return "(full|quiescing|writer_stopped)"', src))
+        declared = {"full", "quiescing", "writer_stopped"}
+        assert returned, "admission helper returned no recognisable outcomes"
+        assert returned <= declared, f"outcome with no bucket: {returned - declared}"
+
+    def test_drop_site_records_the_reason(self):
+        """The drop path must count, not just log — a warning is not telemetry."""
+        import inspect
+
+        from vmlx_engine import block_disk_store
+
+        src = inspect.getsource(block_disk_store)
+        idx = src.find("dropping block write")
+        assert idx > 0, "drop site not found"
+        window = src[max(0, idx - 500):idx]
+        assert "write_drop_reasons" in window, "drop site does not record a reason"
+
+    def test_reasons_are_exported_next_to_the_miss_breakdown(self):
+        import inspect
+
+        from vmlx_engine import block_disk_store
+
+        src = inspect.getsource(block_disk_store)
+        assert '"write_drop_reasons"' in src, "write_drop_reasons never exported to stats"
+        assert '"disk_miss_reasons"' in src, "disk_miss_reasons never exported to stats"

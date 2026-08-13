@@ -771,7 +771,7 @@
       "openPanguTypedCacheNote": "openPangu v2 使用精确的类型化 N-1 提示词快照。内存和提示词磁盘 L2 一并保留 MLA KV、DSA 索引器状态、rotating-SWA 元数据和全部三个因果卷积状态。通用分页块、反向截断和通用 KV q4/q8 保持关闭。",
       "prefixCacheRequiresBatching": "前缀缓存需要连续批处理。请在上方并发处理部分开启“连续批处理”以启用前缀缓存。",
       "enablePrefixCache": "启用前缀缓存",
-      "enablePrefixCacheTooltip": "缓存提示词前缀，使重复的系统提示词、文档和对话历史可以复用已计算的状态而无需重复预填充。可复用块保留在哪由下方选择的 RAM 和/或 SSD 层决定。",
+      "enablePrefixCacheTooltip": "缓存提示词前缀，使重复的系统提示词、文档和对话历史可以复用已计算的状态而无需重复预填充。可复用块保留在哪由下方选择的 RAM 和/或 SSD 层决定。 复用的状态不会重新计算，因此命中缓存的回合措辞可能与未命中时略有不同；如果需要逐字节一致的复现，请关闭此项。",
       "openPanguMemoryAwareNote": "openPangu 的非别名类型化缓存克隆需要内存感知模式。此系列不支持传统条目计数后端。",
       "legacyEntryCountCache": "传统条目计数缓存",
       "legacyEntryCountCacheTooltip": "从内存感知缓存（使用缓存内存 %、缓存内存上限和缓存 TTL 控件）切换到更简单的条目计数缓存。开启时：仅按最大条目数控制缓存。关闭时：获得细粒度内存预算控件（RAM 百分比、MB 上限、TTL 过期）。建议大多数用户使用内存感知模式。",

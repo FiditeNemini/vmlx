@@ -6233,20 +6233,45 @@ class Scheduler:
         )
 
     def request_progress(self, request_id: str) -> Optional[int]:
-        """Monotonic progress counter for a live request, or None if unknown.
+        """Monotonic count of tokens generated so far, or None if unknown.
 
-        Sums prefilled tokens and generated tokens so timeout logic can tell
-        a healthy long prefill/decode apart from a wedged request. Uses
-        total_output_tokens (survives _reschedule_running_requests zeroing
-        output_token_ids) rather than len(output_token_ids).
+        This used to return ``num_computed_tokens + total_output_tokens`` and
+        describe itself as "prefilled tokens plus generated tokens". It was
+        neither.
+
+        ``num_computed_tokens`` is incremented in exactly ONE place —
+        ``Request.append_output_token`` — so it counts output tokens and
+        nothing advances it during prefill. The sum was therefore **2x the
+        generated token count**, reported to operators as "%d tokens" by the
+        two "still progressing" log lines. ``server.py`` had already worked
+        this out at the consumer ("it counts OUTPUT tokens only") and relies on
+        a prefilling request reporting 0; the producer's docstring was never
+        corrected to match.
+
+        Worse, it was not monotonic. ``_reschedule_running_requests`` zeroes
+        ``num_computed_tokens`` on a recovery restart while deliberately
+        preserving ``total_output_tokens``, so the counter HALVED mid-request.
+        The timeout logic only credits ``progress > last_progress``: after a
+        restart a healthy request had to regenerate everything it had already
+        produced before it registered as alive again, and in the meantime it
+        matched neither the "progressing" branch nor the "no reading" grace
+        branch — so it could be killed as wedged while generating normally.
+        A recovery restart is precisely when that must not happen.
+
+        ``total_output_tokens`` alone is accurate, is never reset, and keeps
+        the prefill-reports-0 contract the streaming grace logic is written
+        against.
+
+        Note ``MLLMScheduler.request_progress`` deliberately returns something
+        different (``num_prompt_tokens + num_output_tokens``): ``MLLMRequest``
+        has no ``num_computed_tokens``, and its value genuinely is prefill plus
+        generation. Both are monotonic, which is the only property the callers
+        require.
         """
         request = self.requests.get(request_id)
         if request is None:
             return None
-        return (
-            int(getattr(request, "num_computed_tokens", 0) or 0)
-            + int(getattr(request, "total_output_tokens", 0) or 0)
-        )
+        return int(getattr(request, "total_output_tokens", 0) or 0)
 
     def abort_request(self, request_id: str) -> bool:
         """

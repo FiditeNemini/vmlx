@@ -7247,17 +7247,43 @@ class TestProgressAwareDefaultTimeout:
 
         asyncio.run(run())
 
-    def test_scheduler_request_progress_sums_prefill_and_decode(self):
+    def test_scheduler_request_progress_counts_generated_tokens_once(self):
+        """Superseded 2026-08-13. The old version asserted 700 + 42 == 742.
+
+        It built `num_computed_tokens = 700` alongside `total_output_tokens =
+        42`, a state the engine cannot reach: both counters are incremented
+        together in `Request.append_output_token`, which is the ONLY place
+        `num_computed_tokens` moves. Nothing advances it during prefill, so it
+        can never run ahead of `total_output_tokens` — only behind, after
+        `_reschedule_running_requests` zeroes it on a recovery restart.
+
+        Summing them therefore returned 2x the generated token count (an
+        operator comparing the "%d tokens" log line against max_tokens saw
+        double), and went BACKWARDS across a restart while the streaming
+        timeout logic credits only `progress > last_progress` as liveness.
+
+        See tests/test_request_progress_monotonic.py for the full contract.
+        """
         from vmlx_engine.scheduler import Scheduler
 
         class FakeReq:
-            num_computed_tokens = 700
+            # A reachable state: 42 tokens generated, both counters agree.
+            num_computed_tokens = 42
             total_output_tokens = 42
 
         sched = Scheduler.__new__(Scheduler)
         sched.requests = {"r1": FakeReq()}
-        assert sched.request_progress("r1") == 742
+        assert sched.request_progress("r1") == 42
         assert sched.request_progress("missing") is None
+
+        class RestartedReq:
+            # What a recovery restart leaves behind: computed zeroed, lifetime
+            # total preserved. The old sum reported 42 here after reporting 84.
+            num_computed_tokens = 0
+            total_output_tokens = 42
+
+        sched.requests = {"r1": RestartedReq()}
+        assert sched.request_progress("r1") == 42
 
 
 # ===========================================================================

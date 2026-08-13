@@ -1803,27 +1803,13 @@ def _patch_turboquant_make_cache(model, jang_cfg: dict, model_config: dict):
         )
         return
 
-    def _has_mixed_attention_layout(cfg: dict) -> bool:
-        candidates = [cfg]
-        text_cfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else None
-        if text_cfg is not None:
-            candidates.append(text_cfg)
-        for candidate in candidates:
-            layer_types = candidate.get("layer_types")
-            if not isinstance(layer_types, list):
-                continue
-            kinds = {str(item).lower() for item in layer_types}
-            if len(kinds) >= 2 and any("sliding" in item for item in kinds):
-                return True
-        return False
-
     # Mixed sliding/full attention (gemma-4, Laguna). A FLAT TQ wrap would replace
     # every slot, destroying the RotatingKVCache window metadata that the
     # mixed_swa_kv_v1 contract depends on. But the full-attention slots grow with
     # the whole context and are exactly where TQ pays off, so under VMLX_SWA_TQ we
     # TQ those slots only and leave the sliding slots on their native rotating
     # cache. See build_mixed_swa_layer_types.
-    _mixed_swa_layout = _has_mixed_attention_layout(model_config)
+    _mixed_swa_layout = has_mixed_attention_layout(model_config)
     _swa_tq_opt_in = (
         _os_tq.environ.get("VMLX_SWA_TQ")
         in ("1", "true", "TRUE", "yes", "on")
@@ -7095,3 +7081,28 @@ def _infer_weight_shape(base_name, config, n_elements):
 
     logger.warning(f"  Could not infer shape for {base_name} ({n_elements} elements)")
     return None
+
+
+def has_mixed_attention_layout(cfg: dict) -> bool:
+    """True for bundles that interleave sliding-window and full attention.
+
+    Canonical detector -- gemma-4, Laguna and friends. Two callers depend on it
+    and they must not drift: the loader uses it to keep a flat TQ wrap off the
+    RotatingKVCache slots, and the CLI uses it to refuse a lossy STORED prefix
+    quantization. A mixed-SWA bundle whose stored KV is quantized returns
+    different answers on a cache HIT than on a cold prefill (live-proven on
+    Laguna-S 2026-08-12), so both call sites are answering the same question and
+    there is exactly one copy of the answer.
+    """
+    candidates = [cfg]
+    text_cfg = cfg.get("text_config") if isinstance(cfg.get("text_config"), dict) else None
+    if text_cfg is not None:
+        candidates.append(text_cfg)
+    for candidate in candidates:
+        layer_types = candidate.get("layer_types")
+        if not isinstance(layer_types, list):
+            continue
+        kinds = {str(item).lower() for item in layer_types}
+        if len(kinds) >= 2 and any("sliding" in item for item in kinds):
+            return True
+    return False

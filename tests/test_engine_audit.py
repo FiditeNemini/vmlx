@@ -14352,9 +14352,15 @@ class TestTurboQuantKVTelemetry:
         # JIT incompat list includes TurboQuant and Laguna mixed-SWA live TQ
         # (engine skips mx.compile for TurboQuantKVCache; UI now matches).
         assert "lagunaMixedSwaTurboQuantActive" in form_source
-        assert "turboQuantActive || lagunaMixedSwaTurboQuantActive" in form_source
-        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}" in form_source
-        assert "checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !multimodalActive && !hybridCacheActive}" in form_source
+        # The rule lives in panel/src/shared/jitPolicy.ts; the form must
+        # delegate to it rather than re-inlining the chain, so that `checked`
+        # and `disabled` cannot drift apart.
+        assert "shared/jitPolicy" in form_source
+        assert "computeEffectiveJit(" in form_source
+        assert "isJitSuppressedByRuntime(" in form_source
+        assert "turboQuantActive," in form_source
+        assert "lagunaMixedSwaTurboQuantActive," in form_source
+        assert "!!config.enableJit &&" not in form_source
         # This copy moved to the locale catalog in the i18n pass; the invariant
         # stays user-facing — the DSV4 JIT surface must still tell the truth
         # that compiled decode is automatic and name the real mechanisms
@@ -16636,8 +16642,12 @@ class TestJitTurboQuantSymmetricGuard:
 
         assert "turboQuantActive" in sessions_source
         assert "(detected as any).isTurboQuant" in sessions_source
-        # effectiveEnableJit must include !turboQuantActive in the AND chain
-        assert "!turboQuantActive" in sessions_source
+        # effectiveEnableJit is computed by the shared policy now; the
+        # launcher must call it and the policy must still suppress TurboQuant.
+        assert "shared/jitPolicy" in sessions_source
+        assert "computeEffectiveJit(" in sessions_source
+        assert "turboQuantActive," in sessions_source
+        assert "!!config.enableJit && !" not in sessions_source
 
     def test_panel_form_disables_jit_checkbox_for_turboquant(self):
         """Panel JIT checkbox must be visually disabled + warned when
@@ -16653,7 +16663,8 @@ class TestJitTurboQuantSymmetricGuard:
         # disabled prop covers turboQuantActive, Laguna mixed-SWA live TQ, and
         # hybrid path-dependent caches.
         assert "lagunaMixedSwaTurboQuantActive" in form
-        assert "disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}" in form
+        assert "disabled={jitSuppressedByRuntime}" in form
+        assert "isJitSuppressedByRuntime(" in form
 
     def test_detect_config_stamps_isTurboQuant_flag(self):
         """detectModelConfigFromDir must set isTurboQuant when bundle is TQ.

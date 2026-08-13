@@ -172,6 +172,40 @@ def jang_config_is_affine(jang_cfg: dict) -> bool:
     )
 
 
+def _bundle_has_mixed_swa_layout(model_path: str | None) -> bool:
+    """True when the bundle interleaves sliding-window and full attention.
+
+    These bundles (gemma-4, Laguna) keep RotatingKVCache window metadata, and a
+    LOSSY STORED prefix cache changes their answers on reuse: the cold prefill
+    computes full-precision KV while the warm turn reads back the quantized
+    copy, so the same question answered twice gives two different answers and
+    the second one is the degraded one.
+
+    Live-proven on Laguna-S-2.1-JANG_4M-CRACK 2026-08-12, temp 0, same prompt
+    cold then on a confirmed cache hit:
+
+        stored q8 (old default)      cold sha bb040715 -> hit sha 633c133d
+        --kv-cache-quantization none cold sha bb040715 -> hit sha bb040715
+
+    The cold answer is identical in both arms, so only the quantized read-back
+    diverges. Shares one detector with the loader so the two cannot drift.
+    """
+    if not model_path:
+        return False
+    try:
+        import json
+        from pathlib import Path
+
+        from vmlx_engine.utils.jang_loader import has_mixed_attention_layout
+
+        cfg_path = Path(model_path).expanduser() / "config.json"
+        if not cfg_path.is_file():
+            return False
+        return has_mixed_attention_layout(json.loads(cfg_path.read_text()))
+    except Exception:
+        return False
+
+
 def _bundle_is_jang_affine(model_path: str | None) -> bool:
     """Return true for JANG-affine bundles.
 
@@ -919,7 +953,19 @@ def serve_command(args):
         _jang_hi_fidelity = _bundle_declares_mxtq_jangtq(
             _model_path
         ) or _bundle_is_jang_affine(_model_path)
-        _fallback_kvq = "q8" if _jang_hi_fidelity else "q4"
+        # Mixed sliding/full attention bundles must store EXACT KV. q8 was
+        # adopted here because it "stayed answer-stable" on MiniMax-M2.7
+        # JANGTQ, but that result does not carry to a RotatingKVCache layout:
+        # on Laguna-S a q8 stored prefix answers a cache HIT differently from
+        # the cold prefill at temp 0. Reuse fidelity is the whole point of the
+        # high-fidelity default, so for these bundles it has to be `none`.
+        _mixed_swa_bundle = _bundle_has_mixed_swa_layout(_model_path)
+        if _mixed_swa_bundle:
+            _fallback_kvq = "none"
+        elif _jang_hi_fidelity:
+            _fallback_kvq = "q8"
+        else:
+            _fallback_kvq = "q4"
         _default_kvq = os.environ.get(
             "VMLX_DEFAULT_KV_CACHE_QUANTIZATION", _fallback_kvq
         )
@@ -937,7 +983,10 @@ def serve_command(args):
             "KV cache auto mode: TurboQuant enabled for compatible models; "
             "stored prefix cache quantization=%s%s",
             args.kv_cache_quantization,
-            " (JANGTQ/JANG-affine high-fidelity default)"
+            " (mixed sliding/full attention: exact stored KV required for "
+            "answer-stable reuse)"
+            if _mixed_swa_bundle
+            else " (JANGTQ/JANG-affine high-fidelity default)"
             if _jang_hi_fidelity
             else "",
         )

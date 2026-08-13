@@ -9,8 +9,9 @@ model.
 Usage:
     python3 scripts/cache_fidelity_check.py <port> <served-model-name> [tag]
 
-Exit status is 0 when cold == hit and 1 when they diverge, so it can gate CI-ish
-sweeps or a release checklist.
+Exit status: 0 when cold == hit with real reuse, 1 when they diverge, and 2 when
+no reuse happened at all — that last case compared two cold prefills and proves
+nothing, so it must not read as a pass.
 
 WHY THE CALLER MUST SET UP THE SERVER CAREFULLY
 -----------------------------------------------
@@ -121,8 +122,22 @@ def main() -> int:
              hit_usage.get("completion_tokens"), _sha(hit),
              (hit_usage.get("prompt_tokens_details") or {}).get("cached_tokens")))
 
+    cached = (hit_usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+    reused = int(cached or 0)
+
+    if reused <= 0:
+        # Two cold prefills prove determinism, not restore fidelity. Reporting
+        # PASS here would be a vacuous pass: Falcon-H1R produced identical text
+        # on both turns while its log showed ZERO cache hits, because a
+        # hybrid/SSM family can decline reuse entirely.
+        print("[%s] INCONCLUSIVE — no prefix reuse occurred (cached_tokens=%r), "
+              "so this compared two cold prefills and proves nothing about the "
+              "cache. Check the engine log for a hit line." % (tag, cached))
+        return 2
+
     if cold == hit:
-        print("[%s] PASS — cache hit reproduces the cold prefill" % tag)
+        print("[%s] PASS — cache hit (%d tokens reused) reproduces the cold "
+              "prefill" % (tag, reused))
         return 0
 
     print("[%s] FAIL — cache hit ANSWERS DIFFERENTLY (diverges at char %d)"

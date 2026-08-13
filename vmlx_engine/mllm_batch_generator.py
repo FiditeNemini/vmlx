@@ -6721,6 +6721,43 @@ class MLLMBatchGenerator:
 
                 _restore_kv_step()
 
+                # DECODE-SIDE PRESIZE. Restoring `step` puts the slots back on
+                # the class default of 256, so a long generation re-grows every
+                # 256 tokens — and growth is mx.concatenate of the WHOLE buffer,
+                # which after a 40k prompt copies 40k x heads x dim per layer,
+                # per K and V, every time. That is O(n^2 / step) bytes moved
+                # across a generation for no reason: the prefill path already
+                # solved the identical problem by pre-sizing the span.
+                #
+                # Sizing `step` to the remaining output length collapses those
+                # ~12 full-buffer copies into one. Off by default until the live
+                # A/B lands; VMLX_DECODE_KV_PRESIZE=1 enables.
+                if os.environ.get("VMLX_DECODE_KV_PRESIZE", "0").strip().lower() in {
+                    "1", "true", "yes", "on"
+                }:
+                    _decode_headroom = int(getattr(request, "max_tokens", 0) or 0)
+                    if _decode_headroom > 0:
+                        _presized_decode = 0
+                        for _slot in cache:
+                            # RotatingKVCache is already bounded by max_size and
+                            # rotates in place — growing its step buys nothing
+                            # and could over-allocate past the window.
+                            if type(_slot).__name__ == "RotatingKVCache":
+                                continue
+                            if not _is_attention_cache_slot(_slot):
+                                continue
+                            try:
+                                _slot.step = max(256, _decode_headroom)
+                                _presized_decode += 1
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if _presized_decode:
+                            logger.info(
+                                "decode-kv-presize slots=%d step=%d (was 256)",
+                                _presized_decode,
+                                max(256, _decode_headroom),
+                            )
+
                 # Persist what this span learned so the NEXT one can be declined
                 # up front. Only refit when this span produced more points than
                 # the fit already in hand: a short span's two samples must not

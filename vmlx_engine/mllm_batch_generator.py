@@ -6787,14 +6787,26 @@ class MLLMBatchGenerator:
                 # the fit already in hand: a short span's two samples must not
                 # displace a long span's forty, which span the context range the
                 # intercept is actually determined by.
-                if len(_peak_samples) >= 2 and len(_peak_samples) >= self._span_peak_samples:
+                # ALWAYS refit from the most recent span, not only when it has
+                # more samples than the fit in hand. Keeping the widest-ever fit
+                # sounds conservative but it is a staleness trap: peak depends on
+                # what else is resident, so a fit learned while a second model
+                # was loaded stays permanently inflated once that model unloads,
+                # and nothing could ever displace it. Recency tracks current
+                # conditions; the extrapolation bound above is what protects a
+                # narrow fit from being pushed past its evidence, so the widest
+                # fit no longer has to be retained to be safe.
+                if len(_peak_samples) >= 2:
                     _fitted = fit_peak_model(_peak_samples)
                     if _fitted is not None:
                         self._span_peak_model = _fitted
                         self._span_peak_samples = len(_peak_samples)
-                        self._span_largest_peak = max(
-                            self._span_largest_peak, _observed_chunk_peak_max
-                        )
+                        # THIS span's largest peak, not the all-time max, for the
+                        # same staleness reason as the fit itself: an all-time
+                        # floor learned under heavier residency would outlive the
+                        # conditions that produced it and keep inflating the
+                        # projection forever.
+                        self._span_largest_peak = _observed_chunk_peak_max
                         self._span_peak_max_context = max(
                             (ctx for ctx, _ in _peak_samples), default=0
                         )

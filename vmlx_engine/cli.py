@@ -330,14 +330,21 @@ def _disable_recurrent_prefix_reuse(args, logger, family_label: str) -> bool:
 
     Each arm is deterministic internally, so this is not sampling. DSV4 (1,792
     tokens reused) and gemma-4-E4B are byte-identical under the same harness, so
-    it is not the harness and not path-dependence in general — both drifting
-    families carry RECURRENT/SSM state.
+    it is not the harness and not path-dependence in general.
 
-    That matches the conclusion already recorded in
-    ``single_batch_generator._cold_prefill_tail_split``: "Recurrent state and
-    rotating ring buffers depend on HOW tokens were fed, not just which ones" —
-    established there for Nemotron and Step-3.7, and not fixable by deriving a
-    correct boundary or matching shapes.
+    Third control, added after the fact: Qwen3.6-27B-JANG_4M is
+    byte-identical on an 18-token `block-disk+ssm` hit. So the mechanism is
+    NOT simply "carries recurrent/SSM state" — Qwen3.6 restores SSM state and
+    is exact. Only `zaya_cca` and `nemotron_h_ssm_attention` are MEASURED to
+    drift, so this gate names those two rather than a class predicate. Add a
+    family only after measuring it, with a non-zero `cached=` on the hit arm
+    or the run proves nothing.
+
+    ``single_batch_generator._cold_prefill_tail_split`` records the same
+    phenomenon for Nemotron and Step-3.7 — "Recurrent state and rotating ring
+    buffers depend on HOW tokens were fed, not just which ones" — and that it
+    is not fixable by deriving a correct boundary or matching shapes. WHICH
+    families exhibit it is an empirical question, answered per family.
 
     Disabling L2 as well is deliberate: a disk chain would reintroduce exactly
     the reuse this removes.

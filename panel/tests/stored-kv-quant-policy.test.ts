@@ -85,9 +85,12 @@ describe("the form delegates instead of re-inlining", () => {
     expect(inlined.test(form)).toBe(false)
   })
 
-  it("gates the lossy stored-codec options", () => {
-    expect(form).toContain("!storedKvMustBeExact && <option value=\"q8\"")
-    expect(form).toContain("!storedKvMustBeExact && <option value=\"q4\"")
+  it("gates the lossy stored-codec options via the policy's option list", () => {
+    // Driven by allowedStoredKvQuantOptions rather than a re-inlined boolean,
+    // so the module cannot go stale against the form it governs.
+    expect(form).toContain("allowedStoredKvQuantOptions(")
+    expect(form).toContain("storedKvQuantOptions.includes('q8')")
+    expect(form).toContain("storedKvQuantOptions.includes('q4')")
   })
 
   it("warns the user why the choice is unavailable", () => {

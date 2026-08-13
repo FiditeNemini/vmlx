@@ -21,7 +21,7 @@ import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
 import { computeEffectiveJit, isJitSuppressedByRuntime } from '../../../../shared/jitPolicy'
-import { isMixedSwaBundle, storedKvQuantMustBeExact } from '../../../../shared/storedKvQuantPolicy'
+import { allowedStoredKvQuantOptions, isMixedSwaBundle, storedKvQuantMustBeExact } from '../../../../shared/storedKvQuantPolicy'
 export interface SessionConfig {
   host: string
   port: number
@@ -397,6 +397,13 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   // A quantized STORED prefix changes this family's answers on a cache HIT
   // (Laguna-S, temp 0: cold bb040715 -> hit 633c133d). The engine already
   // refuses it by default; the selector must not offer it either.
+  // Drive the selector from the policy's own option list rather than
+  // re-inlining the gate, so the module cannot go stale against the form.
+  const storedKvQuantOptions = allowedStoredKvQuantOptions({
+    cacheType: detectedCacheType,
+    cacheSubtype: detectedCacheSubtype,
+    architectureHints: detectedArchitectureHints,
+  })
   const storedKvMustBeExact = storedKvQuantMustBeExact({
     cacheType: detectedCacheType,
     cacheSubtype: detectedCacheSubtype,
@@ -1247,8 +1254,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           <select value={effectiveStoredCacheQuantization} onChange={e => onChange('kvCacheQuantization', e.target.value)} className="cfg-input" disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}>
             <option value="auto">{dsv4Active ? t('sessions.config.storedQuantNativeTyped') : t('sessions.config.storedQuantAuto')}</option>
             <option value="none">{t('sessions.config.kvQuantNone')}</option>
-            {!storedKvMustBeExact && <option value="q8">{t('sessions.config.storedQuantQ8')}</option>}
-            {!storedKvMustBeExact && <option value="q4">{t('sessions.config.storedQuantQ4')}</option>}
+            {storedKvQuantOptions.includes('q8') && <option value="q8">{t('sessions.config.storedQuantQ8')}</option>}
+            {storedKvQuantOptions.includes('q4') && <option value="q4">{t('sessions.config.storedQuantQ4')}</option>}
           </select>
         </div>
         {effectiveStoredCacheQuantization !== 'auto' && effectiveStoredCacheQuantization !== 'none' && (

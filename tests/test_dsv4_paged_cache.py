@@ -500,9 +500,20 @@ def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
     sessions = Path("panel/src/main/sessions.ts").read_text()
 
     assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
-    assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form
+    assert "nativeTypedCacheOwnsStoredCodec" in form
+    assert "? 'auto'" in form, (
+        "the native-typed-cache arm must still resolve the stored codec to "
+        "auto; pin the behaviour, not one formatting of the ternary"
+    )
     assert "disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}" in form
-    assert "!dsv4Active && !m3Active && !openPanguExactTypedCache && config.kvCacheQuantization" in settings
+    _kv_push_idx = settings.find("parts.push('--kv-cache-quantization'")
+    assert _kv_push_idx > 0, "SessionSettings no longer pushes --kv-cache-quantization"
+    _kv_guard = settings[max(0, _kv_push_idx - 900) : _kv_push_idx]
+    for _guard in ("!dsv4Active", "!m3Active", "!openPanguExactTypedCache"):
+        assert _guard in _kv_guard, (
+            f"{_guard} must still gate the --kv-cache-quantization push "
+            "(order-independent: the condition may gain further arms)"
+        )
     # The launch-arg guard moved from detectedFamily to effectiveFamily, which
     # is strictly stronger: an explicit family override now suppresses generic
     # KV quantization too, not just autodetection. Confirmed live on DSV4 --
@@ -701,7 +712,11 @@ def test_dsv4_cache_ui_uses_shared_cache_owner_without_duplicate_labels():
     assert '"pagedKVCache": "In-Memory Paged Cache (RAM)"' in en_catalog
     assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
     assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
-    assert ": nativeTypedCacheOwnsStoredCodec ? 'auto' : config.kvCacheQuantization" in form
+    assert "nativeTypedCacheOwnsStoredCodec" in form
+    assert "? 'auto'" in form, (
+        "the native-typed-cache arm must still resolve the stored codec to "
+        "auto; pin the behaviour, not one formatting of the ternary"
+    )
 
     # A stale label would reach users through a catalog entry now, so check
     # both surfaces.

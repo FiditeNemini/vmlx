@@ -172,6 +172,25 @@ def jang_config_is_affine(jang_cfg: dict) -> bool:
     )
 
 
+def _stored_kvq_fallback(mixed_swa: bool, jang_hi_fidelity: bool) -> str:
+    """Pick the auto-mode stored-prefix codec. Mixed-SWA wins over JANG q8.
+
+    Mixed sliding/full attention bundles must store EXACT KV — a quantized
+    stored prefix makes them answer a cache HIT differently from a cold prefill
+    (Laguna-S at temperature 0: cold bb040715 vs hit 633c133d). That outranks
+    the JANGTQ/JANG-affine q8 preference, which exists for reuse FIDELITY and
+    therefore has no reason to override the very property it is protecting.
+
+    Pure and separately testable on purpose: the precedence used to be an
+    inline if/elif that a test could only restate rather than execute.
+    """
+    if mixed_swa:
+        return "none"
+    if jang_hi_fidelity:
+        return "q8"
+    return "q4"
+
+
 def _bundle_has_mixed_swa_layout(model_path: str | None) -> bool:
     """True when the bundle interleaves sliding-window and full attention.
 
@@ -960,12 +979,7 @@ def serve_command(args):
         # the cold prefill at temp 0. Reuse fidelity is the whole point of the
         # high-fidelity default, so for these bundles it has to be `none`.
         _mixed_swa_bundle = _bundle_has_mixed_swa_layout(_model_path)
-        if _mixed_swa_bundle:
-            _fallback_kvq = "none"
-        elif _jang_hi_fidelity:
-            _fallback_kvq = "q8"
-        else:
-            _fallback_kvq = "q4"
+        _fallback_kvq = _stored_kvq_fallback(_mixed_swa_bundle, _jang_hi_fidelity)
         _default_kvq = os.environ.get(
             "VMLX_DEFAULT_KV_CACHE_QUANTIZATION", _fallback_kvq
         )
@@ -983,8 +997,16 @@ def serve_command(args):
             "KV cache auto mode: TurboQuant enabled for compatible models; "
             "stored prefix cache quantization=%s%s",
             args.kv_cache_quantization,
+            # Gate on the RESOLVED value, not just the bundle shape:
+            # VMLX_DEFAULT_KV_CACHE_QUANTIZATION can override the fallback, and
+            # claiming "exact stored KV required" next to quantization=q8 would
+            # assert the requirement in the same breath as violating it.
             " (mixed sliding/full attention: exact stored KV required for "
             "answer-stable reuse)"
+            if _mixed_swa_bundle and args.kv_cache_quantization == "none"
+            else " (mixed sliding/full attention: EXACT stored KV expected, but "
+            "VMLX_DEFAULT_KV_CACHE_QUANTIZATION overrode it — cache hits may "
+            "answer differently than a cold prefill)"
             if _mixed_swa_bundle
             else " (JANGTQ/JANG-affine high-fidelity default)"
             if _jang_hi_fidelity
@@ -2298,7 +2320,14 @@ def bench_command(args):
                 "Invalid VMLX_DEFAULT_KV_CACHE_QUANTIZATION="
                 f"{args.kv_cache_quantization!r}; using q4"
             )
-            args.kv_cache_quantization = "q4"
+            # Same precedence as serve: a mixed-SWA bundle benchmarked with a
+            # lossy stored codec measures a configuration production will not
+            # use, and exercises the answer-corrupting path serve now avoids.
+            args.kv_cache_quantization = _stored_kvq_fallback(
+                _bundle_has_mixed_swa_layout(getattr(args, "model", None)),
+                _bundle_declares_mxtq_jangtq(getattr(args, "model", None))
+                or _bundle_is_jang_affine(getattr(args, "model", None)),
+            )
         args.kv_cache_quantization_explicit = False
         os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
     else:
@@ -3145,10 +3174,10 @@ Examples:
              "q4 = 4-bit (slight quality loss, ~4x savings). "
              "Cache is stored compressed but decompressed for generation (no inference slowdown). "
              "Requires --continuous-batching. Omitting this flag uses production auto "
-             "mode: TurboQuant KV for compatible models plus q4 stored-prefix fallback. "
+             "mode: TurboQuant KV for compatible models plus an exact stored prefix for mixed sliding/full attention bundles, q8 for JANGTQ/JANG-affine, q4 otherwise. "
              "Passing the flag explicitly disables JANG-calibrated TurboQuant KV so your "
              "choice is honored. Set VMLX_DEFAULT_KV_CACHE_QUANTIZATION=none to turn "
-             "the stored-prefix fallback off. (default: auto q4)",
+             "the stored-prefix fallback off. (default: auto, codec chosen per bundle)",
     )
     serve_parser.add_argument(
         "--kv-cache-group-size",
@@ -3735,7 +3764,7 @@ Examples:
         choices=["none", "q4", "q8"],
         help="Quantize KV cache to reduce Apple unified-memory use (~2-4x). q8=8-bit, q4=4-bit. "
              "Passing this flag explicitly disables JANG-calibrated TurboQuant KV. "
-             "Omitting it uses auto q4 stored-prefix fallback.",
+             "Omitting it uses auto an exact stored prefix for mixed sliding/full attention bundles, q8 for JANGTQ/JANG-affine, q4 otherwise.",
     )
     bench_parser.add_argument(
         "--kv-cache-group-size",

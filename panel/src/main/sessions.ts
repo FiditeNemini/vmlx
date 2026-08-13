@@ -74,6 +74,7 @@ import {
 } from './engine-manager'
 import { app as electronApp } from 'electron'
 import { computeEffectiveJit } from '../shared/jitPolicy'
+import { storedKvQuantMustBeExact } from '../shared/storedKvQuantPolicy'
 import {
   GENERIC_DEFAULT_TIMEOUT_SECONDS,
   SLOW_FAMILY_TIMEOUTS,
@@ -2304,6 +2305,35 @@ export class SessionManager extends EventEmitter {
             if (panguChanged) {
               this.pushLog(sessionId, '[INFO] openPangu detected; exact full-precision typed prefix + prompt-L2 cache enabled, generic paged/block/TurboQuant KV codecs disabled')
             }
+          }
+          // A saved q8/q4 stored codec makes a mixed sliding/full attention
+          // bundle answer a cache HIT differently from a cold prefill
+          // (Laguna-S at temp 0: cold bb040715 vs hit 633c133d). The engine's
+          // auto mode already picks exact storage for these bundles, but an
+          // explicit flag overrides that by design — and the session may still
+          // be carrying q8 from before that default existed. Rewrite it here,
+          // in the main process, because THIS is what builds the launch args.
+          //
+          // Rewrite to 'auto', NOT 'none': an explicit none sets
+          // VMLX_DISABLE_TQ_KV=1 in the engine and would also disable the
+          // calibrated LIVE TurboQuant cache, whereas auto now yields exact
+          // stored KV anyway.
+          if (
+            storedKvQuantMustBeExact({
+              cacheType: freshConfig.cacheType,
+              cacheSubtype: freshConfig.cacheSubtype,
+              architectureHints: freshConfig.architectureHints,
+            }) &&
+            config.kvCacheQuantization &&
+            config.kvCacheQuantization !== 'auto' &&
+            config.kvCacheQuantization !== 'none'
+          ) {
+            const priorStoredCodec = config.kvCacheQuantization
+            config.kvCacheQuantization = 'auto'
+            this.pushLog(
+              sessionId,
+              `[INFO] Mixed sliding/full attention detected; saved stored-cache quantization=${priorStoredCodec} reset to auto (exact stored KV) because a quantized stored prefix changes this model's answers when the cache is reused`,
+            )
           }
           // Refresh multimodal detection from disk. A detected VLM must win
           // over stale saved `isMultimodal=false` from older sessions, while a

@@ -32,6 +32,7 @@ import {
   cacheSubtypeSupportsBlockDiskOnly,
 } from '../../../../shared/cacheTypeCapabilities'
 import { computeEffectiveJit } from '../../../../shared/jitPolicy'
+import { storedKvQuantMustBeExact } from '../../../../shared/storedKvQuantPolicy'
 import {
   filterAdditionalArgs,
   finiteNonNegativeNumber,
@@ -460,7 +461,21 @@ function buildCommandPreview(
 
   // KV cache quantization — requires prefix cache ON (works for both LLM and VLM)
   // Hybrid/Mamba models allowed — Python scheduler only quantizes KVCache layers
-  if (!prefixCacheOff && !dsv4Active && !m3Active && !openPanguExactTypedCache && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
+  // Mixed sliding/full attention bundles must not receive a lossy stored
+  // codec: it changes their answers on a cache HIT. The main process rewrites
+  // a saved q8/q4 to 'auto' for these bundles; mirror that here so the command
+  // preview shows what will actually be launched.
+  const storedKvMustBeExact = storedKvQuantMustBeExact({
+    cacheType: detected?.cacheType,
+    cacheSubtype: detected?.cacheSubtype,
+    architectureHints: detected?.architectureHints,
+  })
+  const lossyStoredCodecSuppressed =
+    storedKvMustBeExact &&
+    !!config.kvCacheQuantization &&
+    config.kvCacheQuantization !== 'auto' &&
+    config.kvCacheQuantization !== 'none'
+  if (!prefixCacheOff && !dsv4Active && !m3Active && !openPanguExactTypedCache && !lossyStoredCodecSuppressed && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
     parts.push('--kv-cache-quantization', config.kvCacheQuantization)
     const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
     if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {

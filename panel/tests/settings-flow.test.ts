@@ -973,12 +973,12 @@ describe('KV Cache Quantization', () => {
             'utf-8',
         )
 
-        expect(source).toContain("detectedCacheType === 'rotating_kv'")
+        expect(source).toContain("isMixedSwaBundle(")
         const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(source).toContain("t('sessions.config.codecMixedSwa')")
-        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
+        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + exact stored prefixes')
         expect(enLocale).toContain("preserves the model's native cache-slot and rotating-window metadata")
-        expect(enLocale).toContain('live full-attention TurboQuant or storage-only q4')
+        expect(enLocale).toContain('whether live full-attention TurboQuant is active')
         expect(source).toContain("t('sessions.config.codecTqOffAll')")
         expect(enLocale).toContain('Live TurboQuant and stored quantization disabled')
         expect(source).toContain("t('sessions.config.codecTqOffStored', { codec: effectiveStoredCacheQuantization })")
@@ -3636,8 +3636,8 @@ describe('JIT Toggle', () => {
 
         expect(form).toContain("t('sessions.config.codecMixedSwa')")
         const enLocale = readFileSync(resolve(__dirname, '../src/renderer/src/i18n/locales/en.json'), 'utf8')
-        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + q4 stored prefixes')
-        expect(enLocale).toContain('whether live full-attention TurboQuant or storage-only q4 is active')
+        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + exact stored prefixes')
+        expect(enLocale).toContain('whether live full-attention TurboQuant is active')
         expect(form).not.toContain('TQ4 full-attention KV + native rotating SWA')
     })
 

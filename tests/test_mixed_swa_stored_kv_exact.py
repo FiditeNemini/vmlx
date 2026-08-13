@@ -103,18 +103,45 @@ class TestSharedDetectorIsNotDuplicated:
 @pytest.mark.parametrize(
     "mixed,jang_hi_fi,expected",
     [
-        (True, True, "none"),  # mixed-SWA wins over the JANG q8 default
+        (True, True, "none"),  # mixed-SWA outranks the JANG q8 default
         (True, False, "none"),
         (False, True, "q8"),
         (False, False, "q4"),
     ],
 )
-def test_stored_quant_default_policy(mixed, jang_hi_fi, expected):
-    """Pin the precedence the CLI applies when picking the stored default."""
-    if mixed:
-        fallback = "none"
-    elif jang_hi_fi:
-        fallback = "q8"
-    else:
-        fallback = "q4"
-    assert fallback == expected
+def test_stored_quant_default_precedence(mixed, jang_hi_fi, expected):
+    """Execute the CLI's own precedence rather than restating it.
+
+    This test used to re-implement the if/elif chain and assert it against its
+    own parametrization, so swapping the branches in cli.py left it green. It
+    now calls the function the CLI actually uses.
+    """
+    from vmlx_engine.cli import _stored_kvq_fallback
+
+    assert _stored_kvq_fallback(mixed, jang_hi_fi) == expected
+
+
+def test_cli_routes_the_default_through_the_precedence_helper():
+    """Pin the ordering at its real call site, not only inside the helper."""
+    import inspect
+
+    from vmlx_engine import cli
+
+    src = inspect.getsource(cli)
+    assert "_fallback_kvq = _stored_kvq_fallback(" in src, (
+        "cli no longer routes the stored-codec default through "
+        "_stored_kvq_fallback; the precedence is unpinned again"
+    )
+
+
+def test_bench_uses_the_same_precedence_as_serve():
+    """A bench that measures a codec serve will never use is a false baseline."""
+    import inspect
+
+    from vmlx_engine import cli
+
+    src = inspect.getsource(cli)
+    assert 'args.kv_cache_quantization = "q4"' not in src, (
+        "bench_command hardcodes q4 again; it must share _stored_kvq_fallback "
+        "so it does not benchmark the answer-corrupting stored codec"
+    )

@@ -54,6 +54,63 @@ _CUMULATIVE_TYPES = {
 }
 
 
+# Cache class names whose state accumulates over every token consumed rather
+# than being indexed by position. These can never be sliced to a shorter token
+# boundary, so they are stored in a typed companion or re-derived instead.
+CUMULATIVE_CACHE_CLASS_NAMES = frozenset(
+    {"MambaCache", "BatchMambaCache", "ArraysCache"}
+)
+
+# Cache class names that hold position-indexed attention KV.
+ATTENTION_CACHE_CLASS_NAMES = frozenset(
+    {"KVCache", "RotatingKVCache", "QuantizedKVCache", "TurboQuantKVCache"}
+)
+
+
+def expand_cache_class_names(cache: Any) -> set:
+    """Return the *effective* cache class names for a model cache, resolving
+    ``CacheList`` wrappers to the classes they actually contain.
+
+    Architecture detection that reads ``type(layer).__name__`` directly sees
+    only ``CacheList`` and has to guess what is inside.  Both guesses are wrong
+    for some family:
+
+      - ``CacheList(KVCache(), KVCache())`` -- deepseek_v32, longcat_flash,
+        longcat_flash_ngram.  Purely attention; treating it as hybrid would
+        force an SSM companion that has nothing to hold.
+      - ``CacheList(ArraysCache(...), KVCache())`` -- falcon_h1, baichuan_m1.
+        Genuinely hybrid; treating it as plain KV skips the SSM companion and
+        the layer never gets a cache lane at all.
+
+    falcon_h1 was found running with the second case misclassified: every layer
+    is a ``CacheList``, so the wrapper name was discarded, the model was called
+    non-hybrid, and it served whole sessions with zero prefix reuse.
+
+    Nested wrappers resolve recursively.  A wrapper with no readable
+    sub-caches keeps its own name rather than vanishing, so an unreadable
+    layout can never silently look like "no non-KV types present".
+    """
+    names = set()
+
+    def _visit(layer: Any, depth: int = 0) -> None:
+        cls_name = type(layer).__name__
+        subs = getattr(layer, "caches", None)
+        if (
+            cls_name == "CacheList"
+            and isinstance(subs, (list, tuple))
+            and subs
+            and depth < 8
+        ):
+            for sub in subs:
+                _visit(sub, depth + 1)
+            return
+        names.add(cls_name)
+
+    for layer in cache or []:
+        _visit(layer)
+    return names
+
+
 def detect_cache_type(cache_obj: Any) -> CacheType:
     """
     Detect the cache type of a cache object by class name and structure.

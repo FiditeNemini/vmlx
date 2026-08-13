@@ -2427,8 +2427,13 @@ def test_generation_prefix_cleanup_rejects_nonpositive_cache_boundary(monkeypatc
     assert request._extracted_cache is None
 
 
-def test_generation_prefix_cleanup_rejects_nonempty_cache_list(monkeypatch):
-    """Nested CacheList payloads fail closed until recursively aligned."""
+def test_generation_prefix_cleanup_aligns_nested_cache_list(monkeypatch):
+    """Nested CacheList payloads of plain KV subs are recursively aligned.
+
+    This used to fail closed, which cost every CacheList-per-layer family
+    (deepseek_v32, longcat_flash, longcat_flash_ngram) all prefix reuse: the
+    store refused each layer, so no entry was ever published.
+    """
     request, published = _run_cleanup_publication_probe(
         monkeypatch,
         request_id="nonempty-cache-list",
@@ -2448,6 +2453,56 @@ def test_generation_prefix_cleanup_rejects_nonempty_cache_list(monkeypatch):
                         "meta_state": (5,),
                         "class_name": "KVCache",
                     }
+                ],
+            }
+        ],
+        uses_dsv4_cache=False,
+        reject_publication=False,
+    )
+
+    assert published, "aligned CacheList must reach store_cache"
+    (_req_id, key_tokens, cache_data), _kwargs = published[0]
+    # prompt_tokens[:-gen_prompt_len] is 4 long, N-1 target is 3. The stored
+    # key and the sliced sub-state must agree -- storing 5 tokens of KV under a
+    # 3-token key is the corruption this alignment exists to prevent.
+    assert len(key_tokens) == 3
+    sub = cache_data[0]["sub_caches"][0]
+    assert int(sub["state"][0].shape[2]) == 3
+    assert int(sub["state"][1].shape[2]) == 3
+    assert sub["meta_state"] == ("3",)
+
+
+def test_generation_prefix_cleanup_rejects_cache_list_with_cumulative_sub(monkeypatch):
+    """A cumulative sub inside a CacheList still fails closed.
+
+    falcon_h1/baichuan_m1 build CacheList(ArraysCache, KVCache). Recurrent
+    state has no token boundary to slice to, so publishing the layer would
+    restore an SSM state that ran past the key it is stored under.
+    """
+    request, published = _run_cleanup_publication_probe(
+        monkeypatch,
+        request_id="cumulative-cache-list",
+        prompt_token_ids=[10, 11, 12, 13, 90, 91],
+        gen_prompt_len=2,
+        extracted_cache=[
+            {
+                "state": None,
+                "meta_state": None,
+                "class_name": "CacheList",
+                "sub_caches": [
+                    {
+                        "state": (mx.zeros((1, 4, 8), dtype=mx.float16),),
+                        "meta_state": (),
+                        "class_name": "ArraysCache",
+                    },
+                    {
+                        "state": (
+                            mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+                            mx.zeros((1, 1, 5, 8), dtype=mx.float16),
+                        ),
+                        "meta_state": (5,),
+                        "class_name": "KVCache",
+                    },
                 ],
             }
         ],

@@ -171,6 +171,7 @@ from .utils.head_dim_detection import (
     detect_cache_head_dims,
 )
 from .utils.hybrid_tq_cache import is_turboquant_make_cache
+from .utils.cache_types import expand_cache_class_names
 from .utils.ssm_companion_disk_store import SSMCompanionDiskStore
 from .utils.memory_limits import (
     get_effective_metal_working_set_bytes,
@@ -1153,15 +1154,16 @@ class MLLMScheduler:
             return False
         try:
             cache = model.make_cache()
-            cache_types = {type(c).__name__ for c in cache}
+            # Resolve CacheList wrappers to their contents rather than
+            # discarding the wrapper name, which assumed every CacheList holds
+            # only KV layers. That assumption is false for falcon_h1-style
+            # layouts (CacheList(ArraysCache, KVCache)) and misclassified them
+            # as plain KV. Shared with the LLM scheduler so the two detectors
+            # cannot drift apart again.
+            cache_types = expand_cache_class_names(cache)
             # Dynamic detection: any type ending with "KVCache" is a KV type
             kv_types = {t for t in cache_types if t == "KVCache" or t.endswith("KVCache")}
-            non_kv = cache_types - kv_types
-            # CacheList is a wrapper, not a non-KV type
-            non_kv.discard("CacheList")
-            if not non_kv:
-                return False
-            return True
+            return bool(cache_types - kv_types)
         except Exception as exc:
             raise RuntimeError(
                 "MLLM language-model make_cache() failed during cache-architecture "

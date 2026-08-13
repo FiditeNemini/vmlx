@@ -63,6 +63,11 @@ from .utils.head_dim_detection import (
     detect_cache_head_dims,
 )
 from .utils.hybrid_tq_cache import is_turboquant_make_cache
+from .utils.cache_types import (
+    ATTENTION_CACHE_CLASS_NAMES,
+    CUMULATIVE_CACHE_CLASS_NAMES,
+    expand_cache_class_names,
+)
 from .utils.ssm_companion_disk_store import SSMCompanionDiskStore
 from .utils.memory_limits import (
     get_effective_metal_working_set_bytes,
@@ -311,6 +316,150 @@ def _rebuild_meta_state_after_truncation(
     if orig_meta:
         return (str(safe_len),) + tuple(orig_meta[1:])
     return (str(safe_len),)
+
+
+def _align_attention_state_dict(
+    state_dict: Dict[str, Any],
+    target: int,
+) -> Optional[Dict[str, Any]]:
+    """Slice one attention KV layer's state to ``target`` tokens.
+
+    Handles the two position-indexed layouts the extractor emits: a plain
+    ``(keys, values)`` pair of arrays, and the ``QuantizedKVCache`` form where
+    each side is a tuple of component arrays sharing a sequence axis.
+
+    Returns ``None`` when the layer cannot be *proven* alignable -- unknown
+    layout, mismatched key/value lengths, a state shorter than ``target``, or a
+    rotating buffer that has already wrapped.  Callers must treat that as
+    "skip the store" rather than publishing a longer state under a shorter key.
+    """
+    if int(target) <= 0:
+        return None
+    state = state_dict.get("state")
+    if not (isinstance(state, tuple) and len(state) == 2):
+        return None
+    keys, values = state
+    cls_name = state_dict.get("class_name", "")
+    safe = int(target)
+
+    if (
+        hasattr(keys, "shape")
+        and hasattr(values, "shape")
+        and len(keys.shape) in (3, 4)
+        and len(values.shape) == len(keys.shape)
+    ):
+        seq_dim = 2 if len(keys.shape) == 4 else 1
+        if int(keys.shape[seq_dim]) != int(values.shape[seq_dim]):
+            return None
+        if int(keys.shape[seq_dim]) < safe:
+            return None
+        if len(keys.shape) == 4:
+            keys = keys[:, :, :safe, :]
+            values = values[:, :, :safe, :]
+        else:
+            keys = keys[:, :safe, :]
+            values = values[:, :safe, :]
+    elif (
+        isinstance(keys, (tuple, list))
+        and isinstance(values, (tuple, list))
+        and len(keys) >= 1
+        and len(values) == len(keys)
+    ):
+        lengths = []
+        for key_part, value_part in zip(keys, values):
+            if (
+                not hasattr(key_part, "shape")
+                or not hasattr(value_part, "shape")
+                or len(key_part.shape) < 2
+                or len(value_part.shape) < 2
+            ):
+                return None
+            if int(key_part.shape[-2]) != int(value_part.shape[-2]):
+                return None
+            lengths.append(int(key_part.shape[-2]))
+        if not lengths or len(set(lengths)) != 1 or lengths[0] < safe:
+            return None
+        keys = tuple(t[..., :safe, :] for t in keys)
+        values = tuple(t[..., :safe, :] for t in values)
+    else:
+        return None
+
+    new_meta = _rebuild_meta_state_after_truncation(
+        cls_name, state_dict.get("meta_state", ()), safe
+    )
+    if new_meta is None:
+        return None
+    return {**state_dict, "state": (keys, values), "meta_state": new_meta}
+
+
+def _align_cache_list_state_dict(
+    state_dict: Dict[str, Any],
+    target: int,
+) -> Optional[Dict[str, Any]]:
+    """Align every sub-cache of an extracted ``CacheList`` wrapper to ``target``.
+
+    A ``CacheList`` layer carries ``state=None`` plus real nested payloads in
+    ``sub_caches``, so passing the wrapper through unchanged would store the
+    longer nested states under the shortened key.  This walks into them and
+    applies the same per-layer rule the flat path uses.
+
+    Families this reaches (all of which build one ``CacheList`` per layer, so
+    every layer hits this path):
+      - ``CacheList(KVCache(), KVCache())`` -- deepseek_v32, longcat_flash,
+        longcat_flash_ngram.  Both subs are position-indexed and align.
+      - ``CacheList(ArraysCache(...), KVCache())`` -- falcon_h1, baichuan_m1.
+        The cumulative sub cannot be sliced to a token boundary, so this
+        returns ``None`` and names the offending class for the caller's log.
+
+    Returns ``None`` when any sub-cache cannot be proven alignable.
+    """
+    if int(target) <= 0:
+        return None
+    subs = state_dict.get("sub_caches")
+    if not isinstance(subs, (list, tuple)) or not subs:
+        return None
+
+    aligned_subs = []
+    for sub in subs:
+        if not isinstance(sub, dict):
+            return None
+        sub_cls = sub.get("class_name", "")
+        sub_state = sub.get("state")
+        if sub_cls in CUMULATIVE_CACHE_CLASS_NAMES:
+            # Cumulative state under a shortened key would replay a prefix whose
+            # recurrent state ran past it. The flat path can drop these because
+            # the companion re-derives them; a nested one has no companion slot,
+            # so refuse the whole layer rather than store a half-valid CacheList.
+            return None
+        if sub_state is None or sub_state == ():
+            # A proven no-state placeholder encodes no token position.
+            aligned_subs.append(sub)
+            continue
+        aligned = _align_attention_state_dict(sub, target)
+        if aligned is None:
+            return None
+        aligned_subs.append(aligned)
+
+    return {**state_dict, "sub_caches": aligned_subs}
+
+
+def _blocking_cache_list_sub_class(state_dict: Dict[str, Any]) -> str:
+    """Name the sub-cache class that made a ``CacheList`` unalignable.
+
+    Purely for diagnostics: a store that silently declines is indistinguishable
+    from a family that has no cache, which is exactly how falcon_h1 went a full
+    campaign with zero prefix reuse and no obvious signal.
+    """
+    subs = state_dict.get("sub_caches")
+    if not isinstance(subs, (list, tuple)):
+        return "<no sub_caches>"
+    for sub in subs:
+        if isinstance(sub, dict) and sub.get("class_name") in CUMULATIVE_CACHE_CLASS_NAMES:
+            return str(sub.get("class_name"))
+    return ",".join(
+        str(sub.get("class_name", "?")) if isinstance(sub, dict) else type(sub).__name__
+        for sub in subs
+    )
 
 
 def _truncate_minimax_m3_state_dict(
@@ -866,52 +1015,78 @@ class Scheduler:
 
                 _template = model.make_cache()
                 self._hybrid_num_layers = len(_template)
-                self._hybrid_kv_positions = [
-                    i
-                    for i, t in enumerate(_template)
-                    if type(t).__name__
-                    in (
-                        "KVCache",
-                        "RotatingKVCache",
-                        "QuantizedKVCache",
-                        "TurboQuantKVCache",
+                # The companion splits layers into "attention" and "SSM" and
+                # restores each from a different lane, so it can only describe a
+                # model where a layer is one or the other. A parallel hybrid --
+                # falcon_h1 and baichuan_m1 build CacheList(ArraysCache, KVCache)
+                # for EVERY layer -- violates that: each layer is both at once.
+                _kv_positions: List[int] = []
+                _parallel_hybrid_layers: List[int] = []
+                for _i, _t in enumerate(_template):
+                    _names = expand_cache_class_names([_t])
+                    _has_kv = bool(_names & ATTENTION_CACHE_CLASS_NAMES)
+                    _has_cumulative = bool(_names & CUMULATIVE_CACHE_CLASS_NAMES)
+                    if _has_kv and _has_cumulative:
+                        _parallel_hybrid_layers.append(_i)
+                    elif _has_kv:
+                        _kv_positions.append(_i)
+                if _parallel_hybrid_layers:
+                    # Leaving _ssm_state_cache as None keeps every companion path
+                    # disabled (they all guard on it). That matters: an empty
+                    # kv_positions list would make the restore loop treat EVERY
+                    # layer as SSM and overwrite it, turning "no prefix cache"
+                    # into a corrupted one.
+                    self._hybrid_kv_positions = None
+                    logger.warning(
+                        "Hybrid SSM companion disabled: %d/%d layers carry "
+                        "attention and cumulative state together (parallel "
+                        "hybrid), which the per-layer companion split cannot "
+                        "represent. Prefix reuse stays off for this model "
+                        "rather than restoring mismatched layers.",
+                        len(_parallel_hybrid_layers),
+                        self._hybrid_num_layers,
                     )
-                ]
-                # Honour SchedulerConfig budgets. The old default of 50 entries
-                # let hybrid users grow several GB of resident SSM state on
-                # short unique prompts; entry count alone is not enough because
-                # entry size scales with architecture and prompt.
-                _ssm_cache_size = getattr(self.config, "ssm_state_cache_size", 8) or 8
-                _ssm_cache_max_mb = getattr(
-                    self.config, "ssm_state_cache_max_mb", 512
-                )
-                _ssm_model_key = compute_model_cache_key(
-                    model,
-                    model_path=self.config.model_path,
-                    smelt_enabled=self.config.smelt_enabled,
-                    smelt_pct=self.config.smelt_pct,
-                    tq_enabled=bool(self._tq_active),
-                    kv_quant_bits=(
-                        4 if self.config.kv_cache_quantization == "q4"
-                        else 8 if self.config.kv_cache_quantization == "q8"
-                        else 0
-                    ),
-                )
-                self._ssm_state_cache = HybridSSMStateCache(
-                    max_entries=_ssm_cache_size,
-                    model_key=_ssm_model_key,
-                    max_bytes=(
-                        int(_ssm_cache_max_mb) * 1024 * 1024
-                        if _ssm_cache_max_mb is not None
-                        else None
-                    ),
-                )
-                logger.info(
-                    f"Hybrid SSM cache: {len(self._hybrid_kv_positions)}/"
-                    f"{self._hybrid_num_layers} KV layers, "
-                    f"SSM companion enabled (entries={_ssm_cache_size}, "
-                    f"max_mb={_ssm_cache_max_mb}, model_key={_ssm_model_key[:12]})"
-                )
+                else:
+                    self._hybrid_kv_positions = _kv_positions
+                    # Honour SchedulerConfig budgets. The old default of 50
+                    # entries let hybrid users grow several GB of resident SSM
+                    # state on short unique prompts; entry count alone is not
+                    # enough because entry size scales with architecture and
+                    # prompt.
+                    _ssm_cache_size = (
+                        getattr(self.config, "ssm_state_cache_size", 8) or 8
+                    )
+                    _ssm_cache_max_mb = getattr(
+                        self.config, "ssm_state_cache_max_mb", 512
+                    )
+                    _ssm_model_key = compute_model_cache_key(
+                        model,
+                        model_path=self.config.model_path,
+                        smelt_enabled=self.config.smelt_enabled,
+                        smelt_pct=self.config.smelt_pct,
+                        tq_enabled=bool(self._tq_active),
+                        kv_quant_bits=(
+                            4 if self.config.kv_cache_quantization == "q4"
+                            else 8 if self.config.kv_cache_quantization == "q8"
+                            else 0
+                        ),
+                    )
+                    self._ssm_state_cache = HybridSSMStateCache(
+                        max_entries=_ssm_cache_size,
+                        model_key=_ssm_model_key,
+                        max_bytes=(
+                            int(_ssm_cache_max_mb) * 1024 * 1024
+                            if _ssm_cache_max_mb is not None
+                            else None
+                        ),
+                    )
+                    logger.info(
+                        f"Hybrid SSM cache: {len(self._hybrid_kv_positions)}/"
+                        f"{self._hybrid_num_layers} KV layers, "
+                        f"SSM companion enabled (entries={_ssm_cache_size}, "
+                        f"max_mb={_ssm_cache_max_mb}, "
+                        f"model_key={_ssm_model_key[:12]})"
+                    )
             except Exception as _e:
                 logger.warning(f"Failed to init hybrid SSM cache layout: {_e}")
         elif self._uses_zaya_cache:
@@ -1715,7 +1890,11 @@ class Scheduler:
             return False
         try:
             cache = model.make_cache()
-            cache_types = {type(c).__name__ for c in cache}
+            # Resolve CacheList wrappers to what they actually contain. Reading
+            # the wrapper name and discarding it classified falcon_h1 (every
+            # layer a CacheList around a cumulative ArraysCache) as plain KV,
+            # which cost it the SSM companion and all prefix reuse.
+            cache_types = expand_cache_class_names(cache)
             # Standard KV-only models don't need special handling.
             # Match any class name ending with "KVCache" (e.g., KVCache,
             # RotatingKVCache, QuantizedKVCache, ChunkedKVCache) so future
@@ -1742,9 +1921,10 @@ class Scheduler:
                 return False
             # DSV4 composite attention is handled by _uses_dsv4_cache above,
             # not by the hybrid SSM companion path.
-            non_kv = cache_types - kv_types
-            non_kv.discard("CacheList")
-            return bool(non_kv)
+            # No CacheList discard here: expand_cache_class_names() already
+            # resolved wrappers, so a surviving "CacheList" means its contents
+            # were unreadable and must not be assumed KV-only.
+            return bool(cache_types - kv_types)
         except Exception as e:
             raise RuntimeError(
                 "make_cache() failed during cache-architecture detection; "
@@ -9641,22 +9821,28 @@ class Scheduler:
                                             if cls_name == "CacheList":
                                                 # Extracted CacheList layers carry
                                                 # state=None plus real nested cache
-                                                # payloads in sub_caches. Passing that
-                                                # wrapper through unchanged stores the
-                                                # longer nested states under a shorter
-                                                # key. Until recursive alignment is
-                                                # implemented, only a truly empty
-                                                # CacheList placeholder is safe.
+                                                # payloads in sub_caches. Passing the
+                                                # wrapper through unchanged would store
+                                                # the longer nested states under a
+                                                # shorter key, so walk into them and
+                                                # apply the same per-layer rule.
                                                 if state is None and not sub_caches:
                                                     truncated_dicts.append(sd)
+                                                    continue
+                                                aligned_cl = _align_cache_list_state_dict(
+                                                    sd, target
+                                                )
+                                                if aligned_cl is not None:
+                                                    truncated_dicts.append(aligned_cl)
                                                     continue
                                                 logger.warning(
                                                     "Skipping paged cache store for %s: "
                                                     "cannot align nonempty CacheList "
                                                     "sub-caches to generation-prompt-"
-                                                    "stripped target=%d",
+                                                    "stripped target=%d (blocked by %s)",
                                                     request_id,
                                                     target,
+                                                    _blocking_cache_list_sub_class(sd),
                                                 )
                                                 trunc_ok = False
                                                 break

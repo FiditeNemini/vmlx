@@ -1651,10 +1651,12 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 # THAT is the real unlock, and it needs a long coherence run to justify.
 from .utils.memory_limits import get_effective_metal_working_set_bytes
 from .utils.prefill_admission import (
+    fit_peak_model,
     hybrid_chunk_valve_check,
     prefill_keep_alloc_enabled,
     prefill_valve_enabled,
     prefill_valve_min_margin_bytes,
+    span_admission_check,
 )
 from .utils.prefill_admission import (
     max_prefill_chunk_tokens,
@@ -4652,6 +4654,13 @@ class MLLMBatchGenerator:
         """
         self.model = model
         self.processor = processor
+        # Cross-span prefill transient model, learned from completed spans and
+        # consumed by the whole-span admission check. Instance state, not
+        # module state: it is a property of THIS loaded model, and the
+        # scheduler drops the generator when it swaps models.
+        self._span_peak_model: tuple[float, float] | None = None
+        self._span_peak_samples: int = 0
+        self._span_largest_peak: int = 0
         self.paged_cache_manager = paged_cache_manager
         self.block_aware_cache = block_aware_cache
         self.memory_aware_cache = memory_aware_cache
@@ -6259,6 +6268,11 @@ class MLLMBatchGenerator:
                 # from OBSERVED peaks instead of predicting them; same idea here.
                 _observed_chunk_transient = 0
                 _observed_transient_at_ctx = 0
+                # (context, absolute peak) pairs for the cross-span affine fit.
+                # The per-chunk valve only needs the LARGEST transient and where
+                # it was seen; fitting an intercept as well needs every point.
+                _peak_samples: list[tuple[int, int]] = []
+                _observed_chunk_peak_max = 0
                 _prefill_valve_enabled = prefill_valve_enabled()
                 _prefill_valve_min_margin = prefill_valve_min_margin_bytes()
                 _max_active_seen = 0
@@ -6318,6 +6332,37 @@ class MLLMBatchGenerator:
                             del _slot_to_restore.step
                         except Exception:  # noqa: BLE001
                             pass
+
+                # WHOLE-SPAN ADMISSION, using a transient model fitted on a
+                # PREVIOUS span. The per-chunk valve below is correct but late:
+                # it only declines once active memory has climbed near the
+                # ceiling, which on a ~100k span is ~46 chunks of GPU work
+                # already spent. This decides once, before the first chunk.
+                #
+                # It cannot fire on the first big prefill after a load — a span
+                # cannot measure itself before it starts — and that is by
+                # design, not a gap: the per-chunk valve still covers that run,
+                # and this one converts every SUBSEQUENT doomed span into an
+                # immediate error. Unknown model => no rejection.
+                if _prefill_valve_enabled and self._span_peak_model is not None:
+                    try:
+                        _span_active, _span_max_ws = (
+                            get_effective_metal_working_set_bytes(mx)
+                        )
+                    except Exception:  # noqa: BLE001
+                        _span_active, _span_max_ws = 0, 0
+                    try:
+                        span_admission_check(
+                            _span_max_ws,
+                            self._span_peak_model,
+                            self._span_largest_peak,
+                            int(getattr(request, "_cached_tokens", 0) or 0) + seq_len,
+                            fresh_tokens=seq_len,
+                            model_label="hybrid prefill",
+                        )
+                    except Exception:
+                        _restore_kv_step()
+                        raise
                 while processed < seq_len - 1:  # -1: keep last token for final logits
                     chunk_size = min(_tight_text_prefill_step_size, seq_len - 1 - processed)
                     while (
@@ -6463,6 +6508,34 @@ class MLLMBatchGenerator:
                     # comfortably.
                     if _chunk_peak > _peak_base and chunk_num > 0:
                         _this_transient = _chunk_peak - _peak_base
+                        # Feed the cross-span fit the ABSOLUTE peak, not this
+                        # transient. The whole-span check compares against the
+                        # device limit directly, and a transient-only model has
+                        # to add an active reading — which, taken at span start,
+                        # is exactly what made the old check admit the span that
+                        # died (active climbs from ~21GB to ~95GB across a 100k
+                        # span as KV accumulates). mx.get_peak_memory() after the
+                        # per-chunk reset is already weights + KV + transient.
+                        #
+                        # EVERY sample feeds the fit, not just the maxima below:
+                        # a least-squares intercept needs the low-context points
+                        # too, and keeping only running maxima biases the slope.
+                        # The chunk_num > 0 exclusion still applies for the same
+                        # reason it does below — chunk 0's one-time full-width
+                        # allocation is not a function of context.
+                        _peak_samples.append(
+                            (
+                                max(
+                                    1,
+                                    int(getattr(request, "_cached_tokens", 0) or 0)
+                                    + processed
+                                    + chunk_size,
+                                ),
+                                _chunk_peak,
+                            )
+                        )
+                        if _chunk_peak > _observed_chunk_peak_max:
+                            _observed_chunk_peak_max = _chunk_peak
                         if _this_transient >= _observed_chunk_transient:
                             # Record the context this was observed AT, not just
                             # the magnitude: the valve scales it forward by the
@@ -6647,6 +6720,28 @@ class MLLMBatchGenerator:
                             pass
 
                 _restore_kv_step()
+
+                # Persist what this span learned so the NEXT one can be declined
+                # up front. Only refit when this span produced more points than
+                # the fit already in hand: a short span's two samples must not
+                # displace a long span's forty, which span the context range the
+                # intercept is actually determined by.
+                if len(_peak_samples) >= 2 and len(_peak_samples) >= self._span_peak_samples:
+                    _fitted = fit_peak_model(_peak_samples)
+                    if _fitted is not None:
+                        self._span_peak_model = _fitted
+                        self._span_peak_samples = len(_peak_samples)
+                        self._span_largest_peak = max(
+                            self._span_largest_peak, _observed_chunk_peak_max
+                        )
+                        logger.info(
+                            "span-peak-fit samples=%d intercept=%.2fGB "
+                            "slope=%.4fGB/1k-tok largest_observed_peak=%.2fGB",
+                            len(_peak_samples),
+                            _fitted[0] / (1024**3),
+                            _fitted[1] * 1000 / (1024**3),
+                            self._span_largest_peak / (1024**3),
+                        )
 
                 # Final chunk: get logits from last token
                 last_chunk = input_ids[:, processed:]

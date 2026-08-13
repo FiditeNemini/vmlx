@@ -232,68 +232,127 @@ class TestChunkAttentionClamp:
         )
 
 
-class TestSpanAdmissionIsNotYetSufficient:
-    """Whole-span admission: the idea is right, the linear model is NOT.
+class TestSpanAdmission:
+    """Whole-span admission: decide once, before burning the span.
 
-    Per-chunk admission cannot save the hybrid abort (three implementations,
-    all failed at the same 73-75k context). Deciding once on the whole span
-    before starting it is the right shape — it turns a process abort into a
-    clean per-request error.
+    Per-chunk admission cannot save the hybrid abort cheaply (three
+    implementations, all failed at the same 73-75k context). Deciding once on
+    the whole span before starting it turns a process abort into a clean
+    per-request error.
 
-    But a transient that scales LINEARLY with context does not reproduce the
-    observed failure, and this test pins that so nobody wires it up believing
-    it works. Fed the real measurements it ADMITS the span that actually died.
+    HISTORY, because it is the whole reason this is shaped the way it is: the
+    first version projected the per-chunk TRANSIENT and added the active
+    reading taken at span START, and the test here pinned that it ADMITTED the
+    span that actually died — so it was left deliberately unwired, with tests
+    passing, for exactly that reason. Active is not constant across a span; it
+    climbed from ~21GB to ~95GB as KV accumulated. Fitting the measured
+    ABSOLUTE peak against context removes the term that was wrong, and the same
+    measurements now decline. See fit_peak_model's docstring.
     """
 
-    def test_linear_projection_admits_the_known_fatal_span(self):
-        from vmlx_engine.utils.prefill_admission import span_admission_check
+    def test_peak_model_declines_the_known_fatal_span(self):
+        """The regression this whole check exists for.
 
-        GIB = 1024**3
-        # Real numbers: 18.32GB transient measured at ~65k context, span ran to
-        # a final context of ~100,935, weights+cache baseline ~21GB, ~107GB limit.
-        span_admission_check(
-            active_bytes=21 * GIB,
-            max_ws_bytes=107 * GIB,
-            measured_transient_bytes=int(18.32 * GIB),
-            measured_at_context=65_536,
-            final_context=100_935,
-            fresh_tokens=67_292,
-            model_label="qwen3_5",
-        )
-        # No exception == admitted == would NOT have prevented the crash.
-        # The observed active at that point was ~95GB, not the ~56GB this
-        # projects, so the real growth is not linear in context.
+        The previous transient-plus-start-active formulation ADMITTED this span
+        — it projected ~56GB against a 107GB limit for a prefill whose observed
+        peak reached ~95GB and killed the process. Fitting the measured absolute
+        peak instead declines it.
 
-    def test_it_does_decline_when_the_projection_is_large_enough(self):
-        """The mechanism itself works; only the growth model is wrong."""
+        Real numbers, Qwen3.6-27B: peak climbs roughly 74.4GB at 65,536 tokens
+        to ~123GB at the final context of 100,935.
+        """
         from vmlx_engine.utils.prefill_admission import (
             PrefillAdmissionError,
+            fit_peak_model,
             span_admission_check,
         )
 
         GIB = 1024**3
+        model = fit_peak_model(
+            [(65_536, int(74.4 * GIB)), (80_000, int(94.3 * GIB))]
+        )
+        assert model is not None
         with pytest.raises(PrefillAdmissionError) as excinfo:
             span_admission_check(
-                active_bytes=80 * GIB,
                 max_ws_bytes=107 * GIB,
-                measured_transient_bytes=30 * GIB,
-                measured_at_context=50_000,
-                final_context=100_000,
-                fresh_tokens=50_000,
+                peak_model=model,
+                largest_observed_peak_bytes=int(94.3 * GIB),
+                final_context=100_935,
+                fresh_tokens=67_292,
                 model_label="qwen3_5",
             )
         assert "cannot be served on this hardware" in str(excinfo.value)
+
+    def test_it_admits_a_span_that_fits(self):
+        """The valve must not reject what the device actually serves."""
+        from vmlx_engine.utils.prefill_admission import (
+            fit_peak_model,
+            span_admission_check,
+        )
+
+        GIB = 1024**3
+        model = fit_peak_model(
+            [(10_000, int(24.0 * GIB)), (20_000, int(26.0 * GIB))]
+        )
+        assert model is not None
+        # Projects ~32GB at 50k, comfortably under a 107GB limit.
+        span_admission_check(
+            max_ws_bytes=107 * GIB,
+            peak_model=model,
+            largest_observed_peak_bytes=int(26.0 * GIB),
+            final_context=50_000,
+            fresh_tokens=30_000,
+            model_label="qwen3_5",
+        )
 
     def test_unknown_readings_never_decline(self):
         from vmlx_engine.utils.prefill_admission import span_admission_check
 
         GIB = 1024**3
-        for active, limit, transient in ((0, 107 * GIB, GIB), (21 * GIB, 0, GIB), (21 * GIB, 107 * GIB, 0)):
+        flat = (float(200 * GIB), 0.0)  # slope <= 0: nothing to extrapolate
+        rising = (0.0, float(GIB))
+        for limit, model in (
+            (0, rising),           # no device limit exposed
+            (107 * GIB, None),     # no fit learned yet (first span)
+            (107 * GIB, flat),     # peak not growing with context
+        ):
             span_admission_check(
-                active_bytes=active,
                 max_ws_bytes=limit,
-                measured_transient_bytes=transient,
-                measured_at_context=1000,
+                peak_model=model,
+                largest_observed_peak_bytes=0,
                 final_context=100_000,
                 fresh_tokens=99_000,
             )
+
+    def test_fit_needs_two_distinct_contexts(self):
+        from vmlx_engine.utils.prefill_admission import fit_peak_model
+
+        assert fit_peak_model([]) is None
+        assert fit_peak_model([(1000, 500)]) is None
+        # Same context twice cannot determine a slope.
+        assert fit_peak_model([(1000, 500), (1000, 900)]) is None
+        assert fit_peak_model([(1000, 500), (2000, 900)]) is not None
+
+    def test_fit_recovers_a_known_affine_model(self):
+        from vmlx_engine.utils.prefill_admission import (
+            fit_peak_model,
+            project_peak_affine,
+        )
+
+        GIB = 1024**3
+        # peak = 20GB + 0.0005GB/token, sampled at four contexts.
+        samples = [
+            (ctx, int((20.0 + 0.0005 * ctx) * GIB))
+            for ctx in (10_000, 20_000, 40_000, 80_000)
+        ]
+        fitted = fit_peak_model(samples)
+        assert fitted is not None
+        projected = project_peak_affine(fitted[0], fitted[1], 100_000)
+        assert abs(projected - int(70.0 * GIB)) < int(0.1 * GIB)
+
+    def test_projection_never_falls_below_an_observed_peak(self):
+        """A fit is an estimate; a measurement is not."""
+        from vmlx_engine.utils.prefill_admission import project_peak_affine
+
+        GIB = 1024**3
+        assert project_peak_affine(0.0, 1.0, 10, floor_bytes=5 * GIB) == 5 * GIB

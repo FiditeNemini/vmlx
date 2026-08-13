@@ -317,41 +317,122 @@ def hybrid_chunk_valve_check(
     )
 
 
+def fit_peak_model(
+    samples: "list[tuple[int, int]]",
+) -> "tuple[float, float] | None":
+    """Least-squares fit of ``absolute peak bytes = intercept + slope * context``.
+
+    THE QUANTITY MATTERS. An earlier version of the whole-span check projected
+    only the per-chunk TRANSIENT and added the active reading taken at span
+    START. That is what made it unwireable, and ``test_prefill_admission.py``
+    pinned the failure: fed the real numbers from the span that actually died
+    (18.32GB transient at ~65k context, final context 100,935, 21GB active at
+    start, ~107GB limit) it projects ~56GB and ADMITS the fatal span. Active is
+    not a constant across a span — it climbs as KV accumulates, and the observed
+    active at the death point was ~95GB, not 21GB.
+
+    Fitting the measured ``mx.get_peak_memory()`` per chunk sidesteps the whole
+    problem: peak is already absolute (weights + KV + transient), so there is
+    nothing to add and nothing to forget. Against the same measurements the
+    affine peak model projects ~123GB at the final context and declines.
+
+    Affine, not proportional: the per-chunk valve
+    (:func:`hybrid_chunk_valve_check`) projects one chunk ahead where scaling by
+    the context ratio is accurate to 0.06GB, but a whole-span decision
+    extrapolates much further, and proportional scaling drops the constant term.
+    The generator already has scar tissue from exactly that error — feeding
+    chunk 0's one-time full-width allocation into a proportional projection
+    "extrapolated to ~425GB at 100k and declined every request".
+
+    Two parameters need two distinct contexts. Returns ``None`` when the
+    samples cannot determine them, and None must never reject.
+    """
+    points = [
+        (float(ctx), float(transient))
+        for ctx, transient in samples
+        if ctx > 0 and transient > 0
+    ]
+    if len(points) < 2:
+        return None
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
+    n = float(len(points))
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx <= 0.0:  # every sample at the same context — slope undetermined
+        return None
+    sxy = sum((x - mean_x) * (y - mean_y) for x, y in points)
+    slope = sxy / sxx
+    intercept = mean_y - slope * mean_x
+    return (intercept, slope)
+
+
+def project_peak_affine(
+    intercept: float, slope: float, context: int, floor_bytes: int = 0
+) -> int:
+    """Projected absolute peak at ``context`` from a fitted affine model.
+
+    ``floor_bytes`` keeps the projection from falling below a peak that was
+    already OBSERVED — a fit is an estimate, a measurement is not, and the
+    larger of the two is the honest input to an admission decision.
+    """
+    projected = intercept + slope * max(0, int(context))
+    return max(int(floor_bytes), int(projected) if projected > 0 else 0)
+
+
 def span_admission_check(
-    active_bytes: int,
     max_ws_bytes: int,
-    measured_transient_bytes: int,
-    measured_at_context: int,
+    peak_model: "tuple[float, float] | None",
+    largest_observed_peak_bytes: int,
     final_context: int,
     *,
     fresh_tokens: int,
     model_label: str = "model",
-    safety: float = 1.25,
+    safety: float = 1.10,
 ) -> None:
     """Decline a whole prefill span that cannot finish, BEFORE burning the work.
 
-    Per-chunk admission cannot save this case: by the time the last chunks run,
-    active memory is already near the ceiling and no chunk size fits. Worse, the
-    failure mode there is a Metal command-buffer OOM, which ABORTS the process —
-    there is no exception to catch and the engine is simply gone.
+    Per-chunk admission declines correctly but late: only once memory has
+    climbed near the ceiling, which on a ~100k span is ~46 chunks of GPU work
+    already spent. Deciding once, up front, converts that into an immediate
+    clean per-request error.
 
-    Deciding once, early, converts that into a clean per-request error while the
-    engine keeps serving. Unknown readings never reject.
+    ``peak_model`` is a fit from :func:`fit_peak_model`, learned from a PREVIOUS
+    span — a span cannot measure itself before it starts, which is why this
+    check needs cross-span state and the per-chunk valve does not.
+
+    Note there is no ``active_bytes`` parameter, deliberately. The fitted peak
+    is already absolute, and the previous signature's ``active at span start``
+    term is precisely what made this check admit the span that died.
+
+    ``safety`` is 1.10 rather than the per-chunk valve's 1.25 because an affine
+    fit over many measured chunks is a far tighter estimator than one scaled
+    observation; the same 10% margin the per-chunk valve uses internally.
+
+    Unknown readings never reject: a missing model, a non-positive limit, or a
+    non-increasing fit (slope <= 0 — peak not growing with context, so there is
+    nothing to extrapolate) all return without raising.
     """
-    if max_ws_bytes <= 0 or active_bytes <= 0 or measured_transient_bytes <= 0:
+    if max_ws_bytes <= 0 or peak_model is None:
         return
-    projected = project_span_peak_bytes(
-        measured_transient_bytes, measured_at_context, final_context
+    intercept, slope = peak_model
+    if slope <= 0:
+        return
+    projected = project_peak_affine(
+        intercept, slope, final_context, floor_bytes=largest_observed_peak_bytes
     )
-    if active_bytes + int(projected * safety) <= max_ws_bytes:
+    if projected <= 0:
         return
-    gib = 1024**3
+    padded = int(projected * safety)
+    if padded <= max_ws_bytes:
+        return
     raise PrefillAdmissionError(
         f"{model_label}: prefill admission declined a {fresh_tokens}-token span "
         f"before starting it — at the final context of {final_context} tokens the "
-        f"projected working set is {(active_bytes + projected * safety) / gib:.1f}GB "
-        f"against a device limit of {max_ws_bytes / gib:.1f}GB (measured "
-        f"{measured_transient_bytes / gib:.2f}GB transient at {measured_at_context} "
-        f"tokens). A context of this length cannot be served on this hardware; "
+        f"projected Metal working set is {padded / _GIB:.1f}GB against a device "
+        f"limit of {max_ws_bytes / _GIB:.1f}GB (fitted peak model "
+        f"{intercept / _GIB:.2f}GB + {slope * 1000 / _GIB:.4f}GB per 1k tokens). "
+        f"A context of this length cannot be served on this hardware; "
         f"shorten the conversation or reduce the prompt."
     )

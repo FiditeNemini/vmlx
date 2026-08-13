@@ -1107,80 +1107,6 @@ def _shape_images_for_processor_call(
     return images
 
 
-def _warn_short_audio_dilution(processor: Any, waveforms: Any, mapping: Any) -> None:
-    """Warn when an audio clip is tiny relative to the prompt it arrives with.
-
-    Measured on gemma-4-E4B-it-qat-JANG_4M: a 1.5s clip (~38 audio tokens) is
-    transcribed exactly at a 61-token prompt and REFUSED ("no audio file was
-    provided") once a ~2.2k-token system prompt is present, while a 9.9s clip
-    (~250 tokens) survives the same padding and an image (280 soft tokens) is
-    unaffected at 2484 tokens. Prefix/paged cache disabled reproduces it
-    identically, and the chat template emits exactly one correctly positioned
-    audio placeholder at every size -- so this is signal proportion, not
-    plumbing.
-
-    The failure is otherwise SILENT: the caller sees a refusal with no hint the
-    clip was too short for the surrounding prompt. Diagnostics only.
-
-    This lives here, at the processor call, because that is the ONE place the
-    executing path passes through with both the loaded waveforms and the
-    resulting input_ids. The same check wired into MLLM.generate/chat/
-    stream_chat or MLLMScheduler.add_request never fires: the first three are
-    not on the batched path at all, and add_request still holds raw request
-    dicts rather than decoded audio.
-    """
-    try:
-        ids = None
-        for key in ("input_ids", "inputs", "tokens"):
-            candidate = None
-            try:
-                candidate = mapping[key] if key in mapping else None
-            except Exception:
-                candidate = getattr(mapping, key, None)
-            if candidate is not None:
-                ids = candidate
-                break
-        if ids is None:
-            return
-        try:
-            prompt_tokens = int(ids.shape[-1])
-        except Exception:
-            prompt_tokens = int(len(ids[0]) if hasattr(ids[0], "__len__") else len(ids))
-        if prompt_tokens < 1000:
-            return
-
-        rate = float(_processor_audio_sampling_rate(processor) or 16000)
-        samples = 0
-        for wave_form in (waveforms or []):
-            try:
-                samples += int(getattr(wave_form, "shape", [len(wave_form)])[-1])
-            except Exception:
-                continue
-        if samples <= 0 or rate <= 0:
-            return
-        audio_ms = 1000.0 * samples / rate
-        ms_per_token = 40.0
-        try:
-            configured = getattr(processor, "audio_ms_per_token", None)
-            if configured:
-                ms_per_token = float(configured)
-        except Exception:
-            pass
-        audio_tokens = audio_ms / ms_per_token
-        share = audio_tokens / prompt_tokens
-        if share < 0.05:
-            logger.warning(
-                "Short audio in a long prompt: ~%d audio tokens (%.1fs) is %.1f%% "
-                "of a %d-token prompt. Below roughly 5%% this model tends to "
-                "ignore the audio and answer as if none was attached. Use a "
-                "longer clip or a shorter system prompt if the reply claims no "
-                "audio was provided.",
-                int(audio_tokens), audio_ms / 1000.0, 100.0 * share, prompt_tokens,
-            )
-    except Exception as exc:  # diagnostics must never break generation
-        logger.debug("audio dilution check skipped: %s", exc)
-
-
 def _processor_audio_sampling_rate(processor: Any) -> int:
     """Best-effort source sampling rate a VLM audio processor expects (Hz)."""
     for obj in (
@@ -1299,10 +1225,7 @@ def _call_processor_direct_unscoped(
             kwargs["audios"] = processor_audio
     if params and not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
         kwargs = {k: v for k, v in kwargs.items() if k in params}
-    mapping = _as_input_mapping(processor(**kwargs))
-    if audio:
-        _warn_short_audio_dilution(processor, kwargs.get("audio"), mapping)
-    return mapping
+    return _as_input_mapping(processor(**kwargs))
 
 
 _GEMMA4_IMAGE_TOKEN_BUDGETS = {70, 140, 280, 560, 1120}

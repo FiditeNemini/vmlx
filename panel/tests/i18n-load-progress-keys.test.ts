@@ -135,3 +135,61 @@ describe('load-progress i18n keys', () => {
     }
   })
 })
+
+/**
+ * The generalisation of the same defect.
+ *
+ * Catalog-vs-catalog parity checks — "all five locales carry the same 1958
+ * keys" — CANNOT catch this class, because the broken keys were missing from
+ * every catalog at once and so parity held perfectly the whole time. A
+ * renderer-side `t('...')` sweep cannot catch it either: the key is a bare
+ * string literal produced in the MAIN process, which has no catalog to check
+ * it against, and only becomes an i18n key once the renderer feeds it to t().
+ *
+ * So sweep every `labelKey:` literal the main process emits, wherever it lives,
+ * and require it to resolve. Keyed on `labelKey:` rather than on
+ * "dotted string in a known namespace", which false-positives on hostnames
+ * (`api.openai.com`) and filenames (`image.png`).
+ */
+describe('every main-process labelKey resolves', () => {
+  function mainProcessLabelKeys(): { key: string; file: string }[] {
+    const files = [
+      'src/main/sessions.ts',
+      'src/main/server.ts',
+      'src/main/ipc/chat.ts',
+      'src/main/ipc/image.ts',
+    ]
+    const found: { key: string; file: string }[] = []
+    for (const file of files) {
+      let src: string
+      try {
+        src = readFileSync(join(ROOT, file), 'utf-8')
+      } catch {
+        continue // file may be reorganised; the sweep below still guards the rest
+      }
+      for (const m of src.matchAll(/labelKey:\s*['"]([A-Za-z0-9_.]+)['"]/g)) {
+        found.push({ key: m[1], file })
+      }
+    }
+    return found
+  }
+
+  it('finds labelKey emitters to check', () => {
+    // Positive control: if this hits zero the sweep below is vacuous.
+    expect(mainProcessLabelKeys().length).toBeGreaterThan(20)
+  })
+
+  it('resolves every emitted labelKey in every locale', () => {
+    const emitted = mainProcessLabelKeys()
+    const unresolved: string[] = []
+    for (const locale of LOCALES) {
+      const catalog = loadCatalog(locale)
+      for (const { key, file } of emitted) {
+        if (resolve(catalog, key) === undefined) {
+          unresolved.push(`${locale}: ${key} (${file})`)
+        }
+      }
+    }
+    expect(unresolved).toEqual([])
+  })
+})

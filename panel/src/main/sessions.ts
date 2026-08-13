@@ -73,6 +73,7 @@ import {
   verifyBundledEngineOnFilesystem,
 } from './engine-manager'
 import { app as electronApp } from 'electron'
+import { computeEffectiveJit } from '../shared/jitPolicy'
 import {
   GENERIC_DEFAULT_TIMEOUT_SECONDS,
   SLOW_FAMILY_TIMEOUTS,
@@ -4509,7 +4510,18 @@ export class SessionManager extends EventEmitter {
     })
     const effectiveDistributed = requestedDistributed && !dsv4Active
     const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
-    const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !hybridCacheActive
+    const effectiveEnableJit = computeEffectiveJit({
+      enableJitRequested: !!config.enableJit,
+      isMultimodal: isVLM,
+      flashMoeActive: effectiveFlashMoe,
+      distributedActive: effectiveDistributed,
+      dsv4Active,
+      m3Active,
+      zayaCcaActive,
+      turboQuantActive,
+      lagunaMixedSwaTurboQuantActive,
+      hybridCacheActive,
+    })
     if (dsv4Active && ((config as any).smelt || requestedFlashMoe || requestedDistributed || config.speculativeModel)) {
       console.warn('[SESSION] DSV4-Flash detected: ignoring stale Smelt/Flash MoE/distributed/speculative flags; native DSV4 cache and expert hydration own this runtime')
     }

@@ -31,6 +31,7 @@ import {
   cacheTypeSupportsBlockDiskOnly,
   cacheSubtypeSupportsBlockDiskOnly,
 } from '../../../../shared/cacheTypeCapabilities'
+import { computeEffectiveJit } from '../../../../shared/jitPolicy'
 import {
   filterAdditionalArgs,
   finiteNonNegativeNumber,
@@ -320,7 +321,18 @@ function buildCommandPreview(
       !!config.kvCacheQuantization &&
       config.kvCacheQuantization !== 'auto',
   })
-  const effectiveEnableJit = !!config.enableJit && !isVLM && !effectiveFlashMoe && !effectiveDistributed && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !hybridCacheActive
+  const effectiveEnableJit = computeEffectiveJit({
+      enableJitRequested: !!config.enableJit,
+      isMultimodal: isVLM,
+      flashMoeActive: effectiveFlashMoe,
+      distributedActive: effectiveDistributed,
+      dsv4Active,
+      m3Active,
+      zayaCcaActive,
+      turboQuantActive,
+      lagunaMixedSwaTurboQuantActive,
+      hybridCacheActive,
+    })
   if (shouldDisableLagunaJitDefault({
     detected,
     kvCacheQuantization: config.kvCacheQuantization,

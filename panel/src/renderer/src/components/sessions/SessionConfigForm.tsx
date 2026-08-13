@@ -20,6 +20,7 @@ import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
 import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
+import { computeEffectiveJit } from '../../../../shared/jitPolicy'
 export interface SessionConfig {
   host: string
   port: number
@@ -1346,7 +1347,18 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           <label className={`flex items-center gap-2 ${flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
-              checked={!!config.enableJit && !flashMoeActive && !distributedActive && !dsv4Active && !m3Active && !zayaCcaActive && !turboQuantActive && !lagunaMixedSwaTurboQuantActive && !multimodalActive && !hybridCacheActive}
+              checked={computeEffectiveJit({
+                enableJitRequested: !!config.enableJit,
+                isMultimodal: multimodalActive,
+                flashMoeActive,
+                distributedActive,
+                dsv4Active,
+                m3Active,
+                zayaCcaActive,
+                turboQuantActive,
+                lagunaMixedSwaTurboQuantActive,
+                hybridCacheActive,
+              })}
               onChange={e => onChange('enableJit', e.target.checked)}
               disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}
               className="rounded border-input"

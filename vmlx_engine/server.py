@@ -17163,8 +17163,14 @@ def _log_inbound_request_fields(endpoint: str, request: Any) -> None:
     Off unless VMLX_LOG_REQUEST_FIELDS is set. Logs only settings-bearing
     fields, never message content -- prompts can carry private data and this is
     meant to be safe to switch on against a real session.
+
+    Set it to a PATH to append there as well as to the logger. An engine started
+    by the desktop app has its stdout piped into Electron, so the log line only
+    reaches an in-app panel that is awkward to read back; a file makes the
+    UI-versus-API comparison readable from anywhere.
     """
-    if not os.environ.get("VMLX_LOG_REQUEST_FIELDS", "").strip():
+    sink = os.environ.get("VMLX_LOG_REQUEST_FIELDS", "").strip()
+    if not sink:
         return
     fields = (
         "model", "stream", "temperature", "top_p", "top_k", "min_p",
@@ -17182,13 +17188,26 @@ def _log_inbound_request_fields(endpoint: str, request: Any) -> None:
         message_count = len(getattr(request, "messages", None) or [])
     except TypeError:
         tool_count = message_count = -1
+    summary = (
+        " ".join(f"{k}={v!r}" for k, v in sorted(present.items())) or "<none set>"
+    )
     logger.info(
         "Inbound %s fields: %s (messages=%d tools=%d)",
         endpoint,
-        " ".join(f"{k}={v!r}" for k, v in sorted(present.items())) or "<none set>",
+        summary,
         message_count,
         tool_count,
     )
+    if os.sep in sink or sink.endswith(".log"):
+        try:
+            with open(sink, "a", encoding="utf-8") as handle:
+                handle.write(
+                    "Inbound %s fields: %s (messages=%d tools=%d)\n"
+                    % (endpoint, summary, message_count, tool_count)
+                )
+        except OSError as exc:
+            # A bad path must not take the request down; this is diagnostics.
+            logger.warning("Could not append request fields to %r: %s", sink, exc)
 
 
 @app.post(
@@ -20399,6 +20418,10 @@ async def create_response(
     }
     ```
     """
+    # The vMLX app talks to THIS endpoint, not /v1/chat/completions -- the Chat
+    # Settings panel shows its API URL as /v1/responses. Logging only the chat
+    # endpoint left every UI request invisible.
+    _log_inbound_request_fields("responses", request)
     # Model name validation (same as chat completions)
     resolved_name = _resolve_model_name()
     if (

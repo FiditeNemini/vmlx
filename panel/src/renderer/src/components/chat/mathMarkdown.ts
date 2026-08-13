@@ -4,8 +4,19 @@ import { renderToString } from 'katex'
 // TeX normalization. Model-generated code frequently uses either spelling;
 // rewriting `\times`, `$...$`, or `*` inside a tilde fence corrupts source.
 const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
+// The unclosed-fence alternatives are NOT redundant with the closed ones, and
+// their position matters. A fence is unclosed for the whole time it streams, so
+// without them every code block renders `&quot;` for `"` until the closing
+// fence arrives — and permanently when a model ends its reply inside the block
+// or is cut off by max_tokens, which is the common case for a trailing code
+// answer.
+//
+// They must sit AFTER the closed forms (so a complete fence still wins) but
+// BEFORE the inline-backtick form, which would otherwise match the first two
+// backticks of an unclosed ``` as an empty inline span and leave the body
+// exposed to escaping.
 const LITERAL_MARKDOWN_PROTECTED_RE =
-  /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|\$\$[\s\S]*?\$\$/g
+  /```[\s\S]*?```|~~~[\s\S]*?~~~|```[\s\S]*$|~~~[\s\S]*$|`[^`\n]*`|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|\$\$[\s\S]*?\$\$/g
 
 const KATEX_OPTIONS = {
   output: 'html' as const,

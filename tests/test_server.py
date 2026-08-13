@@ -604,9 +604,15 @@ class TestHelperFunctions:
         chat_stream_src = inspect.getsource(server.stream_chat_completion)
         responses_stream_src = inspect.getsource(server.stream_responses_api)
 
-        assert chat_stream_src.count("except PromptTooLongError") == 1
+        # Match the HANDLER, not one exact spelling of it. These routes also
+        # catch PrefillAdmissionError in the same clause — a device that cannot
+        # serve the context is the same class of client error — so the tuple
+        # form `except (PromptTooLongError, PrefillAdmissionError)` is correct
+        # and the old literal count(...) == 1 failed on it while the behaviour
+        # it was protecting was intact.
+        assert chat_stream_src.count("except (PromptTooLongError") == 1
         assert "code\": \"prompt_too_long\"" in chat_stream_src
-        assert "except PromptTooLongError" in responses_stream_src
+        assert "PromptTooLongError" in responses_stream_src
         assert "code\": \"prompt_too_long\"" in responses_stream_src
 
     def test_is_mllm_model_detection(self, tmp_path):

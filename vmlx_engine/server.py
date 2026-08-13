@@ -6162,6 +6162,8 @@ async def check_memory_pressure(request: Request):
 # Knobs:
 # - VMLX_METAL_WS_GUARD=0       → disable entirely (accept hard-crash risk)
     # - VMLX_METAL_WS_REJECT_PCT=N  → tune threshold (default 99)
+from vmlx_engine.utils.prefill_admission import PrefillAdmissionError
+
 _last_metal_ws_log: float = 0.0
 
 
@@ -17016,6 +17018,15 @@ async def create_completion(request: CompletionRequest):
             )
         except PromptTooLongError as e:
             return _prompt_too_long_response_from_error(e)
+        except PrefillAdmissionError as e:
+            # 413, not 500: the device cannot serve a context this long,
+            # which the caller fixes by shortening the prompt. As a bare
+            # RuntimeError this read to the user as an engine crash.
+            return JSONResponse(
+                status_code=413,
+                content={"error": {"message": str(e), "type": "prompt_too_long",
+                                   "code": "prefill_admission_declined"}},
+            )
         except VLMImagePrefillBudgetError as e:
             return _vlm_image_prefill_budget_response_from_error(e)
         except UnsupportedMediaModalityError as e:
@@ -17759,6 +17770,15 @@ async def create_chat_completion(
         )
     except PromptTooLongError as e:
         return _prompt_too_long_response_from_error(e)
+    except PrefillAdmissionError as e:
+        # 413, not 500: the device cannot serve a context this long,
+        # which the caller fixes by shortening the prompt. As a bare
+        # RuntimeError this read to the user as an engine crash.
+        return JSONResponse(
+            status_code=413,
+            content={"error": {"message": str(e), "type": "prompt_too_long",
+                               "code": "prefill_admission_declined"}},
+        )
     except VLMImagePrefillBudgetError as e:
         return _vlm_image_prefill_budget_response_from_error(e)
     except UnsupportedMediaModalityError as e:
@@ -20949,6 +20969,15 @@ async def create_response(
         )
     except PromptTooLongError as e:
         return _prompt_too_long_response_from_error(e)
+    except PrefillAdmissionError as e:
+        # 413, not 500: the device cannot serve a context this long,
+        # which the caller fixes by shortening the prompt. As a bare
+        # RuntimeError this read to the user as an engine crash.
+        return JSONResponse(
+            status_code=413,
+            content={"error": {"message": str(e), "type": "prompt_too_long",
+                               "code": "prefill_admission_declined"}},
+        )
     except VLMImagePrefillBudgetError as e:
         return _vlm_image_prefill_budget_response_from_error(e)
     except UnsupportedMediaModalityError as e:
@@ -21785,7 +21814,10 @@ async def stream_completions_multi(
                 if output.finished:
                     data["usage"] = get_usage(output).model_dump(exclude_none=True)
                 yield f"data: {json.dumps(data, ensure_ascii=True)}\n\n"
-        except PromptTooLongError as e:
+        # PrefillAdmissionError rides along: same class of client error (the
+        # device cannot serve this context), and the body below uses only
+        # str(e), so it needs no PromptTooLongError-specific fields.
+        except (PromptTooLongError, PrefillAdmissionError) as e:
             if hasattr(engine, "abort_request"):
                 await engine.abort_request(prompt_request_id)
             error_data = {
@@ -23191,7 +23223,10 @@ async def stream_chat_completion(
                 # (progress-only engine chunk). Skip — don't emit empty delta.
                 continue
 
-    except PromptTooLongError as e:
+    # PrefillAdmissionError rides along: same class of client error (the
+    # device cannot serve this context), and the body below uses only
+    # str(e), so it needs no PromptTooLongError-specific fields.
+    except (PromptTooLongError, PrefillAdmissionError) as e:
         if hasattr(engine, "abort_request"):
             await engine.abort_request(response_id)
         error_data = {
@@ -25328,7 +25363,10 @@ async def stream_responses_api(
                         "usage": usage_obj,
                     },
                 )
-    except PromptTooLongError as e:
+    # PrefillAdmissionError rides along: same class of client error (the
+    # device cannot serve this context), and the body below uses only
+    # str(e), so it needs no PromptTooLongError-specific fields.
+    except (PromptTooLongError, PrefillAdmissionError) as e:
         if hasattr(engine, "abort_request"):
             await engine.abort_request(response_id)
         yield _sse(

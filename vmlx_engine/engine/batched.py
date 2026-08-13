@@ -214,6 +214,15 @@ def _raise_prompt_too_long_from_output(output: Any) -> None:
             family=getattr(output, "error_family", None),
             request_id=getattr(output, "request_id", None),
         )
+    if getattr(output, "error_code", None) == "prefill_admission_declined":
+        # Keep the admission decline TYPED across the engine boundary. As a bare
+        # RuntimeError it read as an internal fault, so a prompt simply too large
+        # for this device surfaced to the user as an engine crash.
+        from vmlx_engine.utils.prefill_admission import PrefillAdmissionError
+
+        raise PrefillAdmissionError(
+            str(getattr(output, "error", None) or "prefill admission declined")
+        )
     error = getattr(output, "error", None)
     if error:
         raise RuntimeError(str(error))

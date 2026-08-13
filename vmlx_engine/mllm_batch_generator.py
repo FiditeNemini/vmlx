@@ -1651,6 +1651,7 @@ def _is_attention_cache_slot(cache: Any) -> bool:
 # THAT is the real unlock, and it needs a long coherence run to justify.
 from .utils.memory_limits import get_effective_metal_working_set_bytes
 from .utils.prefill_admission import (
+    PrefillAdmissionError,
     fit_peak_model,
     hybrid_chunk_valve_check,
     prefill_keep_alloc_enabled,
@@ -8671,6 +8672,12 @@ class MLLMBatchGenerator:
                     _err_code = UnsupportedMediaModalityError.code
                 elif isinstance(prefill_err, PromptTooLongError):
                     _err_code = "prompt_too_long"
+                elif isinstance(prefill_err, PrefillAdmissionError):
+                    # A span the device cannot serve is the CALLER's problem to
+                    # fix by shortening the prompt, not an engine fault. Without
+                    # a code it fell through as a generic RuntimeError and the UI
+                    # rendered a device-capacity limit as an internal crash.
+                    _err_code = "prefill_admission_declined"
                 else:
                     _err_code = None
                 _err_detail = (
@@ -8682,6 +8689,7 @@ class MLLMBatchGenerator:
                     VLMImagePrefillBudgetError.code,
                     UnsupportedMediaModalityError.code,
                     "prompt_too_long",
+                    "prefill_admission_declined",
                 }:
                     logger.warning(
                         f"Prefill rejected for {req.request_id}: {_err_detail} "

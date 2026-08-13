@@ -35,6 +35,25 @@ from .prefill_admission import (
 
 logger = logging.getLogger(__name__)
 
+def _cold_prefill_tail_split() -> int:
+    """How many trailing prompt tokens the COLD prefill computes separately.
+
+    0 (the default) keeps the historical single-pass cold prefill. Set
+    VMLX_COLD_PREFILL_TAIL_SPLIT to the number of tokens a warm turn re-feeds
+    after restoring, to make the two arms shape-equivalent.
+
+    Diagnostic lever, not a shipping default: it perturbs cold-path numerics for
+    EVERY family, and the correct width is per-request (it tracks the cache-key
+    boundary, not a constant).
+    """
+    import os as _os
+
+    try:
+        return max(0, int(_os.environ.get("VMLX_COLD_PREFILL_TAIL_SPLIT", "0") or 0))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 
 @dataclass
 class _Request:
@@ -829,7 +848,32 @@ class SingleBatchGenerator:
                 prompt_cache_snapshot=prompt_cache_snapshot,
             )
         if len(req.prompt_tokens) > 1:
-            self._prefill(req.prompt_tokens[:-1], req)
+            # A prefix-cache HIT restores the cached prefix and then computes
+            # the remaining few positions in a SMALL forward, while a cold
+            # prefill computes them inside one large pass. FP reductions are not
+            # shape-invariant, so those positions come out fractionally
+            # different and can flip an argmax later in a long generation.
+            #
+            # This gate makes the COLD path split at the same boundary so both
+            # arms compute the tail with the same shape. Default OFF: it changes
+            # cold-path numerics for every family, including the ones already
+            # byte-exact, so it must be proven per family with
+            # scripts/cache_fidelity_check.py before it could become a default.
+            _tail = _cold_prefill_tail_split()
+            _cold_tokens = req.prompt_tokens[:-1]
+            if _tail > 0 and len(_cold_tokens) > _tail:
+                # Log so an A/B can PROVE the path engaged. A guard that
+                # silently declines makes the comparison stock-vs-stock.
+                logger.info(
+                    "COLD_PREFILL_TAIL_SPLIT engaged: %d + %d (of %d)",
+                    len(_cold_tokens) - _tail,
+                    _tail,
+                    len(_cold_tokens),
+                )
+                self._prefill(_cold_tokens[:-_tail], req)
+                self._prefill(_cold_tokens[-_tail:], req)
+            else:
+                self._prefill(_cold_tokens, req)
         uses_openpangu = self._cache_uses_openpangu(req.cache)
         # openPangu's KV, DSA-indexer, rotating-SWA and causal-conv states are a
         # single path-dependent unit.  Capture the immutable N-1 boundary BEFORE

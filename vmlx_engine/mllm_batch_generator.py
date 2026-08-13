@@ -6730,8 +6730,28 @@ class MLLMBatchGenerator:
                 # solved the identical problem by pre-sizing the span.
                 #
                 # Sizing `step` to the remaining output length collapses those
-                # ~12 full-buffer copies into one. Off by default until the live
-                # A/B lands; VMLX_DECODE_KV_PRESIZE=1 enables.
+                # ~12 full-buffer copies into one.
+                #
+                # MEASURED, and it does NOT pay off — stays OFF. Muse-Glimmer-30B,
+                # 27,078-token prompt, 1200 output tokens, one run per arm:
+                #
+                #   OFF  decode 22.21 t/s  TTFT 31.73s  total 85.76s  (fired 0x)
+                #   ON   decode 24.77 t/s  TTFT 39.74s  total 88.19s  (fired 1x)
+                #
+                # Decode rate improves ~11%, but TTFT rises ~8s and TOTAL WALL
+                # CLOCK GETS WORSE. The allocation is not eliminated, only moved:
+                # the first decode token now pays one growth sized to the whole
+                # output instead of twelve spread through the generation, and
+                # mx.concatenate copies the entire existing 27k-token buffer
+                # either way. Judging this on decode t/s alone would have shipped
+                # a regression — the same shape as the fp16 indexer that was 2.26x
+                # in isolation and -22% end to end.
+                #
+                # Caveat, stated honestly: one run per arm, and the 2.4s total
+                # delta is ~2.8% so it is within plausible run-to-run noise. The
+                # 8s TTFT rise is not. Re-run both arms several times before
+                # concluding anything stronger than "no demonstrated win".
+                # VMLX_DECODE_KV_PRESIZE=1 enables it for that experiment.
                 if os.environ.get("VMLX_DECODE_KV_PRESIZE", "0").strip().lower() in {
                     "1", "true", "yes", "on"
                 }:

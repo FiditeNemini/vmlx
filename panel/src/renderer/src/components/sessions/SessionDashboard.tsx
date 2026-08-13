@@ -83,7 +83,16 @@ export function SessionDashboard({ onOpenSession, onConfigureSession, onCreateSe
       window.api.sessions.onHealth((data: any) => {
         // Targeted update — only patch if the health check confirms the model is loaded.
         // Don't falsely set 'running' when the process is up but model is still loading.
-        if (data?.sessionId && data?.status === 'ok') {
+        //
+        // Keyed on `running`, not `status`: only ONE of the four session:health
+        // emits carries `status` (the local periodic check, where it is exactly
+        // `modelReady ? 'ok' : 'loading'` and therefore identical to `running`).
+        // The other three — remote healthy, remote busy, local busy on a long
+        // prefill — send `running: true` with no `status` at all, so a guard on
+        // `status` silently ignored every one of them and this dashboard could
+        // never reconcile a stale remote session. SessionsContext already keys
+        // on `running`; these two must agree.
+        if (data?.sessionId && data?.running === true) {
           setSessions(prev => prev.map(s =>
             s.id === data.sessionId
               ? { ...s, status: 'running' as const, modelName: data.modelName || s.modelName }

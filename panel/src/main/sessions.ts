@@ -1480,6 +1480,14 @@ export class SessionManager extends EventEmitter {
         label: streamsWeights
           ? `Resident RAM ${formatGb(residentBytes)} GB (weights stream from SSD; bundle ${formatGb(modelBytes)} GB)`
           : `Loading weights into RAM ${formatGb(residentBytes)} / ~${formatGb(expectedResidentBytes)} GB`,
+        // Numbers stay OUT of the catalog string — the renderer interpolates
+        // them, so the phrasing around them can be translated per locale.
+        labelKey: streamsWeights
+          ? 'main.loadProgress.residentRamStreaming'
+          : 'main.loadProgress.loadingWeightsIntoRam',
+        labelParams: streamsWeights
+          ? { resident: formatGb(residentBytes), bundle: formatGb(modelBytes) }
+          : { resident: formatGb(residentBytes), expected: formatGb(expectedResidentBytes) },
         progress,
         ...meta,
       })
@@ -2503,6 +2511,7 @@ export class SessionManager extends EventEmitter {
       this.emit('session:loadProgress', {
         sessionId,
         label: 'Scanning model files...',
+        labelKey: 'main.loadProgress.scanningModelFiles',
         progress: 2,
         ...meta,
       })
@@ -3474,7 +3483,7 @@ export class SessionManager extends EventEmitter {
               this.lastHealthyAt.set(session.id, Date.now())
               if (session.status === 'loading') {
                 this.loadProgressState.set(session.id, 100)
-                this.emit('session:loadProgress', { sessionId: session.id, label: 'Connected', progress: 100 })
+                this.emit('session:loadProgress', { sessionId: session.id, label: 'Connected', labelKey: 'main.loadProgress.connected', progress: 100 })
                 db.updateSession(session.id, { status: 'running' })
                 this.emit('session:ready', { sessionId: session.id, port: session.port })
               }
@@ -3550,7 +3559,7 @@ export class SessionManager extends EventEmitter {
               if (session.status === 'loading') {
                 // Emit 100% progress so bar completes before disappearing
                 this.loadProgressState.set(session.id, 100)
-                this.emit('session:loadProgress', { sessionId: session.id, label: 'Model ready', progress: 100 })
+                this.emit('session:loadProgress', { sessionId: session.id, label: 'Model ready', labelKey: 'main.loadProgress.modelReady', progress: 100 })
                 db.updateSession(session.id, { status: 'running', standbyDepth: null })
                 this.touchSession(session.id)
                 this.emit('session:ready', {
@@ -3585,6 +3594,7 @@ export class SessionManager extends EventEmitter {
                 this.emit('session:loadProgress', {
                   sessionId: session.id,
                   label: 'Model runtime still loading...',
+                  labelKey: 'main.loadProgress.modelRuntimeStillLoading',
                   progress: 95,
                   ...(this.loadProgressMeta.get(session.id) || {}),
                 })
@@ -3847,7 +3857,7 @@ export class SessionManager extends EventEmitter {
             }
           : {}
         if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
-        this.emit('session:loadProgress', { sessionId, label: 'Waking from sleep...', progress: 50, ...meta })
+        this.emit('session:loadProgress', { sessionId, label: 'Waking from sleep...', labelKey: 'main.loadProgress.wakingFromSleep', progress: 50, ...meta })
         if (session.pid && modelFileBytes > 0) {
           this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)
         }

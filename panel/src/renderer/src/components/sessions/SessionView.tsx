@@ -637,7 +637,9 @@ function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
       </div>
       <p className="text-[10px] text-muted-foreground mt-1">
         {progress
-          ? (progress.labelKey ? t(progress.labelKey, { defaultValue: progress.label }) : progress.label)
+          ? (progress.labelKey
+              ? t(progress.labelKey, { defaultValue: progress.label, ...(progress.labelParams || {}) })
+              : progress.label)
           : t('sessions.view.loadProgressFallback')} {progress ? `(${progress.progress}%)` : ''}
       </p>
       {formatModelBytes(progress?.modelBytes) && (

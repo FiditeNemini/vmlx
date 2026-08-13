@@ -27,6 +27,12 @@ export interface LoadProgress {
    * renders (the label is then used verbatim, exactly as before).
    */
   labelKey?: string
+  /**
+   * Values interpolated into `labelKey`. The resident-RAM phases embed GB
+   * figures, so the numbers travel separately and the sentence around them
+   * stays translatable instead of being baked into an English template.
+   */
+  labelParams?: Record<string, string | number>
   progress: number
   modelBytes?: number
   expectedResidentBytes?: number
@@ -119,6 +125,7 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
             // made the i18n keys dead — SessionCard saw labelKey undefined and
             // fell back to English in every locale.
             labelKey: data.labelKey,
+            labelParams: data.labelParams,
             progress: data.progress,
             ...(data.modelBytes != null ? { modelBytes: data.modelBytes } : {}),
             ...(data.expectedResidentBytes != null ? { expectedResidentBytes: data.expectedResidentBytes } : {}),

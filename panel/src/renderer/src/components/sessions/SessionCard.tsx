@@ -236,7 +236,10 @@ export function SessionCard({
                     beside the English text; resolve the key and fall back to the
                     literal so a locale missing the entry still reads correctly. */}
                 {progress.labelKey
-                  ? t(progress.labelKey, { defaultValue: progress.label })
+                  ? t(progress.labelKey, {
+                      defaultValue: progress.label,
+                      ...(progress.labelParams || {}),
+                    })
                   : progress.label}{' '}
                 ({progress.progress}%)
               </p>

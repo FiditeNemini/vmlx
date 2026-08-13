@@ -43,7 +43,31 @@ function resolve(catalog: Record<string, unknown>, key: string): string | undefi
 /** Every labelKey the main process actually emits for load progress. */
 function emittedLabelKeys(): string[] {
   const src = readFileSync(join(ROOT, 'src/main/sessions.ts'), 'utf-8')
-  return [...src.matchAll(/labelKey:\s*'([^']+)'/g)].map(m => m[1])
+  // Quoted `main.loadProgress.*` rather than `labelKey: '...'`, because one
+  // emit picks its key with a ternary and would otherwise go unchecked.
+  return [...src.matchAll(/'(main\.loadProgress\.[A-Za-z0-9_]+)'/g)].map(m => m[1])
+}
+
+/** Body of every `session:loadProgress` emit in the main process. */
+function loadProgressEmitBodies(): { line: number; body: string }[] {
+  const src = readFileSync(join(ROOT, 'src/main/sessions.ts'), 'utf-8')
+  const out: { line: number; body: string }[] = []
+  const re = /\.emit\(\s*'session:loadProgress'\s*,\s*\{/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(src))) {
+    let depth = 0
+    const start = re.lastIndex - 1
+    let j = start
+    for (; j < src.length; j++) {
+      if (src[j] === '{') depth++
+      else if (src[j] === '}') {
+        depth--
+        if (depth === 0) break
+      }
+    }
+    out.push({ line: src.slice(0, m.index).split('\n').length, body: src.slice(start, j + 1) })
+  }
+  return out
 }
 
 describe('load-progress i18n keys', () => {
@@ -60,6 +84,19 @@ describe('load-progress i18n keys', () => {
     const catalog = loadCatalog(locale)
     const unresolved = [...new Set(keys)].filter(k => resolve(catalog, k) === undefined)
     expect(unresolved).toEqual([])
+  })
+
+  it('EVERY session:loadProgress emit ships a labelKey', () => {
+    // The pattern table was fixed first and six other emits were missed —
+    // 'Connected', 'Model ready', 'Waking from sleep...', 'Scanning model
+    // files...', 'Model runtime still loading...' and the resident-RAM phase.
+    // Three of those already HAD catalog entries, so translations existed and
+    // sat unreachable purely because the emit never sent a key. Checking only
+    // the keys that are sent can never catch an emit that sends none.
+    const emits = loadProgressEmitBodies()
+    expect(emits.length).toBeGreaterThan(5)
+    const missing = emits.filter(e => !e.body.includes('labelKey')).map(e => e.line)
+    expect(missing).toEqual([])
   })
 
   it('each key maps to the English text it is emitted beside', () => {

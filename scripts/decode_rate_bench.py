@@ -106,12 +106,25 @@ def main():
             continue
         g = r["gaps"]
         rates.append(r["rate"])
+        p50 = statistics.median(g) if g else 0.0
+        # Where the worst stall lands matters more than its size. One big gap
+        # early is warmup; evenly spaced ones are periodic (cache growth,
+        # eviction); scattered ones are jitter. max_gap alone cannot tell them
+        # apart.
+        #
+        # @d<n> is a DELTA index, NOT a token index. SSE deltas coalesce -- that
+        # is the whole reason this script takes counts from usage rather than
+        # from the stream -- so the nth delta is at or beyond the nth token.
+        # Use it to see spacing and periodicity, never to claim an exact token
+        # boundary.
+        worst_i = max(range(len(g)), key=lambda k: g[k]) if g else -1
+        stalls = sum(1 for x in g if p50 > 0 and x > 4 * p50)
         print("[%s] run %d: %.1f t/s  tokens=%d  ttft=%.3fs  "
-              "p50_gap=%.4fs  mean_gap=%.4fs  max_gap=%.4fs"
+              "p50_gap=%.4fs  mean_gap=%.4fs  max_gap=%.4fs @d%d  "
+              "gaps>4xp50=%d"
               % (tag, i + 1, r["rate"], r["completion_tokens"], r["ttft"],
-                 statistics.median(g) if g else 0.0,
-                 statistics.fmean(g) if g else 0.0,
-                 max(g) if g else 0.0))
+                 p50, statistics.fmean(g) if g else 0.0,
+                 max(g) if g else 0.0, worst_i + 2, stalls))
         time.sleep(2.0)
 
     if rates:

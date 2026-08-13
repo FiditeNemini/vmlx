@@ -281,6 +281,40 @@ class TestStoreUsesSharedAlignment:
         # The old unconditional bail must not come back.
         assert "Until recursive alignment is implemented" not in source
 
+    def test_flat_path_uses_the_shared_helper_too(self):
+        """The flat (non-CacheList) store path had its own copy of the same
+        slicing rule. Two copies is how the nested and flat paths would drift
+        into different metadata behaviour."""
+        import inspect
+
+        from vmlx_engine import scheduler
+
+        source = inspect.getsource(scheduler)
+        assert "aligned_flat = _align_attention_state_dict(" in source
+        # The inlined copy's distinctive lines must be gone.
+        assert "key_len = int(keys.shape[seq_dim])" not in source
+        assert "quantized_aligned = True" not in source
+
+    def test_recognized_layout_is_distinguished_from_unknown(self):
+        """A wrapped rotating buffer and an unheard-of layout are different
+        events; collapsing them into one warning hides the real gap."""
+        import mlx.core as mx
+
+        from vmlx_engine.scheduler import _is_recognized_attention_layout
+
+        assert _is_recognized_attention_layout(
+            (mx.ones((1, 2, 4, 8)), mx.ones((1, 2, 4, 8)))
+        )
+        assert _is_recognized_attention_layout(
+            (tuple(mx.ones((1, 2, 4, 8)) for _ in range(3)),
+             tuple(mx.ones((1, 2, 4, 8)) for _ in range(3)))
+        )
+        assert not _is_recognized_attention_layout(("a", "b"))
+        assert not _is_recognized_attention_layout({"opaque": 1})
+        assert not _is_recognized_attention_layout(
+            (mx.ones((1, 1, 1, 4, 8)), mx.ones((1, 1, 1, 4, 8)))
+        )
+
     def test_neither_detector_discards_the_wrapper_name(self):
         """Discarding "CacheList" assumes the wrapper only ever holds KV layers.
 

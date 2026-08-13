@@ -2041,7 +2041,19 @@ class DSV4BatchGenerator:
         capture_prompt_snapshots: Optional[List[bool]] = None,
         prompt_snapshot_tail_tokens: Optional[List[int]] = None,
         thinking_soft_caps: Optional[List[Optional[int]]] = None,
+        gen_prompt_lens: Optional[List[int]] = None,
     ):
+        # gen_prompt_lens is accepted and ignored. The scheduler passes it to
+        # whichever generator it bound, and it drives the cold-prefill tail
+        # split, which is proven to apply to PLAIN attention KV only --
+        # DeepseekV4Cache is a path-dependent composite (SWA ring + CSA/HCA
+        # pools), so re-feeding a tail onto a restored state cannot be made
+        # numerically equal to a full prefill at any split width.
+        #
+        # It must still be in the signature: omitting it made every DSV4
+        # request die with "unexpected keyword argument" and loop back onto
+        # the waiting queue, with the whole test suite green.
+        del gen_prompt_lens
         # Auto-evict any already-finished requests so the scheduler can
         # queue the next one. Without this, the scheduler keeps retrying
         # inserts because the generator still claims slot 0 is taken.

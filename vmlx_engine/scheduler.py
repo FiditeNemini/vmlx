@@ -392,6 +392,34 @@ def _align_attention_state_dict(
     return {**state_dict, "state": (keys, values), "meta_state": new_meta}
 
 
+def _is_recognized_attention_layout(state: Any) -> bool:
+    """Whether ``state`` is one of the KV layouts the store knows how to slice.
+
+    Only used to tell two failures apart in the log: a layout we understand but
+    refused to align (a wrapped rotating buffer -- expected), versus a layout we
+    do not recognise at all (a real gap worth chasing). Collapsing both into one
+    "unknown format" warning would have hidden the second behind the first.
+    """
+    if not (isinstance(state, tuple) and len(state) == 2):
+        return False
+    keys, values = state
+    if (
+        hasattr(keys, "shape")
+        and hasattr(values, "shape")
+        and len(keys.shape) in (3, 4)
+        and len(values.shape) == len(keys.shape)
+    ):
+        return True
+    return (
+        isinstance(keys, (tuple, list))
+        and isinstance(values, (tuple, list))
+        and len(keys) >= 1
+        and len(values) == len(keys)
+        and all(hasattr(t, "shape") and len(t.shape) >= 2 for t in keys)
+        and all(hasattr(t, "shape") and len(t.shape) >= 2 for t in values)
+    )
+
+
 def _align_cache_list_state_dict(
     state_dict: Dict[str, Any],
     target: int,
@@ -9908,126 +9936,27 @@ class Scheduler:
                                                     break
                                                 truncated_dicts.append(truncated_m3)
                                                 continue
-                                            if isinstance(state, tuple) and len(state) == 2:
-                                                keys, values = state
-                                                if (
-                                                    hasattr(keys, "shape")
-                                                    and hasattr(values, "shape")
-                                                    and len(keys.shape) in (3, 4)
-                                                    and len(values.shape) == len(keys.shape)
-                                                ):
-                                                    seq_dim = (
-                                                        2 if len(keys.shape) == 4 else 1
-                                                    )
-                                                    key_len = int(keys.shape[seq_dim])
-                                                    value_len = int(values.shape[seq_dim])
-                                                    if key_len == value_len and key_len >= target:
-                                                        safe = target
-                                                        if len(keys.shape) == 4:
-                                                            keys = keys[:, :, :safe, :]
-                                                            values = values[:, :, :safe, :]
-                                                        else:
-                                                            keys = keys[:, :safe, :]
-                                                            values = values[:, :safe, :]
-                                                        new_meta = _rebuild_meta_state_after_truncation(
-                                                            cls_name,
-                                                            sd.get("meta_state", ()),
-                                                            safe,
-                                                        )
-                                                        if new_meta is None:
-                                                            # RotatingKVCache with wrapped
-                                                            # buffer: cannot safely truncate.
-                                                            # Skip this store entirely.
-                                                            logger.info(
-                                                                "Skipping paged cache store for %s: "
-                                                                "cannot rebuild %s metadata after "
-                                                                "truncation (target=%d, safe=%d, "
-                                                                "prompt_tokens=%d, gen_prompt_len=%d)",
-                                                                request_id,
-                                                                cls_name,
-                                                                target,
-                                                                safe,
-                                                                len(prompt_tokens),
-                                                                gen_prompt_len,
-                                                            )
-                                                            trunc_ok = False
-                                                            break
-                                                        truncated_dicts.append(
-                                                            {
-                                                                **sd,
-                                                                "state": (keys, values),
-                                                                "meta_state": new_meta,
-                                                            }
-                                                        )
-                                                        continue
-                                                elif (
-                                                    isinstance(keys, (tuple, list))
-                                                    and isinstance(values, (tuple, list))
-                                                    and len(keys) >= 1
-                                                    and len(values) == len(keys)
-                                                ):
-                                                    # QuantizedKVCache: tuple of (data, scales, zeros)
-                                                    quantized_lengths = []
-                                                    quantized_aligned = True
-                                                    for key_part, value_part in zip(keys, values):
-                                                        if (
-                                                            not hasattr(key_part, "shape")
-                                                            or not hasattr(value_part, "shape")
-                                                            or len(key_part.shape) < 2
-                                                            or len(value_part.shape) < 2
-                                                        ):
-                                                            quantized_aligned = False
-                                                            break
-                                                        key_len = int(key_part.shape[-2])
-                                                        value_len = int(value_part.shape[-2])
-                                                        if key_len != value_len:
-                                                            quantized_aligned = False
-                                                            break
-                                                        quantized_lengths.append(key_len)
-                                                    if (
-                                                        quantized_aligned
-                                                        and quantized_lengths
-                                                        and len(set(quantized_lengths)) == 1
-                                                        and quantized_lengths[0] >= target
-                                                    ):
-                                                        safe = target
-                                                        if safe > 0:
-                                                            keys = tuple(
-                                                                t[..., :safe, :]
-                                                                for t in keys
-                                                            )
-                                                            values = tuple(
-                                                                t[..., :safe, :]
-                                                                for t in values
-                                                            )
-                                                            new_meta = _rebuild_meta_state_after_truncation(
-                                                                cls_name,
-                                                                sd.get("meta_state", ()),
-                                                                safe,
-                                                            )
-                                                            if new_meta is None:
-                                                                logger.info(
-                                                                    "Skipping paged cache store for %s: "
-                                                                    "cannot rebuild %s quantized metadata "
-                                                                    "after truncation (target=%d, safe=%d, "
-                                                                    "prompt_tokens=%d, gen_prompt_len=%d)",
-                                                                    request_id,
-                                                                    cls_name,
-                                                                    target,
-                                                                    safe,
-                                                                    len(prompt_tokens),
-                                                                    gen_prompt_len,
-                                                                )
-                                                                trunc_ok = False
-                                                                break
-                                                            truncated_dicts.append(
-                                                                {
-                                                                    **sd,
-                                                                    "state": (keys, values),
-                                                                    "meta_state": new_meta,
-                                                                }
-                                                            )
-                                                            continue
+                                            # Same rule as the CacheList sub-caches: one implementation, so
+                                            # the flat and nested paths cannot drift into different slicing
+                                            # or metadata behaviour.
+                                            aligned_flat = _align_attention_state_dict(sd, target)
+                                            if aligned_flat is not None:
+                                                truncated_dicts.append(aligned_flat)
+                                                continue
+                                            if _is_recognized_attention_layout(state):
+                                                # Layout understood, alignment refused -- most often a
+                                                # RotatingKVCache whose ring buffer already wrapped, where
+                                                # tensor order is no longer temporal. Expected, not a gap.
+                                                logger.info(
+                                                    "Skipping paged cache store for %s: recognized %s state could not be aligned to target=%d (prompt_tokens=%d, gen_prompt_len=%d)",
+                                                    request_id,
+                                                    cls_name or type(state).__name__,
+                                                    target,
+                                                    len(prompt_tokens),
+                                                    gen_prompt_len,
+                                                )
+                                                trunc_ok = False
+                                                break
                                             # Unknown nonempty state cannot be assumed
                                             # token-independent. Fail closed rather
                                             # than publish a longer state under the

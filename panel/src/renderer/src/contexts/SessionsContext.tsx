@@ -112,6 +112,13 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
           next.set(data.sessionId, {
             ...(next.get(data.sessionId) || {}),
             label: data.label,
+            // Assigned unconditionally, not spread in only when present: the
+            // previous entry is spread above, so a conditional copy would leave
+            // the LAST phase's key paired with this phase's English label and
+            // render the wrong translated string. Dropping it here was what
+            // made the i18n keys dead — SessionCard saw labelKey undefined and
+            // fell back to English in every locale.
+            labelKey: data.labelKey,
             progress: data.progress,
             ...(data.modelBytes != null ? { modelBytes: data.modelBytes } : {}),
             ...(data.expectedResidentBytes != null ? { expectedResidentBytes: data.expectedResidentBytes } : {}),

@@ -118,4 +118,24 @@ describe('load-progress labels can reach the locale catalogs', () => {
     )
     expect(context).toContain('labelKey?: string')
   })
+
+  it('the loadProgress handler actually forwards labelKey into state', () => {
+    // Declaring `labelKey?: string` on the interface proves nothing about the
+    // wire. The handler copied label, progress, modelBytes, residentMb, peakMb
+    // and cacheMb field by field and silently omitted labelKey, so every card
+    // saw `undefined`, took the English branch, and stayed English in all five
+    // locales while its own sibling lines rendered translated. The type said
+    // the field existed the entire time.
+    const context = readFileSync(
+      join(repo, 'src/renderer/src/contexts/SessionsContext.tsx'),
+      'utf8',
+    )
+    const start = context.indexOf('onLoadProgress')
+    expect(start).toBeGreaterThan(-1)
+    const handler = context.slice(start, start + 1600)
+    expect(handler).toMatch(/labelKey:\s*data\.labelKey/)
+    // Unconditional, because the previous entry is spread in first: a
+    // conditional copy would pair a stale key with a fresh English label.
+    expect(handler).not.toMatch(/\.\.\.\(data\.labelKey[^)]*\)/)
+  })
 })

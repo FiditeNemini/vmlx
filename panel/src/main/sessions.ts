@@ -38,6 +38,7 @@ import {
 } from '../shared/sessionConfigMigrations'
 import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
 import { sessionMatchesModelPath } from '../shared/sessionUtils'
+import { normalizeHfTokenSetting } from '../shared/hfSettings'
 import { shouldUseProofOwnedEngineLifecycle } from '../shared/userDataOverride'
 import {
   classifySessionModelPaths,
@@ -2574,7 +2575,12 @@ export class SessionManager extends EventEmitter {
     // stored token is synchronous in Electron safeStorage and can block the
     // main thread; local bundles do not need HF_TOKEN at session startup.
     if (shouldPassHfTokenToEngine(config.modelPath)) {
-      const hfToken = db.getSetting('hf_api_key')
+      // Normalize on READ, like the other consumers. Both UI save paths trim
+      // today, so a whitespace-bearing token can only arrive from an older
+      // build, a migration or a direct DB write -- but a stray newline here
+      // becomes an invalid Authorization header inside the engine, which fails
+      // as an auth error rather than as the formatting problem it is.
+      const hfToken = normalizeHfTokenSetting(db.getSetting('hf_api_key'))
       if (hfToken) {
         spawnEnv.HF_TOKEN = hfToken
       }

@@ -38,6 +38,19 @@ describe("secret setting presence checks", () => {
     expect(sessions).toContain("function shouldPassHfTokenToEngine");
     expect(sessions).toContain("if (existsSync(value)) return false");
     expect(sessions).toContain("if (shouldPassHfTokenToEngine(config.modelPath))");
-    expect(sessions).toContain("const hfToken = db.getSetting('hf_api_key')");
+    // Assert the PROPERTY this test exists for -- that the decrypting read
+    // happens inside the guard -- not the exact spelling of the read. Pinning
+    // the literal line broke the moment the read was wrapped in
+    // normalizeHfTokenSetting, a change that preserved the guard entirely.
+    const guardIndex = sessions.indexOf(
+      "if (shouldPassHfTokenToEngine(config.modelPath))",
+    );
+    const reads = [...sessions.matchAll(/db\.getSetting\(\s*'hf_api_key'\s*\)/g)];
+    expect(reads.length).toBeGreaterThan(0);
+    for (const read of reads) {
+      expect(read.index).toBeGreaterThan(guardIndex);
+      // and close enough to sit in that block rather than somewhere later
+      expect(read.index! - guardIndex).toBeLessThan(800);
+    }
   });
 });

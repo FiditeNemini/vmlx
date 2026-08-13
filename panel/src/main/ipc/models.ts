@@ -2743,8 +2743,10 @@ export function registerModelHandlers(): void {
         };
       }
 
-      // Check HF token for gated models (Flux repos require authentication)
-      const hfToken = db.getSetting("hf_api_key");
+      // Check HF token for gated models (Flux repos require authentication).
+      // Normalized so a whitespace-only value cannot pass this presence check
+      // and silently suppress the warning it exists to emit.
+      const hfToken = normalizeHfTokenSetting(db.getSetting("hf_api_key"));
       if (!hfToken) {
         // Warn but don't block — some repos may be public
         console.log(

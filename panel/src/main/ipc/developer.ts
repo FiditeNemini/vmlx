@@ -7,6 +7,7 @@ import {
   type StreamingOperationResult,
 } from './streaming-operation-lifecycle'
 import { attachChildProcessStreamErrorGuard } from '../childProcessStreamGuards'
+import { normalizeHfTokenSetting } from '../../shared/hfSettings'
 
 const operationLifecycle = new StreamingOperationLifecycle<ChildProcess>()
 let bufferedLogLines: string[] = []  // Persists across component mounts for reconnection
@@ -22,7 +23,8 @@ function buildCliEnv(): Record<string, string | undefined> {
     PYTHONPATH: undefined,
   }
   try {
-    const hfToken = db.getSetting('hf_api_key')
+    // Same normalize-on-read contract as the session spawn path.
+    const hfToken = normalizeHfTokenSetting(db.getSetting('hf_api_key'))
     if (hfToken) env.HF_TOKEN = hfToken
   } catch { /* DB not ready yet — skip token injection */ }
   return env

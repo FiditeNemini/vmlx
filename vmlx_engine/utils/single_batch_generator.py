@@ -42,9 +42,29 @@ def _cold_prefill_tail_split(gen_prompt_len: int = 0) -> int:
     VMLX_COLD_PREFILL_TAIL_SPLIT to the number of tokens a warm turn re-feeds
     after restoring, to make the two arms shape-equivalent.
 
-    Diagnostic lever, not a shipping default: it perturbs cold-path numerics for
-    EVERY family, and the correct width is per-request (it tracks the cache-key
-    boundary, not a constant).
+    DO NOT ENABLE THIS. Measured 2026-08-13: the gen_prompt_len derivation is
+    WRONG and REGRESSES a family that is byte-exact without it.
+
+        Laguna-S with the gate on: FAIL, diverges at char 43 (exact without it)
+          gate fired "1450 + 2 (of 1452)" while the warm turn reported
+          cached=1452 -- the cache covers the WHOLE prefill, so Laguna re-feeds
+          NOTHING and the correct width is 0, not 2.
+
+    The real width is ``len(cold_tokens) - cached_tokens``. That merely
+    COINCIDES with gen_prompt_len on MiniMax-M2.7 (1449 - 1444 = 5 = gpl), which
+    is the one family the formula was validated against; it diverges on Laguna
+    (0 vs 2). A cold turn cannot know cached_tokens -- nothing is cached yet --
+    so a correct boundary has to come from the same computation the STORE uses,
+    not from a proxy.
+
+    Splitting also cannot help PATH-DEPENDENT caches at all: Nemotron
+    (nemotron_h_ssm_attention) still diverges with the boundary derived
+    correctly, and Step-3.7 (mixed-SWA RotatingKVCache) still diverges with the
+    shapes made exactly identical to a warm turn. Recurrent state and rotating
+    ring buffers depend on HOW tokens were fed, not just which ones.
+
+    Kept as a reproduction lever for the MiniMax-M2.7 case (where it does give a
+    byte-exact PASS) and as the record of why the obvious fix is not the fix.
     """
     import os as _os
 

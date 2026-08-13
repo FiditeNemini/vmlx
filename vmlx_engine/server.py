@@ -17151,6 +17151,46 @@ async def create_completion(request: CompletionRequest):
     )
 
 
+def _log_inbound_request_fields(endpoint: str, request: Any) -> None:
+    """Log the settings a request actually arrived with, when asked.
+
+    UI-vs-API parity is otherwise unobservable from either end: the app sends
+    chat requests over its Electron IPC bridge from the MAIN process, so hooking
+    the renderer's fetch and XMLHttpRequest captures nothing, and the server had
+    no way to report what it received. That left "the UI toggle does nothing"
+    indistinguishable from "the value never reached the engine".
+
+    Off unless VMLX_LOG_REQUEST_FIELDS is set. Logs only settings-bearing
+    fields, never message content -- prompts can carry private data and this is
+    meant to be safe to switch on against a real session.
+    """
+    if not os.environ.get("VMLX_LOG_REQUEST_FIELDS", "").strip():
+        return
+    fields = (
+        "model", "stream", "temperature", "top_p", "top_k", "min_p",
+        "max_tokens", "max_completion_tokens", "repetition_penalty",
+        "reasoning_effort", "reasoning_strength", "enable_thinking",
+        "thinking", "tool_choice", "seed", "stop", "logprobs", "top_logprobs",
+    )
+    present = {}
+    for name in fields:
+        value = getattr(request, name, None)
+        if value is not None:
+            present[name] = value
+    try:
+        tool_count = len(getattr(request, "tools", None) or [])
+        message_count = len(getattr(request, "messages", None) or [])
+    except TypeError:
+        tool_count = message_count = -1
+    logger.info(
+        "Inbound %s fields: %s (messages=%d tools=%d)",
+        endpoint,
+        " ".join(f"{k}={v!r}" for k, v in sorted(present.items())) or "<none set>",
+        message_count,
+        tool_count,
+    )
+
+
 @app.post(
     "/v1/chat/completions",
     dependencies=[
@@ -17206,6 +17246,7 @@ async def create_chat_completion(
     }
     ```
     """
+    _log_inbound_request_fields("chat.completions", request)
     # Model name validation: accept served name, actual name, or any name (permissive)
     resolved_name = _resolve_model_name()
     if (

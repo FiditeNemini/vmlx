@@ -62,6 +62,25 @@ describe('load-progress i18n keys', () => {
     expect(unresolved).toEqual([])
   })
 
+  it('each key maps to the English text it is emitted beside', () => {
+    // Resolving is not enough — a key can resolve to the WRONG entry. The
+    // repoint mapped by exact English text precisely because eight keys had
+    // been renamed, and two of them differ only by a word:
+    // `loadingJangVl` is "Loading JANG VL model..." while `loadingJangVlShort`
+    // is "Loading JANG VL...". Swapping them resolves fine and silently shows
+    // the wrong phase in every language. Pinning en[labelKey] === label is what
+    // makes a mis-mapping fail.
+    const src = readFileSync(join(ROOT, 'src/main/sessions.ts'), 'utf-8')
+    const pairs = [...src.matchAll(/label:\s*'([^']+)',\s*labelKey:\s*'([^']+)'/g)]
+    expect(pairs.length).toBeGreaterThan(20)
+
+    const en = loadCatalog('en')
+    const mismatched = pairs
+      .map(([, label, key]) => ({ key, label, en: resolve(en, key) }))
+      .filter(r => r.en !== r.label)
+    expect(mismatched).toEqual([])
+  })
+
   it('keeps the key set identical across every locale', () => {
     const flatten = (node: unknown, prefix = ''): string[] =>
       typeof node === 'object' && node !== null

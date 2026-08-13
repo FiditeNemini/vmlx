@@ -325,7 +325,9 @@ def _disable_recurrent_prefix_reuse(args, logger, family_label: str) -> bool:
 
         Zaya-8B (zaya_cca)                     cache off 228 tok / 335824b8
                                                cache on  119 tok / 74b2e5c7   (24 tok reused)
-        Nemotron-3.5-Lightning-30B-A3B         cache off 902 tok / 236724e7
+        LFM2.5-8B-A1B (lfm2_moe_hybrid_ssm)    cache off 469 tok / 518ad89b
+                                             cache on  398 tok / 12c913c4   (19 tok reused)
+      Nemotron-3.5-Lightning-30B-A3B         cache off 902 tok / 236724e7
           (nemotron_h_ssm_attention)           cache on  781 tok / 1321ab79   (23 tok reused)
 
     Each arm is deterministic internally, so this is not sampling. DSV4 (1,792
@@ -1362,8 +1364,9 @@ def serve_command(args):
         ):
             _apply_zaya_cca_cache_policy(args, logger)
         elif (
-            _mc.family_name == "nemotron_h"
-            or getattr(_mc, "cache_subtype", None) == "nemotron_h_ssm_attention"
+            _mc.family_name in ("nemotron_h", "lfm2")
+            or getattr(_mc, "cache_subtype", None)
+            in ("nemotron_h_ssm_attention", "lfm2_moe_hybrid_ssm")
         ):
             # L70: measured to answer differently on a cache HIT, same signature
             # as ZAYA (23-token reuse turned a 902-token reply into 781, each arm

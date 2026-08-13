@@ -163,7 +163,14 @@ class TestRecurrentClassGate:
         # Target the WIRING site, not the first textual match -- the docstring
         # above the helper also names the subtype, and matching that would make
         # this test pass while nothing called the gate.
-        marker = 'getattr(_mc, "cache_subtype", None) == "nemotron_h_ssm_attention"'
-        assert marker in src, "nemotron is not wired into the family policy chain"
+        marker = '"nemotron_h_ssm_attention", "lfm2_moe_hybrid_ssm"'
+        assert marker in src, "drifting families are not wired into the policy chain"
         i = src.index(marker)
         assert "_disable_recurrent_prefix_reuse" in src[i : i + 900]
+
+    def test_lfm2_is_covered(self):
+        # L71a: LFM2.5-8B-A1B drifts on a 19-token paged+ssm hit (469 -> 398).
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
+        assert "lfm2_moe_hybrid_ssm" in src

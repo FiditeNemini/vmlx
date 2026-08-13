@@ -46,7 +46,14 @@ def _args():
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    monkeypatch.delenv("VMLX_ZAYA_DISABLE_PREFIX_REUSE", raising=False)
+    # Clear every accepted name: a real one exported in the developer's shell
+    # would otherwise make the default-OFF tests pass for the wrong reason.
+    for _name in (
+        "VMLX_ZAYA_DISABLE_PREFIX_REUSE",
+        "VMLX_DISABLE_DRIFTING_PREFIX_REUSE",
+        "VMLX_DISABLE_RECURRENT_PREFIX_REUSE",
+    ):
+        monkeypatch.delenv(_name, raising=False)
     yield
 
 
@@ -120,17 +127,17 @@ class TestRecurrentClassGate:
 
     def test_class_gate_default_off(self):
         args, log = _args(), _Logger()
-        from vmlx_engine.cli import _disable_recurrent_prefix_reuse
+        from vmlx_engine.cli import _disable_drifting_prefix_reuse
 
-        assert _disable_recurrent_prefix_reuse(args, log, "X") is False
+        assert _disable_drifting_prefix_reuse(args, log, "X") is False
         assert args.enable_prefix_cache is True
 
     def test_class_gate_disables_both_tiers(self, monkeypatch):
         monkeypatch.setenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", "1")
         args, log = _args(), _Logger()
-        from vmlx_engine.cli import _disable_recurrent_prefix_reuse
+        from vmlx_engine.cli import _disable_drifting_prefix_reuse
 
-        assert _disable_recurrent_prefix_reuse(args, log, "Nemotron-H SSM") is True
+        assert _disable_drifting_prefix_reuse(args, log, "Nemotron-H SSM") is True
         assert args.enable_prefix_cache is False
         # L2 must go too or a disk chain reintroduces the same reuse.
         assert args.enable_block_disk_cache is False
@@ -140,9 +147,9 @@ class TestRecurrentClassGate:
     def test_class_gate_only_exact_1(self, monkeypatch, value):
         monkeypatch.setenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", value)
         args, log = _args(), _Logger()
-        from vmlx_engine.cli import _disable_recurrent_prefix_reuse
+        from vmlx_engine.cli import _disable_drifting_prefix_reuse
 
-        assert _disable_recurrent_prefix_reuse(args, log, "X") is False
+        assert _disable_drifting_prefix_reuse(args, log, "X") is False
 
     def test_class_gate_also_covers_zaya(self, monkeypatch):
         # Set ONLY the class gate; the ZAYA policy must still disable reuse so an
@@ -166,7 +173,7 @@ class TestRecurrentClassGate:
         marker = '"nemotron_h_ssm_attention", "lfm2_moe_hybrid_ssm"'
         assert marker in src, "drifting families are not wired into the policy chain"
         i = src.index(marker)
-        assert "_disable_recurrent_prefix_reuse" in src[i : i + 900]
+        assert "_disable_drifting_prefix_reuse" in src[i : i + 900]
 
     def test_lfm2_is_covered(self):
         # L71a: LFM2.5-8B-A1B drifts on a 19-token paged+ssm hit (469 -> 398).
@@ -174,3 +181,85 @@ class TestRecurrentClassGate:
 
         src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
         assert "lfm2_moe_hybrid_ssm" in src
+
+    def test_legacy_env_var_still_arms_the_gate(self, monkeypatch):
+        # The RECURRENT name shipped before the mechanism was refuted. An
+        # operator who set it must not silently lose the protection.
+        monkeypatch.delenv("VMLX_DISABLE_DRIFTING_PREFIX_REUSE", raising=False)
+        monkeypatch.setenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", "1")
+        args, log = _args(), _Logger()
+        from vmlx_engine.cli import _disable_drifting_prefix_reuse
+
+        assert _disable_drifting_prefix_reuse(args, log, "X") is True
+        assert args.enable_prefix_cache is False
+
+    def test_log_names_the_variable_actually_set(self, monkeypatch):
+        # With two accepted names, a message hardcoding one of them tells the
+        # operator to check a variable they never set.
+        monkeypatch.delenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", raising=False)
+        monkeypatch.setenv("VMLX_DISABLE_DRIFTING_PREFIX_REUSE", "1")
+        args, log = _args(), _Logger()
+        from vmlx_engine.cli import _disable_drifting_prefix_reuse
+
+        _disable_drifting_prefix_reuse(args, log, "X")
+        assert any("VMLX_DISABLE_DRIFTING_PREFIX_REUSE=1" in w for w in log.warnings)
+        assert not any("RECURRENT" in w for w in log.warnings)
+
+
+class TestDriftSetMembership:
+    """The measured-drift set is DATA, and every member cites a measurement.
+
+    Six families are measured to change their answer on a cache hit; three of
+    them (minimax, muse_glimmer, step3p7) have no branch in the family policy
+    chain, which is why the gate is applied ahead of the chain rather than as
+    another arm of it.
+    """
+
+    @pytest.mark.parametrize(
+        "family",
+        ["zaya", "nemotron_h", "lfm2", "minimax", "muse_glimmer", "step3p7"],
+    )
+    def test_measured_family_is_in_the_set(self, family):
+        from vmlx_engine.cli import _family_drifts_on_cache_hit
+
+        assert _family_drifts_on_cache_hit(SimpleNamespace(family_name=family)) is True
+
+    @pytest.mark.parametrize(
+        "family",
+        # Each of these was MEASURED byte-exact on a hit with non-zero reuse.
+        # DSV4 is the strongest: 1,792 tokens reused and still identical.
+        # Names resolved by running the registry against the real bundles on
+        # the box, not recalled: "openpangu_v2" (not "openpangu") and
+        # "qwen3_5" (not "qwen3.6") are the strings the gate would compare.
+        ["deepseek_v4", "gemma4", "qwen3_5", "laguna", "nanbeige", "openpangu_v2"],
+    )
+    def test_exact_family_is_not_in_the_set(self, family):
+        from vmlx_engine.cli import _family_drifts_on_cache_hit
+
+        assert _family_drifts_on_cache_hit(SimpleNamespace(family_name=family)) is False
+
+    def test_subtype_alone_is_enough(self):
+        # Nemotron-Omni-Nano-JANGTQ is a DIFFERENT bundle from
+        # Nemotron-3.5-Lightning and was measured to drift the same way
+        # (cold 09e50462 x3, hit be6c858a, 23 reused). Matching on subtype as
+        # well as family is what covers bundles nobody has enumerated.
+        from vmlx_engine.cli import _family_drifts_on_cache_hit
+
+        mc = SimpleNamespace(family_name="something_new", cache_subtype="zaya_cca")
+        assert _family_drifts_on_cache_hit(mc) is True
+
+    def test_missing_config_is_not_a_match(self):
+        from vmlx_engine.cli import _family_drifts_on_cache_hit
+
+        assert _family_drifts_on_cache_hit(None) is False
+        assert _family_drifts_on_cache_hit(SimpleNamespace()) is False
+
+    def test_gate_is_applied_ahead_of_the_family_chain(self):
+        # A correctness switch that only fires for families holding a branch in
+        # the chain would silently skip half the measured set. Pin the ordering.
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
+        gate = src.index("if _family_drifts_on_cache_hit(_mc):")
+        chain = src.index('if _mc.family_name == "deepseek_v4":')
+        assert gate < chain, "drift gate must run before the family policy chain"

@@ -317,7 +317,57 @@ def _apply_jangtq_mpp_nax_policy(args, logger):
     return mode
 
 
-def _disable_recurrent_prefix_reuse(args, logger, family_label: str) -> bool:
+# Families MEASURED to answer differently on a prefix-cache HIT at temperature
+# 0. This is an empirical list, not a class predicate: every attempt to state
+# the rule mechanically has been refuted by measurement (stored quantization,
+# prefill chunking, chunked-vs-one-pass state divergence, missing N-1 snapshot
+# machinery, "carries recurrent/SSM state", and the cache tier itself). Qwen3.6
+# restores SSM state and is byte-exact; LFM2 drifts on BOTH the paged and the
+# block-disk tier, and gives two DIFFERENT wrong answers. So membership here is
+# decided one family at a time, by running the A/B.
+#
+# Entry requirement: a temperature-0 cold-vs-hit A/B on this box with a
+# NON-ZERO ``cached=`` on the hit arm. A run that reused nothing compares two
+# cold prefills and proves only determinism.
+_DRIFT_ON_HIT_FAMILY_NAMES = frozenset(
+    {
+        "zaya",  # L63  Zaya-8B-JANG_4M          228 tok -> 119 (24 reused)
+        "nemotron_h",  # L70  Nemotron-3.5-Lightning   902 tok -> 781 (23 reused)
+        "lfm2",  # L71a LFM2.5-8B-A1B           469 tok -> 398 (19 reused)
+        "minimax",  # MiniMax-M2.7            diverges @293 ch (1444 reused)
+        "muse_glimmer",  # Muse-Glimmer-30B        diverges @788 ch (274 reused)
+        "step3p7",  # Step-3.7-Flash          diverges @97 ch (1417 reused)
+    }
+)
+_DRIFT_ON_HIT_CACHE_SUBTYPES = frozenset(
+    {
+        "zaya_cca",
+        "nemotron_h_ssm_attention",
+        "lfm2_moe_hybrid_ssm",
+        "step3p7_full_sliding_kv",
+    }
+)
+
+
+def _family_drifts_on_cache_hit(model_config) -> bool:
+    """Is THIS model one of the families measured to drift on a cache hit?
+
+    Detection is by family name OR cache subtype because the two are not
+    redundant: Nemotron-Omni-Nano-JANGTQ is a different bundle from
+    Nemotron-3.5-Lightning yet reports the same ``nemotron_h`` family and the
+    same ``nemotron_h_ssm_attention`` subtype, and it was measured to drift the
+    same way (cold ``09e50462`` three times over, hit ``be6c858a``, 23 reused).
+    Naming the family rather than the bundle is what let that one be covered
+    without a code change.
+    """
+    if model_config is None:
+        return False
+    if getattr(model_config, "family_name", None) in _DRIFT_ON_HIT_FAMILY_NAMES:
+        return True
+    return getattr(model_config, "cache_subtype", None) in _DRIFT_ON_HIT_CACHE_SUBTYPES
+
+
+def _disable_drifting_prefix_reuse(args, logger, family_label: str) -> bool:
     """Turn off prefix reuse for a family PROVEN to answer differently on a HIT.
 
     MEASURED 2026-08-13 (ISSUE-LEDGER L63 / L70), temperature 0, same prompt,
@@ -337,10 +387,9 @@ def _disable_recurrent_prefix_reuse(args, logger, family_label: str) -> bool:
     Third control, added after the fact: Qwen3.6-27B-JANG_4M is
     byte-identical on an 18-token `block-disk+ssm` hit. So the mechanism is
     NOT simply "carries recurrent/SSM state" — Qwen3.6 restores SSM state and
-    is exact. Only `zaya_cca` and `nemotron_h_ssm_attention` are MEASURED to
-    drift, so this gate names those two rather than a class predicate. Add a
-    family only after measuring it, with a non-zero `cached=` on the hit arm
-    or the run proves nothing.
+    is exact. WHICH families drift is therefore an empirical question; the
+    answer lives in `_DRIFT_ON_HIT_FAMILY_NAMES` / `_DRIFT_ON_HIT_CACHE_SUBTYPES`
+    above, with the entry requirement stated there.
 
     ``single_batch_generator._cold_prefill_tail_split`` records the same
     phenomenon for Nemotron and Step-3.7 — "Recurrent state and rotating ring
@@ -354,15 +403,32 @@ def _disable_recurrent_prefix_reuse(args, logger, family_label: str) -> bool:
     DEFAULT OFF. Enabling it removes a working cache tier, which is the
     operator's performance call, not something to change silently.
     """
-    if os.environ.get("VMLX_DISABLE_RECURRENT_PREFIX_REUSE") != "1":
+    # Two names for one switch. RECURRENT was the original name, published
+    # before Qwen3.6 refuted "recurrent state" as the mechanism and before
+    # MiniMax-M2.7 (plain `kv`, no recurrent state at all) was found to drift.
+    # It keeps working so an operator's existing invocation does not silently
+    # stop protecting them; DRIFTING is the accurate name to use going forward.
+    _var = next(
+        (
+            name
+            for name in (
+                "VMLX_DISABLE_DRIFTING_PREFIX_REUSE",
+                "VMLX_DISABLE_RECURRENT_PREFIX_REUSE",
+            )
+            if os.environ.get(name) == "1"
+        ),
+        None,
+    )
+    if _var is None:
         return False
     args.enable_prefix_cache = False
     args.enable_block_disk_cache = False
     logger.warning(
-        "%s prefix reuse DISABLED via VMLX_DISABLE_RECURRENT_PREFIX_REUSE=1. "
+        "%s prefix reuse DISABLED via %s=1. "
         "Every request re-prefills cleanly: costs cache speed, buys cold==warm "
         "answer stability (see ISSUE-LEDGER L63/L70).",
         family_label,
+        _var,
     )
     return True
 
@@ -403,7 +469,7 @@ def _apply_zaya_cca_cache_policy(args, logger):
         )
     # The class-level switch (L70: Nemotron drifts the same way) also covers
     # ZAYA, so an operator does not have to know which families are affected.
-    elif _disable_recurrent_prefix_reuse(args, logger, "ZAYA/CCA"):
+    elif _disable_drifting_prefix_reuse(args, logger, "ZAYA/CCA"):
         changed.append("prefix_reuse=disabled_for_answer_stability")
     if (
         getattr(args, "enable_prefix_cache", True)
@@ -1351,6 +1417,15 @@ def serve_command(args):
         # opt-in can request it, and the scheduler still rejects unsafe hits.
         # DSV4_POOL_QUANT configures the model's internal CSA/HCA pool codec;
         # it is distinct from reusable prefix-cache publication/restoration.
+        # Ahead of the family policy chain, not inside it. Three of the six
+        # measured-drifting families (minimax, muse_glimmer, step3p7) have no
+        # branch of their own, and adding elif arms just to reach them would
+        # make an operator-facing correctness switch depend on where a family
+        # happens to sit in a long chain. The families that DO have a branch
+        # call the same function again; it is idempotent.
+        if _family_drifts_on_cache_hit(_mc):
+            _disable_drifting_prefix_reuse(args, logger, _mc.family_name)
+
         if _mc.family_name == "deepseek_v4":
             _is_dsv4_model = True
             _apply_dsv4_runtime_policy(args, logger)
@@ -1372,7 +1447,7 @@ def serve_command(args):
             # as ZAYA (23-token reuse turned a 902-token reply into 781, each arm
             # deterministic). No other policy applies to this family, so the gate
             # is the only thing here.
-            _disable_recurrent_prefix_reuse(args, logger, "Nemotron-H SSM")
+            _disable_drifting_prefix_reuse(args, logger, "Nemotron-H SSM")
         elif (
             _mc.family_name == "mimo_v2"
             or getattr(_mc, "cache_subtype", None) == "mimo_v2_asymmetric_swa"

@@ -85,10 +85,18 @@ describe('load-progress labels can reach the locale catalogs', () => {
     // they are derived from engine log lines and delivered to the renderer as
     // DATA. SessionCard rendered `progress.label` verbatim, so the renderer's
     // i18n could never reach them and they stayed English in all five locales.
+    //
+    // The namespace is asserted because it is the half that actually broke.
+    // These keys were emitted as `sessions.loadProgress.*` while every catalog
+    // defined `main.loadProgress.*`, so all 31 resolved nowhere and the
+    // defaultValue quietly served English to all five locales. Pinning the
+    // prefix alone cannot prove they resolve — see
+    // i18n-load-progress-keys.test.ts, which checks each key against every
+    // catalog.
     const start = sessions.indexOf('LOAD_PROGRESS_PATTERNS')
     const block = sessions.slice(start, sessions.indexOf('\n  ]', start))
     const labels = block.match(/label: '/g) || []
-    const keys = block.match(/labelKey: 'sessions\.loadProgress\./g) || []
+    const keys = block.match(/labelKey: 'main\.loadProgress\./g) || []
     expect(labels.length).toBeGreaterThan(20)
     expect(keys.length).toBe(labels.length)
   })
@@ -96,8 +104,10 @@ describe('load-progress labels can reach the locale catalogs', () => {
   it('the renderer resolves the key and falls back to the English text', () => {
     expect(card).toContain('progress.labelKey')
     expect(card).toContain('defaultValue: progress.label')
-    // The fallback is what makes this safe to land before the locale entries
-    // exist, and what keeps an older main process rendering correctly.
+    // The fallback keeps an older main process — one that sends no labelKey —
+    // rendering correctly. It is NOT licence to ship keys the catalogs lack:
+    // it makes a missing entry invisible rather than loud, which is how the
+    // whole namespace stayed unresolved without anyone noticing.
     expect(card).not.toMatch(/\{progress\.label\}\s*\(\{progress\.progress\}%\)/)
   })
 

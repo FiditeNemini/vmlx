@@ -321,7 +321,7 @@ registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reason
 // through to generic — openpangu startup defaults (timeout 900, JIT off) in
 // sessions.ts never fired and the chat thinking toggle stayed disabled
 // (live UI matrix finding, 2026-07-02).
-registerFamily('openpangu_v2', { cacheType: 'kv', cacheSubtype: 'openpangu_v2_composite', toolParser: 'openpangu', reasoningParser: 'deepseek_r1', supportsThinking: true, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: false, description: 'openPangu-2.0-Flash (MLA + DSA/SWA + mHC MoE)', priority: 20 })
+registerFamily('openpangu_v2', { cacheType: 'kv', cacheSubtype: 'openpangu_v2_composite', toolParser: 'openpangu', reasoningParser: 'deepseek_r1', supportsThinking: true, honorsEnableThinking: false, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: false, description: 'openPangu-2.0-Flash (MLA + DSA/SWA + mHC MoE)', priority: 20 })
 
 // Ling / Bailing hybrid: MLA softmax layers plus linear-attention/SSM-style
 // companion state. Eric directive 2026-05-11: treat Ling chat output as plain
@@ -336,7 +336,7 @@ registerFamily('hy3', { cacheType: 'kv', toolParser: 'hunyuan', reasoningParser:
 
 // StepFun
 registerFamily('step-vl', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: true, description: 'StepFun Step-1V Vision-Language', priority: 3 })
-registerFamily('step-3.7-flash', { cacheType: 'kv', cacheSubtype: 'step3p7_full_sliding_kv', architectureHints: { textModelType: 'step3p5', attentionArch: 'full_and_sliding_kv', slidingWindow: 512 }, toolParser: 'step3p5', reasoningParser: 'qwen3', supportsThinking: true, supportsInstructMode: false, supportedReasoningEfforts: ['low', 'medium', 'high'], thinkInTemplate: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'StepFun Step-3.7-Flash JANG/VL', priority: 4 })
+registerFamily('step-3.7-flash', { cacheType: 'kv', cacheSubtype: 'step3p7_full_sliding_kv', architectureHints: { textModelType: 'step3p5', attentionArch: 'full_and_sliding_kv', slidingWindow: 512 }, toolParser: 'step3p5', reasoningParser: 'qwen3', supportsThinking: true, honorsEnableThinking: false, supportsInstructMode: false, supportedReasoningEfforts: ['low', 'medium', 'high'], thinkInTemplate: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'StepFun Step-3.7-Flash JANG/VL', priority: 4 })
 registerFamily('step-3.5-flash', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'StepFun Step-3.5-Flash (MoE)', priority: 5 })
 registerFamily('step', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'StepFun Step models', priority: 30 })
 
@@ -359,7 +359,7 @@ registerFamily('exaone', { cacheType: 'kv', description: 'EXAONE', priority: 20 
 registerFamily('olmo', { cacheType: 'kv', description: 'OLMo', priority: 20 })
 
 // Liquid / hybrid SSM
-registerFamily('lfm2', { cacheType: 'hybrid', cacheSubtype: 'lfm2_moe_hybrid_ssm', architectureHints: { attentionArch: 'hybrid_ssm_attention', cacheSchema: 'hybrid_ssm_v1', ssmCompanionCache: true, attentionKvStorageQuantization: true }, toolParser: 'lfm2', reasoningParser: 'qwen3', supportsThinking: true, supportsInstructMode: false, usePagedCache: true, enableAutoToolChoice: true, description: 'Liquid LFM2 / LFM2-MoE hybrid', priority: 10 })
+registerFamily('lfm2', { cacheType: 'hybrid', cacheSubtype: 'lfm2_moe_hybrid_ssm', architectureHints: { attentionArch: 'hybrid_ssm_attention', cacheSchema: 'hybrid_ssm_v1', ssmCompanionCache: true, attentionKvStorageQuantization: true }, toolParser: 'lfm2', reasoningParser: 'qwen3', supportsThinking: true, honorsEnableThinking: false, supportsInstructMode: false, usePagedCache: true, enableAutoToolChoice: true, description: 'Liquid LFM2 / LFM2-MoE hybrid', priority: 10 })
 
 // StarCoder / StableLM / Baichuan
 registerFamily('starcoder', { cacheType: 'kv', description: 'StarCoder', priority: 30 })

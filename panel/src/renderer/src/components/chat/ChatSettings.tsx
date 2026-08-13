@@ -114,6 +114,10 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [detectedDefaultReasoningEffort, setDetectedDefaultReasoningEffort] = useState<'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined>(undefined)
   const [thinkingBudgetSupported, setThinkingBudgetSupported] = useState<boolean | undefined>(undefined)
   const [supportsThinkingBudget, setSupportsThinkingBudget] = useState<boolean | undefined>(undefined)
+  // Does this family's template actually READ enable_thinking? Distinct from
+  // supportsThinking (does it reason at all). Muse reasons but reads only
+  // reasoning_strength, so Auto/On were byte-identical — a dead control.
+  const [detectedHonorsEnableThinking, setDetectedHonorsEnableThinking] = useState<boolean | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
   const loadRequestRef = useRef(0)
@@ -145,6 +149,8 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     (detectedSupportsThinking !== false && !!effectiveReasoningParser)
   )
   const thinkingOffSupported = detectedSupportsInstructMode !== false
+  // Only families whose template reads the kwarg get the Auto/On control.
+  const enableThinkingHonored = detectedHonorsEnableThinking !== false
   const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined
   const displayedTemperature = displayedOverrides.temperature ?? displayedModelDefaults.temperature
   const displayedTopP = displayedOverrides.topP ?? displayedModelDefaults.topP
@@ -234,6 +240,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
       setDetectedReasoningParser(detected?.reasoningParser)
       setDetectedSupportsThinking(detected?.supportsThinking)
       setDetectedSupportsInstructMode(detected?.supportsInstructMode)
+      setDetectedHonorsEnableThinking(detected?.honorsEnableThinking)
       setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
       setDetectedDefaultReasoningEffort(detected?.defaultReasoningEffort)
       setSupportsThinkingBudget(detected?.supportsThinkingBudget)
@@ -607,6 +614,18 @@ function statusToneClass(status: string): string {
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium">{t('chat.settings.enableThinking')}</span>
               </div>
+              {/* A family whose template never reads `enable_thinking` must not be
+                  offered an Auto/On toggle: both values are ignored, so the control
+                  renders, is interactive, and does nothing. MEASURED on Muse —
+                  Auto and On produced byte-identical output (148-char reasoning,
+                  same 64-token answer). Depth there is set by Reasoning effort,
+                  which IS live. Same honesty pattern the drawer already uses for
+                  Step-3.7's unavailable Thinking-Off rail. */}
+              {!enableThinkingHonored ? (
+                <div className="px-2 py-1.5 rounded text-[11px] bg-muted/40 border border-border text-muted-foreground leading-tight">
+                  {t('chat.settings.thinkingNotConfigurable')}
+                </div>
+              ) : (
               <div className="flex gap-1 bg-background rounded border border-border p-0.5">
                 <button
                   disabled={!thinkingSupported}
@@ -644,11 +663,14 @@ function statusToneClass(status: string): string {
                   </button>
                 )}
               </div>
-              <p className="text-xs text-muted-foreground mt-1.5">
-                {t(thinkingOffSupported
-                  ? 'chat.settings.thinkingHelp'
-                  : 'chat.settings.thinkingNativeOnlyHelp')}
-              </p>
+              )}
+              {enableThinkingHonored && (
+                <p className="text-xs text-muted-foreground mt-1.5">
+                  {t(thinkingOffSupported
+                    ? 'chat.settings.thinkingHelp'
+                    : 'chat.settings.thinkingNativeOnlyHelp')}
+                </p>
+              )}
               {displayedOverrides.enableThinking !== false && showReasoningEffort && (
                 <div className="mt-3">
                   <div className="flex items-center justify-between mb-1.5">

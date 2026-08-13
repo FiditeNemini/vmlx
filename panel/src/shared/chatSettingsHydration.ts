@@ -21,6 +21,11 @@ export interface ChatSettingsDetectedConfig {
   reasoningParser?: string
   supportsThinking?: boolean
   supportsInstructMode?: boolean
+  /** Does the family's chat template actually READ `enable_thinking`?
+   * Distinct from supportsThinking (does it reason at all). Muse reasons but
+   * reads only `reasoning_strength`, so an Auto/On toggle rendered off
+   * supportsThinking is inert — MEASURED byte-identical output for both. */
+  honorsEnableThinking?: boolean
   supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>
   defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   supportsThinkingBudget?: boolean

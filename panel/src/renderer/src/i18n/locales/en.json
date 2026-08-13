@@ -415,6 +415,7 @@
       "thinkingOff": "Off",
       "thinkingHelp": "Auto: local vMLX uses the model/runtime reasoning default. On: request thinking. Off: request direct responses.",
       "thinkingNativeOnlyHelp": "This model exposes native reasoning only. Auto uses the model default; On requests reasoning. Thinking Off is unavailable.",
+      "thinkingNotConfigurable": "This model's template does not read a thinking toggle — reasoning depth is set by Reasoning effort below.",
       "reasoningEffort": "Reasoning Effort",
       "effortLow": "Low",
       "effortMedium": "Medium",

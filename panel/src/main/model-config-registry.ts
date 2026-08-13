@@ -64,6 +64,18 @@ interface ModelConfig {
   reasoningParser?: string
   supportsThinking?: boolean
   supportsInstructMode?: boolean
+  /** Does this family's chat template actually READ `enable_thinking`?
+   *
+   * `supportsThinking` conflates two different questions: does the model reason
+   * at all, and does its template honour the enable_thinking kwarg. Muse reasons
+   * (supportsThinking: true) but its template reads ONLY `reasoning_strength` —
+   * so the Auto/On toggle rendered off supportsThinking sent a value nothing
+   * consumed. MEASURED live: Auto and On produced byte-identical output
+   * (148-char reasoning, same 64-token answer). Default true; set false for a
+   * family whose template ignores the kwarg, and the Thinking toggle is replaced
+   * by an honest notice instead of a dead control.
+   */
+  honorsEnableThinking?: boolean
   supportedReasoningEfforts?: ReasoningEffort[]
   defaultReasoningEffort?: ReasoningEffort
   supportsThinkingBudget?: boolean
@@ -83,6 +95,18 @@ export interface DetectedConfig {
   reasoningParser?: string
   supportsThinking?: boolean
   supportsInstructMode?: boolean
+  /** Does this family's chat template actually READ `enable_thinking`?
+   *
+   * `supportsThinking` conflates two different questions: does the model reason
+   * at all, and does its template honour the enable_thinking kwarg. Muse reasons
+   * (supportsThinking: true) but its template reads ONLY `reasoning_strength` —
+   * so the Auto/On toggle rendered off supportsThinking sent a value nothing
+   * consumed. MEASURED live: Auto and On produced byte-identical output
+   * (148-char reasoning, same 64-token answer). Default true; set false for a
+   * family whose template ignores the kwarg, and the Thinking toggle is replaced
+   * by an honest notice instead of a dead control.
+   */
+  honorsEnableThinking?: boolean
   supportedReasoningEfforts?: ReasoningEffort[]
   defaultReasoningEffort?: ReasoningEffort
   supportsThinkingBudget?: boolean
@@ -237,7 +261,7 @@ registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoning
 // The effort levels below are surfaced through the existing reasoning control
 // and translated to `reasoning_strength` in the request builder, so the knob
 // the user sees is the knob the model actually has.
-registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinking: true, supportsInstructMode: false, supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
+registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinking: true, supportsInstructMode: false, honorsEnableThinking: false, supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })
@@ -1316,6 +1340,7 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     reasoningParser: config.reasoningParser,
     supportsThinking: config.supportsThinking,
     supportsInstructMode: config.supportsInstructMode,
+    honorsEnableThinking: config.honorsEnableThinking,
     supportedReasoningEfforts: config.supportedReasoningEfforts,
     defaultReasoningEffort: config.defaultReasoningEffort,
     supportsThinkingBudget: config.supportsThinkingBudget,

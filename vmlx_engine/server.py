@@ -27194,6 +27194,14 @@ Examples:
 
     # Initialize tool call parser from CLI args
     global _tool_call_parser, _enable_auto_tool_choice
+    global _tool_call_parser_disabled_explicitly
+    # An explicit `none` is a disable regardless of --enable-auto-tool-choice.
+    # The per-request fallbacks auto-detect a parser from the registry whenever
+    # a request carries tools, with or without that flag, so clearing
+    # _tool_call_parser alone leaves the opt-out inert exactly as it did on the
+    # reasoning side. cli.py publishes this; this second launcher did not.
+    if args.tool_call_parser == "none":
+        _tool_call_parser_disabled_explicitly = True
     if args.enable_auto_tool_choice:
         _enable_auto_tool_choice = True
         _tool_call_parser = args.tool_call_parser or "auto"

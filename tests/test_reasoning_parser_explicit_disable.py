@@ -107,3 +107,61 @@ def test_flag_defaults_to_false_so_untouched_deployments_keep_recovering():
     )
     assert match, "module-level default declaration not found"
     assert match.group(1) == "False"
+
+
+class TestToolParserDisableSymmetry:
+    """The module entry point is a SECOND LAUNCHER, and it under-recorded.
+
+    `server.main()` cleared `_tool_call_parser` for `--tool-call-parser none`
+    but never published `_tool_call_parser_disabled_explicitly`, which is what
+    the four per-request sites actually consult. Those sites re-detect a parser
+    from the registry whenever a request carries tools -- with or without
+    `--enable-auto-tool-choice` -- so the opt-out was inert on this path in the
+    same way the reasoning opt-out was inert on the streaming path.
+
+    `_delegate_module_main_to_cli` routes `python -m vmlx_engine.server` to the
+    CLI, but `main()` still runs for a malformed `--model` and for anything that
+    imports and calls `server.main()` directly, which that code path documents
+    as deliberately keeping the old behaviour.
+    """
+
+    def test_disable_is_published_even_without_enable_auto_tool_choice(self):
+        import inspect
+
+        src = inspect.getsource(server.main)
+        # The publish must not be nested under the enable_auto_tool_choice
+        # branch, or passing `none` alone leaves the flag False.
+        publish = src.index("_tool_call_parser_disabled_explicitly = True")
+        branch = src.index("if args.enable_auto_tool_choice:")
+        assert publish < branch, (
+            "the explicit-disable publish must precede (not sit inside) the "
+            "enable_auto_tool_choice branch"
+        )
+
+    def test_main_declares_the_flag_global(self):
+        import inspect
+
+        src = inspect.getsource(server.main)
+        assert "global _tool_call_parser_disabled_explicitly" in src, (
+            "without the global declaration the assignment binds a local and "
+            "the module flag silently stays False"
+        )
+
+    def test_the_flag_actually_suppresses_parsing_when_a_request_carries_tools(self):
+        # The behaviour the two source assertions above exist to protect. The
+        # registry fallback fires on `request.tools`, so a request carrying
+        # tools is the case where an unpublished disable leaks a parser back in.
+        saved = server._tool_call_parser_disabled_explicitly
+        try:
+            request = SimpleNamespace(
+                tools=[{"type": "function", "function": {"name": "get_weather"}}],
+                model="m",
+            )
+            text = "<tool_call>{\"name\": \"get_weather\"}</tool_call>"
+
+            server._tool_call_parser_disabled_explicitly = True
+            cleaned, calls = server._parse_tool_calls_with_parser(text, request)
+            assert calls is None, "an explicit disable must suppress tool parsing"
+            assert cleaned == text, "disabled parsing must not rewrite the text"
+        finally:
+            server._tool_call_parser_disabled_explicitly = saved

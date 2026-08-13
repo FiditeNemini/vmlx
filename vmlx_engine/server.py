@@ -4703,6 +4703,16 @@ _PRIVATE_CACHE_ATTESTATION_MAX_PAIR_PREFIX_TOKENS = 262_144
 _reasoning_parser = None  # ReasoningParser instance when enabled
 _reasoning_parser_id: str | None = None
 
+# True only for an EXPLICIT ``--reasoning-parser none``.
+#
+# A deliberate opt-out and a failed detection both leave ``_reasoning_parser``
+# as None, so the per-request fallback in _new_request_reasoning_parser cannot
+# tell them apart from the global alone -- it re-installed the registry parser
+# on every streaming request and made the opt-out inert. The tool-call side has
+# carried ``_tool_call_parser_disabled_explicitly`` for exactly this reason;
+# the reasoning side simply never got its counterpart.
+_reasoning_parser_disabled_explicitly: bool = False
+
 
 def _set_active_reasoning_parser(parser, parser_id: str | None) -> None:
     """Install a reasoning parser together with its canonical runtime ID.
@@ -5009,6 +5019,16 @@ def _new_request_reasoning_parser(
     """
     parser = None
     parser_source = None
+    if configured_parser is None and _reasoning_parser_disabled_explicitly:
+        # The fallbacks below exist for ACCIDENTAL absence. An explicit
+        # `--reasoning-parser none` is not absence, and resurrecting the
+        # registry parser here silently overrode the user's choice on every
+        # streaming surface while non-streaming honoured it.
+        logger.debug(
+            "[%s] Reasoning parser explicitly disabled; no per-request fallback",
+            stream_surface,
+        )
+        return None
     if configured_parser is not None:
         parser = configured_parser.__class__()
         parser_source = type(configured_parser).__name__
@@ -27133,7 +27153,7 @@ Examples:
     registry = get_model_config_registry()
 
     # Initialize reasoning parser (auto-detect or explicit)
-    global _reasoning_parser
+    global _reasoning_parser, _reasoning_parser_disabled_explicitly
     from .reasoning import get_parser
 
     parser_name = args.reasoning_parser
@@ -27148,6 +27168,7 @@ Examples:
     elif parser_name == "none":
         # Explicitly disabled by user
         parser_name = None
+        _reasoning_parser_disabled_explicitly = True
         logger.info("Reasoning parser explicitly disabled via --reasoning-parser none")
     elif parser_name == "auto":
         detected = registry.get_reasoning_parser(model_name)

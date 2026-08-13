@@ -1229,8 +1229,10 @@ def serve_command(args):
         try:
             from .reasoning import get_parser
             parser_cls = get_parser(parser_name)
+            # _set_active_reasoning_parser already records the canonical ID as
+            # _reasoning_parser_id; the old _reasoning_parser_explicit_name
+            # attribute it superseded was written here and read nowhere.
             server._set_active_reasoning_parser(parser_cls(), parser_name)
-            server._reasoning_parser_explicit_name = parser_name
             logger.info(f"Reasoning parser enabled: {parser_name}")
         except KeyError as e:
             print(f"Error: {e}")
@@ -1246,6 +1248,11 @@ def serve_command(args):
             sys.exit(1)
     else:
         server._set_active_reasoning_parser(None, None)
+
+    # Publish the opt-out to the server module. Held only as a local, the
+    # streaming fallback could not distinguish "user said none" from "detection
+    # raced" and re-installed the registry parser per request.
+    server._reasoning_parser_disabled_explicitly = _user_disabled_reasoning_parser
 
     # Auto-apply tool/reasoning parsers from model config registry when CLI
     # flags were not explicitly set.  This lets known models "just work" for

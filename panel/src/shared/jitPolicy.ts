@@ -52,3 +52,18 @@ export function jitSuppressionReason(
 export function computeEffectiveJit(input: JitSuppressionInput): boolean {
   return jitSuppressionReason(input) === null
 }
+
+/**
+ * Runtime-only suppression, ignoring the saved toggle.
+ *
+ * The checkbox needs this separately from `computeEffectiveJit`: `checked`
+ * depends on the toggle, while `disabled`, the dimmed styling and the
+ * incompatibility warning depend only on whether some runtime owns its own
+ * kernels. Keeping both derived from one condition list stops the box from
+ * rendering enabled while the launcher suppresses it (or vice versa).
+ */
+export function isJitSuppressedByRuntime(
+  input: Omit<JitSuppressionInput, "enableJitRequested">,
+): boolean {
+  return jitSuppressionReason({ ...input, enableJitRequested: true }) !== null
+}

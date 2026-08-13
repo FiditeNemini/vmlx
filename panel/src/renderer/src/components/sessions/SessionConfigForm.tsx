@@ -20,7 +20,7 @@ import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
 import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
-import { computeEffectiveJit } from '../../../../shared/jitPolicy'
+import { computeEffectiveJit, isJitSuppressedByRuntime } from '../../../../shared/jitPolicy'
 export interface SessionConfig {
   host: string
   port: number
@@ -376,6 +376,17 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       !prefixOff &&
       !!config.kvCacheQuantization &&
       config.kvCacheQuantization !== 'auto',
+  })
+  const jitSuppressedByRuntime = isJitSuppressedByRuntime({
+    isMultimodal: multimodalActive,
+    flashMoeActive,
+    distributedActive,
+    dsv4Active,
+    m3Active,
+    zayaCcaActive,
+    turboQuantActive,
+    lagunaMixedSwaTurboQuantActive,
+    hybridCacheActive,
   })
   const isMambaCache =
     detectedCacheType === 'mamba' ||
@@ -1344,7 +1355,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         <PerformanceHint text={t('sessions.config.performanceHint')} />
         {/* Whole-model JIT is not available for path-dependent cache models. */}
         <Field label={t('sessions.config.modelWideJit')} tooltip={t('sessions.config.modelWideJitTooltip')}>
-          <label className={`flex items-center gap-2 ${flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
+          <label className={`flex items-center gap-2 ${jitSuppressedByRuntime ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}>
             <input
               type="checkbox"
               checked={computeEffectiveJit({
@@ -1360,7 +1371,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 hybridCacheActive,
               })}
               onChange={e => onChange('enableJit', e.target.checked)}
-              disabled={flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive}
+              disabled={jitSuppressedByRuntime}
               className="rounded border-input"
             />
             <span className="text-xs text-muted-foreground">
@@ -1368,7 +1379,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             </span>
           </label>
         </Field>
-        {(flashMoeActive || distributedActive || dsv4Active || m3Active || zayaCcaActive || turboQuantActive || lagunaMixedSwaTurboQuantActive || multimodalActive || hybridCacheActive) && (
+        {(jitSuppressedByRuntime) && (
           <IncompatWarning text={dsv4Active
             ? t('sessions.config.jitDisabledDsv4')
             : m3Active

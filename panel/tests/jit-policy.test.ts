@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   computeEffectiveJit,
+  isJitSuppressedByRuntime,
   jitSuppressionReason,
 } from "../src/shared/jitPolicy"
 
@@ -75,5 +76,33 @@ describe("JIT suppression policy", () => {
         `${rel} re-inlined the JIT suppression chain`,
       ).toBe(false)
     }
+  })
+
+  it("derives runtime suppression independently of the saved toggle", () => {
+    const runtime = {
+      isMultimodal: false,
+      flashMoeActive: false,
+      distributedActive: false,
+      dsv4Active: false,
+      m3Active: false,
+      zayaCcaActive: false,
+      turboQuantActive: false,
+      lagunaMixedSwaTurboQuantActive: false,
+      hybridCacheActive: false,
+    }
+    expect(isJitSuppressedByRuntime(runtime)).toBe(false)
+    expect(isJitSuppressedByRuntime({ ...runtime, dsv4Active: true })).toBe(true)
+    expect(isJitSuppressedByRuntime({ ...runtime, isMultimodal: true })).toBe(true)
+  })
+
+  it("keeps the checkbox disabled state on the same condition list", () => {
+    // `checked` and `disabled` were separately inlined; if they drift the box
+    // can render enabled while the launcher suppresses JIT.
+    const form = readFileSync(resolve(__dirname, "..", CONSUMERS[2]), "utf8")
+    expect(
+      /flashMoeActive \|\| distributedActive \|\| dsv4Active/.test(form),
+      "SessionConfigForm re-inlined the runtime suppression chain",
+    ).toBe(false)
+    expect(form).toContain("isJitSuppressedByRuntime")
   })
 })

@@ -3503,7 +3503,12 @@ export class SessionManager extends EventEmitter {
             // since remote servers have no PID to check liveness.
             this.emit('session:health', {
               sessionId: session.id,
-              running: true,
+              // EVERY exception lands here — DNS failure, connection refused,
+              // timeout — not only "busy with inference", and unlike a local
+              // session there is no PID to prove anything is alive. While the
+              // session is still connecting, an unreachable remote must not
+              // report itself running just because the request threw.
+              running: session.status !== 'loading',
               busy: true,
               modelName: session.remoteModel,
               port: session.port
@@ -3620,7 +3625,12 @@ export class SessionManager extends EventEmitter {
             // Emit a "busy" health event so the UI knows the server isn't dead
             this.emit('session:health', {
               sessionId: session.id,
-              running: true,
+              // Liveness is NOT readiness. A still-loading server has not opened
+              // /health yet, so the fetch throws and the process is obviously
+              // alive — reporting `running: true` there would tell the UI the
+              // model is usable while it is still loading, hiding the progress
+              // bar and offering Open mid-load. Consumers key on `running`.
+              running: session.status !== 'loading',
               busy: true,
               modelName: session.modelName,
               port: session.port

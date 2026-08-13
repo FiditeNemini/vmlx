@@ -231,15 +231,38 @@ class AtemToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: dict[str, Any] | None = None,
     ) -> Any:
-        """Buffer until the call is complete, then emit it once.
+        """Buffer until a call block is complete, then emit that block once.
 
         ATEM parameter values are only decodable once their closing tag lands,
         so emitting partial arguments would surface malformed JSON to clients.
+
+        EVERY completed block emits, not just the first. This guard used to be
+        ``if "</atem:function_calls>" in previous_text: return None``, which
+        latched the extractor OFF for the rest of the turn as soon as one block
+        closed — so a multi-step agentic turn emitted its first block and then
+        silently dropped every later one. Unemitted markup falls through to the
+        renderer, and MEASURED on Muse-Glimmer-30B that put ~26 raw
+        ``<atem:function_calls>`` blocks (39 ``<atem:`` occurrences) into the
+        visible transcript. A tool loop is exactly the case that regresses,
+        because it is the case with more than one block.
+
+        Counting CLOSED blocks is what makes emit-once still hold: the parse
+        starts after the last block that was already complete in
+        ``previous_text``, so nothing is re-emitted on subsequent deltas.
         """
         if "<atem:invoke" not in current_text:
             return None
-        if "</atem:function_calls>" not in current_text:
-            return None
-        if "</atem:function_calls>" in previous_text:
-            return None
-        return self.extract_tool_calls(current_text, request)
+        closed = "</atem:function_calls>"
+        already_done = previous_text.count(closed)
+        if current_text.count(closed) <= already_done:
+            return None  # nothing NEWLY completed since the last delta
+        # Resume just past the last block that had already closed, so only the
+        # newly-completed blocks are parsed.
+        offset = 0
+        for _ in range(already_done):
+            found = current_text.find(closed, offset)
+            if found < 0:
+                offset = 0
+                break
+            offset = found + len(closed)
+        return self.extract_tool_calls(current_text[offset:], request)

@@ -437,3 +437,65 @@ class TestMuseReasoningEffortParity:
         """Only families that steer on reasoning_strength get the translation."""
         out = self._merge(monkeypatch, "xhigh", model="DSV4-Flash-JANG_2L")
         assert "reasoning_strength" not in out
+
+
+class TestAtemStreamingEmitsEveryBlock:
+    """A multi-step tool loop must emit EVERY completed call block.
+
+    The streaming extractor used to return None for the whole rest of the turn
+    once one `</atem:function_calls>` closed, so a turn with several blocks
+    emitted the first and dropped the rest. Unemitted markup falls through to
+    the renderer: MEASURED on Muse-Glimmer-30B, ~26 raw blocks (39 `<atem:`
+    occurrences) were visible in the transcript.
+    """
+
+    BLOCK1 = (
+        '<atem:function_calls>\n'
+        '<atem:invoke name="create_directory">\n'
+        '<atem:parameter name="path">/tmp/vmlx-tooltest</atem:parameter>\n'
+        '</atem:invoke>\n'
+        '</atem:function_calls>'
+    )
+    # Embedded double quotes inside the parameter — the real payload that leaked.
+    BLOCK2 = (
+        '<atem:function_calls>\n'
+        '<atem:invoke name="run_applescript">\n'
+        '<atem:parameter name="script">do shell script "ls -la /tmp/vmlx-tooltest"</atem:parameter>\n'
+        '</atem:invoke>\n'
+        '</atem:function_calls>'
+    )
+
+    def _parser(self):
+        from vmlx_engine.tool_parsers.atem_tool_parser import AtemToolParser
+
+        return AtemToolParser.__new__(AtemToolParser)
+
+    def _stream(self, previous, current):
+        return self._parser().extract_tool_calls_streaming(
+            previous, current, "", [], [], [], None
+        )
+
+    def test_first_block_emits(self):
+        out = self._stream("", self.BLOCK1)
+        assert out is not None and out.tool_calls
+        assert out.tool_calls[0]["name"] == "create_directory"
+
+    def test_second_block_also_emits(self):
+        """The regression: this returned None, so block 2 leaked as raw text."""
+        out = self._stream(self.BLOCK1, self.BLOCK1 + "\n" + self.BLOCK2)
+        assert out is not None, "second completed block was dropped"
+        names = [c["name"] for c in out.tool_calls]
+        assert names == ["run_applescript"], names
+
+    def test_no_reemit_when_nothing_new_completed(self):
+        """Emit-once still holds — a delta that closes no new block emits nothing."""
+        assert self._stream(self.BLOCK1, self.BLOCK1 + "\nsome trailing prose") is None
+
+    def test_partial_second_block_waits(self):
+        partial = self.BLOCK1 + '\n<atem:function_calls>\n<atem:invoke name="list_directory">'
+        assert self._stream(self.BLOCK1, partial) is None
+
+    def test_embedded_quotes_survive(self):
+        out = self._stream(self.BLOCK1, self.BLOCK1 + "\n" + self.BLOCK2)
+        args = str(out.tool_calls[0]["arguments"])
+        assert 'ls -la /tmp/vmlx-tooltest' in args

@@ -542,3 +542,60 @@ class TestAtemMarkupSuppressedFromVisibleText:
         )
         # A word merely containing the substring must not trip it.
         assert not _has_tool_marker_or_partial_suffix("we discussed the atem dialect")
+
+
+class TestBlockDiskMissReasons:
+    """A bare disk_misses count cannot separate "never stored" from "stored but
+    unreadable/invalid" — and those need opposite fixes.
+
+    MEASURED a live session with 0 disk_hits against 72 disk_misses where the
+    cause was indistinguishable from the counters alone; every L2 lookup failed
+    and nothing said why.
+    """
+
+    def _store(self):
+        from vmlx_engine.block_disk_store import BlockDiskStore
+
+        return BlockDiskStore.__new__(BlockDiskStore)
+
+    def test_every_miss_path_has_a_reason_bucket(self):
+        """The four buckets must cover the reasons the code actually records."""
+        import inspect
+        import re
+
+        from vmlx_engine import block_disk_store
+
+        src = inspect.getsource(block_disk_store)
+        used = set(re.findall(r'_note_miss\("([a-z_]+)"\)', src))
+        declared = {"absent", "load_failed", "budget_locked", "validation"}
+        assert used, "no _note_miss call sites found — the breakdown is dead code"
+        assert used <= declared, f"reason with no bucket: {used - declared}"
+
+    def test_note_miss_counts_and_ignores_unknown(self):
+        store = self._store()
+        store.disk_miss_reasons = {
+            "absent": 0, "load_failed": 0, "budget_locked": 0, "validation": 0,
+        }
+        store._note_miss("absent")
+        store._note_miss("absent")
+        store._note_miss("validation")
+        # An unrecognised reason must not create a bucket or raise — telemetry
+        # must never be able to break a cache read.
+        store._note_miss("something_new")
+        assert store.disk_miss_reasons["absent"] == 2
+        assert store.disk_miss_reasons["validation"] == 1
+        assert "something_new" not in store.disk_miss_reasons
+
+    def test_every_disk_misses_increment_is_attributed(self):
+        """A miss site without a _note_miss beside it is an unexplained miss."""
+        import inspect
+
+        from vmlx_engine import block_disk_store
+
+        lines = inspect.getsource(block_disk_store).split("\n")
+        unattributed = [
+            i for i, l in enumerate(lines)
+            if "self.disk_misses += 1" in l
+            and "_note_miss" not in "\n".join(lines[i + 1:i + 3])
+        ]
+        assert not unattributed, f"disk_misses incremented with no reason at lines {unattributed}"

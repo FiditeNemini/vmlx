@@ -292,6 +292,17 @@ class BlockDiskStore:
         self._pending_write_condition = threading.Condition(self._stats_lock)
         self.disk_hits = 0
         self.disk_misses = 0
+        # WHY a lookup missed. A bare disk_misses count cannot distinguish
+        # "the block was never stored" from "it was stored and we failed to
+        # read or validate it" — and those need opposite fixes. MEASURED a
+        # session with 0 hits against 72 misses where the reason was
+        # indistinguishable from the counters alone.
+        self.disk_miss_reasons: dict = {
+            "absent": 0,          # no index entry / no payload on disk
+            "load_failed": 0,     # worker-owned read raised
+            "budget_locked": 0,   # global budget mutation guard held
+            "validation": 0,      # payload found but rejected, entry cleaned up
+        }
         self.disk_writes = 0
         self.disk_evictions = 0
         self.tq_native_writes = 0
@@ -674,7 +685,14 @@ class BlockDiskStore:
             )
             with self._stats_lock:
                 self.disk_misses += 1
+                self._note_miss("load_failed")
             return None
+
+
+    def _note_miss(self, reason: str) -> None:
+        """Record WHY a lookup missed. Caller already holds _stats_lock."""
+        if reason in self.disk_miss_reasons:
+            self.disk_miss_reasons[reason] += 1
 
     def _read_block_impl(self, block_hash: bytes) -> Optional[List[Tuple]]:
         # Root-exclusive eviction cannot unlink the payload while validation,
@@ -683,6 +701,7 @@ class BlockDiskStore:
             if not locked:
                 with self._stats_lock:
                     self.disk_misses += 1
+                    self._note_miss("budget_locked")
                 return None
             return self._read_block_impl_guarded(block_hash)
 
@@ -718,6 +737,7 @@ class BlockDiskStore:
         if row is None:
             with self._stats_lock:
                 self.disk_misses += 1
+                self._note_miss("absent")
             return None
 
         file_name, dtype = row
@@ -729,6 +749,7 @@ class BlockDiskStore:
             self._queue_index_cleanup(hash_hex)
             with self._stats_lock:
                 self.disk_misses += 1
+                self._note_miss("validation")
             return None
 
         try:
@@ -767,12 +788,14 @@ class BlockDiskStore:
                         )
                         with self._stats_lock:
                             self.disk_misses += 1
+                            self._note_miss("absent")
                         return None
                     # Queue index + file cleanup under the background writer's
                     # exclusive aggregate mutation transaction.
                     self._queue_index_cleanup(hash_hex)
                     with self._stats_lock:
                         self.disk_misses += 1
+                        self._note_miss("validation")
                     return None
 
             data = mx.load(str(file_path))
@@ -782,6 +805,7 @@ class BlockDiskStore:
             ):
                 with self._stats_lock:
                     self.disk_misses += 1
+                    self._note_miss("validation")
                 return None
             # Post-load validator (defense in depth): the header validator
             # only sees declared shapes, not the deserialized cache_data
@@ -797,6 +821,7 @@ class BlockDiskStore:
                     self._queue_index_cleanup(hash_hex)
                     with self._stats_lock:
                         self.disk_misses += 1
+                        self._note_miss("validation")
                     return None
             with self._stats_lock:
                 self.disk_hits += 1
@@ -823,12 +848,14 @@ class BlockDiskStore:
                 )
                 with self._stats_lock:
                     self.disk_misses += 1
+                    self._note_miss("absent")
                 return None
             logger.warning(f"Failed to load block {hash_hex[:12]}: {e}")
             # Corrupt file — queue removal
             self._queue_index_cleanup(hash_hex)
             with self._stats_lock:
                 self.disk_misses += 1
+                self._note_miss("validation")
             return None
 
     @staticmethod
@@ -2818,6 +2845,9 @@ class BlockDiskStore:
                 "total_cached_tokens": int(row[3]),
                 "disk_hits": self.disk_hits,
                 "disk_misses": self.disk_misses,
+                # Per-reason breakdown: a bare miss count cannot separate
+                # "never stored" from "stored but unreadable/invalid".
+                "disk_miss_reasons": dict(self.disk_miss_reasons),
                 "disk_writes": self.disk_writes,
                 "disk_evictions": self.disk_evictions,
                 "tq_native_writes": self.tq_native_writes,

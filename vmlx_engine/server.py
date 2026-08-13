@@ -17177,6 +17177,16 @@ def _log_inbound_request_fields(endpoint: str, request: Any) -> None:
         "max_tokens", "max_completion_tokens", "repetition_penalty",
         "reasoning_effort", "reasoning_strength", "enable_thinking",
         "thinking", "tool_choice", "seed", "stop", "logprobs", "top_logprobs",
+        # Responses-API spellings. This list was written for the chat
+        # completions shape, but the app talks to /v1/responses, where the
+        # cap is `max_output_tokens` and reasoning may arrive NESTED as
+        # `reasoning={"effort": ...}` rather than flat `reasoning_effort`.
+        # Omitting them made a request that carried an effort log as though it
+        # carried none -- a parity probe that under-reports on the endpoint it
+        # exists to observe is worse than no probe, because it reads as proof
+        # the UI sent nothing.
+        "reasoning", "max_output_tokens", "max_thinking_tokens",
+        "thinking_mode", "frequency_penalty", "presence_penalty",
     )
     present = {}
     for name in fields:

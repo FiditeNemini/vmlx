@@ -35,7 +35,7 @@ from .prefill_admission import (
 
 logger = logging.getLogger(__name__)
 
-def _cold_prefill_tail_split() -> int:
+def _cold_prefill_tail_split(gen_prompt_len: int = 0) -> int:
     """How many trailing prompt tokens the COLD prefill computes separately.
 
     0 (the default) keeps the historical single-pass cold prefill. Set
@@ -48,10 +48,15 @@ def _cold_prefill_tail_split() -> int:
     """
     import os as _os
 
-    try:
-        return max(0, int(_os.environ.get("VMLX_COLD_PREFILL_TAIL_SPLIT", "0") or 0))
-    except Exception:  # noqa: BLE001
-        return 0
+    _override = _os.environ.get("VMLX_COLD_PREFILL_TAIL_SPLIT")
+    if _override:
+        try:
+            return max(0, int(_override))
+        except Exception:  # noqa: BLE001
+            return 0
+    if _os.environ.get("VMLX_COLD_PREFILL_MATCH_WARM_SPLIT") == "1":
+        return max(0, int(gen_prompt_len or 0))
+    return 0
 
 
 
@@ -67,6 +72,11 @@ class _Request:
     state_machine: SequenceStateMachine
     matcher_state: Any
     token_context: TokenBuffer
+    # Length of the generation-prompt suffix. The prefix cache keys on
+    # len(prompt_tokens[:-gen_prompt_len]) - 1, so this is exactly how many
+    # trailing positions a warm turn re-feeds after restoring — and therefore
+    # where a cold prefill must split to stay numerically equivalent to it.
+    gen_prompt_len: int = 0
     prompt_processed: bool = False
     output_tokens: list[int] = field(default_factory=list)
     prompt_cache_snapshot: Optional[list[Any]] = None
@@ -374,8 +384,10 @@ class SingleBatchGenerator:
         image_grid_thw: Optional[list[Any]] = None,
         pixel_values_videos: Optional[list[Any]] = None,
         video_grid_thw: Optional[list[Any]] = None,
+        gen_prompt_lens: Optional[list[int]] = None,
     ):
         max_tokens = max_tokens or [self.max_tokens] * len(prompts)
+        gen_prompt_lens = gen_prompt_lens or [0] * len(prompts)
         caches = caches or [None] * len(prompts)
         # M3 VL (additive): per-prompt vision tensors, default None == text path.
         pixel_values = pixel_values or [None] * len(prompts)
@@ -407,6 +419,7 @@ class SingleBatchGenerator:
             grid,
             pv_video,
             video_grid,
+            gen_prompt_len,
         ) in zip(
             prompts,
             max_tokens,
@@ -419,6 +432,7 @@ class SingleBatchGenerator:
             image_grid_thw,
             pixel_values_videos,
             video_grid_thw,
+            gen_prompt_lens,
         ):
             prompt_tokens = list(prompt)
             if not prompt_tokens:
@@ -442,6 +456,7 @@ class SingleBatchGenerator:
                 image_grid_thw=grid,
                 pixel_values_videos=pv_video,
                 video_grid_thw=video_grid,
+                gen_prompt_len=int(gen_prompt_len or 0),
             )
             self._unprocessed.append(req)
             uids.append(uid)
@@ -859,7 +874,7 @@ class SingleBatchGenerator:
             # cold-path numerics for every family, including the ones already
             # byte-exact, so it must be proven per family with
             # scripts/cache_fidelity_check.py before it could become a default.
-            _tail = _cold_prefill_tail_split()
+            _tail = _cold_prefill_tail_split(req.gen_prompt_len)
             _cold_tokens = req.prompt_tokens[:-1]
             if _tail > 0 and len(_cold_tokens) > _tail:
                 # Log so an A/B can PROVE the path engaged. A guard that

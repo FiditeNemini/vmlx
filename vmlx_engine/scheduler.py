@@ -7734,6 +7734,12 @@ class Scheduler:
                         # Request.remaining_output_budget).
                         max_tokens=[request.remaining_output_budget],
                         caches=[cache_to_use] if cache_to_use else None,
+                        # Where a warm turn would re-feed after restoring. Lets
+                        # the cold prefill split at the same boundary so the two
+                        # arms are numerically equivalent.
+                        gen_prompt_lens=[
+                            int(getattr(request, "_gen_prompt_len", 0) or 0)
+                        ],
                         **insert_kwargs,
                     )
                 except Exception as e:

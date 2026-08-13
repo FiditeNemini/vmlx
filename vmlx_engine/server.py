@@ -4759,6 +4759,16 @@ _TOOL_CALL_MARKERS = [
     "<function=",
     "<minimax:tool_call>",
     "]<]minimax[>[",  # MiniMax-M3 namespace separator before native XML elements
+    # Muse Glimmer's ATEM dialect. Its absence here is why Muse was the ONE
+    # family whose native markup reached the user: this list is what keeps
+    # tool-control payload out of visible text, and every other dialect above
+    # is represented. MEASURED live before the fix — a single three-call turn
+    # added 6 raw <atem:function_calls> blocks to the rendered transcript
+    # (39 -> 49 occurrences of "<atem:"), while the calls themselves parsed and
+    # executed correctly. Both opener forms are listed because the invoke tag
+    # can appear without its wrapper when a block is split across deltas.
+    "<atem:function_calls>",
+    "<atem:invoke",
     "[Calling tool:",
     "<|recipient|>",
     "<|tool_calls_section_begin|>",

@@ -499,3 +499,46 @@ class TestAtemStreamingEmitsEveryBlock:
         out = self._stream(self.BLOCK1, self.BLOCK1 + "\n" + self.BLOCK2)
         args = str(out.tool_calls[0]["arguments"])
         assert 'ls -la /tmp/vmlx-tooltest' in args
+
+
+class TestAtemMarkupSuppressedFromVisibleText:
+    """Muse was the ONE family missing from the visible-text suppression list.
+
+    `_TOOL_CALL_MARKERS` is what keeps native tool-control payload out of what
+    the user reads. It carried entries for tool_call, zyphra, minimax, DSML,
+    gemma4, python_tag and more — but nothing for Muse's ATEM dialect. MEASURED
+    live: a single three-call turn added 6 raw <atem:function_calls> blocks to
+    the rendered transcript (39 -> 49 occurrences of "<atem:") while the calls
+    themselves parsed and executed correctly.
+    """
+
+    def test_atem_is_in_the_marker_list(self):
+        from vmlx_engine.server import _TOOL_CALL_MARKERS
+
+        assert any("atem" in m.lower() for m in _TOOL_CALL_MARKERS)
+
+    def test_atem_block_is_detected_as_tool_markup(self):
+        from vmlx_engine.server import _has_tool_marker_or_partial_suffix
+
+        payload = (
+            'Sure.\n<atem:function_calls>\n<atem:invoke name="run_applescript">\n'
+            '<atem:parameter name="script">do shell script "ls -la /tmp"</atem:parameter>\n'
+            '</atem:invoke>\n</atem:function_calls>'
+        )
+        assert _has_tool_marker_or_partial_suffix(payload)
+
+    def test_bare_invoke_without_wrapper_is_detected(self):
+        """A block split across deltas can show the invoke tag alone."""
+        from vmlx_engine.server import _has_tool_marker_or_partial_suffix
+
+        assert _has_tool_marker_or_partial_suffix('<atem:invoke name="list_directory">')
+
+    def test_ordinary_prose_is_not_flagged(self):
+        """The suppression must not swallow normal answers."""
+        from vmlx_engine.server import _has_tool_marker_or_partial_suffix
+
+        assert not _has_tool_marker_or_partial_suffix(
+            "The sky is blue because of Rayleigh scattering."
+        )
+        # A word merely containing the substring must not trip it.
+        assert not _has_tool_marker_or_partial_suffix("we discussed the atem dialect")

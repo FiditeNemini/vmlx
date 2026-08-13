@@ -114,16 +114,27 @@ def main() -> int:
     def _sha(s: str) -> str:
         return hashlib.sha256(s.encode()).hexdigest()[:16]
 
-    print("[%s] COLD ttft=%.3fs len=%d tokens=%s sha=%s"
-          % (tag, cold_ttft or -1, len(cold),
+    print("[%s] COLD ttft=%.3fs len=%d prompt=%s tokens=%s sha=%s"
+          % (tag, cold_ttft or -1, len(cold), cold_usage.get("prompt_tokens"),
              cold_usage.get("completion_tokens"), _sha(cold)))
-    print("[%s] HIT  ttft=%.3fs len=%d tokens=%s sha=%s cached=%s"
-          % (tag, hit_ttft or -1, len(hit),
+    print("[%s] HIT  ttft=%.3fs len=%d prompt=%s tokens=%s sha=%s cached=%s"
+          % (tag, hit_ttft or -1, len(hit), hit_usage.get("prompt_tokens"),
              hit_usage.get("completion_tokens"), _sha(hit),
              (hit_usage.get("prompt_tokens_details") or {}).get("cached_tokens")))
 
     cached = (hit_usage.get("prompt_tokens_details") or {}).get("cached_tokens")
     reused = int(cached or 0)
+
+    # The re-fed tail: how many trailing positions the warm turn recomputes on
+    # top of the restored prefix. This is the quantity the divergence is
+    # suspected to track -- the warm turn computes these as a small forward on a
+    # restored base while the cold turn computes them inside one large prefill,
+    # and FP reductions are not shape-invariant. Reporting it on every row is
+    # what makes that hypothesis checkable instead of anecdotal.
+    hit_prompt = hit_usage.get("prompt_tokens")
+    if isinstance(hit_prompt, int) and reused > 0:
+        print("[%s] re-fed tail = %d token(s) (prompt %d - cached %d)"
+              % (tag, hit_prompt - reused, hit_prompt, reused))
 
     if reused <= 0:
         # Two cold prefills prove determinism, not restore fidelity. Reporting

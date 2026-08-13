@@ -71,6 +71,30 @@ from .utils.memory_limits import (
 
 logger = logging.getLogger(__name__)
 
+def prefix_cache_key_tokens(request: Any) -> list:
+    """The token sequence a prefix-cache entry is keyed on.
+
+    Chat templates append assistant-role tokens at the end (e.g.
+    ``<|im_start|>assistant\n<think>\n``) which differ on every subsequent
+    turn, so including them in the key causes a 100% miss rate in multi-turn
+    conversations. The key therefore strips ``_gen_prompt_len`` trailing tokens.
+
+    This existed as three hand-copied copies of the same four lines
+    (the disk-store paths and the generic paged store). Keeping ONE copy matters
+    beyond tidiness: the boundary this returns is also where a warm turn resumes
+    computing, so anything that needs to reproduce a warm turn's arithmetic —
+    such as splitting a cold prefill at the same place — has to agree with it
+    exactly. A near-miss proxy is not good enough; deriving the width from
+    ``_gen_prompt_len`` alone regressed Laguna-S, whose cache covers the whole
+    prompt and whose correct width is 0.
+    """
+    tokens = list(getattr(request, "prompt_token_ids", None) or [])
+    gpl = int(getattr(request, "_gen_prompt_len", 0) or 0)
+    if 0 < gpl < len(tokens):
+        tokens = tokens[:-gpl]
+    return tokens
+
+
 
 def _call_with_optional_cache_extra(
     method: Callable[..., Any],
@@ -4034,11 +4058,7 @@ class Scheduler:
         explicit = getattr(request, "_hybrid_ssm_fetch_tokens", None)
         if explicit is not None:
             return list(explicit)
-        prompt_tokens = list(request.prompt_token_ids or [])
-        gen_prompt_len = int(getattr(request, "_gen_prompt_len", 0) or 0)
-        if 0 < gen_prompt_len < len(prompt_tokens):
-            return prompt_tokens[:-gen_prompt_len]
-        return prompt_tokens
+        return prefix_cache_key_tokens(request)
 
     def _fetch_block_aligned_ssm_checkpoint(
         self,
@@ -8734,21 +8754,9 @@ class Scheduler:
                                                 tq_for_disk = _recompress_to_tq(
                                                     cache_for_extract, self.model
                                                 )
-                                                _disk_store_tokens = list(
-                                                    request.prompt_token_ids
+                                                _disk_store_tokens = (
+                                                    prefix_cache_key_tokens(request)
                                                 )
-                                                _gpl_s = (
-                                                    getattr(
-                                                        request, "_gen_prompt_len", 0
-                                                    )
-                                                    or 0
-                                                )
-                                                if _gpl_s > 0 and _gpl_s < len(
-                                                    _disk_store_tokens
-                                                ):
-                                                    _disk_store_tokens = (
-                                                        _disk_store_tokens[:-_gpl_s]
-                                                    )
                                                 _call_with_optional_cache_extra(
                                                     self.disk_cache.store,
                                                     _disk_store_tokens,
@@ -9080,10 +9088,7 @@ class Scheduler:
                     from .mllm_batch_generator import _recompress_to_tq
 
                     tq_for_disk = _recompress_to_tq(clean_cache, self.model)
-                    disk_store_tokens = list(request.prompt_token_ids)
-                    gen_prompt_len = getattr(request, "_gen_prompt_len", 0) or 0
-                    if 0 < gen_prompt_len < len(disk_store_tokens):
-                        disk_store_tokens = disk_store_tokens[:-gen_prompt_len]
+                    disk_store_tokens = prefix_cache_key_tokens(request)
                     _call_with_optional_cache_extra(
                         self.disk_cache.store,
                         disk_store_tokens,
@@ -9484,7 +9489,7 @@ class Scheduler:
                                 if gen_prompt_len > 0 and gen_prompt_len < len(
                                     prompt_tokens
                                 ):
-                                    prompt_tokens = prompt_tokens[:-gen_prompt_len]
+                                    prompt_tokens = prefix_cache_key_tokens(request)
                                     # Also truncate KV cache data to match shortened key.
                                     # Without this, KV has more tokens than the key,
                                     # causing duplicate KV entries on cache hit → <unk> flood.

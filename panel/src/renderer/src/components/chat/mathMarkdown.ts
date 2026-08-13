@@ -64,7 +64,17 @@ function looksLikeSingleDollarMath(text: string): boolean {
   if (!trimmed || trimmed !== text) return false
   // Two currency amounts can otherwise be mistaken for one math span while
   // streaming (for example "$5<$10" temporarily matches "$5<$").
-  if (/^[+\-*/=<>]/.test(trimmed) || /[+\-*/=<>]$/.test(trimmed)) return false
+  //
+  // That case is caught by the TRAILING operator, and rejecting a LEADING one
+  // as well was too broad: models routinely continue a derivation onto its own
+  // line as `$= 340 + 51$`, which is unambiguous math because no currency
+  // amount ever begins with a relational operator. Live-reproduced on
+  // gemma-4-E4B, which rendered `17 x 23 = 17 x (20 + 3)` correctly through
+  // KaTeX and then showed the next three lines as literal `$= ...$` text.
+  //
+  // Leading `+ - * /` stay rejected: a signed currency amount ("$-5") is real,
+  // so those remain genuinely ambiguous. A leading `= < >` is not.
+  if (/^[+\-*/]/.test(trimmed) || /[+\-*/=<>]$/.test(trimmed)) return false
   if (/^\d+(?:[.,]\d{2})?$/.test(trimmed)) return false
   // A missing single-dollar closer must never let a later currency amount
   // terminate a prose-sized span. Strip TeX commands, then look at the

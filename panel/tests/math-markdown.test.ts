@@ -421,3 +421,50 @@ describe('welded inline math still renders — currency is decided by what follo
     expect(rendersMath('$AB = CD$')).toBe(true)
   })
 })
+
+describe('a derivation continued onto its own line is math, not currency', () => {
+  /**
+   * Live-reproduced on gemma-4-E4B: the model rendered
+   * `17 \times 23 = 17 \times (20 + 3)` correctly through KaTeX and then
+   * emitted the remaining steps as `$= (17 \times 20) + (17 \times 3)$`,
+   * `$= 340 + 51$`, `$= 391$` — every one of which showed as literal dollar
+   * text in the chat. The guard rejected any body STARTING with an operator,
+   * but the streaming case its comment cites ("$5<$10" matching "$5<$") is
+   * caught by the TRAILING operator instead.
+   */
+  it('renders a step that opens with = and carries a TeX command', () => {
+    const rendered = prepareMarkdownWithMath('$= (17 \\times 20) + (17 \\times 3)$')
+
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).not.toContain('$=')
+  })
+
+  it('renders a bare arithmetic step that opens with =', () => {
+    const rendered = prepareMarkdownWithMath('$= 340 + 51$')
+
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).not.toContain('$=')
+  })
+
+  it('renders a single-value step that opens with =', () => {
+    const rendered = prepareMarkdownWithMath('$= 391$')
+
+    expect(rendered).toContain('class="katex"')
+    expect(rendered).not.toContain('$=')
+  })
+
+  it('still leaves a body that ENDS with an operator alone', () => {
+    // The streaming guard the original comment was actually written for.
+    const rendered = prepareMarkdownWithMath('Compare $5<$10 today.')
+
+    expect(rendered).toBe('Compare $5<$10 today.')
+    expect(rendered).not.toContain('math-inline')
+  })
+
+  it('still leaves a leading sign alone, which a currency amount can carry', () => {
+    const rendered = prepareMarkdownWithMath('The swing was $-5$ per share.')
+
+    expect(rendered).toBe('The swing was $-5$ per share.')
+    expect(rendered).not.toContain('math-inline')
+  })
+})

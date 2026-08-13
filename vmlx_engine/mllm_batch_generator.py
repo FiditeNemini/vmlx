@@ -3493,21 +3493,6 @@ def _native_mtp_restore_replay_cache(
     return True
 
 
-def _native_mtp_restore_or_trim(cache: List[Any], draft_count: int) -> bool:
-    """Rollback unaccepted native-MTP draft tokens after verifier rejection."""
-    for layer in cache:
-        rollback = getattr(layer, "rollback_state", None)
-        if rollback is not None:
-            conv_snap, ssm_snap = rollback
-            layer.conv_state = conv_snap
-            layer.ssm_state = ssm_snap
-            layer.rollback_state = None
-        elif hasattr(layer, "is_trimmable") and layer.is_trimmable():
-            layer.trim(max(1, int(draft_count)))
-        elif draft_count > 0:
-            return False
-    return True
-
 
 def _native_mtp_bump_emit(state: MLLMNativeMTPState, source: str) -> None:
     if source == "init":

@@ -1228,27 +1228,6 @@ def _dsv4_delta_record_for_interval(
     raise ValueError(f"DSV4 block transport has no interval {wanted}")
 
 
-def _block_payload_has_dsv4(cache_data) -> bool:
-    """Return True for a serialized DSV4 native composite block payload.
-
-    This is intentionally separate from ``_cache_data_has_dsv4``: that helper
-    receives extracted live-cache dictionaries, while reconstruction receives
-    the per-layer tuple records stored in paged L1/L2.
-    """
-    try:
-        return any(
-            isinstance(entry, (tuple, list))
-            and bool(entry)
-            and entry[0] in (
-                "deepseek_v4",
-                "deepseek_v4_pending",
-                "deepseek_v4_delta_v1",
-            )
-            for entry in cache_data or []
-        )
-    except Exception:
-        return False
-
 
 def _block_payload_needs_native_residency(cache_data) -> bool:
     """Return True for path-dependent native cache records.

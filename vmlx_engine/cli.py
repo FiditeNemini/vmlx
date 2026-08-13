@@ -48,9 +48,6 @@ DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
 
 
-def _env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").lower() in ("1", "true", "yes", "on")
-
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
     prefix = option + "="

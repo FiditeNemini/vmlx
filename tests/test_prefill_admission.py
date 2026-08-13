@@ -645,3 +645,25 @@ class TestBlockDiskWriteDropReasons:
         src = inspect.getsource(block_disk_store)
         assert '"write_drop_reasons"' in src, "write_drop_reasons never exported to stats"
         assert '"disk_miss_reasons"' in src, "disk_miss_reasons never exported to stats"
+
+
+    def test_byte_budget_drops_are_in_the_same_structure(self):
+        """One structure must answer "why was this block not stored".
+
+        MEASURED: a saturating run showed write_drop_reasons all zero while
+        byte_budget_drops was 2 — the real drop path was outside the breakdown,
+        which is exactly the blind spot the breakdown exists to remove.
+        """
+        import inspect
+
+        from vmlx_engine import block_disk_store
+
+        src = inspect.getsource(block_disk_store)
+        idx = src.find("_pending_write_byte_drops += 1")
+        assert idx > 0, "byte-budget drop site not found"
+        # Every byte-budget increment must also record into write_drop_reasons.
+        count_sites = src.count("_pending_write_byte_drops += 1")
+        count_mirrored = src.count('write_drop_reasons["byte_budget"]')
+        assert count_mirrored >= count_sites, (
+            f"{count_sites} byte-budget drop sites but only {count_mirrored} recorded"
+        )

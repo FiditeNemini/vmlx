@@ -305,6 +305,7 @@ class BlockDiskStore:
             "full": 0,            # FIFO at capacity and admission timeout expired
             "quiescing": 0,       # store closing / admission shut
             "writer_stopped": 0,  # writer thread not alive
+            "byte_budget": 0,     # 512MB pending-bytes budget refused the reservation
         }
         self.disk_miss_reasons: dict = {
             "absent": 0,          # no index entry / no payload on disk
@@ -1064,11 +1065,13 @@ class BlockDiskStore:
         with self._pending_write_condition:
             if amount > self._max_pending_write_bytes:
                 self._pending_write_byte_drops += 1
+                self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
                 return False
             while self._pending_write_bytes + amount > self._max_pending_write_bytes:
                 remaining = deadline - time.monotonic()
                 if timeout_s <= 0.0 or remaining <= 0.0:
                     self._pending_write_byte_drops += 1
+                    self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
                     return False
                 self._pending_write_condition.wait(timeout=remaining)
             self._pending_write_bytes += amount
@@ -1088,6 +1091,7 @@ class BlockDiskStore:
                     0, self._pending_write_bytes - old_amount
                 )
                 self._pending_write_byte_drops += 1
+                self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
                 return False
             self._pending_write_bytes = max(
                 0, self._pending_write_bytes + delta

@@ -325,6 +325,32 @@ def _apply_zaya_cca_cache_policy(args, logger):
     """
 
     changed = []
+    # ANSWER-STABILITY ESCAPE HATCH (measured 2026-08-13, ISSUE-LEDGER L63).
+    #
+    # ZAYA prefix reuse currently CHANGES THE ANSWER. Same prompt at temp 0 on
+    # Zaya-8B: with the prefix cache off the reply is 228 tokens
+    # (sha 335824b8, 2/2 reproducible); with it on, a mere 24-token reuse
+    # yields 119 tokens (sha 74b2e5c7, 5/5 reproducible). Both arms are
+    # deterministic, so this is not sampling. It is NOT the stored q8 codec —
+    # it reproduces with --kv-cache-quantization none.
+    #
+    # The existing guards only check that a restored chain CARRIES terminal CCA
+    # conv_state/prev_hs, never that replaying it is EQUIVALENT to a one-pass
+    # cold prefill; for a conv/recurrent state those differ at chunk
+    # boundaries. Until a chunk-exact restore is proven, this switch trades the
+    # cache tier for answer stability.
+    #
+    # Default OFF: flipping it removes a working cache tier, which is a
+    # performance decision for the operator, not something to change silently.
+    if os.environ.get("VMLX_ZAYA_DISABLE_PREFIX_REUSE") == "1":
+        args.enable_prefix_cache = False
+        args.enable_block_disk_cache = False
+        changed.append("prefix_reuse=disabled_for_answer_stability")
+        logger.warning(
+            "ZAYA/CCA prefix reuse DISABLED via VMLX_ZAYA_DISABLE_PREFIX_REUSE=1. "
+            "Every request re-prefills cleanly, which costs cache speed and buys "
+            "cold==warm answer stability (see ISSUE-LEDGER L63)."
+        )
     if (
         getattr(args, "enable_prefix_cache", True)
         and not getattr(args, "use_paged_cache", False)

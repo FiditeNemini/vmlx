@@ -317,6 +317,47 @@ def _apply_jangtq_mpp_nax_policy(args, logger):
     return mode
 
 
+def _disable_recurrent_prefix_reuse(args, logger, family_label: str) -> bool:
+    """Turn off prefix reuse for a family PROVEN to answer differently on a HIT.
+
+    MEASURED 2026-08-13 (ISSUE-LEDGER L63 / L70), temperature 0, same prompt,
+    reuse confirmed non-zero in the metrics:
+
+        Zaya-8B (zaya_cca)                     cache off 228 tok / 335824b8
+                                               cache on  119 tok / 74b2e5c7   (24 tok reused)
+        Nemotron-3.5-Lightning-30B-A3B         cache off 902 tok / 236724e7
+          (nemotron_h_ssm_attention)           cache on  781 tok / 1321ab79   (23 tok reused)
+
+    Each arm is deterministic internally, so this is not sampling. DSV4 (1,792
+    tokens reused) and gemma-4-E4B are byte-identical under the same harness, so
+    it is not the harness and not path-dependence in general — both drifting
+    families carry RECURRENT/SSM state.
+
+    That matches the conclusion already recorded in
+    ``single_batch_generator._cold_prefill_tail_split``: "Recurrent state and
+    rotating ring buffers depend on HOW tokens were fed, not just which ones" —
+    established there for Nemotron and Step-3.7, and not fixable by deriving a
+    correct boundary or matching shapes.
+
+    Disabling L2 as well is deliberate: a disk chain would reintroduce exactly
+    the reuse this removes.
+
+    DEFAULT OFF. Enabling it removes a working cache tier, which is the
+    operator's performance call, not something to change silently.
+    """
+    if os.environ.get("VMLX_DISABLE_RECURRENT_PREFIX_REUSE") != "1":
+        return False
+    args.enable_prefix_cache = False
+    args.enable_block_disk_cache = False
+    logger.warning(
+        "%s prefix reuse DISABLED via VMLX_DISABLE_RECURRENT_PREFIX_REUSE=1. "
+        "Every request re-prefills cleanly: costs cache speed, buys cold==warm "
+        "answer stability (see ISSUE-LEDGER L63/L70).",
+        family_label,
+    )
+    return True
+
+
 def _apply_zaya_cca_cache_policy(args, logger):
     """Apply ZAYA's typed CCA cache contract to serve args.
 
@@ -351,6 +392,10 @@ def _apply_zaya_cca_cache_policy(args, logger):
             "Every request re-prefills cleanly, which costs cache speed and buys "
             "cold==warm answer stability (see ISSUE-LEDGER L63)."
         )
+    # The class-level switch (L70: Nemotron drifts the same way) also covers
+    # ZAYA, so an operator does not have to know which families are affected.
+    elif _disable_recurrent_prefix_reuse(args, logger, "ZAYA/CCA"):
+        changed.append("prefix_reuse=disabled_for_answer_stability")
     if (
         getattr(args, "enable_prefix_cache", True)
         and not getattr(args, "use_paged_cache", False)
@@ -1309,6 +1354,15 @@ def serve_command(args):
             or getattr(_mc, "cache_subtype", None) == "zaya_cca"
         ):
             _apply_zaya_cca_cache_policy(args, logger)
+        elif (
+            _mc.family_name == "nemotron_h"
+            or getattr(_mc, "cache_subtype", None) == "nemotron_h_ssm_attention"
+        ):
+            # L70: measured to answer differently on a cache HIT, same signature
+            # as ZAYA (23-token reuse turned a 902-token reply into 781, each arm
+            # deterministic). No other policy applies to this family, so the gate
+            # is the only thing here.
+            _disable_recurrent_prefix_reuse(args, logger, "Nemotron-H SSM")
         elif (
             _mc.family_name == "mimo_v2"
             or getattr(_mc, "cache_subtype", None) == "mimo_v2_asymmetric_swa"

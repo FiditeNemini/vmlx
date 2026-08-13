@@ -102,3 +102,68 @@ def test_only_exactly_1_arms_the_gate(monkeypatch, value):
     _apply_zaya_cca_cache_policy(args, log)
 
     assert args.enable_prefix_cache is True
+
+
+class TestRecurrentClassGate:
+    """L70: the drift is a CLASS, not one family.
+
+    Nemotron-3.5-Lightning-30B-A3B (`nemotron_h_ssm_attention`) shows the same
+    signature as ZAYA at temperature 0 -- a 23-token reuse turned a 902-token
+    reply (sha 236724e7) into 781 (sha 1321ab79), with the cache-off arm
+    deterministic across runs. DSV4 (1,792 tokens reused) and gemma-4-E4B are
+    byte-identical under the same harness, so it is neither the harness nor
+    path-dependence in general: both drifting families carry RECURRENT/SSM state.
+
+    `VMLX_DISABLE_RECURRENT_PREFIX_REUSE` is the class-level lever so an operator
+    does not need to know which families are affected.
+    """
+
+    def test_class_gate_default_off(self):
+        args, log = _args(), _Logger()
+        from vmlx_engine.cli import _disable_recurrent_prefix_reuse
+
+        assert _disable_recurrent_prefix_reuse(args, log, "X") is False
+        assert args.enable_prefix_cache is True
+
+    def test_class_gate_disables_both_tiers(self, monkeypatch):
+        monkeypatch.setenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", "1")
+        args, log = _args(), _Logger()
+        from vmlx_engine.cli import _disable_recurrent_prefix_reuse
+
+        assert _disable_recurrent_prefix_reuse(args, log, "Nemotron-H SSM") is True
+        assert args.enable_prefix_cache is False
+        # L2 must go too or a disk chain reintroduces the same reuse.
+        assert args.enable_block_disk_cache is False
+        assert any("Nemotron-H SSM" in w for w in log.warnings)
+
+    @pytest.mark.parametrize("value", ["0", "", "true", "yes"])
+    def test_class_gate_only_exact_1(self, monkeypatch, value):
+        monkeypatch.setenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", value)
+        args, log = _args(), _Logger()
+        from vmlx_engine.cli import _disable_recurrent_prefix_reuse
+
+        assert _disable_recurrent_prefix_reuse(args, log, "X") is False
+
+    def test_class_gate_also_covers_zaya(self, monkeypatch):
+        # Set ONLY the class gate; the ZAYA policy must still disable reuse so an
+        # operator does not have to set two variables.
+        monkeypatch.delenv("VMLX_ZAYA_DISABLE_PREFIX_REUSE", raising=False)
+        monkeypatch.setenv("VMLX_DISABLE_RECURRENT_PREFIX_REUSE", "1")
+        args, log = _args(), _Logger()
+        _apply_zaya_cca_cache_policy(args, log)
+
+        assert args.enable_prefix_cache is False
+        assert args.enable_block_disk_cache is False
+
+    def test_nemotron_is_wired_into_the_family_chain(self):
+        # A gate nothing calls is the dead-code shape this campaign keeps finding.
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
+        # Target the WIRING site, not the first textual match -- the docstring
+        # above the helper also names the subtype, and matching that would make
+        # this test pass while nothing called the gate.
+        marker = 'getattr(_mc, "cache_subtype", None) == "nemotron_h_ssm_attention"'
+        assert marker in src, "nemotron is not wired into the family policy chain"
+        i = src.index(marker)
+        assert "_disable_recurrent_prefix_reuse" in src[i : i + 900]

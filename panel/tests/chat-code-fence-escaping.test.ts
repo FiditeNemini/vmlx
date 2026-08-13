@@ -65,3 +65,32 @@ describe('code fences keep their literal text', () => {
     expect(out).not.toContain('&quot;')
   })
 })
+
+/**
+ * Math delimiters are deliberately NOT given an unclosed form. Extending the
+ * fence fix to `$$`/`\[` does stop `<` escaping mid-stream, but it swallows the
+ * rest of any message with a stray opener and real markup then stops being
+ * escaped — dropped from view instead of shown as text. A lone `$` is ordinary
+ * prose. The fence case differs: its body is literal code, so swallowing an
+ * unterminated block is correct, and its corruption was permanent, not
+ * transient.
+ */
+describe('math delimiters decline the unclosed-span trick', () => {
+  it('a stray dollar never disables escaping for the rest of the message', () => {
+    const out = prepareAssistantMarkdownWithMath(
+      'It costs $5 and then <result status="ok"> appears',
+    )
+    expect(out).toContain('&lt;result')
+  })
+
+  it('a stray double-dollar never disables escaping either', () => {
+    // This is the regression that an unclosed-$$ alternative introduces.
+    const out = prepareAssistantMarkdownWithMath('cost $$5 then <result> here')
+    expect(out).toContain('&lt;result')
+  })
+
+  it('paired math still renders', () => {
+    expect(prepareAssistantMarkdownWithMath('x $a < b$ y')).toContain('math-inline')
+    expect(prepareAssistantMarkdownWithMath('x\n\n$$a < b$$\n')).toContain('math-block')
+  })
+})

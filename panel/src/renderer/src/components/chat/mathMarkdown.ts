@@ -15,6 +15,21 @@ const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
 // BEFORE the inline-backtick form, which would otherwise match the first two
 // backticks of an unclosed ``` as an empty inline span and leave the body
 // exposed to escaping.
+// Math delimiters deliberately get NO unclosed form, unlike fences above.
+//
+// An unclosed `$$`/`\[`/`$` does escape `<` to `&lt;` while it streams, and
+// extending the same to-end-of-string trick does fix that — measured. But it
+// then swallows the remainder of any message containing a stray opener, so
+// `cost $$5 then <result>` stops escaping `<result>`, and the tag is dropped
+// from the rendered output instead of shown as text. That is the exact failure
+// escaping exists to prevent, and a lone `$` ("costs $5") is ordinary prose.
+//
+// The fence case is different and is fixed above: a fence body is rendered as
+// literal code, so swallowing to end-of-message is the correct reading of an
+// unterminated block, and the corruption there was proven live and PERMANENT
+// (a model ending its reply inside the block). The math case is transient —
+// the closing delimiter almost always arrives. Trading a rare permanent
+// content drop for a rare transient artifact is a bad trade, so it is declined.
 const LITERAL_MARKDOWN_PROTECTED_RE =
   /```[\s\S]*?```|~~~[\s\S]*?~~~|```[\s\S]*$|~~~[\s\S]*$|`[^`\n]*`|\\\[[\s\S]*?\\\]|\\\([^\n]*?\\\)|\$\$[\s\S]*?\$\$/g
 

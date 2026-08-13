@@ -396,3 +396,44 @@ class TestSpanAdmission:
 
         GIB = 1024**3
         assert project_peak_affine(0.0, 1.0, 10, floor_bytes=5 * GIB) == 5 * GIB
+
+
+class TestMuseReasoningEffortParity:
+    """The API path must reach the same depth control the panel already sets.
+
+    Muse's template reads ONLY `reasoning_strength`; it ignores enable_thinking
+    and reasoning_effort. The panel translates the UI level in its request
+    builder (panel/src/main/ipc/chat.ts), so a UI user could steer reasoning
+    depth while a plain API caller sending the standard reasoning_effort
+    silently could not. MEASURED before the fix, temperature 0, same prompt:
+    high and xhigh were BYTE-IDENTICAL (1073-char reasoning, 287-char answer),
+    consistent with the template ignoring the field and defaulting to high.
+    """
+
+    def _merge(self, monkeypatch, effort, kwargs=None, model="Muse-Glimmer-30B-JANG_4M-CRACK"):
+        from vmlx_engine import server
+
+        monkeypatch.setattr(server, "_model_path", model, raising=False)
+        monkeypatch.setattr(server, "_model_name", model, raising=False)
+        monkeypatch.setattr(server, "_default_chat_template_kwargs", None, raising=False)
+        return server._merge_ct_kwargs(kwargs, effort)
+
+    def test_effort_becomes_reasoning_strength_for_muse(self, monkeypatch):
+        assert self._merge(monkeypatch, "xhigh")["reasoning_strength"] == "xhigh"
+        assert self._merge(monkeypatch, "low")["reasoning_strength"] == "low"
+        # "max" is the OpenAI-ish top level; Muse's top is xhigh.
+        assert self._merge(monkeypatch, "max")["reasoning_strength"] == "xhigh"
+
+    def test_explicit_kwarg_wins_over_effort(self, monkeypatch):
+        """A caller who names the kwarg directly meant it."""
+        out = self._merge(monkeypatch, "low", {"reasoning_strength": "xhigh"})
+        assert out["reasoning_strength"] == "xhigh"
+
+    def test_unknown_effort_is_not_guessed(self, monkeypatch):
+        assert "reasoning_strength" not in self._merge(monkeypatch, "banana")
+        assert "reasoning_strength" not in self._merge(monkeypatch, None)
+
+    def test_other_families_are_untouched(self, monkeypatch):
+        """Only families that steer on reasoning_strength get the translation."""
+        out = self._merge(monkeypatch, "xhigh", model="DSV4-Flash-JANG_2L")
+        assert "reasoning_strength" not in out

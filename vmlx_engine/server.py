@@ -1120,7 +1120,37 @@ def _unsupported_media_modality_response_from_error(
     )
 
 
-def _merge_ct_kwargs(request_kwargs: dict | None) -> dict:
+def _reasoning_strength_family() -> bool:
+    """Does the loaded bundle steer reasoning by the ``reasoning_strength`` kwarg?
+
+    Muse Glimmer's template reads ONLY ``reasoning_strength``; it never reads
+    ``enable_thinking`` or ``reasoning_effort`` (see model_configs.py). The panel
+    already translates the UI level into that kwarg in its request builder, so a
+    UI user can steer depth while a plain API caller sending the standard
+    ``reasoning_effort`` silently could not — the two paths disagreed.
+    """
+    try:
+        identity = " ".join(str(v or "").lower() for v in (_model_path, _model_name))
+    except Exception:  # noqa: BLE001
+        return False
+    return "muse" in identity and "glimmer" in identity
+
+
+# Muse accepts low/medium/high/xhigh. Map the OpenAI-style effort vocabulary
+# onto it; anything unrecognised is left alone rather than guessed at.
+_REASONING_STRENGTH_BY_EFFORT = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "xhigh",
+}
+
+
+def _merge_ct_kwargs(
+    request_kwargs: dict | None, reasoning_effort: str | None = None
+) -> dict:
     """Merge server-wide default chat_template_kwargs with per-request overrides.
 
     Server defaults (from --chat-template-kwargs) are used as the base layer.
@@ -1128,10 +1158,23 @@ def _merge_ct_kwargs(request_kwargs: dict | None) -> dict:
 
     Normalizes enable_thinking to a real bool — guards against bool("false") == True
     when API clients send string values instead of JSON booleans.
+
+    ``reasoning_effort`` is translated to ``reasoning_strength`` for families that
+    steer on that kwarg, so the plain API path reaches the same depth control the
+    panel already sets. An explicit ``reasoning_strength`` in the request always
+    wins — a caller who names the kwarg directly meant it.
     """
     base = dict(_default_chat_template_kwargs) if _default_chat_template_kwargs else {}
     if request_kwargs:
         base.update(request_kwargs)
+    if (
+        reasoning_effort
+        and "reasoning_strength" not in base
+        and _reasoning_strength_family()
+    ):
+        mapped = _REASONING_STRENGTH_BY_EFFORT.get(str(reasoning_effort).strip().lower())
+        if mapped:
+            base["reasoning_strength"] = mapped
     # Normalize enable_thinking: reject non-bool values that bool() would mishandle
     if "enable_thinking" in base:
         val = base["enable_thinking"]
@@ -12611,7 +12654,10 @@ def _cache_contract_render_and_tokenize(
         messages,
         preserve_native_order=_is_loaded_dsv4_model(model),
     )
-    ct_kwargs = _merge_ct_kwargs(dry_request.chat_template_kwargs)
+    ct_kwargs = _merge_ct_kwargs(
+        dry_request.chat_template_kwargs,
+        getattr(dry_request, "reasoning_effort", None),
+    )
     resolved_thinking = _resolve_enable_thinking(
         request_value=dry_request.enable_thinking,
         ct_kwargs=ct_kwargs,
@@ -14378,7 +14424,10 @@ async def create_anthropic_message(
         _msg_kwargs["stop"] = chat_req.stop
     # Merge server-wide --chat-template-kwargs defaults with any adapter-populated
     # kwargs (e.g., thinking_budget from Anthropic thinking.budget_tokens)
-    _ct_kwargs = _merge_ct_kwargs(chat_req.chat_template_kwargs)
+    _ct_kwargs = _merge_ct_kwargs(
+        chat_req.chat_template_kwargs,
+        getattr(chat_req, "reasoning_effort", None),
+    )
     _msg_tool_choice = chat_req.tool_choice
     _msg_effective_tools = _request_tools_for_generation_prompt(chat_req)
     _attach_effective_tools_for_tool_parsing(chat_req, _msg_effective_tools)
@@ -15260,7 +15309,10 @@ async def ollama_chat(fastapi_request: Request):
     # enable_thinking precedence: per-request > chat_template_kwargs > server default.
     # Mirrors the OpenAI path at create_chat_completion so clients get identical
     # behavior whether they speak the OpenAI or Ollama wire format.
-    _ollama_ct_kwargs = _merge_ct_kwargs(chat_req.chat_template_kwargs)
+    _ollama_ct_kwargs = _merge_ct_kwargs(
+        chat_req.chat_template_kwargs,
+        getattr(chat_req, "reasoning_effort", None),
+    )
     _et = _resolve_enable_thinking(
         request_value=chat_req.enable_thinking,
         ct_kwargs=_ollama_ct_kwargs,
@@ -17362,7 +17414,10 @@ async def create_chat_completion(
     # in context and mimics the pattern, producing reasoning even when the generation
     # prompt doesn't inject <think>. This is the root cause of "thinking OFF but model
     # still thinks on 2nd message" bugs.
-    _ct_kwargs = _merge_ct_kwargs(request.chat_template_kwargs)
+    _ct_kwargs = _merge_ct_kwargs(
+        request.chat_template_kwargs,
+        getattr(request, "reasoning_effort", None),
+    )
     _explicit_thinking_off = request.enable_thinking is False or (
         _ct_kwargs.get("enable_thinking") is False
     )
@@ -20466,7 +20521,10 @@ async def create_response(
     _responses_max_prompt_tokens = _effective_max_prompt_tokens(request)
 
     # Strip <think> blocks from history when thinking is OFF (same as Chat Completions path)
-    _ct_kwargs = _merge_ct_kwargs(request.chat_template_kwargs)
+    _ct_kwargs = _merge_ct_kwargs(
+        request.chat_template_kwargs,
+        getattr(request, "reasoning_effort", None),
+    )
     _explicit_thinking_off = request.enable_thinking is False or (
         _ct_kwargs.get("enable_thinking") is False
     )
@@ -22271,7 +22329,10 @@ async def stream_chat_completion(
     # Priority: top-level field > chat_template_kwargs > server default > auto-detect
     # (None = fall through to template/tokenizer auto-detect below — this site
     # drives SSE parser behavior, not engine kwargs, so no Gemma4+tools override.)
-    _ct_kwargs = _merge_ct_kwargs(request.chat_template_kwargs)
+    _ct_kwargs = _merge_ct_kwargs(
+        request.chat_template_kwargs,
+        getattr(request, "reasoning_effort", None),
+    )
     _effective_thinking = _resolve_enable_thinking(
         request_value=request.enable_thinking,
         ct_kwargs=_ct_kwargs,
@@ -24666,7 +24727,10 @@ async def stream_responses_api(
     # Priority: top-level field > chat_template_kwargs > server default > auto-detect
     # (None = fall through to template/tokenizer auto-detect below — this site
     # drives SSE parser behavior, not engine kwargs, so no Gemma4+tools override.)
-    _ct_kwargs = _merge_ct_kwargs(request.chat_template_kwargs)
+    _ct_kwargs = _merge_ct_kwargs(
+        request.chat_template_kwargs,
+        getattr(request, "reasoning_effort", None),
+    )
     _effective_thinking = _resolve_enable_thinking(
         request_value=request.enable_thinking,
         ct_kwargs=_ct_kwargs,

@@ -390,6 +390,8 @@ def span_admission_check(
     fresh_tokens: int,
     model_label: str = "model",
     safety: float = 1.10,
+    fitted_max_context: int = 0,
+    max_extrapolation: float = 4.0,
 ) -> None:
     """Decline a whole prefill span that cannot finish, BEFORE burning the work.
 
@@ -418,6 +420,14 @@ def span_admission_check(
         return
     intercept, slope = peak_model
     if slope <= 0:
+        return
+    # Do not extrapolate a fit far past the contexts it was measured over.
+    # REJECTING A SPAN THAT WOULD HAVE RUN IS THE WORSE FAILURE: the per-chunk
+    # valve is a real backstop that still declines correctly (just later), so
+    # missing a decline costs wasted work, while a false decline breaks a
+    # request the device serves. Beyond `max_extrapolation` x the measured
+    # range, defer to the per-chunk valve rather than guess.
+    if fitted_max_context > 0 and final_context > fitted_max_context * max_extrapolation:
         return
     projected = project_peak_affine(
         intercept, slope, final_context, floor_bytes=largest_observed_peak_bytes

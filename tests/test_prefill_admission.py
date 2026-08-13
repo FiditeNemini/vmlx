@@ -350,6 +350,52 @@ class TestSpanAdmission:
         projected = project_peak_affine(fitted[0], fitted[1], 100_000)
         assert abs(projected - int(70.0 * GIB)) < int(0.1 * GIB)
 
+    def test_refuses_to_extrapolate_far_past_measured_range(self):
+        """A false decline breaks a working request; a missed decline only costs
+        wasted work, because the per-chunk valve still backstops it."""
+        from vmlx_engine.utils.prefill_admission import (
+            PrefillAdmissionError,
+            fit_peak_model,
+            span_admission_check,
+        )
+
+        GIB = 1024**3
+        # Fit measured only up to 20k context, but with a steep slope, so a naive
+        # projection to 500k would decline.
+        model = fit_peak_model(
+            [(10_000, int(24.0 * GIB)), (20_000, int(40.0 * GIB))]
+        )
+        assert model is not None
+        # Sanity: without the range bound this WOULD decline.
+        with pytest.raises(PrefillAdmissionError):
+            span_admission_check(
+                max_ws_bytes=107 * GIB,
+                peak_model=model,
+                largest_observed_peak_bytes=int(40.0 * GIB),
+                final_context=500_000,
+                fresh_tokens=480_000,
+                fitted_max_context=0,  # unknown range = old behaviour
+            )
+        # With the measured range known, 500k is 25x past it — defer instead.
+        span_admission_check(
+            max_ws_bytes=107 * GIB,
+            peak_model=model,
+            largest_observed_peak_bytes=int(40.0 * GIB),
+            final_context=500_000,
+            fresh_tokens=480_000,
+            fitted_max_context=20_000,
+        )
+        # Just inside the bound it still declines.
+        with pytest.raises(PrefillAdmissionError):
+            span_admission_check(
+                max_ws_bytes=107 * GIB,
+                peak_model=model,
+                largest_observed_peak_bytes=int(40.0 * GIB),
+                final_context=70_000,
+                fresh_tokens=50_000,
+                fitted_max_context=20_000,
+            )
+
     def test_projection_never_falls_below_an_observed_peak(self):
         """A fit is an estimate; a measurement is not."""
         from vmlx_engine.utils.prefill_admission import project_peak_affine

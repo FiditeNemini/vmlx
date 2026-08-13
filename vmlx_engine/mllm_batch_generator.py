@@ -4661,6 +4661,9 @@ class MLLMBatchGenerator:
         self._span_peak_model: tuple[float, float] | None = None
         self._span_peak_samples: int = 0
         self._span_largest_peak: int = 0
+        # Largest context the fit was actually measured over, so the check can
+        # refuse to extrapolate far past its own evidence.
+        self._span_peak_max_context: int = 0
         self.paged_cache_manager = paged_cache_manager
         self.block_aware_cache = block_aware_cache
         self.memory_aware_cache = memory_aware_cache
@@ -6359,6 +6362,7 @@ class MLLMBatchGenerator:
                             int(getattr(request, "_cached_tokens", 0) or 0) + seq_len,
                             fresh_tokens=seq_len,
                             model_label="hybrid prefill",
+                            fitted_max_context=self._span_peak_max_context,
                         )
                     except Exception:
                         _restore_kv_step()
@@ -6790,6 +6794,9 @@ class MLLMBatchGenerator:
                         self._span_peak_samples = len(_peak_samples)
                         self._span_largest_peak = max(
                             self._span_largest_peak, _observed_chunk_peak_max
+                        )
+                        self._span_peak_max_context = max(
+                            (ctx for ctx, _ in _peak_samples), default=0
                         )
                         logger.info(
                             "span-peak-fit samples=%d intercept=%.2fGB "

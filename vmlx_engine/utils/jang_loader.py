@@ -2191,6 +2191,18 @@ def is_jang_model(model_path: str | Path) -> bool:
         or str(cfg.get("tq_layout") or "").lower()
     ):
         return True
+    # v3 capability-schema stamps (Qwen3.6-27B D-series onward) carry NO
+    # format/weight_format at all — their jang_config is pure serving metadata
+    # (structured `chat` presets, `capabilities`, `mtp`, `reasoning`, `tools`,
+    # `vision`) and the weights are STOCK MLX affine with per-module overrides
+    # in config.json["quantization"], which stock mlx_vlm consumes directly.
+    # Routing them into the JANG codec loader killed the server at startup
+    # ("Not a JANG VLM: format='None' weight_format='None'") for every stamped
+    # D-series bundle. The structured `chat` block is the discriminator:
+    # legacy JANG/JJQF bundles with an otherwise-empty stamp predate that
+    # schema entirely, so its presence means capability-stamp, not codec.
+    if fmt is None and weight_format is None and isinstance(cfg.get("chat"), dict):
+        return False
     # Legacy JANG/JJQF bundles can carry an otherwise-empty config file. Treat
     # presence of the stamp as JANG unless it explicitly declares a stock MLX
     # weight format, which is the capability-only case above documents.

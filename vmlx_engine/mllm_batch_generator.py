@@ -1213,7 +1213,36 @@ def _call_processor_direct_unscoped(
     if images:
         kwargs["images"] = _shape_images_for_processor_call(processor, images)
     if videos:
-        kwargs["videos"] = videos
+        # Mirror mlx_vlm.prepare_inputs' video handling EXACTLY: load string
+        # paths through load_video and pass the per-video fps alongside the
+        # frames. The fps is the temporal metadata Qwen-style processors use
+        # to build video_grid_thw; without it the temporal grid degenerates
+        # and the model perceives the clip as one static frame repeated.
+        # Measured live on Qwen3.6-4D: video-only turns (which route through
+        # prepare_inputs) answered "the ball moves right", while mixed
+        # image+video turns (which route HERE because the image forces the
+        # safe direct path) enumerated 12 identical frames at fixed
+        # coordinates. Same video, same engine — the only difference was this
+        # call's missing load/fps step.
+        try:
+            from mlx_vlm.utils import load_video as _load_video
+
+            _fps_hint = 2.0
+            _loaded, _video_fps = [], []
+            for _v in videos:
+                if isinstance(_v, (str, bytes)):
+                    _arr, _s_fps = _load_video(str(_v), fps=_fps_hint)
+                else:
+                    _arr, _s_fps = _v, _fps_hint
+                _loaded.append(_arr)
+                _video_fps.append(_s_fps)
+            kwargs["videos"] = _loaded
+            if params is None or "fps" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in (params or {}).values()
+            ):
+                kwargs["fps"] = _video_fps
+        except Exception:
+            kwargs["videos"] = videos
     if audio:
         processor_audio = (
             audio

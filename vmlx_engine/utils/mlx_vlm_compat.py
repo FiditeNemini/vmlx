@@ -60,6 +60,7 @@ def apply() -> None:
     _patch_qwen35_patch_embed_layout()
     _patch_qwen3_vl_vision_model_type_allowlist()
     _patch_prompt_cache_rank3_trim()
+    _patch_qwen35_mixed_image_video_embeddings()
     # MRoPE none-delta patch (Eric perf-regression suspect 2026-06-27):
     # monkey-patches qwen3_5/qwen3_5_moe LanguageModel.__call__ to add a
     # get_rope_index fallback when rope_deltas is None. If self._rope_deltas
@@ -692,3 +693,92 @@ def _patch_qwen3_vl_vision_model_type_allowlist() -> None:
     _logger.debug(
         "mlx_vlm_compat: patched qwen3_vl VisionModel allowlist (adds qwen3_5_moe_vision, qwen3_5_vision)"
     )
+
+
+def _patch_qwen35_mixed_image_video_embeddings() -> None:
+    """Encode BOTH image and video pixels when a conversation carries both.
+
+    Upstream ``qwen3_5.Model.get_input_embeddings`` reads
+    ``pixel_values_videos`` only as a FALLBACK (``if pixel_values is None``)
+    and picks ``grid_thw = image_grid_thw or video_grid_thw``. With an image
+    and a video in the same conversation, the vision tower therefore encodes
+    ONLY the image, and the sequential merge scatters those image features
+    into the VIDEO token positions as well.
+
+    Measured live on Qwen3.6-27B-4D: the processor emits byte-identical video
+    tensors with or without an image present (probe: identical
+    pixel_values_videos, grid [2,32,32]), yet the model in the mixed case
+    enumerates ~12 identical frames pinned at fixed coordinates — the image,
+    replicated where the ball should be. Video-only turns answer "moves
+    right" because the fallback fires.
+
+    Fix: encode image and video pixel sets separately with their own grids
+    and concatenate the feature rows in the order their pad tokens appear in
+    ``input_ids`` (the merge fills special positions sequentially). The
+    vision feature cache is only consulted for the image-only case, where its
+    key covers all encoded content.
+    """
+    try:
+        from mlx_vlm.models.qwen3_5 import qwen3_5 as _qvl
+    except Exception as exc:  # pragma: no cover
+        _logger.debug("mixed image+video patch skipped: %s", exc)
+        return
+    cls = _qvl.Model
+    if getattr(cls.get_input_embeddings, "_vmlx_mixed_media_patched", False):
+        return
+
+    _original = cls.get_input_embeddings
+
+    def patched_get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+        pixel_values_videos = kwargs.get("pixel_values_videos", None)
+        if pixel_values is None or pixel_values_videos is None:
+            # Single-media (or text-only): upstream handles these correctly.
+            return _original(self, input_ids=input_ids, pixel_values=pixel_values, **kwargs)
+
+        import mlx.core as mx
+
+        image_grid_thw = kwargs.get("image_grid_thw", None)
+        video_grid_thw = kwargs.get("video_grid_thw", None)
+        mask = kwargs.get("mask", None)
+
+        dtype = self.vision_tower.patch_embed.proj.weight.dtype
+        inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+
+        image_feats, _ = self.vision_tower(pixel_values.astype(dtype), image_grid_thw)
+        video_feats, _ = self.vision_tower(
+            pixel_values_videos.astype(dtype), video_grid_thw
+        )
+
+        # The merge fills image/video token positions sequentially from one
+        # feature matrix, so the concatenation order must match the order the
+        # pad tokens appear in the prompt.
+        ids = input_ids[0] if input_ids.ndim > 1 else input_ids
+        img_tok = int(self.config.image_token_index)
+        vid_tok = int(self.config.video_token_index)
+        id_list = ids.tolist()
+        img_first = (
+            id_list.index(img_tok) if img_tok in id_list else len(id_list)
+        ) <= (id_list.index(vid_tok) if vid_tok in id_list else len(id_list))
+        hidden_states = (
+            mx.concatenate([image_feats, video_feats], axis=0)
+            if img_first
+            else mx.concatenate([video_feats, image_feats], axis=0)
+        )
+
+        inputs_embeds, _ = self.merge_input_ids_with_image_features(
+            hidden_states,
+            inputs_embeds,
+            input_ids,
+            self.config.image_token_index,
+            self.config.video_token_index,
+        )
+        position_ids, rope_deltas = self.language_model.get_rope_index(
+            input_ids, image_grid_thw, video_grid_thw, mask
+        )
+        self.language_model._position_ids = position_ids
+        self.language_model._rope_deltas = rope_deltas
+        return _qvl.InputEmbeddingsFeatures(inputs_embeds=inputs_embeds)
+
+    patched_get_input_embeddings._vmlx_mixed_media_patched = True  # type: ignore[attr-defined]
+    cls.get_input_embeddings = patched_get_input_embeddings  # type: ignore[assignment]
+    _logger.info("mlx_vlm_compat: qwen3_5 mixed image+video embeddings patched")

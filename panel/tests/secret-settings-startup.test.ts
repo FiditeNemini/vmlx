@@ -36,19 +36,37 @@ describe("secret setting presence checks", () => {
     const database = read("src/main/database.ts");
     const sessions = read("src/main/sessions.ts");
 
-    expect(database).toContain("getSessionsWithoutSecrets(): Session[]");
-
-    // The migration loop runs while `sessions.ts` is still evaluating, so a
-    // decrypting read there blocks the main thread on the keychain before any
-    // window exists. Assert the loop feeds off the non-decrypting read.
-    const ctorIndex = sessions.indexOf("export const sessionManager");
-    expect(ctorIndex).toBeGreaterThan(-1);
-    const migrationRead = sessions.indexOf(
-      "for (const session of db.getSessionsWithoutSecrets())",
+    // A list read must never decrypt. The startup migration iterates it while
+    // sessions.ts is still evaluating, so one keychain call there blocks the
+    // main thread before any window exists.
+    const listRead = database.indexOf("getSessions(): Session[]");
+    expect(listRead).toBeGreaterThan(-1);
+    expect(database.slice(listRead, listRead + 400)).toContain(
+      "remote_api_key: null",
     );
-    expect(migrationRead).toBeGreaterThan(-1);
-    expect(migrationRead).toBeLessThan(ctorIndex);
-    expect(sessions).not.toContain("for (const session of db.getSessions())");
+
+    // The single-session read still decrypts — that is where auth, connect and
+    // polling get the key.
+    const oneRead = database.indexOf("getSession(id: string): Session");
+    expect(oneRead).toBeGreaterThan(-1);
+    expect(database.slice(oneRead, oneRead + 300)).toContain(
+      "this.mapSessionRow(row)",
+    );
+
+    expect(sessions).toContain("for (const session of db.getSessions())");
+  });
+
+  it("fetches the remote key per session when polling instead of from the list", () => {
+    const sessions = read("src/main/sessions.ts");
+
+    // The health poller iterates the secret-free list, so it must pull the key
+    // for the one session it is about to authenticate against.
+    expect(sessions).toContain(
+      "const remoteApiKey = db.getSession(session.id)?.remoteApiKey",
+    );
+    expect(sessions).toContain(
+      "if (remoteApiKey) remoteHeaders['Authorization'] = `Bearer ${remoteApiKey}`",
+    );
   });
 
   it("does not decrypt the HF token for local bundle session startup", () => {

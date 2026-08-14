@@ -1820,22 +1820,15 @@ class DatabaseManager {
     return this.mapSessionRow(row);
   }
 
-  getSessions(): Session[] {
-    this.ensureOpen();
-    const stmt = this.db.prepare(
-      "SELECT * FROM sessions ORDER BY updated_at DESC",
-    );
-    return stmt.all().map((row: any) => this.mapSessionRow(row));
-  }
-
   /**
-   * Sessions with `remoteApiKey` left encrypted. Reading a secret costs a
-   * synchronous macOS keychain call, and before `app.whenReady()` that call
-   * both blocks the main thread and binds to Electron's default "Chromium"
-   * service name instead of ours. Callers that only need config/model fields
-   * must use this so startup never touches the keychain.
+   * Every session, with `remoteApiKey` left out. Decrypting one costs a
+   * synchronous macOS keychain call that can sit behind a login-password
+   * prompt, so doing it per row on a list read meant merely showing the
+   * session list could freeze the app. Nothing that lists sessions needs the
+   * secret; the paths that do (auth headers, connecting, polling a live
+   * remote) fetch that one session through `getSession`.
    */
-  getSessionsWithoutSecrets(): Session[] {
+  getSessions(): Session[] {
     this.ensureOpen();
     const stmt = this.db.prepare(
       "SELECT * FROM sessions ORDER BY updated_at DESC",

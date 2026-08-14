@@ -10,9 +10,6 @@ const { db, state } = vi.hoisted(() => {
   }
   const db = {
     getSessions: vi.fn(() => state.sessions),
-    // What the module-scope startup migration reads; the fake rows carry no
-    // secret, so it can share the same backing list.
-    getSessionsWithoutSecrets: vi.fn(() => state.sessions),
     getSession: vi.fn((id: string) => state.sessions.find(session => session.id === id)),
     getSessionByModelPath: vi.fn((modelPath: string) =>
       state.sessions.find(session => session.modelPath === modelPath),

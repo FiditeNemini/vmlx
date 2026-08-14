@@ -3011,9 +3011,9 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('/** Get timestamp', start)
         const block = source.slice(start, end)
 
-        // Non-decrypting read: the loop runs at module scope, so pulling a
-        // session secret here would block the main thread on the keychain.
-        expect(block).toContain('for (const session of db.getSessionsWithoutSecrets())')
+        // db.getSessions() never returns secrets, which is what makes this
+        // module-scope loop safe to run before the app is ready.
+        expect(block).toContain('for (const session of db.getSessions())')
         expect(block).toContain('applyMissingCacheStackStartupDefaults(config, session.modelPath)')
         expect(block).toContain('applyCacheStackStartupDefaultMigration(config, session.modelPath)')
         expect(block).toContain('normalizeCacheStackMutualExclusion(config)')

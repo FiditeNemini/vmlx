@@ -1316,9 +1316,9 @@ export class SessionManager extends EventEmitter {
     // Start-time migration alone makes the engine argv correct, but leaves the
     // Settings UI showing a stale cache stack until the model is launched. The
     // UI must reflect the configuration that launch will actually use.
-    // Secrets stay encrypted here: this runs at module scope, before the app
-    // is ready, and decrypting one would block the main thread on the keychain.
-    for (const session of db.getSessionsWithoutSecrets()) {
+    // Runs at module scope, before the app is ready — a list read must not
+    // reach the keychain, or the main thread blocks before any window exists.
+    for (const session of db.getSessions()) {
       let config: Partial<ServerConfig>
       try {
         config = JSON.parse(session.config || '{}')
@@ -3477,7 +3477,11 @@ export class SessionManager extends EventEmitter {
           try {
             const remoteBase = session.remoteUrl.replace(/\/+$/, '')
             const remoteHeaders: Record<string, string> = {}
-            if (session.remoteApiKey) remoteHeaders['Authorization'] = `Bearer ${session.remoteApiKey}`
+            // The list read above carries no secret, so fetch this one
+            // session's key. Only reached for a remote session that is
+            // actually running, so idle app startup never hits the keychain.
+            const remoteApiKey = db.getSession(session.id)?.remoteApiKey
+            if (remoteApiKey) remoteHeaders['Authorization'] = `Bearer ${remoteApiKey}`
             if (session.remoteOrganization) remoteHeaders['OpenAI-Organization'] = session.remoteOrganization
             const resolvedHealthUrl = await resolveUrl(`${remoteBase}/v1/models`)
             const pingStart = Date.now()

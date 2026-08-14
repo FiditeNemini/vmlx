@@ -966,17 +966,30 @@ class TestHybridSSMResumeRemaining:
         """
         import inspect
 
-        from vmlx_engine.mllm_scheduler import MLLMScheduler
+        from vmlx_engine.mllm_scheduler import (
+            MLLMScheduler,
+            _hybrid_clean_store_enabled,
+            _hybrid_prefix_promotion_enabled,
+        )
 
         source = inspect.getsource(MLLMScheduler._cleanup_finished)
         skip_idx = source.index("hybrid restored-prefix promotion disabled")
         paged_store_idx = source.index("# --- Cache store: paged path ---")
-        guard = source[max(0, skip_idx - 700):skip_idx + 200]
+        # Window widened for the opt-in routes that now sit between the
+        # condition and the skip; the condition itself must still be there.
+        guard = source[max(0, skip_idx - 1600):skip_idx + 200]
 
         assert skip_idx < paged_store_idx
         assert 'getattr(self, "_is_hybrid", False)' in guard
         assert 'getattr(request, "_cached_tokens", 0)' in guard
         assert "_skip_cache_store = True" in guard
+
+        # The routes that bypass the skip are opt-in, so an unconfigured engine
+        # still refuses to promote a restored hybrid prefix. Promotion in
+        # particular was measured to collapse the model on its first extended
+        # turn, so its default is the thing under test here.
+        assert _hybrid_prefix_promotion_enabled() is False
+        assert _hybrid_clean_store_enabled() is False
 
     def test_performance_timeout_sufficient(self):
         """Performance health check must use >= 30s timeout."""

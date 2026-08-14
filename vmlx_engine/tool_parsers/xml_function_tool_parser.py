@@ -25,9 +25,21 @@ from .abstract_tool_parser import (
 )
 
 
-@ToolParserManager.register_module(["xml_function", "mimo_xml_function"])
+@ToolParserManager.register_module(["xml_function", "mimo_xml_function", "qwen3_coder"])
 class XMLFunctionToolParser(ToolParser):
-    """Parse XML function calls used by MiMo-style chat templates."""
+    """Parse XML function calls used by MiMo-style chat templates.
+
+    ``qwen3_coder`` is registered here rather than on the Qwen parser because
+    the formats differ and the name has to follow the FORMAT: Qwen3.6-27B
+    D-series bundles are stamped ``tool parser qwen3_coder`` and their chat
+    template emits exactly this parser's shape —
+    ``<tool_call>\\n<function=NAME>\\n<parameter=KEY>\\nVALUE\\n</parameter>`` —
+    not the plain ``<tool_call>{json}`` the ``qwen``/``qwen3`` parser reads.
+    Verified against the bundle's chat_template.jinja, not inferred from the
+    name. Before this name existed the engine exited at startup
+    ("Tool parser 'qwen3_coder' not found"), which took the whole session down
+    for every stamped D-series bundle.
+    """
 
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 

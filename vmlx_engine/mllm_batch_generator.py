@@ -9172,11 +9172,13 @@ class MLLMBatchGenerator:
             # batch_generator.last_native_mtp_skip, and without this key an
             # MLLM session that only ever ran sampled requests shows a null
             # MTP tile with no way to tell "skipped by policy" from "broken".
-            self._stats.last_native_mtp_skip = {
-                "uid": str(getattr(request, "request_id", "unknown")),
-                "request_id": getattr(request, "request_id", None),
-                "reason": reason,
-            }
+            stats = getattr(self, "_stats", None)
+            if stats is not None:
+                stats.last_native_mtp_skip = {
+                    "uid": str(getattr(request, "request_id", "unknown")),
+                    "request_id": getattr(request, "request_id", None),
+                    "reason": reason,
+                }
         return False
 
     def _step_native_mtp_head(

@@ -3866,10 +3866,13 @@ Examples:
         "--native-mtp-sampling-policy",
         choices=["compatible-only", "deterministic-defaults"],
         default="compatible-only",
-        help="Native MTP request policy. compatible-only leaves sampling defaults alone and "
-             "uses MTP only for deterministic requests. deterministic-defaults is used by "
-             "the app for native-MTP sessions to set deterministic temperature/top-p/top-k/min-p "
-             "without applying repetition-penalty guards.",
+        help="Native MTP request policy. compatible-only leaves sampling defaults alone, so "
+             "MTP accelerates deterministic requests only and a sampled one (temperature != 0) "
+             "decodes autoregressively -- the skip reason is reported on /health and in the "
+             "app's Performance panel. deterministic-defaults instead fills omitted "
+             "temperature/top-p/top-k/min-p with greedy values, without applying "
+             "repetition-penalty guards; the app sends it only when a session picks the "
+             "Deterministic MTP mode, never for the default Auto mode.",
     )
     serve_parser.add_argument(
         "--disable-native-mtp",

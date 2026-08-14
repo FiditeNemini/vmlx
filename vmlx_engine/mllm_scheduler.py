@@ -181,6 +181,23 @@ from .prefix_cache import runtime_cache_fingerprint
 
 logger = logging.getLogger(__name__)
 
+_PROMOTION_ENABLE_VALUES = {"1", "true", "TRUE", "yes", "YES", "on", "ON"}
+
+
+def _hybrid_prefix_promotion_enabled() -> bool:
+    """Opt in to extending a RESTORED hybrid prefix instead of only cold ones.
+
+    Off by default: a hybrid restored prefix pairs attention KV with
+    path-dependent SSM state, and promoting it repeatedly is what made
+    Bonsai/Qwen3.5 collapse into a token loop. Both spellings are accepted so a
+    second name cannot make the switch a silent no-op the way VMLX_NATIVE_MTP
+    once did.
+    """
+    return any(
+        os.environ.get(name, "") in _PROMOTION_ENABLE_VALUES
+        for name in ("VMLX_HYBRID_PREFIX_PROMOTION", "VMLINUX_HYBRID_PREFIX_PROMOTION")
+    )
+
 
 def _mllm_scheduler_trace_enabled() -> bool:
     return os.environ.get("VMLINUX_MLLM_SCHEDULER_TRACE", "").lower() in {
@@ -3426,13 +3443,33 @@ class MLLMScheduler:
             # turns (Bonsai/Qwen3.5 eventually collapses into a token loop).
             # Keep the cold-prefill blocks reusable and recompute the growing
             # tail instead of recursively storing restored state.
+            # The freeze above costs every hybrid conversation its multiturn
+            # reuse: only the first cold prefill is ever stored, so turn 5 still
+            # replays from turn 1. Opting in is measurable rather than
+            # theoretical now that the companion is captured inline ("no
+            # re-derive") instead of reconstructed, which is the premise the
+            # rationale rests on. Default OFF -- the failure it guards against
+            # (token-loop collapse) is worse than slow prefill, so this has to
+            # be earned by a byte-exactness A/B over a LONG conversation, not
+            # by a TTFT graph.
             if (
                 request is not None
                 and getattr(self, "_is_hybrid", False)
                 and int(getattr(request, "_cached_tokens", 0) or 0) > 0
             ):
-                _skip_cache_store = True
-                _skip_cache_store_reason = "hybrid restored-prefix promotion disabled"
+                if _hybrid_prefix_promotion_enabled():
+                    logger.info(
+                        "Hybrid prefix promotion ENABLED for %s: extending a "
+                        "restored prefix (%d reused) — experimental, watch for "
+                        "drift",
+                        request_id,
+                        int(getattr(request, "_cached_tokens", 0) or 0),
+                    )
+                else:
+                    _skip_cache_store = True
+                    _skip_cache_store_reason = (
+                        "hybrid restored-prefix promotion disabled"
+                    )
             if _skip_cache_store:
                 logger.debug(
                     f"Skipping cache store for {request_id}: "

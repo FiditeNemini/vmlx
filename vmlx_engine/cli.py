@@ -1796,6 +1796,26 @@ def serve_command(args):
                     logger.debug(f"JANG-affine JIT auto-default skipped: {_jit_e}")
     except Exception as e:
         logger.debug(f"Registry auto-apply skipped: {e}")
+        # The drift gate lives inside the block above, so a registry failure
+        # (lookup raises on a malformed or incomplete JANG stamp) silently
+        # takes the operator's answer-stability switch with it. Debug level is
+        # right for the rest of the auto-apply — it is best-effort — but an
+        # explicitly armed correctness switch failing closed without a word is
+        # the "enabled != engaged" shape this campaign keeps finding. Say so.
+        if any(
+            os.environ.get(_n) == "1"
+            for _n in (
+                "VMLX_DISABLE_DRIFTING_PREFIX_REUSE",
+                "VMLX_DISABLE_RECURRENT_PREFIX_REUSE",
+            )
+        ):
+            logger.warning(
+                "Prefix-reuse drift gate NOT applied: model config lookup "
+                "failed (%s), so the family could not be identified. Prefix "
+                "reuse remains ENABLED. Pass --disable-prefix-cache "
+                "explicitly if you need answer stability for this model.",
+                e,
+            )
 
     # Thinking-template detection & warning (mlxstudio user report: Raymond
     # Wong, GLM-5.1-JANG_1L).

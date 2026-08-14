@@ -309,3 +309,28 @@ class TestDriftSetMembership:
         gate = src.index("if _family_drifts_on_cache_hit(_mc):")
         chain = src.index('if _mc.family_name == "deepseek_v4":')
         assert gate < chain, "drift gate must run before the family policy chain"
+
+
+class TestGateFailureIsAnnounced:
+    """An armed correctness switch must not fail closed in silence.
+
+    The gate is applied inside `serve_command`'s registry `try`, whose `except`
+    logs at DEBUG. Registry lookup raises on a malformed or incomplete JANG
+    stamp, so an operator who exported the variable would get NO protection and
+    NO indication — the "enabled != engaged" shape this campaign keeps finding.
+    """
+
+    def test_source_warns_when_armed_and_lookup_failed(self):
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
+        i = src.index('logger.debug(f"Registry auto-apply skipped: {e}")')
+        window = src[i : i + 1200]
+        assert "Prefix-reuse drift gate NOT applied" in window, (
+            "a registry failure must announce that the armed gate did not apply"
+        )
+        # It must check BOTH accepted names, or the legacy variable fails silent.
+        assert "VMLX_DISABLE_DRIFTING_PREFIX_REUSE" in window
+        assert "VMLX_DISABLE_RECURRENT_PREFIX_REUSE" in window
+        # And it must be a warning, not another debug line.
+        assert "logger.warning" in window

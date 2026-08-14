@@ -730,7 +730,28 @@ def _patch_qwen35_mixed_image_video_embeddings() -> None:
     _original = cls.get_input_embeddings
 
     def patched_get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+        # The generator historically shipped the video tensor as
+        # `video_pixel_values` while every model reader (upstream and vendor)
+        # spells it `pixel_values_videos`. Accept both here so neither caller
+        # generation strands the tensor in an ignored kwarg.
         pixel_values_videos = kwargs.get("pixel_values_videos", None)
+        if pixel_values_videos is None:
+            pixel_values_videos = kwargs.get("video_pixel_values", None)
+        import os as _dbg_os
+        if _dbg_os.environ.get("VMLX_DEBUG_MEDIA_KWARGS") == "1":
+            _logger.info(
+                "media kwargs: pixel_values=%s pixel_values_videos=%s keys=%s",
+                None if pixel_values is None else tuple(pixel_values.shape),
+                None if pixel_values_videos is None else tuple(pixel_values_videos.shape),
+                sorted(k for k in kwargs if "pixel" in k or "grid" in k),
+            )
+        if pixel_values is None and pixel_values_videos is not None:
+            # Video-only: give the tensor to upstream under the POSITIONAL
+            # slot it actually consumes (the vendored runtime has no
+            # pixel_values_videos fallback at all).
+            return _original(
+                self, input_ids=input_ids, pixel_values=pixel_values_videos, **kwargs
+            )
         if pixel_values is None or pixel_values_videos is None:
             # Single-media (or text-only): upstream handles these correctly.
             return _original(self, input_ids=input_ids, pixel_values=pixel_values, **kwargs)

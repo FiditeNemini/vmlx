@@ -1095,8 +1095,24 @@ def _patch_outer_model(qvl: Any) -> None:
             ".pre_fc_norm_embedding.weight",
             "mtp.norm.weight",
         )
+        # Re-homing `mtp.*` to `language_model.mtp.*` when no head was built
+        # walks 31 orphans into load_weights, which is strict, and startup dies
+        # -- that is what --disable-native-mtp used to do to any bundle shipping
+        # MTP weights. Drop them, but only when MTP is POSITIVELY off: keying
+        # this on the attribute alone would also fire while the module simply
+        # has not been constructed yet, silently discarding a live head's
+        # weights.
+        from ..mlx_lm_mtp import is_mtp_active
+
+        language_model = getattr(self, "language_model", None)
+        drop_mtp_weights = not is_mtp_active() and not hasattr(
+            language_model, "mtp"
+        )
+
         sanitized_weights = {}
         for key, value in weights.items():
+            if drop_mtp_weights and (key.startswith("mtp.") or ".mtp." in key):
+                continue
             if "model" in key:
                 if "model.language_model" in key:
                     key = key.replace("model.language_model", "language_model.model")
@@ -1225,8 +1241,24 @@ def _patch_moe_outer_model(qmoe_vl: Any) -> None:
             ".pre_fc_norm_embedding.weight",
             "mtp.norm.weight",
         )
+        # Re-homing `mtp.*` to `language_model.mtp.*` when no head was built
+        # walks 31 orphans into load_weights, which is strict, and startup dies
+        # -- that is what --disable-native-mtp used to do to any bundle shipping
+        # MTP weights. Drop them, but only when MTP is POSITIVELY off: keying
+        # this on the attribute alone would also fire while the module simply
+        # has not been constructed yet, silently discarding a live head's
+        # weights.
+        from ..mlx_lm_mtp import is_mtp_active
+
+        language_model = getattr(self, "language_model", None)
+        drop_mtp_weights = not is_mtp_active() and not hasattr(
+            language_model, "mtp"
+        )
+
         sanitized_weights = {}
         for key, value in weights.items():
+            if drop_mtp_weights and (key.startswith("mtp.") or ".mtp." in key):
+                continue
             if "model" in key:
                 if "model.language_model" in key:
                     key = key.replace("model.language_model", "language_model.model")

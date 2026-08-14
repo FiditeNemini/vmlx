@@ -1484,14 +1484,31 @@ def serve_command(args):
             # this arm exists only to keep these families OUT of the generic
             # hybrid branch below.
             #
-            # ⚠️ KNOWN DEFECT, pre-existing and NOT fixed here: this arm swallows
-            # `lfm2`, so the generic `cache_type == "hybrid"` branch below never
-            # runs for it — including the explicit LFM2 handling written inside
-            # that branch, which disables the generic QuantizedKVCache wrapper so
-            # the architecture-selected attention-TQ codec is not applied twice.
-            # That LFM2 policy is therefore dead code today. Making it reachable
-            # changes LFM2's live KV quantization, so it needs a measured A/B
-            # rather than a control-flow tidy-up.
+            # ⚠️ This arm swallows `lfm2`, so the generic `cache_type ==
+            # "hybrid"` branch below never runs for it — including the explicit
+            # LFM2 handling inside that branch, which would set
+            # kv_cache_quantization to "none" so the generic QuantizedKVCache
+            # wrapper does not encode storage a second time on top of the
+            # architecture-selected attention-TQ codec. That LFM2 policy is dead
+            # code today.
+            #
+            # MEASURED 2026-08-13 rather than assumed, on LFM2.5-8B-A1B-MXFP8
+            # with fresh cache dirs per arm. Default gives
+            # `KV cache quantization enabled: q4` alongside the scheduler's own
+            # `stored_kv_quantization=q4`, which is exactly the double-encode the
+            # dead branch exists to prevent. Simulating the branch with an
+            # explicit `--kv-cache-quantization none`:
+            #
+            #   cold answer   6e367b55 (q4)  ==  6e367b55 (none)   byte-identical
+            #   cold vs hit   DRIFTS in BOTH arms (fec783cb / 7795b3f4)
+            #   decode        171.5 t/s (q4)  vs  170.8 t/s (none), median of 3
+            #
+            # So making it reachable changes nothing observable: same cold
+            # answer, same drift, decode within noise. The double-encode is real
+            # in the logs and inert in the metrics. NOT restructuring the chain
+            # for a change with zero measured benefit and non-zero risk — and
+            # recording the numbers so this is not re-chased as a suspected
+            # speed or correctness win.
             _disable_drifting_prefix_reuse(
                 args,
                 logger,

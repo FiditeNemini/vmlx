@@ -80,6 +80,22 @@ export function canonicalizeToolParserId(
   return TOOL_PARSERS_FOR_CLI.has(canonical) ? canonical : undefined
 }
 
+/**
+ * Human-readable form of a DETECTED parser name for "Auto (detected: …)"
+ * labels. A bundle-stamped alias (qwen3_coder, muse, zaya…) is shown together
+ * with the canonical parser it launches with, because the dropdown only
+ * offers the canonical name — without the arrow the detected value looks
+ * unrelated to every selectable option.
+ */
+export function describeDetectedToolParser(
+  detected: string | null | undefined,
+): string | undefined {
+  const raw = typeof detected === 'string' ? detected.trim() : ''
+  if (!raw) return undefined
+  const canonical = TOOL_PARSER_CANONICAL_ALIASES[raw]
+  return canonical && canonical !== raw ? `${raw} → ${canonical}` : raw
+}
+
 export interface ToolParserResolution {
   configuredParser?: string | null
   detectedParser?: string | null

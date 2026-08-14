@@ -16,7 +16,7 @@ import {
 import { metalWiredLimitCommand } from '../../../../shared/metalWiredLimit'
 import { isLagunaMixedSwaTurboQuantEffective } from '../../../../shared/lagunaCachePolicy'
 import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
-import { canonicalizeToolParserId } from '../../../../shared/toolParserAliases'
+import { canonicalizeToolParserId, describeDetectedToolParser } from '../../../../shared/toolParserAliases'
 import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
@@ -1580,10 +1580,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           label={t('sessions.config.toolCallParser')}
           tooltip={t('sessions.config.toolCallParserTooltip')}
           noneLabel={t('sessions.config.parserNoneToolCalls')}
-          value={canonicalizeToolParserId(config.toolCallParser) ?? 'auto'}
+          value={config.toolCallParser === 'none' ? '' : canonicalizeToolParserId(config.toolCallParser) ?? 'auto'}
           onChange={v => onChange('toolCallParser', v)}
           options={TOOL_PARSER_OPTIONS}
-          detectedValue={detectedToolParser}
+          detectedValue={describeDetectedToolParser(detectedToolParser)}
         />
         <ParserField
           label={t('sessions.config.reasoningParser')}

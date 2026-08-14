@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeDetectedToolParser,
   resolveEffectiveToolParser,
   toolParserIsEnabled,
 } from '../src/shared/toolParserAliases'
@@ -60,5 +61,23 @@ import { canonicalizeToolParserId } from '../src/shared/toolParserAliases'
 describe('qwen3_coder alias', () => {
   it('resolves to xml_function for CLI launch', () => {
     expect(canonicalizeToolParserId('qwen3_coder')).toBe('xml_function')
+  })
+})
+
+describe('describeDetectedToolParser (Auto label)', () => {
+  it('shows the canonical resolution for a bundle-stamped alias', () => {
+    expect(describeDetectedToolParser('qwen3_coder')).toBe('qwen3_coder → xml_function')
+    expect(describeDetectedToolParser('muse_glimmer')).toBe('muse_glimmer → atem')
+  })
+
+  it('passes canonical names through untouched', () => {
+    expect(describeDetectedToolParser('xml_function')).toBe('xml_function')
+    expect(describeDetectedToolParser('qwen')).toBe('qwen')
+  })
+
+  it('returns undefined for missing/blank detection', () => {
+    expect(describeDetectedToolParser(undefined)).toBeUndefined()
+    expect(describeDetectedToolParser(null)).toBeUndefined()
+    expect(describeDetectedToolParser('  ')).toBeUndefined()
   })
 })

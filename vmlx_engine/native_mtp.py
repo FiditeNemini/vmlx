@@ -599,20 +599,27 @@ def native_mtp_effective_depth(
         if tuned_depth is not None and tuned_source is not None:
             return tuned_depth, tuned_source
 
-    # v3 capability-schema stamps declare the trained speculative width in
-    # jang_config.mtp.upstream_num_speculative_tokens (Qwen3.6-27B D-series
-    # stamps 2). That is a bundle-measured policy in the same spirit as a
-    # tuning sidecar, so it outranks the generic default: the head was trained
-    # for that width, and drafting past it is exactly the regime the Nemotron
-    # sweep measured at 0.48x. Explicit env/tuning overrides above still win.
+    # v3 capability-schema stamps carry a bundle recommendation in
+    # jang_config.mtp.recommended_num_drafts — DRAFT tokens per cycle, which
+    # maps 1:1 onto this engine's depth. It ranks like a tuning sidecar:
+    # below explicit env/tuning overrides, above the generic default.
+    #
+    # ⚠️ NEVER read `upstream_num_speculative_tokens` for this. A first
+    # version of this branch did, and it is a terminology collision: vLLM's
+    # field counts DRAFTS, the kit's D-notation counts drafts+verified, so
+    # upstream's "2" is 2 drafts — the kit's forbidden D3, the exact config
+    # the Nemotron sweep measured at 0.48x. The stamp's `depth_notation`
+    # field exists precisely because an agent (me) copied the only number
+    # present and mapped it to the nearest-looking label. The stamper keeps
+    # the upstream value for provenance, flagged do-not-copy.
     try:
         _v3_mtp = _read_json(tuned_path, "jang_config.json").get("mtp")
         if isinstance(_v3_mtp, dict):
-            _v3_width, _v3_invalid = _coerce_non_negative_int(
-                _v3_mtp.get("upstream_num_speculative_tokens")
+            _v3_drafts, _v3_invalid = _coerce_non_negative_int(
+                _v3_mtp.get("recommended_num_drafts")
             )
-            if not _v3_invalid and _v3_width:
-                return max(1, min(3, _v3_width)), "bundle:upstream_num_speculative_tokens"
+            if not _v3_invalid and _v3_drafts:
+                return max(1, min(3, _v3_drafts)), "bundle:recommended_num_drafts"
     except Exception:
         pass
 
@@ -927,21 +934,23 @@ def maybe_apply_native_mtp(
         if _apply_mlx_lm_mtp_patch():
             _set_mtp_active(runtime_active)
             _ACTIVE_NATIVE_MTP_MODEL_PATH = Path(model_path) if runtime_active else None
-            # v3 capability-schema bundles declare the head ONLY in
-            # jang_config's mtp block; config.json is silent, so the qwen35_vl
-            # construction path cannot see the layer count on its own. Publish
-            # the bundle-declared count for it to consume as a fallback —
-            # bundles that stamp config.json directly are unaffected because
-            # the fallback only fires when config.json is silent.
+            # v3 capability-schema bundles declare the head in jang_config's
+            # mtp block; publish the bundle-declared count for the qwen35_vl
+            # construction patch to consume as a fallback. The publisher does
+            # NOT try to decide whether config.json already carries the count —
+            # review proved that check was self-defeating (the inspection
+            # PROMOTES the jang value into `config_num_nextn_predict_layers`,
+            # so "config is silent" was never true and this always published
+            # 0; the shipped D-series worked only because their config.json
+            # stamps `text_config.mtp_num_hidden_layers` after all). The
+            # consumer already prefers config.json and touches the published
+            # value ONLY when the config is genuinely silent, which is the one
+            # place that judgement can be made correctly.
             try:
                 from .patches.mlx_vlm_mtp.qwen35_vl import set_active_bundle_mtp_layers
-                _bundle_layers = (
-                    status.get("jang_mtp_layers")
-                    if runtime_active
-                    and not status.get("config_num_nextn_predict_layers")
-                    else 0
+                set_active_bundle_mtp_layers(
+                    int(status.get("jang_mtp_layers") or 0) if runtime_active else 0
                 )
-                set_active_bundle_mtp_layers(int(_bundle_layers or 0))
             except Exception as _pub_err:
                 logger.debug(f"MTP bundle layer publish skipped: {_pub_err}")
             status["runtime_active"] = runtime_active

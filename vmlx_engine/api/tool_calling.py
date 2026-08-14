@@ -285,7 +285,7 @@ def check_and_inject_fallback_tools(
                 explicitly_requested_tool_names.add(tool_names[0])
             explicit_tool_requested = bool(explicitly_requested_tool_names)
     is_qwen_native_tool_prompt = (
-        parser_id not in {"xml_function", "mimo_xml_function"}
+        parser_id not in {"xml_function", "mimo_xml_function", "qwen3_coder"}
         and "<|im_start|>" in prompt
         and "<tools>" in prompt
         and "<function=example_function_name>" in prompt
@@ -319,6 +319,11 @@ def check_and_inject_fallback_tools(
     is_xml_function_native_tool_prompt = parser_id in {
         "xml_function",
         "mimo_xml_function",
+        # Qwen3.6 D-series / Qwen 3.8 stamps. Without this the D-series prompt
+        # (which contains <|im_start|> AND <function=...> exemplars) classified
+        # as qwen-native, whose fallback path pops the native tools kwarg and
+        # skips the ChatML splice -- the exact MiMo failure documented below.
+        "qwen3_coder",
     }
     is_step3p5_native_tool_prompt = (
         parser_id in {"step3p5", "step", "stepfun"}

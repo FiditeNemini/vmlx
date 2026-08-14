@@ -191,7 +191,12 @@ node_modules/
 panel/node_modules/
 panel/dist/
 panel/out/
-panel/release/
+# Any release-artifact directory, including moved-aside snapshots like
+# panel/release.pre-<version>-<time>/ — one of those escaped the old exact
+# pattern and put two 500MB DMGs plus the Electron framework into a commit,
+# which GitHub hard-rejects (>100MB blobs) and which required a history
+# rewrite to undo.
+panel/release*/
 panel/bundled-python/
 panel/.bundled-python.staging.*/
 panel/.bundled-python.previous.*/

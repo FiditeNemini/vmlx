@@ -736,7 +736,30 @@ def _estimate_max_prompt_tokens() -> int:
                     free / (1024**3),
                 )
             return max(1, estimated)
-        return 0
+        # Zero capacity estimate with a loaded config: keep the declared
+        # context as the cap so a beyond-context prompt still fast-fails with
+        # 413 instead of grinding through a prefill the model cannot serve.
+        return declared_limit if declared_limit > 0 else 0
+    except Exception:
+        return _declared_context_fallback_tokens()
+
+
+def _declared_context_fallback_tokens() -> int:
+    """Declared-context-only prompt cap for when memory projection fails.
+
+    ``_estimate_max_prompt_tokens`` returning 0 means NO limit is enforced
+    anywhere: a prompt longer than the model's positional range then grinds
+    through prefill instead of fast-failing. Metal projection can throw
+    (headless boots, sandboxed test runs) while the model config is still
+    readable — in that case the declared context is still a hard truth worth
+    enforcing.
+    """
+    try:
+        config = _loaded_model_config_for_memory_projection()
+        if config is None:
+            return 0
+        declared = _declared_context_limit_from_config(config)
+        return declared if declared > 0 else 0
     except Exception:
         return 0
 

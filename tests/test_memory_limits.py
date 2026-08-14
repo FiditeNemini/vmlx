@@ -791,3 +791,62 @@ def test_estimate_max_prompt_tokens_wires_dsv4_hw_ceiling():
     assert "dsv4_hw_context_ceiling_tokens" in src
     assert "honest" in src
     assert "prefill" in src
+
+
+def test_estimate_max_prompt_tokens_falls_back_to_declared_context(monkeypatch):
+    """Metal projection failure must not disable the prompt cap entirely.
+
+    A beyond-declared-context prompt can never be served; without this
+    fallback the estimator returned 0 (no limit) whenever projection threw
+    and the request ground through prefill instead of fast-failing 413.
+    """
+    from vmlx_engine import server
+
+    def _boom():
+        raise RuntimeError("no Metal device")
+
+    monkeypatch.setattr(server, "_metal_projection_stats", _boom)
+    monkeypatch.setattr(
+        server,
+        "_loaded_model_config_for_memory_projection",
+        lambda: {"max_position_embeddings": 32_768},
+    )
+    assert server._estimate_max_prompt_tokens() == 32_768
+
+
+def test_estimate_max_prompt_tokens_zero_capacity_keeps_declared_cap(monkeypatch):
+    """A zero capacity estimate with a loaded config keeps the declared cap."""
+    from vmlx_engine import server
+    from vmlx_engine.utils import memory_limits
+
+    monkeypatch.setattr(
+        server, "_metal_projection_stats", lambda: (0, 0)
+    )
+    monkeypatch.setattr(
+        server,
+        "_loaded_model_config_for_memory_projection",
+        lambda: {"max_position_embeddings": 8_192},
+    )
+    monkeypatch.setattr(
+        memory_limits, "estimate_cache_token_capacity_from_config",
+        lambda *a, **k: 0,
+    )
+    monkeypatch.setattr(
+        memory_limits, "estimate_dsv4_cache_memory_from_config",
+        lambda *a, **k: None,
+    )
+    assert server._estimate_max_prompt_tokens() == 8_192
+
+
+def test_estimate_max_prompt_tokens_no_config_still_returns_zero(monkeypatch):
+    """With neither projection nor a config there is nothing to enforce."""
+    from vmlx_engine import server
+
+    def _boom():
+        raise RuntimeError("no Metal device")
+
+    monkeypatch.setattr(server, "_metal_projection_stats", _boom)
+    monkeypatch.setattr(
+        server, "_loaded_model_config_for_memory_projection", lambda: None
+    )
+    assert server._estimate_max_prompt_tokens() == 0

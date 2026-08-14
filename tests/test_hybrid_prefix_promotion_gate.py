@@ -40,12 +40,35 @@ def test_falsey_values_stay_off(monkeypatch, name, value):
     assert _hybrid_prefix_promotion_enabled() is False
 
 
-def test_the_guard_still_consults_the_switch():
-    """Pin that the skip is gated, not unconditional -- and vice versa."""
+def test_the_guard_consults_both_switches():
+    """Pin that the skip is gated by BOTH routes, not unconditional.
+
+    Clean store (re-prefill the N-1 key) is checked first because it is the
+    safe way to extend a path-dependent chain; promotion (write back the
+    restored cache) is the measured-harmful fallback and must stay behind its
+    own switch.
+    """
     from pathlib import Path
 
     source = Path("vmlx_engine/mllm_scheduler.py").read_text()
-    guard = source.index('_skip_cache_store_reason = (\n                        "hybrid restored-prefix promotion disabled"')
-    window = source[max(0, guard - 900):guard]
+    marker = '"hybrid restored-prefix promotion disabled"'
+    window = source[max(0, source.index(marker) - 1400):source.index(marker)]
+    assert "_hybrid_clean_store_enabled()" in window
     assert "_hybrid_prefix_promotion_enabled()" in window
     assert 'getattr(self, "_is_hybrid", False)' in window
+    # clean store is the preferred route, so it must be tested first
+    assert window.index("_hybrid_clean_store_enabled()") < window.index(
+        "_hybrid_prefix_promotion_enabled()"
+    )
+
+
+def test_hybrid_joins_the_path_dependent_clean_store_branch():
+    """Hybrid must reach the same clean re-prefill route as ZAYA/mixed-SWA."""
+    from pathlib import Path
+
+    source = Path("vmlx_engine/mllm_scheduler.py").read_text()
+    assert "_uses_hybrid_clean_store" in source
+    branch = source.index("or _uses_hybrid_clean_store")
+    window = source[max(0, branch - 300):branch]
+    assert "_uses_zaya_cache" in window
+    assert "_uses_mixed_attention_cache" in window

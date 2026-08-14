@@ -184,6 +184,24 @@ logger = logging.getLogger(__name__)
 _PROMOTION_ENABLE_VALUES = {"1", "true", "TRUE", "yes", "YES", "on", "ON"}
 
 
+def _hybrid_clean_store_enabled() -> bool:
+    """Let hybrid models extend the chain via the CLEAN re-prefill store.
+
+    Distinct from promotion below, and the difference is the whole point:
+    promotion writes back the RESTORED cache (reconstructed attention KV plus
+    path-dependent SSM), which was measured to break the model on the first
+    extended turn. The clean route instead re-prefills exactly the N-1 cache key
+    and stores that typed state — the same treatment ZAYA CCA and Gemma
+    mixed-SWA already get for being path-dependent. Hybrid was simply never
+    wired into it, so it fell through to a blanket skip and never grew its
+    prefix past turn one.
+    """
+    return any(
+        os.environ.get(name, "") in _PROMOTION_ENABLE_VALUES
+        for name in ("VMLX_HYBRID_CLEAN_STORE", "VMLINUX_HYBRID_CLEAN_STORE")
+    )
+
+
 def _hybrid_prefix_promotion_enabled() -> bool:
     """Opt in to extending a RESTORED hybrid prefix instead of only cold ones.
 
@@ -3457,7 +3475,17 @@ class MLLMScheduler:
                 and getattr(self, "_is_hybrid", False)
                 and int(getattr(request, "_cached_tokens", 0) or 0) > 0
             ):
-                if _hybrid_prefix_promotion_enabled():
+                if _hybrid_clean_store_enabled():
+                    # Fall through to the clean re-prefill store instead of
+                    # skipping: the chain still grows, but from a re-derived
+                    # N-1 key rather than from restored state.
+                    logger.info(
+                        "Hybrid clean store for %s: extending the chain via a "
+                        "clean N-1 re-prefill (%d reused)",
+                        request_id,
+                        int(getattr(request, "_cached_tokens", 0) or 0),
+                    )
+                elif _hybrid_prefix_promotion_enabled():
                     logger.info(
                         "Hybrid prefix promotion ENABLED for %s: extending a "
                         "restored prefix (%d reused) — experimental, watch for "
@@ -3544,6 +3572,15 @@ class MLLMScheduler:
                             _uses_mixed_attention_cache = bool(
                                 getattr(self, "_mixed_attention_cache_model", False)
                             )
+                            # A hybrid model's GatedDelta/SSM layers are
+                            # path-dependent in exactly the way ZAYA's conv_state
+                            # and Gemma's rotating windows are, so it belongs on
+                            # the same clean re-prefill route rather than on the
+                            # blanket skip that froze its prefix at turn one.
+                            _uses_hybrid_clean_store = bool(
+                                getattr(self, "_is_hybrid", False)
+                                and _hybrid_clean_store_enabled()
+                            )
                             raw_for_layout = request._extracted_cache
                             if callable(raw_for_layout):
                                 try:
@@ -3600,7 +3637,11 @@ class MLLMScheduler:
                                         request_id,
                                         len(cache_blocks),
                                     )
-                                elif _uses_zaya_cache or _uses_mixed_attention_cache:
+                                elif (
+                                    _uses_zaya_cache
+                                    or _uses_mixed_attention_cache
+                                    or _uses_hybrid_clean_store
+                                ):
                                     # ZAYA CCA and Gemma-style mixed-SWA caches are
                                     # path-dependent. ZAYA conv_state/prev_hs and
                                     # RotatingKVCache windows cannot be recovered

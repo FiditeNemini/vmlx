@@ -7523,6 +7523,7 @@ async def _await_chat_with_disconnect_abort(
     )
     started = time.perf_counter()
     last_progress: int | None = None
+    unknown_progress_windows = 0
 
     # Active receive-channel drain. `Request.is_disconnected()` is a lazy
     # zero-timeout poll of receive — it can miss `http.disconnect` events
@@ -7615,9 +7616,41 @@ async def _await_chat_with_disconnect_abort(
             if timeout is not None and (time.perf_counter() - started) >= timeout:
                 if not hard_timeout:
                     progress = _engine_request_progress(engine, request_id)
+                    # ZERO/NONE IS "PREFILLING", NOT "WEDGED" — the same
+                    # contract the streaming keepalive already implements and
+                    # this non-stream twin never got. Both schedulers report 0
+                    # generated tokens for the entire prefill (the MLLM lane
+                    # sets num_prompt_tokens only when the FIRST output token
+                    # arrives), and prefill is the only phase long enough to
+                    # hit this timeout. Measured live: a 150k-token prompt on
+                    # a healthy engine was killed with a 504 at exactly 300.0s
+                    # while the GPU was mid-prefill. Bounded grace, so a truly
+                    # wedged request still dies — just after
+                    # _UNKNOWN_PROGRESS_GRACE_WINDOWS windows instead of one.
+                    if (
+                        not progress
+                        and unknown_progress_windows < _UNKNOWN_PROGRESS_GRACE_WINDOWS
+                    ):
+                        unknown_progress_windows += 1
+                        logger.warning(
+                            "%s: request %s reached the %.1fs window with no "
+                            "engine progress reading — cannot distinguish a "
+                            "long prefill from a wedged request; extending "
+                            "(%d/%d)",
+                            endpoint,
+                            request_id,
+                            timeout,
+                            unknown_progress_windows,
+                            _UNKNOWN_PROGRESS_GRACE_WINDOWS,
+                        )
+                        started = time.perf_counter()
+                        continue
                     if progress is not None and progress > 0 and (
                         last_progress is None or progress > last_progress
                     ):
+                        # Real evidence clears the ambiguity budget, so a later
+                        # unreadable stretch gets the full grace again.
+                        unknown_progress_windows = 0
                         logger.info(
                             "%s: request %s still progressing "
                             "(%d tokens, +%d this window) — extending "

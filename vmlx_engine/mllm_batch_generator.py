@@ -4192,6 +4192,7 @@ class MLLMBatchStats:
         self.last_hybrid_kv_without_ssm: Optional[Dict[str, Any]] = None
         self.last_cache_execution: Optional[Dict[str, Any]] = None
         self.last_native_mtp: Optional[Dict[str, Any]] = None
+        self.last_native_mtp_skip: Optional[Dict[str, Any]] = None
         self.last_prefill_trace: Optional[Dict[str, Any]] = None
         self.last_turboquant_cache: Optional[Dict[str, Any]] = None
 
@@ -4239,6 +4240,7 @@ class MLLMBatchStats:
             "last_hybrid_kv_without_ssm": self.last_hybrid_kv_without_ssm,
             "last_cache_execution": self.last_cache_execution,
             "last_native_mtp": self.last_native_mtp,
+            "last_native_mtp_skip": self.last_native_mtp_skip,
             "last_prefill_trace": self.last_prefill_trace,
             "last_turboquant_cache": self.last_turboquant_cache,
         }
@@ -9166,6 +9168,15 @@ class MLLMBatchGenerator:
                     getattr(request, "request_id", "unknown"),
                     reason,
                 )
+            # Publish the skip like the text lane does: PerformancePanel reads
+            # batch_generator.last_native_mtp_skip, and without this key an
+            # MLLM session that only ever ran sampled requests shows a null
+            # MTP tile with no way to tell "skipped by policy" from "broken".
+            self._stats.last_native_mtp_skip = {
+                "uid": str(getattr(request, "request_id", "unknown")),
+                "request_id": getattr(request, "request_id", None),
+                "reason": reason,
+            }
         return False
 
     def _step_native_mtp_head(

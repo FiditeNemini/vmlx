@@ -608,3 +608,35 @@ class TestMtpTelemetryEdgeCases:
             '}}'
         )
         assert _bundle_index_mtp_layer_count(str(tmp_path)) == 3
+
+
+def test_mllm_native_mtp_skip_reaches_health_snapshot():
+    """The MLLM gate must publish WHY MTP was skipped, like the text lane.
+
+    PerformancePanel reads batch_generator.last_native_mtp_skip; without this
+    key an MLLM session that only ever ran sampled requests showed a null MTP
+    tile with no way to tell "skipped by policy" from "broken".
+    """
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchStats,
+    )
+
+    class _Req:
+        request_id = "sampled-row"
+        temperature = 0.7
+        repetition_penalty = 1.0
+
+    gen = object.__new__(MLLMBatchGenerator)
+    gen._stats = MLLMBatchStats()
+    gen.language_model = object()  # no MTP head — irrelevant; temp gate first
+
+    assert gen._native_mtp_enabled_for_request(_Req()) is False
+
+    snapshot = gen._stats.to_dict()
+    skip = snapshot["last_native_mtp_skip"]
+    assert skip is not None
+    assert skip["uid"] == "sampled-row"
+    assert skip["reason"]
+    # Engagement snapshots stay independent of skip snapshots (text-lane parity).
+    assert snapshot["last_native_mtp"] is None

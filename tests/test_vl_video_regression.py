@@ -1528,12 +1528,49 @@ class TestIssueGuards:
             "broadcast_shapes bug returns."
         )
 
-        # Long recurrent prompt: declines outright, never chunks.
+        # Long recurrent prompt: chunks by default now. Declining meant the
+        # store was skipped, so a long document was re-prefilled from scratch on
+        # every follow-up (43.7k doc on Qwen3.8: cached 0, ~122s x4). Chunking it
+        # was verified byte-identical to the one-shot path over an 8-turn matrix
+        # and restored reuse to 99.9% on that same document.
         long_ = _gen([KVCache(), ArraysCache(4)])
-        assert long_._prefill_for_clean_path_dependent_cache(list(range(120_000))) is None
-        assert long_.calls == [], (
-            "v1.3.84 regression: an over-cap recurrent prompt must skip, not chunk."
+        assert long_._prefill_for_clean_path_dependent_cache(
+            list(range(120_000))
+        ) is not None
+        assert len(long_.calls) > 1 and set(long_.calls[:-1]) == {1024}, (
+            "over-cap recurrent prompt must now be re-derived in chunks"
         )
+
+        # ...and the v1.3.84 contract is still exactly one pass under the opt-out.
+        import importlib
+
+        os.environ["VMLX_CHUNKED_SSM_REDERIVE"] = "0"
+        try:
+            strict = importlib.reload(_m)
+
+            def _strict_gen(cache_slots):
+                g = strict.MLLMBatchGenerator.__new__(strict.MLLMBatchGenerator)
+                g.prefill_step_size = 1024
+                g._cache_model = MagicMock(make_cache=lambda: list(cache_slots))
+                g.calls = []
+                g.language_model = MagicMock(
+                    side_effect=lambda input_ids, cache=None: g.calls.append(
+                        int(input_ids.shape[1])
+                    )
+                )
+                return g
+
+            strict_long = _strict_gen([KVCache(), ArraysCache(4)])
+            assert strict_long._prefill_for_clean_path_dependent_cache(
+                list(range(120_000))
+            ) is None
+            assert strict_long.calls == [], (
+                "v1.3.84 regression: under the opt-out an over-cap recurrent "
+                "prompt must still skip rather than chunk."
+            )
+        finally:
+            os.environ.pop("VMLX_CHUNKED_SSM_REDERIVE", None)
+            importlib.reload(_m)
 
     def test_clean_ssm_rederive_resets_qwen_sticky_rope_state(self):
         """Hybrid Qwen clean SSM re-derive must be a fresh prompt-only pass.

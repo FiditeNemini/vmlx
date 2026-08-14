@@ -174,10 +174,29 @@ class TestChunkedSsmRederiveGate:
 
         assert _cache_requires_one_shot_rederive([object()]) is True
 
-    def test_override_is_off_by_default(self):
+    def test_override_is_on_by_default(self):
+        """Chunking recurrent re-derives is the default.
+
+        Requiring one contiguous pass made the re-derive decline past the Metal
+        single-buffer cap, and a declined re-derive is a skipped store, so long
+        documents were never cached at all.
+        """
         from vmlx_engine.mllm_batch_generator import _CHUNKED_SSM_REDERIVE
 
-        assert _CHUNKED_SSM_REDERIVE is False
+        assert _CHUNKED_SSM_REDERIVE is True
+
+    def test_override_can_be_turned_off(self):
+        import importlib
+        import os
+
+        import vmlx_engine.mllm_batch_generator as mbg
+
+        os.environ["VMLX_CHUNKED_SSM_REDERIVE"] = "0"
+        try:
+            assert importlib.reload(mbg)._CHUNKED_SSM_REDERIVE is False
+        finally:
+            os.environ.pop("VMLX_CHUNKED_SSM_REDERIVE", None)
+            importlib.reload(mbg)
 
 
 class TestChunkAttentionClamp:

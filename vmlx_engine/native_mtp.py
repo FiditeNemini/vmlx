@@ -599,6 +599,23 @@ def native_mtp_effective_depth(
         if tuned_depth is not None and tuned_source is not None:
             return tuned_depth, tuned_source
 
+    # v3 capability-schema stamps declare the trained speculative width in
+    # jang_config.mtp.upstream_num_speculative_tokens (Qwen3.6-27B D-series
+    # stamps 2). That is a bundle-measured policy in the same spirit as a
+    # tuning sidecar, so it outranks the generic default: the head was trained
+    # for that width, and drafting past it is exactly the regime the Nemotron
+    # sweep measured at 0.48x. Explicit env/tuning overrides above still win.
+    try:
+        _v3_mtp = _read_json(tuned_path, "jang_config.json").get("mtp")
+        if isinstance(_v3_mtp, dict):
+            _v3_width, _v3_invalid = _coerce_non_negative_int(
+                _v3_mtp.get("upstream_num_speculative_tokens")
+            )
+            if not _v3_invalid and _v3_width:
+                return max(1, min(3, _v3_width)), "bundle:upstream_num_speculative_tokens"
+    except Exception:
+        pass
+
     try:
         family = _bundle_family(
             _read_json(tuned_path, "config.json"),

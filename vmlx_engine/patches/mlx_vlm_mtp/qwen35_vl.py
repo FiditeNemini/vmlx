@@ -115,6 +115,25 @@ def apply() -> bool:
     return True
 
 
+# v3 capability-schema bundles (Qwen3.6-27B D-series onward) do NOT put
+# `mtp_num_hidden_layers` in config.json — their MTP declaration lives in
+# jang_config.json's `mtp` block (`num_hidden_layers`, `tensor_count`,
+# `upstream_num_speculative_tokens`). `inspect_native_mtp_bundle` reads that
+# block and reports READY, but model construction read only config.json, so
+# the module was never built, sanitize dropped the 31 mtp.* tensors, and every
+# request logged "loaded language model has no native MTP head" — inspection
+# and construction enforcing one policy from two different sources.
+# `maybe_apply_native_mtp` publishes the bundle's declared count here before
+# the load; construction consumes it ONLY when config.json is silent, so
+# bundles that stamp config.json directly are untouched.
+_ACTIVE_BUNDLE_MTP_LAYERS: int = 0
+
+
+def set_active_bundle_mtp_layers(count: int) -> None:
+    global _ACTIVE_BUNDLE_MTP_LAYERS
+    _ACTIVE_BUNDLE_MTP_LAYERS = max(0, int(count or 0))
+
+
 def _patch_text_config(qcfg: Any) -> None:
     cls = qcfg.TextConfig
     if hasattr(cls, "_vmlx_mtp_from_dict_patched"):
@@ -130,6 +149,9 @@ def _patch_text_config(qcfg: Any) -> None:
             text_config = params.get("text_config")
             if raw_mtp_layers is None and isinstance(text_config, dict):
                 raw_mtp_layers = text_config.get("mtp_num_hidden_layers")
+        if raw_mtp_layers is None and _ACTIVE_BUNDLE_MTP_LAYERS:
+            # v3 stamp fallback — see note on _ACTIVE_BUNDLE_MTP_LAYERS.
+            raw_mtp_layers = _ACTIVE_BUNDLE_MTP_LAYERS
         instance.mtp_num_hidden_layers = int(raw_mtp_layers or 0)
         return instance
 

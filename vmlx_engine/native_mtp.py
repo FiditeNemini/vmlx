@@ -379,6 +379,11 @@ def _config_mtp_layer_count(
     for source, raw in (
         ("jang_config.runtime.mtp_layers", runtime.get("mtp_layers")),
         ("jang_config.mtp.num_layers", mtp.get("num_layers")),
+        # v3 capability-schema stamps (Qwen3.6-27B D-series onward) spell it
+        # `num_hidden_layers` inside the mtp block. Without this entry the
+        # inspection reported the artifact READY while the layer count stayed
+        # None, and model construction then built no head at all.
+        ("jang_config.mtp.num_hidden_layers", mtp.get("num_hidden_layers")),
     ):
         value, invalid = _coerce_non_negative_int(raw)
         if invalid:
@@ -874,6 +879,13 @@ def deactivate_native_mtp() -> None:
         _set_mtp_active(False)
     except Exception:
         pass
+    # Clear the published v3 bundle layer count, or the NEXT model loaded in
+    # this process would inherit the previous bundle's head declaration.
+    try:
+        from .patches.mlx_vlm_mtp.qwen35_vl import set_active_bundle_mtp_layers
+        set_active_bundle_mtp_layers(0)
+    except Exception:
+        pass
 
 
 def maybe_apply_native_mtp(
@@ -898,6 +910,23 @@ def maybe_apply_native_mtp(
         if _apply_mlx_lm_mtp_patch():
             _set_mtp_active(runtime_active)
             _ACTIVE_NATIVE_MTP_MODEL_PATH = Path(model_path) if runtime_active else None
+            # v3 capability-schema bundles declare the head ONLY in
+            # jang_config's mtp block; config.json is silent, so the qwen35_vl
+            # construction path cannot see the layer count on its own. Publish
+            # the bundle-declared count for it to consume as a fallback —
+            # bundles that stamp config.json directly are unaffected because
+            # the fallback only fires when config.json is silent.
+            try:
+                from .patches.mlx_vlm_mtp.qwen35_vl import set_active_bundle_mtp_layers
+                _bundle_layers = (
+                    status.get("jang_mtp_layers")
+                    if runtime_active
+                    and not status.get("config_num_nextn_predict_layers")
+                    else 0
+                )
+                set_active_bundle_mtp_layers(int(_bundle_layers or 0))
+            except Exception as _pub_err:
+                logger.debug(f"MTP bundle layer publish skipped: {_pub_err}")
             status["runtime_active"] = runtime_active
             if runtime_active:
                 logger.info(

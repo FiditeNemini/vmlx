@@ -1909,11 +1909,26 @@ class BatchedEngine(BaseEngine):
                         tool_parser_id=self._model_tool_parser_name(),
                     )
 
-                if num_images > 0 and num_audio == 0:
-                    # Two-step pipeline:
+                if num_images > 0 and num_videos == 0 and num_audio == 0:
+                    # Two-step pipeline (IMAGES ONLY):
                     # 1. Build messages with image tokens via mlx_vlm
                     #    (return_messages=True)
                     # 2. Apply template via processor with enable_thinking support
+                    #
+                    # ⚠️ Videos must NOT take this branch. mlx_vlm's
+                    # prompt_utils builder is called with num_images only and
+                    # silently drops video content items (the bundle kit
+                    # documents this as trap #13), so in a mixed
+                    # image+video conversation the video's frames reached the
+                    # model as unmarked extra IMAGES — measured live on
+                    # Qwen3.6-4D: asked what each media item shows, the model
+                    # enumerated "Image 1 / Image 2 / Image 3" where 2 and 3
+                    # were the video's frames, and could not see a video at
+                    # all. Video-only turns already worked because they take
+                    # the processor path below, which preserves
+                    # {"type": "video"} items and renders the template's own
+                    # <|video_pad|> framing; with this condition, mixed
+                    # conversations take it too.
                     try:
                         built_messages = apply_chat_template(
                             self._processor,

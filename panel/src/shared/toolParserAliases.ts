@@ -8,6 +8,12 @@ const TOOL_PARSER_CANONICAL_ALIASES: Record<string, string> = {
   // Zaya likewise registers "zaya"/"zyphra" alongside "zaya_xml".
   zaya: 'zaya_xml',
   zyphra: 'zaya_xml',
+  // Qwen3.6-27B D-series (and the Qwen 3.8 line) stamp `qwen3_coder`, whose
+  // template emits the XML-function shape (<function=NAME><parameter=KEY>),
+  // NOT the plain qwen `<tool_call>{json}`. The engine registers the literal
+  // name too, but the alias maps to a name every RELEASED engine also knows,
+  // so app sessions work against older bundled runtimes as well.
+  qwen3_coder: 'xml_function',
 }
 
 export const TOOL_PARSERS_FOR_CLI = new Set([

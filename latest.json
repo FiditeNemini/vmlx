@@ -1,19 +1,19 @@
 {
-  "version": "1.6.24",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.24/vMLX-1.6.24-tahoe-arm64.dmg",
-  "sha256": "9ff7a841e933074fe44e353318e4eeeb9b3a44f3cad9308d70df0d191fcf233b",
-  "sha512": "jM81f6d/CqKcVVks1cuXZ5m7QwkX2qcuN07HjvVYHYr1Bv+mYpvrzPLQZ9Q2b/4dkafdYUxLDZd7WAFI7JDc1g==",
+  "version": "1.6.28",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.28/vMLX-1.6.28-tahoe-arm64.dmg",
+  "sha256": "95469cd9933ec8d4d67e88c546d9c9593d9ef57885c8573c64e40e75d2d8c594",
+  "sha512": "RutlMvQtHkkUhcbLT/6+03XzeCiIDFzgxsI2qeZkYfkTXdYtQ/Sdn6I97mu2boivo72NdO7WhIqlQ0Hhu12niw==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.24/vMLX-1.6.24-sequoia-arm64.dmg",
-      "sha256": "f169fd27026d29d41114531f033f88856309ca69024b5f4afa8c6b7f5c5309f8",
-      "sha512": "vhfBojK4hfpyMVER+MGwCWg4wHxhxvp3NOy3UcBZcFW6cqW0V6l07Onb7JSKRRmk6yk0uRGL0FkMUu2UXmrYvg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.28/vMLX-1.6.28-sequoia-arm64.dmg",
+      "sha256": "13120d0eee9cac6f35fe1a1fd2f06d1cc130814bb7d8aff17115aab8d9a0673e",
+      "sha512": "qdJftVw0f4PRQvaxycksiyRvTcN1F9RUuQJ5ZjWsF13Hi+JhK7iI3/VTqGmCBF9mbE18TtDCisoL/x6N0KKlNw=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.24/vMLX-1.6.24-tahoe-arm64.dmg",
-      "sha256": "9ff7a841e933074fe44e353318e4eeeb9b3a44f3cad9308d70df0d191fcf233b",
-      "sha512": "jM81f6d/CqKcVVks1cuXZ5m7QwkX2qcuN07HjvVYHYr1Bv+mYpvrzPLQZ9Q2b/4dkafdYUxLDZd7WAFI7JDc1g=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.28/vMLX-1.6.28-tahoe-arm64.dmg",
+      "sha256": "95469cd9933ec8d4d67e88c546d9c9593d9ef57885c8573c64e40e75d2d8c594",
+      "sha512": "RutlMvQtHkkUhcbLT/6+03XzeCiIDFzgxsI2qeZkYfkTXdYtQ/Sdn6I97mu2boivo72NdO7WhIqlQ0Hhu12niw=="
     }
   },
-  "notes": "## vMLX 1.6.24 for macOS\n\nBuilt from source commit `2121e57fc`.\n\n### Highlights\n\n- Long DeepSeek V4 Flash generations no longer crash the engine. Metal caps the NUMBER of live buffers, not just their bytes, and the output guard only modelled bytes \u2014 so it allowed budgets the model could not survive. It now projects that ceiling too and refuses or clamps up front. Architectures measured at zero retained buffers per token are left uncapped, so nothing else is affected.\n- DeepSeek V4 Flash answers again at small output budgets; anything under 512 tokens previously came back empty.\n- The chat Max Tokens field shows the budget actually in force instead of sitting blank.\n\nSeparate signed and Apple-notarized Apple-silicon downloads are available for macOS Tahoe and Sequoia-compatible systems. Tahoe is the default download."
+  "notes": "vMLX 1.6.28: new Qwen3.6/3.8 bundle line support with automatic multi-token prediction (+33% decode), answer-stability cache controls, long-context prefill resilience, and Ollama/Anthropic gateway fixes."
 }

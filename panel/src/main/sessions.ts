@@ -1316,7 +1316,9 @@ export class SessionManager extends EventEmitter {
     // Start-time migration alone makes the engine argv correct, but leaves the
     // Settings UI showing a stale cache stack until the model is launched. The
     // UI must reflect the configuration that launch will actually use.
-    for (const session of db.getSessions()) {
+    // Secrets stay encrypted here: this runs at module scope, before the app
+    // is ready, and decrypting one would block the main thread on the keychain.
+    for (const session of db.getSessionsWithoutSecrets()) {
       let config: Partial<ServerConfig>
       try {
         config = JSON.parse(session.config || '{}')

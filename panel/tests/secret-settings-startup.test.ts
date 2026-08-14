@@ -32,6 +32,25 @@ describe("secret setting presence checks", () => {
     expect(startupSurfaces).not.toContain("settings.get('braveApiKey')");
   });
 
+  it("does not decrypt session API keys in the module-scope startup migration", () => {
+    const database = read("src/main/database.ts");
+    const sessions = read("src/main/sessions.ts");
+
+    expect(database).toContain("getSessionsWithoutSecrets(): Session[]");
+
+    // The migration loop runs while `sessions.ts` is still evaluating, so a
+    // decrypting read there blocks the main thread on the keychain before any
+    // window exists. Assert the loop feeds off the non-decrypting read.
+    const ctorIndex = sessions.indexOf("export const sessionManager");
+    expect(ctorIndex).toBeGreaterThan(-1);
+    const migrationRead = sessions.indexOf(
+      "for (const session of db.getSessionsWithoutSecrets())",
+    );
+    expect(migrationRead).toBeGreaterThan(-1);
+    expect(migrationRead).toBeLessThan(ctorIndex);
+    expect(sessions).not.toContain("for (const session of db.getSessions())");
+  });
+
   it("does not decrypt the HF token for local bundle session startup", () => {
     const sessions = read("src/main/sessions.ts");
 

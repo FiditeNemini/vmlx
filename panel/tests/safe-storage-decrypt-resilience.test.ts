@@ -13,7 +13,13 @@ const safeStorageMock = vi.hoisted(() => ({
   decryptString: vi.fn((buf: Buffer) => buf.toString("utf8")),
 }));
 
-vi.mock("electron", () => ({ safeStorage: safeStorageMock }));
+// Ready: this contract is about a running app whose keychain ACL denies the
+// read, not about the pre-ready guard covered in
+// secret-storage-app-ready-guard.test.ts.
+vi.mock("electron", () => ({
+  app: { isReady: () => true },
+  safeStorage: safeStorageMock,
+}));
 
 import { decryptValue, encryptValue } from "../src/main/secretStorage";
 

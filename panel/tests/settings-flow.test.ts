@@ -3011,7 +3011,9 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('/** Get timestamp', start)
         const block = source.slice(start, end)
 
-        expect(block).toContain('for (const session of db.getSessions())')
+        // Non-decrypting read: the loop runs at module scope, so pulling a
+        // session secret here would block the main thread on the keychain.
+        expect(block).toContain('for (const session of db.getSessionsWithoutSecrets())')
         expect(block).toContain('applyMissingCacheStackStartupDefaults(config, session.modelPath)')
         expect(block).toContain('applyCacheStackStartupDefaultMigration(config, session.modelPath)')
         expect(block).toContain('normalizeCacheStackMutualExclusion(config)')

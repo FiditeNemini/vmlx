@@ -1828,6 +1828,23 @@ class DatabaseManager {
     return stmt.all().map((row: any) => this.mapSessionRow(row));
   }
 
+  /**
+   * Sessions with `remoteApiKey` left encrypted. Reading a secret costs a
+   * synchronous macOS keychain call, and before `app.whenReady()` that call
+   * both blocks the main thread and binds to Electron's default "Chromium"
+   * service name instead of ours. Callers that only need config/model fields
+   * must use this so startup never touches the keychain.
+   */
+  getSessionsWithoutSecrets(): Session[] {
+    this.ensureOpen();
+    const stmt = this.db.prepare(
+      "SELECT * FROM sessions ORDER BY updated_at DESC",
+    );
+    return stmt
+      .all()
+      .map((row: any) => this.mapSessionRow({ ...row, remote_api_key: null }));
+  }
+
   getSessionByModelPath(modelPath: string): Session | undefined {
     this.ensureOpen();
     // Normalize trailing slashes: try both with and without to handle legacy data

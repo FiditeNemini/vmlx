@@ -984,12 +984,17 @@ class TestHybridSSMResumeRemaining:
         assert 'getattr(request, "_cached_tokens", 0)' in guard
         assert "_skip_cache_store = True" in guard
 
-        # The routes that bypass the skip are opt-in, so an unconfigured engine
-        # still refuses to promote a restored hybrid prefix. Promotion in
-        # particular was measured to collapse the model on its first extended
-        # turn, so its default is the thing under test here.
+        # Promotion — writing the RESTORED cache back as a longer entry — was
+        # measured to collapse the model on its first extended turn, so an
+        # unconfigured engine must still refuse it. That default is the thing
+        # under test here.
         assert _hybrid_prefix_promotion_enabled() is False
-        assert _hybrid_clean_store_enabled() is False
+
+        # The clean re-prefill route is deliberately NOT the same thing and is
+        # on by default: it re-derives the N-1 key and stores that typed state
+        # rather than writing back a reconstructed one. Keeping it off is what
+        # froze hybrid reuse at turn one.
+        assert _hybrid_clean_store_enabled() is True
 
     def test_performance_timeout_sufficient(self):
         """Performance health check must use >= 30s timeout."""

@@ -182,6 +182,7 @@ from .prefix_cache import runtime_cache_fingerprint
 logger = logging.getLogger(__name__)
 
 _PROMOTION_ENABLE_VALUES = {"1", "true", "TRUE", "yes", "YES", "on", "ON"}
+_PROMOTION_DISABLE_VALUES = {"0", "false", "FALSE", "no", "NO", "off", "OFF"}
 
 
 def _hybrid_clean_store_enabled() -> bool:
@@ -195,11 +196,29 @@ def _hybrid_clean_store_enabled() -> bool:
     mixed-SWA already get for being path-dependent. Hybrid was simply never
     wired into it, so it fell through to a blanket skip and never grew its
     prefix past turn one.
+
+    ON by default. It shipped off only because the route crashed before it could
+    store (a rebuilt attention-only base was handed to a linear layer), and the
+    resulting half-written state is what made the model collapse on its first
+    extended turn — the damage was the broken store, not the restore. With the
+    crash fixed, an 8-turn matrix that varies reasoning effort, tools appearing
+    and disappearing, and thinking toggled off returned byte-identical text on
+    Qwen3.8 across arms whose hit counts differed wildly (0 vs 80, 320 vs 946),
+    while reuse climbed to 96% instead of freezing at turn one.
+
+    Set VMLX_HYBRID_CLEAN_STORE=0 to fall back to the old freeze-at-turn-1
+    behaviour. Note that on the families where a cache HIT already changes the
+    answer (nemotron_h and friends), this makes hits more frequent; it does not
+    make them less exact — a cold-vs-warm control with this route disabled on
+    both arms drifts by exactly the same 8/9 turns.
     """
-    return any(
-        os.environ.get(name, "") in _PROMOTION_ENABLE_VALUES
-        for name in ("VMLX_HYBRID_CLEAN_STORE", "VMLINUX_HYBRID_CLEAN_STORE")
-    )
+    for name in ("VMLX_HYBRID_CLEAN_STORE", "VMLINUX_HYBRID_CLEAN_STORE"):
+        value = os.environ.get(name, "")
+        if value in _PROMOTION_DISABLE_VALUES:
+            return False
+        if value in _PROMOTION_ENABLE_VALUES:
+            return True
+    return True
 
 
 def _hybrid_prefix_promotion_enabled() -> bool:

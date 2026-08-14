@@ -72,3 +72,55 @@ def test_hybrid_joins_the_path_dependent_clean_store_branch():
     window = source[max(0, branch - 300):branch]
     assert "_uses_zaya_cache" in window
     assert "_uses_mixed_attention_cache" in window
+
+
+class TestHybridCleanStoreDefaultsOn:
+    """The clean re-prefill route is the DEFAULT for hybrid models.
+
+    It was gated off while the route still crashed mid-store; the half-written
+    state that produced is what collapsed the model on the first extended turn.
+    With the crash fixed the route is byte-exact on Qwen3.8, so leaving it off
+    would silently cost every hybrid conversation its prefix reuse past turn one.
+    """
+
+    def _enabled(self, monkeypatch, value):
+        import importlib
+
+        module = importlib.import_module("vmlx_engine.mllm_scheduler")
+        for name in ("VMLX_HYBRID_CLEAN_STORE", "VMLINUX_HYBRID_CLEAN_STORE"):
+            monkeypatch.delenv(name, raising=False)
+        if value is not None:
+            monkeypatch.setenv("VMLX_HYBRID_CLEAN_STORE", value)
+        return module._hybrid_clean_store_enabled()
+
+    def test_on_when_unset(self, monkeypatch):
+        assert self._enabled(monkeypatch, None) is True
+
+    def test_explicit_opt_out_is_honoured(self, monkeypatch):
+        for value in ("0", "false", "FALSE", "no", "off", "OFF"):
+            assert self._enabled(monkeypatch, value) is False, value
+
+    def test_explicit_opt_in_still_works(self, monkeypatch):
+        for value in ("1", "true", "yes", "on"):
+            assert self._enabled(monkeypatch, value) is True, value
+
+    def test_unrecognised_value_does_not_silently_disable(self, monkeypatch):
+        """A typo must not quietly turn the route off and freeze reuse again."""
+        assert self._enabled(monkeypatch, "maybe") is True
+
+    def test_alternate_spelling_can_disable(self, monkeypatch):
+        import importlib
+
+        module = importlib.import_module("vmlx_engine.mllm_scheduler")
+        monkeypatch.delenv("VMLX_HYBRID_CLEAN_STORE", raising=False)
+        monkeypatch.setenv("VMLINUX_HYBRID_CLEAN_STORE", "0")
+        assert module._hybrid_clean_store_enabled() is False
+
+    def test_promotion_stays_off_by_default(self, monkeypatch):
+        """The RESTORED-prefix writeback is a different thing and stays off."""
+        import importlib
+
+        module = importlib.import_module("vmlx_engine.mllm_scheduler")
+        for name in ("VMLX_HYBRID_PREFIX_PROMOTION", "VMLINUX_HYBRID_PREFIX_PROMOTION"):
+            monkeypatch.delenv(name, raising=False)
+        assert module._hybrid_prefix_promotion_enabled() is False

@@ -2187,6 +2187,46 @@ def _jang_chat_default_mode(bundle_path: str) -> str | None:
         return None
 
 
+def _stamped_reasoning_effort_contract(
+    bundle_path: str,
+) -> tuple[tuple[str, ...], str | None]:
+    """Return the bundle's stamped effort levels and default, or empty.
+
+    Qwen3.8 accepts exactly low/medium/xhigh and its template RAISES on
+    anything else, so an effort list must come from the artifact rather than a
+    family guess -- offering vMLX's generic five would hand the template two
+    values it rejects outright. Absence means the bundle has no effort control
+    at all (Qwen3.6 is deliberately unstamped), never "anything goes".
+    """
+    if not bundle_path:
+        return (), None
+    reasoning = _read_bundle_json(bundle_path, "jang_config.json").get("reasoning")
+    if not isinstance(reasoning, dict):
+        return (), None
+    # Two spellings name this one fact: `supported_reasoning_efforts` mirrors
+    # the engine identifier (Qwen3.8 onward), `reasoning_effort_levels` is what
+    # the DSV4/Muse stamps already ship. Read both here so neither side has to
+    # know which vintage a bundle is -- a second reader is how a stamp silently
+    # stops being honoured.
+    raw_levels = reasoning.get("supported_reasoning_efforts") or reasoning.get(
+        "reasoning_effort_levels"
+    )
+    levels = tuple(
+        dict.fromkeys(
+            value.strip().lower()
+            for value in raw_levels or ()
+            if isinstance(value, str) and value.strip()
+        )
+    )
+    if not levels:
+        return (), None
+    default = reasoning.get("default_reasoning_effort") or reasoning.get(
+        "default_effort"
+    )
+    normalized_default = default.strip().lower() if isinstance(default, str) else ""
+    return levels, normalized_default if normalized_default in levels else None
+
+
 def _dsv4_reasoning_contract(
     bundle_path: str,
 ) -> tuple[tuple[str, ...], str | None]:
@@ -14186,7 +14226,15 @@ async def model_capabilities(model_id: str) -> dict:
         supported_modes = (
             ["instruct", "reasoning"] if supports_instruct_mode else ["reasoning"]
         )
-        if configured_reasoning_efforts is not None:
+        stamped_efforts, stamped_default = _stamped_reasoning_effort_contract(
+            bundle_path
+        )
+        if stamped_efforts:
+            # The artifact outranks the family table: it is the thing whose
+            # template will raise if handed a level it does not implement.
+            reasoning_efforts = list(stamped_efforts)
+            default_reasoning_effort = stamped_default
+        elif configured_reasoning_efforts is not None:
             reasoning_efforts = list(configured_reasoning_efforts)
         elif family == "hy_v3":
             reasoning_efforts = ["low", "high"]

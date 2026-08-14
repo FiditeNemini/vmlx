@@ -2248,6 +2248,45 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     })
   }
 
+  it('reads a TOP-LEVEL reasoning stamp, as the Qwen bundles ship it', () => {
+    // Qwen stamps put `reasoning` at the top level and leave `chat` holding
+    // only sampling defaults, so an overlay that looked solely at
+    // `chat.reasoning` contributed nothing for that whole vintage. Qwen3.8
+    // accepts exactly low/medium/xhigh and its template RAISES on anything
+    // else, so the panel must not keep offering high/max.
+    const dir = makeModelDir(
+      { model_type: 'qwen3_5_moe' },
+      {
+        chat: { sampling_defaults: { temperature: 1.0 } },
+        reasoning: {
+          supported: true,
+          parser: 'qwen3',
+          supported_reasoning_efforts: ['low', 'medium', 'xhigh'],
+          default_reasoning_effort: 'xhigh',
+        },
+      },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.supportedReasoningEfforts).toEqual(['low', 'medium', 'xhigh'])
+    expect(detected.supportedReasoningEfforts).not.toContain('high')
+    expect(detected.supportedReasoningEfforts).not.toContain('max')
+    expect(detected.defaultReasoningEffort).toBe('xhigh')
+  })
+
+  it('leaves an unstamped bundle with no effort control at all', () => {
+    // Qwen3.6 genuinely has no tiers; absence must not read as "unconstrained".
+    const dir = makeModelDir(
+      { model_type: 'qwen3_5_moe' },
+      { reasoning: { supported: true, parser: 'qwen3', default: 'on' } },
+    )
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.supportedReasoningEfforts).toBeUndefined()
+  })
+
   it('derives the DSV4-0731 reasoning contract from the selected bundle sidecar', () => {
     const dir = makeModelDir(
       { model_type: 'deepseek_v4' },

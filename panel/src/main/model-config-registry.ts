@@ -690,12 +690,15 @@ function readJangChatMetadata(
   jangCfg: any,
 ): DetectedConfig {
   if (!jangCfg || typeof jangCfg !== 'object') return detected
-  const chat = jangCfg.chat
-  if (!chat || typeof chat !== 'object') return detected
+  const chat = jangCfg.chat && typeof jangCfg.chat === 'object' ? jangCfg.chat : {}
+  // DSV4/Muse nest these under `chat`; the Qwen stamps put them at the top
+  // level, where `chat` carries only sampling defaults. Reading just one place
+  // meant a whole vintage of bundle silently contributed nothing here.
+  const reasoning = chat.reasoning ?? jangCfg.reasoning
+  const toolCalling = chat.tool_calling ?? jangCfg.tool_calling
+  if (!reasoning && !toolCalling && !jangCfg.chat) return detected
 
   const next = { ...detected }
-  const reasoning = chat.reasoning
-  const toolCalling = chat.tool_calling
 
   if (reasoning && typeof reasoning === 'object') {
     if (reasoning.supported === false) {
@@ -743,7 +746,13 @@ function readJangChatMetadata(
       // thinking toggle and never surfaced the strength buttons the model
       // actually has. A `modes` list that carries no recognizable effort level
       // (e.g. only chat/think) yields undefined and leaves the registry value.
-      let effortLevels = normalizeReasoningEffortLevels(reasoning.reasoning_effort_levels)
+      // `supported_reasoning_efforts` mirrors the engine identifier and is what
+      // Qwen3.8-era stamps ship; `reasoning_effort_levels` is the older DSV4 and
+      // Muse spelling. Both name the same fact, so read both here rather than
+      // letting one vintage of bundle silently lose its effort list.
+      let effortLevels = normalizeReasoningEffortLevels(
+        reasoning.supported_reasoning_efforts ?? reasoning.reasoning_effort_levels,
+      )
       if (effortLevels === undefined && modes) {
         const modeEffortLevels = normalizeReasoningEffortLevels(modes)
         if (modeEffortLevels && modeEffortLevels.length > 0) {
@@ -753,9 +762,11 @@ function readJangChatMetadata(
       if (effortLevels !== undefined) {
         next.supportedReasoningEfforts = effortLevels
       }
-      // Default effort: an explicit `default_effort`, else the `default_mode`
-      // when it names one of the effort levels (Muse ships default_mode: high).
+      // Default effort: an explicit default (either spelling), else the
+      // `default_mode` when it names one of the effort levels (Muse ships
+      // default_mode: high).
       const defaultEffort =
+        normalizeReasoningEffort(reasoning.default_reasoning_effort) ??
         normalizeReasoningEffort(reasoning.default_effort) ??
         normalizeReasoningEffort(reasoning.default_mode)
       if (

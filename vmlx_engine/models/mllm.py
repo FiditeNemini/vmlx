@@ -4469,6 +4469,20 @@ class MLXMultimodalLM:
         except Exception as _e:
             logger.debug(f"mlx_vlm compat patch skipped: {_e}")
 
+        # Native MTP sanitize/runtime patches must be applied BEFORE the model
+        # is constructed, whichever loader runs. Both existing call sites live
+        # inside the JANG loader, so a v3 capability-schema bundle (stock MLX
+        # weights + jang_config metadata, e.g. Qwen3.6-27B D-series) loaded via
+        # stock mlx_vlm never got patched: the MTPModule was not constructed,
+        # sanitize dropped the mtp.* tensors, and every request logged "loaded
+        # language model has no native MTP head" while the startup banner said
+        # READY. Best-effort and a no-op for bundles without an MTP artifact.
+        try:
+            from ..native_mtp import maybe_apply_native_mtp
+            maybe_apply_native_mtp(resolved_name, allow_runtime=True)
+        except Exception as _mtp_e:
+            logger.debug(f"Native MTP pre-load apply skipped: {_mtp_e}")
+
         # JANG VL models: use JANG loader (handles mixed-precision + mlx-vlm sanitization)
         from ..utils.jang_loader import is_jang_model
         if is_jang_model(resolved_name):

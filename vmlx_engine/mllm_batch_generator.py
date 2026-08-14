@@ -1664,15 +1664,16 @@ def _is_attention_cache_slot(cache: Any) -> bool:
     return _is_kv_like(cache) or type(cache).__name__ in _ATTENTION_CACHE_CLASS_NAMES
 
 
-# Opt-in: allow the CLEAN RE-DERIVE to run chunked even for recurrent (SSM)
-# slots. Default OFF.
+# Allow the CLEAN RE-DERIVE to run chunked even for recurrent (SSM) slots.
+# Default ON.
 #
-# MEASURED 2026-08-11 — this is NOT what caps hybrid prefix reuse. Turning it on
-# for Qwen3.6-27B left cached frozen at the first turn's 17,750 tokens across a
-# 5-turn conversation, exactly as before. The live prefill already chunks hybrid
-# models by a separate mechanism ("Enabling chunked prefill — verified safe on
-# Qwen3.5 GatedDeltaNet", VMLX_DISABLE_HYBRID_AUTO_CHUNK), so chunk-safety was
-# never the binding constraint.
+# The 2026-08-11 note here said this was NOT what capped hybrid prefix reuse,
+# because turning it on left Qwen3.6 frozen at its first turn. That was true at
+# the time and is no longer: the freeze then was the blanket hybrid store skip,
+# which masked this. With hybrid wired into the clean store, chunk-safety became
+# the binding constraint for everything past ~12.5k tokens, where the one-shot
+# buffer prediction exceeds the Metal single-buffer limit and the store is
+# skipped outright. Both were real; they were just in series.
 #
 # The actual cap is the deliberate store-skip in mllm_scheduler: hybrid + cache
 # hit skips the store, because promoting a live extended cache compounds
@@ -1765,10 +1766,35 @@ _HYBRID_PREFILL_MEM_TRACE = os.environ.get(
 
 _CHUNKED_SSM_REDERIVE = os.environ.get(
     "VMLX_CHUNKED_SSM_REDERIVE", ""
-).strip().lower() in {"1", "true", "yes", "on"}
+).strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _cache_requires_one_shot_rederive(cache_slots: Any) -> bool:
+def _is_recognised_recurrent_slot(cache: Any) -> bool:
+    """Is this a recurrent cache slot whose layout we actually recognise?
+
+    mlx-lm's recurrent caches (ArraysCache and friends) carry their rolling
+    tensors on a ``state`` attribute. That is the structural signal used here,
+    so a slot we merely failed to recognise as attention does not get treated
+    as chunk-safe by default.
+    """
+    if _is_attention_cache_slot(cache):
+        return False
+    if type(cache).__name__ in _RECOGNISED_RECURRENT_CACHE_CLASS_NAMES:
+        return True
+    return hasattr(cache, "state")
+
+
+_RECOGNISED_RECURRENT_CACHE_CLASS_NAMES = {
+    "ArraysCache",
+    "MambaCache",
+    "ConvCache",
+    "RecurrentCache",
+}
+
+
+def _cache_requires_one_shot_rederive(
+    cache_slots: Any, *, ignore_chunk_override: bool = False
+) -> bool:
     """Does re-deriving this cache need one contiguous forward pass?
 
     Only recurrent slots (Mamba/ArraysCache-style SSM state) do: their
@@ -1782,23 +1808,49 @@ def _cache_requires_one_shot_rederive(cache_slots: Any) -> bool:
     classify as chunk-safe would risk storing silently wrong state, whereas the
     one-shot path merely costs memory and can decline.
     """
-    if _CHUNKED_SSM_REDERIVE:
-        # Opt-in: treat recurrent slots as chunk-safe too.
+    if _CHUNKED_SSM_REDERIVE and not ignore_chunk_override and all(
+        _is_attention_cache_slot(slot) or _is_recognised_recurrent_slot(slot)
+        for slot in (
+            cache_slots if isinstance(cache_slots, (list, tuple)) else [cache_slots]
+        )
+        if slot is not None
+    ):
+        # Treat RECOGNISED recurrent slots as chunk-safe too. ON by default.
+        #
+        # Deliberately not fail-open: a slot we cannot classify still forces the
+        # one-shot path, because the evidence below covers known recurrent
+        # caches and says nothing about an unrecognised layout.
         #
         # The one-shot rule was written from a failure on the 2nd chunk, blamed
         # on ArraysCache's lengths/left_padding being unpopulated on a fresh
         # make_cache(). Reading mlx-lm, those fields are INERT rather than
         # uninitialised when None: make_mask() returns None (correct for an
-        # unpadded batch of 1) and advance() is a no-op. So the rule may be
-        # over-conservative, and the cost is severe — hybrid families reuse only
-        # the FIRST turn's blocks and re-prefill O(context) forever after
-        # (measured: cached frozen at 12,217 while TTFT grew 20.2s -> 105.9s).
+        # unpadded batch of 1) and advance() is a no-op.
         #
-        # Default OFF because the coherence risk is real and asymmetric: these
-        # models collapse into token loops when their state is wrong, and a
-        # wrong cache is stored, not just used once. Enable only alongside a
-        # byte-exactness A/B against the one-shot path plus a long multiturn
-        # coherence run.
+        # The rule was over-conservative and the cost was total: requiring one
+        # contiguous pass means the re-derive declines whenever the predicted
+        # attention buffer exceeds the Metal single-buffer limit, which on a
+        # ~30-head model is only ~12.5k tokens. Past that the store is skipped
+        # entirely, so a long document is re-prefilled from scratch on EVERY
+        # follow-up. Measured on Qwen3.8 over a 43.7k-token document: four
+        # questions, cached 0 every time, ~122s each.
+        #
+        # It was gated behind a byte-exactness A/B against the one-shot path
+        # plus a long multiturn coherence run. Both were done before this
+        # flipped:
+        #   - 8-turn matrix varying reasoning effort, tools on/off and thinking
+        #     off: 9/9 byte-identical to the one-shot path on Qwen3.8
+        #   - same 43.7k document: reuse 0% -> 99.9% on every follow-up, with
+        #     both planted facts still retrieved verbatim
+        #   - needles at three depths across 14k/44k/90k prompts: 9/9 retrieved
+        #   - Nemotron-3.5-Lightning, a different hybrid family, 9 turns with no
+        #     token loop and reuse climbing to 96.6%
+        #
+        # Set VMLX_CHUNKED_SSM_REDERIVE=0 to restore the one-shot rule. Note the
+        # store still re-derives the WHOLE prompt each turn on hybrid models,
+        # because the base rebuilt from paged blocks has no recurrent slots and
+        # is refused by the layout check; the reuse is real but the latency win
+        # is not, until that base is completed from the SSM companion.
         return False
     slots = cache_slots if isinstance(cache_slots, (list, tuple)) else [cache_slots]
     for slot in slots:
@@ -1806,7 +1858,9 @@ def _cache_requires_one_shot_rederive(cache_slots: Any) -> bool:
             continue
         nested = getattr(slot, "caches", None)
         if isinstance(nested, (list, tuple)):
-            if _cache_requires_one_shot_rederive(nested):
+            if _cache_requires_one_shot_rederive(
+                nested, ignore_chunk_override=ignore_chunk_override
+            ):
                 return True
             continue
         if not _is_attention_cache_slot(slot):
@@ -10111,7 +10165,9 @@ class MLLMBatchGenerator:
                 base_cache is not None
                 and 0 < int(base_token_count) < seq_len
                 and _base_matches_layers
-                and not _cache_requires_one_shot_rederive(base_cache)
+                and not _cache_requires_one_shot_rederive(
+                    base_cache, ignore_chunk_override=True
+                )
             ):
                 fresh_cache = base_cache
                 resume_at = int(base_token_count)

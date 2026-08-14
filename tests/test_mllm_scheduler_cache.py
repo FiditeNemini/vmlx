@@ -2921,14 +2921,45 @@ class TestCleanRederiveChunking:
         gemma_like = [RotatingKVCache(max_size=512), KVCache()] * 4
         assert _cache_requires_one_shot_rederive(gemma_like) is False
 
-    def test_recurrent_slot_still_forces_one_shot(self):
+    def test_recognised_recurrent_slot_is_chunk_safe(self, monkeypatch):
+        """ArraysCache is the GatedDelta slot the byte-exactness A/B covered."""
+        import importlib
+
+        from mlx_lm.models.cache import ArraysCache, KVCache
+
+        import vmlx_engine.mllm_batch_generator as mbg
+
+        assert mbg._cache_requires_one_shot_rederive(
+            [KVCache(), ArraysCache(4)]
+        ) is False
+
+        # The opt-out must still restore the strict rule.
+        monkeypatch.setenv("VMLX_CHUNKED_SSM_REDERIVE", "0")
+        strict = importlib.reload(mbg)
+        try:
+            assert strict._cache_requires_one_shot_rederive(
+                [KVCache(), ArraysCache(4)]
+            ) is True
+        finally:
+            monkeypatch.delenv("VMLX_CHUNKED_SSM_REDERIVE", raising=False)
+            importlib.reload(mbg)
+
+    def test_resume_from_a_recurrent_base_stays_strict(self):
+        """Chunking a fresh re-derive is a different question from resuming.
+
+        Whether the forward pass may be chunked says nothing about whether a
+        RESTORED recurrent base is a safe thing to resume from, so that call
+        site keeps the strict rule regardless of the chunking default.
+        """
         from mlx_lm.models.cache import ArraysCache, KVCache
 
         from vmlx_engine.mllm_batch_generator import (
             _cache_requires_one_shot_rederive,
         )
 
-        assert _cache_requires_one_shot_rederive([KVCache(), ArraysCache(4)]) is True
+        assert _cache_requires_one_shot_rederive(
+            [KVCache(), ArraysCache(4)], ignore_chunk_override=True
+        ) is True
 
     def test_unclassifiable_slot_fails_closed_to_one_shot(self):
         """Chunking state we cannot classify could store silently wrong data."""
@@ -2952,8 +2983,13 @@ class TestCleanRederiveChunking:
         assert _cache_requires_one_shot_rederive(
             [_Wrapper([KVCache(), KVCache()])]
         ) is False
+        # Recognised recurrent slots nested inside a wrapper are chunk-safe
+        # like any other; the strict rule still reaches them via the override.
         assert _cache_requires_one_shot_rederive(
             [_Wrapper([KVCache(), ArraysCache(4)])]
+        ) is False
+        assert _cache_requires_one_shot_rederive(
+            [_Wrapper([KVCache(), ArraysCache(4)])], ignore_chunk_override=True
         ) is True
 
     def test_attention_stack_is_prefilled_in_prefill_step_chunks(self):
@@ -3186,3 +3222,45 @@ class TestCleanStoreBaseLookup:
         assert sched._clean_store_base_from_stored_chain(
             "req-1", [1, 2, 3], None
         ) == (None, 0)
+
+
+class TestChunkedSSMRederiveDefault:
+    """Recurrent slots are chunk-safe by default.
+
+    Requiring one contiguous pass made the re-derive decline whenever the
+    predicted attention buffer exceeded the Metal single-buffer limit -- only
+    ~12.5k tokens on a ~30-head model -- and a declined re-derive means the
+    store is skipped, so long documents were re-prefilled in full on every
+    follow-up.
+    """
+
+    def _requires_one_shot(self, monkeypatch, value):
+        import importlib
+
+        import vmlx_engine.mllm_batch_generator as mbg
+
+        monkeypatch.delenv("VMLX_CHUNKED_SSM_REDERIVE", raising=False)
+        if value is not None:
+            monkeypatch.setenv("VMLX_CHUNKED_SSM_REDERIVE", value)
+        mbg = importlib.reload(mbg)
+        try:
+            class _Recurrent:
+                # mlx-lm recurrent caches carry their rolling tensors here; a
+                # slot without it is unclassifiable and must stay one-shot.
+                state = None
+
+            return mbg._cache_requires_one_shot_rederive([_Recurrent()])
+        finally:
+            monkeypatch.delenv("VMLX_CHUNKED_SSM_REDERIVE", raising=False)
+            importlib.reload(mbg)
+
+    def test_recurrent_slot_is_chunk_safe_by_default(self, monkeypatch):
+        assert self._requires_one_shot(monkeypatch, None) is False
+
+    def test_opt_out_restores_the_one_shot_rule(self, monkeypatch):
+        for value in ("0", "false", "no", "off"):
+            assert self._requires_one_shot(monkeypatch, value) is True, value
+
+    def test_typo_does_not_silently_restore_one_shot(self, monkeypatch):
+        """An unrecognised value must not quietly disable long-context stores."""
+        assert self._requires_one_shot(monkeypatch, "maybe") is False

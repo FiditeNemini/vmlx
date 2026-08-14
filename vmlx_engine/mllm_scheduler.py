@@ -377,6 +377,17 @@ class MLLMRequest:
     # Token counts
     num_prompt_tokens: int = 0
     num_output_tokens: int = 0
+    # Lifetime generated-token count, NEVER cleared on a recovery retry.
+    # `num_output_tokens` is derived from `len(output_tokens)`, and the retry
+    # path clears that list, so anything built on it goes BACKWARDS mid-request.
+    # `request_progress` is consumed as a liveness signal by a timeout that
+    # credits only `progress > last_progress`, so a counter that drops makes a
+    # healthy retrying request look wedged. Mirrors `Request.total_output_tokens`
+    # in the text scheduler.
+    total_output_tokens: int = 0
+    # Lifetime total as of the last retry, so the running total can be rebuilt
+    # from a cleared `output_tokens` list.
+    _retry_output_base: int = 0
 
     # Video processing parameters (per-request overrides)
     image_token_budget: Optional[int] = None
@@ -2607,7 +2618,16 @@ class MLLMScheduler:
         """Monotonic progress counter for a live request, or None if unknown.
 
         MLLMRequest has no num_computed_tokens; approximate prefill progress
-        with num_prompt_tokens once known, plus generated token count.
+        with num_prompt_tokens once known, plus the LIFETIME generated count.
+
+        Uses ``total_output_tokens``, not ``num_output_tokens``. The latter is
+        derived from ``len(output_tokens)`` and the recovery-retry path clears
+        that list, so summing it made this counter DECREASE mid-request. The
+        shared consumer in ``server.py`` credits only ``progress >
+        last_progress`` as liveness and treats a positive-but-not-greater
+        reading as neither progress nor "no reading", so a healthy retrying
+        request could be killed as wedged — precisely the defect fixed for the
+        text scheduler, which this path had silently kept.
         """
         with self._queue_lock:
             request = self.requests.get(request_id)
@@ -2615,7 +2635,7 @@ class MLLMScheduler:
                 return None
             return (
                 int(getattr(request, "num_prompt_tokens", 0) or 0)
-                + int(getattr(request, "num_output_tokens", 0) or 0)
+                + int(getattr(request, "total_output_tokens", 0) or 0)
             )
 
     def abort_request(self, request_id: str) -> bool:
@@ -2919,6 +2939,9 @@ class MLLMScheduler:
             tokens = [int(resp.token) for resp in burst]
             request.output_tokens.extend(tokens)
             request.num_output_tokens = len(request.output_tokens)
+            request.total_output_tokens = (
+                request._retry_output_base + request.num_output_tokens
+            )
 
             detok = self._get_detokenizer(request_id, tokenizer)
             for resp in burst:
@@ -3029,6 +3052,9 @@ class MLLMScheduler:
             # Append token to request
             request.output_tokens.append(response.token)
             request.num_output_tokens = len(request.output_tokens)
+            request.total_output_tokens = (
+                request._retry_output_base + request.num_output_tokens
+            )
 
             # vmlx#reasoning-leak-2026-04-21: thinking-capable models
             # (Qwen 3.6 / Gemma 4 / MiniMax / Nemotron Cascade) occasionally
@@ -4324,6 +4350,11 @@ class MLLMScheduler:
                         req._retry_count += 1
                         if req._retry_count <= max_retries:
                             req.status = RequestStatus.WAITING
+                            # Carry the lifetime total forward BEFORE the list
+                            # that derives it is cleared, or progress goes
+                            # backwards and the timeout reads a healthy retry as
+                            # a wedged request.
+                            req._retry_output_base = req.total_output_tokens
                             req.output_tokens.clear()
                             req.num_output_tokens = 0
                             req.output_text = ""

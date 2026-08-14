@@ -317,14 +317,20 @@ def _apply_jangtq_mpp_nax_policy(args, logger):
     return mode
 
 
-# 🚨 ABSENCE FROM THIS LIST IS NOT EXEMPTION. A prefix-cache hit can change the
-# answer on EVERY family measured; only the RATE differs. Measured over six
-# distinct prompts each: Nanbeige4.2-3B 5/6, ZAYA-8B 1/6, DSV4-Flash 0/6,
-# gemma-4-E4B 0/6, Laguna-S 0/6. An earlier per-family "EXACT vs DIVERGES" map
-# built from ONE prompt each was retracted — it sent several rounds of work
-# hunting an architectural difference between two groups that do not exist.
-# Muse reproduces the retraction directly: byte-exact on a short prompt,
-# divergent at ~1.4k tokens. Report a RATE, never a label.
+# 🚨 ABSENCE FROM THIS LIST IS NOT EXEMPTION. No family has been shown exempt.
+# Measured over six distinct prompts each: Nanbeige4.2-3B 5/6, ZAYA-8B 1/6,
+# DSV4-Flash 0/6, gemma-4-E4B 0/6, Laguna-S 0/6. A 0/6 is "never observed on
+# six prompts", NOT proof of exemption — assuming otherwise from a small sample
+# is exactly the error being guarded against here. (An earlier revision of this
+# comment claimed a hit "can change the answer on EVERY family measured"; that
+# overstates the data, since the 0/6 families were never observed to drift.)
+#
+# An earlier per-family "EXACT vs DIVERGES" map built from ONE prompt each was
+# retracted — it sent several rounds of work hunting an architectural difference
+# between two groups that do not exist. Muse reproduces the retraction directly:
+# byte-exact on a short prompt AND at ~1.4k (2,232 tokens reused), against the
+# single historical sample that had labelled it divergent. Report a RATE, never
+# a label.
 #
 # The mechanism is understood and is not family-specific: a warm turn computes
 # the last unmatched token plus the generation prompt as a SMALL forward on a
@@ -334,11 +340,12 @@ def _apply_jangtq_mpp_nax_policy(args, logger):
 # it lands is prompt- and generation-dependent. Bit-identity would require
 # recomputing all N tokens, i.e. not caching.
 #
-# So this list is NOT a theory of which architectures are affected. It is a
-# convenience: families whose measured rate was high enough that an operator
-# hitting reproducible answer instability is likely to be looking at one of
-# them. The first-class, user-facing lever is the Enable Prefix Cache toggle,
-# which states the cost in the UI; this env switch is the CLI equivalent.
+# So this list is NOT a theory of which architectures are affected, and NOT a
+# ranking. It is simply every family this campaign has measured to drift at
+# least once. Membership is not "rate high enough" — ZAYA is in at 1/6 — it is
+# "observed at all". The first-class, user-facing lever is the Enable Prefix
+# Cache toggle, which states the cost in the UI; this env switch is the CLI
+# equivalent.
 #
 # Entry requirement: a temperature-0 cold-vs-hit A/B on this box with a
 # NON-ZERO ``cached=`` on the hit arm. A run that reused nothing compares two
@@ -348,9 +355,17 @@ _DRIFT_ON_HIT_FAMILY_NAMES = frozenset(
         "zaya",  # L63  Zaya-8B-JANG_4M          228 tok -> 119 (24 reused)
         "nemotron_h",  # L70  Nemotron-3.5-Lightning   902 tok -> 781 (23 reused)
         "lfm2",  # L71a LFM2.5-8B-A1B           469 tok -> 398 (19 reused)
-        "minimax",  # MiniMax-M2.7            diverges @293 ch (1444 reused)
-        "muse_glimmer",  # Muse-Glimmer-30B        diverges @788 ch (274 reused)
-        "step3p7",  # Step-3.7-Flash          diverges @97 ch (1417 reused)
+        "minimax",  # MiniMax-M2.7            2/2  d4f70528 -> 93ed79cc (46 reused)
+        "muse_glimmer",  # Muse-Glimmer-30B   1/3  @788 ch (274 reused); 0/2 since
+        "step3p7",  # Step-3.7-Flash          2/2  d9629bb9 -> 70346ce8 (19 reused)
+        # Nanbeige4.2-3B is the WORST measured family at 5/6 and was absent from
+        # this list until review caught it. By the entry rule above it plainly
+        # qualifies, and leaving it out made the switch behave as an exemption
+        # for exactly the family most likely to need it. A looped transformer
+        # (22 layers x 2 loops, `cache_schema: looped_kv_v1`) processes every
+        # token twice, which plausibly amplifies the tail-recompute delta — that
+        # predicts a higher RATE, not a different mechanism.
+        "nanbeige",
     }
 )
 _DRIFT_ON_HIT_CACHE_SUBTYPES = frozenset(
@@ -436,6 +451,13 @@ def _disable_drifting_prefix_reuse(args, logger, family_label: str) -> bool:
         return False
     args.enable_prefix_cache = False
     args.enable_block_disk_cache = False
+    # The gate runs once ahead of the family policy chain and again from any
+    # family branch that calls it (ZAYA does). The flags are idempotent but the
+    # warning was not, so an armed ZAYA session logged the same line twice and
+    # an operator could reasonably read that as two different things firing.
+    if getattr(args, "_drifting_prefix_reuse_announced", False):
+        return True
+    args._drifting_prefix_reuse_announced = True
     logger.warning(
         "%s prefix reuse DISABLED via %s=1. "
         "Every request re-prefills cleanly: costs cache speed, buys cold==warm "
@@ -1458,9 +1480,23 @@ def serve_command(args):
         ):
             # L70: measured to answer differently on a cache HIT, same signature
             # as ZAYA (23-token reuse turned a 902-token reply into 781, each arm
-            # deterministic). No other policy applies to this family, so the gate
-            # is the only thing here.
-            _disable_drifting_prefix_reuse(args, logger, "Nemotron-H SSM")
+            # deterministic). The gate itself already ran ahead of this chain;
+            # this arm exists only to keep these families OUT of the generic
+            # hybrid branch below.
+            #
+            # ⚠️ KNOWN DEFECT, pre-existing and NOT fixed here: this arm swallows
+            # `lfm2`, so the generic `cache_type == "hybrid"` branch below never
+            # runs for it — including the explicit LFM2 handling written inside
+            # that branch, which disables the generic QuantizedKVCache wrapper so
+            # the architecture-selected attention-TQ codec is not applied twice.
+            # That LFM2 policy is therefore dead code today. Making it reachable
+            # changes LFM2's live KV quantization, so it needs a measured A/B
+            # rather than a control-flow tidy-up.
+            _disable_drifting_prefix_reuse(
+                args,
+                logger,
+                "Nemotron-H SSM" if _mc.family_name != "lfm2" else "LFM2 hybrid SSM",
+            )
         elif (
             _mc.family_name == "mimo_v2"
             or getattr(_mc, "cache_subtype", None) == "mimo_v2_asymmetric_swa"

@@ -7470,7 +7470,14 @@ def _suppress_tool_parsing_when_no_tools(
 
 
 def _engine_request_progress(engine: Any, request_id: str) -> int | None:
-    """Best-effort monotonic progress (prefilled+generated tokens) for a request.
+    """Best-effort monotonic progress counter for a request.
+
+    The unit differs by scheduler and is NOT "prefilled+generated" in both, as
+    this docstring used to claim: the text scheduler returns generated tokens
+    only (a prefilling request reports 0 — the grace branch below depends on
+    that), while the MLLM scheduler returns prompt + generated. Callers may
+    rely only on the shared property: monotonically non-decreasing for a live
+    request.
 
     Returns None when the engine cannot report progress (SimpleEngine, or the
     request is unknown) — callers fall back to hard wall-clock timeout.
@@ -22137,13 +22144,14 @@ async def _stream_with_keepalive(
                         and unknown_progress_windows < _UNKNOWN_PROGRESS_GRACE_WINDOWS
                     ):
                         # ZERO IS ALSO "UNKNOWN", and this is the case that
-                        # actually happens. `Scheduler.request_progress` sums
-                        # `num_computed_tokens + total_output_tokens`, and
-                        # `num_computed_tokens` is incremented in exactly one
-                        # place — `Request.append_output_token` — so it counts
-                        # OUTPUT tokens only. Nothing advances it during prefill.
-                        # A registered request that is prefilling healthily
-                        # therefore reports 0, not None.
+                        # actually happens. `Scheduler.request_progress` returns
+                        # `total_output_tokens` — generated tokens only; nothing
+                        # advances it during prefill — so a registered request
+                        # that is prefilling healthily reports 0, not None.
+                        # (It used to sum `num_computed_tokens +
+                        # total_output_tokens`, which double-counted and went
+                        # backwards across a recovery retry; the observation
+                        # this comment records was what exposed that.)
                         #
                         # Gating this grace on `progress is None` alone left the
                         # 900s kill exactly as it was for every prefill, which is

@@ -107,3 +107,77 @@ def test_matches_the_number_an_operator_would_check():
         req.append_output_token(tok)
 
     assert _FakeScheduler({"r1": req}).request_progress("r1") == 16384
+
+
+class TestMLLMRequestProgress:
+    """The MLLM scheduler had the SAME go-backwards defect, and kept it.
+
+    Found in review of `6b5f11ca5`, which fixed the text scheduler and then
+    asserted in its own docstring that "both are monotonic, which is the only
+    property the callers require". That was false.
+
+    `MLLMScheduler.request_progress` summed `num_output_tokens`, which is
+    assigned from `len(request.output_tokens)` — and the recovery-retry path
+    calls `output_tokens.clear()` and sets `num_output_tokens = 0`. The value
+    therefore DROPPED mid-request, and because it stayed positive it matched
+    neither the "progressing" branch (`progress > last_progress`) nor the
+    zero/unknown grace branch in `server.py`, so a healthy retrying request
+    could be killed as wedged.
+    """
+
+    class _FakeMLLM:
+        from vmlx_engine.mllm_scheduler import MLLMScheduler as _S
+
+        request_progress = _S.request_progress
+
+        def __init__(self, requests):
+            self.requests = requests
+            import threading
+
+            self._queue_lock = threading.RLock()
+
+    @staticmethod
+    def _req(prompt=100, generated=50, base=0):
+        return SimpleNamespace(
+            num_prompt_tokens=prompt,
+            num_output_tokens=generated,
+            total_output_tokens=base + generated,
+        )
+
+    def test_unknown_request_is_none(self):
+        assert self._FakeMLLM({}).request_progress("nope") is None
+
+    def test_counts_prompt_plus_generated(self):
+        sched = self._FakeMLLM({"r": self._req(prompt=100, generated=50)})
+        assert sched.request_progress("r") == 150
+
+    def test_does_not_go_backwards_across_a_retry(self):
+        # Reproduces mllm_scheduler's retry path: output_tokens cleared,
+        # num_output_tokens zeroed, lifetime total carried forward.
+        req = self._req(prompt=100, generated=50)
+        sched = self._FakeMLLM({"r": req})
+        before = sched.request_progress("r")
+
+        req._retry_output_base = req.total_output_tokens
+        req.num_output_tokens = 0  # what the retry path does
+        after = sched.request_progress("r")
+
+        assert after >= before, (
+            "MLLM progress went backwards across a recovery retry; the shared "
+            "timeout credits only progress > last_progress, so a healthy "
+            "request would be killed as wedged"
+        )
+        assert after == 150
+
+        # And it climbs past the pre-retry peak as regeneration proceeds.
+        req.num_output_tokens = 5
+        req.total_output_tokens = req._retry_output_base + 5
+        assert sched.request_progress("r") == 155
+
+    def test_reads_lifetime_counter_not_the_resettable_one(self):
+        # Guard the specific regression: if this ever reads num_output_tokens
+        # again, a retry silently reintroduces the defect.
+        req = SimpleNamespace(
+            num_prompt_tokens=10, num_output_tokens=0, total_output_tokens=77
+        )
+        assert self._FakeMLLM({"r": req}).request_progress("r") == 87

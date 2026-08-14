@@ -6262,11 +6262,18 @@ class Scheduler:
         the prefill-reports-0 contract the streaming grace logic is written
         against.
 
-        Note ``MLLMScheduler.request_progress`` deliberately returns something
-        different (``num_prompt_tokens + num_output_tokens``): ``MLLMRequest``
-        has no ``num_computed_tokens``, and its value genuinely is prefill plus
-        generation. Both are monotonic, which is the only property the callers
-        require.
+        ``MLLMScheduler.request_progress`` deliberately returns something
+        different — ``num_prompt_tokens + total_output_tokens`` — because
+        ``MLLMRequest`` has no ``num_computed_tokens`` and its value genuinely
+        is prefill plus generation.
+
+        ⚠️ An earlier version of this docstring asserted "both are monotonic,
+        which is the only property the callers require". That was FALSE and was
+        caught in review: the MLLM path summed ``num_output_tokens``, which is
+        derived from ``len(output_tokens)``, and its retry path clears that
+        list — so it had the identical go-backwards defect this fix removed
+        here. Both now use a lifetime counter that survives a retry. Do not
+        restate the invariant without re-checking both sides.
         """
         request = self.requests.get(request_id)
         if request is None:

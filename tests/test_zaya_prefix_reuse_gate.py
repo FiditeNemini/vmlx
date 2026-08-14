@@ -173,7 +173,15 @@ class TestRecurrentClassGate:
         marker = '"nemotron_h_ssm_attention", "lfm2_moe_hybrid_ssm"'
         assert marker in src, "drifting families are not wired into the policy chain"
         i = src.index(marker)
-        assert "_disable_drifting_prefix_reuse" in src[i : i + 900]
+        # Window sized generously on purpose: a fixed 900 chars broke as soon as
+        # the branch grew an explanatory comment, which is a documentation change,
+        # not a wiring regression. What matters is that the CALL follows the
+        # match, before the next elif arm.
+        window = src[i : i + 2500]
+        nxt = window.find("\n        elif ")
+        if nxt != -1:
+            window = window[:nxt]
+        assert "_disable_drifting_prefix_reuse" in window
 
     def test_lfm2_is_covered(self):
         # L71a: LFM2.5-8B-A1B drifts on a 19-token paged+ssm hit (469 -> 398).
@@ -217,7 +225,8 @@ class TestDriftSetMembership:
 
     @pytest.mark.parametrize(
         "family",
-        ["zaya", "nemotron_h", "lfm2", "minimax", "muse_glimmer", "step3p7"],
+        ["zaya", "nemotron_h", "lfm2", "minimax", "muse_glimmer", "step3p7",
+         "nanbeige"],
     )
     def test_measured_family_is_in_the_set(self, family):
         from vmlx_engine.cli import _family_drifts_on_cache_hit
@@ -230,7 +239,7 @@ class TestDriftSetMembership:
         # gate does not name, so the switch must leave them alone. Names
         # resolved by running the registry against the real bundles, not
         # recalled: "openpangu_v2" (not "openpangu"), "qwen3_5" (not "qwen3.6").
-        ["deepseek_v4", "gemma4", "qwen3_5", "laguna", "nanbeige", "openpangu_v2"],
+        ["deepseek_v4", "gemma4", "qwen3_5", "laguna", "openpangu_v2"],
     )
     def test_unnamed_family_is_left_alone(self, family):
         from vmlx_engine.cli import _family_drifts_on_cache_hit
@@ -256,17 +265,23 @@ class TestDriftSetMembership:
         from pathlib import Path
 
         src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
-        assert "ABSENCE FROM THIS LIST IS NOT EXEMPTION" in src
+        # Normalise comment reflow: these phrases live in a wrapped block, so a
+        # raw substring match breaks every time the comment is re-wrapped. That
+        # brittleness already failed this test once for no real reason.
+        flat = " ".join(src.replace("#", " ").split())
+        assert "ABSENCE FROM THIS LIST IS NOT EXEMPTION" in flat
         # The measured rates are the evidence; keep them next to the list.
-        assert "Nanbeige4.2-3B 5/6" in src
-        assert "Report a RATE, never a label." in src
+        assert "Nanbeige4.2-3B 5/6" in flat
+        assert "Report a RATE, never a label." in flat
 
         from vmlx_engine.cli import _family_drifts_on_cache_hit
 
-        # The concrete embarrassment: the worst-measured family is not named.
+        # Nanbeige is 5/6 — the worst measured — and was MISSING from the list
+        # until review caught it, which made the switch an exemption for exactly
+        # the family most likely to need it. It is named now; this pins that.
         assert (
             _family_drifts_on_cache_hit(SimpleNamespace(family_name="nanbeige"))
-            is False
+            is True
         )
 
     def test_subtype_alone_is_enough(self):

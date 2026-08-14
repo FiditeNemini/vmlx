@@ -26,9 +26,49 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.28] - 2026-08-11
+## [1.6.28] - 2026-08-13
 
 ### Fixed
+
+- A prefix-cache hit could change the answer on seven measured model families,
+  and the opt-in switch that trades cache reuse for answer stability only
+  reached three of them. It was reachable only from inside the family policy
+  chain, and `minimax`, `muse_glimmer` and `step3p7` hold no branch there. The
+  switch now runs ahead of that chain, and `nanbeige` — the family with the
+  highest measured divergence rate — has been added to the list it was missing
+  from. Proven end-to-end: with the switch armed, both turns reproduce the cold
+  answer byte for byte. Absence from the list is not exemption; no family has
+  been shown exempt, and the accompanying notes now say so.
+
+- A long-running request could be killed as unresponsive while it was
+  generating normally. The engine's liveness counter double-counted output
+  tokens, and a recovery restart reset half of the sum, so the value went
+  backwards mid-request; the streaming timeout only credits a counter that
+  increases. Both the text and multimodal schedulers had the defect. Operator
+  logs that report "still progressing (N tokens)" now show the true token
+  count rather than twice it.
+
+- Explicitly disabling a parser was silently ignored. `--reasoning-parser none`
+  had no effect on any streaming surface and `--tool-call-parser none` was
+  inert in the module entry point, while the startup banner reported both as
+  disabled.
+
+- A derivation step beginning with `=` rendered as literal dollar-sign text in
+  chat instead of as maths.
+
+- The Hugging Face token was normalised on only two of the five paths that read
+  it, so a token with surrounding whitespace worked in some places and failed
+  in others.
+
+- Muse Glimmer failed to load on a fresh `pip install vmlx`. mlx-vlm 0.6 began
+  shipping its own `muse_glimmer` package, and vMLX handed the namespace to it
+  on sight — but upstream names its preprocessing module differently, so the
+  server exited with a missing-module error before it could start, and had it
+  started it would have used a forward pass without this port's corrections.
+  vMLX now keeps its own validated runtime unless an upstream package genuinely
+  provides the same interface. The macOS app was never affected: it pins the
+  older mlx-vlm that has no upstream package, which is why the app tested clean
+  while the published wheel did not.
 
 - Muse Glimmer failed to load on a fresh `pip install vmlx`. mlx-vlm 0.6 began
   shipping its own `muse_glimmer` package, and vMLX handed the namespace to it

@@ -28,6 +28,19 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ## [1.6.28] - 2026-08-13
 
+### Added
+
+- Support for the new Qwen3.6-27B bundle line (and the upcoming Qwen 3.8
+  line), whose metadata-only stamps previously killed the server at startup
+  or load. The `qwen3_coder` tool-parser name now resolves to the XML-function
+  parser its templates actually emit, capability-only stamps route through the
+  stock loader instead of the JANG codec, and the bundled multi-token
+  prediction head is constructed, correctly quantized per the stamp's
+  per-module overrides, and engaged automatically at the stamp's trained
+  speculative depth. Measured on the 4-bit bundle: 23.3 to 31 tokens/sec
+  (+33%) with no flags, greedy output byte-identical with the head on or off,
+  and image and video probes answering correctly through both API and app.
+
 ### Fixed
 
 - A prefix-cache hit could change the answer on seven measured model families,

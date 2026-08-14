@@ -3596,9 +3596,17 @@ class MLLMScheduler:
                             # and Gemma's rotating windows are, so it belongs on
                             # the same clean re-prefill route rather than on the
                             # blanket skip that froze its prefix at turn one.
+                            # Text turns only. The clean route re-prefills from
+                            # token ids, which on a media prompt would rebuild
+                            # the prefix WITHOUT the vision embeddings and store
+                            # that as if it were the real thing -- the same trap
+                            # the captured mixed-SWA branch below exists to
+                            # avoid. Media turns keep whatever handling they had
+                            # before this route was enabled.
                             _uses_hybrid_clean_store = bool(
                                 getattr(self, "_is_hybrid", False)
                                 and _hybrid_clean_store_enabled()
+                                and not media_context
                             )
                             raw_for_layout = request._extracted_cache
                             if callable(raw_for_layout):

@@ -124,3 +124,20 @@ class TestHybridCleanStoreDefaultsOn:
         for name in ("VMLX_HYBRID_PREFIX_PROMOTION", "VMLINUX_HYBRID_PREFIX_PROMOTION"):
             monkeypatch.delenv(name, raising=False)
         assert module._hybrid_prefix_promotion_enabled() is False
+
+
+def test_hybrid_clean_store_excludes_media_turns():
+    """A media prompt must never take the text-only re-prefill route.
+
+    The clean route rebuilds the prefix from token ids alone. On a media turn
+    that silently drops the vision embeddings and stores a text-only prefix
+    under the media key, so a later hit answers about an image it never saw.
+    """
+    from pathlib import Path
+
+    source = Path("vmlx_engine/mllm_scheduler.py").read_text()
+    marker = "_uses_hybrid_clean_store = bool("
+    window = source[source.index(marker):source.index(marker) + 320]
+    assert "not media_context" in window, (
+        "hybrid clean store must be gated off for media-bearing prompts"
+    )

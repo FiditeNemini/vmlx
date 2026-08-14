@@ -6604,6 +6604,20 @@ class MLLMBatchGenerator:
                             pass
                     processed += chunk_size
                     chunk_num += 1
+                    # Advancing prefill progress for the liveness probes.
+                    # `num_prompt_tokens` is set only when the FIRST output
+                    # token arrives, so without this a long prefill reads as
+                    # zero progress for its entire duration — and prefill is
+                    # the only phase long enough to hit the request timeout.
+                    # Measured live: a 196k-token span burned all bounded
+                    # grace windows (900s) and was still killed as wedged
+                    # while the GPU was legitimately chunking. This counter
+                    # makes `request_progress` genuinely increase per chunk,
+                    # so the extension logic needs no grace at all here.
+                    try:
+                        request._prefill_tokens_done = processed
+                    except Exception:  # noqa: BLE001
+                        pass
                     if processed in ssm_boundaries and processed not in ssm_captured_boundaries:
                         if self._maybe_capture_clean_ssm_boundary(
                             request,

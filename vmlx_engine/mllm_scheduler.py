@@ -2633,10 +2633,17 @@ class MLLMScheduler:
             request = self.requests.get(request_id)
             if request is None:
                 return None
-            return (
-                int(getattr(request, "num_prompt_tokens", 0) or 0)
-                + int(getattr(request, "total_output_tokens", 0) or 0)
+            # `num_prompt_tokens` is assigned only when the FIRST output token
+            # arrives; `_prefill_tokens_done` is advanced per chunk by the
+            # generator's prefill loop. max() of the two, not their sum — they
+            # describe the SAME tokens, and adding them would double-count the
+            # prompt the moment decode starts (the 2x defect fixed earlier
+            # today for the text scheduler, reintroduced through a new field).
+            prompt_side = max(
+                int(getattr(request, "num_prompt_tokens", 0) or 0),
+                int(getattr(request, "_prefill_tokens_done", 0) or 0),
             )
+            return prompt_side + int(getattr(request, "total_output_tokens", 0) or 0)
 
     def abort_request(self, request_id: str) -> bool:
         """

@@ -181,3 +181,58 @@ class TestMLLMRequestProgress:
             num_prompt_tokens=10, num_output_tokens=0, total_output_tokens=77
         )
         assert self._FakeMLLM({"r": req}).request_progress("r") == 87
+
+
+class TestMLLMPrefillProgress:
+    """Prefill must register as ADVANCING progress, not zero.
+
+    Measured live: a 196k-token span exhausted all bounded grace windows
+    (900s) and was killed as wedged while the GPU was legitimately chunking.
+    The generator now advances `_prefill_tokens_done` per chunk; the probe
+    takes max(num_prompt_tokens, _prefill_tokens_done) — NOT their sum, which
+    would double-count the prompt once decode starts (the exact 2x defect
+    fixed for the text scheduler earlier the same day).
+    """
+
+    class _FakeMLLM:
+        from vmlx_engine.mllm_scheduler import MLLMScheduler as _S
+
+        request_progress = _S.request_progress
+
+        def __init__(self, requests):
+            self.requests = requests
+            import threading
+
+            self._queue_lock = threading.RLock()
+
+    def test_prefill_chunks_advance_progress(self):
+        req = SimpleNamespace(
+            num_prompt_tokens=0, total_output_tokens=0, _prefill_tokens_done=0
+        )
+        sched = self._FakeMLLM({"r": req})
+        readings = []
+        for chunk_end in (2048, 4096, 8192):
+            req._prefill_tokens_done = chunk_end
+            readings.append(sched.request_progress("r"))
+        assert readings == [2048, 4096, 8192], (
+            "each prefill chunk must be visible as increased progress or the "
+            "timeout kills a healthy long prefill"
+        )
+
+    def test_no_double_count_when_decode_starts(self):
+        # After prefill: _prefill_tokens_done == prompt len; first output sets
+        # num_prompt_tokens to the same value. Sum would jump to 2x.
+        req = SimpleNamespace(
+            num_prompt_tokens=8192, total_output_tokens=3, _prefill_tokens_done=8192
+        )
+        assert self._FakeMLLM({"r": req}).request_progress("r") == 8195
+
+    def test_monotonic_across_the_prefill_to_decode_boundary(self):
+        req = SimpleNamespace(
+            num_prompt_tokens=0, total_output_tokens=0, _prefill_tokens_done=8192
+        )
+        sched = self._FakeMLLM({"r": req})
+        before = sched.request_progress("r")
+        req.num_prompt_tokens = 8192  # first output token lands
+        req.total_output_tokens = 1
+        assert sched.request_progress("r") == before + 1

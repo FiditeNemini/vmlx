@@ -471,6 +471,19 @@ def _runtime_enabled_by_env() -> bool:
     return not _env_disabled("VMLINUX_NATIVE_MTP", "VMLX_NATIVE_MTP")
 
 
+def native_mtp_disabled_by_env() -> bool:
+    """Whether the environment turns native MTP off, for every reader.
+
+    The per-request MLLM gate and the /health status bit each grew their own
+    copy of this check that only knew the legacy VMLINUX_ spelling, so
+    ``VMLX_NATIVE_MTP=0`` switched the runtime off here while those two carried
+    on as if it were on — an A/B run that way compares MTP against itself and
+    /health reports the wrong state. One function so a new spelling can only
+    ever be added in one place.
+    """
+    return not _runtime_enabled_by_env()
+
+
 def _env_enabled(*names: str) -> bool:
     return any(os.environ.get(name, "") in _ENABLE_ENV_VALUES for name in names)
 

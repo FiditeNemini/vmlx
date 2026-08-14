@@ -9253,15 +9253,9 @@ def _model_mtp_status(bundle_path: str | None) -> dict:
 def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
     """MTP artifact status plus the currently loaded runtime activation bit."""
     status = dict(_model_mtp_status(bundle_path))
-    native_disabled = os.environ.get("VMLINUX_NATIVE_MTP", "1") in (
-        "0",
-        "false",
-        "FALSE",
-        "no",
-        "NO",
-        "off",
-        "OFF",
-    )
+    from .native_mtp import native_mtp_disabled_by_env
+
+    native_disabled = native_mtp_disabled_by_env()
     status["request_policy"] = (
         "disabled" if native_disabled else os.environ.get(
             "VMLINUX_NATIVE_MTP_SAMPLING_POLICY",

@@ -640,3 +640,47 @@ def test_mllm_native_mtp_skip_reaches_health_snapshot():
     assert skip["reason"]
     # Engagement snapshots stay independent of skip snapshots (text-lane parity).
     assert snapshot["last_native_mtp"] is None
+
+
+def test_both_native_mtp_env_spellings_reach_every_reader(monkeypatch):
+    """VMLX_NATIVE_MTP=0 must disable MTP for the MLLM gate and /health too.
+
+    native_mtp.py's kill switch already accepted both prefixes, but the MLLM
+    per-request gate and the /health status bit each kept their own copy that
+    only knew the legacy VMLINUX_ spelling. So `VMLX_NATIVE_MTP=0` switched the
+    runtime off while those two carried on as if MTP were on: an A/B run that
+    way silently compares MTP against itself, and /health reports the wrong
+    state. Pin that all readers now agree, for BOTH spellings.
+    """
+    from vmlx_engine.native_mtp import native_mtp_disabled_by_env
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator, MLLMBatchStats
+
+    class _Req:
+        request_id = "env-gate"
+        temperature = 0.0
+        repetition_penalty = 1.0
+
+    def gate_reason():
+        gen = object.__new__(MLLMBatchGenerator)
+        gen._stats = MLLMBatchStats()
+        gen.language_model = _ModelWithHead()
+        return gen._native_mtp_disabled_reason_for_request(_Req())
+
+    class _ModelWithHead:
+        """Passes the head check so the env gate is what decides."""
+
+        mtp = object()
+
+    for name in ("VMLX_NATIVE_MTP", "VMLINUX_NATIVE_MTP"):
+        monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+        monkeypatch.setenv(name, "0")
+
+        assert native_mtp_disabled_by_env() is True, name
+        reason = gate_reason()
+        assert reason is not None, f"MLLM gate ignored {name}=0"
+        assert "disable" in reason.lower(), reason
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
+    monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+    assert native_mtp_disabled_by_env() is False

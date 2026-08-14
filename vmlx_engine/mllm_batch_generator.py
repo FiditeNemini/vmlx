@@ -9134,16 +9134,10 @@ class MLLMBatchGenerator:
 
     def _native_mtp_disabled_reason_for_request(self, request: MLLMBatchRequest) -> Optional[str]:
         """Return a per-request native-MTP gate reason, or None when enabled."""
-        if os.environ.get("VMLINUX_NATIVE_MTP", "1") in (
-            "0",
-            "false",
-            "FALSE",
-            "no",
-            "NO",
-            "off",
-            "OFF",
-        ):
-            return "disabled by VMLINUX_NATIVE_MTP=0/--disable-native-mtp"
+        from .native_mtp import native_mtp_disabled_by_env
+
+        if native_mtp_disabled_by_env():
+            return "disabled by VMLX_NATIVE_MTP=0/--disable-native-mtp"
         if not _native_mtp_model_has_head(self.language_model):
             return "loaded language model has no native MTP head"
         if float(getattr(request, "temperature", 0.0) or 0.0) != 0.0:

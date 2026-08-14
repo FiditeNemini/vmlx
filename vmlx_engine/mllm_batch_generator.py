@@ -10081,13 +10081,45 @@ class MLLMBatchGenerator:
         try:
             resume_at = 0
             fresh_cache = None
+            # A base rebuilt from paged blocks carries attention KV only, so a
+            # hybrid model's linear layers would receive a KVCache and index it
+            # ("'KVCache' object is not subscriptable"). The one-shot detector
+            # cannot catch that: with no ArraysCache present the base looks
+            # attention-only and passes. Compare the base against the layers it
+            # will actually feed instead.
+            _model_layers = getattr(self.language_model, "layers", None)
+            if not isinstance(_model_layers, (list, tuple)):
+                # Only a real layer sequence can be compared; anything else
+                # (including a test double) must not veto a valid base.
+                _model_layers = None
+            _base_matches_layers = True
+            if base_cache is not None and _model_layers is not None:
+                if len(base_cache) != len(_model_layers):
+                    _base_matches_layers = False
+                else:
+                    for _layer, _entry in zip(_model_layers, base_cache):
+                        # `is True` on purpose: a stub/mock layer returns a
+                        # truthy object for any attribute, which would make
+                        # every layer look linear and refuse a perfectly good
+                        # attention-only base.
+                        if getattr(_layer, "is_linear", False) is True and type(
+                            _entry
+                        ).__name__ in ("KVCache", "QuantizedKVCache", "RotatingKVCache"):
+                            _base_matches_layers = False
+                            break
             if (
                 base_cache is not None
                 and 0 < int(base_token_count) < seq_len
+                and _base_matches_layers
                 and not _cache_requires_one_shot_rederive(base_cache)
             ):
                 fresh_cache = base_cache
                 resume_at = int(base_token_count)
+            elif base_cache is not None and not _base_matches_layers:
+                logger.info(
+                    "MLLM clean prefill: reconstructed base does not match the "
+                    "hybrid layer layout; re-deriving the whole prompt instead"
+                )
 
             if fresh_cache is None:
                 cache_model = getattr(self, "_cache_model", None)

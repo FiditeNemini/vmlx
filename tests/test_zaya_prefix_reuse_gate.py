@@ -325,7 +325,7 @@ class TestGateFailureIsAnnounced:
 
         src = Path(__file__).resolve().parents[1].joinpath("vmlx_engine/cli.py").read_text()
         i = src.index('logger.debug(f"Registry auto-apply skipped: {e}")')
-        window = src[i : i + 1200]
+        window = src[i : i + 2600]
         assert "Prefix-reuse drift gate NOT applied" in window, (
             "a registry failure must announce that the armed gate did not apply"
         )
@@ -334,3 +334,13 @@ class TestGateFailureIsAnnounced:
         assert "VMLX_DISABLE_RECURRENT_PREFIX_REUSE" in window
         # And it must be a warning, not another debug line.
         assert "logger.warning" in window
+        # Review caught the first version claiming "lookup failed" and "reuse
+        # remains ENABLED" unconditionally — the except wraps the ENTIRE
+        # auto-apply block, so a post-gate failure made both claims false. The
+        # warning must be gated on what actually happened.
+        assert "_drifting_prefix_reuse_announced" in window, (
+            "the failure warning must not fire when the gate already applied"
+        )
+        assert 'getattr(args, "enable_prefix_cache", True)' in window, (
+            "the warning must not claim reuse is enabled without checking"
+        )

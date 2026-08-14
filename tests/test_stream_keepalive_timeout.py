@@ -186,7 +186,7 @@ async def test_unknown_progress_grace_is_bounded():
 async def test_a_prefilling_request_reports_zero_and_must_not_be_killed():
     """ZERO is the reading that actually happens, and it meant "wedged".
 
-    `Scheduler.request_progress` sums `num_computed_tokens + total_output_tokens`,
+    `Scheduler.request_progress` used to sum `num_computed_tokens + total_output_tokens`,
     and `num_computed_tokens` is incremented in exactly one place —
     `Request.append_output_token` — so it counts OUTPUT tokens only. Nothing
     advances it during prefill. A registered request that is prefilling

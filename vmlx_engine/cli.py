@@ -1813,26 +1813,41 @@ def serve_command(args):
                     logger.debug(f"JANG-affine JIT auto-default skipped: {_jit_e}")
     except Exception as e:
         logger.debug(f"Registry auto-apply skipped: {e}")
-        # The drift gate lives inside the block above, so a registry failure
-        # (lookup raises on a malformed or incomplete JANG stamp) silently
-        # takes the operator's answer-stability switch with it. Debug level is
-        # right for the rest of the auto-apply — it is best-effort — but an
-        # explicitly armed correctness switch failing closed without a word is
-        # the "enabled != engaged" shape this campaign keeps finding. Say so.
+        # The drift gate lives inside the block above, so a failure here can
+        # silently take the operator's answer-stability switch with it. Debug
+        # level is right for the rest of the auto-apply — it is best-effort —
+        # but an explicitly armed correctness switch failing closed without a
+        # word is the "enabled != engaged" shape this campaign keeps finding.
+        #
+        # ⚠️ This except terminates the ENTIRE auto-apply block, not just the
+        # lookup — a first version of this warning claimed "lookup failed" and
+        # "reuse remains ENABLED" unconditionally, both of which are FALSE when
+        # the lookup succeeded, the gate applied, and some LATER policy line
+        # raised (caught in review). Gate on what actually happened instead:
+        # the announcement flag says whether the switch engaged, and
+        # args.enable_prefix_cache says whether reuse is actually on.
         if any(
             os.environ.get(_n) == "1"
             for _n in (
                 "VMLX_DISABLE_DRIFTING_PREFIX_REUSE",
                 "VMLX_DISABLE_RECURRENT_PREFIX_REUSE",
             )
-        ):
-            logger.warning(
-                "Prefix-reuse drift gate NOT applied: model config lookup "
-                "failed (%s), so the family could not be identified. Prefix "
-                "reuse remains ENABLED. Pass --disable-prefix-cache "
-                "explicitly if you need answer stability for this model.",
-                e,
-            )
+        ) and not getattr(args, "_drifting_prefix_reuse_announced", False):
+            if getattr(args, "enable_prefix_cache", True):
+                logger.warning(
+                    "Prefix-reuse drift gate NOT applied: registry auto-apply "
+                    "failed before the gate could run (%s). Prefix reuse "
+                    "remains ENABLED. Pass --disable-prefix-cache explicitly "
+                    "if you need answer stability for this model.",
+                    e,
+                )
+            else:
+                logger.warning(
+                    "Registry auto-apply failed (%s) after prefix reuse was "
+                    "already disabled; the drift switch did not run but reuse "
+                    "is OFF, so answer stability is unaffected.",
+                    e,
+                )
 
     # Thinking-template detection & warning (mlxstudio user report: Raymond
     # Wong, GLM-5.1-JANG_1L).

@@ -49,3 +49,16 @@ describe('effective tool parser resolution', () => {
     })).toBeUndefined()
   })
 })
+
+// qwen3_coder (Qwen3.6-27B D-series / Qwen 3.8 stamps) must resolve to the
+// XML-function parser — the template emits <function=NAME><parameter=KEY>,
+// not qwen JSON. A name missing from the alias/CLI tables is not a no-op:
+// the session launches with NO tool parser at all (the Muse lesson, hit again
+// live on the first D-series serve: "Ignoring unsupported tool parser").
+import { canonicalizeToolParserId } from '../src/shared/toolParserAliases'
+
+describe('qwen3_coder alias', () => {
+  it('resolves to xml_function for CLI launch', () => {
+    expect(canonicalizeToolParserId('qwen3_coder')).toBe('xml_function')
+  })
+})

@@ -754,6 +754,30 @@ class BatchedEngine(BaseEngine):
         if family not in {"qwen3_5", "qwen3_5_moe", "step3p7", "gemma4", "gemma4_unified"}:
             return messages
 
+        # Bundles that ship a real video preprocessor take the NATIVE video
+        # path (pixel_values_videos + video_grid_thw) instead of this frame
+        # fallback. The fallback exists because OLD Qwen bundles' native video
+        # tensors misread simple colors; the Qwen3.6-27B D-series (and the
+        # Qwen 3.8 line) stamp video_preprocessor_config.json precisely so the
+        # native path can be trusted. The fallback representation also has a
+        # measured failure the native path does not: with a visually similar
+        # image earlier in the conversation, the model misreads the sampled
+        # frame sequence as static (ground truth: extracted frames show the
+        # ball at x=102..392 across 8 frames, yet the mixed-context model
+        # reports every frame at the same coordinates). Env override:
+        # VMLX_VIDEO_FRAME_FALLBACK=1 forces the old behaviour for A/B.
+        if family in {"qwen3_5", "qwen3_5_moe"}:
+            import os as _os
+            if _os.environ.get("VMLX_VIDEO_FRAME_FALLBACK") != "1":
+                try:
+                    from pathlib import Path as _Path
+                    if _Path(self._model_name).joinpath(
+                        "video_preprocessor_config.json"
+                    ).is_file():
+                        return messages
+                except Exception:
+                    pass
+
         try:
             from ..models.mllm import (
                 DEFAULT_FPS,

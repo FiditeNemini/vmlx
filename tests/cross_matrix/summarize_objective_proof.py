@@ -214,13 +214,17 @@ MODEL_ARTIFACT_FORMAT_CONTRACT_REL = "build/current-model-artifact-format-contra
 GENERATION_DEFAULTS_CONTRACT_REL = "build/current-generation-defaults-contract-after-pr-intake-matrix-refresh-20260609.json"
 NATIVE_MTP_CONTRACT_REL = "build/current-native-mtp-contract-after-noheavy-contract-refresh-20260608.json"
 VL_MEDIA_CONTRACT_REL = "build/current-vl-media-cache-contract-after-dsv4-preflight-refresh-20260608.json"
-QWEN_JANG_SOURCE_SPEED_REL = "build/current-decode-speed-live-qwen27-jang4m-source-20260606.json"
-QWEN_JANG_PACKAGED_SPEED_REL = "build/current-decode-speed-live-qwen27-jang4m-installed-app-deterministic-pp-20260606.json"
+# 2026-08-15 hardware transition: retargeted from the retired 27B JANG_4M
+# artifacts to the current 35B A3B MXFP8 CRACK MTP bundle speed campaign.
+QWEN_JANG_SOURCE_SPEED_REL = "build/current-decode-speed-live-qwen35-mxfp8-mtp-source-20260815.json"
+QWEN_JANG_PACKAGED_SPEED_REL = "build/current-decode-speed-live-qwen35-mxfp8-mtp-installed-app-deterministic-pp-20260815.json"
 QWEN_NATIVE_MTP_SPEED_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-20260523.json"
 QWEN_NATIVE_MTP_PREFILL_SPEED_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-prefill2048-source-isolated-20260523.json"
 QWEN_NATIVE_MTP_PACKAGED_PREFILL_SPEED_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-prefill2048-cacheon-isolated-20260523.json"
 QWEN_NATIVE_MTP_PREFILL_TRACE_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-prefill-trace-isolated-20260523.json"
-QWEN_JANG_TEXT_BASELINE_SPEED_REL = "build/current-decode-speed-live-qwen27-jang4m-source-20260606.json"
+# Aliased to the same current-hardware source speed artifact (the June 27B
+# artifact served both roles; the 35B campaign keeps that aliasing).
+QWEN_JANG_TEXT_BASELINE_SPEED_REL = "build/current-decode-speed-live-qwen35-mxfp8-mtp-source-20260815.json"
 QWEN_NATIVE_MTP_NO_PREFIX_LOGITS_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-no-prefix-logits-20260523.json"
 QWEN_NATIVE_MTP_HYBRID_LONG_PREFIX_SPLIT_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-hybrid-long-prefix-split-20260523.json"
 QWEN_NATIVE_MTP_KVNONE_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-kvnone-20260523.json"

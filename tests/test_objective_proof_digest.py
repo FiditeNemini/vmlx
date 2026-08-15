@@ -1011,12 +1011,12 @@ def _write_passing_base_artifacts(tmp_path: Path) -> None:
     }
     _write_json(
         tmp_path,
-        "build/current-decode-speed-live-qwen27-jang4m-source-20260606.json",
+        "build/current-decode-speed-live-qwen35-mxfp8-mtp-source-20260815.json",
         speed_base,
     )
     _write_json(
         tmp_path,
-        "build/current-decode-speed-live-qwen27-jang4m-installed-app-deterministic-pp-20260606.json",
+        "build/current-decode-speed-live-qwen35-mxfp8-mtp-installed-app-deterministic-pp-20260815.json",
         speed_base,
     )
     mtp_speed_base = {

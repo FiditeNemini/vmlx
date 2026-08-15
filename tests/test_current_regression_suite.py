@@ -195,13 +195,19 @@ def test_current_regression_suite_carries_qwen_speed_rows_as_transition_open():
     from tests.cross_matrix import run_current_regression_suite as suite
 
     for requirement in (
-        "Qwen/JANG packaged MX matmul speed is release-cleared",
         "Qwen native MTP live decode speed and output equivalence are release-cleared",
         "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
     ):
         assert requirement in suite.EXPECTED_OPEN_REQUIREMENTS
+    # The packaged MX matmul speed row CLEARED 2026-08-15: 35B source +
+    # installed-app speed artifacts both pass and the digest pointers
+    # retargeted. It must stay OUT of expected-open.
+    assert (
+        "Qwen/JANG packaged MX matmul speed is release-cleared"
+        not in suite.EXPECTED_OPEN_REQUIREMENTS
+    )
     source = inspect.getsource(suite)
-    assert "35B speed artifacts land" in source, (
+    assert "35B" in source, (
         "the expected-open entries must document the reopen condition"
     )
 

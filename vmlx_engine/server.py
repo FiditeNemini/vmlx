@@ -25980,11 +25980,14 @@ async def stream_responses_api(
             _buffered_candidate
         )
         if _safe_visible_prefix != _buffered_candidate:
+            _discarded_suffix = _buffered_candidate[len(_safe_visible_prefix):]
             logger.warning(
                 "Request %s: buffered tool markup produced no valid call; "
-                "discarding %d unsafe control characters after the visible prefix",
+                "discarding %d unsafe control characters after the visible "
+                "prefix; raw_suffix=%r",
                 response_id,
-                len(_buffered_candidate) - len(_safe_visible_prefix),
+                len(_discarded_suffix),
+                _discarded_suffix[:500].replace("\n", "\\n"),
             )
             _record_tool_call_drop(
                 "Buffered native tool markup did not produce a schema-valid "

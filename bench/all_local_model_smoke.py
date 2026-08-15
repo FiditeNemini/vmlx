@@ -972,17 +972,23 @@ def build_probe_payloads(
         },
     ]
     if include_reasoning and row.get("supports_thinking"):
-        probes.append(
-            {
-                "label": "reasoning_on",
-                "payload": _text_payload(
-                    model,
-                    "Think briefly, then answer visibly with exactly: FINAL=OK",
-                    _reasoning_probe_max_tokens(row, max_tokens),
-                    thinking=True,
-                ),
-            }
+        reasoning_payload = _text_payload(
+            model,
+            "Think briefly, then answer visibly with exactly: FINAL=OK",
+            _reasoning_probe_max_tokens(row, max_tokens),
+            thinking=True,
         )
+        if _is_minimax_row(row):
+            # MiniMax M2.7 at forced temp 0 degenerates inside its (always-on)
+            # thinking rail: the same rumination sentence 22x across 1024
+            # tokens, finish=length, FINAL=OK only ever QUOTED inside
+            # reasoning, never emitted (batch9b, per-probe JSON). The app
+            # never overrides its temperature; probing what users get means
+            # the bundle's own sampling defaults. Validation is unchanged —
+            # if it also loops at its native temperature, that failure is
+            # real and must surface.
+            reasoning_payload.pop("temperature", None)
+        probes.append({"label": "reasoning_on", "payload": reasoning_payload})
     if include_tools and row.get("supports_tools", True):
         probes.append(
             {

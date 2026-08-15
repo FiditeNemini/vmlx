@@ -100,7 +100,8 @@ ROWS: dict[str, Row] = {
     ),
     "gemma4_26b_jang4m": Row(
         "gemma4_26b_jang4m",
-        "/Users/example/models/dealign.ai/Gemma-4-26B-A4B-it-JANG_4M-CRACK",
+        # 2026-08-15 hardware transition: retargeted to the current drive.
+        "/Volumes/EricsLLMDrive/dealignai/Gemma-4-26B-A4B-it-JANG_4M-CRACK",
         is_mllm=True,
         tool_parser="gemma4",
         reasoning_parser="gemma4",

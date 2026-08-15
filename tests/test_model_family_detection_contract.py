@@ -244,7 +244,9 @@ def test_decode_speed_gate_has_explicit_qwen36_mxfp8_and_native_mtp_rows():
             "reasoning_parser": "qwen3",
         },
         "qwen35_mxfp8_mtp": {
-            "path": "/Users/example/models/JANGQ/Qwen3.6-35B-A3B-MXFP8-MTP",
+            # 2026-08-15 hardware transition: retargeted to the current drive's
+            # CRACK MTP bundle (speed campaign cleared on it same day).
+            "path": "/Volumes/EricsLLMDrive/dealignai/Qwen3.6-35B-A3B-MXFP8-CRACK-MTP",
             "is_mllm": True,
             "tool_parser": "qwen",
             "reasoning_parser": "qwen3",

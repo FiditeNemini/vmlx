@@ -42,10 +42,12 @@ EXPECTED_OPEN_REQUIREMENTS = [
     "DSV4 long-output/code/file-generation quality is release-cleared",
     # Ling-2.6-flash bundles are not present on current hardware.
     "Ling/Bailing multilingual output quality is release-cleared",
-    # Pinned to the 2026-05-25 installed-app artifact set from the previous
-    # machine (5 legacy speed artifacts + streaming diagnostic); current
-    # bundled-engine probes pass and the 12-family matrix holds 93.9%.
-    "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
+    # Gemma4 speed floor CLEARED 2026-08-15 on the CURRENT installed app
+    # (1.6.31 bundled runtime, current drive bundle): streamed decode 102.3
+    # t/s cold-ish and 93.8 t/s on a 9.7k-cached hit row, both over the 80
+    # floor. The earlier 38.4 was the non-streamed wall metric folding
+    # prefill+reconstruction into decode - the clearance metric is
+    # decode_tok_s_stream, per the manifest's own recorded command.
     # 2026-08-15 hardware-transition carryover, two of three Qwen rows now
     # CLEARED same day on 35B artifacts: packaged MX matmul speed (source
     # 77.8 t/s / 2276+ pp; installed-app 78.2 t/s native wheels) and the

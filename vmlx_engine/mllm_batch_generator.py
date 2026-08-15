@@ -9717,10 +9717,15 @@ class MLLMBatchGenerator:
         # is safe. All other families rope FROM cache.offset and must see the
         # raw per-row array — see _offset_proxy_needed_for_model_type
         # (F16/F18, 2026-07-08).
+        trace = self._decode_trace
+        _wrap_t0 = time.perf_counter() if trace else 0.0
         if _offset_proxy_needed_for_model_type(self._model_type):
             cache = _wrap_batch_caches(cache)
+        if trace:
+            self._decode_trace_wrap_s = getattr(
+                self, "_decode_trace_wrap_s", 0.0
+            ) + (time.perf_counter() - _wrap_t0)
 
-        trace = self._decode_trace
         model_t0 = time.perf_counter() if trace else 0.0
 
         # Run language model only (not full VLM). Qwen3.5/3.6 mRoPE language
@@ -9728,6 +9733,7 @@ class MLLMBatchGenerator:
         # explicit positions, so keep decode absolute too instead of relying on
         # module-level rope state.
         lm_kwargs: Dict[str, Any] = {"cache": cache}
+        _posid_t0 = time.perf_counter() if trace else 0.0
         if _lm_supports_position_ids(self.language_model):
             position_ids = _absolute_text_position_ids(
                 input_tokens,
@@ -9736,6 +9742,10 @@ class MLLMBatchGenerator:
             )
             if position_ids is not None:
                 lm_kwargs["position_ids"] = position_ids
+        if trace:
+            self._decode_trace_posid_s = getattr(
+                self, "_decode_trace_posid_s", 0.0
+            ) + (time.perf_counter() - _posid_t0)
         output = self.language_model(input_tokens, **lm_kwargs)
         if trace:
             mx.synchronize()
@@ -9790,12 +9800,14 @@ class MLLMBatchGenerator:
                 logger.info(
                     "VMLINUX_DECODE_TRACE mllm steps=%d avg_model_ms=%.2f "
                     "avg_sample_ms=%.2f last_model_ms=%.2f last_sample_ms=%.2f "
-                    "batch=%d",
+                    "avg_wrap_ms=%.2f avg_posid_ms=%.2f batch=%d",
                     n,
                     (self._decode_trace_model_s / n) * 1000.0,
                     (self._decode_trace_sample_s / n) * 1000.0,
                     model_s * 1000.0,
                     sample_s * 1000.0,
+                    (getattr(self, "_decode_trace_wrap_s", 0.0) / n) * 1000.0,
+                    (getattr(self, "_decode_trace_posid_s", 0.0) / n) * 1000.0,
                     int(logits.shape[0]),
                 )
 

@@ -353,6 +353,15 @@ class QwenToolParser(ToolParser):
             else:
                 for pn, pv in cls.BARE_ARG_PATTERN.findall(body):
                     arguments[pn.strip()] = cls._coerce_arg_value(pv)
+            if not arguments:
+                # Qwen3.6-35B live variant of the doubled-wrapper miskeying:
+                # the function NAME is correct but a parameter opens as
+                # `<function=KEY>` and closes as `</parameter>`. Without this
+                # the call parses with empty arguments and the required-args
+                # validator drops it (observed live: run_command missing
+                # 'command' on the Responses stream path).
+                for pn, pv in cls._RECOVERY_MISKEYED_PARAM.findall(body):
+                    arguments[pn.strip()] = cls._coerce_arg_value(pv)
             calls.append(
                 {
                     "id": generate_tool_id(),

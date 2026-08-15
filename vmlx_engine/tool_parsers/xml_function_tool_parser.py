@@ -117,13 +117,20 @@ class XMLFunctionToolParser(ToolParser):
 
     @classmethod
     def _extract_arguments_from_body(cls, body: str) -> dict[str, Any]:
-        """Extract args trying strict `<parameter=K>V</parameter>` first, then
-        the Ornith `<arg_key>K</arg_key><value>V</value>` fallback."""
+        """Extract args trying strict `<parameter=K>V</parameter>` first, the
+        Ornith `<arg_key>K</arg_key><value>V</value>` fallback, then the
+        Qwen3.6 miskeyed `<function=K>V</parameter>` shape (correct function
+        name, parameter opened with the wrong tag — observed live on the
+        Responses stream path as an empty-args call the required-args
+        validator then dropped)."""
         arguments: dict[str, Any] = {}
         for param_name, param_value in cls.PARAM_PATTERN.findall(body):
             arguments[param_name.strip()] = cls._coerce_value(param_value)
         if not arguments:
             for k, v in cls.ORNITH_ARG_KEY_VALUE_PATTERN.findall(body):
+                arguments[k.strip()] = cls._coerce_value(v)
+        if not arguments:
+            for k, v in cls._RECOVERY_MISKEYED_PARAM.findall(body):
                 arguments[k.strip()] = cls._coerce_value(v)
         return arguments
 

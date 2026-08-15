@@ -4100,3 +4100,57 @@ class TestOllamaToolIdentityF5:
             preserve_native_format=True,
         )
         assert "name" not in plain[0], "existing OpenAI flows must keep identical bytes"
+
+
+class TestMiskeyedParameterWithProperName:
+    """The live Qwen3.6-35B variant on the Responses stream path: the function
+    NAME is correct but a parameter opens `<function=KEY>` and closes
+    `</parameter>`. The block parse then succeeded with EMPTY arguments and
+    the required-args validator dropped the call (observed: run_command
+    missing 'command'). Both parser routes recover the miskeyed argument."""
+
+    RAW = (
+        "<tool_call>\n<function=run_command>\n<function=command>\n"
+        "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    REQUEST = {
+        "tools": [
+            {"type": "function", "function": {
+                "name": "run_command",
+                "parameters": {"type": "object",
+                               "properties": {"command": {"type": "string"}},
+                               "required": ["command"]}}}
+        ]
+    }
+
+    def _parsers(self):
+        from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+        from vmlx_engine.tool_parsers.xml_function_tool_parser import (
+            XMLFunctionToolParser,
+        )
+
+        return [QwenToolParser.__new__(QwenToolParser),
+                XMLFunctionToolParser.__new__(XMLFunctionToolParser)]
+
+    def test_miskeyed_parameter_recovered_on_both_routes(self):
+        import json
+
+        for parser in self._parsers():
+            info = parser.extract_tool_calls(self.RAW, request=self.REQUEST)
+            assert info.tools_called is True, type(parser).__name__
+            call = info.tool_calls[0]
+            assert call["name"] == "run_command", type(parser).__name__
+            args = json.loads(call["arguments"])
+            assert "command" in args and "real_ui_tool_probe_1.txt" in args["command"], (
+                type(parser).__name__, args)
+
+    def test_wellformed_parameters_still_take_the_strict_path(self):
+        import json
+
+        good = ("<tool_call>\n<function=run_command>\n<parameter=command>\nls\n"
+                "</parameter>\n</function>\n</tool_call>")
+        for parser in self._parsers():
+            info = parser.extract_tool_calls(good, request=self.REQUEST)
+            assert json.loads(info.tool_calls[0]["arguments"]) == {"command": "ls"}, (
+                type(parser).__name__)

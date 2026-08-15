@@ -22770,6 +22770,23 @@ async def stream_chat_completion(
             payload = dict(obj)
         if include_usage and not terminal_usage:
             payload["usage"] = None
+        if terminal_usage:
+            # Attach the context-clamp record on the one terminal usage
+            # chunk (mirrors the non-stream surface; pops so the registry
+            # never leaks). `exhausted` = the clamped budget was consumed.
+            from vmlx_engine.context_limits import pop_context_clamp
+
+            _clamp_record = pop_context_clamp(str(response_id))
+            if _clamp_record:
+                _completion = int(
+                    ((payload.get("usage") or {}).get("completion_tokens"))
+                    or 0
+                )
+                payload["context_exhaustion"] = {
+                    **_clamp_record,
+                    "exhausted": _completion
+                    >= int(_clamp_record["clamped_max_tokens"]),
+                }
         return json.dumps(payload, ensure_ascii=True)
 
     # Stable timestamp for all chunks in this stream (OpenAI spec compliance)

@@ -4479,7 +4479,18 @@ export function validateGenerationDefaultsEvidence(result) {
   if (String(dom?.wireApi || '') !== expectedWire) {
     failures.push(`reopened visible wire format ${dom?.wireApi || 'missing'} does not match ${expectedWire}`)
   }
-  if (!acceptableReasoningLabels.includes(String(dom?.reasoningMode || ''))) {
+  // Notice families (thinkingNotConfigurable: LFM2.5, MiniMax) render the
+  // honesty notice instead of mode buttons — a missing mode control there is
+  // the CORRECT persisted state for Auto. An explicit requested override
+  // against the notice is already fatal at interaction time.
+  const noticeWithAutoRequested = dom?.thinkingNotice === true
+    && result?.requestedEnableThinking !== true
+    && result?.requestedEnableThinking !== false
+    && !dom?.reasoningMode
+  if (
+    !noticeWithAutoRequested
+    && !acceptableReasoningLabels.includes(String(dom?.reasoningMode || ''))
+  ) {
     failures.push('reopened visible reasoning mode does not match the requested mode')
   }
   if (dom?.builtinToolsEnabled !== (result?.requestedBuiltinTools === true)) {
@@ -9670,6 +9681,12 @@ async function main() {
             reasoningMode: (reopenedThinkingButton?.textContent || '')
               .replace(/\\s+/g, ' ')
               .trim() || null,
+            // Notice families (LFM2.5, MiniMax) render the honesty notice
+            // instead of mode buttons — record the shape so the reopen
+            // validator can accept a legitimately absent mode control.
+            thinkingNotice: /does not read a thinking toggle/i.test(
+              reopenedDrawer?.innerText || '',
+            ),
             builtinToolsEnabled: reopenedCheckboxValueFor('Enable Built-in Coding Tools'),
             workingDirectory: reopenedWorkingDirectory,
             maxToolIterations: reopenedNumberValueFor('Max Tool Iterations'),
@@ -9745,7 +9762,10 @@ async function main() {
             && visibleSamplingPersisted
             && visibleMaxTokensPersisted
             && chatSettingsDom.wireApi === desiredWire
-            && acceptableThinkingLabels.includes(chatSettingsDom.reasoningMode)
+            && (acceptableThinkingLabels.includes(chatSettingsDom.reasoningMode)
+              || (chatSettingsDom.thinkingNotice === true
+                && enableThinking === undefined
+                && !chatSettingsDom.reasoningMode))
             && chatSettingsDom.builtinToolsEnabled === builtinToolsEnabled
             && visibleToolSettingsPersisted
           );

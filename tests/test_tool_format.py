@@ -4206,3 +4206,85 @@ class TestSplitKeyParameterVariant:
             assert all(
                 c.get("name") != "run_command" for c in (info.tool_calls or [])
             ), type(parser).__name__
+
+
+class TestTruncatedNameAndNamelessVariants:
+    """Fourth and fifth live degraded shapes, captured verbatim by the
+    catalog-size bisect on the Responses stream (the degeneracy is
+    prompt-content-sensitive, not monotonic in catalog size):
+    (A) `<function=_command>` — the name truncated, parameters perfect;
+    (B) the function opener missing entirely, block starts at a well-formed
+    parameter. Both repairs are schema-gated: A renames only when the parsed
+    name is a strict suffix of exactly one advertised tool whose schema
+    accepts the parsed args; B promotes only when the block starts directly
+    at the parameter tag AND the key set matches exactly one advertised
+    tool. Explicitly-named unadvertised tools are never reassigned."""
+
+    TOOLS = {"tools": [
+        {"type": "function", "function": {"name": "run_command",
+         "parameters": {"type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"]}}},
+        {"type": "function", "function": {"name": "read_file",
+         "parameters": {"type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"]}}},
+        {"type": "function", "function": {"name": "write_file",
+         "parameters": {"type": "object",
+                        "properties": {"path": {"type": "string"},
+                                       "content": {"type": "string"}},
+                        "required": ["path"]}}},
+    ]}
+
+    def _parser(self):
+        from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+
+        return QwenToolParser.__new__(QwenToolParser)
+
+    def test_truncated_name_repaired_when_suffix_unique_and_schema_valid(self):
+        import json
+
+        raw = ("<tool_call>\n<function=_command>\n<parameter=command>\n"
+               "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt\n"
+               "</parameter>\n</function>\n</tool_call>")
+        info = self._parser().extract_tool_calls(raw, request=self.TOOLS)
+        call = info.tool_calls[0]
+        assert call["name"] == "run_command"
+        assert json.loads(call["arguments"])["command"].startswith("printf")
+
+    def test_nameless_block_promoted_when_schema_uniquely_matches(self):
+        import json
+
+        raw = ("<tool_call>\n<parameter=command>\n"
+               "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt\n"
+               "</parameter>\n</function>\n</tool_call>")
+        info = self._parser().extract_tool_calls(raw, request=self.TOOLS)
+        assert info.tools_called is True
+        call = info.tool_calls[0]
+        assert call["name"] == "run_command"
+        assert "command" in json.loads(call["arguments"])
+
+    def test_ambiguous_params_and_ambiguous_suffix_are_not_promoted(self):
+        raw_ambiguous_params = (
+            "<tool_call>\n<parameter=path>\n/tmp/x\n</parameter>\n"
+            "</function>\n</tool_call>")
+        info = self._parser().extract_tool_calls(
+            raw_ambiguous_params, request=self.TOOLS)
+        assert all(c.get("name") not in ("read_file", "write_file")
+                   for c in (info.tool_calls or []))
+
+        two_suffix = {"tools": [
+            {"type": "function", "function": {"name": "run_command",
+             "parameters": {"type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"]}}},
+            {"type": "function", "function": {"name": "spawn_command",
+             "parameters": {"type": "object",
+                            "properties": {"command": {"type": "string"}},
+                            "required": ["command"]}}},
+        ]}
+        raw_truncated = ("<tool_call>\n<function=_command>\n<parameter=command>\n"
+                         "ls\n</parameter>\n</function>\n</tool_call>")
+        info = self._parser().extract_tool_calls(raw_truncated, request=two_suffix)
+        assert all(c.get("name") not in ("run_command", "spawn_command")
+                   for c in (info.tool_calls or []))

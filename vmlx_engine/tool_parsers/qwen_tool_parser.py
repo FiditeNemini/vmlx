@@ -230,13 +230,57 @@ class QwenToolParser(ToolParser):
             #   <parameter=path>panel/package.json</parameter>
             # Accept it only when that empty first tag names an advertised tool.
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", tool_name):
-                if not params or params[0][1].strip():
-                    continue
-                candidate_name = params[0][0].strip()
-                if cls._function_schema_for_tool(request, candidate_name) is None:
-                    continue
-                tool_name = candidate_name
-                params = params[1:]
+                if params and not params[0][1].strip():
+                    candidate_name = params[0][0].strip()
+                    if cls._function_schema_for_tool(request, candidate_name) is None:
+                        continue
+                    tool_name = candidate_name
+                    params = params[1:]
+                else:
+                    # Third live degraded form (catalog-bisect raw capture):
+                    # the function opener is MISSING entirely — the block goes
+                    # straight to a well-formed parameter:
+                    #   <tool_call>
+                    #   <parameter=command>
+                    #   printf %s ... > file.txt
+                    #   </parameter>
+                    #   </function>
+                    #   </tool_call>
+                    # Promote ONLY when the block starts DIRECTLY with the
+                    # parameter tag — a bare token before it is the model
+                    # naming a tool explicitly (possibly unadvertised), and
+                    # reassigning explicit intent to a different tool is
+                    # invention, not repair (pinned in test_tool_parsers).
+                    if not inner.lstrip().startswith("<parameter="):
+                        continue
+                    # ...and the parameter key set matches exactly one
+                    # advertised tool's schema (required subset present,
+                    # every key known) — the schema gate, not guessing.
+                    keys = {p[0].strip() for p in params}
+                    if not keys:
+                        continue
+                    matches = []
+                    for tool in (request.get("tools") or []):
+                        fn = tool.get("function") if isinstance(tool, dict) else None
+                        if not isinstance(fn, dict):
+                            fn = tool if isinstance(tool, dict) and tool.get("type") == "function" else None
+                        if not isinstance(fn, dict):
+                            continue
+                        name = fn.get("name")
+                        schema_c = fn.get("parameters")
+                        if not isinstance(name, str) or not isinstance(schema_c, dict):
+                            continue
+                        props = schema_c.get("properties")
+                        req_keys = schema_c.get("required") or []
+                        if not isinstance(props, dict):
+                            continue
+                        if keys <= set(props) and set(
+                            k for k in req_keys if isinstance(k, str)
+                        ) <= keys:
+                            matches.append(name)
+                    if len(matches) != 1:
+                        continue
+                    tool_name = matches[0]
             schema = cls._function_schema_for_tool(request, tool_name)
             if not isinstance(schema, dict):
                 continue
@@ -442,22 +486,54 @@ class QwenToolParser(ToolParser):
             if allowed_names and not any(
                 call.get("name") in allowed_names for call in func_calls
             ):
-                # Qwen3.6-35B doubled-wrapper miskeying: the block parse yields
-                # only bogus wrapper names (or nothing), while the requested
-                # tool name appears as a nested opener. Shared recovery on
-                # ToolParser — the same shape arrives on the xml_function
-                # route (this landed there first and was inert here).
-                recovered = self._recover_doubled_wrapper_calls(
-                    cleaned_text, allowed_names=allowed_names
-                )
-                if recovered:
-                    func_calls = recovered
-                    cleaned_text = re.sub(
-                        r"<tool_call>.*?(?:</tool_call>|$)",
-                        "",
-                        cleaned_text,
-                        flags=re.DOTALL,
+                # Truncated-name variant (catalog-bisect raw capture):
+                # `<function=_command>` with a perfect parameter block — the
+                # model dropped the leading chars of the name. Repair ONLY
+                # when the parsed name is a strict suffix of exactly one
+                # advertised tool and the parsed argument keys validate
+                # against that tool's schema.
+                repaired = False
+                for call in func_calls:
+                    parsed_name = str(call.get("name") or "")
+                    if len(parsed_name) < 4:
+                        continue
+                    suffix_matches = [
+                        name for name in allowed_names
+                        if name != parsed_name and name.endswith(parsed_name)
+                    ]
+                    if len(suffix_matches) != 1:
+                        continue
+                    schema = self._function_schema_for_tool(
+                        request, suffix_matches[0]
                     )
+                    props = (schema or {}).get("properties")
+                    if not isinstance(props, dict):
+                        continue
+                    try:
+                        arg_keys = set(json.loads(call.get("arguments") or "{}"))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if arg_keys and arg_keys <= set(props):
+                        call["name"] = suffix_matches[0]
+                        repaired = True
+                if not repaired:
+                    # Qwen3.6-35B doubled-wrapper miskeying: the block parse
+                    # yields only bogus wrapper names (or nothing), while the
+                    # requested tool name appears as a nested opener. Shared
+                    # recovery on ToolParser — the same shape arrives on the
+                    # xml_function route (this landed there first and was
+                    # inert here).
+                    recovered = self._recover_doubled_wrapper_calls(
+                        cleaned_text, allowed_names=allowed_names
+                    )
+                    if recovered:
+                        func_calls = recovered
+                        cleaned_text = re.sub(
+                            r"<tool_call>.*?(?:</tool_call>|$)",
+                            "",
+                            cleaned_text,
+                            flags=re.DOTALL,
+                        )
             if func_calls:
                 tool_calls.extend(func_calls)
                 cleaned_text = self.FUNCTION_PATTERN.sub("", cleaned_text)

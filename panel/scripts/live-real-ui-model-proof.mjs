@@ -9340,11 +9340,23 @@ async function main() {
             'Repetition Penalty': samplingOverrides.repeatPenalty,
           })) {
             if (value == null) continue;
-            await setInput(rangeInputFor(label), value, label);
+            // Controls hydrate asynchronously after the drawer opens on a
+            // freshly-started session (observed: MiniMax drawer showed only
+            // the session header when queried immediately) — wait for the
+            // requested control instead of failing on the first paint.
+            await setInput(
+              await waitFor(() => rangeInputFor(label) || null, 'visible ' + label + ' slider'),
+              value,
+              label,
+            );
             chatSettingsInteraction.controlsChanged.push(label);
           }
           if (requestedMaxTokens != null) {
-            await setInput(maxTokenInputFor(), requestedMaxTokens, 'Max Tokens');
+            await setInput(
+              await waitFor(() => maxTokenInputFor() || null, 'visible Max Tokens input'),
+              requestedMaxTokens,
+              'Max Tokens',
+            );
             chatSettingsInteraction.controlsChanged.push('Max Tokens');
           }
           const thinkingLabel = enableThinking === true
@@ -9357,24 +9369,32 @@ async function main() {
             : enableThinking === false
               ? ['Off', 'Instruct']
               : ['Auto'];
-          const thinkingButton = [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
-            .find((button) =>
-              isVisible(button)
-              && !button.disabled
-              && acceptableThinkingLabels.includes(
-                (button.textContent || '').replace(/\\s+/g, ' ').trim()
-              )
-            );
+          // Same hydration wait as the inputs above: the mode buttons appear
+          // after the drawer hydrates on a fresh session.
+          const thinkingButton = await waitFor(
+            () => [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
+              .find((button) =>
+                isVisible(button)
+                && !button.disabled
+                && acceptableThinkingLabels.includes(
+                  (button.textContent || '').replace(/\\s+/g, ' ').trim()
+                )
+              ) || null,
+            'visible reasoning mode control: ' + thinkingLabel,
+          ).catch(() => null);
           if (!thinkingButton) {
             throw new Error('visible reasoning mode control missing: ' + thinkingLabel);
           }
           thinkingButton.click();
           chatSettingsInteraction.controlsChanged.push('Reasoning ' + thinkingLabel);
           await new Promise((resolve) => setTimeout(resolve, 50));
-          const wireSelect = [...(chatSettingsDrawer?.querySelectorAll('select') || [])]
-            .find((candidate) =>
-              [...candidate.options].some((option) => option.value === 'responses')
-            );
+          const wireSelect = await waitFor(
+            () => [...(chatSettingsDrawer?.querySelectorAll('select') || [])]
+              .find((candidate) =>
+                [...candidate.options].some((option) => option.value === 'responses')
+              ) || null,
+            'visible API Wire Format control',
+          ).catch(() => null);
           if (!(wireSelect instanceof HTMLSelectElement) || !selectSetter) {
             throw new Error('visible API Wire Format control missing');
           }

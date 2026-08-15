@@ -530,6 +530,13 @@ class ChatCompletionResponse(BaseModel):
     choices: list[ChatCompletionChoice]
     usage: Usage = Field(default_factory=Usage)
     warnings: list[str] | None = None
+    # Present only when the admission-time context clamp bound this request:
+    # {prompt_tokens, requested_max_tokens, clamped_max_tokens,
+    #  declared_context_tokens, exhausted}. `exhausted` is true when the
+    # generation ran to the clamped budget — a finish_reason=length that
+    # means CONTEXT EXHAUSTION, not an ordinary output-limit stop. Additive;
+    # OpenAI clients ignore unknown fields.
+    context_exhaustion: dict | None = None
 
 
 # =============================================================================

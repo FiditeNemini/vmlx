@@ -18730,6 +18730,33 @@ async def create_chat_completion(
             detail=_reasoning_only_chat_error_payload(response_id)["error"],
         )
 
+    # Attach the context-clamp record when the admission clamp bound this
+    # request (pop regardless of outcome so the registry never leaks).
+    from vmlx_engine.context_limits import pop_context_clamp
+
+    _clamp_record = pop_context_clamp(str(response_id))
+    _context_exhaustion = None
+    if _clamp_record:
+        _usage_for_clamp = get_usage(output)
+        _exhausted = (
+            _normalize_responses_finish_reason(finish_reason) == "length"
+            and int(getattr(_usage_for_clamp, "completion_tokens", 0) or 0)
+            >= int(_clamp_record["clamped_max_tokens"])
+        )
+        _context_exhaustion = {**_clamp_record, "exhausted": _exhausted}
+        _notice = (
+            "output budget clamped to the model's declared context "
+            f"({_clamp_record['prompt_tokens']} prompt + "
+            f"{_clamp_record['requested_max_tokens']} requested > "
+            f"{_clamp_record['declared_context_tokens']} declared); "
+            + (
+                "generation ran to the context ceiling - CONTEXT EXHAUSTED"
+                if _exhausted
+                else f"generating at most {_clamp_record['clamped_max_tokens']} tokens"
+            )
+        )
+        response_warnings = list(response_warnings or []) + [_notice]
+
     response = ChatCompletionResponse(
         id=response_id,
         model=request.model,
@@ -18751,6 +18778,7 @@ async def create_chat_completion(
         ],
         usage=get_usage(output),
         warnings=response_warnings,
+        context_exhaustion=_context_exhaustion,
     )
 
     # When tool_calls are present, serialize manually to ensure content:null is

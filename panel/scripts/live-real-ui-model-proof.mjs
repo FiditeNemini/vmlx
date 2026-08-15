@@ -4542,7 +4542,7 @@ export function validateGenerationDefaultsEvidence(result) {
       const resolvedExpected = requestOverride ?? expected
       const resolvedValue = numericField(resolved, resolvedKey, engineKey, bundleKey, uiKey)
       const resolvedSentinelOmitted = (
-        engineKey === 'top_k'
+        (engineKey === 'top_k' || engineKey === 'min_p')
         && Number(resolvedExpected) === 0
         && (resolvedValue === undefined || resolvedValue === null)
       )
@@ -4558,7 +4558,7 @@ export function validateGenerationDefaultsEvidence(result) {
           uiKey,
         )
         const turnSentinelOmitted = (
-          engineKey === 'top_k'
+          (engineKey === 'top_k' || engineKey === 'min_p')
           && Number(resolvedExpected) === 0
           && (turnValue === undefined || turnValue === null)
         )

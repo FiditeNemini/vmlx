@@ -9398,10 +9398,12 @@ async function main() {
             : enableThinking === false
               ? ['Off', 'Instruct']
               : ['Auto'];
-          // Families render the thinking control in one of two shapes: a mode
-          // button group (On/Off/Auto or Reasoning/Instruct) or a plain
-          // "Enable Thinking" checkbox (LFM2.5, MiniMax). Accept both shapes;
-          // hydration wait as for the inputs above.
+          // A family whose template never reads enable_thinking renders an
+          // honesty NOTICE instead of the Auto/On/Off button group
+          // (ChatSettings thinkingNotConfigurable — LFM2.5, MiniMax). Wait for
+          // either shape; interact only when the buttons exist. Requesting an
+          // explicit on/off override against the notice is a row
+          // misconfiguration and stays fatal.
           const findThinkingButton = () => [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
             .find((button) =>
               isVisible(button)
@@ -9410,25 +9412,26 @@ async function main() {
                 (button.textContent || '').replace(/\\s+/g, ' ').trim()
               )
             ) || null;
+          const thinkingNoticeShown = () =>
+            /does not read a thinking toggle/i.test(chatSettingsDrawer?.innerText || '');
           const thinkingControl = await waitFor(
-            () => findThinkingButton() || checkboxFor('Enable Thinking') || null,
-            'visible reasoning control (' + thinkingLabel + ' button or Enable Thinking checkbox)',
+            () => findThinkingButton() || (thinkingNoticeShown() ? 'notice' : null),
+            'visible reasoning control (' + thinkingLabel + ' button or not-configurable notice)',
           ).catch(() => null);
-          if (thinkingControl instanceof HTMLInputElement) {
+          if (thinkingControl === 'notice' || thinkingControl == null) {
             if (enableThinking === true || enableThinking === false) {
-              if (Boolean(thinkingControl.checked) !== enableThinking) {
-                thinkingControl.click();
-                await new Promise((resolve) => setTimeout(resolve, 50));
-              }
-              chatSettingsInteraction.controlsChanged.push('Enable Thinking ' + thinkingLabel);
+              throw new Error(
+                'visible reasoning mode control missing: ' + thinkingLabel
+                + (thinkingControl === 'notice'
+                  ? ' (family renders the thinking-not-configurable notice)'
+                  : ''),
+              );
             }
-            // Auto: leave the checkbox at the family default.
-          } else if (thinkingControl) {
+            // Auto with no toggle rendered: family default applies untouched.
+          } else {
             thinkingControl.click();
             chatSettingsInteraction.controlsChanged.push('Reasoning ' + thinkingLabel);
             await new Promise((resolve) => setTimeout(resolve, 50));
-          } else {
-            throw new Error('visible reasoning mode control missing: ' + thinkingLabel);
           }
           const wireSelect = await waitFor(
             () => [...(chatSettingsDrawer?.querySelectorAll('select') || [])]

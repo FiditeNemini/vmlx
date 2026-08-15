@@ -102,4 +102,58 @@ def clamp_output_to_declared_context(
         declared,
         remaining,
     )
+    record_context_clamp(
+        request_id,
+        prompt_tokens=prompt_count,
+        requested_max_tokens=requested,
+        clamped_max_tokens=remaining,
+        declared_context_tokens=declared,
+    )
     return remaining
+
+
+# ---------------------------------------------------------------------------
+# Per-request clamp registry (feeds the response-surface notice, #175).
+# The admission-time clamp runs in the scheduler; the response builder runs
+# later on the API path. Record binding clamps by request id so finalize can
+# attach an explicit context_exhausted signal instead of a bare length stop.
+# Bounded FIFO so abandoned requests cannot grow the map.
+# ---------------------------------------------------------------------------
+
+_CLAMP_REGISTRY_MAX = 256
+_clamped_requests: "dict[str, dict[str, int]]" = {}
+_clamped_order: "list[str]" = []
+
+
+def record_context_clamp(
+    request_id: str,
+    *,
+    prompt_tokens: int,
+    requested_max_tokens: int,
+    clamped_max_tokens: int,
+    declared_context_tokens: int,
+) -> None:
+    with _lock:
+        if request_id not in _clamped_requests:
+            _clamped_order.append(request_id)
+            while len(_clamped_order) > _CLAMP_REGISTRY_MAX:
+                stale = _clamped_order.pop(0)
+                _clamped_requests.pop(stale, None)
+        _clamped_requests[request_id] = {
+            "prompt_tokens": int(prompt_tokens),
+            "requested_max_tokens": int(requested_max_tokens),
+            "clamped_max_tokens": int(clamped_max_tokens),
+            "declared_context_tokens": int(declared_context_tokens),
+        }
+
+
+def pop_context_clamp(request_id: str) -> "dict[str, int] | None":
+    """Return-and-clear the clamp record for a finishing request."""
+    with _lock:
+        record = _clamped_requests.pop(request_id, None)
+        if record is not None:
+            try:
+                _clamped_order.remove(request_id)
+            except ValueError:
+                pass
+        return record

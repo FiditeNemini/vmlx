@@ -66,3 +66,38 @@ def test_env_toggle_disables(monkeypatch, caplog):
 def test_none_max_tokens_passes_through():
     context_limits.set_declared_context_tokens(32768)
     assert context_limits.clamp_output_to_declared_context(5875, None) is None
+
+
+def test_binding_clamp_records_registry_entry_and_pop_clears():
+    context_limits.set_declared_context_tokens(32768)
+    clamped = context_limits.clamp_output_to_declared_context(
+        5875, 32768, request_id="req-registry"
+    )
+    assert clamped == 32768 - 5875
+    record = context_limits.pop_context_clamp("req-registry")
+    assert record == {
+        "prompt_tokens": 5875,
+        "requested_max_tokens": 32768,
+        "clamped_max_tokens": 32768 - 5875,
+        "declared_context_tokens": 32768,
+    }
+    assert context_limits.pop_context_clamp("req-registry") is None
+
+
+def test_non_binding_requests_record_nothing():
+    context_limits.set_declared_context_tokens(32768)
+    context_limits.clamp_output_to_declared_context(
+        100, 200, request_id="req-clean"
+    )
+    assert context_limits.pop_context_clamp("req-clean") is None
+
+
+def test_registry_is_bounded():
+    context_limits.set_declared_context_tokens(1000)
+    for i in range(300):
+        context_limits.clamp_output_to_declared_context(
+            100, 5000, request_id=f"req-{i}"
+        )
+    # oldest entries evicted; newest retained
+    assert context_limits.pop_context_clamp("req-0") is None
+    assert context_limits.pop_context_clamp("req-299") is not None

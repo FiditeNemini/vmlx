@@ -822,11 +822,17 @@ def _required_tool_probe_max_tokens(row: dict[str, Any], max_tokens: int) -> int
 
 
 def _reasoning_probe_max_tokens(row: dict[str, Any], max_tokens: int) -> int:
-    # ZAYA/Nemotron/Qwen3.6 MoE MTP thinking rails are valid, but a 256-token
-    # probe can stop before the closing </think> and visible final answer.
+    # ZAYA/Nemotron/Qwen3.6 MoE MTP/MiniMax thinking rails are valid, but a
+    # 256-token probe can stop before the closing </think> and visible final
+    # answer (MiniMax M2.7 spent all 256 inside reasoning at temp 0).
     # Keep validation strict; give these families enough budget to prove the
     # advertised thinking mode instead of misclassifying them as empty-visible.
-    if _is_zaya_row(row) or _is_nemotron_row(row) or _is_qwen36_moe_mtp_row(row):
+    if (
+        _is_zaya_row(row)
+        or _is_nemotron_row(row)
+        or _is_qwen36_moe_mtp_row(row)
+        or _is_minimax_row(row)
+    ):
         return max(512, max_tokens)
     return max(256, max_tokens)
 

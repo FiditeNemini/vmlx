@@ -176,19 +176,6 @@ ROWS: dict[str, Row] = {
         expected_min_tps=25.0,
         expected_min_pp=600.0,
     ),
-    # 2026-08-15 hardware transition: the 27B bundles above were retired with
-    # the previous machine; the current drive ships the 35B A3B MXFP8 CRACK
-    # MTP bundle. Floors inherit the MXFP8 class (A3B active experts decode
-    # in the same band; the live real-UI runs measured 46-65 t/s decode).
-    "qwen35_mxfp8_mtp": Row(
-        "qwen35_mxfp8_mtp",
-        "/Volumes/EricsLLMDrive/dealignai/Qwen3.6-35B-A3B-MXFP8-CRACK-MTP",
-        is_mllm=True,
-        tool_parser="qwen",
-        reasoning_parser="qwen3",
-        expected_min_tps=25.0,
-        expected_min_pp=600.0,
-    ),
     "qwen27_jang4m_mtp": Row(
         "qwen27_jang4m_mtp",
         "/Users/example/models/JANGQ/Qwen3.6-27B-JANG_4M-MTP",
@@ -234,7 +221,9 @@ ROWS: dict[str, Row] = {
     ),
     "qwen35_mxfp8_mtp": Row(
         "qwen35_mxfp8_mtp",
-        "/Users/example/models/JANGQ/Qwen3.6-35B-A3B-MXFP8-MTP",
+        # 2026-08-15 hardware transition: retargeted from the retired
+        # machine's JANGQ layout to the current drive's CRACK MTP bundle.
+        "/Volumes/EricsLLMDrive/dealignai/Qwen3.6-35B-A3B-MXFP8-CRACK-MTP",
         is_mllm=True,
         tool_parser="qwen",
         reasoning_parser="qwen3",

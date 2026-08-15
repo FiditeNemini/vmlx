@@ -1437,13 +1437,16 @@ def test_validate_probe_response_rejects_mimo_sentinel_json_dehyphenation():
     ]
 
 
-def test_validate_probe_response_rejects_tool_visible_text_leak():
+def test_validate_probe_response_allows_prose_preamble_with_valid_tool_call():
+    # OpenAI wire semantics permit content alongside tool_calls; the app
+    # renders a preamble plus the tool chip cleanly (DSV4 says "I'll record
+    # the fact as instructed." before calling). Plain prose is NOT a leak.
     mod = load_module()
 
     failures = mod.validate_probe_response(
         "tool_required",
         200,
-        "thought",
+        "I'll record the fact as instructed.",
         "",
         tool_calls=[
             {
@@ -1455,11 +1458,32 @@ def test_validate_probe_response_rejects_tool_visible_text_leak():
         ],
     )
 
-    assert {
-        "label": "tool_required",
-        "reason": "tool_visible_text_leak",
-        "content": "thought",
-    } in failures
+    assert not any(
+        failure.get("reason") == "tool_visible_text_leak" for failure in failures
+    )
+
+
+def test_validate_probe_response_rejects_raw_markup_tool_text_leak():
+    mod = load_module()
+
+    failures = mod.validate_probe_response(
+        "tool_required",
+        200,
+        '<tool_call>{"name":"record_fact"}</tool_call>',
+        "",
+        tool_calls=[
+            {
+                "function": {
+                    "name": "record_fact",
+                    "arguments": '{"value":"blue-cat"}',
+                }
+            }
+        ],
+    )
+
+    assert any(
+        failure.get("reason") == "tool_visible_text_leak" for failure in failures
+    )
 
 
 def test_validate_probe_response_rejects_runaway_reasoning_loop():

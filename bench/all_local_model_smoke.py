@@ -1373,7 +1373,16 @@ def validate_probe_response(
     if label in {"tool_required", "mimo_tool_required_sentinel"}:
         expected_tool = "record_fact"
         expected_value = "B7-CAT-09" if label == "mimo_tool_required_sentinel" else "blue-cat"
-        if stripped:
+        # OpenAI wire semantics permit assistant content alongside tool_calls
+        # and the app renders a preamble plus the tool chip cleanly (DSV4
+        # says "I'll record the fact as instructed." before calling). Only
+        # flag visible text that leaks raw tool MARKUP, or plain prose when
+        # no valid call was produced at all (caught below as
+        # expected_tool_call_missing).
+        if stripped and any(
+            needle in stripped
+            for needle in ("<tool_call", "<function", "</function", "<atem:", "<|")
+        ):
             failures.append(
                 {
                     "label": label,

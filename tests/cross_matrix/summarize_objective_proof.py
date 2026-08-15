@@ -6388,13 +6388,15 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         requirements,
         "DSV4 native composite same-process reuse is cold-prefill equivalent",
         _status(_dsv4_sp_eq_ok),
-        [DSV4_SAMEPROC_EQUIVALENCE_REL, DSV4_RESPONSES_CACHE_GATE_REL],
+        [DSV4_SAMEPROC_EQUIVALENCE_REL],
         caveat=(
             "Cleared 2026-08-15 by the dedicated cold-vs-restored probe at "
             "DEFAULT config: per-request cached_tokens 569/512/512 with "
             "byte-exact answers 3/3 at temp 0 (turns above the 256-token "
             "composite block floor; shorter prompts are skipped by the store "
-            "by design). Historical gate retained as secondary evidence."
+            "by design). The 2026-06-06 historical cache gate artifact did "
+            "not survive the hardware transition and is intentionally not "
+            "listed as evidence (a listed-but-absent file reopens the row)."
         ),
         details={
             "deferred_release": "v1.6.20",

@@ -263,6 +263,97 @@ class ToolParser(ABC):
                 return parameters if isinstance(parameters, dict) else None
         return None
 
+    @staticmethod
+    def _request_tool_names(request: dict[str, Any] | None) -> set[str]:
+        """Advertised function-tool names, reading BOTH protocol shapes
+        (Chat Completions nests under "function", Responses is flat) for the
+        same reason as _function_schema_for_tool above."""
+        if not isinstance(request, dict):
+            return set()
+        names: set[str] = set()
+        for tool in request.get("tools") or []:
+            if not isinstance(tool, dict):
+                continue
+            fn = tool.get("function")
+            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
+                names.add(fn["name"])
+            elif tool.get("type") == "function" and isinstance(tool.get("name"), str):
+                names.add(tool["name"])
+        return names
+
+    # Qwen3.6-35B at temp 0 emits a malformed doubled-wrapper nesting
+    # (observed verbatim in the 2026-08-15 smoke on BOTH the qwen and
+    # xml_function parser routes — the recovery lives here so every parser
+    # that can receive the shape shares one implementation):
+    #   <tool_call>
+    #   <function=function>
+    #   <function=record_fact>
+    #   <function=value>
+    #   blue-cat
+    #   </parameter>
+    #   </function>
+    #   </tool_call>
+    # The real function name and every parameter are unambiguous when the
+    # request's tool names are known: the only opener matching a requested
+    # tool is the call, and `<function=KEY>V</parameter>` inside it is a
+    # miskeyed `<parameter=KEY>V</parameter>`.
+    _RECOVERY_FUNCTION_OPENER = re.compile(r"<function=([^>]+)>")
+    _RECOVERY_STRICT_PARAM = re.compile(
+        r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>", re.DOTALL
+    )
+    _RECOVERY_MISKEYED_PARAM = re.compile(
+        r"<function=([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</parameter>", re.DOTALL
+    )
+
+    @staticmethod
+    def _recovery_coerce_value(value: str) -> Any:
+        try:
+            return json.loads(value.strip())
+        except (json.JSONDecodeError, ValueError):
+            return value
+
+    @classmethod
+    def _recovery_arguments_from_body(cls, body: str) -> dict[str, Any]:
+        arguments: dict[str, Any] = {}
+        for param_name, param_value in cls._RECOVERY_STRICT_PARAM.findall(body):
+            arguments[param_name.strip()] = cls._recovery_coerce_value(param_value)
+        return arguments
+
+    @classmethod
+    def _recover_doubled_wrapper_calls(
+        cls, text: str, *, allowed_names: set[str] | None
+    ) -> list[dict[str, Any]]:
+        if not allowed_names:
+            return []
+        tool_calls: list[dict[str, Any]] = []
+        for match in cls._RECOVERY_FUNCTION_OPENER.finditer(text):
+            name = match.group(1).strip()
+            if name not in allowed_names:
+                continue
+            body = text[match.end():]
+            next_real = None
+            for later in cls._RECOVERY_FUNCTION_OPENER.finditer(body):
+                if later.group(1).strip() in allowed_names:
+                    next_real = later.start()
+                    break
+            if next_real is not None:
+                body = body[:next_real]
+            arguments = cls._recovery_arguments_from_body(body)
+            if not arguments:
+                for key, value in cls._RECOVERY_MISKEYED_PARAM.findall(body):
+                    key = key.strip()
+                    if key in allowed_names:
+                        continue
+                    arguments[key] = cls._recovery_coerce_value(value)
+            tool_calls.append(
+                {
+                    "id": generate_tool_id(),
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                }
+            )
+        return tool_calls
+
     @classmethod
     def _serialize_tool_arguments(
         cls,

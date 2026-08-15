@@ -98,21 +98,8 @@ class XMLFunctionToolParser(ToolParser):
         except (json.JSONDecodeError, ValueError):
             return value
 
-    @staticmethod
-    def _request_tool_names(request: dict[str, Any] | None) -> set[str]:
-        if not isinstance(request, dict):
-            return set()
-        tools = request.get("tools")
-        if not isinstance(tools, list):
-            return set()
-        names: set[str] = set()
-        for tool in tools:
-            if not isinstance(tool, dict):
-                continue
-            fn = tool.get("function")
-            if isinstance(fn, dict) and isinstance(fn.get("name"), str):
-                names.add(fn["name"])
-        return names
+    # _request_tool_names and the doubled-wrapper recovery live on ToolParser:
+    # the malformed shape arrives on both the qwen and xml_function routes.
 
     # Relaxed function pattern: Ornith-1.0 may emit `<function=name>` without
     # the matching `</function>` close. Body extends to the next `</tool_call>`
@@ -122,60 +109,11 @@ class XMLFunctionToolParser(ToolParser):
         re.DOTALL,
     )
 
-    # Qwen3.6-35B at temp 0 emits a malformed doubled-wrapper nesting
-    # (observed verbatim in the 2026-08-15 smoke, and the cause of the
-    # family's empty visible turns once the markup was suppressed):
-    #   <tool_call>
-    #   <function=function>
-    #   <function=record_fact>
-    #   <function=value>
-    #   blue-cat
-    #   </parameter>
-    #   </function>
-    #   </tool_call>
-    # The real function name and every parameter are unambiguous when the
-    # request's tool names are known: the only opener matching a requested
-    # tool is the call, and `<function=KEY>V</parameter>` inside it is a
-    # miskeyed `<parameter=KEY>V</parameter>`.
-    MISKEYED_PARAM_PATTERN = re.compile(
-        r"<function=([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</parameter>",
-        re.DOTALL,
-    )
-
     @classmethod
-    def _recover_doubled_wrapper_calls(
-        cls, text: str, *, allowed_names: set[str] | None
-    ) -> list[dict[str, Any]]:
-        if not allowed_names:
-            return []
-        tool_calls: list[dict[str, Any]] = []
-        for match in re.finditer(r"<function=([^>]+)>", text):
-            name = match.group(1).strip()
-            if name not in allowed_names:
-                continue
-            body = text[match.end():]
-            next_real = None
-            for later in re.finditer(r"<function=([^>]+)>", body):
-                if later.group(1).strip() in allowed_names:
-                    next_real = later.start()
-                    break
-            if next_real is not None:
-                body = body[:next_real]
-            arguments = cls._extract_arguments_from_body(body)
-            if not arguments:
-                for key, value in cls.MISKEYED_PARAM_PATTERN.findall(body):
-                    key = key.strip()
-                    if key in allowed_names:
-                        continue
-                    arguments[key] = cls._coerce_value(value)
-            tool_calls.append(
-                {
-                    "id": generate_tool_id(),
-                    "name": name,
-                    "arguments": json.dumps(arguments, ensure_ascii=False),
-                }
-            )
-        return tool_calls
+    def _recovery_arguments_from_body(cls, body: str) -> dict[str, Any]:
+        # Route the shared doubled-wrapper recovery through this parser's own
+        # argument extraction so the Ornith arg_key/value fallback still works.
+        return cls._extract_arguments_from_body(body)
 
     @classmethod
     def _extract_arguments_from_body(cls, body: str) -> dict[str, Any]:

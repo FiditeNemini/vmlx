@@ -421,6 +421,26 @@ class QwenToolParser(ToolParser):
         # Qwen3-Coder / Qwen3.6 XML function-parameter format (issue #192)
         if not tool_calls and "<function" in cleaned_text:
             func_calls = self._parse_function_blocks(cleaned_text)
+            allowed_names = self._request_tool_names(request)
+            if allowed_names and not any(
+                call.get("name") in allowed_names for call in func_calls
+            ):
+                # Qwen3.6-35B doubled-wrapper miskeying: the block parse yields
+                # only bogus wrapper names (or nothing), while the requested
+                # tool name appears as a nested opener. Shared recovery on
+                # ToolParser — the same shape arrives on the xml_function
+                # route (this landed there first and was inert here).
+                recovered = self._recover_doubled_wrapper_calls(
+                    cleaned_text, allowed_names=allowed_names
+                )
+                if recovered:
+                    func_calls = recovered
+                    cleaned_text = re.sub(
+                        r"<tool_call>.*?(?:</tool_call>|$)",
+                        "",
+                        cleaned_text,
+                        flags=re.DOTALL,
+                    )
             if func_calls:
                 tool_calls.extend(func_calls)
                 cleaned_text = self.FUNCTION_PATTERN.sub("", cleaned_text)

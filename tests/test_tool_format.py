@@ -3988,3 +3988,70 @@ class TestXMLFunctionDoubledWrapperRecovery:
         # No names to disambiguate: parser keeps its old behavior rather than
         # guessing (the engine's required-mode check then reports it).
         assert all(c["name"] == "function" for c in info.tool_calls)
+
+
+class TestQwenDoubledWrapperRecovery:
+    """The SAME doubled-wrapper raw arrives on the qwen parser route: the live
+    Qwen3.6-35B-A3B-MXFP8-CRACK-MTP bundle is jang-stamped tool_parser=qwen, so
+    the recovery that first landed on the xml_function route was inert in the
+    2026-08-15 batch9 smoke (tool_choice=required 400 with the markup verbatim
+    in raw_preview). Recovery is shared on ToolParser; these pin the qwen
+    route and both protocol tool shapes."""
+
+    RAW = (
+        "<tool_call>\n<function=function>\n<function=record_fact>\n"
+        "<function=value>\nblue-cat\n</parameter>\n</function>\n</tool_call>"
+    )
+    REQUEST_CHAT = {
+        "tools": [
+            {"type": "function", "function": {"name": "record_fact", "parameters": {}}}
+        ]
+    }
+    REQUEST_RESPONSES = {
+        "tools": [{"type": "function", "name": "record_fact", "parameters": {}}]
+    }
+
+    def _parser(self):
+        from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+
+        return QwenToolParser.__new__(QwenToolParser)
+
+    def test_recovers_the_real_call_on_the_qwen_route(self):
+        import json
+
+        info = self._parser().extract_tool_calls(self.RAW, request=self.REQUEST_CHAT)
+
+        assert info.tools_called is True
+        assert len(info.tool_calls) == 1
+        assert info.tool_calls[0]["name"] == "record_fact"
+        assert json.loads(info.tool_calls[0]["arguments"]) == {"value": "blue-cat"}
+        assert not info.content
+
+    def test_responses_shape_tools_also_disambiguate(self):
+        import json
+
+        info = self._parser().extract_tool_calls(
+            self.RAW, request=self.REQUEST_RESPONSES
+        )
+
+        assert info.tools_called is True
+        assert info.tool_calls[0]["name"] == "record_fact"
+        assert json.loads(info.tool_calls[0]["arguments"]) == {"value": "blue-cat"}
+
+    def test_wellformed_function_blocks_do_not_take_the_recovery_path(self):
+        import json
+
+        good = (
+            "<tool_call>\n<function=record_fact>\n<parameter=value>\nblue-cat\n"
+            "</parameter>\n</function>\n</tool_call>"
+        )
+        info = self._parser().extract_tool_calls(good, request=self.REQUEST_CHAT)
+
+        assert info.tools_called is True
+        assert info.tool_calls[0]["name"] == "record_fact"
+        assert json.loads(info.tool_calls[0]["arguments"]) == {"value": "blue-cat"}
+
+    def test_without_request_names_no_call_is_invented(self):
+        info = self._parser().extract_tool_calls(self.RAW, request=None)
+
+        assert all(c.get("name") != "record_fact" for c in info.tool_calls)

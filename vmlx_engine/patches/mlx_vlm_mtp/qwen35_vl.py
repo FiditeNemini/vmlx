@@ -1109,6 +1109,21 @@ def _patch_outer_model(qvl: Any) -> None:
             language_model, "mtp"
         )
 
+        # The unconditional mtp-norm +1 shift was written for HF-format
+        # shards; an MLX-ready checkpoint (format=mlx CRACK/base bundles
+        # sanitized via the load_weights override) already carries shifted
+        # head norms and would be corrupted by a second +1. Trust the same
+        # sampled-value evidence the base norms use, scoped to head keys.
+        mtp_norms_unshifted = _qwen_norm_shard_looks_unshifted(
+            {
+                key: value
+                for key, value in weights.items()
+                if key.startswith("mtp.") or ".mtp." in key
+            },
+            norm_keys,
+        )
+        self._vmlx_sanitize_ran = True
+
         sanitized_weights = {}
         for key, value in weights.items():
             if drop_mtp_weights and (key.startswith("mtp.") or ".mtp." in key):
@@ -1135,7 +1150,7 @@ def _patch_outer_model(qvl: Any) -> None:
                         or _qwen_norm_shard_looks_unshifted(weights, norm_keys)
                     )
                 )
-                or is_mtp_norm
+                or (is_mtp_norm and mtp_norms_unshifted)
             )
             if should_shift_norm and is_norm:
                 if value.ndim == 1:
@@ -1150,7 +1165,35 @@ def _patch_outer_model(qvl: Any) -> None:
     cls.mtp_forward = mtp_forward
     cls.make_mtp_cache = make_mtp_cache
     cls.sanitize = sanitize
+    cls.load_weights = _make_mtp_rehoming_load_weights()
     cls._vmlx_mtp_patched = True
+
+
+def _make_mtp_rehoming_load_weights():
+    """load_weights override that guarantees sanitize ran on EVERY load path.
+
+    mlx_vlm.load_model skips Model.sanitize entirely for checkpoints whose
+    safetensors metadata stamps format=mlx (the is_mlx_format short-circuit).
+    JANG CRACK repacks and OsaurusAI base bundles carry that stamp while
+    still needing sanitize's guarded work: top-level mtp.* placement (31
+    orphans killed startup with native MTP enabled AND disabled), HF-layout
+    conv1d moveaxis, and the shape/value-guarded norm and embed transforms.
+    Every transform inside sanitize is self-guarding (shape or sampled-value
+    checks), so running it here on a genuinely MLX-ready checkpoint is a
+    no-op apart from key placement. The _vmlx_sanitize_ran marker prevents a
+    second pass when mlx_vlm already sanitized (non-mlx-format bundles).
+    """
+    import mlx.nn as nn
+
+    def load_weights(self, weights, strict: bool = True):
+        items = list(weights.items()) if isinstance(weights, dict) else list(weights)
+        if not getattr(self, "_vmlx_sanitize_ran", False):
+            sanitized = self.sanitize(dict(items))
+            items = list(sanitized.items())
+        self._vmlx_sanitize_ran = False
+        return nn.Module.load_weights(self, items, strict=strict)
+
+    return load_weights
 
 
 def _patch_moe_outer_model(qmoe_vl: Any) -> None:
@@ -1255,6 +1298,21 @@ def _patch_moe_outer_model(qmoe_vl: Any) -> None:
             language_model, "mtp"
         )
 
+        # The unconditional mtp-norm +1 shift was written for HF-format
+        # shards; an MLX-ready checkpoint (format=mlx CRACK/base bundles
+        # sanitized via the load_weights override) already carries shifted
+        # head norms and would be corrupted by a second +1. Trust the same
+        # sampled-value evidence the base norms use, scoped to head keys.
+        mtp_norms_unshifted = _qwen_norm_shard_looks_unshifted(
+            {
+                key: value
+                for key, value in weights.items()
+                if key.startswith("mtp.") or ".mtp." in key
+            },
+            norm_keys,
+        )
+        self._vmlx_sanitize_ran = True
+
         sanitized_weights = {}
         for key, value in weights.items():
             if drop_mtp_weights and (key.startswith("mtp.") or ".mtp." in key):
@@ -1281,7 +1339,7 @@ def _patch_moe_outer_model(qmoe_vl: Any) -> None:
                         or _qwen_norm_shard_looks_unshifted(weights, norm_keys)
                     )
                 )
-                or is_mtp_norm
+                or (is_mtp_norm and mtp_norms_unshifted)
             )
             if should_shift_norm and is_norm:
                 if value.ndim == 1:
@@ -1296,4 +1354,5 @@ def _patch_moe_outer_model(qmoe_vl: Any) -> None:
     cls.mtp_forward = mtp_forward
     cls.make_mtp_cache = make_mtp_cache
     cls.sanitize = sanitize
+    cls.load_weights = _make_mtp_rehoming_load_weights()
     cls._vmlx_mtp_patched = True

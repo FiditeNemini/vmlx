@@ -961,7 +961,11 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         },
         "results": [],
     }
-    row.path = _resolve_row_path(row.path)
+    import dataclasses as _dc
+    try:
+        row = _dc.replace(row, path=_resolve_row_path(row.path))
+    except TypeError:
+        object.__setattr__(row, "path", _resolve_row_path(row.path))
     if not Path(row.path).is_dir():
         out["status"] = "skipped"
         out["reason"] = "model path missing"

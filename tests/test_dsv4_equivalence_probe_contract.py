@@ -206,3 +206,17 @@ def test_conversation_is_three_turns_and_nonce_salted(sameproc: Any, restart_l2:
         turns = module.conversation_turns("NONCE-XYZ-123")
         assert len(turns) == 3
         assert all("NONCE-XYZ-123" in turn for turn in turns)
+
+
+def test_dsv4_extended_store_prompt_cap_gate_defaults_off(monkeypatch):
+    """Task #168 env gate: default OFF (extended stores unchanged); ON skips
+    the extended snapshot so the prompt-snapshot fallback stores prompt-keyed
+    state that reasoning-stripped multiturn history can reuse."""
+    from vmlx_engine.utils.dsv4_batch_generator import (
+        _dsv4_extended_store_prompt_cap_enabled,
+    )
+
+    monkeypatch.delenv("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", raising=False)
+    assert _dsv4_extended_store_prompt_cap_enabled() is False
+    monkeypatch.setenv("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "1")
+    assert _dsv4_extended_store_prompt_cap_enabled() is True

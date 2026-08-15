@@ -57,6 +57,22 @@ _PREFILL_MEM_LOG = os.environ.get("DSV4_PREFILL_MEM_LOG", "") == "1"
 _PREFILL_MEM_VALVE = os.environ.get("DSV4_PREFILL_MEM_VALVE", "1") == "1"
 
 
+
+def _dsv4_extended_store_prompt_cap_enabled() -> bool:
+    """Env-gated DSV4 store-policy cap (task #168), default OFF.
+
+    When enabled, extended prefill+decode stores are skipped so the
+    prompt-snapshot fallback stores prompt-keyed state that reasoning-
+    stripped multiturn continuations can actually reuse.
+    """
+    return os.environ.get("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 class DSV4PrefillMemoryError(RuntimeError):
     """Prefill valve abort: the next chunk's projected Metal working set
     would exceed the device limit.
@@ -1600,6 +1616,17 @@ class DSV4BatchGenerator:
         ``(None, 0)`` when the extended chain adds nothing over the prompt
         snapshot (the scheduler then falls back to the snapshot store).
         """
+        if _dsv4_extended_store_prompt_cap_enabled():
+            # Env-gated store-policy cap (default OFF): the extended chain
+            # covers generated tokens INCLUDING the assistant's <think>
+            # rail, and DSV4's template STRIPS prior reasoning from replayed
+            # history — the follow-up turn's token sequence diverges at the
+            # assistant boundary, so extended-keyed blocks can never match a
+            # multiturn continuation (proven live 2026-08-15: identical
+            # replay, 6/6 misses, 2 stored blocks). Returning (None, 0)
+            # routes the store through the existing prompt-snapshot fallback,
+            # whose prompt-only key the next turn CAN match.
+            return None, 0
         if not r.extended_capture or r.extended_last_stamped <= 0:
             return None, 0
         prompt_boundary = len(r.context_tokens) - min(

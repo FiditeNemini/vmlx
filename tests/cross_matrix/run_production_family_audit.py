@@ -43,6 +43,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 FALLBACK_MODEL_ROOTS = [
     Path("/Volumes/EricsLLMDrive/jangq-ai"),
     Path("/Volumes/EricsLLMDrive/dealignai"),
+    Path("/Volumes/EricsLLMDrive/models"),
     Path("/Users/example/models/JANGQ"),
     Path("/Users/example/models/dealign.ai"),
     Path("/Users/example/models/Sources"),
@@ -50,6 +51,7 @@ FALLBACK_MODEL_ROOTS = [
     Path("/Users/example/.mlxstudio/models"),
 ]
 MODEL_NAME_ALIASES = {
+    "DeepSeek-V4-Flash-JANG": ["DeepSeek-V4-Flash-0731-JANG", "DeepSeek-V4-Flash-0731-JANG-CRACK"],
     "Nemotron-3-Nano-Omni-30B-A3B-JANGTQ2": [
         "Nemotron-Omni-Nano-JANGTQ-CRACK",
     ],

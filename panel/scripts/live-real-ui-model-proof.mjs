@@ -9887,10 +9887,17 @@ async function main() {
               // The clean prefix-cache store runs AFTER the turn completes, so
               // scheduler.last_cache_execution can lag the terminal response id
               // briefly. Poll a few times before recording a partial mismatch.
+              // A NULL last_cache_execution is the same lag one step earlier
+              // (health read before the scheduler records the execution) and
+              // reports partial_product_support_missing — live polling proved
+              // the engine sets it seconds after each terminal completion, so
+              // that status must retry too instead of being recorded as a
+              // missing product capability.
               for (
                 let retry = 0;
                 retry < 6
-                  && cacheCorrelation.correlationStatus === 'partial_request_identity_mismatch';
+                  && (cacheCorrelation.correlationStatus === 'partial_request_identity_mismatch'
+                    || cacheCorrelation.correlationStatus === 'partial_product_support_missing');
                 retry += 1
               ) {
                 await new Promise((resolve) => setTimeout(resolve, 2000));

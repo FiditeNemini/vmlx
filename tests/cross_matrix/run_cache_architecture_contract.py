@@ -172,12 +172,12 @@ REQUIRED_API_CACHE_COMMAND_MARKERS = (
 REQUIRED_PANEL_CACHE_MARKERS = (
     "deepseek-v4 uses native SSD-only composite reuse without generic cache codecs",
     "deepseek-v4 respects explicit prefix cache disable and suppresses dependent caches",
-    "deepseek-v4 stale native-cache settings remain fail-closed",
+    "DSV4 native cache settings stay family-scoped and suppress only generic TurboQuant",
     "deepseek-v4 cache launch flags are singular and preserve explicit standard controls",
     "DSV4 native cache settings stay family-scoped and suppress only generic TurboQuant",
     "deepseek-v4 SSD-only settings use fixed native composite blocks",
-    "detected Qwen3.6 hybrid cache forces paged cache over stale saved false",
-    "detected Mamba cache forces paged cache while regular KV respects saved false",
+    "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend",
+    "detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false",
     "continuous batching off is a real master switch for LLM cache flags",
     "continuous batching off is a real master switch for VLM cache flags",
     "disabling prefix cache disables all dependent features",
@@ -283,7 +283,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "api_command_markers": ("generic_turboquant_patcher_skips_hybrid_ssm",),
         "panel_markers": (
-            "detected Mamba cache forces paged cache while regular KV respects saved false",
+            "detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false",
         ),
     },
     "ling_bailing_hybrid_registry": {
@@ -314,7 +314,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
         "api_checks": ("turboquant_kv_runtime_contract",),
         "api_command_markers": (),
         "panel_markers": (
-            "detected Qwen3.6 hybrid cache forces paged cache over stale saved false",
+            "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend",
         ),
     },
     "qwen36_registry_hybrid_parser": {

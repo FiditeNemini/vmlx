@@ -102,9 +102,9 @@ REQUIRED_PANEL_API_TEST_MARKERS = (
     "keeps Responses maxTokens as output budget only, never prompt context",
     "omits invalid persisted maxTokens values instead of poisoning Responses",
     "preserves DSV4 Responses max_output_tokens for Max thinking",
-    "Hy3 local Responses Auto omits enable_thinking and reasoning_effort",
+    "Hy3 local Responses Auto omits the toggle and reasoning_effort",
     "omits malformed Ollama context values instead of poisoning max_prompt_tokens",
-    "omits unset and disabled sampling sentinels without dropping explicit overrides",
+    "omits unset and negative sentinels while forwarding explicit neutral sampling overrides",
     "omits malformed Ollama num_predict values instead of poisoning max_tokens",
     "applies gateway timeout handling to Ollama embeddings proxy requests",
     "auto-switches by model id in single-model mode before preserving streaming deltas",
@@ -125,7 +125,7 @@ REQUIRED_PANEL_API_TEST_MARKERS = (
     "chat:setOverrides rejects non-finite or non-numeric maxTokens instead of poisoning server defaults",
     "Auto chat maxTokens omits per-request output caps so server default can apply",
     "guards gateway streaming writes against client disconnect EPIPE errors",
-    "guards every Ollama backend response stream error as a disconnect boundary",
+    "aborts Ollama backend streaming when the client disconnects mid-response",
     "aborts Ollama backend response streams when the client response closes",
     "writes each streamed gateway response chunk once and treats EPIPE as disconnect",
     "does not write gateway response chunks after the client socket is destroyed",
@@ -296,7 +296,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         ),
         "panel_ollama_gateway_omits_disabled_sentinels": (
             not failed
-            and "omits unset and disabled sampling sentinels without dropping explicit overrides" not in missing_panel_markers
+            and "omits unset and negative sentinels while forwarding explicit neutral sampling overrides" not in missing_panel_markers
             and "omits malformed Ollama num_predict values instead of poisoning max_tokens" not in missing_panel_markers
             and "omits malformed Ollama context values instead of poisoning max_prompt_tokens" not in missing_panel_markers
             and panel_passed >= 53
@@ -356,7 +356,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         ),
         "panel_gateway_ollama_proxy_response_error_guard": (
             not failed
-            and "guards every Ollama backend response stream error as a disconnect boundary" not in missing_panel_markers
+            and "aborts Ollama backend streaming when the client disconnects mid-response" not in missing_panel_markers
             and "aborts Ollama backend response streams when the client response closes" not in missing_panel_markers
             and panel_passed >= 61
         ),

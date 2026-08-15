@@ -60,9 +60,17 @@ def test_cache_architecture_contract_pins_named_cache_edges():
 
     assert "test_dsv4_cli_cache_policy_keeps_prefix_and_independent_ram_l2_tiers" in required_pytest
     assert "test_dsv4_runtime_policy_applies_to_bench_like_cli_args" in required_pytest
-    assert "test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle" in required_pytest
+    # The DSV4 cache-off UI expectation moved to the panel suite during the
+    # SSD-only composite reversal; the engine markers no longer carry a UI name.
+    assert (
+        "deepseek-v4 SSD-only settings use fixed native composite blocks"
+        in required_panel
+    )
     assert "test_dsv4_launch_filters_stale_saved_and_additional_args" in required_pytest
-    assert "test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit" in required_pytest
+    assert (
+        "deepseek-v4 uses native SSD-only composite reuse without generic cache codecs"
+        in required_panel
+    )
     assert "test_failed_generation_prefix_trim_never_stores_original_state_under_shorter_key" in required_pytest
     assert "test_dsv4_v9_paged_restore_is_not_unconditionally_rejected" in required_pytest
     assert "test_dsv4_storage_quantization_is_forced_off_for_composite_cache" in required_pytest
@@ -87,14 +95,20 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     assert "hybrid_ssm_partial_reuse" in required_api
     assert "turboquant_disk_roundtrip" in required_api
 
-    assert "deepseek-v4 disables native composite reuse even with stale cache config" in required_panel
-    assert "defaults production DSV4 runtime env to full-prefill serving" in required_panel
-    assert "deepseek-v4 stale native-cache settings remain fail-closed" in required_panel
-    assert "deepseek-v4 cache launch flags are singular and fail closed" in required_panel
-    assert "DSV4 stale cache settings fail closed and stay family-scoped" in required_panel
-    assert "renders the fail-closed DSV4 cache boundary without unusable toggles" in required_panel
-    assert "detected Qwen3.6 hybrid cache forces paged cache over stale saved false" in required_panel
-    assert "detected Mamba cache forces paged cache while regular KV respects saved false" in required_panel
+    assert "deepseek-v4 respects explicit prefix cache disable and suppresses dependent caches" in required_panel
+    # The production full-prefill default is now published as the structured
+    # check dsv4_product_full_prefill_policy rather than a panel test title.
+    from tests.cross_matrix import release_regression_manifest as _manifest_mod
+    assert (
+        "dsv4_product_full_prefill_policy"
+        in _manifest_mod.EXPECTED_CURRENT_CACHE_ARCHITECTURE_CHECKS
+    )
+    assert "DSV4 native cache settings stay family-scoped and suppress only generic TurboQuant" in required_panel
+    assert "deepseek-v4 cache launch flags are singular and preserve explicit standard controls" in required_panel
+    assert "deepseek-v4 SSD-only settings use fixed native composite blocks" in required_panel
+    assert "derives disabled/ignored control state from effective paged cache state" in required_panel
+    assert "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend" in required_panel
+    assert "detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false" in required_panel
     assert "disabling prefix cache disables all dependent features" in required_panel
 
     command = gate.COMMANDS["cache_family_pytest"].cmd

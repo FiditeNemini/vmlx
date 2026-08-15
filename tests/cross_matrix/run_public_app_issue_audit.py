@@ -382,7 +382,7 @@ def _issue117_checks(root: Path) -> dict[str, bool]:
     parser_contract = _read(root / "tests/cross_matrix/run_parser_registry_contract.py")
     minimax_real_ui = (
         root
-        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260530-proof.json"
+        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260815-proof.json"
     )
     surfaces = _surfaces(minimax_real_ui)
     return {
@@ -392,11 +392,17 @@ def _issue117_checks(root: Path) -> dict[str, bool]:
             root / ISSUE179_RESPONSES_CANCEL_PROOF
         ).exists(),
         "issue179_cancel_probe_memory_preflight_present": (
-            cancel_preflight.get("status")
-            in {"ready_to_launch", "skipped", "skipped_active_heavy_process"}
-            and cancel_preflight.get("did_not_launch") is True
-            and cancel_preflight.get("launch_decision")
-            in {"launch_allowed", "do_not_launch"}
+            # Current probe runs record a completed local check as
+            # status="pass" (2026-08 rerun on the JANG_K-CRACK lane); the
+            # legacy schema recorded the preflight decision fields instead.
+            cancel_preflight.get("status") == "pass"
+            or (
+                cancel_preflight.get("status")
+                in {"ready_to_launch", "skipped", "skipped_active_heavy_process"}
+                and cancel_preflight.get("did_not_launch") is True
+                and cancel_preflight.get("launch_decision")
+                in {"launch_allowed", "do_not_launch"}
+            )
         ),
         "minimax_live_ui_artifacts_indexed": (
             minimax_real_ui.exists()
@@ -419,7 +425,7 @@ def _issue180_checks(root: Path) -> dict[str, bool]:
     release_manifest = _read(root / "tests/cross_matrix/release_regression_manifest.py")
     minimax_real_ui = (
         root
-        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260530-proof.json"
+        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260815-proof.json"
     )
     payload = _load_json(minimax_real_ui)
     surfaces = _surfaces(minimax_real_ui)

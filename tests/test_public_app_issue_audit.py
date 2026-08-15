@@ -249,7 +249,7 @@ def test_public_app_issue117_open_boundary_uses_preflight_without_live_cancel_pr
     )
     note = (
         root
-        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260530-proof.json"
+        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260815-proof.json"
     )
     note.parent.mkdir(parents=True, exist_ok=True)
     note.write_text(

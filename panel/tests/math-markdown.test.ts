@@ -502,3 +502,64 @@ describe('a backslash before an HTML-escapable character stays literal', () => {
     expect(html).toContain('&#92;&amp;')
   })
 })
+
+import { renderChatMarkdownHtml } from '../src/renderer/src/components/chat/mathMarkdown'
+
+describe('renderChatMarkdownHtml keeps renderer-owned math HTML out of marked', () => {
+  it('does not inject math markup into an unclosed streaming code fence', () => {
+    const html = renderChatMarkdownHtml('S:\n```js\nconst re = /\\[abc\\]/;\nconst s = "\\(group\\)";')
+
+    expect(html).not.toContain('math-block')
+    expect(html).not.toContain('math-inline')
+    expect(html).toContain('\\[abc\\]')
+  })
+
+  it('renders math after an odd leading backslash without leaking the wrapper tag', () => {
+    const html = renderChatMarkdownHtml('The answer is \\\\(2+2=4\\\\), confirmed.')
+
+    expect(html).not.toContain('&lt;span class="math-inline')
+    expect(html).toContain('math-inline')
+  })
+
+  it('keeps a KaTeX backslash glyph intact instead of showing a stray closing tag', () => {
+    const html = renderChatMarkdownHtml('norm \\(x \\backslash y\\) mid \\(a+b\\) end')
+
+    expect(html).not.toContain('&lt;/span&gt;')
+    expect(html).toContain('math-inline')
+  })
+
+  it('KaTeX-error fallback shows backslash-quote literally, never a visible entity', () => {
+    const html = renderChatMarkdownHtml('Try \\(\\errcmd \\"x\\"\\) done')
+
+    expect(html).toContain('math-fallback')
+    expect(html).not.toContain('&amp;quot;')
+    expect(html).not.toContain('&amp;amp;')
+  })
+
+  it('does not pair underscores across two adjacent math spans as emphasis', () => {
+    const html = renderChatMarkdownHtml('lit \\(a\\_b\\) and \\(c\\_d\\) end')
+
+    expect(html).not.toContain('<em>')
+  })
+
+  it('keeps single newlines as line breaks (unified breaks option)', () => {
+    const html = renderChatMarkdownHtml('line one\nline two\nline three')
+
+    expect((html.match(/<br\s*\/?>/g) || []).length).toBe(2)
+  })
+})
+
+describe('prepareStreamingPlainTextMath protects code while streaming', () => {
+  it('leaves fence bodies untouched', () => {
+    const out = prepareStreamingPlainTextMath('Code:\n```\na = "\\\\times 5"\nb = "$x^2$ z"\n```\ndone')
+
+    expect(out).toContain('\\\\times 5')
+    expect(out).toContain('$x^2$ z')
+  })
+
+  it('leaves an unclosed streaming fence untouched', () => {
+    const out = prepareStreamingPlainTextMath('S:\n```js\nconst s = "\\(group\\)";')
+
+    expect(out).toContain('\\(group\\)')
+  })
+})

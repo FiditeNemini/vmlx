@@ -9,10 +9,7 @@ import { InlineToolCall, InlineToolGroup } from './InlineToolCall'
 import { TTSPlayer } from './VoiceChat'
 import { formatTimestamp, parseContentArray, getMetricsItems, type MessageMetrics } from './chat-utils'
 import { useRelativeTime } from '../ui/use-relative-time'
-import {
-  prepareAssistantMarkdownWithMath,
-  prepareUserMarkdownWithMath,
-} from './mathMarkdown'
+import { renderChatMarkdownHtml } from './mathMarkdown'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
 import { useTranslation } from '../../i18n'
 import { sanitizeChatHtml } from './sanitizeChatHtml'
@@ -60,10 +57,11 @@ function parseMarkdown(
   const headerHtml = `<div class="code-header"><span class="code-lang">${lang || defaultLanguage}</span><button class="code-copy-btn">${copyLabel}</button></div>`
   return `<div class="code-block-wrapper">${headerHtml}<pre><code class="hljs language-${lang || 'plaintext'}">${highlighted}</code></pre></div>`
   }
-  const prepared = userContent
-    ? prepareUserMarkdownWithMath(markdown)
-    : prepareAssistantMarkdownWithMath(markdown)
-  return marked.parse(prepared, { renderer, breaks: true, gfm: true }) as string
+  // renderChatMarkdownHtml owns prepare -> marked -> KaTeX-splice ordering so
+  // renderer-owned math HTML never flows through marked (userContent and
+  // assistant text share the same literal pipeline).
+  void userContent
+  return renderChatMarkdownHtml(markdown, { renderer })
 }
 
 /**

@@ -1,9 +1,16 @@
 import { renderToString } from 'katex'
+import { marked } from 'marked'
 
 // Preserve both CommonMark backtick fences and GFM tilde fences before any
 // TeX normalization. Model-generated code frequently uses either spelling;
 // rewriting `\times`, `$...$`, or `*` inside a tilde fence corrupts source.
-const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g
+// The unclosed-to-end-of-string alternatives mirror
+// LITERAL_MARKDOWN_PROTECTED_RE below and are just as load-bearing here: a
+// fence is unclosed for the whole time it streams (and permanently when the
+// model ends its reply inside the block), and without them transformMath
+// injected KaTeX wrapper HTML INTO the code body, which marked then rendered
+// as literal escaped text inside the block.
+const CODE_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~|```[\s\S]*$|~~~[\s\S]*$|`[^`\n]*`/g
 // The unclosed-fence alternatives are NOT redundant with the closed ones, and
 // their position matters. A fence is unclosed for the whole time it streams, so
 // without them every code block renders `&quot;` for `"` until the closing
@@ -240,6 +247,23 @@ function normalizeEscapedUnicodeMath(text: string): string {
 
 type MathDelimiter = 'bracket' | 'double-dollar' | 'paren' | 'single-dollar'
 
+// Renderer-owned math HTML must NOT flow through marked: marked re-parses it
+// as Markdown, so a literal `\` inside KaTeX output (e.g. `\backslash`), a
+// backslash directly before the injected tag, `_` glyphs pairing as emphasis
+// across two spans, and the escaped-entity fallback all corrupt visibly.
+// While a sink is active, transformMath emits inert private-use-area tokens
+// instead of HTML; renderChatMarkdownHtml restores them AFTER marked runs.
+// PUA delimiters survive marked untouched (they are plain text to CommonMark;
+// NUL would be replaced with U+FFFD).
+const MATH_HTML_TOKEN_RE = /(\d+)/g
+let activeMathHtmlSink: string[] | null = null
+
+function emitMathHtml(html: string): string {
+  if (!activeMathHtmlSink) return html
+  const index = activeMathHtmlSink.push(html) - 1
+  return `${index}`
+}
+
 function renderMath(
   raw: string,
   displayMode: boolean,
@@ -362,8 +386,16 @@ function normalizeRepeatedMathDelimiters(markdown: string): string {
  */
 export function prepareStreamingPlainTextMath(markdown: string): string {
   if (!markdown) return ''
-  const normalized = normalizeRepeatedMathDelimiters(markdown)
-  return normalizeBareLatexCommands(
+  // Code spans and fences (closed OR still streaming unclosed) must not have
+  // their `\times`, `$..$`, or delimiter text rewritten — the rail was
+  // visibly rewriting fence bodies while tokens streamed.
+  const protectedSegments: string[] = []
+  const protectedMarkdown = markdown.replace(CODE_RE, (segment) => {
+    const index = protectedSegments.push(segment) - 1
+    return ` STREAMCODE${index} `
+  })
+  const normalized = normalizeRepeatedMathDelimiters(protectedMarkdown)
+  const rewritten = normalizeBareLatexCommands(
     replaceSingleDollarMath(
       normalized
       .replace(/\\\[([\s\S]*?)(?:\\\]|$)/g, '$1')
@@ -372,21 +404,23 @@ export function prepareStreamingPlainTextMath(markdown: string): string {
       (body) => body,
     )
   )
+  return rewritten.replace(/ STREAMCODE(\d+) /g, (_match, indexText) =>
+    protectedSegments[Number(indexText)] || '')
 }
 
 function transformMath(markdown: string): string {
   let out = markdown
     .replace(/\\\[([\s\S]*?)\\\]/g, (_match, body) =>
-      renderMath(body, true, 'bracket'))
+      emitMathHtml(renderMath(body, true, 'bracket')))
     .replace(/\$\$([\s\S]*?)\$\$/g, (_match, body) =>
-      renderMath(body, true, 'double-dollar'))
+      emitMathHtml(renderMath(body, true, 'double-dollar')))
     // Inline math must not consume later paragraphs when a model leaves one
     // opener unmatched in a reasoning stream.
     .replace(/\\\(([^\n]*?)\\\)/g, (_match, body) =>
-      renderMath(body, false, 'paren'))
+      emitMathHtml(renderMath(body, false, 'paren')))
 
   out = replaceSingleDollarMath(out, (body) =>
-    renderMath(body, false, 'single-dollar'))
+    emitMathHtml(renderMath(body, false, 'single-dollar')))
 
   out = normalizeBareLatexCommands(out)
   return escapeBareArithmeticAsterisks(out)
@@ -455,4 +489,43 @@ export function prepareUserMarkdownWithMath(markdown: string): string {
 
 export function prepareAssistantMarkdownWithMath(markdown: string): string {
   return prepareLiteralMarkdownWithMath(markdown)
+}
+
+export interface RenderChatMarkdownOptions {
+  renderer?: InstanceType<typeof marked.Renderer>
+}
+
+/**
+ * The one supported path from raw chat text to markdown HTML. Prepares the
+ * text (literal HTML escaping + math), parses with marked using the unified
+ * chat options, and only THEN splices in renderer-owned KaTeX HTML — marked
+ * must never see that HTML, or it re-parses it as Markdown (a `\` inside
+ * KaTeX output, a backslash before the injected tag, `_` glyphs pairing as
+ * emphasis across spans, and the escaped-entity fallback all corrupted
+ * visibly). Callers still sanitize the returned HTML before rendering.
+ */
+export function renderChatMarkdownHtml(
+  markdown: string,
+  options: RenderChatMarkdownOptions = {},
+): string {
+  if (!markdown) return ''
+  const sink: string[] = []
+  activeMathHtmlSink = sink
+  let prepared: string
+  try {
+    // Strip pre-existing private-use token delimiters from untrusted text so
+    // model output cannot forge a restore token.
+    prepared = prepareLiteralMarkdownWithMath(
+      String(markdown).replace(/[]/g, ''),
+    )
+  } finally {
+    activeMathHtmlSink = null
+  }
+  const parsed = marked.parse(prepared, {
+    ...(options.renderer ? { renderer: options.renderer } : {}),
+    breaks: true,
+    gfm: true,
+  }) as string
+  return parsed.replace(MATH_HTML_TOKEN_RE, (_match, indexText) =>
+    sink[Number(indexText)] || '')
 }

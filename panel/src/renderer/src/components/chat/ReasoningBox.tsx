@@ -1,9 +1,8 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { ChevronRight, Maximize2, Minimize2 } from 'lucide-react'
-import { marked } from 'marked'
 import {
-  prepareAssistantMarkdownWithMath,
   prepareStreamingPlainTextMath,
+  renderChatMarkdownHtml,
 } from './mathMarkdown'
 import { useTranslation } from '../../i18n'
 import { sanitizeChatHtml } from './sanitizeChatHtml'
@@ -61,14 +60,17 @@ export function ReasoningBox({ content, isStreaming, isDone }: ReasoningBoxProps
     userScrolledUp.current = !atBottom
   }
 
-  // Render markdown with code highlighting (reuses global marked config from MessageBubble).
-  // During active streaming, the typewriter updates content every rAF frame — parsing
-  // markdown 60fps would cause heavy CPU load on long chains (DeepSeek R1 at 30K+ chars).
-  // Instead, render plain text during streaming and only parse markdown when done.
+  // Render markdown through the shared chat pipeline (renderChatMarkdownHtml
+  // carries the unified marked options — the rail previously parsed with
+  // default options and silently collapsed single newlines the bubble kept).
+  // During active streaming, the typewriter updates content every rAF frame —
+  // parsing markdown 60fps would cause heavy CPU load on long chains
+  // (DeepSeek R1 at 30K+ chars). Instead, render plain text during streaming
+  // and only parse markdown when done.
   const renderedHtml = useMemo(() => {
     if (!content) return ''
     if (isStreaming && !isDone) return ''  // plain text path during streaming
-    return sanitizeChatHtml(marked.parse(prepareAssistantMarkdownWithMath(content)) as string)
+    return sanitizeChatHtml(renderChatMarkdownHtml(content))
   }, [content, isStreaming, isDone])
 
   // Handle copy button clicks inside code blocks (same as MessageBubble)

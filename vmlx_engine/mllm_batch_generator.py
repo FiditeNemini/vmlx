@@ -5607,16 +5607,31 @@ class MLLMBatchGenerator:
         *,
         source: str,
     ) -> None:
-        max_prompt_tokens = int(getattr(request, "max_prompt_tokens", 0) or 0)
-        if max_prompt_tokens <= 0:
-            return
         prompt_tokens = _mllm_input_ids_token_count(request.input_ids)
-        if prompt_tokens > max_prompt_tokens:
+        max_prompt_tokens = int(getattr(request, "max_prompt_tokens", 0) or 0)
+        if max_prompt_tokens > 0 and prompt_tokens > max_prompt_tokens:
             raise PromptTooLongError(
                 prompt_tokens,
                 max_prompt_tokens,
                 source=source,
                 request_id=request.request_id,
+            )
+        # Bound output by the model's declared context (MLLM twin of the text
+        # scheduler's admission clamp): prompt + output must not run past the
+        # positional ceiling; a binding clamp logs a clear context-exhaustion
+        # notice instead of silently degrading past-ceiling.
+        sampling_params = getattr(request, "sampling_params", None)
+        if sampling_params is not None and getattr(
+            sampling_params, "max_tokens", None
+        ) is not None:
+            from vmlx_engine.context_limits import (
+                clamp_output_to_declared_context,
+            )
+
+            sampling_params.max_tokens = clamp_output_to_declared_context(
+                prompt_tokens,
+                sampling_params.max_tokens,
+                request_id=str(request.request_id),
             )
 
     def _maybe_capture_clean_ssm_boundary(

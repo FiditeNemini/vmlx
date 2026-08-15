@@ -839,6 +839,30 @@ def _refresh_loaded_max_prompt_tokens(reason: str) -> int:
 
     global _max_prompt_tokens
 
+    # Record the loaded bundle's declared positional ceiling so both
+    # schedulers can clamp output budgets to (context − prompt) with a
+    # logged context-exhaustion notice — max OUTPUT and max CONTEXT are
+    # separate budgets and conflating them silently is the field-failure
+    # class this exists to prevent.
+    try:
+        from vmlx_engine.context_limits import set_declared_context_tokens
+
+        _bundle = _model_path or ""
+        _declared = 0
+        if _bundle:
+            _declared = _declared_context_limit_from_config(
+                _read_bundle_json(_bundle, "config.json")
+            )
+        set_declared_context_tokens(_declared)
+        if _declared > 0:
+            logger.info(
+                "Declared model context ceiling: %d tokens (%s)",
+                _declared,
+                reason,
+            )
+    except Exception:
+        logger.debug("Declared-context refresh failed", exc_info=True)
+
     explicit_limit = (_cli_args or {}).get("max_prompt_tokens")
     auto_estimate = _estimate_max_prompt_tokens()
     _max_prompt_tokens = _resolve_max_prompt_tokens(

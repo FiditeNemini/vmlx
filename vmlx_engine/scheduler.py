@@ -5649,6 +5649,21 @@ class Scheduler:
                 request_id=request.request_id,
             )
 
+        # Bound output by the model's declared context (prompt + output must
+        # not run past the positional ceiling); a binding clamp logs a clear
+        # context-exhaustion notice instead of silently degrading.
+        from vmlx_engine.context_limits import clamp_output_to_declared_context
+
+        sampling_params = getattr(request, "sampling_params", None)
+        if sampling_params is not None and getattr(
+            sampling_params, "max_tokens", None
+        ) is not None:
+            sampling_params.max_tokens = clamp_output_to_declared_context(
+                len(request.prompt_token_ids),
+                sampling_params.max_tokens,
+                request_id=str(request.request_id),
+            )
+
         if self._uses_dsv4_cache:
             from vmlx_engine.utils.dsv4_batch_generator import (
                 dsv4_max_prefill_tokens,

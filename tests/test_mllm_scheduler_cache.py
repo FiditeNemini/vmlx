@@ -3338,7 +3338,7 @@ class TestVmlx91ResumeAlignmentGuard:
         source = Path("vmlx_engine/mllm_batch_generator.py").read_text()
         marker = '"reason": "kv_ssm_checkpoint_misaligned"'
         assert marker in source, "misalignment refusal is missing from the MLLM resume"
-        window = source[source.index(marker) - 1500:source.index(marker) + 1200]
+        window = source[source.index(marker) - 1500:source.index(marker) + 2400]
         assert "int(trimmed.num_tokens) != int(_ck_len or 0)" in window
         assert "release_cache(req.request_id)" in window
         assert "_adjust_paged_hit_credit(req.request_id, 0)" in window

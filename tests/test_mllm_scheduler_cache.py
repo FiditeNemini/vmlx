@@ -3264,3 +3264,29 @@ class TestChunkedSSMRederiveDefault:
     def test_typo_does_not_silently_restore_one_shot(self, monkeypatch):
         """An unrecognised value must not quietly disable long-context stores."""
         assert self._requires_one_shot(monkeypatch, "maybe") is False
+
+
+class TestNullContentAssistantTurnDoesNotCrashTemplate:
+    """A replayed empty assistant turn must not 500.
+
+    A reply that spends its whole budget on reasoning finishes with `length` and
+    empty content -- allowed by the never-empty contract. Replaying it used to
+    reach the chat template with no `content` key at all (model_dump drops None),
+    and Mistral's template raises rather than rendering an empty turn.
+    """
+
+    def test_server_fills_empty_content_for_contentless_assistant_turns(self):
+        from pathlib import Path
+
+        source = Path("vmlx_engine/server.py").read_text()
+        marker = '_msg.get("role") == "assistant"'
+        assert marker in source, "contentless assistant-turn handling is missing"
+        window = source[source.index(marker) - 700:source.index(marker) + 400]
+        assert 'not _msg.get("content")' in window
+        assert 'not _msg.get("tool_calls")' in window, (
+            "a tool-call-only assistant turn is valid and must NOT be dropped"
+        )
+        # Filling with "" does not work -- Mistral's template rejects the empty
+        # string exactly as it rejects a missing key. The turn must be DROPPED.
+        assert '_msg["content"] = ""' not in window
+        assert "messages = [" in window

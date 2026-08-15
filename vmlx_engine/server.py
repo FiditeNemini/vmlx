@@ -17587,6 +17587,35 @@ async def create_chat_completion(
             preserve_native_format=engine.preserve_native_tool_format,
         )
 
+    # An assistant turn may legitimately carry NO content: a reply that spent its
+    # whole budget on reasoning finishes with `length` and an empty answer, and
+    # the never-empty contract permits that. When a client replays such a turn,
+    # `model_dump(exclude_none=True)` above drops the `content` key entirely, so
+    # the chat template sees an assistant message with neither content nor tool
+    # calls -- Mistral's then raises TemplateError("Assistant message must have a
+    # string or a list of chunks in content or a list of tool calls") and the
+    # caller gets a 500 for echoing back the turn we handed them.
+    #
+    # DROP the turn rather than filling it. Setting content to "" does NOT work:
+    # Mistral's template rejects the empty string exactly as it rejects a missing
+    # key (verified by rendering both shapes through the real tokenizer). A turn
+    # that produced neither text nor a tool call carries no information, so
+    # dropping it is also the honest repair -- injecting a placeholder would put
+    # words in the assistant's mouth. Verified that the resulting consecutive
+    # user turns still render on Mistral, Qwen3.8, Nanbeige and Muse.
+    #
+    # A tool-call-only assistant turn is left alone: it is valid without content.
+    messages = [
+        _msg
+        for _msg in messages
+        if not (
+            isinstance(_msg, dict)
+            and _msg.get("role") == "assistant"
+            and not _msg.get("content")
+            and not _msg.get("tool_calls")
+        )
+    ]
+
     # Include audio in the media check: extract_multimodal_content returns only
     # images+videos, so an audio-only request that reached this text path
     # (omni dispatch declined or a non-omni model) used to be answered

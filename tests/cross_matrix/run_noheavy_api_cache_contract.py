@@ -263,7 +263,7 @@ COMMANDS: dict[str, list[str]] = {
             "or tool_markup_residue_strips_all_registered_marker_families "
             "or tool_markup_residue_strips_interrupted_non_dsml_fragments "
             "or responses_api_no_fallback_on_suppressed_reasoning "
-            "or responses_extracts_suppressed_reasoning_tool_calls_before_finalize"
+            "or responses_extracts_reasoning_rail_tool_calls_before_finalize"
         ),
     ],
     "responses_history_contracts": [

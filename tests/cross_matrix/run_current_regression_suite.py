@@ -43,6 +43,22 @@ EXPECTED_OPEN_REQUIREMENTS = [
     # machine (5 legacy speed artifacts + streaming diagnostic); current
     # bundled-engine probes pass and the 12-family matrix holds 93.9%.
     "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
+    # 2026-08-15 hardware-transition carryover: the three Qwen speed
+    # clearances point at 2026-06-06 artifacts for the retired 27B JANG_4M
+    # bundle; the current drive carries the 35B MXFP8 CRACK MTP bundle, whose
+    # speed campaign (source + installed app, deterministic PP) has not run
+    # yet. Reopen when the 35B speed artifacts land and the digest pointers
+    # retarget.
+    "Qwen/JANG packaged MX matmul speed is release-cleared",
+    "Qwen native MTP live decode speed and output equivalence are release-cleared",
+    "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
+    # 2026-08-15: the non-MiMo real-UI matrix holds green rows for qwen38,
+    # gemma4, zaya, nemotron dev, step37 (3/4), minimax m1; the remaining
+    # reds are attributed to the Qwen3.6 full-tool-catalog temp-0 emission
+    # degeneracy (task #166), LFM2.5/Zaya bundle-quality rows awaiting
+    # jang-side re-quants, and installed rows awaiting the next release
+    # cycle's bundle/source parity.
+    "Real Electron UI unblocked non-MiMo live model matrix is proven",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",

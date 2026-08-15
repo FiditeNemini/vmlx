@@ -58,12 +58,25 @@ def test_current_regression_suite_keeps_declared_known_blockers_open(tmp_path, m
     assert artifact["steps"]["release_gate_skip_app"]["returncode"] == 0
 
 
-def test_current_regression_suite_does_not_keep_cleared_unblocked_non_mimo_gap_open():
+def test_current_regression_suite_carries_non_mimo_matrix_gap_with_rationale():
+    """2026-08-15 hardware-transition carryover: the May-era clearance was
+    proven on the previous machine's bundle set. On current bundles the
+    matrix holds green rows for qwen38/gemma4/zaya/nemotron/step37/minimax-m1
+    and the residual reds are attributed (Qwen3.6 full-tool-catalog temp-0
+    degeneracy, LFM/Zaya bundle-quality re-quants, installed-row parity), so
+    the row is EXPECTED open until those carriers clear. The expected-open
+    entry must keep its written rationale."""
+    import inspect
+
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
         "Real Electron UI unblocked non-MiMo live model matrix is proven"
-        not in suite.EXPECTED_OPEN_REQUIREMENTS
+        in suite.EXPECTED_OPEN_REQUIREMENTS
+    )
+    source = inspect.getsource(suite)
+    assert "full-tool-catalog temp-0" in source, (
+        "the expected-open entry must document its carrier tasks"
     )
 
 
@@ -171,7 +184,14 @@ def test_decode_speed_gate_error_artifact_preserves_partial_live_rows():
     assert '"greedy_topk0": greedy' in error_block
 
 
-def test_current_regression_suite_does_not_keep_proven_qwen_speed_rows_open():
+def test_current_regression_suite_carries_qwen_speed_rows_as_transition_open():
+    """2026-08-15 hardware-transition carryover: the three Qwen speed
+    clearances were proven 2026-06-06 against the retired 27B JANG_4M bundle;
+    the current drive carries the 35B MXFP8 CRACK MTP bundle whose speed
+    campaign has not run. The rows are EXPECTED open, and the entry must
+    document the reopen condition (35B speed artifacts + digest retarget)."""
+    import inspect
+
     from tests.cross_matrix import run_current_regression_suite as suite
 
     for requirement in (
@@ -179,7 +199,11 @@ def test_current_regression_suite_does_not_keep_proven_qwen_speed_rows_open():
         "Qwen native MTP live decode speed and output equivalence are release-cleared",
         "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
     ):
-        assert requirement not in suite.EXPECTED_OPEN_REQUIREMENTS
+        assert requirement in suite.EXPECTED_OPEN_REQUIREMENTS
+    source = inspect.getsource(suite)
+    assert "35B speed artifacts land" in source, (
+        "the expected-open entries must document the reopen condition"
+    )
 
 
 def test_current_regression_suite_does_not_keep_proven_dsv4_one_tool_stop_open():

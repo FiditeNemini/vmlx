@@ -19808,6 +19808,32 @@ def _responses_input_to_messages(
                 },
             )
 
+    # Drop assistant turns that carry neither text nor a tool call. A reply that
+    # spends its whole budget on reasoning finishes with `length` and an empty
+    # answer -- the never-empty contract permits that -- and replaying it hands
+    # the chat template an assistant message it refuses to render: Mistral's
+    # raises TemplateError("Assistant message must have a string or a list of
+    # chunks in content or a list of tool calls"), so the caller gets a 500 for
+    # echoing back the turn we gave them.
+    #
+    # This mirrors the same drop on the chat-completions path. It has to exist
+    # in BOTH: /v1/responses builds its messages here, not there, and the app
+    # talks to /v1/responses -- fixing only the other one would leave the
+    # surface users actually hit still broken.
+    #
+    # Filling with "" is NOT a fix: Mistral's template rejects the empty string
+    # exactly as it rejects a missing key (verified against the real tokenizer).
+    messages = [
+        _m
+        for _m in messages
+        if not (
+            isinstance(_m, dict)
+            and _m.get("role") == "assistant"
+            and not _m.get("content")
+            and not _m.get("tool_calls")
+        )
+    ]
+
     return messages
 
 

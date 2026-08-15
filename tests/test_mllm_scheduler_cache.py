@@ -3290,3 +3290,32 @@ class TestNullContentAssistantTurnDoesNotCrashTemplate:
         # string exactly as it rejects a missing key. The turn must be DROPPED.
         assert '_msg["content"] = ""' not in window
         assert "messages = [" in window
+
+    def test_responses_path_drops_contentless_assistant_turns_too(self):
+        """The app talks to /v1/responses, which builds messages separately.
+
+        Fixing only the chat-completions loop would leave the surface users
+        actually hit still returning 500.
+        """
+        import inspect
+
+        from vmlx_engine.server import _responses_input_to_messages
+
+        source = inspect.getsource(_responses_input_to_messages)
+        assert '_m.get("role") == "assistant"' in source
+        assert 'not _m.get("content")' in source
+        assert 'not _m.get("tool_calls")' in source, (
+            "a tool-call-only assistant turn is valid and must NOT be dropped"
+        )
+
+    def test_responses_builder_drops_the_empty_turn_in_practice(self):
+        from vmlx_engine.server import _responses_input_to_messages
+
+        out = _responses_input_to_messages(
+            [
+                {"role": "user", "content": "Hi"},
+                {"role": "assistant", "content": ""},
+                {"role": "user", "content": "Name one colour."},
+            ]
+        )
+        assert [m["role"] for m in out] == ["user", "user"], out

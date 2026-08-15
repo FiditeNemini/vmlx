@@ -9537,8 +9537,23 @@ async function main() {
             'Repetition Penalty':
               samplingOverrides.repeatPenalty ?? independentBundleDefaults?.repeatPenalty,
           };
+          const bundleHasSamplerDefaults = independentBundleDefaults
+            && Object.values(independentBundleDefaults).some((value) => value != null);
           await waitFor(() => {
-            if (!independentBundleDefaults) return false;
+            if (!bundleHasSamplerDefaults) {
+              // A bundle with NO stamped sampler defaults (e.g. a
+              // generation_config carrying only bos/eos ids —
+              // Step-3.7-Flash-JANG_K-CRACK) renders the engine-fallback
+              // banner instead of sliders. There are no model-derived
+              // values to verify — accept once the drawer states it.
+              if (!/No sampler defaults were available from this bundle/i
+                .test(chatSettingsDrawer?.innerText || '')) return false;
+              const fallbackMaxTokens = maxTokenInputFor();
+              if (!fallbackMaxTokens) return false;
+              return requestedMaxTokens != null
+                ? Number(fallbackMaxTokens.value) === Number(requestedMaxTokens)
+                : true;
+            }
             for (const [label, expected] of Object.entries(expectedUiValues)) {
               if (expected == null) continue;
               const observed = rangeValueFor(label);

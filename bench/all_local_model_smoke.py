@@ -1410,7 +1410,10 @@ def validate_probe_response(
                     "tool_calls": tool_calls,
                 }
             )
-        if stripped != "STORED blue-cat.":
+        # The check proves the tool RESULT was preserved into the final
+        # answer; terminal punctuation is model style, not preservation
+        # (Nemotron-Omni-Nano-JANGTQ-CRACK answers "STORED blue-cat").
+        if stripped.rstrip(".") != "STORED blue-cat":
             failures.append(
                 {
                     "label": label,

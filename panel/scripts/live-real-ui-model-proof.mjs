@@ -4417,6 +4417,16 @@ export function validateGenerationDefaultsEvidence(result) {
     ['maxNewTokens', 'max_output_tokens', 'maxTokens', 'max_tokens'],
   ]
   if (!defaults) {
+    // A bundle whose generation_config stamps no sampler fields has no
+    // model-owned defaults BY DESIGN; the truthful evidence is the drawer's
+    // engine-fallback banner plus verified request correlation (the engine's
+    // resolved kwargs ARE the live defaults). Seen on Step-3.7-Flash-JANG_K.
+    if (
+      settingsInteraction.noSamplerDefaultsBanner === true
+      && requestCorrelationVerified
+    ) {
+      return failures
+    }
     failures.push('bundle has no independently resolved generation defaults')
     return failures
   }
@@ -9550,6 +9560,7 @@ async function main() {
                 .test(chatSettingsDrawer?.innerText || '')) return false;
               const fallbackMaxTokens = maxTokenInputFor();
               if (!fallbackMaxTokens) return false;
+              chatSettingsInteraction.noSamplerDefaultsBanner = true;
               return requestedMaxTokens != null
                 ? Number(fallbackMaxTokens.value) === Number(requestedMaxTokens)
                 : true;

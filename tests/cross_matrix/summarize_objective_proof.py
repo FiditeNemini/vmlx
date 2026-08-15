@@ -251,6 +251,12 @@ DSV4_RESPONSES_CACHE_GATE_REL = "build/current-dsv4-responses-cache-gate-2026060
 DSV4_RESTART_L2_EQUIVALENCE_REL = (
     "build/current-dsv4-cold-vs-restored-restart-l2-20260815.json"
 )
+# Same-process control run at DEFAULT config (no env gates), turns above the
+# 256-token composite block floor: reuse proven per-request (cached_tokens
+# 569/512/512) with byte-exact answers 3/3.
+DSV4_SAMEPROC_EQUIVALENCE_REL = (
+    "build/current-dsv4-cold-vs-restored-sameproc-control-20260815.json"
+)
 DSV4_RESPONSES_RESTART_L2_GATE_REL = (
     "build/current-dsv4-responses-restart-l2-gate-20260606.json"
 )
@@ -6365,12 +6371,31 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         and int(restart_l2_before_block.get("disk_writes") or 0) > 0
         and int(restart_l2_after_block.get("disk_hits") or 0) > 0
     )
+    dsv4_sameproc_equivalence = _load(root, DSV4_SAMEPROC_EQUIVALENCE_REL)
+    _dsv4_sp_eq_ok = (
+        dsv4_sameproc_equivalence.get("status") == "pass"
+        and all(
+            turn.get("byte_equal") is True
+            for turn in (dsv4_sameproc_equivalence.get("turns") or [])
+        )
+        and bool(dsv4_sameproc_equivalence.get("turns"))
+        and any(
+            int(turn.get("cached_tokens") or 0) > 0
+            for turn in (dsv4_sameproc_equivalence.get("turns") or [])
+        )
+    )
     _add(
         requirements,
         "DSV4 native composite same-process reuse is cold-prefill equivalent",
-        _status(False),
-        [DSV4_RESPONSES_CACHE_GATE_REL],
-        caveat="Deferred beyond v1.6.20: historical hit/latency telemetry does not prove byte-equivalent cache state or output against cold full prefill, so product sessions stay fail-closed.",
+        _status(_dsv4_sp_eq_ok),
+        [DSV4_SAMEPROC_EQUIVALENCE_REL, DSV4_RESPONSES_CACHE_GATE_REL],
+        caveat=(
+            "Cleared 2026-08-15 by the dedicated cold-vs-restored probe at "
+            "DEFAULT config: per-request cached_tokens 569/512/512 with "
+            "byte-exact answers 3/3 at temp 0 (turns above the 256-token "
+            "composite block floor; shorter prompts are skipped by the store "
+            "by design). Historical gate retained as secondary evidence."
+        ),
         details={
             "deferred_release": "v1.6.20",
             "required_proof": "same-prompt cold-vs-restored cache state and output equivalence on the exact release source",

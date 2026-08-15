@@ -34,12 +34,11 @@ EXPECTED_OPEN_REQUIREMENTS = [
     "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
     "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
     "Real Electron UI cross-family live model matrix is release-cleared",
-    "DSV4 native composite same-process reuse is cold-prefill equivalent",
-    # restart/L2 CLEARED 2026-08-15: dedicated cold-vs-restored probe, byte
-    # -exact 3/3 with disk_hits attribution (composite N-1 reprefill keeps
-    # cached_tokens 0 by design). The same-process row stays open: the
-    # in-memory replay recorded zero prefix-table hits (keying/lookup
-    # question, ledger row 47).
+    # BOTH DSV4 equivalence rows CLEARED 2026-08-15 by the dedicated
+    # cold-vs-restored probes: restart/L2 (byte-exact 3/3, disk_hits
+    # attribution) and same-process at DEFAULT config (cached_tokens
+    # 569/512/512, byte-exact 3/3, turns above the 256-token block floor —
+    # the earlier zero-hit runs used prompts the store skips by design).
     "DSV4 long-output/code/file-generation quality is release-cleared",
     # Ling-2.6-flash bundles are not present on current hardware.
     "Ling/Bailing multilingual output quality is release-cleared",
@@ -66,12 +65,11 @@ EXPECTED_OPEN_REQUIREMENTS = [
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",
-    "DSV4 native composite same-process reuse is cold-prefill equivalent",
-    # restart/L2 CLEARED 2026-08-15: dedicated cold-vs-restored probe, byte
-    # -exact 3/3 with disk_hits attribution (composite N-1 reprefill keeps
-    # cached_tokens 0 by design). The same-process row stays open: the
-    # in-memory replay recorded zero prefix-table hits (keying/lookup
-    # question, ledger row 47).
+    # BOTH DSV4 equivalence rows CLEARED 2026-08-15 by the dedicated
+    # cold-vs-restored probes: restart/L2 (byte-exact 3/3, disk_hits
+    # attribution) and same-process at DEFAULT config (cached_tokens
+    # 569/512/512, byte-exact 3/3, turns above the 256-token block floor —
+    # the earlier zero-hit runs used prompts the store skips by design).
     "DSV4 long-output/code/file-generation quality is release-cleared",
     "Qwen/JANG packaged MX matmul speed is release-cleared",
     "Qwen native MTP live decode speed and output equivalence are release-cleared",

@@ -5734,7 +5734,10 @@ def test_objective_proof_digest_keeps_dsv4_same_process_equivalence_open_despite
         "DSV4 native composite same-process reuse is cold-prefill equivalent"
     ]
     assert row["status"] == "open"
-    assert row["evidence"] == ["build/current-dsv4-responses-cache-gate-20260606.json"]
+    assert row["evidence"] == [
+        "build/current-dsv4-cold-vs-restored-sameproc-control-20260815.json",
+        "build/current-dsv4-responses-cache-gate-20260606.json",
+    ]
     assert row["details"]["historical_responses_cache_gate_status"] == "pass"
     assert row["details"]["historical_responses_cached_tokens"] == 5195
     assert row["details"]["historical_responses_cache_detail"] == "paged+dsv4"

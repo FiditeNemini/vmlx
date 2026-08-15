@@ -115,16 +115,17 @@ def test_current_regression_suite_keeps_dsv4_classification_and_historical_tool_
     )
 
 
-def test_current_regression_suite_defers_dsv4_same_process_equivalence():
+def test_current_regression_suite_cleared_dsv4_same_process_equivalence():
+    """CLEARED 2026-08-15 at DEFAULT config: the cold-vs-restored probe with
+    turns above the 256-token composite block floor proved per-request reuse
+    (cached_tokens 569/512/512) with byte-exact answers 3/3. The row must
+    stay OUT of expected-open; it remains in the historical deferred set for
+    release-notes lineage only."""
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
         "DSV4 native composite same-process reuse is cold-prefill equivalent"
-        in suite.EXPECTED_OPEN_REQUIREMENTS
-    )
-    assert (
-        "DSV4 native composite same-process reuse is cold-prefill equivalent"
-        in suite.DEFERRED_RELEASE_OPEN_REQUIREMENTS
+        not in suite.EXPECTED_OPEN_REQUIREMENTS
     )
 
 

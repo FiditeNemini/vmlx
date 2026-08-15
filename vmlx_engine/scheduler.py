@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .mllm_scheduler import _resolve_prefix_cache_byte_budget
+from .utils.ssm_companion_cache import DEFAULT_SSM_COMPANION_ENTRIES
 
 
 from mlx_lm.generate import BatchGenerator, generation_stream
@@ -655,7 +656,7 @@ class SchedulerConfig:
     # SSM companion cache budget for hybrid (Mamba/GatedDelta) models. Mirrors
     # `MLLMSchedulerConfig`. Entries can be tens/hundreds of MB, so production
     # defaults are deliberately conservative and byte-bound.
-    ssm_state_cache_size: int = 8
+    ssm_state_cache_size: int = DEFAULT_SSM_COMPANION_ENTRIES
     ssm_state_cache_max_mb: Optional[int] = 512
 
     # Dedicated single-worker ThreadPoolExecutor that loaded the model and
@@ -1082,7 +1083,8 @@ class Scheduler:
                     # enough because entry size scales with architecture and
                     # prompt.
                     _ssm_cache_size = (
-                        getattr(self.config, "ssm_state_cache_size", 8) or 8
+                        getattr(self.config, "ssm_state_cache_size", DEFAULT_SSM_COMPANION_ENTRIES)
+                        or DEFAULT_SSM_COMPANION_ENTRIES
                     )
                     _ssm_cache_max_mb = getattr(
                         self.config, "ssm_state_cache_max_mb", 512

@@ -156,6 +156,8 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
 from mlx_lm.tokenizer_utils import NaiveStreamingDetokenizer
 
+from .utils.ssm_companion_cache import DEFAULT_SSM_COMPANION_ENTRIES
+
 from .mllm_batch_generator import (
     MLLMBatchGenerator,
     MLLMBatchRequest,
@@ -387,7 +389,7 @@ class MLLMSchedulerConfig:
     # Hybrid SSM state cache budget (companion cache for SSM layer states).
     # These entries can be tens or hundreds of MB each on Nemotron/Gemma
     # hybrid models, so bound by both count and bytes.
-    ssm_state_cache_size: int = 8
+    ssm_state_cache_size: int = DEFAULT_SSM_COMPANION_ENTRIES
     ssm_state_cache_max_mb: Optional[int] = 512
 
     # Maximum images per request (guard against Metal OOM from excessive images)

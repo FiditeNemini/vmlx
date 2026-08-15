@@ -78,6 +78,13 @@ back-compat with existing imports inside `mllm_batch_generator.py` and
 
 from __future__ import annotations
 
+# The ONE scheduler-config default for companion-cache entry capacity. This
+# value previously lived as an inline literal in four places (both scheduler
+# config fields, a getattr fallback, and the MLLM generator's parameter
+# default) — the second-consumer policy-drift class. Direct SSMCompanionCache
+# constructions keep their own documented default (see __init__).
+DEFAULT_SSM_COMPANION_ENTRIES = 8
+
 import hashlib
 import json
 import logging
@@ -374,6 +381,10 @@ class SSMCompanionCache:
 
     def __init__(
         self,
+        # Deliberately 20, NOT DEFAULT_SSM_COMPANION_ENTRIES: direct
+        # constructions keep the documented 50 → 20 worst-case-footprint
+        # default; the engine's scheduler configs apply their own tighter
+        # policy via the shared constant.
         max_entries: int = 20,
         model_key: str = "",
         disk_store: Any = None,

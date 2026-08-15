@@ -2702,6 +2702,7 @@ def _fix_hybrid_cache(
 # See `agentprogress/3/notes-to-2.md` for the migration guide and
 # `agentprogress/2/decisions.md` D-A2-007 for the option-C rationale.
 from .utils.ssm_companion_cache import (  # noqa: F401
+    DEFAULT_SSM_COMPANION_ENTRIES,
     HybridSSMStateCache,
     SSMCompanionCache,
     make_ssm_prefix_lookup,
@@ -4732,7 +4733,7 @@ class MLLMBatchGenerator:
         disk_cache: Optional[Any] = None,
         kv_cache_bits: int = 0,
         kv_cache_group_size: int = 64,
-        ssm_state_cache_size: int = 8,
+        ssm_state_cache_size: int = DEFAULT_SSM_COMPANION_ENTRIES,
         ssm_state_cache_max_mb: Optional[int] = 512,
         ssm_state_disk_store: Optional[Any] = None,
         ssm_state_cache_model_key: str = "",

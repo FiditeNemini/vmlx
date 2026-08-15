@@ -3149,6 +3149,13 @@ def _sample_mllm_prefill_logits(
     return sampled, logprobs
 
 
+# One device fence per MTP verify cycle. See the call site in the verify
+# cycle for the measured async-accumulation pathology this bounds.
+_NATIVE_MTP_CYCLE_FENCE = os.environ.get(
+    "VMLX_MTP_CYCLE_FENCE", ""
+).lower() in {"1", "true", "yes", "on"}
+
+
 def _native_mtp_trace_enabled() -> bool:
     return os.environ.get("VMLINUX_NATIVE_MTP_TRACE", "").lower() in {
         "1",
@@ -9524,6 +9531,18 @@ class MLLMBatchGenerator:
         trace_t0 = _native_mtp_trace_start()
         _native_mtp_materialize_draft_ids(state)
         _native_mtp_trace_stop(state.stats, "materialize_ms", trace_t0)
+        # Measured 2026-08-15 (35B MXFP8 MTP, depth 2): with any cache tier
+        # populated, per-cycle wall GROWS 19 -> ~30ms under normal async
+        # execution while barrier-traced runs stay FLAT at ~21.6ms with the
+        # SAME per-phase compute — lazy work accumulated between cycle evals
+        # stalls later forwards. One fence per cycle bounds the outstanding
+        # queue. Gated for A/B; flips default only on byte-equal + speedup
+        # proof at the app-default cache shape.
+        if _NATIVE_MTP_CYCLE_FENCE:
+            try:
+                mx.synchronize()
+            except Exception:
+                pass
 
         accepted = 0
         for idx, draft_id in enumerate(state.draft_ids):

@@ -1769,36 +1769,6 @@ _CHUNKED_SSM_REDERIVE = os.environ.get(
 ).strip().lower() not in {"0", "false", "no", "off"}
 
 
-_HYBRID_BASE_SPLICE = os.environ.get(
-    "VMLX_HYBRID_BASE_SPLICE", ""
-).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _hybrid_base_splice_enabled() -> bool:
-    """Opt in to completing a paged-rebuilt base with companion SSM state.
-
-    DEFAULT OFF, deliberately. The reuse win already landed: hybrid prefixes
-    extend and long documents cache. What has NOT landed is the LATENCY win --
-    a base rebuilt from paged blocks carries attention KV only, so on a hybrid
-    model the layout check refuses it and the store re-derives the WHOLE prompt
-    every turn (measured: 43.7k-token document reused 99.9% yet each follow-up
-    still cost ~113s, essentially all of it that re-derive).
-
-    The missing half is already on disk: the SSM companion is stored complete at
-    the same absolute token key the base covers, so pairing the two reconstructs
-    a correctly typed hybrid cache and only the delta needs forwarding.
-
-    Gated because it is a CACHE-CORRECTNESS change on path-dependent state, and
-    the failure mode is silent: a base paired with recurrent state from the wrong
-    position produces a plausible-looking cache that degrades answers rather than
-    crashing. Enable only alongside a byte-identical A/B at temperature 0 against
-    the same conversation with it off, and confirm from the log that the splice
-    actually ENGAGED -- an unexercised gate makes an A/B compare stock to stock,
-    which is how this campaign has been fooled before.
-    """
-    return _HYBRID_BASE_SPLICE
-
-
 def _is_recognised_recurrent_slot(cache: Any) -> bool:
     """Is this a recurrent cache slot whose layout we actually recognise?
 
@@ -10116,61 +10086,6 @@ class MLLMBatchGenerator:
         """Check if there are pending or active requests."""
         return bool(self.unprocessed_requests or self.active_batch)
 
-    def _complete_hybrid_base_from_companion(
-        self, base_cache: Any, token_ids: Any, base_token_count: int
-    ) -> Optional[List[Any]]:
-        """Fill a paged-reconstructed base's recurrent slots from the companion.
-
-        Returns None whenever the pairing cannot be made EXACTLY -- no companion,
-        an incomplete one, or a state count that does not fill every
-        non-attention slot. A partial fill would pair attention KV with recurrent
-        state from a different token position, which is precisely the corruption
-        this path exists to avoid, so it declines instead of guessing.
-        """
-        cache = getattr(self, "_ssm_state_cache", None)
-        if cache is None or int(base_token_count) <= 0:
-            return None
-        if not getattr(self, "_is_hybrid", False):
-            return None
-        try:
-            entry = cache.fetch(list(token_ids), int(base_token_count))
-        except Exception as exc:
-            logger.debug("Companion fetch for clean-store base failed: %s", exc)
-            return None
-        if not entry:
-            return None
-        try:
-            ssm_states, is_complete = entry
-        except (TypeError, ValueError):
-            return None
-        # An incomplete companion was captured after the gen-prompt suffix, so it
-        # does not describe this prefix boundary.
-        if not ssm_states or not is_complete:
-            return None
-        try:
-            fixed = _fix_hybrid_cache(
-                base_cache,
-                getattr(self, "_cache_model", None) or self.language_model,
-                kv_positions=self._hybrid_kv_positions,
-                num_model_layers=self._hybrid_num_layers,
-            )
-        except Exception as exc:
-            logger.debug("Hybrid base layout repair failed: %s", exc)
-            return None
-        if not fixed:
-            return None
-        kv_positions = set(self._hybrid_kv_positions or [])
-        injected = 0
-        for layer_idx in range(len(fixed)):
-            if layer_idx not in kv_positions and injected < len(ssm_states):
-                fixed[layer_idx] = ssm_states[injected]
-                injected += 1
-        if injected != len(ssm_states):
-            return None
-        if not _validate_prompt_cache(fixed, source="mllm-clean-store-base"):
-            return None
-        return fixed
-
     def _prefill_for_clean_path_dependent_cache(
         self,
         tokens: List[int],
@@ -10257,30 +10172,10 @@ class MLLMBatchGenerator:
                 fresh_cache = base_cache
                 resume_at = int(base_token_count)
             elif base_cache is not None and not _base_matches_layers:
-                _spliced = (
-                    self._complete_hybrid_base_from_companion(
-                        base_cache, token_ids, int(base_token_count)
-                    )
-                    if _HYBRID_BASE_SPLICE
-                    else None
+                logger.info(
+                    "MLLM clean prefill: reconstructed base does not match the "
+                    "hybrid layer layout; re-deriving the whole prompt instead"
                 )
-                if _spliced is not None:
-                    fresh_cache = _spliced
-                    resume_at = int(base_token_count)
-                    logger.info(
-                        "MLLM clean prefill: SPLICED companion SSM state into the "
-                        "reconstructed base at %d tokens; forwarding only the "
-                        "%d-token delta (VMLX_HYBRID_BASE_SPLICE)",
-                        int(base_token_count),
-                        max(0, seq_len - int(base_token_count)),
-                    )
-                else:
-                    logger.info(
-                        "MLLM clean prefill: reconstructed base does not match the "
-                        "hybrid layer layout; re-deriving the whole prompt instead"
-                        "%s",
-                        " (splice declined)" if _HYBRID_BASE_SPLICE else "",
-                    )
 
             if fresh_cache is None:
                 cache_model = getattr(self, "_cache_model", None)

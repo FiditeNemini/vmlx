@@ -1201,6 +1201,10 @@ EXPECTED_CURRENT_OPEN_REQUIREMENTS = [
     "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
     # Ling-2.6-flash bundles are not present on current hardware.
     "Ling/Bailing multilingual output quality is release-cleared",
+    # Pinned to the 2026-05-25 installed-app artifact set from the previous
+    # machine (5 legacy speed artifacts + streaming diagnostic); current
+    # bundled-engine probes pass and the 12-family matrix holds 93.9%.
+    "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",

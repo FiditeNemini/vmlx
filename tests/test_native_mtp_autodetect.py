@@ -2929,6 +2929,9 @@ class TestNativeMtpAutodetect:
         )
 
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
+        # AR fallback is ON by default since 2026-08-15: a sub-breakeven d1
+        # head (58% acceptance, the live Qwen3.8-27B case) must not run MTP
+        # for the whole request. Explicit =0 still disables it.
         monkeypatch.delenv("VMLINUX_NATIVE_MTP_AR_FALLBACK", raising=False)
         monkeypatch.delenv("VMLX_NATIVE_MTP_AR_FALLBACK", raising=False)
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES", "8")
@@ -2940,7 +2943,17 @@ class TestNativeMtpAutodetect:
 
         _native_mtp_maybe_adapt_depth("adaptive-row", state)
 
-        assert state.ar_fallback_pending is False
+        assert state.ar_fallback_pending is True
+
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_AR_FALLBACK", "0")
+        state_off = MLLMNativeMTPState(depth=1)
+        state_off.stats.cycles = 12
+        state_off.stats.drafted_by_depth = [12, 0, 0]
+        state_off.stats.accepted_by_depth = [7, 0, 0]
+
+        _native_mtp_maybe_adapt_depth("adaptive-row-off", state_off)
+
+        assert state_off.ar_fallback_pending is False
 
     def test_native_mtp_cost_policy_marks_ar_fallback_when_mtp_is_slower(
         self, monkeypatch, caplog
@@ -2987,6 +3000,10 @@ class TestNativeMtpAutodetect:
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_FALLBACK", "1")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES", "4")
+        # Isolate the COST policy: the acceptance-based AR fallback (default
+        # ON) would also fire on this 0%-acceptance fixture and mask whether
+        # the cost policy respects its calibration requirement.
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_AR_FALLBACK", "0")
         state = MLLMNativeMTPState(depth=3)
         state.stats.cycles = 4
         state.stats.accepted_tokens = 0

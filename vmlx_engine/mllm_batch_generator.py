@@ -3924,8 +3924,15 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
     if _native_mtp_maybe_cost_fallback(request_id, state, current):
         return
 
+    # Default ON since 2026-08-15: Qwen3.8-27B-JANG_4D served at temp 0 ran
+    # its 58.6% d1-acceptance head for entire requests (483 cycles, 200
+    # replay forwards for 768 tokens) because this gate was opt-in — a
+    # sub-breakeven head must fall back to AR (measured breakeven ~0.68 on
+    # the MLLM path where a rejected cycle pays verify + replay; healthy
+    # heads run 0.93-0.98, so the 0.65 floor cleanly separates).
+    # VMLX_NATIVE_MTP_AR_FALLBACK=0 reverts.
     if target <= 1 and _native_mtp_env_flag(
-        False,
+        True,
         "VMLINUX_NATIVE_MTP_AR_FALLBACK",
         "VMLX_NATIVE_MTP_AR_FALLBACK",
     ):

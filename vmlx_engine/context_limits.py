@@ -157,3 +157,11 @@ def pop_context_clamp(request_id: str) -> "dict[str, int] | None":
             except ValueError:
                 pass
         return record
+
+
+def peek_context_clamp(request_id: str) -> "dict[str, int] | None":
+    """Non-destructive read for surfaces derived multiple times per request
+    (the responses terminal state); entries expire via the FIFO bound."""
+    with _lock:
+        record = _clamped_requests.get(request_id)
+        return dict(record) if record is not None else None

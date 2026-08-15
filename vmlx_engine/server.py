@@ -19100,6 +19100,7 @@ def _responses_terminal_state(
     cancelled: bool = False,
     failed: bool = False,
     reasoning_only_no_content: bool = False,
+    request_id: str | None = None,
 ) -> _ResponsesTerminalState:
     """Return matching response/item status, details, and SSE terminal event."""
 
@@ -19120,12 +19121,25 @@ def _responses_terminal_state(
             incomplete_details={"reason": "cancelled"},
         )
     if normalized == "length":
+        # Keep the OpenAI-spec reason value; attach the context-clamp record
+        # ADDITIVELY when the admission clamp bound this request so a
+        # length-stop at the declared ceiling is machine-distinguishable
+        # from an ordinary max_output_tokens stop (mirrors the chat
+        # surfaces). Peek, not pop — this state derives more than once per
+        # stream; the registry's FIFO bound handles expiry.
+        _incomplete: dict[str, Any] = {"reason": "max_output_tokens"}
+        if request_id:
+            from vmlx_engine.context_limits import peek_context_clamp
+
+            _clamp_record = peek_context_clamp(str(request_id))
+            if _clamp_record:
+                _incomplete["context_exhaustion"] = _clamp_record
         return _ResponsesTerminalState(
             finish_reason="length",
             response_status="incomplete",
             item_status="incomplete",
             event_type="response.incomplete",
-            incomplete_details={"reason": "max_output_tokens"},
+            incomplete_details=_incomplete,
         )
     if reasoning_only_no_content:
         return _ResponsesTerminalState(
@@ -22020,7 +22034,9 @@ async def create_response(
         if _ns_visible_answer_finish_reason is not None
         else getattr(output, "finish_reason", None)
     )
-    _response_terminal = _responses_terminal_state(_response_finish)
+    _response_terminal = _responses_terminal_state(
+        _response_finish, request_id=response_id
+    )
 
     # Build output array
     output_items = []
@@ -22083,6 +22099,7 @@ async def create_response(
         _response_terminal = _responses_terminal_state(
             _response_finish,
             reasoning_only_no_content=True,
+            request_id=response_id,
         )
         for _item in output_items:
             if hasattr(_item, "status"):
@@ -26010,6 +26027,7 @@ async def stream_responses_api(
     _response_terminal = _responses_terminal_state(
         _resp_finish,
         cancelled=_response_was_cancelled,
+        request_id=response_id,
     )
     _response_output_status = _response_terminal.item_status
 
@@ -26653,6 +26671,7 @@ async def stream_responses_api(
                         _response_terminal = _responses_terminal_state(
                             _resp_finish,
                             cancelled=_response_was_cancelled,
+                            request_id=response_id,
                         )
                         _response_output_status = _response_terminal.item_status
                     if _ans_tool_calls:
@@ -26911,6 +26930,7 @@ async def stream_responses_api(
         cancelled=_response_was_cancelled,
         failed=_required_tool_contract_failed,
         reasoning_only_no_content=_stream_reasoning_only,
+        request_id=response_id,
     )
     _resp_status = _response_terminal.response_status
     _resp_extra: dict = {}

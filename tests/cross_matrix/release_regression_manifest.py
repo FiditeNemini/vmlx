@@ -1193,6 +1193,14 @@ EXPECTED_CURRENT_OPEN_REQUIREMENTS = [
     "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
     "Real Electron UI cross-family live model matrix is release-cleared",
     "DSV4 long-output/code/file-generation quality is release-cleared",
+    # Pinned to Qwen3.6-27B-JANG_4M-* artifacts from the previous machine;
+    # that bundle does not exist on current hardware (drive holds 3.8-27B and
+    # 3.6-35B lanes, both separately proven in the 2026-08 campaign).
+    "Qwen/JANG packaged MX matmul speed is release-cleared",
+    "Qwen native MTP live decode speed and output equivalence are release-cleared",
+    "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
+    # Ling-2.6-flash bundles are not present on current hardware.
+    "Ling/Bailing multilingual output quality is release-cleared",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",

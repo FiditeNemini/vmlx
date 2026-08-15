@@ -1,18 +1,18 @@
 {
-  "version": "1.6.30",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.30/vMLX-1.6.30-tahoe-arm64.dmg",
-  "sha256": "1d887e662776bef0356da169be67c64283a94903251de645ad743abc84881e86",
-  "sha512": "Fi8JiqIxzdao8GW/dHl6C+V6qLebl22PGvGnDqauiacUu3XOHMv2s7Zyd0PVK16KiQYyphAVoXg11sxUNvesyQ==",
+  "version": "1.6.31",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.31/vMLX-1.6.31-tahoe-arm64.dmg",
+  "sha256": "4cbb9a42d951e47f6a3dea9034b320f8c19f01ac34a69e84d85e4b33276a5613",
+  "sha512": "dBwng/242VBJA6MS3EU+N0SDw7m5WFqpoJrVrTe/p67IIpQk65JHTw8n5YZNTeybiIE0ICHmM8TajGFprsTrfg==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.30/vMLX-1.6.30-sequoia-arm64.dmg",
-      "sha256": "2df3b7c0176b2612e9cacaf19d9b4b1eb15105eaa0b710a2ebb852061d53285b",
-      "sha512": "x4JlbgJjZ4v9BQhr2UcGPoDEodF2B+dXxvPSJS+TVIbKMgBofBi7HbZZKbA0SORjQCqQQT+4rzvGTjfxf5x2hQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.31/vMLX-1.6.31-sequoia-arm64.dmg",
+      "sha256": "6cc4d9a2d62fcd8909b100a9259b7dfc9fb4fba59d893b146069d7269cb43df2",
+      "sha512": "L+80TjAJuF+GaRhpElGpNbQkguPAd8s8aWGSPqUbajwbelJ/vSGVxZjIeBVnJVPHPU/JcvIHdA29+GWHTklT6g=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.30/vMLX-1.6.30-tahoe-arm64.dmg",
-      "sha256": "1d887e662776bef0356da169be67c64283a94903251de645ad743abc84881e86",
-      "sha512": "Fi8JiqIxzdao8GW/dHl6C+V6qLebl22PGvGnDqauiacUu3XOHMv2s7Zyd0PVK16KiQYyphAVoXg11sxUNvesyQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.31/vMLX-1.6.31-tahoe-arm64.dmg",
+      "sha256": "4cbb9a42d951e47f6a3dea9034b320f8c19f01ac34a69e84d85e4b33276a5613",
+      "sha512": "dBwng/242VBJA6MS3EU+N0SDw7m5WFqpoJrVrTe/p67IIpQk65JHTw8n5YZNTeybiIE0ICHmM8TajGFprsTrfg=="
     }
   },
   "notes": "vMLX 1.6.29: hybrid prefix cache follow-ups up to 20x faster on long documents, 100k-context multiturn proven stable, chunked SSM re-derive restores long-context reuse, contentless-turn 500 fix on chat and Responses, and per-family cache/parser hardening across 12 model families."

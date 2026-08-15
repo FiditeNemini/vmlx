@@ -3866,6 +3866,8 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     for (const channel of ['reasoning', 'content']) {
       let previousLength = 0
       let previousSegmentIndex = null
+      let accumulatedSegmentText = ''
+      let previousSegmentIndexForText = null
       let previousReasoningSegments = []
       const channelEvents = events.filter(
         (event) => event?.event === 'stream' && event?.channel === channel,
@@ -3889,8 +3891,21 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
         const retainedReasoningSegments = channel === 'reasoning'
           ? event?.payload?.reasoningSegments
           : null
+        if (channel === 'reasoning') {
+          accumulatedSegmentText = segmentIndex === previousSegmentIndexForText
+            ? accumulatedSegmentText + delta
+            : delta
+          previousSegmentIndexForText = segmentIndex
+        }
+        // The panel's snapshot carries VISIBLE segments (whitespace-only
+        // segments are filtered by design — LFM reasoning opens with a bare
+        // "\n" delta), so an empty/short snapshot is CORRECT until the
+        // current segment has non-whitespace content.
+        const segmentHasVisibleText = channel === 'reasoning'
+          && accumulatedSegmentText.trim().length > 0
         if (
           channel === 'reasoning'
+          && segmentHasVisibleText
           && (
             !Array.isArray(retainedReasoningSegments)
             || retainedReasoningSegments.length <= segmentIndex

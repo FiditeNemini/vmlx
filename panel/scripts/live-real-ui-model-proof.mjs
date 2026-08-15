@@ -9730,20 +9730,42 @@ async function main() {
                 logMatchMode: 'exact_identity_ring_safe',
                 logLines: resolvedLogEvidence.matchedLines,
               });
-              const cacheCorrelation =
+              let effectiveHealthAfter = turnHealthAfter;
+              let cacheCorrelation =
                 correlateTerminalResponseToCacheExecution({
                   terminal: boundTerminal,
-                  cacheSnapshot: turnHealthAfter,
+                  cacheSnapshot: effectiveHealthAfter,
                   turn,
                   proofRequestId,
                   userMessageId: userMessage?.id || null,
                   assistantMessageId: assistantMessage?.id || null,
                 });
+              // The clean prefix-cache store runs AFTER the turn completes, so
+              // scheduler.last_cache_execution can lag the terminal response id
+              // briefly. Poll a few times before recording a partial mismatch.
+              for (
+                let retry = 0;
+                retry < 6
+                  && cacheCorrelation.correlationStatus === 'partial_request_identity_mismatch';
+                retry += 1
+              ) {
+                await new Promise((resolve) => setTimeout(resolve, 2000));
+                effectiveHealthAfter = await window.api.performance.health(endpoint)
+                  .catch((error) => ({ error: String(error?.message || error) }));
+                cacheCorrelation = correlateTerminalResponseToCacheExecution({
+                  terminal: boundTerminal,
+                  cacheSnapshot: effectiveHealthAfter,
+                  turn,
+                  proofRequestId,
+                  userMessageId: userMessage?.id || null,
+                  assistantMessageId: assistantMessage?.id || null,
+                });
+              }
               cacheRequestEvidence.push({
                 ...cacheCorrelation,
                 before: turnCacheBefore,
                 after: turnCacheAfter,
-                healthAfter: turnHealthAfter,
+                healthAfter: effectiveHealthAfter,
               });
               return true;
             } catch (error) {

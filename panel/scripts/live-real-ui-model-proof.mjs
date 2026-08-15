@@ -3895,8 +3895,17 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
             !Array.isArray(retainedReasoningSegments)
             || retainedReasoningSegments.length <= segmentIndex
             || previousReasoningSegments.some(
+              // One legal transition for an EARLIER segment: the panel's
+              // reasoning_summary_text.done reconcile may EXTEND a completed
+              // segment when wire deltas were dropped (the streamed text is a
+              // strict prefix of the server's authoritative text) — that
+              // repair is byte-faithful to the server. Any other rewrite of
+              // an earlier segment remains corruption. Observed live on LFM
+              // tool-loop turns where each iteration opens a new segment
+              // after the previous one's done-reconcile.
               (value, index) => index < segmentIndex
-                && String(retainedReasoningSegments[index] || '') !== value,
+                && String(retainedReasoningSegments[index] || '') !== value
+                && !String(retainedReasoningSegments[index] || '').startsWith(value),
             )
           )
         ) {

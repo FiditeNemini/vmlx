@@ -9597,6 +9597,20 @@ async function main() {
             const drawer = document.querySelector('[data-vmlx-surface="chat-settings"]');
             return drawer instanceof HTMLElement && isVisible(drawer) ? drawer : null;
           }, 'reopened Chat Settings drawer');
+          // The reopened drawer re-fetches saved settings + model defaults;
+          // reading controls while "Loading saved chat settings and model
+          // defaults…" is still showing races the hydration and reports every
+          // field as null (observed live: MiniMax row reopened into the
+          // loading state and failed persistence checks that had actually
+          // saved). The first-open path already waits for hydration; the
+          // reopen read must too.
+          await waitFor(() => {
+            const drawerNow = document.querySelector('[data-vmlx-surface="chat-settings"]');
+            if (!(drawerNow instanceof HTMLElement)) return false;
+            if (/Loading saved chat settings/i.test(drawerNow.textContent || '')) return false;
+            return drawerNow.querySelectorAll('input[type="range"]').length > 0
+              || drawerNow.querySelectorAll('select').length > 0;
+          }, 'reopened Chat Settings drawer to hydrate');
           chatSettingsInteraction.reopenedAfterSave = true;
           const reopenedRangeValueFor = (label) => {
             const input = [...(reopenedDrawer?.querySelectorAll('input[type="range"]') || [])]

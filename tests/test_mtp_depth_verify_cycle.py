@@ -173,9 +173,11 @@ class TestMtpDepthGreedyIdentity:
             state = batch._omlx_mtp_state
             assert state.depth == 3
             assert state.stats.depth == 3
-            # post-init drafts a full chain of `depth` tokens
+            # post-init drafts a full chain of `depth` tokens. The chain is
+            # lazy: draft_ids stay empty until the verify cycle's single eval
+            # materializes them (no per-draft host sync).
             assert len(state.draft_toks) == 3
-            assert len(state.draft_ids) == 3
+            assert state.draft_ids == []
             assert len(state.draft_lps) == 3
 
             # Drain the 2 init tokens, then one verify cycle.

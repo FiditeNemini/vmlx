@@ -589,19 +589,24 @@ def cache_mode_cli_args(
 ) -> list[str]:
     if cache_mode == "off":
         return ["--disable-prefix-cache"]
-    if cache_mode != "on":
+    if cache_mode not in {"on", "paged"}:
         raise ValueError(f"unknown cache mode: {cache_mode}")
 
+    # "paged" = L1 paged cache only, no disk L2 — isolates the block-disk
+    # writer from the paged-tier bookkeeping when attributing MTP cycle tax.
     args = [
         "--use-paged-cache",
-        "--enable-block-disk-cache",
-        "--block-disk-cache-dir",
-        str(block_cache_dir),
-        "--block-disk-cache-max-gb",
-        "2",
         "--ssm-state-cache-mb",
         "1024",
     ]
+    if cache_mode == "on":
+        args[1:1] = [
+            "--enable-block-disk-cache",
+            "--block-disk-cache-dir",
+            str(block_cache_dir),
+            "--block-disk-cache-max-gb",
+            "2",
+        ]
     quant = (kv_cache_quantization or "auto").strip().lower()
     if quant not in {"auto", "none", "q4", "q8"}:
         raise ValueError(f"unknown kv cache quantization: {kv_cache_quantization}")
@@ -878,7 +883,7 @@ def main() -> int:
     ap.add_argument("--served-name", default=None)
     ap.add_argument("--out", default=None)
     ap.add_argument("--port", type=int, default=8130)
-    ap.add_argument("--cache", choices=["off", "on"], default="off")
+    ap.add_argument("--cache", choices=["off", "on", "paged"], default="off")
     ap.add_argument("--max-num-seqs", type=int, default=2)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--repeats", type=int, default=3)

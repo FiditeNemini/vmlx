@@ -395,8 +395,8 @@ class _MtpState:
     # Filtered (sampler-applied) draft logprobs reused by the next cycle's
     # acceptance ratio + residual sampling.
     draft_accept_lps: List[Any] = field(default_factory=list)  # each (vocab,)
-    # Host-side int copies cached at draft creation time so the verify cycle
-    # compares draft vs verify ids without a GPU→CPU sync per position.
+    # Host-side int copies of the draft chain. Empty until the verify cycle's
+    # single eval materializes them — drafting itself never syncs the host.
     draft_ids: List[int] = field(default_factory=list)
 
     # Resolved draft depth for this sequence (1..3).
@@ -938,8 +938,12 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     # Hy3 and would change RNG consumption for stochastic samplers, so keep
     # the row-wise draws the depth-1 path has always used.
     sampled = [sampler(combined_lp[i : i + 1]) for i in range(n + 1)]
-    mx.eval(*sampled)
+    mx.eval(*sampled, *state.draft_toks)
     sampled_ids = [int(t.tolist()[0]) for t in sampled]
+    # Draft ids materialize here, off the same eval — the chain itself never
+    # forces a host sync (one sync per cycle instead of one per draft).
+    if len(state.draft_ids) != len(state.draft_toks):
+        state.draft_ids = [int(t.tolist()[0]) for t in state.draft_toks]
 
     # Longest-prefix acceptance. Position i's logits verify draft i+1
     # (0-indexed: combined_lp[i] is the target distribution for d_{i+1}).
@@ -1082,16 +1086,18 @@ def _draft_chain(
         # cycle's acceptance ratio uses this so the math matches the sampling
         # distribution rather than raw softmax.
         new_accept_lp = _accept_lp_for(sampler, new_lp)
-        # ``.tolist()`` forces evaluation and doubles as the host-side copy.
-        new_id = int(new_tok.tolist()[0])
 
         state.draft_toks.append(_ensure_uint32(new_tok))
         state.draft_lps.append(new_lp.squeeze(0))
         state.draft_accept_lps.append(new_accept_lp.squeeze(0))
-        state.draft_ids.append(new_id)
 
         hidden = mtp_hidden[:, -1:, :]
         cur_tok = state.draft_toks[-1]
+    # The chain stays lazy: the next step feeds the draft *array* forward, so
+    # no host copy is needed here. ``draft_ids`` materializes in the verify
+    # cycle's single eval — one sync per cycle instead of one per draft
+    # (mirrors the MLLM generator's ``_native_mtp_materialize_draft_ids``).
+    state.draft_ids = []
     _pbar(*state.draft_toks)  # profiling: isolate real MTP-head GPU cost
     state.stats.mtp_head_ms += (time.perf_counter() - t_start) * 1000
 

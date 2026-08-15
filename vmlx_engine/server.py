@@ -2840,6 +2840,7 @@ def _apply_stamped_effort_policy(
     ct_kwargs: dict,
     *,
     model_key: str,
+    request_id: str | None = None,
 ) -> None:
     """Clamp a requested ``reasoning_effort`` to the bundle's stamped set.
 
@@ -2887,6 +2888,15 @@ def _apply_stamped_effort_policy(
         list(levels),
         coerced,
     )
+    if request_id:
+        from vmlx_engine.context_limits import record_effort_substitution
+
+        record_effort_substitution(
+            str(request_id),
+            requested_effort=raw,
+            effective_effort=coerced,
+            stamped_levels=levels,
+        )
     chat_kwargs["reasoning_effort"] = coerced
     ct_kwargs["reasoning_effort"] = coerced
 

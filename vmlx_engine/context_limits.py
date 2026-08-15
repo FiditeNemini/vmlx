@@ -165,3 +165,44 @@ def peek_context_clamp(request_id: str) -> "dict[str, int] | None":
     with _lock:
         record = _clamped_requests.get(request_id)
         return dict(record) if record is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Effort-substitution registry (#175, same bounded pop-on-finalize pattern):
+# when an out-of-set reasoning_effort is coerced to a stamped tier, the
+# response should say which tier actually ran.
+# ---------------------------------------------------------------------------
+
+_effort_substitutions: "dict[str, dict[str, object]]" = {}
+_effort_order: "list[str]" = []
+
+
+def record_effort_substitution(
+    request_id: str,
+    *,
+    requested_effort: str,
+    effective_effort: str,
+    stamped_levels: "tuple[str, ...] | list[str]",
+) -> None:
+    with _lock:
+        if request_id not in _effort_substitutions:
+            _effort_order.append(request_id)
+            while len(_effort_order) > _CLAMP_REGISTRY_MAX:
+                stale = _effort_order.pop(0)
+                _effort_substitutions.pop(stale, None)
+        _effort_substitutions[request_id] = {
+            "requested_effort": str(requested_effort),
+            "effective_effort": str(effective_effort),
+            "stamped_levels": [str(level) for level in stamped_levels],
+        }
+
+
+def pop_effort_substitution(request_id: str) -> "dict[str, object] | None":
+    with _lock:
+        record = _effort_substitutions.pop(request_id, None)
+        if record is not None:
+            try:
+                _effort_order.remove(request_id)
+            except ValueError:
+                pass
+        return record

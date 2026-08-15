@@ -101,3 +101,33 @@ def test_registry_is_bounded():
     # oldest entries evicted; newest retained
     assert context_limits.pop_context_clamp("req-0") is None
     assert context_limits.pop_context_clamp("req-299") is not None
+
+
+def test_responses_length_terminal_attaches_clamp_record():
+    import vmlx_engine.server as server
+
+    context_limits.set_declared_context_tokens(128000)
+    context_limits.clamp_output_to_declared_context(
+        22, 127990, request_id="resp-term-1"
+    )
+    terminal = server._responses_terminal_state(
+        "length", request_id="resp-term-1"
+    )
+    details = terminal.incomplete_details
+    assert details["reason"] == "max_output_tokens"
+    assert details["context_exhaustion"]["clamped_max_tokens"] == 127978
+    # peek is non-destructive: a second derivation still sees the record
+    again = server._responses_terminal_state(
+        "length", request_id="resp-term-1"
+    )
+    assert "context_exhaustion" in again.incomplete_details
+    context_limits.pop_context_clamp("resp-term-1")
+
+
+def test_responses_length_terminal_without_record_is_spec_shaped():
+    import vmlx_engine.server as server
+
+    terminal = server._responses_terminal_state(
+        "length", request_id="resp-term-none"
+    )
+    assert terminal.incomplete_details == {"reason": "max_output_tokens"}

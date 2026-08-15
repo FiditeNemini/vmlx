@@ -15,5 +15,5 @@
       "sha512": "dBwng/242VBJA6MS3EU+N0SDw7m5WFqpoJrVrTe/p67IIpQk65JHTw8n5YZNTeybiIE0ICHmM8TajGFprsTrfg=="
     }
   },
-  "notes": "vMLX 1.6.29: hybrid prefix cache follow-ups up to 20x faster on long documents, 100k-context multiturn proven stable, chunked SSM re-derive restores long-context reuse, contentless-turn 500 fix on chat and Responses, and per-family cache/parser hardening across 12 model families."
+  "notes": "vMLX 1.6.31: tool-calling reliability follow-up \u2014 malformed native tool calls are repaired on the parser routes shipping bundles actually use, families without a thinking-off mode no longer reject requests under a global thinking default, Responses chains and parallel tool-call replays are consistent across continuation modes, and Ollama tool results keep their identity."
 }

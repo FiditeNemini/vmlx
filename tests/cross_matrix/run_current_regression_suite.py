@@ -49,6 +49,11 @@ EXPECTED_OPEN_REQUIREMENTS = [
     # machine (5 legacy speed artifacts + streaming diagnostic); current
     # bundled-engine probes pass and the 12-family matrix holds 93.9%.
     "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
+    # Pinned to the previous machine's 11-family v2-format evidence set
+    # (/Users/example model paths). Current hardware transition: single-family
+    # dual-surface v2 evidence exists (Qwen3.8, correlation verified) plus the
+    # 2026-08 live-UI campaign; full matrix rebuild tracked for post-.29.
+    "Real Electron UI unblocked non-MiMo live model matrix is proven",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",

@@ -2808,6 +2808,65 @@ def _apply_hy3_reasoning_policy(
     ct_kwargs["reasoning_effort"] = normalized
 
 
+_EFFORT_LADDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _apply_stamped_effort_policy(
+    chat_kwargs: dict,
+    ct_kwargs: dict,
+    *,
+    model_key: str,
+) -> None:
+    """Clamp a requested ``reasoning_effort`` to the bundle's stamped set.
+
+    Families with a stamped ``supported_reasoning_efforts`` contract render
+    ONLY those levels; an out-of-set value silently became the template
+    default — the field-failure class where a client sends "high" to a
+    low/medium/xhigh bundle and nobody is told which tier actually ran.
+    Coerce to the nearest stamped tier and LOG the substitution. DSV4 keeps
+    its own strict encoder (explicit invalid effort must stay a loud 400)
+    and Hy3 keeps its own normalizer, so both are skipped here.
+    """
+    requested = ct_kwargs.get("reasoning_effort") or chat_kwargs.get(
+        "reasoning_effort"
+    )
+    if not isinstance(requested, str) or not requested.strip():
+        return
+    if _is_hy3_model(model_key):
+        return
+    if _model_family_for_defaults(model_key) == "deepseek_v4":
+        return
+    levels, stamped_default = _stamped_reasoning_effort_contract(
+        _model_path or model_key
+    )
+    if not levels:
+        return
+    raw = requested.strip().lower()
+    if raw in levels:
+        return
+    coerced = None
+    if raw in _EFFORT_LADDER:
+        rank = _EFFORT_LADDER.index(raw)
+        ranked_levels = sorted(
+            (_EFFORT_LADDER.index(level), level)
+            for level in levels
+            if level in _EFFORT_LADDER
+        )
+        if ranked_levels:
+            coerced = min(ranked_levels, key=lambda t: abs(t[0] - rank))[1]
+    if coerced is None:
+        coerced = stamped_default or levels[-1]
+    logger.warning(
+        "reasoning_effort %r is not in this bundle's stamped set %s; "
+        "using %r (the template would otherwise apply its default silently)",
+        raw,
+        list(levels),
+        coerced,
+    )
+    chat_kwargs["reasoning_effort"] = coerced
+    ct_kwargs["reasoning_effort"] = coerced
+
+
 def _force_answer_pass_direct_rail(
     answer_kwargs: dict,
     *,
@@ -14645,6 +14704,11 @@ async def create_anthropic_message(
         model_key=_model_path or _model_name or chat_req.model,
         enable_thinking=chat_req.enable_thinking,
     )
+    _apply_stamped_effort_policy(
+        _msg_kwargs,
+        _ct_kwargs,
+        model_key=_model_path or _model_name or chat_req.model,
+    )
 
     # DeepSeek V4 three-mode encoder (mirror OpenAI chat-completions path).
     # See research/DSV4-RUNTIME-ARCHITECTURE.md §4 + dsv4_chat_encoder.py.
@@ -15547,6 +15611,11 @@ async def ollama_chat(fastapi_request: Request):
         _ollama_ct_kwargs,
         model_key=_model_path or _model_name or chat_req.model,
         enable_thinking=chat_req.enable_thinking,
+    )
+    _apply_stamped_effort_policy(
+        chat_kwargs,
+        _ollama_ct_kwargs,
+        model_key=_model_path or _model_name or chat_req.model,
     )
 
     # DSV4 three-mode mapping mirrored onto the Ollama adapter path so
@@ -17792,6 +17861,11 @@ async def create_chat_completion(
         _ct_kwargs,
         model_key=_model_path or _model_name or request.model,
         enable_thinking=request.enable_thinking,
+    )
+    _apply_stamped_effort_policy(
+        chat_kwargs,
+        _ct_kwargs,
+        model_key=_model_path or _model_name or request.model,
     )
 
     # DeepSeek V4 bundle-owned encoder: thinking_mode=chat|thinking plus an
@@ -20946,6 +21020,11 @@ async def create_response(
         _ct_kwargs,
         model_key=_model_path or _model_name or request.model,
         enable_thinking=request.enable_thinking,
+    )
+    _apply_stamped_effort_policy(
+        chat_kwargs,
+        _ct_kwargs,
+        model_key=_model_path or _model_name or request.model,
     )
 
     # DSV4 rail-policy + reasoning_effort handling — REAL /v1/responses path.

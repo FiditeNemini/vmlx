@@ -375,15 +375,21 @@ def build_turn_records(
     return records
 
 
-def compute_verdict(turn_records: list[dict[str, Any]]) -> str:
+def compute_verdict(
+    turn_records: list[dict[str, Any]],
+    table_hit_evidence: bool = False,
+) -> str:
     """Map per-turn records to pass | fail | inconclusive_no_reuse.
 
     Ledger rules encoded here:
-    - "pass" requires EVERY turn byte_equal AND proven reuse (cached_tokens
-      > 0 on at least one restored turn).
-    - Zero cached_tokens across all restored turns can NEVER be "pass": the
-      restored arm did not demonstrate restore, so the comparison proves
-      nothing — "inconclusive_no_reuse".
+    - "pass" requires EVERY turn byte_equal AND proven reuse. The DSV4
+      composite performs a clean N-1 reprefill over restored anchors, so
+      ``usage.cached_tokens`` can stay 0 BY DESIGN on a real in-memory
+      reuse; the composite's own attribution is the prefix-table hit
+      counter. Reuse is therefore proven by ``table_hit_evidence`` (the
+      scheduler_cache hits delta between the arms) OR cached_tokens > 0.
+    - Without proven reuse the comparison proves nothing:
+      "inconclusive_no_reuse", never "pass".
     - Any non-200 turn means the A/B did not complete: "fail".
     """
     if not turn_records:
@@ -393,7 +399,9 @@ def compute_verdict(turn_records: list[dict[str, Any]]) -> str:
             return "fail"
         if record.get("restored_http_code", 200) != 200:
             return "fail"
-    reuse_proven = any(int(record.get("cached_tokens") or 0) > 0 for record in turn_records)
+    reuse_proven = bool(table_hit_evidence) or any(
+        int(record.get("cached_tokens") or 0) > 0 for record in turn_records
+    )
     if not reuse_proven:
         return "inconclusive_no_reuse"
     if not all(record.get("byte_equal") is True for record in turn_records):
@@ -466,7 +474,21 @@ def main() -> int:
 
         records = build_turn_records(cold, restored)
         artifact["turns"] = records
-        artifact["status"] = compute_verdict(records)
+
+        def _table_hits(stats: Any) -> int:
+            body = stats.get("body") if isinstance(stats, dict) else None
+            body = body if isinstance(body, dict) else (stats or {})
+            table = body.get("scheduler_cache") or {}
+            try:
+                return int(table.get("hits") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        hits_delta = _table_hits(artifact.get("cache_stats_after") or {}) - _table_hits(
+            artifact.get("cache_stats_before") or {}
+        )
+        artifact["table_hits_delta"] = hits_delta
+        artifact["status"] = compute_verdict(records, table_hit_evidence=hits_delta > 0)
     except Exception as exc:  # noqa: BLE001 - artifact must always be written
         artifact["error"] = repr(exc)
         artifact["status"] = "fail"

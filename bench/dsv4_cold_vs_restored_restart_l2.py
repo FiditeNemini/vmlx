@@ -417,10 +417,13 @@ def compute_verdict(turn_records: list[dict[str, Any]], disk_evidence: bool) -> 
 
     Ledger rules encoded here:
     - "pass" requires EVERY turn byte_equal AND proven reuse FROM DISK:
-      cached_tokens > 0 on at least one restored turn AND ``disk_evidence``
-      (disk_hits > 0 or a cache_detail mentioning disk). After a restart L1
-      is empty, but the disk evidence keeps "reuse" from being asserted on
-      cached_tokens alone.
+      ``disk_evidence`` (disk_hits > 0 or a cache_detail mentioning disk).
+      The DSV4 composite performs a clean N-1 reprefill over restored
+      SWA+CSA/HCA anchors, so ``usage.cached_tokens`` stays 0 BY DESIGN even
+      on a real restore (proven live 2026-08-15: disk_hits=2 with byte-equal
+      answers and cached_tokens=[0,0,0]); disk_hits IS the composite's
+      restore attribution. cached_tokens > 0, when present, is accepted as
+      additional evidence but is not required.
     - Without proven disk reuse the comparison proves nothing:
       "inconclusive_no_reuse", never "pass".
     - Any non-200 turn means the A/B did not complete: "fail".
@@ -432,9 +435,7 @@ def compute_verdict(turn_records: list[dict[str, Any]], disk_evidence: bool) -> 
             return "fail"
         if record.get("restored_http_code", 200) != 200:
             return "fail"
-    reuse_proven = bool(disk_evidence) and any(
-        int(record.get("cached_tokens") or 0) > 0 for record in turn_records
-    )
+    reuse_proven = bool(disk_evidence)
     if not reuse_proven:
         return "inconclusive_no_reuse"
     if not all(record.get("byte_equal") is True for record in turn_records):

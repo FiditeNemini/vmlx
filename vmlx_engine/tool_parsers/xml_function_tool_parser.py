@@ -122,6 +122,61 @@ class XMLFunctionToolParser(ToolParser):
         re.DOTALL,
     )
 
+    # Qwen3.6-35B at temp 0 emits a malformed doubled-wrapper nesting
+    # (observed verbatim in the 2026-08-15 smoke, and the cause of the
+    # family's empty visible turns once the markup was suppressed):
+    #   <tool_call>
+    #   <function=function>
+    #   <function=record_fact>
+    #   <function=value>
+    #   blue-cat
+    #   </parameter>
+    #   </function>
+    #   </tool_call>
+    # The real function name and every parameter are unambiguous when the
+    # request's tool names are known: the only opener matching a requested
+    # tool is the call, and `<function=KEY>V</parameter>` inside it is a
+    # miskeyed `<parameter=KEY>V</parameter>`.
+    MISKEYED_PARAM_PATTERN = re.compile(
+        r"<function=([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</parameter>",
+        re.DOTALL,
+    )
+
+    @classmethod
+    def _recover_doubled_wrapper_calls(
+        cls, text: str, *, allowed_names: set[str] | None
+    ) -> list[dict[str, Any]]:
+        if not allowed_names:
+            return []
+        tool_calls: list[dict[str, Any]] = []
+        for match in re.finditer(r"<function=([^>]+)>", text):
+            name = match.group(1).strip()
+            if name not in allowed_names:
+                continue
+            body = text[match.end():]
+            next_real = None
+            for later in re.finditer(r"<function=([^>]+)>", body):
+                if later.group(1).strip() in allowed_names:
+                    next_real = later.start()
+                    break
+            if next_real is not None:
+                body = body[:next_real]
+            arguments = cls._extract_arguments_from_body(body)
+            if not arguments:
+                for key, value in cls.MISKEYED_PARAM_PATTERN.findall(body):
+                    key = key.strip()
+                    if key in allowed_names:
+                        continue
+                    arguments[key] = cls._coerce_value(value)
+            tool_calls.append(
+                {
+                    "id": generate_tool_id(),
+                    "name": name,
+                    "arguments": json.dumps(arguments, ensure_ascii=False),
+                }
+            )
+        return tool_calls
+
     @classmethod
     def _extract_arguments_from_body(cls, body: str) -> dict[str, Any]:
         """Extract args trying strict `<parameter=K>V</parameter>` first, then
@@ -224,8 +279,22 @@ class XMLFunctionToolParser(ToolParser):
             )
 
         tool_calls: list[dict[str, Any]] = []
+        allowed_names_for_recovery = self._request_tool_names(request)
         for block in self.TOOL_CALL_PATTERN.findall(model_output):
-            tool_calls.extend(self._parse_functions(block))
+            parsed = self._parse_functions(block)
+            # A doubled `<function=function>` wrapper parses as one bogus call
+            # named "function" with no arguments; recover the real nested call
+            # when the request's tool names disambiguate it.
+            if allowed_names_for_recovery and parsed and all(
+                call.get("name") not in allowed_names_for_recovery
+                for call in parsed
+            ):
+                recovered = self._recover_doubled_wrapper_calls(
+                    block, allowed_names=allowed_names_for_recovery
+                )
+                if recovered:
+                    parsed = recovered
+            tool_calls.extend(parsed)
             if not tool_calls:
                 tool_calls.extend(self._parse_nested_invoke_functions(block))
 

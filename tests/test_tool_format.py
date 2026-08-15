@@ -3933,3 +3933,58 @@ class TestXMLFunctionToolParser:
         assert delta is not None
         assert delta["tool_calls"][0]["type"] == "function"
         assert delta["tool_calls"][0]["function"]["name"] == "fetch"
+
+
+class TestXMLFunctionDoubledWrapperRecovery:
+    """Qwen3.6-35B at temp 0 emits a doubled `<function=function>` wrapper with
+    miskeyed `<function=KEY>V</parameter>` parameters (observed verbatim in the
+    2026-08-15 smoke). The bogus parse suppressed the markup and left visibly
+    empty turns; with the request's tool names the real call is unambiguous."""
+
+    RAW = (
+        "<tool_call>\n<function=function>\n<function=record_fact>\n"
+        "<function=value>\nblue-cat\n</parameter>\n</function>\n</tool_call>"
+    )
+    REQUEST = {
+        "tools": [
+            {"type": "function", "function": {"name": "record_fact", "parameters": {}}}
+        ]
+    }
+
+    def _parser(self):
+        from vmlx_engine.tool_parsers.xml_function_tool_parser import (
+            XMLFunctionToolParser,
+        )
+
+        return XMLFunctionToolParser.__new__(XMLFunctionToolParser)
+
+    def test_recovers_the_real_call_and_miskeyed_parameter(self):
+        import json
+
+        info = self._parser().extract_tool_calls(self.RAW, request=self.REQUEST)
+
+        assert info.tools_called is True
+        assert len(info.tool_calls) == 1
+        assert info.tool_calls[0]["name"] == "record_fact"
+        assert json.loads(info.tool_calls[0]["arguments"]) == {"value": "blue-cat"}
+        assert not info.content
+
+    def test_wellformed_calls_do_not_take_the_recovery_path(self):
+        import json
+
+        good = (
+            "<tool_call>\n<function=record_fact>\n<parameter=value>\nblue-cat\n"
+            "</parameter>\n</function>\n</tool_call>"
+        )
+        info = self._parser().extract_tool_calls(good, request=self.REQUEST)
+
+        assert info.tools_called is True
+        assert info.tool_calls[0]["name"] == "record_fact"
+        assert json.loads(info.tool_calls[0]["arguments"]) == {"value": "blue-cat"}
+
+    def test_without_request_names_the_bogus_wrapper_is_not_invented(self):
+        info = self._parser().extract_tool_calls(self.RAW, request=None)
+
+        # No names to disambiguate: parser keeps its old behavior rather than
+        # guessing (the engine's required-mode check then reports it).
+        assert all(c["name"] == "function" for c in info.tool_calls)

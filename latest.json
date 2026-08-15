@@ -1,19 +1,19 @@
 {
-  "version": "1.6.28",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.28/vMLX-1.6.28-tahoe-arm64.dmg",
-  "sha256": "95469cd9933ec8d4d67e88c546d9c9593d9ef57885c8573c64e40e75d2d8c594",
-  "sha512": "RutlMvQtHkkUhcbLT/6+03XzeCiIDFzgxsI2qeZkYfkTXdYtQ/Sdn6I97mu2boivo72NdO7WhIqlQ0Hhu12niw==",
+  "version": "1.6.29",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.29/vMLX-1.6.29-tahoe-arm64.dmg",
+  "sha256": "143627e6626d669515c9fc1b67ee91736cdd2b9365a3ce6f39659ed0fef8eed2",
+  "sha512": "RGcVT4PM2nPC5ZXxzhoPxesSPmdlDnZjvX+8RG28bkl2gaRx1cEnSY5FBMqa2Jd8ggLCk2NUnra5EJ4GRd/vCw==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.28/vMLX-1.6.28-sequoia-arm64.dmg",
-      "sha256": "13120d0eee9cac6f35fe1a1fd2f06d1cc130814bb7d8aff17115aab8d9a0673e",
-      "sha512": "qdJftVw0f4PRQvaxycksiyRvTcN1F9RUuQJ5ZjWsF13Hi+JhK7iI3/VTqGmCBF9mbE18TtDCisoL/x6N0KKlNw=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.29/vMLX-1.6.29-sequoia-arm64.dmg",
+      "sha256": "7ea612c94bc0e06c848bd3ee3b58ebf01728e2fc7279e6b06cec8141b5f6ad02",
+      "sha512": "2HpghB3MUNPXM4MWgrZ8jumES++cj/V0nIg62nAeyQm958aXYTnFIz15GWSwtZiArVuOK15d54iMKH7CDrzCAg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.28/vMLX-1.6.28-tahoe-arm64.dmg",
-      "sha256": "95469cd9933ec8d4d67e88c546d9c9593d9ef57885c8573c64e40e75d2d8c594",
-      "sha512": "RutlMvQtHkkUhcbLT/6+03XzeCiIDFzgxsI2qeZkYfkTXdYtQ/Sdn6I97mu2boivo72NdO7WhIqlQ0Hhu12niw=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.29/vMLX-1.6.29-tahoe-arm64.dmg",
+      "sha256": "143627e6626d669515c9fc1b67ee91736cdd2b9365a3ce6f39659ed0fef8eed2",
+      "sha512": "RGcVT4PM2nPC5ZXxzhoPxesSPmdlDnZjvX+8RG28bkl2gaRx1cEnSY5FBMqa2Jd8ggLCk2NUnra5EJ4GRd/vCw=="
     }
   },
-  "notes": "vMLX 1.6.28: new Qwen3.6/3.8 bundle line support with automatic multi-token prediction (+33% decode), answer-stability cache controls, long-context prefill resilience, and Ollama/Anthropic gateway fixes."
+  "notes": "vMLX 1.6.29: hybrid prefix cache follow-ups up to 20x faster on long documents, 100k-context multiturn proven stable, chunked SSM re-derive restores long-context reuse, contentless-turn 500 fix on chat and Responses, and per-family cache/parser hardening across 12 model families."
 }

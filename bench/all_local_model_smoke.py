@@ -1158,6 +1158,18 @@ def build_probe_payloads(
                     },
                 ]
             )
+    # A family that does not expose a native thinking-off/instruct mode
+    # rejects enable_thinking=false with a clean enforcement 400 (lfm2:
+    # "Use Auto/On with one of the advertised reasoning_efforts"). Honor the
+    # advertised capability: drop the off-override so those probes run in
+    # Auto instead of being refused wholesale.
+    capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), dict) else {}
+    body = capabilities.get("body") if isinstance(capabilities.get("body"), dict) else capabilities
+    if body.get("supports_instruct_mode") is False:
+        for probe in probes:
+            payload = probe.get("payload")
+            if isinstance(payload, dict) and payload.get("enable_thinking") is False:
+                payload.pop("enable_thinking")
     return probes
 
 

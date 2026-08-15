@@ -719,6 +719,14 @@ def summarize_response_rails(resp: Any) -> dict[str, Any]:
                         reasoning_parts.append(text)
                     elif item_type in {"message", "output_text", "text"}:
                         visible_parts.append(text)
+                # Responses reasoning items carry their text under "summary"
+                # ([{type: "summary_text", text: ...}]), not "content".
+                if item_type == "reasoning":
+                    summary = item.get("summary")
+                    if isinstance(summary, list):
+                        for part in summary:
+                            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                                reasoning_parts.append(part["text"])
         choices = resp.get("choices")
         if isinstance(choices, list) and choices:
             first = choices[0] if isinstance(choices[0], dict) else {}

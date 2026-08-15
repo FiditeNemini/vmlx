@@ -41,6 +41,8 @@ class XMLFunctionToolParser(ToolParser):
     for every stamped D-series bundle.
     """
 
+    NATIVE_MARKERS = ("<function=", "<function_call>", "<tool_call>")
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     TOOL_CALL_PATTERN = re.compile(

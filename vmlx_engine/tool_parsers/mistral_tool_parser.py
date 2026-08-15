@@ -46,6 +46,8 @@ class MistralToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser mistral are set.
     """
 
+    NATIVE_MARKERS = ("[TOOL_CALLS]",)
+
     # Mistral chat templates support native tool message format
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 

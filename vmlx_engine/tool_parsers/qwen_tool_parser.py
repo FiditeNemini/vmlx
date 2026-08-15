@@ -33,6 +33,8 @@ class QwenToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser qwen are set.
     """
 
+    NATIVE_MARKERS = ("<tool_call>", "<function")
+
     # Pattern for XML-style: <tool_call>{"json"}</tool_call>
     XML_PATTERN = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 

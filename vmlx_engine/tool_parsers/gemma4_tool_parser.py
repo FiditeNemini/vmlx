@@ -134,6 +134,8 @@ class Gemma4ToolParser(ToolParser):
     raw JSON format for compatibility.
     """
 
+    NATIVE_MARKERS = ("<|tool_call>",)
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
     STREAM_STOPS_AFTER_COMPLETE_CALL = True
 

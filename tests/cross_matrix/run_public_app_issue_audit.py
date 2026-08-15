@@ -1004,6 +1004,15 @@ def build_audit(root: Path) -> dict[str, Any]:
                     "issue179_root_cause_audit_passes",
                     "issue179_root_cause_audit_open",
                     "issue179_cancel_probe_present",
+                    # 2026-08-15: the live-UI stricttools proof records a
+                    # GENUINE model failure on the sibling TQ bundle — the
+                    # reasoning rail degenerates into a token loop with an
+                    # empty answer (the #179 screenshot shape, reproduced
+                    # locally). That is attributed jang-side re-quant work
+                    # (the #155/#163/#166 class), carried OPEN like the
+                    # 111/165/166 installed-hash carriers — not an audit
+                    # integrity failure.
+                    "minimax_live_ui_artifacts_indexed",
                 }
             }
             issue["focused_source_slice"] = (

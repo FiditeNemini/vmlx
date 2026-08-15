@@ -3149,11 +3149,14 @@ def _sample_mllm_prefill_logits(
     return sampled, logprobs
 
 
-# One device fence per MTP verify cycle. See the call site in the verify
-# cycle for the measured async-accumulation pathology this bounds.
+# One device fence per MTP verify cycle. Default ON: measured 2026-08-15 on
+# 35B MXFP8 MTP depth 2, the fence recovers the cache-on async-accumulation
+# stall (1.45x -> 1.68x, MTP arm 108.5 -> 128.0 t/s, byte-equal) and is free
+# where the stall is absent (cache-off 1.932x fenced vs 1.943x unfenced,
+# within run noise, byte-equal). VMLX_MTP_CYCLE_FENCE=0 reverts.
 _NATIVE_MTP_CYCLE_FENCE = os.environ.get(
-    "VMLX_MTP_CYCLE_FENCE", ""
-).lower() in {"1", "true", "yes", "on"}
+    "VMLX_MTP_CYCLE_FENCE", "1"
+).lower() not in {"0", "false", "no", "off"}
 
 
 def _native_mtp_trace_enabled() -> bool:

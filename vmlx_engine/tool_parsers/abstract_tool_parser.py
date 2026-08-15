@@ -68,6 +68,13 @@ class ToolParser(ABC):
     Each parser implementation handles a specific model's tool calling format.
     """
 
+    # Stream-visible opening markers of this parser's native dialect. The
+    # server's _TOOL_CALL_MARKERS visibility guard must cover every entry
+    # (prefix match) or the dialect's control payload can leak into visible
+    # text - the exact class that let Muse's <atem: markup reach users. A
+    # contract test enforces coverage for every registered parser.
+    NATIVE_MARKERS: tuple = ()
+
     # Class attribute to declare native format support.
     # Set to True in subclasses whose corresponding model chat templates
     # can handle role="tool" messages and tool_calls fields directly,

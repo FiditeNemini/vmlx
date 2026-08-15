@@ -75,6 +75,8 @@ class MiniMaxToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser minimax are set.
     """
 
+    NATIVE_MARKERS = ("<minimax:tool_call>",)
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     # Pattern to match entire <minimax:tool_call>...</minimax:tool_call> blocks

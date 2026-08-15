@@ -32,6 +32,8 @@ class HermesToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser hermes are set.
     """
 
+    NATIVE_MARKERS = ("<tool_call>",)
+
     # Standard format: <tool_call>{"name": ..., "arguments": ...}</tool_call>
     TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
     # Lenient format: <tool_call or <tool_call> followed by JSON (handles malformed tags)

@@ -52,6 +52,8 @@ class OpenPanguToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser openpangu are set.
     """
 
+    NATIVE_MARKERS = ("<|tool_call_start|>",)
+
     # The template handles role="tool" messages and assistant tool_calls
     # natively (renders <|message_start|>tool ... and re-encodes tool_calls
     # into the <|tool_call_start|> list), so no text-format conversion needed.

@@ -107,6 +107,8 @@ def _coerce(value: str, declared_type: str | None) -> Any:
 class AtemToolParser(ToolParser):
     """Tool call parser for the Muse Glimmer ATEM dialect."""
 
+    NATIVE_MARKERS = ("<atem:function_calls>", "<atem:invoke")
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     # Whole <atem:function_calls>...</atem:function_calls> blocks.

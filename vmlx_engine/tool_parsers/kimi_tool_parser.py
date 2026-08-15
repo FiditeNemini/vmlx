@@ -33,6 +33,8 @@ class KimiToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser kimi are set.
     """
 
+    NATIVE_MARKERS = ("<|tool_calls_section_begin|>", "<|tool_call_begin|>")
+
     # Kimi chat templates support native tool message format
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 

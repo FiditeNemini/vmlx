@@ -136,6 +136,8 @@ def _args_from_invoke(body: str) -> dict[str, Any]:
 class MiniMaxM3ToolParser(ToolParser):
     """Tool call parser for MiniMax-M3 (tag-named-parameter XML)."""
 
+    NATIVE_MARKERS = ("]<]minimax[>[",)
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     def _strip_noise(self, text: str) -> str:

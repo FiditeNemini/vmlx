@@ -55,6 +55,8 @@ from .abstract_tool_parser import (
 class HunyuanToolParser(ToolParser):
     """Hunyuan/Tencent Hy3 tool-call XML parser."""
 
+    NATIVE_MARKERS = ("<tool_calls>", "<tool_sep>", "<arg_key>", "<arg_value>")
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     # Optional ``:variant`` suffix on every tag (the shipped Hy3 tokenizer

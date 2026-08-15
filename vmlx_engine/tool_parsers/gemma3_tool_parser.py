@@ -153,6 +153,8 @@ def _split_kwargs(args_src: str) -> list[tuple[str, str]]:
 class Gemma3ToolParser(ToolParser):
     """Parse Gemma 3 / 3n ``tool_code`` code-block tool calls."""
 
+    NATIVE_MARKERS = ("```tool_code",)
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     def extract_tool_calls(

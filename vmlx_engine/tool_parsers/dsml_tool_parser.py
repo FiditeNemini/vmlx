@@ -59,6 +59,11 @@ class DSMLToolParser(ToolParser):
     (numbers/bools/nested structures parsed when `string="false"`).
     """
 
+    NATIVE_MARKERS = (
+        f"<{DSML_PREFIX}tool_calls>",
+        f"<{DSML_PREFIX}invoke",
+    )
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     # DSML is an executable native control protocol.  A malformed DSML-looking

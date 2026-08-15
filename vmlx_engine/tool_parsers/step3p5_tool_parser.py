@@ -47,6 +47,8 @@ class Step3p5ToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser step3p5 are set.
     """
 
+    NATIVE_MARKERS = ("<tool_call>",)
+
     # Pattern for XML-style with <function=name>...</function> inside <tool_call>
     TOOL_CALL_PATTERN = re.compile(
         r"<tool_call>\s*<function=([^>]+)>(.*?)</function>\s*</tool_call>",

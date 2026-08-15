@@ -24,6 +24,8 @@ from .abstract_tool_parser import (
 class Lfm2ToolParser(ToolParser):
     """Parser for Liquid LFM2 Python-call-list tool calls."""
 
+    NATIVE_MARKERS = ("<|tool_call_start|>",)
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     TOOL_CALL_START = "<|tool_call_start|>"

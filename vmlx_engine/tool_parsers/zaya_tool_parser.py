@@ -30,6 +30,8 @@ class ZayaToolParser(ToolParser):
     </zyphra_tool_call>
     """
 
+    NATIVE_MARKERS = ("<zyphra_tool_call",)
+
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 
     TOOL_CALL_PATTERN = re.compile(

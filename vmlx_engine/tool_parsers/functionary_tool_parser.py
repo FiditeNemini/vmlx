@@ -35,6 +35,8 @@ class FunctionaryToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser functionary are set.
     """
 
+    NATIVE_MARKERS = ("<|recipient|>",)
+
     # Functionary chat templates support native tool message format
     SUPPORTS_NATIVE_TOOL_FORMAT = True
 

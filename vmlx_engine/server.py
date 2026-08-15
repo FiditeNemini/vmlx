@@ -4584,8 +4584,23 @@ def _resolve_enable_thinking(
     if _default_enable_thinking is True:
         return True
     if _default_enable_thinking is False:
-        _reject_unsupported_instruct_mode("the server default")
-        return False
+        # The 400 exists to tell CALLERS their request is impossible. A
+        # server-resolved default of false on a family that exposes no
+        # instruct mode must not make the server reject its own
+        # configuration on every request (lfm2/step37 answered every text
+        # request with the enforcement 400 whenever a global default was
+        # set); degrade to Auto and let the bundle's native default decide.
+        if (
+            _mc is not None
+            and getattr(_mc, "supports_instruct_mode", None) is False
+        ):
+            logger.info(
+                "%s does not expose a native thinking-off mode; ignoring the "
+                "server default enable_thinking=false and resolving Auto",
+                _family,
+            )
+        else:
+            return False
 
     # Some families have a richer native Auto policy than a boolean parser
     # capability can express. Preserve None until their scoped normalizer runs:

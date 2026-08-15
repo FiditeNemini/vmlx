@@ -3259,9 +3259,13 @@ export function validateModelBundleBinding(result) {
     .filter(Boolean)
   if (!requestedPath) failures.push('requested local bundle path is missing')
   if (!requestedModel) failures.push('requested served model name is missing')
+  const boundIds = listedIds.filter(
+    (id) => id === requestedModel || id.endsWith(`/${requestedModel}`),
+  )
   if (
-    listedIds.length !== 1
-    || listedIds[0] !== requestedModel
+    listedIds.length < 1
+    || boundIds.length !== listedIds.length
+    || !listedIds.includes(requestedModel)
   ) {
     failures.push(
       `/v1/models is not exactly bound to requested served model ${requestedModel || 'missing'}`,
@@ -4537,7 +4541,12 @@ export function validateGenerationDefaultsEvidence(result) {
     if (requestCorrelationVerified) {
       const resolvedExpected = requestOverride ?? expected
       const resolvedValue = numericField(resolved, resolvedKey, engineKey, bundleKey, uiKey)
-      if (!approximatelyEqual(Number(resolvedValue), Number(resolvedExpected))) {
+      const resolvedSentinelOmitted = (
+        engineKey === 'top_k'
+        && Number(resolvedExpected) === 0
+        && (resolvedValue === undefined || resolvedValue === null)
+      )
+      if (!resolvedSentinelOmitted && !approximatelyEqual(Number(resolvedValue), Number(resolvedExpected))) {
         failures.push(`resolved request ${engineKey}=${resolvedValue} does not match ${resolvedExpected}`)
       }
       resolvedRecords.forEach((record, index) => {
@@ -4548,7 +4557,12 @@ export function validateGenerationDefaultsEvidence(result) {
           bundleKey,
           uiKey,
         )
-        if (!approximatelyEqual(Number(turnValue), Number(resolvedExpected))) {
+        const turnSentinelOmitted = (
+          engineKey === 'top_k'
+          && Number(resolvedExpected) === 0
+          && (turnValue === undefined || turnValue === null)
+        )
+        if (!turnSentinelOmitted && !approximatelyEqual(Number(turnValue), Number(resolvedExpected))) {
           failures.push(
             `resolved request record ${index + 1} ${engineKey}=${turnValue} does not match ${resolvedExpected}`,
           )

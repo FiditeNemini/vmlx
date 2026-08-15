@@ -3276,20 +3276,24 @@ class TestNullContentAssistantTurnDoesNotCrashTemplate:
     """
 
     def test_server_fills_empty_content_for_contentless_assistant_turns(self):
-        from pathlib import Path
+        # The inline filter became the shared _drop_contentless_assistant_turns
+        # helper so every dialect's request prep (chat, responses, anthropic,
+        # streaming ollama) applies the same drop. Pin the helper's behavior
+        # instead of the old inline source shape.
+        from vmlx_engine.server import _drop_contentless_assistant_turns
 
-        source = Path("vmlx_engine/server.py").read_text()
-        marker = '_msg.get("role") == "assistant"'
-        assert marker in source, "contentless assistant-turn handling is missing"
-        window = source[source.index(marker) - 700:source.index(marker) + 400]
-        assert 'not _msg.get("content")' in window
-        assert 'not _msg.get("tool_calls")' in window, (
-            "a tool-call-only assistant turn is valid and must NOT be dropped"
+        kept = _drop_contentless_assistant_turns(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": ""},
+                {"role": "assistant"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c"}]},
+            ]
         )
-        # Filling with "" does not work -- Mistral's template rejects the empty
-        # string exactly as it rejects a missing key. The turn must be DROPPED.
-        assert '_msg["content"] = ""' not in window
-        assert "messages = [" in window
+        assert kept == [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c"}]},
+        ], "a tool-call-only assistant turn is valid and must NOT be dropped"
 
     def test_responses_path_drops_contentless_assistant_turns_too(self):
         """The app talks to /v1/responses, which builds messages separately.
@@ -3302,10 +3306,8 @@ class TestNullContentAssistantTurnDoesNotCrashTemplate:
         from vmlx_engine.server import _responses_input_to_messages
 
         source = inspect.getsource(_responses_input_to_messages)
-        assert '_m.get("role") == "assistant"' in source
-        assert 'not _m.get("content")' in source
-        assert 'not _m.get("tool_calls")' in source, (
-            "a tool-call-only assistant turn is valid and must NOT be dropped"
+        assert "_drop_contentless_assistant_turns(" in source, (
+            "the responses builder must apply the shared contentless drop"
         )
 
     def test_responses_builder_drops_the_empty_turn_in_practice(self):

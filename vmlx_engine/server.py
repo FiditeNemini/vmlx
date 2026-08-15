@@ -1387,6 +1387,33 @@ def _strip_residual_think_markup_for_display(
     return stripped.strip()
 
 
+def _drop_contentless_assistant_turns(messages: list) -> list:
+    """Drop replayed assistant turns that carry neither text nor a tool call.
+
+    A reply that spends its whole budget on reasoning finishes with `length`
+    and an empty answer -- the never-empty contract permits that -- and
+    replaying it hands the chat template an assistant message it refuses to
+    render (Mistral raises TemplateError; filling with "" is rejected exactly
+    like a missing key, verified against the real tokenizer). Dropping is the
+    honest repair; a tool-call-only turn is valid and left alone.
+
+    Every dialect's request prep must call this: chat and /v1/responses build
+    messages in separate functions, and Anthropic and streaming Ollama build
+    theirs separately again -- fixing fewer than all four leaves the surface
+    those clients hit still broken (the fix-one-of-N-schedulers class).
+    """
+    return [
+        _msg
+        for _msg in messages
+        if not (
+            isinstance(_msg, dict)
+            and _msg.get("role") == "assistant"
+            and not _msg.get("content")
+            and not _msg.get("tool_calls")
+        )
+    ]
+
+
 def _strip_prior_reasoning_for_thinking_off(
     messages: list[dict],
 ) -> list[dict]:
@@ -14691,6 +14718,11 @@ async def create_anthropic_message(
     if _explicit_thinking_off and messages_dump:
         messages_dump = _strip_prior_reasoning_for_thinking_off(messages_dump)
 
+    # Anthropic builds its own message dump; without this drop a replayed
+    # thinking-only assistant turn 500s on strict templates while the same
+    # conversation succeeds through chat/responses.
+    messages_dump = _drop_contentless_assistant_turns(messages_dump)
+
     # Force usage accounting so message_delta reports real input/output tokens
     # (Anthropic clients otherwise log zero tokens).
     from .api.models import StreamOptions as _StreamOptions
@@ -15623,6 +15655,11 @@ async def ollama_chat(fastapi_request: Request):
     )
     if _explicit_thinking_off and messages:
         messages = _strip_prior_reasoning_for_thinking_off(messages)
+
+    # Streaming Ollama builds its own message list; content:null becomes ""
+    # downstream and 500s on strict templates while stream:false (which
+    # delegates to create_chat_completion) succeeds.
+    messages = _drop_contentless_assistant_turns(messages)
 
     # Ollama's `format` (JSON mode). The adapter already mapped it onto
     # response_format, but THIS streaming branch builds its own chat_kwargs
@@ -17605,16 +17642,7 @@ async def create_chat_completion(
     # user turns still render on Mistral, Qwen3.8, Nanbeige and Muse.
     #
     # A tool-call-only assistant turn is left alone: it is valid without content.
-    messages = [
-        _msg
-        for _msg in messages
-        if not (
-            isinstance(_msg, dict)
-            and _msg.get("role") == "assistant"
-            and not _msg.get("content")
-            and not _msg.get("tool_calls")
-        )
-    ]
+    messages = _drop_contentless_assistant_turns(messages)
 
     # Include audio in the media check: extract_multimodal_content returns only
     # images+videos, so an audio-only request that reached this text path
@@ -19823,16 +19851,7 @@ def _responses_input_to_messages(
     #
     # Filling with "" is NOT a fix: Mistral's template rejects the empty string
     # exactly as it rejects a missing key (verified against the real tokenizer).
-    messages = [
-        _m
-        for _m in messages
-        if not (
-            isinstance(_m, dict)
-            and _m.get("role") == "assistant"
-            and not _m.get("content")
-            and not _m.get("tool_calls")
-        )
-    ]
+    messages = _drop_contentless_assistant_turns(messages)
 
     return messages
 

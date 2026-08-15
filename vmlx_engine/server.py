@@ -19720,6 +19720,23 @@ def _responses_input_to_messages(
                 message = pending_visible_assistant
                 pending_visible_assistant = None
                 message["tool_calls"] = [tool_call]
+                messages.append(message)
+            elif (
+                messages
+                and isinstance(messages[-1], dict)
+                and messages[-1].get("role") == "assistant"
+                and messages[-1].get("tool_calls")
+                and not pending_reasoning_parts
+            ):
+                # Parallel tool calls: one assistant generation emits several
+                # function_call items back-to-back (nothing between them).
+                # Chain replay via previous_response_id coalesces them into
+                # ONE assistant turn (_responses_output_to_assistant_messages);
+                # the explicit-replay path must build the identical shape or
+                # the two continuation modes tokenize differently — splitting
+                # the prompt prefix cache and producing consecutive assistant
+                # turns that strict-alternation templates reject (dialect F3).
+                messages[-1]["tool_calls"].append(tool_call)
             else:
                 message = {
                     "role": "assistant",
@@ -19734,7 +19751,7 @@ def _responses_input_to_messages(
                 reasoning = _take_pending_reasoning()
                 if reasoning:
                     message["reasoning_content"] = reasoning
-            messages.append(message)
+                messages.append(message)
             continue
 
         # function_call_output → tool message with result

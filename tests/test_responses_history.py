@@ -1215,3 +1215,92 @@ def test_reasoning_only_marker_eviction_with_history_capacity():
         server._RESPONSES_HISTORY_MAX = original_max
         _responses_history.clear()
         _responses_was_reasoning_only.clear()
+
+
+# --- dialect F3: parallel tool calls must reconstruct identically on both
+# replay modes. Explicit replay built one assistant turn PER function_call
+# item while previous_response_id chain replay coalesced all of them into
+# one turn -> different prompt bytes (prefix-cache split on every chained
+# multi-tool turn) and consecutive assistant turns that strict-alternation
+# templates reject.
+
+
+def test_parallel_tool_calls_coalesce_on_explicit_replay():
+    from vmlx_engine.server import _responses_input_to_messages
+
+    msgs = _responses_input_to_messages(
+        [
+            {"type": "message", "role": "user", "content": "check both files"},
+            {"type": "function_call", "call_id": "c1", "name": "read_file",
+             "arguments": '{"path": "a.txt"}'},
+            {"type": "function_call", "call_id": "c2", "name": "read_file",
+             "arguments": '{"path": "b.txt"}'},
+            {"type": "function_call_output", "call_id": "c1", "output": "A"},
+            {"type": "function_call_output", "call_id": "c2", "output": "B"},
+            {"type": "message", "role": "user", "content": "and now?"},
+        ],
+        None,
+    )
+    assistants = [m for m in msgs if m.get("role") == "assistant"]
+    assert len(assistants) == 1, assistants
+    assert len(assistants[0]["tool_calls"]) == 2
+    tools = [m for m in msgs if m.get("role") == "tool"]
+    assert [t["tool_call_id"] for t in tools] == ["c1", "c2"]
+
+
+def test_parallel_tool_calls_explicit_and_chain_replay_share_one_shape():
+    from vmlx_engine.server import (
+        _responses_input_to_messages,
+        _responses_output_to_assistant_messages,
+    )
+
+    output_items = [
+        {"type": "function_call", "call_id": "c1", "name": "read_file",
+         "arguments": '{"path": "a.txt"}'},
+        {"type": "function_call", "call_id": "c2", "name": "read_file",
+         "arguments": '{"path": "b.txt"}'},
+    ]
+    chain = _responses_output_to_assistant_messages(output_items)
+    explicit = _responses_input_to_messages(
+        [{"type": "message", "role": "user", "content": "go"}] + output_items,
+        None,
+    )
+    explicit_assistants = [m for m in explicit if m.get("role") == "assistant"]
+    assert len(chain) == 1 and len(explicit_assistants) == 1
+    key = lambda turn: [
+        (t["function"]["name"], t["function"]["arguments"])
+        for t in turn["tool_calls"]
+    ]
+    assert key(chain[0]) == key(explicit_assistants[0])
+
+
+def test_sequential_and_reasoning_separated_calls_stay_split():
+    from vmlx_engine.server import _responses_input_to_messages
+
+    sequential = _responses_input_to_messages(
+        [
+            {"type": "message", "role": "user", "content": "step by step"},
+            {"type": "function_call", "call_id": "s1", "name": "f", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "s1", "output": "r1"},
+            {"type": "function_call", "call_id": "s2", "name": "g", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "s2", "output": "r2"},
+        ],
+        None,
+    )
+    seq_assistants = [m for m in sequential if m.get("role") == "assistant"]
+    assert len(seq_assistants) == 2
+    assert all(len(m["tool_calls"]) == 1 for m in seq_assistants)
+
+    with_reasoning = _responses_input_to_messages(
+        [
+            {"type": "message", "role": "user", "content": "hi"},
+            {"type": "function_call", "call_id": "r1", "name": "f", "arguments": "{}"},
+            {"type": "reasoning",
+             "content": [{"type": "reasoning_text", "text": "thinking"}]},
+            {"type": "function_call", "call_id": "r2", "name": "g", "arguments": "{}"},
+        ],
+        None,
+    )
+    r_assistants = [m for m in with_reasoning if m.get("role") == "assistant"]
+    assert len(r_assistants) == 2
+    assert r_assistants[1].get("reasoning_content") == "thinking"

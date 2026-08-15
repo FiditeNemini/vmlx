@@ -43,14 +43,14 @@ EXPECTED_OPEN_REQUIREMENTS = [
     # machine (5 legacy speed artifacts + streaming diagnostic); current
     # bundled-engine probes pass and the 12-family matrix holds 93.9%.
     "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
-    # 2026-08-15 hardware-transition carryover: the remaining two Qwen rows
-    # point at retired-27B-era clearance artifacts (native-MTP A/B and the
-    # norm-shift clearance). The packaged MX matmul speed row REOPENED and
-    # CLEARED same day: the 35B speed artifacts land and the digest pointers
-    # retarget (source pass 77.8 t/s decode / 2276+ pp; installed-app pass
-    # 78.2 t/s on native cp312 wheels). Reopen the rest when the 35B MTP A/B
-    # and pp-floor clearance artifacts land.
-    "Qwen native MTP live decode speed and output equivalence are release-cleared",
+    # 2026-08-15 hardware-transition carryover, two of three Qwen rows now
+    # CLEARED same day on 35B artifacts: packaged MX matmul speed (source
+    # 77.8 t/s / 2276+ pp; installed-app 78.2 t/s native wheels) and the
+    # native-MTP A/B (depth 2, 1.63x, 96.5% acceptance, FULL output
+    # equivalence with --disable-prompt-reuse — reuse-enabled arms produce
+    # FALSE non-equivalence via warm/cold argmax flips). The pp-floor row
+    # still points at retired-27B MTP-prefill diagnostics; reopen when its
+    # 35B clearance artifacts land.
     "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
     # 2026-08-15: the non-MiMo real-UI matrix holds green rows for qwen38,
     # gemma4, zaya, nemotron dev, step37 (3/4), minimax m1; the remaining

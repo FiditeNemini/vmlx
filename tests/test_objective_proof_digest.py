@@ -1155,7 +1155,7 @@ def _write_passing_base_artifacts(tmp_path: Path) -> None:
     )
     _write_json(
         tmp_path,
-        "build/current-native-mtp-speed-ab-qwen27-jang4m-mtp-installed-app-20260606/result.json",
+        "build/current-native-mtp-ab-qwen35-mxfp8-d2-noreuse-20260815.json/result.json",
         {
             "speedup_vs_baseline": 1.83,
             "output_equivalence": {

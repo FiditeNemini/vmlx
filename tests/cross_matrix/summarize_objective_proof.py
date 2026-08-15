@@ -234,8 +234,13 @@ QWEN_RAW_FORWARD_AB_4096_REL = "build/current-qwen-forward-path-ab-4096-vlm-load
 QWEN_NATIVE_MTP_NORM_SHIFT_CLEARANCE_REL = (
     "build/current-decode-speed-live-qwen27-jang4m-mtp-installed-app-deterministic-pp-20260606.json"
 )
+# 2026-08-15: retargeted to the 35B campaign. The A/B MUST run with
+# --disable-prompt-reuse: with reuse enabled, warm-vs-cold cache asymmetry
+# between arms produces FALSE output-non-equivalence (the known warm/cold
+# argmax-flip class); reuse-disabled, depths 1-3 are all equivalent and
+# depth 2 delivers 1.63x at 96.5% acceptance.
 QWEN_NATIVE_MTP_AB_REL = (
-    "build/current-native-mtp-speed-ab-qwen27-jang4m-mtp-installed-app-20260606/result.json"
+    "build/current-native-mtp-ab-qwen35-mxfp8-d2-noreuse-20260815.json/result.json"
 )
 DSV4_DEFAULT_CACHE_TOOL_LOOP_REL = "build/current-dsv4-default-cache-tool-loop/result.json"
 DSV4_RESPONSES_CACHE_GATE_REL = "build/current-dsv4-responses-cache-gate-20260606.json"

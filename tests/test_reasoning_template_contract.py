@@ -14,7 +14,7 @@ def test_reasoning_template_contract_pins_named_reasoning_edges():
 
     required = gate.REQUIRED_REASONING_TEMPLATE_TEST_MARKERS
 
-    assert "test_dsv4_reasoning_effort_preserves_requested_rails" in required
+    assert "test_dsv4_reasoning_effort_preserves_bundle_native_rails" in required
     assert "test_dsv4_thinking_policy_does_not_force_tool_calls_to_direct_rail" in required
     assert "test_dsv4_bundle_defaults_apply_only_when_request_omits_values" in required
     assert "test_minimax_m2_preserves_sampling_values_without_family_floor" in required

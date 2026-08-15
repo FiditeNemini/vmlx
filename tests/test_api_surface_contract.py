@@ -55,7 +55,7 @@ def test_api_surface_contract_pins_named_public_surface_edges():
     assert "keeps Responses maxTokens as output budget only, never prompt context" in panel
     assert "preserves DSV4 Responses max_output_tokens for Max thinking" in panel
     assert "omits malformed Ollama context values instead of poisoning max_prompt_tokens" in panel
-    assert "omits unset and disabled sampling sentinels without dropping explicit overrides" in panel
+    assert "omits unset and negative sentinels while forwarding explicit neutral sampling overrides" in panel
     assert "omits malformed Ollama num_predict values instead of poisoning max_tokens" in panel
     assert "applies gateway timeout handling to Ollama embeddings proxy requests" in panel
     assert "auto-switches by model id in single-model mode before preserving streaming deltas" in panel
@@ -76,7 +76,7 @@ def test_api_surface_contract_pins_named_public_surface_edges():
     assert "chat:setOverrides rejects non-finite or non-numeric maxTokens instead of poisoning server defaults" in panel
     assert "Auto chat maxTokens omits per-request output caps so server default can apply" in panel
     assert "guards gateway streaming writes against client disconnect EPIPE errors" in panel
-    assert "guards every Ollama backend response stream error as a disconnect boundary" in panel
+    assert "aborts Ollama backend response streams when the client response closes" in panel
     assert "aborts Ollama backend response streams when the client response closes" in panel
     assert "writes each streamed gateway response chunk once and treats EPIPE as disconnect" in panel
     assert "does not write gateway response chunks after the client socket is destroyed" in panel
@@ -210,7 +210,7 @@ def test_noheavy_api_cache_contract_pins_named_server_rows():
     assert "test_native_cache_status_reports_dsv4_separately_from_tq_kv" in required
     assert "test_native_cache_status_reports_zaya_typed_cca" in required
     assert "test_acceleration_status_reports_internal_jangtq_acceleration_when_enabled" in required
-    assert "test_responses_extracts_suppressed_reasoning_tool_calls_before_finalize" in required
+    assert "test_responses_extracts_reasoning_rail_tool_calls_before_finalize" in required
     assert "test_dsml_issue_165_server_tool_call_arguments_are_not_empty_or_raw" in required
     assert "test_dsv4_encoder_preserves_code_identifiers_on_direct_chat_rail" in required
 

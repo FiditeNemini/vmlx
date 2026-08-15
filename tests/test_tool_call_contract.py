@@ -14,7 +14,7 @@ def test_tool_call_contract_has_required_marker_gate():
     from tests.cross_matrix import run_tool_call_contract as gate
 
     required = gate.REQUIRED_TOOL_CALL_TEST_MARKERS
-    assert "responses_extracts_suppressed_reasoning_tool_calls_before_finalize" in required
+    assert "responses_extracts_reasoning_rail_tool_calls_before_finalize" in required
     assert "resets text-chat tool streaming state before chained follow-up requests" in required
     assert "panel max tool iterations caps tool loops" in required
     assert "TestGemma4ToolParser::test_tools_called_implies_no_marker_in_content" in required

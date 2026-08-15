@@ -58,13 +58,13 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     required_api_command = gate.REQUIRED_API_CACHE_COMMAND_MARKERS
     required_panel = gate.REQUIRED_PANEL_CACHE_MARKERS
 
-    assert "test_dsv4_cli_cache_policy_defaults_composite_cache_off" in required_pytest
+    assert "test_dsv4_cli_cache_policy_keeps_prefix_and_independent_ram_l2_tiers" in required_pytest
     assert "test_dsv4_runtime_policy_applies_to_bench_like_cli_args" in required_pytest
     assert "test_dsv4_ui_defaults_composite_cache_off_and_exposes_no_false_reuse_toggle" in required_pytest
     assert "test_dsv4_launch_filters_stale_saved_and_additional_args" in required_pytest
     assert "test_dsv4_product_ui_has_no_cache_opt_in_but_cli_env_remains_explicit" in required_pytest
-    assert "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" in required_pytest
-    assert "test_dsv4_paged_restore_requires_full_prefill" in required_pytest
+    assert "test_failed_generation_prefix_trim_never_stores_original_state_under_shorter_key" in required_pytest
+    assert "test_dsv4_v9_paged_restore_is_not_unconditionally_rejected" in required_pytest
     assert "test_dsv4_storage_quantization_is_forced_off_for_composite_cache" in required_pytest
     assert "test_dsv4_scheduler_forces_generic_kv_quantization_off" in required_pytest
     assert "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint" in required_pytest
@@ -169,8 +169,8 @@ def test_cache_architecture_contract_publishes_structured_family_matrix():
     assert "dsv4_product_full_prefill_policy" in dsv4["checks"]
     assert "dsv4_invalid_snapshot_store_guard" in dsv4["checks"]
     assert "dsv4_generic_tq_disabled" in dsv4["checks"]
-    assert "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" in dsv4["markers"]
-    assert "test_dsv4_paged_restore_requires_full_prefill" in dsv4["markers"]
+    assert "test_failed_generation_prefix_trim_never_stores_original_state_under_shorter_key" in dsv4["markers"]
+    assert "test_dsv4_v9_paged_restore_is_not_unconditionally_rejected" in dsv4["markers"]
     assert dsv4["deferred_open"] == (
         "same-process cold-vs-restored cache state and output equivalence",
         "restart and SSD-only L2 refault cold-vs-restored equivalence",
@@ -182,7 +182,7 @@ def test_cache_architecture_contract_publishes_structured_family_matrix():
     assert "dsv4_swa_hca_csa_component_contracts" in dsv4_components["checks"]
     assert "test_pool_quantized_v4_cache_is_detected_as_dsv4_composite" in dsv4_components["markers"]
     assert "test_dsv4_block_disk_serialization_round_trips_nested_state" in dsv4_components["markers"]
-    assert "test_dsv4_untrimmed_composite_is_never_stored_under_shorter_key" in dsv4_components["markers"]
+    assert "test_failed_generation_prefix_trim_never_stores_original_state_under_shorter_key" in dsv4_components["markers"]
     assert dsv4_components["deferred_open"] == (
         "native SWA+CSA/HCA positive-hit reconstruction equivalence",
     )

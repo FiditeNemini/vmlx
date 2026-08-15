@@ -6201,6 +6201,13 @@ class BlockAwarePrefixCache:
                             mx.concatenate([s[c] for s in sub_qkv_vals], axis=-2)
                             for c in range(n_comp)
                         )
+                        # Single-block chains: mx.concatenate([x]) can return
+                        # the same object, aliasing block.cache_data with the
+                        # live cache (see the standard-KV guard below); force
+                        # fresh buffers.
+                        if len(sub_qkv_keys) == 1:
+                            ck = tuple(c * 1 for c in ck)
+                            cv = tuple(c * 1 for c in cv)
                         mx.eval(*ck, *cv)
                         try:
                             from mlx_lm.models.cache import QuantizedKVCache as QKVCache
@@ -6222,6 +6229,12 @@ class BlockAwarePrefixCache:
                         seq_axis = 1 if ndim == 3 else 2
                         ck = mx.concatenate(sub_kv_keys, axis=seq_axis)
                         cv = mx.concatenate(sub_kv_vals, axis=seq_axis)
+                        # Same single-block aliasing hazard; the step-padding
+                        # re-concat below only fires when offset % step != 0,
+                        # so it cannot be relied on for a fresh buffer.
+                        if len(sub_kv_keys) == 1:
+                            ck = ck * 1
+                            cv = cv * 1
                         mx.eval(ck, cv)
                         if ndim == 4:
                             allowed_kv = self._get_allowed_n_kv_heads()
@@ -6999,6 +7012,12 @@ class BlockAwarePrefixCache:
                                 mx.concatenate([s[c] for s in sub_qkv_vals], axis=-2)
                                 for c in range(n_comp)
                             )
+                            # Single-block chains: mx.concatenate([x]) can
+                            # return the same object, aliasing block.cache_data
+                            # with the live cache; force fresh buffers.
+                            if len(sub_qkv_keys) == 1:
+                                ck = tuple(c * 1 for c in ck)
+                                cv = tuple(c * 1 for c in cv)
                             mx.eval(*ck, *cv)
                             try:
                                 from mlx_lm.models.cache import QuantizedKVCache as QKVCache
@@ -7021,6 +7040,11 @@ class BlockAwarePrefixCache:
                             seq_axis = 1 if ndim == 3 else 2
                             ck = mx.concatenate(sub_kv_keys, axis=seq_axis)
                             cv = mx.concatenate(sub_kv_vals, axis=seq_axis)
+                            # Same single-block aliasing hazard; the step
+                            # padding below only fires when offset % step != 0.
+                            if len(sub_kv_keys) == 1:
+                                ck = ck * 1
+                                cv = cv * 1
                             mx.eval(ck, cv)
 
                             # Validate head count in sub-cache (mixed-head aware)

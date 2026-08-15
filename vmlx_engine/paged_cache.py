@@ -1246,29 +1246,19 @@ class PagedCacheManager:
         ceiling never triggers for DSV4. Returns 0 on any error — accounting is
         advisory, never fatal.
         """
-        total = 0
-        _seen: set = set()
+        from vmlx_engine.cache.byte_estimators import walk_payload_bytes
 
-        def _add(x: Any) -> None:
-            nonlocal total
-            nb = getattr(x, "nbytes", None)
-            if isinstance(nb, int):
-                total += nb
-            elif isinstance(x, dict):
-                # Guard against pathological self-referential state trees.
-                if id(x) in _seen:
-                    return
-                _seen.add(id(x))
-                for e in x.values():
-                    _add(e)
-            elif isinstance(x, (tuple, list)):
-                for e in x:
-                    _add(e)
-
-        try:
-            _add(cache_data)
-        except Exception:
-            return 0
+        total, _tensors = walk_payload_bytes(
+            cache_data,
+            # Historical residency semantics: any int-nbytes leaf counts,
+            # aliased arrays count at every occurrence, no raw-bytes or
+            # __dict__ traversal, unbounded depth.
+            require_shape_for_arrays=False,
+            dedupe_arrays=False,
+            count_raw_bytes=False,
+            walk_object_dicts=False,
+            max_depth=None,
+        )
         return total
 
     @property

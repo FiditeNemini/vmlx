@@ -1015,39 +1015,20 @@ class BlockDiskStore:
         enqueue.
         """
 
-        seen: set[int] = set()
-        tensor_count = 0
+        from vmlx_engine.cache.byte_estimators import walk_payload_bytes
 
-        def walk(value: Any, depth: int = 0) -> int:
-            nonlocal tensor_count
-            if value is None or depth > 16:
-                return 0
-            identity = id(value)
-            if identity in seen:
-                return 0
-            if isinstance(value, (str, bytes, bytearray, int, float, bool)):
-                return len(value) if isinstance(value, (bytes, bytearray)) else 0
-            nbytes = getattr(value, "nbytes", None)
-            if nbytes is not None and hasattr(value, "shape"):
-                seen.add(identity)
-                tensor_count += 1
-                try:
-                    return max(0, int(nbytes))
-                except (TypeError, ValueError):
-                    return 0
-            if isinstance(value, dict):
-                seen.add(identity)
-                return sum(walk(item, depth + 1) for item in value.values())
-            if isinstance(value, (list, tuple)):
-                seen.add(identity)
-                return sum(walk(item, depth + 1) for item in value)
-            attributes = getattr(value, "__dict__", None)
-            if isinstance(attributes, dict):
-                seen.add(identity)
-                return sum(walk(item, depth + 1) for item in attributes.values())
-            return 0
-
-        tensor_bytes = walk(cache_data)
+        tensor_bytes, tensor_count = walk_payload_bytes(
+            cache_data,
+            # Admission semantics: array leaves need a shape (stray int
+            # nbytes attributes must not count), aliased arrays count once,
+            # raw bytes lengths count, object __dict__ trees are walked,
+            # depth capped.
+            require_shape_for_arrays=True,
+            dedupe_arrays=True,
+            count_raw_bytes=True,
+            walk_object_dicts=True,
+            max_depth=16,
+        )
         # Safetensors headers are JSON and padded; 64 KiB plus 1 KiB/tensor is
         # intentionally generous so exact reconciliation almost always shrinks
         # rather than grows the reservation.

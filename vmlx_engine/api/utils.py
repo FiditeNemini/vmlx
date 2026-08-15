@@ -981,21 +981,29 @@ def extract_multimodal_content(
         if role == "tool":
             if isinstance(msg, dict):
                 tool_call_id = msg.get("tool_call_id", "") or ""
+                tool_name = msg.get("tool_name", "") or ""
             else:
                 tool_call_id = getattr(msg, "tool_call_id", None) or ""
+                tool_name = getattr(msg, "tool_name", None) or ""
             tool_content = content if content else ""
 
             if preserve_native_format:
                 # Preserve native tool format for models that support it
-                processed_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call_id,
-                        "content": tool_content,
-                    }
-                )
+                native_tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": tool_content,
+                }
+                if tool_name:
+                    # Ollama identifies replayed results by tool_name, not
+                    # call id; templates that read ``message.name`` on tool
+                    # turns need it forwarded (dialect F5). Only added when
+                    # present so existing OpenAI flows keep identical bytes.
+                    native_tool_msg["name"] = tool_name
+                processed_messages.append(native_tool_msg)
             else:
                 # Convert to user role for models without native support
+                result_label = tool_call_id or tool_name
                 processed_messages.append(
                     {
                         "role": "user",
@@ -1005,7 +1013,7 @@ def extract_multimodal_content(
                         # a completed tool result from a new user request.
                         "type": "function_call_output",
                         "tool_call_id": tool_call_id,
-                        "content": f"[Tool Result ({tool_call_id})]: {tool_content}",
+                        "content": f"[Tool Result ({result_label})]: {tool_content}",
                     }
                 )
             continue
@@ -1065,6 +1073,12 @@ def extract_multimodal_content(
                         func = tc.get("function", {})
                         name = func.get("name", "unknown")
                         args = func.get("arguments", "{}")
+                        if isinstance(args, dict):
+                            # Replayed histories carry parsed dict arguments;
+                            # rendering the Python repr ({'path': ...}) into
+                            # the prompt diverges from the JSON the model
+                            # originally emitted (dialect F5).
+                            args = json.dumps(args, ensure_ascii=False)
                         tool_calls_text.append(f"[Calling tool: {name}({args})]")
 
                 # Flatten list content to string (fixes list + "\n" crash)

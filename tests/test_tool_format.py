@@ -4055,3 +4055,48 @@ class TestQwenDoubledWrapperRecovery:
         info = self._parser().extract_tool_calls(self.RAW, request=None)
 
         assert all(c.get("name") != "record_fact" for c in info.tool_calls)
+
+
+class TestOllamaToolIdentityF5:
+    """dialect F5: Ollama replays tool results as role:"tool" with tool_name
+    and no tool_call_id. The Message model silently discarded the field, the
+    non-native flatten rendered an anonymous "[Tool Result ()]", and replayed
+    dict-form arguments rendered as a Python repr instead of the JSON the
+    model originally emitted."""
+
+    def test_message_model_keeps_tool_name(self):
+        from vmlx_engine.api.models import Message
+
+        assert Message(role="tool", tool_name="read_file", content="A").tool_name == "read_file"
+
+    def test_non_native_flatten_labels_by_tool_name_and_renders_json_args(self):
+        from vmlx_engine.api.utils import extract_multimodal_content
+
+        msgs = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "",
+             "tool_calls": [{"id": "x", "type": "function",
+                             "function": {"name": "read_file",
+                                          "arguments": {"path": "a.txt"}}}]},
+            {"role": "tool", "tool_name": "read_file", "content": "A"},
+        ]
+        processed, _, _ = extract_multimodal_content(msgs, preserve_native_format=False)
+        tool_texts = [p["content"] for p in processed if p.get("type") == "function_call_output"]
+        assert tool_texts == ["[Tool Result (read_file)]: A"]
+        call_text = next(p["content"] for p in processed if "[Calling tool:" in str(p.get("content")))
+        assert 'read_file({"path": "a.txt"})' in call_text
+        assert "{'path'" not in call_text
+
+    def test_native_branch_forwards_name_only_when_present(self):
+        from vmlx_engine.api.utils import extract_multimodal_content
+
+        named, _, _ = extract_multimodal_content(
+            [{"role": "tool", "tool_name": "read_file", "content": "A"}],
+            preserve_native_format=True,
+        )
+        assert named[0].get("name") == "read_file"
+        plain, _, _ = extract_multimodal_content(
+            [{"role": "tool", "tool_call_id": "c1", "content": "B"}],
+            preserve_native_format=True,
+        )
+        assert "name" not in plain[0], "existing OpenAI flows must keep identical bytes"

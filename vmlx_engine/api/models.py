@@ -128,6 +128,10 @@ class Message(BaseModel):
     tool_calls: list[dict] | None = None
     # For tool response messages (role="tool")
     tool_call_id: str | None = None
+    # Ollama replays tool results as ``role:"tool"`` with ``tool_name`` and no
+    # tool_call_id. Without this field pydantic silently discarded the name
+    # and the result rendered as an anonymous "[Tool Result ()]" (dialect F5).
+    tool_name: str | None = None
 
 
 # =============================================================================

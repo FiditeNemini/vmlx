@@ -33,6 +33,7 @@ DEFAULT_PY = (
 DEFAULT_OUT = REPO / "docs/internal/release-gates/decode_speed_gate_latest.json"
 SAFE_SERVER_CWD = Path("/tmp")
 DSV4_AFFINE_MODEL_CANDIDATES = (
+    "/Volumes/EricsLLMDrive/jangq-ai/DeepSeek-V4-Flash-0731-JANG-CRACK",
     "/Users/example/models/JANGQ/"
     "DeepSeek-V4-Flash-JANG_DQ2-Token8-DownG32-Gate3Math6-NoMTP",
     "/Users/example/models/JANGQ/DeepSeek-V4-Flash-JANG",

@@ -41,6 +41,8 @@ DEFAULT_PY = Path(
 OUT_DIR = Path("/tmp/vmlx_family_audit")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 FALLBACK_MODEL_ROOTS = [
+    Path("/Volumes/EricsLLMDrive/jangq-ai"),
+    Path("/Volumes/EricsLLMDrive/dealignai"),
     Path("/Users/example/models/JANGQ"),
     Path("/Users/example/models/dealign.ai"),
     Path("/Users/example/models/Sources"),

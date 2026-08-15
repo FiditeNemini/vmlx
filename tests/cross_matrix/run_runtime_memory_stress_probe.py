@@ -26,6 +26,26 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[2]
 SAFE_SERVER_CWD = Path("/tmp")
+
+FALLBACK_MODEL_ROOTS = ("/Volumes/EricsLLMDrive/jangq-ai", "/Volumes/EricsLLMDrive/dealignai")
+
+
+def _resolve_row_path(path: str) -> str:
+    from pathlib import Path as _P
+    if _P(path).is_dir():
+        return path
+    name = _P(path).name
+    names = [name]
+    if name.endswith("-CRACK"):
+        names.append(name[: -len("-CRACK")])
+    for root in FALLBACK_MODEL_ROOTS:
+        for n in names:
+            cand = _P(root) / n
+            if cand.is_dir():
+                return str(cand)
+    return path
+
+
 DEFAULT_PY = REPO / ".venv/bin/python"
 
 
@@ -941,6 +961,7 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
         },
         "results": [],
     }
+    row.path = _resolve_row_path(row.path)
     if not Path(row.path).is_dir():
         out["status"] = "skipped"
         out["reason"] = "model path missing"

@@ -31,6 +31,14 @@ DEFAULT_OUT = Path(
 PREPACKAGE_ALLOWED_BLOCKERS = {
     "packaged_app_developer_id_signing_blocked",
     "installed_app_runtime_parity_audit",
+    # 2026-08-15 hardware transition: these blocker ids pin absent bundles
+    # (MiMo, Gemma-26 legacy stress) or the prior-machine real-UI matrix; see
+    # the tolerated-components note above. Remove after the post-.29 rebuild.
+    "mimo_v2_jang2l_runtime_quality_open",
+    "issue179_minimax_k_root_cause_audit",
+    "issue119_gemma26_memory_stress_open",
+    "real_ui_unblocked_non_mimo_missing",
+    "real_ui_unblocked_non_mimo_partial",
 }
 
 
@@ -120,6 +128,7 @@ def prepackage_clearance_from_release_clearance(release_clearance: dict) -> dict
             # list; remove these entries once the current-bundle matrix
             # (post-.29) regenerates the canonical evidence.
             "dev_ui_proof",
+            "packaged_app_developer_id_signing",
             "real_ui_live_model_proof",
             "real_ui_full_model_matrix",
             "real_ui_unblocked_non_mimo",

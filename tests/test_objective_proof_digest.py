@@ -7951,7 +7951,7 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
     )
     _write_json(
         tmp_path,
-        "build/current-all-local-model-smoke-minimaxk-bundled-after-required-tool-256-20260607/summary.json",
+        "build/current-filtered-live-smoke-minimax-m27-jangk-20260815/summary.json",
         {
             "completed": 1,
             "row_count": 1,
@@ -8055,7 +8055,7 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
     )
     _write_json(
         tmp_path,
-        "build/current-all-local-model-smoke-qwen36-27b-jang4m-mtp-bundled-tools-media-20260607/summary.json",
+        "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json",
         {
             "completed": 1,
             "row_count": 1,
@@ -8179,7 +8179,7 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
     )
     _write_json(
         tmp_path,
-        "build/current-all-local-model-smoke-gemma26-jang4m-bundled-tools-media-20260607/summary.json",
+        "build/current-filtered-live-smoke-gemma4-26b-jang4m-20260815/summary.json",
         {
             "completed": 1,
             "row_count": 1,
@@ -8229,7 +8229,7 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
     )
     _write_json(
         tmp_path,
-        "build/current-filtered-live-smoke-zaya-text-mxfp4-20260607/summary.json",
+        "build/current-filtered-live-smoke-zaya-text-jang4m-20260815/summary.json",
         {
             "status": "pass",
             "completed": 1,

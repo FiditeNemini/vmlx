@@ -329,7 +329,7 @@ GEMMA4_LOCAL_METADATA_AUDIT_REL = (
     "build/current-local-generation-metadata-audit-20260524-gemma4-visible-budget.json"
 )
 ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL = (
-    "build/current-filtered-live-smoke-zaya-text-mxfp4-20260607/summary.json"
+    "build/current-filtered-live-smoke-zaya-text-jang4m-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_VL_CURRENT_REL = (
     "build/current-all-local-model-smoke-zaya-text-vl-tools-media-after-reasoning-budget-20260606/summary.json"
@@ -350,13 +350,13 @@ ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL = (
     "build/current-all-local-model-smoke-ling-hy3-nemotron-tools-media-20260606/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL = (
-    "build/current-all-local-model-smoke-gemma26-jang4m-bundled-tools-media-20260607/summary.json"
+    "build/current-filtered-live-smoke-gemma4-26b-jang4m-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_LING_BAILING_JANGTQ_REL = (
     "build/current-filtered-live-smoke-ling-flash-jangtq-20260607/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_QWEN36_MXFP4_CRACK_REL = (
-    "build/current-all-local-model-smoke-qwen36-27b-jang4m-mtp-bundled-tools-media-20260607/summary.json"
+    "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL = (
     "build/current-all-local-model-smoke-qwen35-mxfp8-mtp-tools-media-20260606/summary.json"
@@ -365,7 +365,7 @@ ALL_LOCAL_MODEL_SMOKE_HY3_JANGTQ2_REL = (
     "build/current-filtered-live-smoke-hy3-preview-jangtq2-20260607/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL = (
-    "build/current-all-local-model-smoke-minimaxk-bundled-after-required-tool-256-20260607/summary.json"
+    "build/current-filtered-live-smoke-minimax-m27-jangk-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL = (
     "build/current-all-local-model-smoke-live-slice-tools-media-continuation-20260606/summary.json"

@@ -17896,10 +17896,16 @@ async def create_chat_completion(
         model_key=_model_path or _model_name or request.model,
         enable_thinking=request.enable_thinking,
     )
+    # Mint the response id BEFORE the stamped-effort policy so a coercion is
+    # recorded under the id the finalize sites pop. Only the policy itself
+    # knows a substitution happened — a request-vs-effective diff at mint
+    # time would false-positive on the hy3/enable_thinking mappings.
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     _apply_stamped_effort_policy(
         chat_kwargs,
         _ct_kwargs,
         model_key=_model_path or _model_name or request.model,
+        request_id=response_id,
     )
 
     # DeepSeek V4 bundle-owned encoder: thinking_mode=chat|thinking plus an
@@ -18121,10 +18127,10 @@ async def create_chat_completion(
             media_type="text/event-stream",
         )
 
-    # Non-streaming response with timing and timeout
+    # Non-streaming response with timing and timeout (response_id was minted
+    # before the stamped-effort policy above).
     start_time = time.perf_counter()
     timeout = request.timeout if request.timeout is not None else _default_timeout
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
     # An explicit max_thinking_tokens may reserve part of the caller's output
     # cap for the existing direct-answer stage. Auto/On without an explicit
@@ -18742,7 +18748,19 @@ async def create_chat_completion(
 
     # Attach the context-clamp record when the admission clamp bound this
     # request (pop regardless of outcome so the registry never leaks).
-    from vmlx_engine.context_limits import pop_context_clamp
+    from vmlx_engine.context_limits import (
+        pop_context_clamp,
+        pop_effort_substitution,
+    )
+
+    _effort_record = pop_effort_substitution(str(response_id))
+    if _effort_record:
+        response_warnings = list(response_warnings or []) + [
+            "reasoning_effort "
+            f"{_effort_record['requested_effort']!r} is not in this bundle's "
+            f"stamped set {_effort_record['stamped_levels']}; ran at "
+            f"{_effort_record['effective_effort']!r}"
+        ]
 
     _clamp_record = pop_context_clamp(str(response_id))
     _context_exhaustion = None

@@ -270,12 +270,25 @@ def build_serve_cmd(model_path: str, port: int) -> list[str]:
 
 
 def conversation_turns(nonce: str) -> list[str]:
-    """Fixed turn texts, nonce-salted so reruns never collide with stale cache."""
+    """Fixed turn texts, nonce-salted so reruns never collide with stale cache.
+
+    Turn one carries a deterministic filler paragraph so the FIRST prompt
+    already exceeds the DSV4 composite's 256-token block floor — shorter
+    prompts are skipped by the store ("prompt below snapshot/store
+    threshold", proven live 2026-08-15), which made every earlier run
+    structurally unable to store, hit, or prove reuse.
+    """
+    filler = " ".join(
+        f"Context sentence {i} for the equivalence ledger: the probe "
+        f"records deterministic filler text so token {i * 7} exceeds the "
+        "composite block floor without changing the questions."
+        for i in range(1, 19)
+    )
     return [
         (
-            f"Equivalence probe nonce {nonce}, turn one. List the first five "
-            "prime numbers in ascending order, then state their sum on its "
-            "own line as 'SUM: <n>'."
+            f"Equivalence probe nonce {nonce}, turn one. Background: {filler} "
+            "Now list the first five prime numbers in ascending order, then "
+            "state their sum on its own line as 'SUM: <n>'."
         ),
         (
             f"Probe {nonce}, turn two. Multiply that sum by seven. Show the "

@@ -140,6 +140,12 @@ def parse_vm_stat_available_gb(text: str) -> float:
         pages.get("Pages free", 0)
         + pages.get("Pages speculative", 0)
         + pages.get("Pages purgeable", 0)
+        # Inactive pages are reclaimable file cache. After a day of serving
+        # large bundles this box holds 40GB+ inactive, and excluding them
+        # made the preflight structurally impossible (80GB bundle + margins
+        # vs "free" alone) even though the SAME bundle served fine all day —
+        # the ledger row 27 file-cache-pollution class.
+        + pages.get("Pages inactive", 0)
     )
     return round(gate_pages * page_size / (1024**3), 2)
 

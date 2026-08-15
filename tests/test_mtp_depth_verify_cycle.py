@@ -650,3 +650,58 @@ class TestBundleDepthSidecar:
         depth, source = native_mtp_effective_depth(str(tmp_path))
         assert depth == 3
         assert source == "default"
+
+
+class TestTqLiveEncodeCrossingGuard:
+    def test_verify_cycle_falls_back_before_tq_compress_crossing(self, monkeypatch):
+        """A verify advance that would cross a TQ layer's one-time compress()
+        must fall back to the standard step instead of running the cycle.
+
+        trim() rewinds offset only, so a partial rejection after compress()
+        fires inside the advance would leave draft KV baked into the
+        compressed buffers — the text-path twin of the MLLM
+        ``_native_mtp_should_snapshot_layer`` crossing guard.
+        """
+        import sys
+
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "1")
+
+        prev = is_mtp_active()
+        try:
+            set_mtp_active(True)
+            model = _build_model(attach_mtp=True)
+            prompt = [3, 5, 7, 11]
+            gm = sys.modules["mlx_lm.generate"]
+            cache = [gm.BatchKVCache(left_padding=[0]) for _ in model.layers]
+            batch = _make_batch(model, prompt, 16, cache=cache)
+            assert getattr(batch, "_omlx_mtp_state", None) is not None
+
+            # Arm a TQ-style crossing on one layer: post-init leaves the
+            # cache at prompt+1 positions, so the first verify advance
+            # (depth 1 -> 2 tokens) crosses this threshold.
+            cache[0].compress_after = cache[0].offset + 1
+            cache[0]._compressed_tokens = 0
+
+            emitted = 0
+            for _ in range(8):
+                responses = batch.next()
+                if not responses:
+                    break
+                emitted += len(responses)
+                if responses[-1].finish_reason is not None:
+                    break
+
+            # The two queued init tokens drain, then the verify cycle hits
+            # the crossing and drops MTP state; the standard path continues
+            # emitting — no exception, no dead generation.
+            assert emitted >= 3
+            assert getattr(batch, "_omlx_mtp_state", None) is None
+        finally:
+            set_mtp_active(prev)

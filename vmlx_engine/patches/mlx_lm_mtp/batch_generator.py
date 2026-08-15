@@ -888,6 +888,27 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     is_greedy = _is_greedy(gen_batch)
     n = len(state.draft_toks)
 
+    # TurboQuant live-encode crossing — text-path twin of the MLLM guard in
+    # _native_mtp_should_snapshot_layer: trim() rewinds offset only, so if a
+    # TQ layer's one-time compress() fires inside this verify advance and the
+    # chain partially rejects, draft KV stays baked into the compressed
+    # buffers — silent corruption. The crossing happens at most once per
+    # layer; fall back to the standard step for it (state drops, AR
+    # continues — conservative and correct).
+    advance = n + 1
+    for c in gen_batch.prompt_cache:
+        compress_after = getattr(c, "compress_after", None)
+        if not compress_after:
+            continue
+        try:
+            threshold = int(compress_after)
+            not_compressed = int(getattr(c, "_compressed_tokens", 0) or 0) == 0
+            offset = int(getattr(c, "offset", 0) or 0)
+        except (TypeError, ValueError):
+            raise _MtpStepFallback("tq live-encode crossing state unreadable")
+        if threshold > 0 and not_compressed and offset + advance >= threshold:
+            raise _MtpStepFallback("tq live-encode crossing in verify advance")
+
     inputs = mx.concatenate([state.next_main] + list(state.draft_toks))  # (n+1,)
 
     # Update the token buffer per position so logits processors see the same

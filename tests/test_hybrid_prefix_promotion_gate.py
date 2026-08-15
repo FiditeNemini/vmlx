@@ -166,12 +166,16 @@ class TestHybridBaseSpliceGate:
             monkeypatch.delenv("VMLX_HYBRID_BASE_SPLICE", raising=False)
             importlib.reload(mbg)
 
-    def test_off_by_default(self, monkeypatch):
-        assert self._enabled(monkeypatch, None) is False
+    def test_on_by_default(self, monkeypatch):
+        """Proven: 107.3s -> 5.2s on a long document, 9/9 byte-identical."""
+        assert self._enabled(monkeypatch, None) is True
 
-    def test_opt_in_works(self, monkeypatch):
-        for value in ("1", "true", "yes", "on"):
-            assert self._enabled(monkeypatch, value) is True, value
+    def test_opt_out_works(self, monkeypatch):
+        for value in ("0", "false", "no", "off"):
+            assert self._enabled(monkeypatch, value) is False, value
+
+    def test_typo_does_not_silently_disable(self, monkeypatch):
+        assert self._enabled(monkeypatch, "maybe") is True
 
     def test_declines_without_a_companion(self):
         """No companion means no pairing -- it must decline, never guess."""

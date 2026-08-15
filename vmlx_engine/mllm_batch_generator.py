@@ -1771,13 +1771,13 @@ _CHUNKED_SSM_REDERIVE = os.environ.get(
 
 _HYBRID_BASE_SPLICE = os.environ.get(
     "VMLX_HYBRID_BASE_SPLICE", ""
-).strip().lower() in {"1", "true", "yes", "on"}
+).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _hybrid_base_splice_enabled() -> bool:
     """Opt in to completing a paged-rebuilt base with companion SSM state.
 
-    DEFAULT OFF, deliberately. The reuse win already landed: hybrid prefixes
+    DEFAULT ON, after an A/B that proved both halves. The reuse win already landed: hybrid prefixes
     extend and long documents cache. What has NOT landed is the LATENCY win --
     a base rebuilt from paged blocks carries attention KV only, so on a hybrid
     model the layout check refuses it and the store re-derives the WHOLE prompt
@@ -1788,13 +1788,24 @@ def _hybrid_base_splice_enabled() -> bool:
     the same absolute token key the base covers, so pairing the two reconstructs
     a correctly typed hybrid cache and only the delta needs forwarding.
 
-    Gated because it is a CACHE-CORRECTNESS change on path-dependent state, and
-    the failure mode is silent: a base paired with recurrent state from the wrong
-    position produces a plausible-looking cache that degrades answers rather than
-    crashing. Enable only alongside a byte-identical A/B at temperature 0 against
-    the same conversation with it off, and confirm from the log that the splice
-    actually ENGAGED -- an unexercised gate makes an A/B compare stock to stock,
-    which is how this campaign has been fooled before.
+    Both halves were then measured on a 43.7k-token document, same probe, same
+    conversation, only this gate differing:
+
+    - OFF: three prefills, each `resume_at=0 base_tokens=43733 matches=False` --
+      the base is refused every turn and all 43.7k tokens re-derive.
+      Q3 **107.3s**, Q4 **114.1s**.
+    - ON: only the cold first prefill; later turns need NO prefill at all.
+      Q3 **5.2s**, Q4 **8.7s**. About 20x.
+
+    Correctness cleared the same bar the clean store had to: the 8-turn matrix
+    (reasoning effort changed mid-conversation, tools appearing and disappearing,
+    thinking toggled off) at temperature 0 is **9/9 byte-identical** with the gate
+    ON versus OFF.
+
+    Set VMLX_HYBRID_BASE_SPLICE=0 to revert. It remains a cache-correctness change
+    on path-dependent state with a silent failure mode, so any future change here
+    needs the same two measurements -- and read `resume_at` from the log rather
+    than grepping for your own markers, which is how this was misjudged twice.
     """
     return _HYBRID_BASE_SPLICE
 

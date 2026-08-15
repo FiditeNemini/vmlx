@@ -141,3 +141,51 @@ def test_hybrid_clean_store_excludes_media_turns():
     assert "not media_context" in window, (
         "hybrid clean store must be gated off for media-bearing prompts"
     )
+
+
+class TestHybridBaseSpliceGate:
+    """Completing a paged base with companion SSM state is OPT-IN.
+
+    It is a cache-correctness change on path-dependent state whose failure mode
+    is silent: a base paired with recurrent state from the wrong token position
+    yields a plausible cache that degrades answers rather than crashing.
+    """
+
+    def _enabled(self, monkeypatch, value):
+        import importlib
+
+        import vmlx_engine.mllm_batch_generator as mbg
+
+        monkeypatch.delenv("VMLX_HYBRID_BASE_SPLICE", raising=False)
+        if value is not None:
+            monkeypatch.setenv("VMLX_HYBRID_BASE_SPLICE", value)
+        mbg = importlib.reload(mbg)
+        try:
+            return mbg._hybrid_base_splice_enabled()
+        finally:
+            monkeypatch.delenv("VMLX_HYBRID_BASE_SPLICE", raising=False)
+            importlib.reload(mbg)
+
+    def test_off_by_default(self, monkeypatch):
+        assert self._enabled(monkeypatch, None) is False
+
+    def test_opt_in_works(self, monkeypatch):
+        for value in ("1", "true", "yes", "on"):
+            assert self._enabled(monkeypatch, value) is True, value
+
+    def test_declines_without_a_companion(self):
+        """No companion means no pairing -- it must decline, never guess."""
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen._ssm_state_cache = None
+        gen._is_hybrid = True
+        assert gen._complete_hybrid_base_from_companion([], [1, 2, 3], 2) is None
+
+    def test_declines_on_a_non_hybrid_model(self):
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen._ssm_state_cache = object()
+        gen._is_hybrid = False
+        assert gen._complete_hybrid_base_from_companion([], [1, 2, 3], 2) is None

@@ -73,12 +73,12 @@ SOURCE_HASH_FILES = (
 )
 
 REQUIRED_PANEL_SETTINGS_SOURCE_MARKERS = (
-    "defaults production DSV4 runtime env to full-prefill serving",
-    "deepseek-v4 disables native composite reuse even with stale cache config",
-    "renders the fail-closed DSV4 cache boundary without unusable toggles",
-    "deepseek-v4 cache launch flags are singular and fail closed",
-    "DSV4 stale cache settings fail closed and stay family-scoped",
-    "allows lazy-mmap launches when reclaimable macOS pages cover the freemem gap",
+    "deepseek-v4 uses native SSD-only composite reuse without generic cache codecs",
+    "deepseek-v4 respects explicit prefix cache disable and suppresses dependent caches",
+    "deepseek-v4 SSD-only settings use fixed native composite blocks",
+    "deepseek-v4 cache launch flags are singular and preserve explicit standard controls",
+    "DSV4 native cache settings stay family-scoped and suppress only generic TurboQuant",
+    "credits bounded reclaimable macOS page cache for EVERY launch",
     "test_panel_serve_flags_are_registered_engine_cli_flags",
     "test_runtime_and_preview_additional_arg_filters_share_blocklists",
 )

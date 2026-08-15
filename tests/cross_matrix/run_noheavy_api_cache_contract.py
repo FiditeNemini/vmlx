@@ -141,7 +141,7 @@ REQUIRED_NOHEAVY_API_CACHE_TEST_MARKERS = (
     "test_dsml_issue_165_server_tool_call_arguments_are_not_empty_or_raw",
     "test_dsv4_encoder_keeps_function_arguments_as_dsml_params",
     "test_dsv4_encoder_preserves_code_identifiers_on_direct_chat_rail",
-    "test_responses_extracts_suppressed_reasoning_tool_calls_before_finalize",
+    "test_responses_extracts_reasoning_rail_tool_calls_before_finalize",
     "test_visible_text_around_invoke_preserved_no_dsml_leak",
     "test_tools_called_implies_no_dsml_in_content",
     "test_server_repairs_dsv4_partial_tool_intent_from_request_args",
@@ -639,7 +639,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             dsml_ok and "test_dsv4_encoder_keeps_function_arguments_as_dsml_params" not in missing_markers
         ),
         "dsv4_suppressed_tool_markup_not_stored": (
-            dsml_ok and "test_responses_extracts_suppressed_reasoning_tool_calls_before_finalize" not in missing_markers
+            dsml_ok and "test_responses_extracts_reasoning_rail_tool_calls_before_finalize" not in missing_markers
         ),
         "zaya_typed_cca_status": (
             api_ok and "test_native_cache_status_reports_zaya_typed_cca" not in missing_markers

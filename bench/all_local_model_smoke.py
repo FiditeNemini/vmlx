@@ -1922,8 +1922,15 @@ def run_model_row(
         if not include_audio:
             probe_options["include_audio"] = False
         result["probe_options"] = probe_options
+        # The classify-time row carries no live capability body; the probes'
+        # instruct-mode sanitize needs the server's advertised
+        # supports_instruct_mode, so hand build_probe_payloads a row enriched
+        # with the live fetch.
+        row_for_probes = dict(row)
+        if isinstance(capability_body, dict) and capability_body:
+            row_for_probes["capabilities"] = capability_body
         for probe in build_probe_payloads(
-            row,
+            row_for_probes,
             max_tokens=48,
             include_reasoning=include_reasoning,
             include_media=probe_options["include_media"],

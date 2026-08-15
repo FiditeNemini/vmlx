@@ -469,14 +469,16 @@ const defaultPromptThree = builtinToolsEnabled
   ? [
       'The authorized release-validation task is complete; no tool is needed for this final response.',
       'Return this exact three-line rendering receipt and nothing else.',
-      'Copy every character literally, including the dollar sign and both backslashes:',
+      'Copy every character literally, including the dollar sign and both backslashes.',
+      'Do not wrap the answer in markdown or code fences:',
       'Third UI turn: REAL_UI_LIVE_TOOL_ONE REAL_UI_LIVE_TOOL_TWO',
       'Currency: $43',
       'Math: \\(2 + 2 = 4\\)',
     ].join('\n')
   : [
       'Your complete visible answer must be exactly the following three lines and nothing else.',
-      'Copy every character literally, including the dollar sign and both backslashes:',
+      'Copy every character literally, including the dollar sign and both backslashes.',
+      'Do not wrap the answer in markdown or code fences:',
       'Third UI turn: REAL_UI_LIVE',
       'Currency: $43',
       'Math: \\(2 + 2 = 4\\)',

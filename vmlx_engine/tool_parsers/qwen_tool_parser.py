@@ -350,7 +350,15 @@ class QwenToolParser(ToolParser):
             if params:
                 for pn, pv in params:
                     arguments[pn.strip()] = cls._coerce_arg_value(pv)
-            else:
+            if not arguments:
+                # Split-key variant (raw-suffix capture): `<parameter>` bare
+                # opener with the KEY floated inside as `command>` on its own
+                # line. Must run BEFORE the bare-args fallback, which would
+                # otherwise misread the literal <parameter> tag as an argument
+                # named "parameter" with the key glued into its value.
+                for pn, pv in cls._RECOVERY_SPLIT_KEY_PARAM.findall(body):
+                    arguments[pn.strip()] = cls._coerce_arg_value(pv)
+            if not arguments:
                 for pn, pv in cls.BARE_ARG_PATTERN.findall(body):
                     arguments[pn.strip()] = cls._coerce_arg_value(pv)
             if not arguments:

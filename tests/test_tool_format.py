@@ -4154,3 +4154,55 @@ class TestMiskeyedParameterWithProperName:
             info = parser.extract_tool_calls(good, request=self.REQUEST)
             assert json.loads(info.tool_calls[0]["arguments"]) == {"command": "ls"}, (
                 type(parser).__name__)
+
+
+class TestSplitKeyParameterVariant:
+    """Third live variant, captured verbatim by the raw-suffix log on the
+    Responses stream: a bare <parameter> opener with the KEY floated inside
+    as `command>` on its own line. The bare-args fallback previously misread
+    the literal <parameter> tag as an argument named "parameter"."""
+
+    RAW = (
+        "<tool_call>\n<function=run_command>\n<parameter>\ncommand>\n"
+        "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    REQUEST = {
+        "tools": [
+            {"type": "function", "function": {
+                "name": "run_command",
+                "parameters": {"type": "object",
+                               "properties": {"command": {"type": "string"}},
+                               "required": ["command"]}}}
+        ]
+    }
+
+    def _parsers(self):
+        from vmlx_engine.tool_parsers.qwen_tool_parser import QwenToolParser
+        from vmlx_engine.tool_parsers.xml_function_tool_parser import (
+            XMLFunctionToolParser,
+        )
+
+        return [QwenToolParser.__new__(QwenToolParser),
+                XMLFunctionToolParser.__new__(XMLFunctionToolParser)]
+
+    def test_split_key_parameter_recovered_on_both_routes(self):
+        import json
+
+        for parser in self._parsers():
+            info = parser.extract_tool_calls(self.RAW, request=self.REQUEST)
+            call = info.tool_calls[0]
+            args = json.loads(call["arguments"])
+            assert call["name"] == "run_command", type(parser).__name__
+            assert args.get("command", "").startswith("printf %s REAL_UI_LIVE_TOOL_ONE"), (
+                type(parser).__name__, args)
+            assert "parameter" not in args, (
+                "the literal <parameter> tag must not become an argument name")
+
+    def test_degenerate_empty_opener_is_not_promoted(self):
+        degen = "<tool_call>\n<>\n</function>\n</tool_call>"
+        for parser in self._parsers():
+            info = parser.extract_tool_calls(degen, request=self.REQUEST)
+            assert all(
+                c.get("name") != "run_command" for c in (info.tool_calls or [])
+            ), type(parser).__name__

@@ -304,6 +304,18 @@ class ToolParser(ABC):
     _RECOVERY_MISKEYED_PARAM = re.compile(
         r"<function=([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</parameter>", re.DOTALL
     )
+    # Third live variant (captured verbatim via the raw-suffix log on the
+    # Responses stream): the parameter KEY floats outside a bare opener —
+    #   <parameter>
+    #   command>
+    #   printf %s ... > file.txt
+    #   </parameter>
+    # The key is the first identifier terminated by `>` inside the bare
+    # parameter block; everything after it is the value.
+    _RECOVERY_SPLIT_KEY_PARAM = re.compile(
+        r"<parameter>\s*([A-Za-z_][A-Za-z0-9_]*)>\s*(.*?)\s*</parameter>",
+        re.DOTALL,
+    )
 
     @staticmethod
     def _recovery_coerce_value(value: str) -> Any:
@@ -317,6 +329,9 @@ class ToolParser(ABC):
         arguments: dict[str, Any] = {}
         for param_name, param_value in cls._RECOVERY_STRICT_PARAM.findall(body):
             arguments[param_name.strip()] = cls._recovery_coerce_value(param_value)
+        if not arguments:
+            for param_name, param_value in cls._RECOVERY_SPLIT_KEY_PARAM.findall(body):
+                arguments[param_name.strip()] = cls._recovery_coerce_value(param_value)
         return arguments
 
     @classmethod

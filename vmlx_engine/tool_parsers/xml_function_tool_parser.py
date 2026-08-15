@@ -127,6 +127,9 @@ class XMLFunctionToolParser(ToolParser):
         for param_name, param_value in cls.PARAM_PATTERN.findall(body):
             arguments[param_name.strip()] = cls._coerce_value(param_value)
         if not arguments:
+            for k, v in cls._RECOVERY_SPLIT_KEY_PARAM.findall(body):
+                arguments[k.strip()] = cls._coerce_value(v)
+        if not arguments:
             for k, v in cls.ORNITH_ARG_KEY_VALUE_PATTERN.findall(body):
                 arguments[k.strip()] = cls._coerce_value(v)
         if not arguments:

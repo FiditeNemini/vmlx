@@ -827,12 +827,12 @@ def _reasoning_probe_max_tokens(row: dict[str, Any], max_tokens: int) -> int:
     # answer (MiniMax M2.7 spent all 256 inside reasoning at temp 0).
     # Keep validation strict; give these families enough budget to prove the
     # advertised thinking mode instead of misclassifying them as empty-visible.
-    if (
-        _is_zaya_row(row)
-        or _is_nemotron_row(row)
-        or _is_qwen36_moe_mtp_row(row)
-        or _is_minimax_row(row)
-    ):
+    # MiniMax at temp 0 rehashes the prompt for 512+ tokens before answering;
+    # 1024 keeps the probe honest while MAX_REASONING_ON_CHARS still catches
+    # genuine loops.
+    if _is_minimax_row(row):
+        return max(1024, max_tokens)
+    if _is_zaya_row(row) or _is_nemotron_row(row) or _is_qwen36_moe_mtp_row(row):
         return max(512, max_tokens)
     return max(256, max_tokens)
 
@@ -1174,8 +1174,18 @@ def build_probe_payloads(
     if body.get("supports_instruct_mode") is False:
         for probe in probes:
             payload = probe.get("payload")
-            if isinstance(payload, dict) and payload.get("enable_thinking") is False:
+            if not isinstance(payload, dict):
+                continue
+            if payload.get("enable_thinking") is False:
                 payload.pop("enable_thinking")
+            # Thinking cannot be disabled on these families, so every probe
+            # pays the reasoning tax before its visible answer or tool call.
+            # Budgets sized for thinking-off (48/96) die inside reasoning and
+            # misreport healthy models as empty_visible / no-tool-call
+            # (Step-3.7 batch9: all 12 failures were this). Validation stays
+            # strict; only the budget acknowledges mandatory thinking.
+            if isinstance(payload.get("max_tokens"), int):
+                payload["max_tokens"] = max(payload["max_tokens"], 512)
     return probes
 
 

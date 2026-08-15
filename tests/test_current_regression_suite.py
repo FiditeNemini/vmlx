@@ -128,16 +128,17 @@ def test_current_regression_suite_defers_dsv4_same_process_equivalence():
     )
 
 
-def test_current_regression_suite_defers_dsv4_restart_l2_equivalence():
+def test_current_regression_suite_cleared_dsv4_restart_l2_equivalence():
+    """CLEARED 2026-08-15: the dedicated cold-vs-restored probe passed
+    (restart + SSD refault, byte-exact 3/3 at temp 0, disk_hits attribution;
+    the composite N-1 reprefill keeps cached_tokens 0 by design). The row
+    must stay OUT of expected-open; it remains in the historical deferred
+    set for release-notes lineage only."""
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
         "DSV4 native composite restart/L2 restore is cold-prefill equivalent"
-        in suite.EXPECTED_OPEN_REQUIREMENTS
-    )
-    assert (
-        "DSV4 native composite restart/L2 restore is cold-prefill equivalent"
-        in suite.DEFERRED_RELEASE_OPEN_REQUIREMENTS
+        not in suite.EXPECTED_OPEN_REQUIREMENTS
     )
 
 

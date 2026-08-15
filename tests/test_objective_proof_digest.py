@@ -5809,7 +5809,8 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
     ]
     assert row["status"] == "open"
     assert row["evidence"] == [
-        "build/current-dsv4-responses-restart-l2-gate-20260606.json"
+        "build/current-dsv4-cold-vs-restored-restart-l2-20260815.json",
+        "build/current-dsv4-responses-restart-l2-gate-20260606.json",
     ]
     assert row["details"]["historical_restart_l2_gate_status"] == "pass"
     assert row["details"]["historical_restart_cached_tokens"] == 2048
@@ -5818,6 +5819,41 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
     assert row["details"]["historical_restart_hit_telemetry_ok"] is True
     assert row["details"]["current_restart_cold_prefill_equivalence_proven"] is False
     assert row["details"]["deferred_release"] == "v1.6.20"
+
+
+def test_objective_proof_digest_clears_dsv4_restart_l2_with_equivalence_probe(
+    tmp_path,
+):
+    """The dedicated cold-vs-restored probe (byte-exact 3/3 + disk restore)
+    is what clears the row — historical hit telemetry alone never does."""
+    from tests.cross_matrix.summarize_objective_proof import build_digest
+
+    _write_passing_base_artifacts(tmp_path)
+    _write_json(
+        tmp_path,
+        "build/current-dsv4-cold-vs-restored-restart-l2-20260815.json",
+        {
+            "status": "pass",
+            "turns": [
+                {"turn": 1, "byte_equal": True, "cached_tokens": 0},
+                {"turn": 2, "byte_equal": True, "cached_tokens": 0},
+                {"turn": 3, "byte_equal": True, "cached_tokens": 0},
+            ],
+        },
+    )
+    # The evidence-presence pass downgrades pass -> open when ANY listed
+    # evidence file is absent; the row also lists the historical gate.
+    _write_json(
+        tmp_path,
+        "build/current-dsv4-responses-restart-l2-gate-20260606.json",
+        {"status": "pass", "checks": {}},
+    )
+    digest = build_digest(tmp_path)
+    rows = {item["requirement"]: item for item in digest["requirements"]}
+    row = rows[
+        "DSV4 native composite restart/L2 restore is cold-prefill equivalent"
+    ]
+    assert row["status"] == "pass"
 
 
 def test_objective_proof_digest_uses_current_one_tool_stop_gate(

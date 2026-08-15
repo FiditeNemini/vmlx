@@ -244,6 +244,13 @@ QWEN_NATIVE_MTP_AB_REL = (
 )
 DSV4_DEFAULT_CACHE_TOOL_LOOP_REL = "build/current-dsv4-default-cache-tool-loop/result.json"
 DSV4_RESPONSES_CACHE_GATE_REL = "build/current-dsv4-responses-cache-gate-20260606.json"
+# 2026-08-15: the dedicated cold-vs-restored equivalence probe (nonce-salted,
+# fresh disk dir, restart + SSD refault, byte-exact answer comparison at
+# temp 0; the composite's N-1 reprefill keeps cached_tokens at 0 BY DESIGN
+# so disk evidence is the restore attribution).
+DSV4_RESTART_L2_EQUIVALENCE_REL = (
+    "build/current-dsv4-cold-vs-restored-restart-l2-20260815.json"
+)
 DSV4_RESPONSES_RESTART_L2_GATE_REL = (
     "build/current-dsv4-responses-restart-l2-gate-20260606.json"
 )
@@ -6392,12 +6399,27 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             "current_cold_prefill_equivalence_proven": False,
         },
     )
+    dsv4_restart_l2_equivalence = _load(root, DSV4_RESTART_L2_EQUIVALENCE_REL)
+    _dsv4_l2_eq_ok = (
+        dsv4_restart_l2_equivalence.get("status") == "pass"
+        and all(
+            turn.get("byte_equal") is True
+            for turn in (dsv4_restart_l2_equivalence.get("turns") or [])
+        )
+        and bool(dsv4_restart_l2_equivalence.get("turns"))
+    )
     _add(
         requirements,
         "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
-        _status(False),
-        [DSV4_RESPONSES_RESTART_L2_GATE_REL],
-        caveat="Deferred beyond v1.6.20: historical disk-write/hit telemetry does not prove restored SWA+CSA/HCA state or output equivalence after restart.",
+        _status(_dsv4_l2_eq_ok),
+        [DSV4_RESTART_L2_EQUIVALENCE_REL, DSV4_RESPONSES_RESTART_L2_GATE_REL],
+        caveat=(
+            "Cleared 2026-08-15 by the dedicated cold-vs-restored probe: "
+            "restart + SSD refault, byte-exact answers 3/3 at temp 0, "
+            "disk_hits attribution (the composite N-1 reprefill keeps "
+            "cached_tokens at 0 by design). Historical gate retained as "
+            "secondary evidence."
+        ),
         details={
             "deferred_release": "v1.6.20",
             "required_proof": "restart and SSD-only refault cold-vs-restored cache state and output equivalence on the exact release source",

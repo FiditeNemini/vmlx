@@ -35,7 +35,11 @@ EXPECTED_OPEN_REQUIREMENTS = [
     "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
     "Real Electron UI cross-family live model matrix is release-cleared",
     "DSV4 native composite same-process reuse is cold-prefill equivalent",
-    "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
+    # restart/L2 CLEARED 2026-08-15: dedicated cold-vs-restored probe, byte
+    # -exact 3/3 with disk_hits attribution (composite N-1 reprefill keeps
+    # cached_tokens 0 by design). The same-process row stays open: the
+    # in-memory replay recorded zero prefix-table hits (keying/lookup
+    # question, ledger row 47).
     "DSV4 long-output/code/file-generation quality is release-cleared",
     # Ling-2.6-flash bundles are not present on current hardware.
     "Ling/Bailing multilingual output quality is release-cleared",
@@ -63,7 +67,11 @@ EXPECTED_OPEN_REQUIREMENTS = [
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
     "Real Electron UI cross-family live model matrix is release-cleared",
     "DSV4 native composite same-process reuse is cold-prefill equivalent",
-    "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
+    # restart/L2 CLEARED 2026-08-15: dedicated cold-vs-restored probe, byte
+    # -exact 3/3 with disk_hits attribution (composite N-1 reprefill keeps
+    # cached_tokens 0 by design). The same-process row stays open: the
+    # in-memory replay recorded zero prefix-table hits (keying/lookup
+    # question, ledger row 47).
     "DSV4 long-output/code/file-generation quality is release-cleared",
     "Qwen/JANG packaged MX matmul speed is release-cleared",
     "Qwen native MTP live decode speed and output equivalence are release-cleared",

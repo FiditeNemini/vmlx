@@ -443,18 +443,29 @@ class TestMtpAcceptPathWithOracleDrafts:
             lambda *_args, **_kwargs: False,
         )
 
-        _out, stats, _cache = _run_fake(
-            monkeypatch,
-            depth=1,
-            wrong_from_step=1,
-            max_tokens=8,
-        )
-        published = mtp_batch.native_mtp_stats_snapshot()["last_native_mtp"]
+        # A refused rollback leaves the rejected speculative advance in the
+        # cache — no continuation is sound, so the cycle now fails the
+        # request loudly (uniform with the MLLM path) after publishing
+        # terminal telemetry. No false retention count either way.
+        retained_before = mtp_batch.native_mtp_stats_snapshot()["native_mtp_totals"][
+            "mtp_cache_retained_on_rejects"
+        ]
+        with pytest.raises(RuntimeError, match="rejected rollback"):
+            _run_fake(
+                monkeypatch,
+                depth=1,
+                wrong_from_step=1,
+                max_tokens=8,
+            )
+        snapshot = mtp_batch.native_mtp_stats_snapshot()
+        published = snapshot["last_native_mtp"]
 
-        assert stats is not None
-        assert stats.rejects == 1
-        assert stats.mtp_cache_retained_on_rejects == 0
-        assert published["finish_reason"] == "fallback_to_ar"
+        assert published["finish_reason"] == "rollback_refused"
+        assert published["rejects"] == 1
+        assert (
+            snapshot["native_mtp_totals"]["mtp_cache_retained_on_rejects"]
+            == retained_before
+        )
         assert len(snapshot_calls) == 1
 
     def test_oracle_draft_accepts_every_cycle_and_matches_baseline(self, monkeypatch):

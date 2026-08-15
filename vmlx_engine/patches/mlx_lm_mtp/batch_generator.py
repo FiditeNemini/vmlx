@@ -633,6 +633,19 @@ def _restore_or_trim_caches(prompt_cache: List[Any], n: int = 1) -> bool:
     layers trim by ``n``. Layers that support neither cause the entire MTP
     step to fall back to the standard path.
     """
+    # Two-phase: validate EVERY layer before mutating ANY. The old
+    # first-refusal-mid-loop return left earlier layers already trimmed —
+    # the fallback then continued the standard path on a partially
+    # rolled-back cache (silent corruption). Eligibility gating makes a
+    # refusal near-unreachable; when it does happen the cache still holds
+    # the speculative verify advance, so no continuation is sound — the
+    # caller must fail the request loudly (uniform with the MLLM path).
+    for c in prompt_cache:
+        if getattr(c, "rollback_state", None) is not None:
+            continue
+        if hasattr(c, "is_trimmable") and c.is_trimmable():
+            continue
+        return False
     for c in prompt_cache:
         rollback = getattr(c, "rollback_state", None)
         if rollback is not None:
@@ -641,10 +654,7 @@ def _restore_or_trim_caches(prompt_cache: List[Any], n: int = 1) -> bool:
             c[1] = ssm_snap
             c.rollback_state = None
             continue
-        if hasattr(c, "is_trimmable") and c.is_trimmable():
-            c.trim(n)
-            continue
-        return False
+        c.trim(n)
     return True
 
 
@@ -1007,9 +1017,30 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
         _clear_rollback(gen_batch.prompt_cache)
     else:
         if not _restore_or_trim_caches(gen_batch.prompt_cache, n - k):
-            if procs is not None:
-                _trim_token_buffer(gen_batch, n - k)
-            raise _MtpStepFallback("cache layer rejects rollback")
+            # The cache still holds the rejected speculative advance and
+            # cannot be repaired — continuing (even via the standard-step
+            # fallback) would generate from corrupt state. Fail the request
+            # loudly, uniform with the MLLM path's rollback refusal.
+            try:
+                _log_mtp_stats(
+                    (
+                        getattr(gen_batch, "uids", ["?"])[0]
+                        if getattr(gen_batch, "uids", None)
+                        else "?"
+                    ),
+                    state.stats,
+                    "rollback_refused",
+                    state.mtp_cache,
+                )
+            except Exception:
+                logger.debug(
+                    "MTP rollback-refusal telemetry publication failed",
+                    exc_info=True,
+                )
+            raise RuntimeError(
+                "native MTP cache rejected rollback (text path) — "
+                "speculative verify advance cannot be undone"
+            )
         state.stats.mtp_cache_retained_on_rejects += 1
         if procs is not None:
             _trim_token_buffer(gen_batch, n - k)

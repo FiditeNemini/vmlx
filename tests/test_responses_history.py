@@ -714,14 +714,17 @@ async def test_responses_streaming_reasoning_only_stores_placeholder_and_marker(
         assert _sse_payloads(events, "response.completed") == []
         response_id = incomplete[-1]["response"]["id"]
 
-        assert server._responses_get_history(response_id) == [
+        assert server._responses_history[response_id] == [
             {"role": "user", "content": "hello"},
             {
                 "role": "assistant",
                 "content": "",
                 "reasoning_content": "thinking only",
             },
-        ]
+        ], "the STORE must keep the reasoning-only placeholder"
+        assert server._responses_get_history(response_id) == [
+            {"role": "user", "content": "hello"},
+        ], "replay must drop the contentless placeholder (dialect F2)"
         assert server._chain_warnings_for_previous_response_id(response_id)
         warnings = incomplete[-1]["response"].get("warnings") or []
         assert any("produced reasoning only" in w for w in warnings)
@@ -1016,9 +1019,12 @@ def test_reasoning_plus_function_call_does_NOT_get_extra_placeholder():
     assert msgs[0].get("tool_calls"), "function_call assistant turn already present"
 
 
-def test_reasoning_only_history_round_trips_through_store():
-    """Integration: store + load preserves the placeholder so chain coherence
-    is end-to-end correct, not just at the converter."""
+def test_reasoning_only_history_stored_but_dropped_at_replay():
+    """Integration: the STORE preserves the reasoning-only placeholder (the
+    chain warning and introspection read it), while `_responses_get_history`
+    — the replay boundary — drops it. Replaying it handed strict templates a
+    contentless assistant turn: the exact 500 every dialect's input drop
+    fixes, reintroduced by the server's own store (dialect F2)."""
     from vmlx_engine.server import (
         _responses_output_to_assistant_messages,
         _responses_store_history,
@@ -1034,15 +1040,19 @@ def test_reasoning_only_history_round_trips_through_store():
     full = user_messages + _responses_output_to_assistant_messages(output_items)
     _responses_store_history("resp_test_reasoning_only", full)
 
-    loaded = _responses_get_history("resp_test_reasoning_only")
-    assert loaded == [
+    assert _responses_history["resp_test_reasoning_only"] == [
         {"role": "user", "content": "what is 2+2?"},
         {
             "role": "assistant",
             "content": "",
             "reasoning_content": "...",
         },
-    ], "stored history must preserve the assistant reasoning and chain anchor"
+    ], "the STORE must preserve the assistant reasoning placeholder"
+
+    loaded = _responses_get_history("resp_test_reasoning_only")
+    assert loaded == [
+        {"role": "user", "content": "what is 2+2?"},
+    ], "replay must not hand templates a contentless assistant turn"
 
     _responses_history.clear()
 

@@ -18864,8 +18864,12 @@ def _responses_output_to_assistant_messages(output_items: list) -> list[dict]:
         assistant_messages.append(message)
     elif reasoning_text and not assistant_messages:
         # Reasoning-only output (no visible text, no tool calls): inject an
-        # assistant turn so `previous_response_id` chains preserve both the
-        # user→assistant→user anchor and the model's actual reasoning rail.
+        # assistant turn so the STORE keeps the model's actual reasoning rail
+        # (read by the reasoning-only chain warning and store introspection).
+        # `_responses_get_history` drops this turn at replay time — no chat
+        # template may receive a contentless assistant turn (strict templates
+        # 500 on it), matching the drop every dialect applies to
+        # client-provided input.
         assistant_messages.append(
             {
                 "role": "assistant",
@@ -19356,6 +19360,17 @@ def _structured_output_repair_warning(report: dict | None) -> list[str] | None:
 
 
 def _responses_get_history(response_id: str | None) -> list[dict]:
+    """Return template-safe replayable history for a chained turn.
+
+    The STORE keeps the reasoning-only assistant turn for fidelity (the
+    reasoning-only chain warning and store introspection read it), but no
+    template path may receive it: every dialect drops contentless assistant
+    turns from request-provided input, and the server's own store must not
+    reintroduce through `previous_response_id` the exact 500 that drop fixes
+    (Mistral-class templates refuse an assistant turn with neither text nor
+    tool calls). Dropping here, at the single replay boundary, keeps chained
+    and client-replayed histories byte-consistent.
+    """
     if not response_id:
         return []
     with _responses_history_lock:
@@ -19363,7 +19378,8 @@ def _responses_get_history(response_id: str | None) -> list[dict]:
         if history is None:
             return []
         _responses_history.move_to_end(response_id)
-        return _clone_response_messages(history)
+        history = _clone_response_messages(history)
+    return _drop_contentless_assistant_turns(history)
 
 
 def _responses_scrub_multimodal_history_for_text_followup(messages: list[dict]) -> list[dict]:

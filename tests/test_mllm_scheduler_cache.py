@@ -3321,3 +3321,24 @@ class TestNullContentAssistantTurnDoesNotCrashTemplate:
             ]
         )
         assert [m["role"] for m in out] == ["user", "user"], out
+
+
+class TestVmlx91ResumeAlignmentGuard:
+    """MLLM resume must refuse a KV/SSM pairing that is not exactly aligned.
+
+    KV block tables trim to whole blocks; SSM state is cumulative at the
+    checkpoint length. Accepting KV@aligned<checkpoint re-feeds the gap
+    tokens through layers whose state already absorbed them (the LLM
+    scheduler pins the same contract via checkpoint_len == aligned_len).
+    """
+
+    def test_resume_site_gates_on_exact_alignment(self):
+        from pathlib import Path
+
+        source = Path("vmlx_engine/mllm_batch_generator.py").read_text()
+        marker = '"reason": "kv_ssm_checkpoint_misaligned"'
+        assert marker in source, "misalignment refusal is missing from the MLLM resume"
+        window = source[source.index(marker) - 1500:source.index(marker) + 1200]
+        assert "int(trimmed.num_tokens) != int(_ck_len or 0)" in window
+        assert "release_cache(req.request_id)" in window
+        assert "_adjust_paged_hit_credit(req.request_id, 0)" in window

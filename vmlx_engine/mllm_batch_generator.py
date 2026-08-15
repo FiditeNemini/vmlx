@@ -7425,6 +7425,52 @@ class MLLMBatchGenerator:
                                             trimmed = self.block_aware_cache.trim_block_table(
                                                 req.request_id, _ck_len
                                             )
+                                            # KV block tables trim to WHOLE blocks while SSM
+                                            # state is cumulative at exactly _ck_len. Pairing
+                                            # KV@aligned<_ck_len with SSM@_ck_len re-feeds the
+                                            # gap tokens through layers whose state already
+                                            # absorbed them -- the double-application class the
+                                            # LLM scheduler refuses via its checkpoint_len ==
+                                            # aligned_len contract (a 1-token version of this
+                                            # caused the v1.3.77 think-loop). Accept the resume
+                                            # ONLY on exact alignment; otherwise full prefill.
+                                            if (
+                                                trimmed is not None
+                                                and trimmed.num_tokens > 0
+                                                and int(trimmed.num_tokens) != int(_ck_len or 0)
+                                            ):
+                                                self._stats.hybrid_kv_without_ssm_hits += 1
+                                                self._stats.hybrid_kv_without_ssm_tokens += int(
+                                                    getattr(block_table, "num_tokens", 0) or 0
+                                                )
+                                                self._stats.last_hybrid_kv_without_ssm = {
+                                                    "request_id": normalize_ssm_telemetry_request_id(
+                                                        req.request_id
+                                                    ),
+                                                    "cached_tokens": int(
+                                                        getattr(block_table, "num_tokens", 0) or 0
+                                                    ),
+                                                    "reason": "kv_ssm_checkpoint_misaligned",
+                                                    "checkpoint_tokens": int(_ck_len or 0),
+                                                    "kv_aligned_tokens": int(trimmed.num_tokens),
+                                                }
+                                                self._stats.last_hybrid_kv_without_ssm[
+                                                    "ssm_prefix_lookup"
+                                                ] = dict(_ssm_prefix_lookup)
+                                                logger.info(
+                                                    f"vmlx#91 RESUME skipped for {req.request_id}: "
+                                                    f"checkpoint at {_ck_len} is not block-aligned "
+                                                    f"(KV trims to {trimmed.num_tokens}) — pairing "
+                                                    f"them would double-apply the gap through the "
+                                                    f"SSM state; full prefill"
+                                                )
+                                                self._mark_required_ssm_checkpoint(
+                                                    req,
+                                                    int(getattr(block_table, "num_tokens", 0) or 0),
+                                                )
+                                                self._adjust_paged_hit_credit(req.request_id, 0)
+                                                self.block_aware_cache.release_cache(req.request_id)
+                                                continue
                                             if trimmed is not None and trimmed.num_tokens > 0:
                                                 self._adjust_paged_hit_credit(
                                                     req.request_id, trimmed.num_tokens

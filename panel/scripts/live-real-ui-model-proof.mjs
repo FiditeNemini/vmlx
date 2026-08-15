@@ -3591,7 +3591,12 @@ export function validateRenderedDomEvidence(result) {
       traceById.get(String(messageId))?.events || [],
       'content',
     )
-    if (finalContent !== persisted) {
+    // The persistence writer (main/ipc/chat.ts periodic/final save) trims
+    // leading/trailing whitespace when stitching tool-loop segments, so the
+    // wire-faithful delta trace can legitimately differ by edge whitespace
+    // (e.g. a leading "\n" content delta after a tool result). Mid-content
+    // must still match byte-exact.
+    if (finalContent.trim() !== persisted.trim()) {
       failures.push(`assistant message ${messageId} final stream does not equal persisted content`)
     }
     if (!traceIds.has(String(messageId))) {
@@ -3958,7 +3963,10 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
       .indexOf(String(row?.messageId || ''))
     const persistedContent = String(result?.assistantRecords?.[assistantIndex]?.content || '')
     const finalContent = traceChannelText(events, 'content')
-    if (finalContent !== persistedContent) {
+    // Same edge-whitespace normalization as the persistence writer
+    // (main/ipc/chat.ts trims at tool-loop segment joins); see the paired
+    // assertion above. Mid-content stays byte-exact.
+    if (finalContent.trim() !== persistedContent.trim()) {
       failures.push(`message ${row?.messageId || 'unknown'} final content stream does not equal persisted final`)
     }
     if (!reasoningEvents.length) continue

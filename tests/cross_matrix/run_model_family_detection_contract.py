@@ -95,11 +95,11 @@ COMMANDS: dict[str, tuple[Path, list[str]]] = {
             "--testNamePattern",
             (
                 "passes MiniMax through the registered minimax_m2 reasoning parser|"
-                "detected Qwen3.6 hybrid cache forces paged cache over stale saved false|"
+                "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend|"
                 "ZAYA sessions keep the qwen3 reasoning parser and model-owned no-thinking default|"
-                "deepseek-v4 disables native composite reuse even with stale cache config|"
+                "deepseek-v4 uses native SSD-only composite reuse without generic cache codecs|"
                 "DSV4 additional args cannot reenable native MTP or deterministic sampling policy|"
-                "defaults native-MTP bundles to deterministic measured-depth launch policy"
+                "defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating"
             ),
         ],
     ),
@@ -274,11 +274,11 @@ ROW_MARKERS: dict[str, tuple[str, ...]] = {
     ),
     "panel_session_launch_parser_modality_policy": (
         "passes MiniMax through the registered minimax_m2 reasoning parser",
-        "detected Qwen3.6 hybrid cache forces paged cache over stale saved false",
+        "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend",
         "ZAYA sessions keep the qwen3 reasoning parser and model-owned no-thinking default",
-        "deepseek-v4 disables native composite reuse even with stale cache config",
+        "deepseek-v4 uses native SSD-only composite reuse without generic cache codecs",
         "DSV4 additional args cannot reenable native MTP or deterministic sampling policy",
-        "defaults native-MTP bundles to deterministic measured-depth launch policy",
+        "defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating",
     ),
     "decode_speed_large_external_jangtq_mxfp_gptoss_rows": (
         "test_decode_speed_gate_has_large_external_mistral_gptoss_rows",

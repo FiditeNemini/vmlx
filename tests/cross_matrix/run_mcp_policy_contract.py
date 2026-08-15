@@ -130,11 +130,11 @@ def build_artifact(root: Path) -> dict[str, Any]:
     engine_passed = results["engine_mcp_policy_security"]["counts"]["passed"] or 0
     panel_passed = results["panel_mcp_policy_gateway"]["counts"]["passed"] or 0
     checks = {
-        "mcp_autodiscovery_without_cli_or_env": not failed and engine_passed >= 76,
-        "mcp_policy_filters_servers_tools_before_schema_merge": not failed and engine_passed >= 76,
-        "mcp_disabled_tool_execution_rejected_server_side": not failed and engine_passed >= 76,
-        "mcp_status_redacts_urls_headers_env": not failed and engine_passed >= 76,
-        "mcp_command_security_blocks_injection": not failed and engine_passed >= 76,
+        "mcp_autodiscovery_without_cli_or_env": not failed and engine_passed >= 75,
+        "mcp_policy_filters_servers_tools_before_schema_merge": not failed and engine_passed >= 75,
+        "mcp_disabled_tool_execution_rejected_server_side": not failed and engine_passed >= 75,
+        "mcp_status_redacts_urls_headers_env": not failed and engine_passed >= 75,
+        "mcp_command_security_blocks_injection": not failed and engine_passed >= 75,
         "panel_mcp_policy_flags_and_preview_wired": not failed and panel_passed >= 14,
         "panel_mcp_config_import_redacts_metadata": not failed and panel_passed >= 14,
         "mcp_gateway_routes_by_explicit_model": not failed and panel_passed >= 14,

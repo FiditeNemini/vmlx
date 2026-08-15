@@ -50,7 +50,7 @@ REQUIRED_REASONING_TEMPLATE_TEST_MARKERS = (
     # Public API rails. These prevent unsafe hidden downgrades: DSV4 must
     # preserve requested reasoning-on/effort rails, and must use its audited
     # quality-safe rail when direct/off is known to corrupt identifiers.
-    "test_dsv4_reasoning_effort_preserves_requested_rails",
+    "test_dsv4_reasoning_effort_preserves_bundle_native_rails",
     "test_dsv4_thinking_policy_does_not_force_tool_calls_to_direct_rail",
     "test_dsv4_bundle_defaults_apply_only_when_request_omits_values",
     "test_minimax_m2_preserves_sampling_values_without_family_floor",
@@ -155,7 +155,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
     checks = {
         "reasoning_on_off_request_wiring_explicit": (
             not failed
-            and "test_dsv4_reasoning_effort_preserves_requested_rails" not in missing_markers
+            and "test_dsv4_reasoning_effort_preserves_bundle_native_rails" not in missing_markers
             and "Responses: local Auto omits enable_thinking so engine auto-detects" not in missing_markers
         ),
         "no_hidden_family_sampling_or_reasoning_forcing": (

@@ -135,7 +135,7 @@ REQUIRED_MAX_OUTPUT_CONTEXT_TEST_MARKERS = (
     "test_explicit_max_thinking_tokens_overrides_effort_budget_without_rewriting_output_length",
     "test_public_api_models_reject_non_positive_output_caps",
     "DSV4 request budget rejects invalid caps and floors fractional explicit caps",
-    "omits unset and disabled sampling sentinels without dropping explicit overrides",
+    "omits unset and negative sentinels while forwarding explicit neutral sampling overrides",
 )
 
 PANEL_PATTERN = (
@@ -296,7 +296,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             and "test_ollama_generate_omits_non_positive_num_predict_sentinels" not in missing_markers
             and "test_ollama_streaming_num_predict_overrides_server_default_without_touching_context_cap" not in missing_markers
             and "omits malformed Ollama num_predict values instead of poisoning max_tokens" not in missing_markers
-            and "omits unset and disabled sampling sentinels without dropping explicit overrides" not in missing_markers
+            and "omits unset and negative sentinels while forwarding explicit neutral sampling overrides" not in missing_markers
         ),
         "prompt_context_caps_do_not_rewrite_output_cap": (
             not failed

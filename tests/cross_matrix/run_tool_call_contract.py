@@ -36,9 +36,9 @@ DSML_PATTERN = (
     "or server_buffers_dsml_wrapper_marker_before_invoke "
     "or dsml_parser_repairs_schema_gated_malformed_old_dsv4_tool_call "
     "or dsml_parser_repairs_partial_canonical_invoke "
-    "or dsml_parser_repairs_dsv4_live_degraded_dsml_params "
-    "or dsml_parser_rejects_canonical_attr_residue_and_repairs_live_write_file "
-    "or dsml_parser_repairs_partial_invoke_with_malformed_value_attr "
+    "or dsml_parser_rejects_dsv4_live_degraded_dsml_params "
+    "or dsml_parser_rejects_canonical_attr_residue_without_repair "
+    "or dsml_parser_rejects_partial_invoke_with_malformed_value_attr "
     "or dsml_parser_repairs_htmlish_invoke_degradation "
     "or server_repairs_dsv4_partial_tool_intent_from_request_args "
     "or server_repairs_required_single_tool_bare_json_arguments "
@@ -51,21 +51,21 @@ DSML_PATTERN = (
     "or tool_markup_residue_strips_all_registered_marker_families "
     "or tool_markup_residue_strips_interrupted_non_dsml_fragments "
     "or responses_api_no_fallback_on_suppressed_reasoning "
-    "or responses_extracts_suppressed_reasoning_tool_calls_before_finalize "
+    "or responses_extracts_reasoning_rail_tool_calls_before_finalize "
     "or qwen_issue_192_plain_tool_line_uses_single_tool_schema"
 )
 
 REQUIRED_TOOL_CALL_TEST_MARKERS = (
     "visible_text_around_invoke_preserved_no_dsml_leak",
     "tools_called_implies_no_dsml_in_content",
-    "dsml_parser_repairs_dsv4_live_degraded_dsml_params",
-    "dsml_parser_rejects_canonical_attr_residue_and_repairs_live_write_file",
-    "dsml_parser_repairs_partial_invoke_with_malformed_value_attr",
+    "dsml_parser_rejects_dsv4_live_degraded_dsml_params",
+    "dsml_parser_rejects_canonical_attr_residue_without_repair",
+    "dsml_parser_rejects_partial_invoke_with_malformed_value_attr",
     "server_repairs_dsv4_partial_tool_intent_from_request_args",
     "server_repairs_required_single_tool_bare_json_arguments",
     "dsv4_encoder_keeps_function_arguments_as_dsml_params",
     "dsv4_encoder_preserves_code_identifiers_on_direct_chat_rail",
-    "responses_extracts_suppressed_reasoning_tool_calls_before_finalize",
+    "responses_extracts_reasoning_rail_tool_calls_before_finalize",
     "qwen_issue_192_xml_string_arguments_use_request_schema",
     "qwen_issue_192_plain_tool_line_uses_single_tool_schema",
     "tool_markup_residue_strips_all_registered_marker_families",

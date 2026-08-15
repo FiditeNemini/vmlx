@@ -468,3 +468,37 @@ describe('a derivation continued onto its own line is math, not currency', () =>
     expect(rendered).not.toContain('math-inline')
   })
 })
+
+describe('a backslash before an HTML-escapable character stays literal', () => {
+  // Live repro (gemma4 reasoning rail): model text `"\"` was escaped to
+  // `\&quot;`, which marked read as a Markdown `\&` escape and re-escaped the
+  // ampersand — the user saw a literal `&quot;` on screen.
+  it('renders backslash-quote as backslash and quote, never a visible entity', () => {
+    const html = marked.parse(
+      prepareAssistantMarkdownWithMath('including "$" and "\\".'),
+    ) as string
+
+    expect(html).not.toContain('&amp;quot;')
+    expect(html).toContain('&#92;&quot;')
+  })
+
+  it('keeps every backslash of a run before an escaped character', () => {
+    const html = marked.parse(
+      prepareAssistantMarkdownWithMath('double "\\\\" run.'),
+    ) as string
+
+    expect(html).not.toContain('&amp;')
+    expect(html).toContain('&#92;&#92;&quot;')
+  })
+
+  it('covers < and & targets the same way', () => {
+    const html = marked.parse(
+      prepareAssistantMarkdownWithMath('a \\< b and \\& c'),
+    ) as string
+
+    expect(html).not.toContain('&amp;lt;')
+    expect(html).not.toContain('&amp;amp;')
+    expect(html).toContain('&#92;&lt;')
+    expect(html).toContain('&#92;&amp;')
+  })
+})

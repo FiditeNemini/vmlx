@@ -3939,7 +3939,19 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     if (progressiveContentDeltaCount < 2) {
       failures.push(`message ${row?.messageId || 'unknown'} content was not progressively streamed`)
     }
-    if (renderedAnswerStates.size < 2) {
+    // The DOM sampler runs at a 125ms floor; a short answer from a fast model
+    // can legitimately paint fully inside one window (seen: gemma4 26B at
+    // ~104 t/s on a 3-line receipt). Only require two distinct rendered
+    // answer states when the wire content stream spanned enough time for the
+    // sampler to observe growth; wire-level progressiveness is asserted above.
+    const contentStreamTimes = events
+      .filter((event) => event?.event === 'stream' && event?.channel === 'content')
+      .map((event) => Number(event?.t))
+      .filter((value) => Number.isFinite(value))
+    const contentStreamSpanMs = contentStreamTimes.length >= 2
+      ? Math.max(...contentStreamTimes) - Math.min(...contentStreamTimes)
+      : 0
+    if (renderedAnswerStates.size < 2 && contentStreamSpanMs >= 750) {
       failures.push(`message ${row?.messageId || 'unknown'} visible answer DOM was not progressively updated`)
     }
     const terminalIndexes = events
@@ -3969,7 +3981,24 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     if (finalContent.trim() !== persistedContent.trim()) {
       failures.push(`message ${row?.messageId || 'unknown'} final content stream does not equal persisted final`)
     }
-    if (!reasoningEvents.length) continue
+    if (!reasoningEvents.length) {
+      // Some families (gemma4 via Responses) deliver reasoning as a single
+      // terminal item rather than progressive deltas — the API probe accepts
+      // the same shape (summary_text). Count the message as reasoning-bearing
+      // when the reasoning is BOTH persisted and visibly rendered; the
+      // progressive-stream checks below only bind delta-streamed reasoning.
+      const renderedNonDelta = domMessages.find(
+        (message) => String(message?.messageId || '') === String(row?.messageId || ''),
+      )
+      const persistedNonDelta = (result?.persistedReasoningByMessage?.[assistantIndex] || [])
+        .filter((segment) => typeof segment === 'string')
+        .join('')
+        .trim()
+      if (persistedNonDelta && String(renderedNonDelta?.reasoningText || '').trim()) {
+        reasoningMessageCount += 1
+      }
+      continue
+    }
     reasoningMessageCount += 1
     const progressiveReasoningDeltaCount = reasoningEvents
       .filter((event) => String(event?.delta || '').length > 0)

@@ -435,6 +435,13 @@ export function prepareLiteralMarkdownWithMath(markdown: string): string {
     return `\u0000CHATLITERAL${index}\u0000`
   })
   const escapedMarkdown = escapeHtml(protectedMarkdown)
+    // A raw backslash directly before a character that escapeHtml just
+    // entity-encoded (e.g. model text `\"` becoming `\&quot;`) reads to
+    // marked as a Markdown `\&` escape, which re-escapes the ampersand and
+    // renders a literal `&quot;` to the user (seen live in gemma4 reasoning).
+    // Entity-encode the whole backslash run so both characters stay literal,
+    // which is this pipeline's contract for raw chat text.
+    .replace(/\\+(?=&(?:amp|lt|gt|quot|#39);)/g, (run) => '&#92;'.repeat(run.length))
   const restoredMarkdown = escapedMarkdown.replace(
     /\u0000CHATLITERAL(\d+)\u0000/g,
     (_match, indexText) => protectedSegments[Number(indexText)] || '',

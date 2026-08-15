@@ -9280,9 +9280,17 @@ async function main() {
             HTMLSelectElement.prototype,
             'value',
           )?.set;
-          const setInput = async (input, value) => {
+          const setInput = async (input, value, controlLabel) => {
             if (!(input instanceof HTMLInputElement) || !valueSetter) {
-              throw new Error('required visible Chat Settings input was not found');
+              const visibleLabels = [...(chatSettingsDrawer?.querySelectorAll('label, div span') || [])]
+                .map((node) => (node.textContent || '').trim())
+                .filter((text) => text && text.length < 40)
+                .slice(0, 40);
+              throw new Error(
+                'required visible Chat Settings input was not found: '
+                + (controlLabel || 'unknown')
+                + ' | visible labels: ' + JSON.stringify(visibleLabels),
+              );
             }
             valueSetter.call(input, String(value));
             input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -9332,11 +9340,11 @@ async function main() {
             'Repetition Penalty': samplingOverrides.repeatPenalty,
           })) {
             if (value == null) continue;
-            await setInput(rangeInputFor(label), value);
+            await setInput(rangeInputFor(label), value, label);
             chatSettingsInteraction.controlsChanged.push(label);
           }
           if (requestedMaxTokens != null) {
-            await setInput(maxTokenInputFor(), requestedMaxTokens);
+            await setInput(maxTokenInputFor(), requestedMaxTokens, 'Max Tokens');
             chatSettingsInteraction.controlsChanged.push('Max Tokens');
           }
           const thinkingLabel = enableThinking === true
@@ -9397,11 +9405,12 @@ async function main() {
                   (candidate.getAttribute('placeholder') || '').includes('project directory')
                 ) || null,
             'visible Working Directory input');
-            await setInput(workingInput, workingDirectory);
-            await setInput(numberInputFor('Max Tool Iterations'), ${JSON.stringify(maxToolIterations)});
+            await setInput(workingInput, workingDirectory, 'Working Directory');
+            await setInput(numberInputFor('Max Tool Iterations'), ${JSON.stringify(maxToolIterations)}, 'Max Tool Iterations');
             await setInput(
               toolResultLimitInputFor(),
               ${JSON.stringify(toolResultMaxChars)},
+              'Tool Result Limit',
             );
             chatSettingsInteraction.controlsChanged.push(
               'Working Directory',

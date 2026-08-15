@@ -1182,10 +1182,11 @@ def build_probe_payloads(
             # pays the reasoning tax before its visible answer or tool call.
             # Budgets sized for thinking-off (48/96) die inside reasoning and
             # misreport healthy models as empty_visible / no-tool-call
-            # (Step-3.7 batch9: all 12 failures were this). Validation stays
-            # strict; only the budget acknowledges mandatory thinking.
+            # (Step-3.7 batch9: all 12 failures were this; at 512 it STILL
+            # hit the cap mid-answer after ~470 reasoning tokens). Validation
+            # stays strict; only the budget acknowledges mandatory thinking.
             if isinstance(payload.get("max_tokens"), int):
-                payload["max_tokens"] = max(payload["max_tokens"], 512)
+                payload["max_tokens"] = max(payload["max_tokens"], 1024)
     return probes
 
 

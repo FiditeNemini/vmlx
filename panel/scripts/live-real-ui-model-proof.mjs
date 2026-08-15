@@ -9369,25 +9369,38 @@ async function main() {
             : enableThinking === false
               ? ['Off', 'Instruct']
               : ['Auto'];
-          // Same hydration wait as the inputs above: the mode buttons appear
-          // after the drawer hydrates on a fresh session.
-          const thinkingButton = await waitFor(
-            () => [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
-              .find((button) =>
-                isVisible(button)
-                && !button.disabled
-                && acceptableThinkingLabels.includes(
-                  (button.textContent || '').replace(/\\s+/g, ' ').trim()
-                )
-              ) || null,
-            'visible reasoning mode control: ' + thinkingLabel,
+          // Families render the thinking control in one of two shapes: a mode
+          // button group (On/Off/Auto or Reasoning/Instruct) or a plain
+          // "Enable Thinking" checkbox (LFM2.5, MiniMax). Accept both shapes;
+          // hydration wait as for the inputs above.
+          const findThinkingButton = () => [...(chatSettingsDrawer?.querySelectorAll('button') || [])]
+            .find((button) =>
+              isVisible(button)
+              && !button.disabled
+              && acceptableThinkingLabels.includes(
+                (button.textContent || '').replace(/\\s+/g, ' ').trim()
+              )
+            ) || null;
+          const thinkingControl = await waitFor(
+            () => findThinkingButton() || checkboxFor('Enable Thinking') || null,
+            'visible reasoning control (' + thinkingLabel + ' button or Enable Thinking checkbox)',
           ).catch(() => null);
-          if (!thinkingButton) {
+          if (thinkingControl instanceof HTMLInputElement) {
+            if (enableThinking === true || enableThinking === false) {
+              if (Boolean(thinkingControl.checked) !== enableThinking) {
+                thinkingControl.click();
+                await new Promise((resolve) => setTimeout(resolve, 50));
+              }
+              chatSettingsInteraction.controlsChanged.push('Enable Thinking ' + thinkingLabel);
+            }
+            // Auto: leave the checkbox at the family default.
+          } else if (thinkingControl) {
+            thinkingControl.click();
+            chatSettingsInteraction.controlsChanged.push('Reasoning ' + thinkingLabel);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          } else {
             throw new Error('visible reasoning mode control missing: ' + thinkingLabel);
           }
-          thinkingButton.click();
-          chatSettingsInteraction.controlsChanged.push('Reasoning ' + thinkingLabel);
-          await new Promise((resolve) => setTimeout(resolve, 50));
           const wireSelect = await waitFor(
             () => [...(chatSettingsDrawer?.querySelectorAll('select') || [])]
               .find((candidate) =>

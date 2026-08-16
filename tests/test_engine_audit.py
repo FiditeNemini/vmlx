@@ -7348,14 +7348,26 @@ class TestL3ReasoningEffort:
         assert _EFFORT_THINKING_BUDGET["medium"] < _EFFORT_THINKING_BUDGET["high"]
 
     def test_chat_completions_maps_effort(self):
-        """Chat Completions must map reasoning_effort to thinking_budget."""
+        """Chat Completions must map reasoning_effort to thinking_budget.
+
+        The mapping now lives in the shared _forward_reasoning_effort_kwargs
+        helper (#185 — /v1/messages was missing the inline copy, so ONE
+        helper serves chat, responses, and messages). The route must call
+        the helper; the helper must use the budget mapping.
+        """
         import inspect
-        from vmlx_engine.server import create_chat_completion
-        source = inspect.getsource(create_chat_completion)
-        assert "thinking_budget" in source, (
-            "Chat Completions must inject thinking_budget from reasoning_effort"
+        from vmlx_engine.server import (
+            _forward_reasoning_effort_kwargs,
+            create_chat_completion,
         )
-        assert "_EFFORT_THINKING_BUDGET" in source, (
+        source = inspect.getsource(create_chat_completion)
+        assert "_forward_reasoning_effort_kwargs" in source, (
+            "Chat Completions must forward reasoning_effort via the shared "
+            "helper"
+        )
+        helper_source = inspect.getsource(_forward_reasoning_effort_kwargs)
+        assert "thinking_budget" in helper_source
+        assert "_EFFORT_THINKING_BUDGET" in helper_source, (
             "Must use the _EFFORT_THINKING_BUDGET mapping"
         )
 

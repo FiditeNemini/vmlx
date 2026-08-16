@@ -5854,12 +5854,32 @@ def _run_restart_restore_scenario(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], dict[str, Any]]:
     failures: list[str] = []
     prompts_all = _l2_identity_prompts(nonce, records)
+    # Paged-lane delegation: the evict scenario kept the PROBE-chain's
+    # companion alive (touch/keepalive/retouch all use the probe prompt),
+    # while a RESTART-variant prompt needs a companion at the store<->restart
+    # shared floor — a file nothing refreshed, which legitimately ages out.
+    # The delegated restore therefore replays the probe prompt: exactly the
+    # "reopen the app and continue the same conversation" shape. Disk-only
+    # keeps the stricter RESTART-variant contract.
+    _store_obs = (
+        store_observation
+        if isinstance(store_observation, dict)
+        else {}
+    )
+    _delegated_restore = bool(
+        (
+            _store_obs.get("l2_size_eviction_observation") or _store_obs
+        ).get("refault_delegated_to_restart_restore")
+        is True
+    )
+    _restore_key = "recent_probe" if _delegated_restore else "recent_restart"
+    _restore_marker = "PROBE" if _delegated_restore else "RESTART"
     prompts = {
         "recent_store": prompts_all["recent_store"],
-        "recent_restart": prompts_all["recent_restart"],
+        _restore_key: prompts_all[_restore_key],
     }
     pairs: dict[str, tuple[str, str]] = {
-        "recent": ("recent_store", "recent_restart")
+        "recent": ("recent_store", _restore_key)
     }
     request_controls = _l2_scenario_request_controls()
     pre_contract, pre_failures = _fetch_prefix_attestation(
@@ -5882,8 +5902,10 @@ def _run_restart_restore_scenario(
         base_url=base_url,
         model=model,
         tag="l2_restart_recent",
-        prompt=prompts["recent_restart"],
-        expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-RESTART",
+        prompt=prompts[_restore_key],
+        expected_marker=(
+            f"CACHE-HIERARCHY-{nonce}-L2-RECENT-{_restore_marker}"
+        ),
         artifact_dir=artifact_dir,
         timeout=timeout,
         request_controls=request_controls,

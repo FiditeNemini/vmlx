@@ -37,7 +37,7 @@ JANG_CONFIG_FILENAMES = [
     "jang_cfg.json",
     "mxq_config.json",
 ]
-JANG_FORMAT_VALUES = ["jang", "jjqf", "mxq"]
+JANG_FORMAT_VALUES = ["jang", "jang-v2", "jjqf", "mxq"]
 JANG_WEIGHT_FORMAT_VALUES = {"affine", "jang_affine", "mxtq", "mxfp4", "mxfp8"}
 _MLX_WEIGHT_QUANT_BITS = {2, 3, 4, 5, 6, 8}
 _MLX_WEIGHT_QUANT_GROUP_SIZES = {32, 64, 128}

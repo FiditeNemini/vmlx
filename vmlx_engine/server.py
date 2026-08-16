@@ -14821,6 +14821,21 @@ async def create_anthropic_message(
         if extra_ct:
             _msg_kwargs["chat_template_kwargs"] = extra_ct
 
+    # Kwargs-parity telemetry (campaign #181 arm A5): this was the ONLY
+    # dialect that never logged its resolved kwargs, so cross-dialect parity
+    # was unprovable for Anthropic-shaped requests.
+    _log_resolved_sampling_kwargs(
+        "/v1/messages",
+        chat_req.model or _resolve_model_name(),
+        _msg_kwargs,
+        proof_request_id=_request_header_value(
+            fastapi_request,
+            "x-vmlx-proof-request-id",
+        ),
+        request_id=_request_header_value(fastapi_request, "x-vmlx-request-id"),
+        message_id=_request_header_value(fastapi_request, "x-vmlx-message-id"),
+    )
+
     messages_dump = [m.model_dump(exclude_none=True) for m in chat_req.messages]
 
     # Strip <think> blocks from prior assistant messages when thinking is disabled.

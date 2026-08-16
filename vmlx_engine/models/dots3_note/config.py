@@ -131,19 +131,20 @@ class TextConfig(BaseModelConfig):
             return False  # MTP layer FFN is dense
         return layer_idx >= self.first_k_dense_replace
 
-    def geom(self, layer_idx: int) -> AttnGeom:
-        if self.is_sliding(layer_idx):
-            return AttnGeom(
-                num_heads=self.swa_num_attention_heads,
-                q_lora_rank=self.swa_q_lora_rank,
-                kv_lora_rank=self.swa_kv_lora_rank,
-                qk_nope_head_dim=self.swa_qk_nope_head_dim,
-                qk_rope_head_dim=self.swa_qk_rope_head_dim,
-                v_head_dim=self.swa_v_head_dim,
-                rope_theta=self.swa_rope_theta,
-                gate_type=self.swa_attention_gate_type,
-                sliding_window=self.sliding_window_size,
-            )
+    def swa_geom(self) -> AttnGeom:
+        return AttnGeom(
+            num_heads=self.swa_num_attention_heads,
+            q_lora_rank=self.swa_q_lora_rank,
+            kv_lora_rank=self.swa_kv_lora_rank,
+            qk_nope_head_dim=self.swa_qk_nope_head_dim,
+            qk_rope_head_dim=self.swa_qk_rope_head_dim,
+            v_head_dim=self.swa_v_head_dim,
+            rope_theta=self.swa_rope_theta,
+            gate_type=self.swa_attention_gate_type,
+            sliding_window=self.sliding_window_size,
+        )
+
+    def full_geom(self) -> AttnGeom:
         return AttnGeom(
             num_heads=self.num_attention_heads,
             q_lora_rank=self.q_lora_rank,
@@ -155,6 +156,9 @@ class TextConfig(BaseModelConfig):
             gate_type=self.attention_gate_type,
             sliding_window=None,
         )
+
+    def geom(self, layer_idx: int) -> AttnGeom:
+        return self.swa_geom() if self.is_sliding(layer_idx) else self.full_geom()
 
 
 @dataclass

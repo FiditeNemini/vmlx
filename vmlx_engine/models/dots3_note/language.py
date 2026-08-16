@@ -250,9 +250,14 @@ class Dots3Indexer(nn.Module):
 
 
 class Dots3MLAAttention(nn.Module):
-    def __init__(self, config: TextConfig, layer_idx: int):
+    def __init__(
+        self,
+        config: TextConfig,
+        layer_idx: int,
+        geom: Optional[AttnGeom] = None,
+    ):
         super().__init__()
-        g = config.geom(layer_idx)
+        g = geom if geom is not None else config.geom(layer_idx)
         self.geom = g
         self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
@@ -587,11 +592,15 @@ class Dots3DecoderLayer(nn.Module):
 class Dots3MTPLayer(nn.Module):
     """MTP decoder = ``model.layers.46``.
 
-    Structure only in stage A so the strict weight map loads; the
-    speculative decode loop wires it up in task #200. Full-attention MLA
-    geometry, NO indexer, dense FFN, ``shared_head.norm`` before the SHARED
-    backbone lm_head. Fusion inputs: eh_proj(cat(enorm(embed(next_tok)),
-    hnorm(prev_hidden))).
+    🚨 The MTP layer uses the SWA GEOMETRY, not the full one — measured
+    from the real checkpoint shapes (q_b [16384, ...] = 64 heads x 256,
+    kv_a 1088 = swa rank 1024 + rope, kv_b 20480, o_proj in 2048, g_proj
+    64). The conversion handoff's "full-geom" note is contradicted by the
+    weights; transformers ignores these keys so shapes are the only
+    authority. NO indexer. Sliding-vs-full masking is indistinguishable in
+    the speculative regime (the private cache never approaches window 513).
+    Dense FFN, ``shared_head.norm`` before the SHARED backbone lm_head.
+    Fusion: eh_proj(cat(enorm(embed(next_tok)), hnorm(prev_hidden))).
     """
 
     def __init__(self, config: TextConfig):
@@ -607,11 +616,11 @@ class Dots3MTPLayer(nn.Module):
         self.post_attention_layernorm = nn.RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        # Full geometry, indexer-free: build with an index past the backbone
-        # so config.geom() resolves full and is_sliding() is False, while the
-        # Dots3MLAAttention constructor's indexer condition (idx <
-        # num_hidden_layers) skips the indexer.
-        self.self_attn = Dots3MLAAttention(config, config.num_hidden_layers)
+        # Index past the backbone keeps the indexer condition off; the
+        # explicit geom override selects SWA per the checkpoint shapes.
+        self.self_attn = Dots3MLAAttention(
+            config, config.num_hidden_layers, geom=config.swa_geom()
+        )
         self.mlp = Dots3DenseMLP(config.hidden_size, config.intermediate_size)
 
         class _SharedHead(nn.Module):
@@ -762,3 +771,57 @@ class LanguageModel(nn.Module):
     @property
     def layers(self):
         return self.model.layers[: self.text_config.num_hidden_layers]
+
+    # ---- native MTP contract --------------------------------------------
+    # The MLLM speculative path requires: a non-null ``mtp`` module, a
+    # callable ``mtp_forward``, and a callable ``make_mtp_cache``.
+
+    @property
+    def mtp(self):
+        layers = self.model.layers
+        if len(layers) > self.text_config.num_hidden_layers:
+            return layers[self.text_config.num_hidden_layers]
+        return None
+
+    def make_mtp_cache(self):
+        if self.mtp is None:
+            return []
+        if _absorb_enabled():
+            # SWA-geometry layer: window-bounded latent cache (moot in the
+            # speculative regime but geometry-consistent).
+            return [
+                Dots3LatentCache(window=self.text_config.sliding_window_size)
+            ]
+        from mlx_lm.models.cache import KVCache
+
+        return [KVCache()]
+
+    def mtp_forward(
+        self,
+        hidden_states: mx.array,
+        next_token_ids: mx.array,
+        mtp_cache: Optional[List[Any]] = None,
+        return_hidden: bool = False,
+    ):
+        """One MTP draft step.
+
+        ``hidden_states``: backbone hidden of the position(s) PRECEDING
+        ``next_token_ids`` ([B, S, H]). The draft embeds the next token
+        through the MTP layer's OWN table (verified not byte-identical to
+        the backbone embedding — never alias), fuses via eh_proj, runs the
+        full-geometry indexer-free MLA + dense FFN, then scores through the
+        SHARED backbone lm_head after ``shared_head.norm``.
+        """
+        mtp_layer = self.mtp
+        if mtp_layer is None:
+            raise RuntimeError("dots3_note MTP layer is not constructed")
+        ids = next_token_ids
+        if ids.ndim == 1:
+            ids = ids[:, None]
+        embed = self.model.mtp.embed_tokens(ids).astype(hidden_states.dtype)
+        cache = mtp_cache[0] if mtp_cache else None
+        hidden = mtp_layer(embed, hidden_states, cache=cache)
+        logits = self.lm_head(hidden)
+        if return_hidden:
+            return logits, hidden
+        return logits

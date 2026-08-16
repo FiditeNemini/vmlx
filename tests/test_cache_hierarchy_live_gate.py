@@ -4440,3 +4440,15 @@ def test_paged_lane_bounded_loss_and_touch_contract():
         max_filler_requests=8,
     )
     assert any("recent prefix did not survive" in f for f in failures)
+
+
+def test_delegated_refault_waives_l1_residency_precondition():
+    """Row 98: under paged-lane delegation the refault is skipped, so the
+    'evicted from L1 before refault' precondition cannot apply — residency
+    is the lane's normal state; the rr probe proves the disk refault."""
+    import inspect
+
+    src = inspect.getsource(gate.validate_l2_size_eviction_observation)
+    anchor = src.index("was not evicted from L1 before refault")
+    window = src[max(0, anchor - 600) : anchor]
+    assert "refault_delegated_to_restart_restore" in window

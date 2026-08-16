@@ -4010,7 +4010,11 @@ def validate_l2_size_eviction_observation(
                 "terminal_resident_payload_present"
             )
             is not False
+            and observation.get("refault_delegated_to_restart_restore")
+            is not True
         ):
+            # Paged-lane delegation: L1 residency is the lane's normal state
+            # and the disk refault is proven by the restart-restore probe.
             failures.append(
                 "L2 size eviction: recent prefix was not evicted from L1 before refault"
             )

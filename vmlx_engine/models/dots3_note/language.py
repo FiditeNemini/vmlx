@@ -406,7 +406,11 @@ class Dots3MLAAttention(nn.Module):
             )
 
         out = mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=g.scale, mask=mask
+            queries,
+            keys,
+            values,
+            scale=g.scale,
+            mask=mask if mask is None else mask.astype(queries.dtype),
         )
         return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
 
@@ -486,11 +490,15 @@ class Dots3MLAAttention(nn.Module):
                 keys.astype(mx.float32),
                 values.astype(mx.float32),
                 scale=g.scale,
-                mask=mask,
+                mask=mask if mask is None else mask.astype(mx.float32),
             ).astype(q_nope.dtype)
         else:
             out = mx.fast.scaled_dot_product_attention(
-                queries, keys, values, scale=g.scale, mask=mask
+                queries,
+                keys,
+                values,
+                scale=g.scale,
+                mask=mask if mask is None else mask.astype(queries.dtype),
             )
         # [B,h,S,rank] @ [1,h,rank,v] -> [B,h,S,v]
         out = mx.matmul(out, w_v[None].swapaxes(-1, -2).astype(out.dtype))

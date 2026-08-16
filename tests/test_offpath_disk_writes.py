@@ -203,13 +203,20 @@ def test_block_disk_byte_admission_precedes_serialization(monkeypatch, tmp_path)
         "vmlx_engine.block_disk_store._serialize_block",
         forbidden_serialize,
     )
+    # Same congestion setup as the SSM sibling test: an oversized payload
+    # against an EMPTY queue now admits exclusively, so the admission failure
+    # this test guards needs something already pending.
+    with store._pending_write_condition:
+        store._pending_write_bytes += 1
     try:
         assert not store.write_block_async(b"x" * 32, _block(), 8)
         pipeline = store.get_stats()["write_pipeline"]
         assert serialized is False
-        assert pipeline["pending_bytes"] == 0
+        assert pipeline["pending_bytes"] == 1
         assert pipeline["byte_budget_drops"] == 1
     finally:
+        with store._pending_write_condition:
+            store._pending_write_bytes = 0
         store.shutdown()
 
 
@@ -271,11 +278,17 @@ def test_ssm_byte_admission_precedes_safetensors_and_reports_failure(
 
     monkeypatch.setattr(ssm_module.mx, "save_safetensors", forbidden_save)
     state = _ArraysState(mx.array([1.0, 2.0], dtype=mx.float16))
+    # An oversized payload against an EMPTY queue now admits exclusively (the
+    # flat cap was a permanent coverage ceiling — see
+    # test_block_disk_oversized_payload_admission). The admission failure this
+    # test guards is the CONGESTED case: something already pending.
+    with store._stats_lock:
+        store._pending_write_bytes += 1
     try:
         assert not store.store("cd" * 32, [state], True, [1, 2], 2)
         pipeline = store.stats()["write_pipeline"]
         assert save_called is False
-        assert pipeline["pending_bytes"] == 0
+        assert pipeline["pending_bytes"] == 1
         assert pipeline["byte_budget_drops"] == 1
     finally:
         assert store.shutdown(timeout=5.0)

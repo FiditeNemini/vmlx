@@ -1061,9 +1061,33 @@ class BlockDiskStore:
         deadline = time.monotonic() + timeout_s
         with self._pending_write_condition:
             if amount > self._max_pending_write_bytes:
-                self._pending_write_byte_drops += 1
-                self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
-                return False
+                # OVERSIZED SINGLE PAYLOAD: admit EXCLUSIVELY instead of
+                # dropping outright. The budget bounds the AGGREGATE RAM of
+                # detached payloads awaiting the writer — a single payload
+                # larger than it (measured live: Laguna's 48-layer Mixed-SWA
+                # state at ~19k tokens brushes the 1GB default) can NEVER be
+                # written under a flat cap, which turns congestion control
+                # into a permanent L2 coverage ceiling: the block drops,
+                # ancestry truncation kills every descendant, and deep
+                # restart-restore finds a hole at that depth forever. Waiting
+                # for the queue to drain and admitting the payload alone
+                # keeps the aggregate bounded by max(budget, one payload) —
+                # RAM the process transiently holds for that copy regardless.
+                while self._pending_write_bytes > 0:
+                    remaining = deadline - time.monotonic()
+                    if timeout_s <= 0.0 or remaining <= 0.0:
+                        self._pending_write_byte_drops += 1
+                        self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
+                        return False
+                    self._pending_write_condition.wait(timeout=remaining)
+                self._pending_write_bytes += amount
+                logger.info(
+                    "BlockDiskStore admitted an oversized payload "
+                    "exclusively (%d bytes > %d budget) after queue drain",
+                    amount,
+                    self._max_pending_write_bytes,
+                )
+                return True
             while self._pending_write_bytes + amount > self._max_pending_write_bytes:
                 remaining = deadline - time.monotonic()
                 if timeout_s <= 0.0 or remaining <= 0.0:
@@ -1084,11 +1108,27 @@ class BlockDiskStore:
                 or self._pending_write_bytes + delta
                 > self._max_pending_write_bytes
             ):
+                # The estimate was admitted but the detached payload came out
+                # larger than the budget allows alongside other writers. If
+                # this reservation is the ONLY thing pending, the exclusive-
+                # admission rule above applies to the resize too — dropping
+                # here would reintroduce the flat ceiling one step later.
+                if self._pending_write_bytes - old_amount <= 0:
+                    self._pending_write_bytes = new_amount
+                    logger.info(
+                        "BlockDiskStore resized an exclusive oversized "
+                        "payload reservation (%d -> %d bytes, budget %d)",
+                        old_amount,
+                        new_amount,
+                        self._max_pending_write_bytes,
+                    )
+                    return True
                 self._pending_write_bytes = max(
                     0, self._pending_write_bytes - old_amount
                 )
                 self._pending_write_byte_drops += 1
                 self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
+                self._pending_write_condition.notify_all()
                 return False
             self._pending_write_bytes = max(
                 0, self._pending_write_bytes + delta

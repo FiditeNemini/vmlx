@@ -347,9 +347,25 @@ class SSMCompanionDiskStore:
     def _reserve_pending_bytes(self, requested: int) -> bool:
         amount = max(1, int(requested))
         with self._stats_lock:
+            if amount > self._max_pending_write_bytes:
+                # Oversized SINGLE payload: admit exclusively when nothing
+                # else is pending, matching BlockDiskStore. A flat cap makes
+                # a companion snapshot larger than the budget PERMANENTLY
+                # unstorable — the budget exists to bound aggregate pending
+                # RAM, not to be a coverage ceiling.
+                if self._pending_write_bytes > 0:
+                    self._pending_write_byte_drops += 1
+                    return False
+                self._pending_write_bytes += amount
+                logger.info(
+                    "SSM disk store admitted an oversized payload "
+                    "exclusively (%d bytes > %d budget)",
+                    amount,
+                    self._max_pending_write_bytes,
+                )
+                return True
             if (
-                amount > self._max_pending_write_bytes
-                or self._pending_write_bytes + amount
+                self._pending_write_bytes + amount
                 > self._max_pending_write_bytes
             ):
                 self._pending_write_byte_drops += 1
@@ -367,6 +383,20 @@ class SSMCompanionDiskStore:
                 or self._pending_write_bytes + delta
                 > self._max_pending_write_bytes
             ):
+                # Exclusive-admission applies to the resize too: if this
+                # reservation is the only thing pending, the actual size
+                # replaces the estimate rather than dropping (the flat
+                # ceiling one step later otherwise).
+                if self._pending_write_bytes - old_amount <= 0:
+                    self._pending_write_bytes = new_amount
+                    logger.info(
+                        "SSM disk store resized an exclusive oversized "
+                        "payload reservation (%d -> %d bytes, budget %d)",
+                        old_amount,
+                        new_amount,
+                        self._max_pending_write_bytes,
+                    )
+                    return True
                 self._pending_write_bytes = max(
                     0, self._pending_write_bytes - old_amount
                 )

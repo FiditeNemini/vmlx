@@ -83,8 +83,13 @@ class Dots3LatentCache:
         # index. bf16: 256 B/token/full-layer (~1.7 GB at 512K).
         self.idx_k: Optional[mx.array] = None
         self.offset = 0
+        # Packing dims for the positional store presentation; carried in
+        # meta_state so a restore can unpack without guessing.
+        self._rope_dim = 0
+        self._idx_dim = 0
 
     def update_indexer(self, idx_k: mx.array) -> mx.array:
+        self._idx_dim = int(idx_k.shape[-1])
         if self.idx_k is None:
             self.idx_k = idx_k
         else:
@@ -94,6 +99,7 @@ class Dots3LatentCache:
     def update_and_fetch(
         self, latent: mx.array, k_pe: mx.array
     ) -> Tuple[mx.array, mx.array]:
+        self._rope_dim = int(k_pe.shape[-1])
         if self.latent is None:
             self.latent, self.k_pe = latent, k_pe
         else:
@@ -113,12 +119,21 @@ class Dots3LatentCache:
 
     # ---- prefix-cache store/restore protocol ---------------------------
     # The MLLM extractor requires state + meta_state; the presence of a
-    # ``.cache`` LIST routes it down the cumulative (SSM-style) branch,
-    # which skips GQA-shape normalization (our arrays are latent streams,
-    # not per-head K/V) and stores the whole state in the LAST block —
-    # restored on exact prefix matches, the multiturn pattern.
-
-    _EMPTY = None  # lazy shared empty placeholder for absent idx_k
+    # ``.cache`` LIST routes it down the branch that skips GQA-shape
+    # normalization (these are latent streams, not per-head K/V).
+    #
+    # TWO presentations, keyed on ``window``:
+    # - FULL layers (window None) present a POSITIONAL 2-tuple
+    #   (packed_keys [B,1,S,rope+idx], latent [B,1,S,rank]) so the block
+    #   machinery slices them per token — this is what makes the SSD (L2)
+    #   publication chain valid: an all-cumulative family leaves every
+    #   non-terminal block empty and the disk writer then refuses the last
+    #   block's parent ancestry (measured live: "cannot publish block whose
+    #   parent ancestry is unavailable", RAM hits masking a dead L2).
+    # - SLIDING layers (window set) present a CUMULATIVE 3-tuple stored
+    #   whole in the last block and restored on exact prefix boundaries
+    #   (the hybrid-family pattern; their trimmed physical window cannot be
+    #   positionally sliced).
 
     @property
     def cache(self):
@@ -127,6 +142,16 @@ class Dots3LatentCache:
     @property
     def state(self):
         empty = mx.zeros((0,), dtype=mx.bfloat16)
+        if self.window is None:
+            if self.latent is None:
+                return (empty, empty)
+            k_pe = self.k_pe
+            idx = self.idx_k
+            parts = [k_pe]
+            if idx is not None:
+                parts.append(idx[:, None] if idx.ndim == 3 else idx)
+            packed = mx.concatenate(parts, axis=-1)
+            return (packed, self.latent)
         return (
             self.latent if self.latent is not None else empty,
             self.k_pe if self.k_pe is not None else empty,
@@ -135,31 +160,55 @@ class Dots3LatentCache:
 
     @state.setter
     def state(self, value):
-        latent, k_pe, idx_k = value
-
         def _real(a):
             return a if a is not None and getattr(a, "size", 0) else None
 
+        if isinstance(value, (tuple, list)) and len(value) == 2:
+            packed, latent = value
+            self.latent = _real(latent)
+            packed = _real(packed)
+            if packed is None:
+                self.k_pe = None
+                self.idx_k = None
+            else:
+                rope_dim = self._rope_dim or packed.shape[-1]
+                self.k_pe = packed[..., :rope_dim]
+                idx = packed[..., rope_dim:]
+                self.idx_k = idx[:, 0] if idx.shape[-1] else None
+            self.window = None
+            return
+        latent, k_pe, idx_k = value
         self.latent = _real(latent)
         self.k_pe = _real(k_pe)
         self.idx_k = _real(idx_k)
 
     @property
     def meta_state(self):
-        return (str(self.offset), str(self.window if self.window else ""))
+        return (
+            str(self.offset),
+            str(self.window if self.window else ""),
+            str(self._rope_dim),
+            str(self._idx_dim),
+        )
 
     @meta_state.setter
     def meta_state(self, value):
-        offset, window = value
+        offset, window = value[0], value[1]
         self.offset = int(offset)
         self.window = int(window) if str(window) else None
+        if len(value) >= 4:
+            self._rope_dim = int(value[2] or 0)
+            self._idx_dim = int(value[3] or 0)
 
     @classmethod
     def from_state(cls, state, meta_state):
         obj = cls()
-        obj.state = state
+        # Meta first: the positional unpack needs the packing dims.
         if meta_state:
             obj.meta_state = meta_state
+        obj.state = state
+        if not meta_state and obj.latent is not None:
+            obj.offset = int(obj.latent.shape[2])
         return obj
 
 

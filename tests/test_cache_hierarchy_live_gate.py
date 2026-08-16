@@ -4137,3 +4137,75 @@ def test_health_cache_counters_retain_request_local_disk_hit_delta():
     assert deltas["scheduler.cache_hit_tokens"] == 112
     assert deltas["scheduler_cache.disk_hits"] == 2
     assert deltas["block_disk_cache.disk_hits"] == 2
+
+
+def test_qwen_hybrid_profile_splits_on_attested_storage_quant():
+    """Campaign #181: the asymmetry guard disables TQ storage for uncalibrated
+    bundles — such serves select the exact-KV profile instead of a TQ4
+    contract they can never satisfy; TQ-on serves keep the TQ4 profile."""
+    def health(storage_enabled):
+        return {
+            "cache_topology_provenance": {
+                "configuration": {
+                    "native_cache": {
+                        "family": "qwen3_5",
+                        "schema": "hybrid_ssm_v1",
+                        "attention_kv_storage_quantization": {
+                            "enabled": storage_enabled,
+                        },
+                    }
+                }
+            }
+        }
+
+    assert (
+        gate._cache_contract_profile_from_health(health(True))
+        == "qwen_hybrid_ssm_tq4"
+    )
+    assert (
+        gate._cache_contract_profile_from_health(health(False))
+        == "qwen_hybrid_ssm_exact"
+    )
+    # Absent/malformed attestation stays on the strict TQ4 contract
+    # (fail closed, never silently downgrade).
+    assert (
+        gate._cache_contract_profile_from_health(health(None))
+        == "qwen_hybrid_ssm_tq4"
+    )
+
+
+def test_exact_kv_contract_rejects_tq_on_and_skips_paged_requirement():
+    def row(storage_enabled):
+        return {
+            "tag": "warm_a",
+            "response_id": "resp_x",
+            "response_id_consistent": True,
+            "last_cache_execution": {"request_id": "resp_x"},
+            "native_cache": {
+                "schema": "hybrid_ssm_v1",
+                "cache_type": "hybrid_ssm_typed",
+                "paged": False,
+                "block_disk_l2": True,
+                "components": ["attention_kv", "ssm_companion_state"],
+                "attention_kv_storage_quantization": {
+                    "enabled": storage_enabled
+                },
+                "generic_turboquant_kv": {"enabled": False},
+            },
+        }
+
+    off = gate._validate_hybrid_ssm_tq4_hit(
+        row(False),
+        require_disk_origin=False,
+        require_tq4=False,
+        require_paged=False,
+    )
+    assert not any("paged RAM" in f for f in off)
+    assert not any("storage quantization" in f for f in off)
+    on = gate._validate_hybrid_ssm_tq4_hit(
+        row(True),
+        require_disk_origin=False,
+        require_tq4=False,
+        require_paged=False,
+    )
+    assert any("attested OFF" in f for f in on)

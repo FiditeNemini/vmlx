@@ -2407,8 +2407,18 @@ def _validate_hybrid_ssm_tq4_hit(
     *,
     require_disk_origin: bool,
     label: str | None = None,
+    require_tq4: bool = True,
+    require_paged: bool = True,
 ) -> list[str]:
-    """Require one accepted Qwen hybrid hit to include KV, SSM, and TQ truth."""
+    """Require one accepted Qwen hybrid hit to include KV, SSM, and TQ truth.
+
+    ``require_tq4=False`` selects the EXACT-KV contract for bundles where the
+    engine's asymmetry guard deliberately disables TurboQuant storage (no
+    calibrated jang_config.turboquant block -> live encode off): the hit must
+    then attest storage quantization OFF (a TQ-on serve fails closed and must
+    use the TQ4 profile). ``require_paged=False`` admits the disk-only lane,
+    which can never attest a paged RAM pool.
+    """
 
     tag = label or str(row.get("tag") or "<missing-tag>")
     failures: list[str] = []
@@ -2434,7 +2444,7 @@ def _validate_hybrid_ssm_tq4_hit(
         failures.append(f"{tag}: native_cache schema is not hybrid_ssm_v1")
     if native_cache.get("cache_type") != "hybrid_ssm_typed":
         failures.append(f"{tag}: native_cache type is not hybrid_ssm_typed")
-    if native_cache.get("paged") is not True:
+    if require_paged and native_cache.get("paged") is not True:
         failures.append(f"{tag}: native_cache does not attest paged RAM")
     if native_cache.get("block_disk_l2") is not True:
         failures.append(f"{tag}: native_cache does not attest block-disk L2")
@@ -2450,26 +2460,35 @@ def _validate_hybrid_ssm_tq4_hit(
     storage_quant = native_cache.get("attention_kv_storage_quantization")
     if not isinstance(storage_quant, dict):
         storage_quant = {}
-    if (
-        storage_quant.get("enabled") is not True
-        or storage_quant.get("codec") != "turboquant_native"
-        or storage_quant.get("applies_to") != "attention_kv_layers_only"
-        or _integer(storage_quant.get("bits")) != 4
-        or _integer(storage_quant.get("value_bits")) != 4
-    ):
+    if require_tq4:
+        if (
+            storage_quant.get("enabled") is not True
+            or storage_quant.get("codec") != "turboquant_native"
+            or storage_quant.get("applies_to") != "attention_kv_layers_only"
+            or _integer(storage_quant.get("bits")) != 4
+            or _integer(storage_quant.get("value_bits")) != 4
+        ):
+            failures.append(
+                f"{tag}: native_cache does not attest attention-only "
+                "TurboQuant q4"
+            )
+    elif storage_quant.get("enabled") is not False:
         failures.append(
-            f"{tag}: native_cache does not attest attention-only TurboQuant q4"
+            f"{tag}: exact-KV contract requires storage quantization "
+            "attested OFF (TQ-on serves must use the TQ4 profile)"
         )
     generic_tq = native_cache.get("generic_turboquant_kv")
     if not isinstance(generic_tq, dict):
         generic_tq = {}
-    if (
-        generic_tq.get("enabled") is not True
-        or generic_tq.get("reason") != "hybrid_attention_kv_only"
-    ):
-        failures.append(
-            f"{tag}: native_cache does not attest Qwen hybrid-only TurboQuant"
-        )
+    if require_tq4:
+        if (
+            generic_tq.get("enabled") is not True
+            or generic_tq.get("reason") != "hybrid_attention_kv_only"
+        ):
+            failures.append(
+                f"{tag}: native_cache does not attest Qwen hybrid-only "
+                "TurboQuant"
+            )
 
     cached_tokens = _integer(execution.get("cached_tokens"))
     attempted_cached_tokens = _integer(execution.get("attempted_cached_tokens"))
@@ -2767,9 +2786,22 @@ def _cache_contract_profile_from_health(health: dict[str, Any]) -> str:
         and native.get("family") == "qwen3_5"
         and native.get("schema") == "hybrid_ssm_v1"
     ):
-        # Family + schema identify the Qwen hybrid contract. Validate all TQ4
-        # and typed-state fields later so malformed intended-Qwen attestations
+        # Family + schema identify the Qwen hybrid contract. The TQ4 vs
+        # exact-KV split keys on the ATTESTED storage-quantization state: the
+        # asymmetry guard deliberately disables TurboQuant storage for
+        # uncalibrated bundles (no jang_config.turboquant -> live encode off),
+        # and such serves can never satisfy the TQ4 contract. Remaining typed
+        # fields still validate later so malformed intended-Qwen attestations
         # fail closed instead of silently downgrading to generic KV.
+        _storage_quant = (
+            native.get("attention_kv_storage_quantization")
+            if isinstance(native, dict)
+            else None
+        )
+        if isinstance(_storage_quant, dict) and _storage_quant.get(
+            "enabled"
+        ) is False:
+            return "qwen_hybrid_ssm_exact"
         return "qwen_hybrid_ssm_tq4"
     if (
         isinstance(native, dict)
@@ -2810,11 +2842,16 @@ def validate_cache_rows(
         "deepseek_v4_native_delta",
         "minimax_m3_sparse_block",
         "qwen_hybrid_ssm_tq4",
+        "qwen_hybrid_ssm_exact",
     }:
         return [f"unsupported cache contract profile: {contract_profile}"]
     native_sparse = contract_profile == "minimax_m3_sparse_block"
     dsv4_native_delta = contract_profile == "deepseek_v4_native_delta"
-    hybrid_ssm_tq4 = contract_profile == "qwen_hybrid_ssm_tq4"
+    hybrid_ssm_tq4 = contract_profile in {
+        "qwen_hybrid_ssm_tq4",
+        "qwen_hybrid_ssm_exact",
+    }
+    hybrid_require_tq4 = contract_profile == "qwen_hybrid_ssm_tq4"
     requirements = (
         {
             "cold_a": "cold",
@@ -3008,6 +3045,8 @@ def validate_cache_rows(
                     _validate_hybrid_ssm_tq4_hit(
                         row,
                         require_disk_origin=requirement == "disk_partial",
+                        require_tq4=hybrid_require_tq4,
+                        require_paged=hybrid_require_tq4,
                     )
                 )
             row_failures.extend(execution_count_failures)
@@ -3222,12 +3261,14 @@ def _validate_disk_refault_execution(
     failures.extend(
         _validate_monotonic_counter_deltas(execution, label=label)
     )
-    if contract_profile == "qwen_hybrid_ssm_tq4":
+    if contract_profile in {"qwen_hybrid_ssm_tq4", "qwen_hybrid_ssm_exact"}:
         failures.extend(
             _validate_hybrid_ssm_tq4_hit(
                 execution,
                 require_disk_origin=True,
                 label=label,
+                require_tq4=contract_profile == "qwen_hybrid_ssm_tq4",
+                require_paged=contract_profile == "qwen_hybrid_ssm_tq4",
             )
         )
     return failures

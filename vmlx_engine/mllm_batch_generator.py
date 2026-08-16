@@ -1783,6 +1783,46 @@ except (TypeError, ValueError):
     _DEEP_SPAN_CACHE_CLEAR_TOKENS = 32768
 
 
+# Decode headroom folded into the span presize. With step == span exactly,
+# the FIRST decode token's lazy eval grows EVERY attention layer's KV to the
+# next step multiple in one graph — a full second copy of the entire span's
+# KV while the old buffers are still alive. MEASURED (R5 intra-turn RSS
+# poller): a ~23GB spike in <4s at the prefill->decode boundary of a ~96k
+# turn, the exact moment of four identical Metal OOM aborts; the per-turn
+# peak stride (~5GB/turn) is this spike growing with span. Presizing to
+# span + headroom makes decode write IN PLACE instead.
+try:
+    _DECODE_PRESIZE_HEADROOM = max(
+        0,
+        int(os.environ.get("VMLX_DECODE_PRESIZE_HEADROOM", "4096") or "0"),
+    )
+except (TypeError, ValueError):
+    _DECODE_PRESIZE_HEADROOM = 4096
+
+
+def _presize_kv_slots_for_span(cache, span_tokens: int) -> int:
+    """Instance-scope KVCache steps to span+headroom; returns count set.
+
+    Must cover BOTH forward lanes (fresh chunked prefill AND the hybrid
+    cache-hit delta — the reconstructed cache had no presize at all, so
+    every delta chunk and the decode start reallocated the full span).
+    """
+    if not _KV_PRESIZE_SPAN or span_tokens <= 0:
+        return 0
+    count = 0
+    for _slot in (cache or []):
+        if type(_slot).__name__ != "KVCache":
+            continue
+        if "step" in getattr(_slot, "__dict__", {}):
+            continue  # already instance-scoped; leave it alone
+        try:
+            _slot.step = int(span_tokens + _DECODE_PRESIZE_HEADROOM)
+            count += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return count
+
+
 def _maybe_clear_deep_span_cache(total_span_tokens: int) -> None:
     """Synchronize + clear the MLX allocator cache ahead of a deep span.
 
@@ -2452,6 +2492,23 @@ def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
     encoded_count = 0
     resident_before = 0
     resident_after = 0
+    # Deep spans: the per-layer encode below is heavy (a 90k-token RQ encode
+    # per attention layer). Left lazy, ALL layers' encodes chain into one
+    # command buffer together with any pending graph work — measured five
+    # identical Metal OOM aborts at a ~96k hybrid-hit turn, ~32s of silent
+    # GPU work between the hit acceptance and the abort, before the forward
+    # ever logged. Optionally skip live recompression outright above a span
+    # cap (0 = no cap): plain KVCache layers pass through and generation is
+    # exact — this function claims no resident-memory reduction anyway.
+    try:
+        _tq_recompress_cap = max(
+            0,
+            int(
+                os.environ.get("VMLX_TQ_RECOMPRESS_MAX_TOKENS", "0") or "0"
+            ),
+        )
+    except (TypeError, ValueError):
+        _tq_recompress_cap = 0
     result = list(cache)
     for i, layer in enumerate(result):
         if not isinstance(layer, KVCache):
@@ -2486,9 +2543,39 @@ def _recompress_to_tq(cache: List[Any], language_model) -> List[Any]:
         tq.offset = layer.offset
         tq.step = getattr(layer, 'step', layer.keys.shape[2]) if layer.keys.ndim >= 3 else layer.offset
         resident_before += int(layer.keys.nbytes + layer.values.nbytes)
-        if tq.compress_after > 0 and tq.offset > tq.compress_after:
+        if (
+            tq.compress_after > 0
+            and tq.offset > tq.compress_after
+            and (
+                _tq_recompress_cap <= 0
+                or int(tq.offset) <= _tq_recompress_cap
+            )
+        ):
             tq.compress(tq.compress_after)
             encoded_count += 1
+            # Materialize THIS layer's encode before the next layer's graph
+            # is built, bounding the transient to one layer instead of the
+            # whole stack fused with ambient pending work.
+            _pending = [
+                _v
+                for _v in (
+                    getattr(tq, _n, None)
+                    for _n in (
+                        "keys",
+                        "values",
+                        "_decoded_k_buffer",
+                        "_decoded_v_buffer",
+                        "_joined_k",
+                        "_joined_v",
+                    )
+                )
+                if _v is not None and hasattr(_v, "dtype")
+            ]
+            if _pending:
+                try:
+                    mx.eval(*_pending)
+                except Exception:  # noqa: BLE001
+                    pass
         for name in (
             "keys", "values", "_decoded_k_buffer", "_decoded_v_buffer",
             "_joined_k", "_joined_v",
@@ -6523,15 +6610,18 @@ class MLLMBatchGenerator:
                         if "step" in getattr(_slot, "__dict__", {}):
                             continue  # already instance-scoped; leave it alone
                         try:
-                            _slot.step = int(seq_len)
+                            _slot.step = int(seq_len + _DECODE_PRESIZE_HEADROOM)
                             _presized_kv_slots.append(_slot)
                         except Exception:  # noqa: BLE001
                             pass
                     if _presized_kv_slots:
                         logger.info(
                             "Pre-sized %d KV slots to the full %d-token span "
-                            "(avoids a full K/V realloc per chunk).",
-                            len(_presized_kv_slots), seq_len,
+                            "+%d decode headroom (avoids a full K/V realloc "
+                            "per chunk AND at decode start).",
+                            len(_presized_kv_slots),
+                            seq_len,
+                            _DECODE_PRESIZE_HEADROOM,
                         )
 
                 def _restore_kv_step() -> None:
@@ -7841,10 +7931,28 @@ class MLLMBatchGenerator:
                                     # garbage before it starts. Span from the
                                     # block table, NOT req._cached_tokens
                                     # (reset_cached_tokens paths zero that).
+                                    _hit_span_tokens = int(
+                                        block_table.num_tokens or 0
+                                    ) + len(_full_remaining or [0])
                                     _maybe_clear_deep_span_cache(
-                                        int(block_table.num_tokens or 0)
-                                        + len(_full_remaining or [0])
+                                        _hit_span_tokens
                                     )
+                                    # The reconstructed cache had NO span
+                                    # presize: every delta chunk and the
+                                    # decode start reallocated the full
+                                    # span (the measured fatal spike).
+                                    _hit_presized = _presize_kv_slots_for_span(
+                                        full_cache, _hit_span_tokens
+                                    )
+                                    if _hit_presized:
+                                        logger.info(
+                                            "Pre-sized %d reconstructed KV "
+                                            "slots to %d+%d tokens for the "
+                                            "hybrid-hit delta+decode.",
+                                            _hit_presized,
+                                            _hit_span_tokens,
+                                            _DECODE_PRESIZE_HEADROOM,
+                                        )
                                 elif not is_hybrid and reconstructed is not None:
                                     if not _validate_prompt_cache(
                                         reconstructed,

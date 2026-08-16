@@ -294,6 +294,12 @@ ROWS: list[ModelRow] = [
         family="qwen3_5",
         expect_reasoning=True,
         expect_tool_parser="qwen",
+        live_supported=False,
+        unsupported_reason=(
+            "Bundle discontinued 2026-08 (hardware transition): the 3.6-27B "
+            "dense line was retired; the Qwen3.8-27B D-series rows below are "
+            "the shipping dense-27B references. Declared skip, not silent."
+        ),
     ),
     ModelRow(
         id="qwen36_dense_jang",
@@ -302,6 +308,65 @@ ROWS: list[ModelRow] = [
         family="qwen3_5",
         expect_reasoning=True,
         expect_tool_parser="qwen",
+        live_supported=False,
+        unsupported_reason=(
+            "Bundle discontinued 2026-08 (hardware transition): the 3.6-27B "
+            "dense line was retired; the Qwen3.8-27B D-series rows below are "
+            "the shipping dense-27B references. Declared skip, not silent."
+        ),
+    ),
+    ModelRow(
+        id="qwen38_2d",
+        label="Qwen3.8-27B JANG_2D (VL, v3 capability stamp)",
+        path="/Volumes/EricsLLMDrive/jangq-ai/Qwen3.8-27B-JANG_2D",
+        family="qwen3_5",
+        kind="vl",
+        expect_reasoning=True,
+        expect_tool_parser="qwen3_coder",
+        notes=[
+            "v3 capability stamp (formless jang_config, structured chat "
+            "block) routes through STOCK mlx_vlm — never the JANG codec. "
+            "qwen3_coder tool dialect = XML-function, aliased engine-side. "
+            "MTP head present but measured sub-breakeven on real content "
+            "(sidecar stamped 2026-08-16); adaptive AR fallback is correct. "
+            "AR decode reference 32.6 t/s cache-off (ledger 139).",
+        ],
+    ),
+    ModelRow(
+        id="qwen38_4d",
+        label="Qwen3.8-27B JANG_4D (VL, v3 capability stamp)",
+        path="/Volumes/EricsLLMDrive/jangq-ai/Qwen3.8-27B-JANG_4D",
+        family="qwen3_5",
+        kind="vl",
+        expect_reasoning=True,
+        expect_tool_parser="qwen3_coder",
+        notes=["Shipping mid-bit dense 27B; AR 23.0 t/s cache-off reference."],
+    ),
+    ModelRow(
+        id="qwen38_6d",
+        label="Qwen3.8-27B JANG_6D (VL, v3 capability stamp)",
+        path="/Volumes/EricsLLMDrive/jangq-ai/Qwen3.8-27B-JANG_6D",
+        family="qwen3_5",
+        kind="vl",
+        slow=True,
+        expect_reasoning=True,
+        expect_tool_parser="qwen3_coder",
+        notes=["High-bit dense 27B; AR 17.1 t/s cache-off reference."],
+    ),
+    ModelRow(
+        id="qwen38_mxfp8",
+        label="Qwen3.8-27B MXFP8 (VL, v3 capability stamp)",
+        path="/Volumes/EricsLLMDrive/jangq-ai/Qwen3.8-27B-MXFP8",
+        family="qwen3_5",
+        kind="vl",
+        slow=True,
+        expect_reasoning=True,
+        expect_tool_parser="qwen3_coder",
+        notes=[
+            "MXFP8 dense 27B; AR 17.8 t/s cache-off reference. MTP depth 2 "
+            "BREAKS temp-0 output equivalence on this quant (3-position "
+            "mxfp8 verify non-identity; d1 holds) — sidecar carries the bar.",
+        ],
     ),
     ModelRow(
         id="hy3_preview_jangtq2",

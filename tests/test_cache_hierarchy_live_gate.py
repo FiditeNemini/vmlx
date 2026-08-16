@@ -4258,6 +4258,50 @@ def test_exact_kv_restart_refault_skips_tq_native_hit_requirement():
     assert any("exact-KV" in f for f in exact_poisoned)
 
 
+def test_scenario_rows_share_the_correlated_health_poll():
+    """Campaign #181: the evict-scenario row runner took ONE immediate
+    /health read — the refault row (whose own request triggers a store +
+    strict fence + eviction) froze the PRIOR request's record while the real
+    hit published later. Both row runners must route through the shared
+    correlated poll (fix-one-of-two rule)."""
+    import inspect
+
+    obs_src = inspect.getsource(gate._run_response_observation)
+    assert "_poll_row_correlated_health" in obs_src
+
+    # Fully-bound record (execution + embedded lookup) exits immediately —
+    # no network round-trips even with a live deadline.
+    bound = {
+        "scheduler": {
+            "last_cache_execution": {
+                "request_id": "resp_r",
+                "ssm_prefix_lookup": {"request_id": "resp_r"},
+            }
+        },
+        "cache": {"ssm_companion": {"last_prefix_lookup": {}}},
+    }
+    out = gate._poll_row_correlated_health(
+        base_url="http://invalid.invalid",
+        timeout=1,
+        response_id="resp_r",
+        health=bound,
+        deadline_s=6.0,
+    )
+    assert out is bound
+
+    # Zero deadline keeps the last read without polling (genuine absence
+    # stays observable).
+    stale = {"scheduler": {"last_cache_execution": {"request_id": "other"}}}
+    out = gate._poll_row_correlated_health(
+        base_url="http://invalid.invalid",
+        timeout=1,
+        response_id="resp_r",
+        health=stale,
+        deadline_s=0.0,
+    )
+    assert out is stale
+
+
 def test_marker_check_tolerates_pure_markdown_emphasis():
     """Semantic-equivalence policy: cold vs warm arms may differ only in
     markdown emphasis around the exact marker (observed live on qwen3.8)."""

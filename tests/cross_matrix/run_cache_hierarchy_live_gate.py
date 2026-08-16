@@ -4491,6 +4491,61 @@ def _l2_filler_prompt(
     return f"{prefix}\nReply exactly {marker}", marker
 
 
+def _poll_row_correlated_health(
+    *,
+    base_url: str,
+    timeout: int,
+    response_id: str,
+    health: dict[str, Any],
+    deadline_s: float = 6.0,
+) -> dict[str, Any]:
+    """Poll /health until the cache-execution record correlates to the row.
+
+    The engine publishes the request-correlated record at finish processing,
+    which can trail the SSE terminal by a scheduler step — and rows whose own
+    request triggers a store + strict write fence + aggregate eviction (the
+    evict-refault row) keep the cached-health window open well past a single
+    read. The execution record can also correlate EARLY (admission-time)
+    while the SSM companion lookup is written at prefill, so accepting the
+    execution match alone captures a row with a dropped/absent lookup:
+    require BOTH correlations when a companion block is exposed. Exits
+    immediately when the bound record EMBEDS a bound lookup. Keeps the last
+    read either way so a genuine absence stays observable.
+    """
+    rid = str(response_id or "")
+    deadline = time.monotonic() + max(0.0, deadline_s)
+    while rid and time.monotonic() < deadline:
+        lce = (health.get("scheduler") or {}).get("last_cache_execution")
+        lce_bound = (
+            isinstance(lce, dict)
+            and str(lce.get("request_id") or "") == rid
+        )
+        embedded = (
+            lce.get("ssm_prefix_lookup") if isinstance(lce, dict) else None
+        )
+        embedded_bound = (
+            isinstance(embedded, dict)
+            and str(embedded.get("request_id") or "") == rid
+        )
+        companion = (health.get("cache") or {}).get("ssm_companion") or {}
+        lookup = (
+            companion.get("last_prefix_lookup")
+            if isinstance(companion, dict)
+            else None
+        )
+        lookup_bound = (
+            isinstance(lookup, dict)
+            and str(lookup.get("request_id") or "") == rid
+        )
+        if lce_bound and (embedded_bound or lookup_bound or not companion):
+            break
+        if lce_bound and time.monotonic() > deadline - 2.0:
+            break
+        time.sleep(0.25)
+        health = _json_get(f"{base_url}/health", timeout)
+    return health
+
+
 def _run_response_observation(
     *,
     base_url: str,
@@ -4521,6 +4576,19 @@ def _run_response_observation(
     raw_path.write_text(raw)
     summary = _summarize(raw, elapsed, code)
     after = _json_get(f"{base_url}/health", timeout)
+    # Scenario rows (stores, fillers, the evict refault) can trigger their
+    # own store + strict fence + eviction pass, which holds the cached-health
+    # window open long after the SSE terminal — a single immediate read
+    # captures the PRIOR request's record and every downstream validation
+    # then judges the wrong request (observed live: r3 refault was a perfect
+    # 24448-token disk hit while its row froze the recent-store's record).
+    after = _poll_row_correlated_health(
+        base_url=base_url,
+        timeout=timeout,
+        response_id=str(summary.get("response_id") or ""),
+        health=after,
+        deadline_s=20.0,
+    )
     after_path = artifact_dir / f"{tag}.health.json"
     after_path.write_text(
         json.dumps(after, indent=2, sort_keys=True) + "\n"
@@ -5851,45 +5919,12 @@ def main() -> int:
         raw_path.write_text(raw)
         summary = _summarize(raw, elapsed, code)
         health = _json_get(f"{args.base_url}/health", args.timeout)
-        # The engine publishes the request-correlated cache-execution record
-        # at finish processing, which can trail the SSE terminal by a
-        # scheduler step — a single immediate read races it and captures the
-        # PRIOR request's record (or none on the first request). Poll briefly
-        # for the correlated record; keep the last read either way so a
-        # genuine absence stays observable.
-        _row_response_id = str(summary.get("response_id") or "")
-        _lce_deadline = time.monotonic() + 6.0
-        while _row_response_id and time.monotonic() < _lce_deadline:
-            _lce = (health.get("scheduler") or {}).get("last_cache_execution")
-            _lce_bound = (
-                isinstance(_lce, dict)
-                and str(_lce.get("request_id") or "") == _row_response_id
-            )
-            # The execution record can correlate EARLY (the admission-time
-            # record lands before prefill) while the SSM companion lookup is
-            # written at prefill — accepting on the execution match alone
-            # captures a row with a dropped/absent lookup. Require BOTH
-            # correlations when a companion block is exposed; a pure-miss
-            # row that never produces a lookup exits at the deadline with
-            # the execution-correlated read.
-            _companion = (
-                (health.get("cache") or {}).get("ssm_companion") or {}
-            )
-            _lookup = (
-                _companion.get("last_prefix_lookup")
-                if isinstance(_companion, dict)
-                else None
-            )
-            _lookup_bound = (
-                isinstance(_lookup, dict)
-                and str(_lookup.get("request_id") or "") == _row_response_id
-            )
-            if _lce_bound and (_lookup_bound or not _companion):
-                break
-            if _lce_bound and time.monotonic() > _lce_deadline - 2.0:
-                break
-            time.sleep(0.25)
-            health = _json_get(f"{args.base_url}/health", args.timeout)
+        health = _poll_row_correlated_health(
+            base_url=args.base_url,
+            timeout=args.timeout,
+            response_id=str(summary.get("response_id") or ""),
+            health=health,
+        )
         health_after = health
         health_path = args.artifact_dir / f"{tag}.health.json"
         health_path.write_text(json.dumps(health, indent=2, sort_keys=True) + "\n")

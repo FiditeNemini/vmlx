@@ -1027,6 +1027,27 @@ class SSMCompanionDiskStore:
                     reverse=True,
                 )
 
+    def touch(self, key: str) -> None:
+        """Refresh the on-disk entry's access time for the shared LRU wall.
+
+        Companion files share the aggregate block-cache budget and are
+        ranked by file age; nothing else ever refreshes them, so an actively
+        used conversation's companion is exactly as evictable as stale data
+        (measured live: 10 stores -> 3 entries after one bounded-L2 filler
+        pass, and the surviving KV chain came back cold after restart
+        because its companion file was gone). An L1 companion hit calls
+        this; best-effort, failures are irrelevant to correctness.
+        """
+        if self._dir is None:
+            return
+        try:
+            data_path, sidecar_path = self._entry_paths(str(key))
+            for path in (data_path, sidecar_path):
+                if path.exists():
+                    os.utime(path, None)
+        except Exception:
+            pass
+
     def fetch(self, key: str) -> Optional[Tuple[List[Any], bool]]:
         """Look up by key. Returns ``(states, is_complete)`` or ``None``."""
         if os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE", "").lower() in {

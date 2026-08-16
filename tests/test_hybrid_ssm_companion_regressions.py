@@ -644,3 +644,33 @@ def test_block_aligned_clean_boundary_captures_one_block_below():
     assert gen._ssm_block_aligned_boundary(10) == 0
     # Aligned at exactly two blocks -> the first block boundary.
     assert gen._ssm_block_aligned_boundary(128) == 64
+
+
+def test_l1_companion_hit_touches_the_disk_entry():
+    """Row 99: companion files share the aggregate block-cache budget and
+    are ranked by file age; an L1 hit must refresh the disk entry or an
+    actively used chain's companion is as evictable as stale data (measured:
+    10 stores -> 3 surviving files after one bounded-L2 filler pass, KV
+    chain orphaned after restart)."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.utils.ssm_companion_cache import HybridSSMStateCache
+
+    touched = []
+    disk = SimpleNamespace(
+        touch=lambda key: touched.append(key),
+        store=lambda *a, **k: None,
+    )
+    cache = HybridSSMStateCache(
+        max_entries=4, model_key="m", disk_store=disk
+    )
+    cache._clone_states = lambda states, key_hint=None: states
+    cache._estimate_state_nbytes = lambda states: 8
+
+    tokens = list(range(32))
+    cache.store(tokens, 16, [object()], is_complete=True)
+    entry = cache.fetch(tokens, 16)
+    assert entry is not None
+    assert len(touched) == 1
+    expected_key = cache._key(tokens, 16)
+    assert touched[0] == expected_key

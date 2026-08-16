@@ -769,6 +769,17 @@ class SSMCompanionCache:
         states, is_complete = entry
         # Move to end (most recently used)
         self._store.move_to_end(key)
+        # An L1 hit must also refresh the DISK entry's LRU standing: the
+        # companion file shares the aggregate block-cache budget and is
+        # ranked by file age, so without this an actively used chain's
+        # companion is exactly as evictable as stale data — and a restart
+        # then finds the KV chain orphaned (measured live: 10 stores -> 3
+        # surviving files after one bounded-L2 filler pass, cold restore).
+        if self._disk is not None:
+            try:
+                self._disk.touch(key)
+            except Exception:
+                pass
         # Deep-copy each layer to prevent in-place mutation by the model's
         # forward pass corrupting the stored companion. SSM state is
         # cumulative — generation updates it token by token.

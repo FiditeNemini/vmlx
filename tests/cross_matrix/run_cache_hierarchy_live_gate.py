@@ -5282,6 +5282,32 @@ def _run_store_evict_refault_scenario(
         contiguous = _integer(l2.get("contiguous_readable_blocks"))
         return expected > 0 and contiguous * 2 >= expected
 
+    def _paged_keepalive_touch(index: int) -> None:
+        nonlocal health_after
+        if not paged_lane:
+            return
+        row, keepalive_health = _run_response_observation(
+            base_url=base_url,
+            model=model,
+            tag=f"l2_recent_keepalive_{index:03d}",
+            prompt=prompts["recent_probe"],
+            expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-PROBE",
+            artifact_dir=artifact_dir,
+            timeout=timeout,
+            request_controls=request_controls,
+        )
+        health_after = keepalive_health
+        rows.append(row)
+        lce = row.get("last_cache_execution")
+        if (
+            not isinstance(lce, dict)
+            or lce.get("cache_outcome") != "hit"
+        ):
+            failures.append(
+                f"store-evict-refault: paged-lane keepalive touch "
+                f"{index:03d} did not hit the cache"
+            )
+
     recent_touch_row = None
     if paged_lane:
         # Live-prove the paged-hit L2 access touch (fetch_cache enqueues
@@ -5415,6 +5441,12 @@ def _run_store_evict_refault_scenario(
                 )
             ),
         )
+        # An idle chain's companion legitimately ages out under sustained
+        # wall pressure (one 157MB file vs fine-grained KV rows). Interleave
+        # a keepalive hit after each filler — an active conversation during
+        # background churn — so the chain's KV rows AND companion file stay
+        # in the freshest tier together.
+        _paged_keepalive_touch(filler_count)
         if (
             not attestation_failures
             and durability_proof.get("ok") is True
@@ -5651,6 +5683,7 @@ def _run_store_evict_refault_scenario(
                 (recent_final.get("l2") or {}).get("store_total_size_bytes")
             ),
         )
+        _paged_keepalive_touch(filler_count)
         if attestation_failures:
             break
 

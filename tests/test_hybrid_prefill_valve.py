@@ -532,6 +532,31 @@ def test_turn_walk_admit_wall_ordinal_matches_r4():
         )
 
 
+def test_admission_decline_crosses_every_door_as_413():
+    """The first LIVE refusal (turn-peak valve, ctx 101,678) reached the
+    client as a bare 500: the /v1/responses handler caught the typed error
+    and then died on a latent NameError, and /v1/messages + /api/chat +
+    /api/generate had no handling at all. The registered app-level handlers
+    are the one mechanism covering every door — present and future."""
+    import json
+
+    from vmlx_engine.errors import PromptTooLongError
+    from vmlx_engine.server import _prefill_admission_declined_response, app
+
+    assert PrefillAdmissionError in app.exception_handlers, (
+        "app-level PrefillAdmissionError handler unregistered — anthropic "
+        "and ollama doors surface valve refusals as bare 500s again"
+    )
+    assert PromptTooLongError in app.exception_handlers
+    resp = _prefill_admission_declined_response(
+        PrefillAdmissionError("hybrid delta: turn-peak admission declined")
+    )
+    assert resp.status_code == 413
+    body = json.loads(resp.body)
+    assert body["error"]["code"] == "prefill_admission_declined"
+    assert "turn-peak admission declined" in body["error"]["message"]
+
+
 def test_deep_span_cache_clear_default_and_gate():
     """Row 110/111: 16 turns of in-process accumulation filled the MLX
     allocator cache (26.9GB limit) and a ~94k span's peak then aborted Metal

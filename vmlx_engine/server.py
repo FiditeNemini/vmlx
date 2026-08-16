@@ -138,6 +138,7 @@ from .errors import (
     UnsupportedMediaModalityError,
     VLMImagePrefillBudgetError,
 )
+from .utils.prefill_admission import PrefillAdmissionError
 from .logprobs import (
     format_chat_logprobs as _format_chat_logprobs,
     format_completion_logprobs as _format_completion_logprobs,
@@ -1114,6 +1115,28 @@ def _prompt_too_long_response(
                 "prompt/context cap.",
                 "type": "invalid_request_error",
                 "code": "prompt_too_long",
+            }
+        },
+    )
+
+
+def _prefill_admission_declined_response(exc: BaseException):
+    """413 for an admission valve decline — the device cannot serve this span.
+
+    One helper for every route: the first live refusal (turn-peak valve,
+    ctx 101,678) found all three routes' inline handlers sharing a latent
+    ``NameError: JSONResponse`` — written before any refusal was reachable,
+    so the caught, correctly-typed decline still surfaced as a bare 500.
+    """
+    from starlette.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=413,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": "prompt_too_long",
+                "code": "prefill_admission_declined",
             }
         },
     )
@@ -5827,6 +5850,27 @@ app = FastAPI(
     version=__import__("vmlx_engine").__version__,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(PrefillAdmissionError)
+async def _prefill_admission_declined_handler(request, exc):
+    """Every door, one translation: an admission decline is a 413, never a 500.
+
+    The chat/completions/responses routes carry their own except blocks, but
+    /v1/messages, /api/chat, and /api/generate had NO handling at all — a
+    valve refusal there surfaced as an unhandled 500 (and the first live
+    refusal exposed exactly that class of gap on a route that DID have a
+    handler, via a latent NameError inside it). A registered handler is one
+    mechanism the framework applies to every route, present and future.
+    """
+    return _prefill_admission_declined_response(exc)
+
+
+@app.exception_handler(PromptTooLongError)
+async def _prompt_too_long_handler(request, exc):
+    """Same rationale as the admission handler: 413 on every door."""
+    return _prompt_too_long_response_from_error(exc)
+
 
 security = HTTPBearer(auto_error=False)
 
@@ -17506,14 +17550,7 @@ async def create_completion(request: CompletionRequest):
         except PromptTooLongError as e:
             return _prompt_too_long_response_from_error(e)
         except PrefillAdmissionError as e:
-            # 413, not 500: the device cannot serve a context this long,
-            # which the caller fixes by shortening the prompt. As a bare
-            # RuntimeError this read to the user as an engine crash.
-            return JSONResponse(
-                status_code=413,
-                content={"error": {"message": str(e), "type": "prompt_too_long",
-                                   "code": "prefill_admission_declined"}},
-            )
+            return _prefill_admission_declined_response(e)
         except VLMImagePrefillBudgetError as e:
             return _vlm_image_prefill_budget_response_from_error(e)
         except UnsupportedMediaModalityError as e:
@@ -18354,14 +18391,7 @@ async def create_chat_completion(
     except PromptTooLongError as e:
         return _prompt_too_long_response_from_error(e)
     except PrefillAdmissionError as e:
-        # 413, not 500: the device cannot serve a context this long,
-        # which the caller fixes by shortening the prompt. As a bare
-        # RuntimeError this read to the user as an engine crash.
-        return JSONResponse(
-            status_code=413,
-            content={"error": {"message": str(e), "type": "prompt_too_long",
-                               "code": "prefill_admission_declined"}},
-        )
+        return _prefill_admission_declined_response(e)
     except VLMImagePrefillBudgetError as e:
         return _vlm_image_prefill_budget_response_from_error(e)
     except UnsupportedMediaModalityError as e:
@@ -21666,14 +21696,7 @@ async def create_response(
     except PromptTooLongError as e:
         return _prompt_too_long_response_from_error(e)
     except PrefillAdmissionError as e:
-        # 413, not 500: the device cannot serve a context this long,
-        # which the caller fixes by shortening the prompt. As a bare
-        # RuntimeError this read to the user as an engine crash.
-        return JSONResponse(
-            status_code=413,
-            content={"error": {"message": str(e), "type": "prompt_too_long",
-                               "code": "prefill_admission_declined"}},
-        )
+        return _prefill_admission_declined_response(e)
     except VLMImagePrefillBudgetError as e:
         return _vlm_image_prefill_budget_response_from_error(e)
     except UnsupportedMediaModalityError as e:

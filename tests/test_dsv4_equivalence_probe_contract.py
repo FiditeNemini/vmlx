@@ -208,15 +208,25 @@ def test_conversation_is_three_turns_and_nonce_salted(sameproc: Any, restart_l2:
         assert all("NONCE-XYZ-123" in turn for turn in turns)
 
 
-def test_dsv4_extended_store_prompt_cap_gate_defaults_off(monkeypatch):
-    """Task #168 env gate: default OFF (extended stores unchanged); ON skips
-    the extended snapshot so the prompt-snapshot fallback stores prompt-keyed
-    state that reasoning-stripped multiturn history can reuse."""
+def test_dsv4_extended_store_prompt_cap_conditional_default_on(monkeypatch):
+    """Task #168 store policy, .32 default: cap the extended store for
+    reasoning-STRIPPING (tools-off) renders so the prompt-snapshot fallback
+    stores prompt-keyed state the stripped continuation can match; tools-ON
+    renders keep reasoning in the fed history and must stay on the extended
+    chain. `0` reverts entirely; `always` caps even tools-on (diagnostics)."""
     from vmlx_engine.utils.dsv4_batch_generator import (
-        _dsv4_extended_store_prompt_cap_enabled,
+        dsv4_extended_store_capped,
     )
 
     monkeypatch.delenv("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", raising=False)
-    assert _dsv4_extended_store_prompt_cap_enabled() is False
+    assert dsv4_extended_store_capped(tools_present=False) is True
+    assert dsv4_extended_store_capped(tools_present=True) is False
+    monkeypatch.setenv("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "0")
+    assert dsv4_extended_store_capped(tools_present=False) is False
+    assert dsv4_extended_store_capped(tools_present=True) is False
+    monkeypatch.setenv("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "always")
+    assert dsv4_extended_store_capped(tools_present=False) is True
+    assert dsv4_extended_store_capped(tools_present=True) is True
     monkeypatch.setenv("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "1")
-    assert _dsv4_extended_store_prompt_cap_enabled() is True
+    assert dsv4_extended_store_capped(tools_present=False) is True
+    assert dsv4_extended_store_capped(tools_present=True) is False

@@ -8582,6 +8582,39 @@ class Scheduler:
                                     extended_store_armed = False
                                     if (
                                         extended_cache is not None
+                                        and self._uses_dsv4_cache
+                                    ):
+                                        # Store-policy cap (#168, default ON):
+                                        # tools-off renders strip prior
+                                        # reasoning from replayed history, so
+                                        # the reasoning-inclusive extended key
+                                        # diverges at the assistant boundary —
+                                        # fall through to the prompt-snapshot
+                                        # store the next turn CAN match.
+                                        from .utils.dsv4_batch_generator import (
+                                            dsv4_extended_store_capped,
+                                        )
+
+                                        if dsv4_extended_store_capped(
+                                            bool(
+                                                getattr(
+                                                    request,
+                                                    "_vmlx_tools_present",
+                                                    False,
+                                                )
+                                            )
+                                        ):
+                                            logger.info(
+                                                "DSV4 extended store capped at "
+                                                "prompt boundary (reasoning-"
+                                                "stripping render, #168 store "
+                                                "policy); using prompt-snapshot "
+                                                "store."
+                                            )
+                                            extended_cache = None
+                                            extended_cache_tokens = 0
+                                    if (
+                                        extended_cache is not None
                                         and extended_cache_tokens > 0
                                         and self._uses_dsv4_cache
                                     ):

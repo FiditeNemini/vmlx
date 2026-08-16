@@ -58,19 +58,34 @@ _PREFILL_MEM_VALVE = os.environ.get("DSV4_PREFILL_MEM_VALVE", "1") == "1"
 
 
 
-def _dsv4_extended_store_prompt_cap_enabled() -> bool:
-    """Env-gated DSV4 store-policy cap (task #168), default OFF.
+def dsv4_extended_store_capped(tools_present: bool) -> bool:
+    """DSV4 store-policy cap (task #168) — conditional, DEFAULT ON for .32.
 
-    When enabled, extended prefill+decode stores are skipped so the
-    prompt-snapshot fallback stores prompt-keyed state that reasoning-
-    stripped multiturn continuations can actually reuse.
+    The extended prefill+decode chain stores generated tokens INCLUDING the
+    assistant's ``<think>`` rail. Tools-OFF renders STRIP prior reasoning
+    from replayed history, so the extended key diverges at the assistant
+    boundary and caps reuse depth on the follow-up turn; skipping the
+    extended store there routes the state through the prompt-snapshot
+    fallback whose prompt-only key the stripped continuation CAN match
+    (measured 2026-08-15: ~25% deeper byte-exact reuse, 638/689 vs 512
+    cached tokens). Tools-ON renders KEEP reasoning in the fed history —
+    the extended chain matches exactly and must stay armed.
+
+    ``VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP``:
+      unset/1/true — cap reasoning-stripping (tools-off) renders (default)
+      0/false/no/off — never cap (pre-#168 behavior, revert switch)
+      always — cap even tools-on renders (diagnostics/A-B only)
+
+    The single consumer is the scheduler's extended-store arming site,
+    which knows the request's tools flag; do not re-add a gate inside
+    ``_extended_store_snapshot`` (fix-one-of-two hazard).
     """
-    return os.environ.get("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    raw = os.environ.get("VMLX_DSV4_EXTENDED_STORE_PROMPT_CAP", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw == "always":
+        return True
+    return not tools_present
 
 
 class DSV4PrefillMemoryError(RuntimeError):
@@ -1616,17 +1631,6 @@ class DSV4BatchGenerator:
         ``(None, 0)`` when the extended chain adds nothing over the prompt
         snapshot (the scheduler then falls back to the snapshot store).
         """
-        if _dsv4_extended_store_prompt_cap_enabled():
-            # Env-gated store-policy cap (default OFF): the extended chain
-            # covers generated tokens INCLUDING the assistant's <think>
-            # rail, and DSV4's template STRIPS prior reasoning from replayed
-            # history — the follow-up turn's token sequence diverges at the
-            # assistant boundary, so extended-keyed blocks can never match a
-            # multiturn continuation (proven live 2026-08-15: identical
-            # replay, 6/6 misses, 2 stored blocks). Returning (None, 0)
-            # routes the store through the existing prompt-snapshot fallback,
-            # whose prompt-only key the next turn CAN match.
-            return None, 0
         if not r.extended_capture or r.extended_last_stamped <= 0:
             return None, 0
         prompt_boundary = len(r.context_tokens) - min(

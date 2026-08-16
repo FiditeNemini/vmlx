@@ -213,3 +213,23 @@ def test_dsa_decode_past_bound_runs(model):
             attn = getattr(layer, "self_attn", None)
             if attn is not None and hasattr(attn, "indexer"):
                 attn.indexer.index_topk = old
+
+
+def test_chunked_prefill_past_window_with_trim(model):
+    # The serve-level failure class: chunked prefill (S>1) after the sliding
+    # cache trimmed — a global-position mask cannot broadcast against the
+    # shorter physical key length. 30 tokens in chunks of 5, window 6,
+    # trim_step 4, compared against the materialized path stepwise.
+    Dots3LatentCache.trim_step = 4
+    try:
+        ids = list(range(3, 33))
+        mat = _materialized_caches(model)
+        lat = _latent_caches(model)
+        a = b = None
+        for start in range(0, 30, 5):
+            chunk = mx.array([ids[start : start + 5]])
+            a = model(chunk, cache=mat)
+            b = model(chunk, cache=lat)
+        assert float(mx.abs(a - b).max()) < 1e-4
+    finally:
+        Dots3LatentCache.trim_step = 256

@@ -717,9 +717,22 @@ class Dots3NoteModel(nn.Module):
         if seq_len > 1 or mask is not None:
             if mask is None:
                 full_mask = _sliding_causal_mask(seq_len, past, None, mx.float32)
-                swa_mask = _sliding_causal_mask(
-                    seq_len, past, self.config.sliding_window_size, mx.float32
-                )
+                # 🚨 Sliding-layer masks must be built against the CACHE's
+                # PHYSICAL key length, not global positions: the latent
+                # sliding cache trims with hysteresis, so once past exceeds
+                # window+trim_step the physical length is shorter than
+                # past+S and a position-built mask cannot broadcast. Every
+                # sliding layer sees the identical stream, so mask=None here
+                # lets each attention build the correct physical-layout mask
+                # (the materialized path never trims and keeps the shared
+                # positional mask).
+                if not absorbed:
+                    swa_mask = _sliding_causal_mask(
+                        seq_len,
+                        past,
+                        self.config.sliding_window_size,
+                        mx.float32,
+                    )
             else:
                 full_mask = mask
                 swa_mask = mask

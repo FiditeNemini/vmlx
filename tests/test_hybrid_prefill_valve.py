@@ -320,6 +320,92 @@ def test_turn_walk_wiring_in_the_generator():
     )
 
 
+def test_turn_walk_admit_state_machine(monkeypatch):
+    """Drive the REAL _turn_peak_walk_admit through a scripted grow-to-wall
+    sequence: deferred pairing, engagement, refusal at the projected wall,
+    anchor zeroing, and the retry's reading NOT poisoning the fit."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    import vmlx_engine.mllm_batch_generator as gen
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    GIB_ = 1024**3
+    limit = int(107.52 * GIB_)
+    # Scripted gauge: peak reading returned at each admit entry — the
+    # PREVIOUS span's absolute peak (deferred measurement). Walks +5.3GB per
+    # +5,649-token turn, anchored like the measured r4 curve.
+    readings = iter(
+        [
+            int(93.3 * GIB_),   # entry t3: t2's peak (span 73,398)
+            int(98.6 * GIB_),   # entry t4: t3's peak (span 79,047)
+            int(104.2 * GIB_),  # entry t5: t4's peak (span 84,696)
+            int(0.05 * GIB_),   # entry t5-retry: no forward ran since reset
+        ]
+    )
+    fake_mx = SimpleNamespace(
+        get_peak_memory=lambda: next(readings),
+        reset_peak_memory=lambda: None,
+    )
+    monkeypatch.setattr(gen, "mx", fake_mx)
+    monkeypatch.setattr(
+        gen, "get_effective_metal_working_set_bytes", lambda _mx: (0, limit)
+    )
+    monkeypatch.setattr(gen, "_TURN_PEAK_ADMISSION", True)
+    monkeypatch.setattr(gen, "_TURN_PEAK_ALLOWANCE_BYTES", 0)
+
+    self = SimpleNamespace(
+        _turn_peak_walk=deque(maxlen=8), _last_deep_span_tokens=73_398
+    )
+    admit = MLLMBatchGenerator._turn_peak_walk_admit
+
+    admit(self, 79_047)  # records (73398, 93.3GB); 1 point — no fit yet
+    admit(self, 84_696)  # records (79047, 98.6GB); projects ~103.9 — admit
+
+    # t5 (ctx 90,345): records (84696, 104.2GB), and the walk now projects
+    # ~109.5GB > 107.52 — REFUSE. One ordinal before the crash ordinal
+    # (95,994), because the 90k turn's own peak (109.2GB, measured) exceeds
+    # the stated device budget: at allowance 0 an ACCURATE projection must
+    # decline it. This is the deliberate boundary trade (see
+    # test_turn_walk_boundary_refusal_is_deliberate), surfaced honestly by
+    # this state machine rather than hidden by optimistic test numbers.
+    with pytest.raises(PrefillAdmissionError):
+        admit(self, 90_345)
+    assert [ctx for ctx, _ in self._turn_peak_walk] == [73_398, 79_047, 84_696]
+    assert self._last_deep_span_tokens == 0, (
+        "refusal must zero the anchor or the retry poisons the fit"
+    )
+    points_after_refusal = list(self._turn_peak_walk)
+
+    # The retry: gauge reads ~0 (nothing ran since the reset). It must NOT be
+    # recorded, and the refusal must repeat.
+    with pytest.raises(PrefillAdmissionError):
+        admit(self, 90_345)
+    assert list(self._turn_peak_walk) == points_after_refusal, (
+        "the no-forward-ran reading was recorded — the poisoned point will "
+        "drag the fit down and re-admit the fatal turn"
+    )
+
+
+def test_turn_walk_admit_wall_ordinal_matches_r4():
+    """The state machine above refuses at ctx 95,994 — the five-crash ordinal.
+    Sanity-check the same arithmetic the method uses, from its own inputs."""
+    walk = [
+        (73_398, int(93.3 * GIB)),
+        (79_047, int(98.6 * GIB)),
+        (84_696, int(104.2 * GIB)),
+        (90_345, int(109.2 * GIB)),
+    ]
+    fit = fit_peak_model(walk)
+    assert fit is not None
+    with pytest.raises(PrefillAdmissionError):
+        turn_peak_admission_check(
+            DEVICE_LIMIT, fit, 95_994,
+            last_observed_peak_bytes=walk[-1][1], allowance_bytes=0,
+            fitted_max_context=90_345,
+        )
+
+
 def test_deep_span_cache_clear_default_and_gate():
     """Row 110/111: 16 turns of in-process accumulation filled the MLX
     allocator cache (26.9GB limit) and a ~94k span's peak then aborted Metal

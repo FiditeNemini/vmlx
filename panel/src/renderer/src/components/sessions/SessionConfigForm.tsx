@@ -2096,6 +2096,11 @@ const TOOL_PARSER_OPTIONS: ParserOption[] = [
     ]
   },
   {
+    value: 'dots', label: 'dots3-note — dots XML', format: '<dots_function_call><invoke name="fn"><parameter name="arg">\nval\n</parameter></invoke></dots_function_call>', models: [
+      'dots3-note (280B omni MoE, text+vision+video+audio)',
+    ]
+  },
+  {
     value: 'minimax_m3', label: 'MiniMax M3 — MiniMax-M3 (sparse MSA + Lightning-Indexer)', format: 'native tool_call (MiniMax M3 parser)', models: [
       'MiniMax-M3 (REAP22 / JANG_2L)',
       'Auto-detected for minimax_m3 / minimax_m3_vl bundles.',
@@ -2157,6 +2162,11 @@ const REASONING_PARSER_OPTIONS: ParserOption[] = [
   {
     value: 'muse_glimmer', label: 'Muse Glimmer — recipient channels', format: '<|start|>assistant to=self<|message|>reasoning<|eom|> then to=user<|message|>answer<|eot|>', models: [
       'Muse Glimmer 30B (reasoning_strength: low/medium/high/xhigh)',
+    ]
+  },
+  {
+    value: 'dots3', label: 'dots3-note — plain think rail', format: '<think>...reasoning...</think>content (thinking ON by default; off = <no_think> + closed-block prefill)', models: [
+      'dots3-note (280B omni MoE)',
     ]
   },
   {

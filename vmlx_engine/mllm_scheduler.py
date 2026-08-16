@@ -5262,20 +5262,46 @@ class MLLMScheduler:
             # its stats can lack a record for the newest request (proven live
             # on qwen3.8 — cold requests published nothing). The scheduler's
             # admission-time record keeps request-correlated proofs possible.
-            if not stats.get("last_cache_execution"):
+            _generator_lce = stats.get("last_cache_execution")
+            if not _generator_lce:
                 _admission_record = getattr(
                     self, "_admission_cache_execution", None
                 )
                 if isinstance(_admission_record, dict) and _admission_record:
                     stats["last_cache_execution"] = dict(_admission_record)
+                    _fb_id = _admission_record.get("request_id")
+                    if getattr(self, "_lce_fb_logged_id", None) != _fb_id:
+                        self._lce_fb_logged_id = _fb_id
+                        logger.info(
+                            "MLLM get_stats: admission-record fallback "
+                            "engaged for %s (scheduler id=%s)",
+                            _fb_id,
+                            hex(id(self)),
+                        )
                 elif getattr(self, "_lce_gap_logged", 0) < 5:
                     self._lce_gap_logged = getattr(self, "_lce_gap_logged", 0) + 1
                     logger.info(
                         "MLLM get_stats: no generator lce and no admission "
-                        "record (generator=%s, scheduler id=%s)",
+                        "record (generator=%s, admission_attr=%r, "
+                        "scheduler id=%s)",
                         type(self.batch_generator).__name__
                         if self.batch_generator is not None
                         else None,
+                        getattr(self, "_admission_cache_execution", None),
+                        hex(id(self)),
+                    )
+            else:
+                _gen_id = (
+                    _generator_lce.get("request_id")
+                    if isinstance(_generator_lce, dict)
+                    else None
+                )
+                if getattr(self, "_lce_gen_logged_id", None) != _gen_id:
+                    self._lce_gen_logged_id = _gen_id
+                    logger.info(
+                        "MLLM get_stats: generator lce wins for %s "
+                        "(scheduler id=%s)",
+                        _gen_id,
                         hex(id(self)),
                     )
 

@@ -381,6 +381,90 @@ def project_peak_affine(
     return max(int(floor_bytes), int(projected) if projected > 0 else 0)
 
 
+def turn_peak_admission_check(
+    max_ws_bytes: int,
+    walk_model: "tuple[float, float] | None",
+    final_context: int,
+    *,
+    last_observed_peak_bytes: int = 0,
+    allowance_bytes: int = 0,
+    fitted_max_context: int = 0,
+    max_extrapolation: float = 2.0,
+    model_label: str = "model",
+) -> None:
+    """Decline a hybrid-hit delta forward whose CROSS-TURN peak walk says it dies.
+
+    Why a third valve. On an incrementally growing conversation the absolute
+    Metal peak walks UP between turns — measured on Qwen3.8 at ~5.0-5.6GB per
+    ~5.6k-token turn (allocator/fragmentation growth that a fresh process does
+    not carry: the identical request replayed cold survives). Neither existing
+    valve can see that walk:
+
+    * :func:`span_admission_check` fits peaks WITHIN one span; a ~5.6k delta
+      yields 2-3 chunk peaks at near-identical contexts, so the fitted slope is
+      ~0 and the check passes silently — confirmed over seven crash runs that
+      aborted with zero admission refusals.
+    * :func:`hybrid_chunk_valve_check` projects from an observed transient, and
+      the first chunk of each span has no observation — precisely the chunk
+      whose command buffer aborted (one ~32s silent buffer, then SIGABRT).
+
+    ``walk_model`` is an affine fit of (final context, absolute turn peak)
+    across PREVIOUS turns of this process, from :func:`fit_peak_model`. Because
+    it is fitted within the current process and config, it self-calibrates to
+    whatever is resident — the cross-config intercept shift measured between the
+    stock pool (wall at ~96k) and a 4GB-bounded pool (wall at ~101.6k) is
+    captured automatically, where any constant threshold misclassifies one of
+    the two.
+
+    ``allowance_bytes`` defaults to ZERO — refuse at the reported limit — and
+    that is a measured decision, not caution by reflex. The limit is advisory
+    (a turn peaking at 109.2GB against the 107.5GB limit demonstrably
+    survived), which tempts a positive allowance; but across both measured
+    configs the last-surviving turn and the first-aborting turn PROJECT to the
+    same ~109.2GB from their own walks — the fatal turn's actual peak
+    overshoots its linear projection by ~3-5GB (the walk is slightly
+    super-linear at the wall), so no threshold separates them. When the
+    boundary cannot be split, the house rule inverts: the alternative to a
+    refusal here is not a served request, it is a process abort the per-chunk
+    valve cannot catch (blind first chunk). Refusing at the limit costs at
+    most one turn that survives only by EXCEEDING the device's stated budget;
+    the conversation continues past the refusal via engine restart +
+    L2 restore, which a fresh process serves with ~90GB of headroom
+    (measured fresh-replay immunity at the same span).
+
+    Unknown readings never reject: no fit, non-positive limit, non-positive
+    slope, or a projection beyond ``max_extrapolation`` x the fitted context
+    range all return without raising.
+    """
+    if max_ws_bytes <= 0 or walk_model is None:
+        return
+    intercept, slope = walk_model
+    if slope <= 0:
+        return
+    if fitted_max_context > 0 and final_context > fitted_max_context * max_extrapolation:
+        return
+    projected = project_peak_affine(
+        intercept, slope, final_context, floor_bytes=max(0, int(last_observed_peak_bytes))
+    )
+    if projected <= 0:
+        return
+    threshold = int(max_ws_bytes) + max(0, int(allowance_bytes))
+    if projected <= threshold:
+        return
+    raise PrefillAdmissionError(
+        f"{model_label}: turn-peak admission declined a delta forward at a "
+        f"context of {final_context} tokens — the cross-turn Metal peak walk "
+        f"projects {projected / _GIB:.1f}GB against a refusal threshold of "
+        f"{threshold / _GIB:.1f}GB (device limit {max_ws_bytes / _GIB:.1f}GB "
+        f"+ {max(0, int(allowance_bytes)) / _GIB:.1f}GB measured overshoot "
+        f"allowance; walk {intercept / _GIB:.2f}GB + "
+        f"{slope * 1000 / _GIB:.4f}GB per 1k tokens). Growing this "
+        f"conversation further in-process would abort the engine; start a new "
+        f"conversation, restart the engine to continue this one, or reduce "
+        f"the prefix-cache memory settings."
+    )
+
+
 def span_admission_check(
     max_ws_bytes: int,
     peak_model: "tuple[float, float] | None",

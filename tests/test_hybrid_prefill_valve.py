@@ -19,8 +19,10 @@ import pytest
 
 from vmlx_engine.utils.prefill_admission import (
     PrefillAdmissionError,
+    fit_peak_model,
     hybrid_chunk_valve_check,
     project_span_peak_bytes,
+    turn_peak_admission_check,
 )
 
 GIB = 1024**3
@@ -160,6 +162,141 @@ def test_a_degenerate_observation_context_cannot_veto_everything():
     projected = project_span_peak_bytes(int(2.86 * GIB), 1, 2048)
     assert projected / GIB > 1000, "sanity: this IS the degenerate case"
     # ...which is exactly why the caller must never pass a start-of-span context.
+
+
+# ---------------------------------------------------------------------------
+# Cross-TURN peak-walk admission (the third valve).
+#
+# MEASURED, Qwen3.8 17-turn incremental grow (+5,649 tokens/turn), eight crash
+# points over two pool configs: the absolute Metal peak walks +5.0-5.6GB per
+# TURN between spans (allocator/fragmentation growth a fresh process does not
+# carry — the identical fatal request replayed cold survives). Neither existing
+# valve sees the walk: the within-span fit gets 2-3 near-identical contexts
+# (slope ~0, silent pass — seven aborts with ZERO refusals), and the per-chunk
+# valve is blind on each span's first chunk, which is the buffer that aborted.
+# Walk anchor: post-t16 high water 109.2GB at ctx 90,345 in the stock config.
+# ---------------------------------------------------------------------------
+
+_TURN = 5_649  # tokens added per turn in the measured grow
+_SLOPE_GB_PER_TURN = 5.3
+
+def _walk(last_ctx_gb: "tuple[int, float]", n: int = 3) -> "list[tuple[int, int]]":
+    """n perfectly linear walk points ending at (ctx, peakGB) — the measured
+    shape: residual-free within a config, differing only in intercept."""
+    ctx, gb = last_ctx_gb
+    return [
+        (ctx - i * _TURN, int((gb - i * _SLOPE_GB_PER_TURN) * GIB))
+        for i in range(n - 1, -1, -1)
+    ]
+
+
+def test_turn_walk_refuses_the_five_crash_ordinal():
+    """Stock config, t17 (ctx 95,994): crashed five consecutive runs. The walk
+    through t16 projects 114.5GB against the 107.52GB limit — must refuse."""
+    walk = _walk((90_345, 109.2))
+    fit = fit_peak_model(walk)
+    assert fit is not None and fit[1] > 0
+    with pytest.raises(PrefillAdmissionError):
+        turn_peak_admission_check(
+            DEVICE_LIMIT,
+            fit,
+            95_994,
+            last_observed_peak_bytes=walk[-1][1],
+            allowance_bytes=0,
+            fitted_max_context=90_345,
+            model_label="hybrid delta",
+        )
+
+
+def test_turn_walk_admits_the_turn_the_device_served():
+    """Stock config, t15 (ctx 84,696) survived; its walk projects 103.9GB —
+    well under the limit, must admit."""
+    walk = _walk((79_047, 98.6))
+    turn_peak_admission_check(
+        DEVICE_LIMIT,
+        fit_peak_model(walk),
+        84_696,
+        last_observed_peak_bytes=walk[-1][1],
+        allowance_bytes=0,
+        fitted_max_context=79_047,
+        model_label="hybrid delta",
+    )  # must not raise
+
+
+def test_turn_walk_boundary_refusal_is_deliberate():
+    """Bounded-pool config (r7), t17 (ctx 95,994) SURVIVED at an observed
+    109.2GB peak — 1.6% OVER the advisory limit — and this valve refuses it.
+
+    DELIBERATE, not a defect to fix by raising the allowance: the fatal turn's
+    actual peak overshoots its linear projection by ~3-5GB, so across both
+    measured configs the last-surviving and first-aborting turns PROJECT to
+    the same ~109.2GB. Any allowance that admits this turn also admits r7's
+    t18, which SIGABRTed the engine at ~101.6k. One turn of depth that exists
+    only beyond the device's stated budget is the price of never aborting."""
+    walk = _walk((90_345, 103.9))  # stock walk minus one turn's intercept
+    with pytest.raises(PrefillAdmissionError):
+        turn_peak_admission_check(
+            DEVICE_LIMIT,
+            fit_peak_model(walk),
+            95_994,
+            last_observed_peak_bytes=walk[-1][1],
+            allowance_bytes=0,
+            fitted_max_context=90_345,
+            model_label="hybrid delta",
+        )
+
+
+def test_turn_walk_unknowns_never_reject():
+    """Missing fit, flat slope, zero limit, and far extrapolation all admit."""
+    walk = _walk((90_345, 109.2))
+    fit = fit_peak_model(walk)
+    turn_peak_admission_check(DEVICE_LIMIT, None, 95_994)
+    turn_peak_admission_check(DEVICE_LIMIT, (100.0 * GIB, 0.0), 95_994)
+    turn_peak_admission_check(0, fit, 95_994)
+    turn_peak_admission_check(
+        DEVICE_LIMIT, fit, 95_994, fitted_max_context=40_000,
+        max_extrapolation=2.0,
+    )  # 95,994 > 2 x 40,000 — defer rather than guess
+
+
+def test_turn_walk_refusal_message_is_not_retried_as_cache_corruption():
+    """Same contract as the other valves: the message must not route into the
+    scheduler's cache-clear recovery, which retries the identical doomed work."""
+    import re
+
+    walk = _walk((90_345, 109.2))
+    with pytest.raises(PrefillAdmissionError) as exc_info:
+        turn_peak_admission_check(
+            DEVICE_LIMIT, fit_peak_model(walk), 95_994,
+            allowance_bytes=0, fitted_max_context=90_345,
+        )
+    for forbidden in ("out of memory", "allocation failed", "insufficient memory"):
+        assert not re.search(forbidden, str(exc_info.value), re.IGNORECASE)
+
+
+def test_turn_walk_wiring_in_the_generator():
+    """Source pins: the hit-lane span path must record the walk, run the check,
+    log an engagement line (the r2-r6 protocol: a mechanism that cannot prove
+    it ran cannot be adjudicated), and default the allowance to 0."""
+    import re
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "vmlx_engine"
+        / "mllm_batch_generator.py"
+    ).read_text(encoding="utf-8")
+    assert "self._turn_peak_walk.append(" in src, "walk recording disappeared"
+    assert "turn_peak_admission_check(" in src, "the third valve is unwired"
+    assert "Turn-peak admission engaged" in src, (
+        "engagement INFO line removed — refusal-free crash runs become "
+        "unauditable"
+    )
+    m = re.search(r'"VMLX_TURN_PEAK_ALLOWANCE_MB", "(\d+)"', src)
+    assert m and int(m.group(1)) == 0, (
+        "allowance default must stay 0 — see "
+        "test_turn_walk_boundary_refusal_is_deliberate"
+    )
 
 
 def test_deep_span_cache_clear_default_and_gate():

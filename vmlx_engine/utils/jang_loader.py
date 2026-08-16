@@ -672,6 +672,15 @@ def _vlm_quant_module_path_candidates(module_path: str, model_type: str = "") ->
     if module_path.endswith("lm_head") or "language_model.lm_head" in module_path:
         candidates.add("lm_head")
 
+    if str(model_type or "").lower() == "dots3_note":
+        # dots3 sidecar keys are BARE model.-rooted (model.embed_tokens,
+        # model.layers.N..., lm_head, vision_encoder..., audio_encoder...)
+        # while runtime text modules live under language_model.model.*.
+        if module_path.startswith("language_model.model."):
+            candidates.add(
+                module_path.replace("language_model.model.", "model.", 1)
+            )
+
     if str(model_type or "").lower() == "zaya1_vl":
         if module_path.startswith("language_model.model."):
             raw = module_path.replace("language_model.model.", "model.", 1)

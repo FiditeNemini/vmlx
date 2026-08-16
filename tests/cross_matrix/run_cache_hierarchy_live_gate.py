@@ -279,6 +279,18 @@ def _exact_cache_marker_observed(
     calls = summary.get("function_calls", [])
     if not isinstance(calls, list):
         return False
+    # Cold and warm generations are semantically equivalent, NOT
+    # byte-identical (decided policy): at temp 0 the same model emits the
+    # marker bare on one arm and markdown-bolded on the other (observed
+    # live on qwen3.8 — cold/partial rows bolded, the full hit did not).
+    # Tolerate pure markdown emphasis around the exact marker; anything
+    # else (extra words, truncation, mutation) still fails.
+    if output_text.startswith(("**", "*", "`", "_")) and output_text.endswith(
+        ("**", "*", "`", "_")
+    ):
+        _stripped = output_text.strip("*`_")
+        if _stripped == expected_marker:
+            output_text = _stripped
     if output_text == expected_marker:
         return not calls
     if output_text:

@@ -4209,3 +4209,26 @@ def test_exact_kv_contract_rejects_tq_on_and_skips_paged_requirement():
         require_paged=False,
     )
     assert any("attested OFF" in f for f in on)
+
+
+def test_marker_check_tolerates_pure_markdown_emphasis():
+    """Semantic-equivalence policy: cold vs warm arms may differ only in
+    markdown emphasis around the exact marker (observed live on qwen3.8)."""
+    marker = "CACHE-HIERARCHY-abc-A"
+    base = {"reasoning_text": "", "function_calls": []}
+    assert gate._exact_cache_marker_observed(
+        {**base, "output_text": f"**{marker}**"}, marker
+    )
+    assert gate._exact_cache_marker_observed(
+        {**base, "output_text": f"`{marker}`"}, marker
+    )
+    assert gate._exact_cache_marker_observed(
+        {**base, "output_text": marker}, marker
+    )
+    # Mutation, extra words, or truncation still fail.
+    assert not gate._exact_cache_marker_observed(
+        {**base, "output_text": f"**{marker} extra**"}, marker
+    )
+    assert not gate._exact_cache_marker_observed(
+        {**base, "output_text": f"**{marker[:-1]}**"}, marker
+    )

@@ -600,3 +600,23 @@ def test_prompt_only_prefill_mirrors_the_live_prefill_step():
         "non-DSV4 re-derive chunking is hardcoded again; it must mirror "
         "config.prefill_step_size like every live prefill site"
     )
+
+
+def test_clean_prefill_splice_call_uses_the_function_parameter_name():
+    """Row 94: `_prefill_for_clean_path_dependent_cache` passed undefined
+    `token_ids` (its parameter is `tokens`) to
+    `_complete_hybrid_base_from_companion`; the NameError was swallowed by the
+    non-fatal handler, silently killing the base-splice branch for every
+    store. Pin the call to the real parameter and keep the whole function
+    free of the stale name."""
+    import inspect
+
+    from vmlx_engine import mllm_batch_generator as mbg
+
+    src = inspect.getsource(
+        mbg.MLLMBatchGenerator._prefill_for_clean_path_dependent_cache
+    )
+    assert "token_ids" not in src, (
+        "undefined name is back in _prefill_for_clean_path_dependent_cache"
+    )
+    assert "_complete_hybrid_base_from_companion" in src

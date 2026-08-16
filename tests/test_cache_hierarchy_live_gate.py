@@ -4301,6 +4301,33 @@ def test_scenario_rows_share_the_correlated_health_poll():
     )
     assert out is stale
 
+    # A CACHED payload overlays the bound record but its cache.* counters
+    # are pre-request — the poll must keep going until a LIVE payload
+    # arrives (r4 refault: disk_hits identical before/after despite 382
+    # physical refaults).
+    cached_bound = dict(bound, health_gauges_cached=True)
+    live_bound = dict(bound)
+    calls = []
+
+    def fake_json_get(url, timeout):
+        calls.append(url)
+        return live_bound
+
+    original_json_get = gate._json_get
+    gate._json_get = fake_json_get
+    try:
+        out = gate._poll_row_correlated_health(
+            base_url="http://x",
+            timeout=1,
+            response_id="resp_r",
+            health=cached_bound,
+            deadline_s=6.0,
+        )
+    finally:
+        gate._json_get = original_json_get
+    assert out is live_bound
+    assert len(calls) == 1
+
 
 def test_marker_check_tolerates_pure_markdown_emphasis():
     """Semantic-equivalence policy: cold vs warm arms may differ only in

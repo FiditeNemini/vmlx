@@ -2421,6 +2421,7 @@ def _validate_hybrid_ssm_tq4_hit(
     label: str | None = None,
     require_tq4: bool = True,
     require_paged: bool = True,
+    require_companion_disk: bool = True,
 ) -> list[str]:
     """Require one accepted Qwen hybrid hit to include KV, SSM, and TQ truth.
 
@@ -2714,7 +2715,12 @@ def _validate_hybrid_ssm_tq4_hit(
             # persist plain KV records; tq_native_hits can never move there
             # and demanding it would fail every healthy exact refault.
             required_delta_keys.append("block_disk_cache.tq_native_hits")
-        required_delta_keys.append("ssm_companion.disk.hits")
+        if require_companion_disk:
+            # A SAME-PROCESS evict refault legitimately serves the SSM
+            # companion from its own L1 RAM (exact_boundary_l1_or_l2) while
+            # the KV payloads physically refault from SSD — only the
+            # cross-restart contract may demand a companion DISK hit.
+            required_delta_keys.append("ssm_companion.disk.hits")
         for key in required_delta_keys:
             if key not in deltas:
                 failures.append(f"{tag}: {key} delta is missing")
@@ -3266,6 +3272,7 @@ def _validate_disk_refault_execution(
     *,
     label: str,
     contract_profile: str = "generic",
+    require_companion_disk: bool = True,
 ) -> list[str]:
     failures: list[str] = []
     if not isinstance(execution, dict):
@@ -3326,6 +3333,7 @@ def _validate_disk_refault_execution(
                 label=label,
                 require_tq4=contract_profile == "qwen_hybrid_ssm_tq4",
                 require_paged=contract_profile == "qwen_hybrid_ssm_tq4",
+                require_companion_disk=require_companion_disk,
             )
         )
     return failures
@@ -4038,6 +4046,10 @@ def validate_l2_size_eviction_observation(
             contract_profile=_cache_contract_profile_from_health(
                 health_attestation
             ),
+            # The refault happens in the SAME serve that stored the recent
+            # chain: KV payloads refault from SSD, but the companion may
+            # legitimately serve from its own L1 (exact_boundary_l1_or_l2).
+            require_companion_disk=False,
         )
     )
     failures.extend(
@@ -4547,9 +4559,23 @@ def _poll_row_correlated_health(
             isinstance(lookup, dict)
             and str(lookup.get("request_id") or "") == rid
         )
-        if lce_bound and (embedded_bound or lookup_bound or not companion):
+        # A CACHED payload overlays the bound execution record but its
+        # cache.* COUNTERS are still pre-request (observed live: r4 refault
+        # disk_hits identical before/after despite 382 physical refaults) —
+        # keep polling for a LIVE payload once bound; a payload still cached
+        # at the deadline is kept as the honest last read.
+        cached_payload = bool(health.get("health_gauges_cached"))
+        if (
+            lce_bound
+            and not cached_payload
+            and (embedded_bound or lookup_bound or not companion)
+        ):
             break
-        if lce_bound and time.monotonic() > deadline - 2.0:
+        if (
+            lce_bound
+            and not cached_payload
+            and time.monotonic() > deadline - 2.0
+        ):
             break
         time.sleep(0.25)
         health = _json_get(f"{base_url}/health", timeout)

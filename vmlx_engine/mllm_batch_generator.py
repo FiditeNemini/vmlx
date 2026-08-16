@@ -10373,7 +10373,7 @@ class MLLMBatchGenerator:
             elif base_cache is not None and not _base_matches_layers:
                 _spliced = (
                     self._complete_hybrid_base_from_companion(
-                        base_cache, token_ids, int(base_token_count)
+                        base_cache, tokens, int(base_token_count)
                     )
                     if _HYBRID_BASE_SPLICE
                     else None
@@ -10482,7 +10482,21 @@ class MLLMBatchGenerator:
                             raise
             return fresh_cache
         except Exception as ex:
-            logger.warning(f"MLLM clean SSM prefill failed (non-fatal): {ex}")
+            if isinstance(ex, (NameError, AttributeError, TypeError)):
+                # Programming errors are not runtime turbulence — a swallowed
+                # NameError here silently killed the hybrid base-splice branch
+                # for every store. Non-fatal for the request, but loud.
+                logger.error(
+                    "MLLM clean SSM prefill hit a programming error "
+                    "(non-fatal for the request, but this branch is broken): "
+                    "%s",
+                    ex,
+                    exc_info=True,
+                )
+            else:
+                logger.warning(
+                    f"MLLM clean SSM prefill failed (non-fatal): {ex}"
+                )
             return None
         finally:
             for _attr, _value in locals().get("_saved_pos_state", {}).items():

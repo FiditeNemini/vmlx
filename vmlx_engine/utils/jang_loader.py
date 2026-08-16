@@ -1233,6 +1233,30 @@ def _build_muse_glimmer_vlm_processor(path: Path, eos_token_id=None, model=None)
     return processor
 
 
+def _build_dots3_note_vlm_processor(path: Path, eos_token_id=None, model=None):
+    """dots3-note's own processor — the installed transformers has no
+    dots3_note support (PR #47844 unreleased), so AutoProcessor degrades to
+    text-only and silently drops media exactly like the Muse case above.
+
+    Same failure economics: video expands through the IMAGE token path
+    (<|imgpad|>, id 151660) and audio through <|audio_comp_pad|> (151720);
+    a text-only processor makes the model confabulate instead of erroring.
+    """
+    from transformers import AutoTokenizer
+
+    from ..models.dots3_note_register import register_dots3_note_runtime
+
+    register_dots3_note_runtime()
+    from mlx_vlm.models.dots3_note.processor import (  # noqa: WPS433
+        Dots3NoteProcessor,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(str(path), trust_remote_code=True)
+    processor = Dots3NoteProcessor(tokenizer, model_path=Path(path))
+    _attach_vlm_detokenizer_and_stopping(processor, path, eos_token_id=eos_token_id)
+    return processor
+
+
 def _load_jang_vlm_processor(path: Path, model):
     """Load a VLM processor while preserving local model-family overrides."""
     from mlx_vlm.utils import load_image_processor, load_processor
@@ -1253,6 +1277,11 @@ def _load_jang_vlm_processor(path: Path, model):
 
     if model_type == "muse_glimmer":
         return _build_muse_glimmer_vlm_processor(
+            processor_path, eos_token_id=eos_token_id, model=model
+        )
+
+    if model_type == "dots3_note":
+        return _build_dots3_note_vlm_processor(
             processor_path, eos_token_id=eos_token_id, model=model
         )
 
@@ -1670,6 +1699,22 @@ def _ensure_jang_family_runtime_supported(path: Path, config: dict | None) -> No
             raise RuntimeError(
                 f"openPangu-2.0 (openpangu_v2) bundle at {path} requires the "
                 f"vendored vmlx_engine/models/openpangu_v2 runtime, but "
+                f"registration failed: {exc}"
+            ) from exc
+
+    if "dots3_note" in model_types:
+        # vMLX-owned vendored runtime under mlx_vlm.models.dots3_note (no
+        # upstream mlx-vlm/transformers package ships this architecture).
+        try:
+            from vmlx_engine.models.dots3_note_register import (
+                register_dots3_note_runtime,
+            )
+
+            register_dots3_note_runtime()
+        except Exception as exc:
+            raise RuntimeError(
+                f"dots3-note (dots3_note) bundle at {path} requires the "
+                f"vendored vmlx_engine/models/dots3_note runtime, but "
                 f"registration failed: {exc}"
             ) from exc
 

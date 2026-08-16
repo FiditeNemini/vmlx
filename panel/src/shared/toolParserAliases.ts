@@ -14,6 +14,10 @@ const TOOL_PARSER_CANONICAL_ALIASES: Record<string, string> = {
   // name too, but the alias maps to a name every RELEASED engine also knows,
   // so app sessions work against older bundled runtimes as well.
   qwen3_coder: 'xml_function',
+  // dots3_note's dots XML dialect registers as dots/dots3/dots3_note in the
+  // engine (dots_tool_parser.py); canonical serving name is 'dots'.
+  dots3: 'dots',
+  dots3_note: 'dots',
 }
 
 export const TOOL_PARSERS_FOR_CLI = new Set([
@@ -68,6 +72,7 @@ export const TOOL_PARSERS_FOR_CLI = new Set([
   'atem',
   'poolside_v1',
   'mimo_xml_function',
+  'dots',
 ])
 
 export function canonicalizeToolParserId(

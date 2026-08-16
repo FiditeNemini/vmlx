@@ -2022,6 +2022,10 @@ class TestModelConfigComprehensiveChecks:
         # Muse Glimmer routes reasoning by RECIPIENT (to=self / to=user) rather
         # than an inline think pair — registered in reasoning/__init__.py.
         "muse_glimmer",
+        # dots3_note plain <think> rail (model opens <think> itself; off-mode
+        # is a template-side closed-block prefill) — registered on the qwen3
+        # think-tag contract in reasoning/__init__.py.
+        "dots3",
     }
     VALID_TOOL_PARSERS = {
         None, "qwen", "llama", "mistral", "deepseek", "hermes",
@@ -2036,6 +2040,10 @@ class TestModelConfigComprehensiveChecks:
         # template states the output "is not expected to be valid XML".
         # vmlx_engine/tool_parsers/atem_tool_parser.py.
         "atem",
+        # dots3_note dots XML dialect: <dots_function_call><invoke name=...>
+        # <parameter name=...> with newline-framed values.
+        # vmlx_engine/tool_parsers/dots_tool_parser.py.
+        "dots",
         # Gemma family: commit 3294a2da added `gemma3` for Google's
         # documented ``` ```tool_code\\nname(k=v)\\n``` ``` format, and
         # `gemma3n` for Gemma 3n (same parser, separate registry entry).

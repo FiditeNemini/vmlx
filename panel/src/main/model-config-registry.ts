@@ -322,6 +322,12 @@ registerFamily('minimax_m3', { cacheType: 'kv', toolParser: 'minimax_m3', reason
 // sessions.ts never fired and the chat thinking toggle stayed disabled
 // (live UI matrix finding, 2026-07-02).
 registerFamily('openpangu_v2', { cacheType: 'kv', cacheSubtype: 'openpangu_v2_composite', toolParser: 'openpangu', reasoningParser: 'deepseek_r1', supportsThinking: true, honorsEnableThinking: false, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: false, description: 'openPangu-2.0-Flash (MLA + DSA/SWA + mHC MoE)', priority: 20 })
+// dots3-note: 280B/16B-active omni MoE — hybrid dual-geometry MLA (13 full/DSA
+// + 33 sliding), DSA indexer past 2048, MTP layer 46, vision + audio towers
+// (video rides the IMAGE token path). Thinking ON by default and the template
+// honors enable_thinking (off = <no_think> user marker + prefilled closed
+// think block). Tool dialect: dots XML — parser 'dots'.
+registerFamily('dots3_note', { cacheType: 'kv', cacheSubtype: 'dots3_hybrid_full_swa', toolParser: 'dots', reasoningParser: 'dots3', supportsThinking: true, honorsEnableThinking: true, thinkInTemplate: true, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: true, description: 'dots3-note omni MoE (hybrid MLA full+SWA, DSA, MTP)', priority: 20 })
 
 // Ling / Bailing hybrid: MLA softmax layers plus linear-attention/SSM-style
 // companion state. Eric directive 2026-05-11: treat Ling chat output as plain
@@ -430,6 +436,8 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'codestral': 'codestral',
   'devstral': 'devstral',
   'codestral_mamba': 'mamba',
+  // ── dots studio ──
+  'dots3_note': 'dots3_note',
   // ── DeepSeek family ──
   'deepseek_v4': 'deepseek-v4',
   'deepseek_v3': 'deepseek-v3',

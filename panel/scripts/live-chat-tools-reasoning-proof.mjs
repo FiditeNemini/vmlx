@@ -512,14 +512,19 @@ function assertResult(result) {
 
   const serverUi = result.serverCacheUi || {}
   if (!serverUi.visible) failures.push('server cache settings UI was not visible in renderer')
-  for (const label of ['Enable Prefix Cache', 'Use Paged KV Cache', 'Block Disk Cache (L2)', 'Enable Disk Cache', 'Stored Cache Quantization']) {
+  for (const label of ['Enable Prefix Cache', 'In-Memory Paged Cache (RAM)', 'Block Disk Cache (SSD / L2)', 'Enable Disk Cache', 'Stored Cache Quantization']) {
     if (!serverUi.labels?.includes(label)) failures.push(`server cache UI missing visible label: ${label}`)
   }
+  // Current interlock (shared/cacheControlPolicy.ts): Block Disk Cache is a standalone
+  // SSD tier — enabling it turns Prefix Cache on and keeps legacy disk off, but does
+  // NOT engage the In-Memory Paged Cache (RAM) tier (pure SSD mode is supported).
   if (serverUi.afterBlockDiskToggle?.enablePrefixCache !== true) failures.push('block disk toggle did not enable prefix cache')
-  if (serverUi.afterBlockDiskToggle?.usePagedCache !== true) failures.push('block disk toggle did not enable paged cache')
+  if (serverUi.afterBlockDiskToggle?.usePagedCache !== false) failures.push('block disk toggle unexpectedly engaged the RAM paged tier (standalone SSD tier expected)')
   if (serverUi.afterBlockDiskToggle?.enableBlockDiskCache !== true) failures.push('block disk toggle did not enable block disk cache')
+  if (serverUi.afterBlockDiskToggle?.enableDiskCache !== false) failures.push('block disk toggle did not keep legacy disk cache off')
   if (serverUi.afterDiskToggle?.enablePrefixCache !== true) failures.push('legacy disk toggle did not enable prefix cache')
   if (serverUi.afterDiskToggle?.usePagedCache !== false) failures.push('legacy disk toggle did not clear paged cache')
+  if (serverUi.afterDiskToggle?.enableBlockDiskCache !== false) failures.push('legacy disk toggle did not keep block disk cache off')
   if (serverUi.afterDiskToggle?.enableDiskCache !== true) failures.push('legacy disk toggle did not enable disk cache')
 
   if (failures.length) {
@@ -747,7 +752,7 @@ async function main() {
       })()
     `
     const rendererResult = await evaluate(cdp, expression)
-    const proofDir = path.join(repoDir, 'docs', 'internal', 'agent-notes')
+    const proofDir = path.join(repoDir, 'build', 'private-evidence')
     mkdirSync(proofDir, { recursive: true })
     const chatSettingsUi = await evaluate(cdp, `
       (async () => {
@@ -832,44 +837,58 @@ async function main() {
           return !!button;
         };
         clickSection('Prefix Cache');
-        clickSection('Paged KV Cache');
+        clickSection('In-Memory Paged Cache (RAM)');
         clickSection('KV Cache Quantization');
         clickSection('Disk Cache (Persistent)');
-        await wait(() => document.body.innerText.includes('Block Disk Cache (L2)'));
+        const PAGED_LABEL = 'In-Memory Paged Cache (RAM)';
+        const BLOCK_LABEL = 'Block Disk Cache (SSD / L2)';
         const labelFor = (text) => [...document.querySelectorAll('label')]
           .find((label) => label.innerText.includes(text));
-        const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');
+        // The checkbox label must be resolved via <label> elements: the block-disk
+        // string also appears in static hint/note text, so innerText alone is ambiguous.
+        const inputFor = (text) => [...document.querySelectorAll('label')]
+          .filter((label) => label.innerText.includes(text))
+          .map((label) => label.querySelector('input[type="checkbox"]'))
+          .find(Boolean);
+        await wait(() => inputFor('Enable Prefix Cache') && inputFor(PAGED_LABEL) && inputFor(BLOCK_LABEL) && inputFor('Enable Disk Cache'));
         const checkedState = () => ({
           enablePrefixCache: !!inputFor('Enable Prefix Cache')?.checked,
-          usePagedCache: !!inputFor('Use Paged KV Cache')?.checked,
-          enableBlockDiskCache: !!inputFor('Block Disk Cache (L2)')?.checked,
+          usePagedCache: !!inputFor(PAGED_LABEL)?.checked,
+          enableBlockDiskCache: !!inputFor(BLOCK_LABEL)?.checked,
           enableDiskCache: !!inputFor('Enable Disk Cache')?.checked,
         });
-        const prefix = inputFor('Enable Prefix Cache');
-        if (prefix?.checked) prefix.click();
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const paged = inputFor('Use Paged KV Cache');
-        if (paged?.checked) paged.click();
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const block = inputFor('Block Disk Cache (L2)');
-        if (!block) throw new Error('Block Disk Cache checkbox not found');
-        if (!block.checked) block.click();
-        await wait(() => inputFor('Enable Prefix Cache')?.checked && inputFor('Use Paged KV Cache')?.checked && inputFor('Block Disk Cache (L2)')?.checked);
-        const afterBlockDiskToggle = checkedState();
-        if (inputFor('Block Disk Cache (L2)')?.checked) inputFor('Block Disk Cache (L2)').click();
-        await wait(() => !inputFor('Block Disk Cache (L2)')?.checked);
-        if (inputFor('Use Paged KV Cache')?.checked) inputFor('Use Paged KV Cache').click();
-        await wait(() => !inputFor('Use Paged KV Cache')?.checked);
+        // Normalize to all-off. Order matters: the paged/block checkboxes render
+        // unchecked whenever Prefix Cache is off even if their underlying config is
+        // still true, so clear them while Prefix Cache is still on, then clear prefix.
+        if (!inputFor('Enable Prefix Cache')?.checked) inputFor('Enable Prefix Cache')?.click();
+        await wait(() => inputFor('Enable Prefix Cache')?.checked);
+        if (inputFor(PAGED_LABEL)?.checked) inputFor(PAGED_LABEL).click();
+        await wait(() => !inputFor(PAGED_LABEL)?.checked);
+        if (inputFor(BLOCK_LABEL)?.checked) inputFor(BLOCK_LABEL).click();
+        await wait(() => !inputFor(BLOCK_LABEL)?.checked);
         if (inputFor('Enable Prefix Cache')?.checked) inputFor('Enable Prefix Cache').click();
         await wait(() => !inputFor('Enable Prefix Cache')?.checked);
+        const block = inputFor(BLOCK_LABEL);
+        if (!block) throw new Error('Block Disk Cache checkbox not found');
+        if (!block.checked) block.click();
+        // Current interlock: enabling block disk turns Prefix Cache on but does NOT
+        // engage the RAM paged tier (block disk is a standalone SSD tier now).
+        await wait(() => inputFor('Enable Prefix Cache')?.checked && !inputFor(PAGED_LABEL)?.checked && inputFor(BLOCK_LABEL)?.checked);
+        const afterBlockDiskToggle = checkedState();
+        if (inputFor(BLOCK_LABEL)?.checked) inputFor(BLOCK_LABEL).click();
+        await wait(() => !inputFor(BLOCK_LABEL)?.checked);
+        if (inputFor(PAGED_LABEL)?.checked) inputFor(PAGED_LABEL).click();
+        await wait(() => !inputFor(PAGED_LABEL)?.checked);
+        if (inputFor('Enable Prefix Cache')?.checked) inputFor('Enable Prefix Cache').click();
+        await wait(() => !inputFor('Enable Prefix Cache')?.checked);
+        await wait(() => inputFor('Enable Disk Cache') && !inputFor('Enable Disk Cache').disabled);
         const legacyDisk = inputFor('Enable Disk Cache');
         if (!legacyDisk) throw new Error('Enable Disk Cache checkbox not found');
-        await wait(() => !inputFor('Enable Disk Cache')?.disabled);
         if (!legacyDisk.checked) legacyDisk.click();
-        await wait(() => inputFor('Enable Prefix Cache')?.checked && !inputFor('Use Paged KV Cache')?.checked && inputFor('Enable Disk Cache')?.checked);
+        await wait(() => inputFor('Enable Prefix Cache')?.checked && !inputFor(PAGED_LABEL)?.checked && inputFor('Enable Disk Cache')?.checked);
         const afterDiskToggle = checkedState();
         const bodyText = document.body.innerText;
-        const labels = ['Enable Prefix Cache', 'Use Paged KV Cache', 'Block Disk Cache (L2)', 'Enable Disk Cache', 'Stored Cache Quantization']
+        const labels = ['Enable Prefix Cache', PAGED_LABEL, BLOCK_LABEL, 'Enable Disk Cache', 'Stored Cache Quantization']
           .filter((label) => bodyText.includes(label));
         labelFor('Enable Disk Cache')?.scrollIntoView({ block: 'center' });
         await new Promise((resolve) => setTimeout(resolve, 150));

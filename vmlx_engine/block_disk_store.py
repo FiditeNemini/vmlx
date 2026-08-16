@@ -330,11 +330,27 @@ class BlockDiskStore:
         self._offthread_serialization_failures = 0
         self._pending_write_bytes = 0
         self._pending_write_byte_drops = 0
+        _pending_env = os.environ.get("VMLX_BLOCK_DISK_PENDING_WRITE_BYTES")
+        try:
+            _pending_default = (
+                max(1, int(_pending_env))
+                if _pending_env
+                else 1024 * 1024 * 1024
+            )
+        except (TypeError, ValueError):
+            _pending_default = 1024 * 1024 * 1024
         self._max_pending_write_bytes = (
             max(1, int(max_pending_write_bytes))
             if max_pending_write_bytes is not None
-            else 512 * 1024 * 1024
+            else _pending_default
         )
+        # Hashes whose writes were budget-dropped this session: descendants of
+        # a dropped block can never publish (ancestry requirement), so they
+        # are truncated at QUEUE time instead of consuming budget and failing
+        # at publish (live: 2 budget drops cascaded into 292 publish failures
+        # on a 23.5k-token store). A successful queue removes the hash so a
+        # retried parent revives its chain.
+        self._session_dropped_hashes: set = set()
         self._write_fences: OrderedDict[str, Dict[str, Any]] = OrderedDict()
         self._max_recent_write_fences = 64
 
@@ -1711,18 +1727,38 @@ class BlockDiskStore:
             # _write_block().
             self.has_block(block_hash)
 
+        if parent_hash is not None and parent_hash in self._session_dropped_hashes:
+            # The parent was budget-dropped this session — this block can
+            # never publish (ancestry requirement). Truncate the chain here
+            # instead of consuming budget and failing later at publish.
+            self._session_dropped_hashes.add(block_hash)
+            if len(self._session_dropped_hashes) > 8192:
+                self._session_dropped_hashes.clear()
+            self._write_fence_queue_result(fence_id, dropped=True)
+            logger.debug(
+                "BlockDiskStore truncating write chain at %s: ancestor was "
+                "budget-dropped",
+                block_hash.hex()[:12],
+            )
+            return False
+
         reserved_bytes = self._estimate_cache_payload_bytes(cache_data)
         if not self._reserve_pending_write_bytes(
             reserved_bytes,
             timeout=_remaining_admission_time(),
         ):
+            self._session_dropped_hashes.add(block_hash)
+            if len(self._session_dropped_hashes) > 8192:
+                self._session_dropped_hashes.clear()
             self._write_fence_queue_result(fence_id, dropped=True)
             logger.warning(
                 "BlockDiskStore pending-write byte budget full "
-                "(%d bytes), skipping serialization",
+                "(%d bytes), skipping serialization; descendants of this "
+                "block will be truncated at queue time",
                 self._max_pending_write_bytes,
             )
             return False
+        self._session_dropped_hashes.discard(block_hash)
 
         hash_hex = block_hash.hex()
 

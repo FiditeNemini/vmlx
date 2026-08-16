@@ -26,6 +26,56 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.32] - 2026-08-16
+
+### Added
+
+- Cross-turn peak-walk admission valve for hybrid models: deep incremental
+  conversations that previously aborted the engine with an uncatchable Metal
+  command-buffer OOM now receive a clean HTTP 413 refusal before the fatal
+  forward. The valve fits the measured between-turn Metal peak walk per
+  process, logs every engagement, and refuses at the device working-set
+  limit; hardened against interleaved conversations, mid-size chunked
+  prefills, retries, and failure paths. Conversations continue past a
+  refusal by restarting the model (the conversation restores from the disk
+  cache — proven live at 101k tokens) or with a fresh cold prefill.
+  `VMLX_TURN_PEAK_ADMISSION` / `VMLX_TURN_PEAK_ALLOWANCE_MB`.
+- 100k+ multiturn proven end-to-end on the Qwen3.8 hybrid line: restart +
+  disk-cache restore continued a refused conversation to 101,673 tokens with
+  96k restored, byte-equal replay at maximal reuse, and byte-equal answers
+  after eviction-forced cold refault.
+- Deep-span allocator cache clear ahead of large forwards on both the fresh
+  prefill and cache-hit lanes (`VMLX_DEEP_SPAN_CACHE_CLEAR_TOKENS`); SSM
+  companion RAM budget default raised to 1536MB (`VMLX_SSM_STATE_CACHE_MB`).
+- Chat UI: context-exhaustion and effort-substitution notices; deep-refusal
+  bubbles carry the actual remedy (restart restores from disk).
+
+### Fixed
+
+- Admission declines and prompt-too-long are 413 on every API door (chat,
+  completions, responses, messages, ollama) via app-level handlers; three
+  routes carried a latent error in their inline handlers and three doors had
+  no handling at all.
+- An oversized single cache payload (deep mixed-SWA layer states) could
+  never be written under the pending-write byte budget, permanently
+  truncating disk-cache coverage for its descendants; oversized payloads now
+  admit exclusively after the write queue drains. Applies to both the block
+  disk store and the SSM companion store.
+- `reasoning_effort` now forwards identically across the chat, responses,
+  and messages routes; companion disk entries are touched on RAM hits so hot
+  entries survive disk eviction; media prefix boundaries capture and reuse
+  byte-equal on matching replays for allow-listed VL families.
+- Panel: raw database error replaced with a clear message when a port is
+  held by another session; MTP mode/depth and all restart-required settings
+  verified to persist across engine restart, sleep/wake, and app relaunch.
+
+### Release-note catch-up (1.6.29 - 1.6.31, shipped 2026-08-15)
+
+- .29/.30/.31 shipped the Qwen3.6/3.8 enablement line with native MTP
+  autodetection, MiniMax M2.7 MTP engagement, disk-L2 writer contention
+  fixes, context-exhaustion hygiene across families, mlx.fast hot-path
+  work, and the notice-chip chat UI. See the release pages for details.
+
 ## [1.6.28] - 2026-08-13
 
 ### Added

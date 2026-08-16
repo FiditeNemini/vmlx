@@ -89,6 +89,13 @@ class AnthropicRequest(BaseModel):
     chat_template_kwargs: dict | None = None
     # Non-Anthropic passthrough for explicit enable_thinking bool.
     enable_thinking: bool | None = None
+    # Non-Anthropic passthrough for top-level reasoning_effort (vMLX
+    # extension). The chat, responses, and ollama dialects all accept it
+    # top-level; without this field pydantic silently DROPPED it here and
+    # /v1/messages resolved effort as None while the other three routes
+    # resolved the requested tier (measured live: qwen3.8 low/medium/xhigh
+    # all divergent on exactly this field).
+    reasoning_effort: str | None = None
     seed: int | None = None
 
     @field_validator("max_tokens")
@@ -262,13 +269,16 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
         max_thinking_tokens=max_thinking_tokens,
         seed=req.seed,
         chat_template_kwargs=chat_template_kwargs,
-        # Forward reasoning_effort if the ct_kwargs carry it (DSV4 "max"
-        # gets set via thinking.budget_tokens≥32768 above). Keeps the
-        # Anthropic → OpenAI conversion honest with the shared OpenAI-path
-        # auto-mapping block at server.py:5186 / :3122.
-        reasoning_effort=(chat_template_kwargs or {}).get("reasoning_effort")
-        if chat_template_kwargs
-        else None,
+        # Forward reasoning_effort: explicit top-level field first (parity
+        # with the chat/responses/ollama dialects), then the ct_kwargs copy
+        # (DSV4 "max" gets set via thinking.budget_tokens≥32768 above).
+        # Keeps the Anthropic → OpenAI conversion honest with the shared
+        # OpenAI-path auto-mapping block at server.py:5186 / :3122.
+        reasoning_effort=(
+            req.reasoning_effort
+            if req.reasoning_effort is not None
+            else (chat_template_kwargs or {}).get("reasoning_effort")
+        ),
     )
 
 

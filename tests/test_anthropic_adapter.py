@@ -1215,3 +1215,42 @@ def test_anthropic_budget_tokens_arms_max_thinking_tokens():
     cc_off = to_chat_completion(off)
     assert cc_off.max_thinking_tokens is None
     assert cc_off.enable_thinking is False
+
+
+def test_top_level_reasoning_effort_passthrough_matches_other_dialects():
+    """#185 parity: chat/responses/ollama accept top-level reasoning_effort;
+    the Anthropic model silently DROPPED it (no field), so /v1/messages
+    resolved effort None while the other three routes resolved the tier
+    (measured live on qwen3.8, all three stamped tiers divergent)."""
+    from vmlx_engine.api.anthropic_adapter import (
+        AnthropicRequest,
+        to_chat_completion,
+    )
+
+    req = AnthropicRequest(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=16,
+        reasoning_effort="low",
+    )
+    chat_req = to_chat_completion(req)
+    assert chat_req.reasoning_effort == "low"
+
+    # ct_kwargs fallback still works when the top-level field is absent.
+    req2 = AnthropicRequest(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=16,
+        chat_template_kwargs={"reasoning_effort": "high"},
+    )
+    assert to_chat_completion(req2).reasoning_effort == "high"
+
+    # Top-level wins over the ct_kwargs copy.
+    req3 = AnthropicRequest(
+        model="m",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=16,
+        reasoning_effort="max",
+        chat_template_kwargs={"reasoning_effort": "low"},
+    )
+    assert to_chat_completion(req3).reasoning_effort == "max"

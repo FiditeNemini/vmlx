@@ -2161,16 +2161,27 @@ class BlockDiskStore:
                 )
 
         batch = prepared_batch
-        block_items = [
-            item
+        batch_fence_ids = {
+            str(item[6])
             for item in batch
             if item
             and not isinstance(item[0], str)
-        ]
-        batch_fence_ids = {
-            str(item[6])
-            for item in block_items
-            if len(item) > 6 and item[6] is not None
+            and len(item) > 6
+            and item[6] is not None
+        }
+        # Byte reservations are settled per block the moment its payload is
+        # durably handed to SQLite/the filesystem, NOT at batch end. A batch
+        # that ends in a multi-second aggregate eviction otherwise pegs the
+        # pending budget for its whole duration and every concurrently
+        # admitted store drops at the 0.25s admission wait (measured: 255/383
+        # blocks lost on a bounded-L2 store). Indexed by position in `batch`
+        # so per-item settlement can also drop the payload reference (the
+        # budget must track actual RAM) and the finally settles whatever an
+        # early return/exception left behind.
+        outstanding_reservations: Dict[int, int] = {
+            idx: int(item[7])
+            for idx, item in enumerate(batch)
+            if item and not isinstance(item[0], str) and len(item) > 7
         }
         fences_to_finalize: List[str] = []
         net_payload_bytes = 0
@@ -2182,7 +2193,9 @@ class BlockDiskStore:
             # stable set of finalized records and ordered LRU metadata.
             with self.global_budget.exclusive_mutation_guard() as locked:
                 if not locked:
-                    for item in block_items:
+                    for item in batch:
+                        if not item or isinstance(item[0], str):
+                            continue
                         fence_id = (
                             str(item[6])
                             if len(item) > 6 and item[6] is not None
@@ -2221,7 +2234,7 @@ class BlockDiskStore:
                     write_conn,
                     terminal_fences,
                 )
-                for item in batch:
+                for idx, item in enumerate(batch):
                     fence_id: Optional[str] = None
                     try:
                         if item[0] == "__access__":
@@ -2280,6 +2293,17 @@ class BlockDiskStore:
                             item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
                         )
                         logger.warning(f"Background writer error ({h}): {e}")
+                    finally:
+                        # Settle this block's byte reservation now — its
+                        # payload is either persisted or failed, and either
+                        # way the RAM copy is dead. Dropping the batch slot
+                        # releases the bytes object so admission waiters see
+                        # budget as soon as the writer makes real progress,
+                        # not after the batch-end eviction pass.
+                        reserved_now = outstanding_reservations.pop(idx, 0)
+                        if reserved_now:
+                            batch[idx] = None
+                            self._release_pending_write_bytes(reserved_now)
 
                 # A fence control sentinel may be deferred when the bounded
                 # data FIFO is full. Finalize it from the writer only after
@@ -2432,9 +2456,12 @@ class BlockDiskStore:
                     )
                     self._fail_write_fence(fence_id, str(exc))
         finally:
-            for item in block_items:
-                if len(item) > 7:
-                    self._release_pending_write_bytes(item[7])
+            # Blocks the write loop settled already popped their entries; this
+            # covers early returns (publication lock unavailable) and batch
+            # exceptions that skipped the per-item settlement.
+            for reserved in outstanding_reservations.values():
+                self._release_pending_write_bytes(reserved)
+            outstanding_reservations.clear()
             with self._stats_lock:
                 self._write_inflight = max(
                     0,

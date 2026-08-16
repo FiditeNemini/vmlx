@@ -4211,6 +4211,53 @@ def test_exact_kv_contract_rejects_tq_on_and_skips_paged_requirement():
     assert any("attested OFF" in f for f in on)
 
 
+def test_exact_kv_restart_refault_skips_tq_native_hit_requirement():
+    """Campaign #181: exact-KV serves persist plain KV records, so the
+    restart-refault contract must not demand a tq_native_hits increase there
+    — and must fail closed if TQ-native records DO hit on an exact serve."""
+    row = {
+        "tag": "restart_partial_c",
+        "last_cache_execution": {},
+        "health_counter_deltas": {
+            "scheduler.hybrid_kv_without_ssm_hits": 0,
+            "scheduler.hybrid_kv_without_ssm_tokens": 0,
+            "block_disk_cache.disk_hits": 5,
+            "block_disk_cache.tq_native_hits": 0,
+            "ssm_companion.disk.hits": 1,
+        },
+    }
+    exact = gate._validate_hybrid_ssm_tq4_hit(
+        row,
+        require_disk_origin=True,
+        require_tq4=False,
+        require_paged=False,
+    )
+    assert not any(
+        "tq_native_hits did not increase" in f for f in exact
+    )
+    tq4 = gate._validate_hybrid_ssm_tq4_hit(
+        row,
+        require_disk_origin=True,
+        require_tq4=True,
+        require_paged=True,
+    )
+    assert any("tq_native_hits did not increase" in f for f in tq4)
+    poisoned = dict(
+        row,
+        health_counter_deltas={
+            **row["health_counter_deltas"],
+            "block_disk_cache.tq_native_hits": 3,
+        },
+    )
+    exact_poisoned = gate._validate_hybrid_ssm_tq4_hit(
+        poisoned,
+        require_disk_origin=True,
+        require_tq4=False,
+        require_paged=False,
+    )
+    assert any("exact-KV" in f for f in exact_poisoned)
+
+
 def test_marker_check_tolerates_pure_markdown_emphasis():
     """Semantic-equivalence policy: cold vs warm arms may differ only in
     markdown emphasis around the exact marker (observed live on qwen3.8)."""

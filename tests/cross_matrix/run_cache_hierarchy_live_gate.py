@@ -2698,11 +2698,14 @@ def _validate_hybrid_ssm_tq4_hit(
         elif _integer(deltas.get(key)) != 0:
             failures.append(f"{tag}: {key} increased during accepted hybrid reuse")
     if require_disk_origin:
-        for key in (
-            "block_disk_cache.disk_hits",
-            "block_disk_cache.tq_native_hits",
-            "ssm_companion.disk.hits",
-        ):
+        required_delta_keys = ["block_disk_cache.disk_hits"]
+        if require_tq4:
+            # Exact-KV bundles (asymmetry guard: TQ storage attested OFF)
+            # persist plain KV records; tq_native_hits can never move there
+            # and demanding it would fail every healthy exact refault.
+            required_delta_keys.append("block_disk_cache.tq_native_hits")
+        required_delta_keys.append("ssm_companion.disk.hits")
+        for key in required_delta_keys:
             if key not in deltas:
                 failures.append(f"{tag}: {key} delta is missing")
             elif _integer(deltas.get(key)) <= 0:
@@ -2714,14 +2717,22 @@ def _validate_hybrid_ssm_tq4_hit(
                 f"{tag}: block-disk hit delta={disk_hits} is below "
                 f"reconstructed disk_blocks={disk_blocks}"
             )
-        tq_native_blocks = _integer(execution.get("tq_native_blocks"))
         tq_native_hits = _integer(
             deltas.get("block_disk_cache.tq_native_hits")
         )
-        if tq_native_blocks > 0 and tq_native_hits < tq_native_blocks:
+        if require_tq4:
+            tq_native_blocks = _integer(execution.get("tq_native_blocks"))
+            if tq_native_blocks > 0 and tq_native_hits < tq_native_blocks:
+                failures.append(
+                    f"{tag}: TQ-native hit delta={tq_native_hits} is below "
+                    f"reconstructed tq_native_blocks={tq_native_blocks}"
+                )
+        elif tq_native_hits > 0:
+            # Fail closed: a TQ-native record hitting on an exact-KV serve
+            # means two codecs share the token-prefix hash space.
             failures.append(
-                f"{tag}: TQ-native hit delta={tq_native_hits} is below "
-                f"reconstructed tq_native_blocks={tq_native_blocks}"
+                f"{tag}: TQ-native hit delta={tq_native_hits} observed on an "
+                "exact-KV (storage-quant OFF) serve"
             )
     return failures
 

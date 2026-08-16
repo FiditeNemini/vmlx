@@ -75,4 +75,23 @@ def register_dots3_note_runtime() -> bool:
     logger.info(
         "Registered source-owned dots3_note runtime under mlx_vlm.models.dots3_note"
     )
+    _register_cache_class()
     return True
+
+
+def _register_cache_class() -> None:
+    """Expose Dots3LatentCache on mlx_lm's cache namespace.
+
+    The prefix-cache restore path resolves cumulative cache classes by name
+    via ``getattr(mlx_lm.models.cache, class_name)``; without this the
+    stored dots3 latent state can never be reconstructed.
+    """
+    try:
+        import mlx_lm.models.cache as _cache_mod
+
+        from mlx_vlm.models.dots3_note.language import Dots3LatentCache
+
+        if getattr(_cache_mod, "Dots3LatentCache", None) is not Dots3LatentCache:
+            setattr(_cache_mod, "Dots3LatentCache", Dots3LatentCache)
+    except Exception as exc:  # pragma: no cover - registration best-effort
+        logger.warning("Dots3LatentCache cache-class registration failed: %s", exc)

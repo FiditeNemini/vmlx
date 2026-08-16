@@ -111,9 +111,56 @@ class Dots3LatentCache:
                 self.k_pe = self.k_pe[:, :, -keep_min:]
         return fetched
 
+    # ---- prefix-cache store/restore protocol ---------------------------
+    # The MLLM extractor requires state + meta_state; the presence of a
+    # ``.cache`` LIST routes it down the cumulative (SSM-style) branch,
+    # which skips GQA-shape normalization (our arrays are latent streams,
+    # not per-head K/V) and stores the whole state in the LAST block —
+    # restored on exact prefix matches, the multiturn pattern.
+
+    _EMPTY = None  # lazy shared empty placeholder for absent idx_k
+
+    @property
+    def cache(self):
+        return [self.latent, self.k_pe, self.idx_k]
+
     @property
     def state(self):
-        return self.latent, self.k_pe
+        empty = mx.zeros((0,), dtype=mx.bfloat16)
+        return (
+            self.latent if self.latent is not None else empty,
+            self.k_pe if self.k_pe is not None else empty,
+            self.idx_k if self.idx_k is not None else empty,
+        )
+
+    @state.setter
+    def state(self, value):
+        latent, k_pe, idx_k = value
+
+        def _real(a):
+            return a if a is not None and getattr(a, "size", 0) else None
+
+        self.latent = _real(latent)
+        self.k_pe = _real(k_pe)
+        self.idx_k = _real(idx_k)
+
+    @property
+    def meta_state(self):
+        return (str(self.offset), str(self.window if self.window else ""))
+
+    @meta_state.setter
+    def meta_state(self, value):
+        offset, window = value
+        self.offset = int(offset)
+        self.window = int(window) if str(window) else None
+
+    @classmethod
+    def from_state(cls, state, meta_state):
+        obj = cls()
+        obj.state = state
+        if meta_state:
+            obj.meta_state = meta_state
+        return obj
 
 
 def _sliding_causal_mask(

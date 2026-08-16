@@ -8560,6 +8560,15 @@ class MLLMBatchGenerator:
                 try:
                     if trace is not None:
                         trace.start("forward")
+                    logger.info(
+                        "MLLM prefill cache-in for %s: layer0=%s offset=%s "
+                        "layers=%d cached_tokens=%s",
+                        req.request_id,
+                        type(req_cache[0]).__name__ if req_cache else None,
+                        getattr(req_cache[0], "offset", None) if req_cache else None,
+                        len(req_cache or []),
+                        getattr(req, "_cached_tokens", None),
+                    )
                     logits = self._run_vision_encoding(req, cache=req_cache)
                     from .utils.turboquant_config import turboquant_cache_telemetry
 

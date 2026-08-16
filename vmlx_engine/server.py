@@ -21116,10 +21116,16 @@ async def create_response(
         model_key=_model_path or _model_name or request.model,
         enable_thinking=request.enable_thinking,
     )
+    # Mint the response id BEFORE the effort policy (mirrors the chat route):
+    # only the policy knows whether a coercion happened, and the finalize
+    # surfaces (non-stream ResponsesObject / stream terminal snapshot) pop the
+    # substitution record by this id. Both branches below reuse this id.
+    response_id = f"resp_{uuid.uuid4().hex[:12]}"
     _apply_stamped_effort_policy(
         chat_kwargs,
         _ct_kwargs,
         model_key=_model_path or _model_name or request.model,
+        request_id=response_id,
     )
 
     # DSV4 rail-policy + reasoning_effort handling — REAL /v1/responses path.
@@ -21441,15 +21447,15 @@ async def create_response(
                 request,
                 fastapi_request,
                 history_messages=history_messages,
+                response_id=response_id,
                 **chat_kwargs,
             ),
             media_type="text/event-stream",
         )
 
-    # Non-streaming response
+    # Non-streaming response (response_id was minted before the effort policy)
     start_time = time.perf_counter()
     timeout = request.timeout if request.timeout is not None else _default_timeout
-    response_id = f"resp_{uuid.uuid4().hex[:12]}"
 
     # Responses parity with Chat: only an explicit max_thinking_tokens may
     # reserve output for the direct-answer stage.
@@ -22134,6 +22140,10 @@ async def create_response(
             if hasattr(_item, "status"):
                 _item.status = _response_terminal.item_status
 
+    # Pop the effort-substitution record minted by the pre-policy route id
+    # (additive field; None when no coercion happened for this request).
+    from vmlx_engine.context_limits import pop_effort_substitution as _ns_pop_effort
+
     response_obj = ResponsesObject(
         id=response_id,
         model=request.model,
@@ -22142,6 +22152,7 @@ async def create_response(
         usage=_get_responses_usage(output),
         previous_response_id=request.previous_response_id,
         incomplete_details=_response_terminal.incomplete_details,
+        effort_substitution=_ns_pop_effort(str(response_id)),
         warnings=_merge_responses_warnings(
             _chain_warnings_for_previous_response_id(request.previous_response_id),
             _current_response_warnings_for_reasoning_only(
@@ -24893,6 +24904,7 @@ async def stream_responses_api(
     request: ResponsesRequest,
     fastapi_request: Request | None = None,
     history_messages: list | None = None,
+    response_id: str | None = None,
     **kwargs,
 ) -> AsyncIterator[str]:
     """Stream response in OpenAI Responses API SSE format.
@@ -24900,8 +24912,12 @@ async def stream_responses_api(
     Streams text deltas incrementally for real-time display. If tool call
     markers are detected mid-stream, switches to buffered mode and emits
     structured function_call events at the end.
+
+    ``response_id`` accepts the route-minted id (minted BEFORE the stamped
+    effort policy so the substitution registry keys match); direct callers
+    without one get a fresh mint.
     """
-    response_id = f"resp_{uuid.uuid4().hex[:12]}"
+    response_id = response_id or f"resp_{uuid.uuid4().hex[:12]}"
     kwargs["request_id"] = response_id
     kwargs.setdefault(
         "max_tokens",
@@ -26997,6 +27013,11 @@ async def stream_responses_api(
         _dropped_tc_diagnostics or None,
     )
 
+    # Effort substitution rides the terminal snapshot additively (chat-stream
+    # parity). Pop, not peek — this snapshot builds exactly once per stream.
+    from vmlx_engine.context_limits import pop_effort_substitution as _pop_effort
+
+    _effort_record = _pop_effort(str(response_id))
     completed_response = {
         "id": response_id,
         "object": "response",
@@ -27006,6 +27027,7 @@ async def stream_responses_api(
         "output_text": display_text,
         "output": all_output_items,
         **_resp_extra,
+        **({"effort_substitution": _effort_record} if _effort_record else {}),
         **({"error": _required_tool_error} if _required_tool_error else {}),
         **({"warnings": _stream_warnings} if _stream_warnings else {}),
         "usage": {

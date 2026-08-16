@@ -11,6 +11,7 @@ These models define the request and response schemas for:
 
 import time
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
@@ -1100,8 +1101,15 @@ class ResponsesObject(BaseModel):
     ] = Field(default_factory=list)
     usage: ResponsesUsage = Field(default_factory=ResponsesUsage)
     previous_response_id: str | None = None
-    incomplete_details: dict[str, str] | None = None
+    # Values are not uniformly strings: the length terminal attaches a nested
+    # context_exhaustion record (dict of ints) next to the spec "reason" key.
+    # dict[str, str] rejected that nested dict at pydantic validation on the
+    # NON-stream door only (the stream terminal is a raw dict).
+    incomplete_details: dict[str, Any] | None = None
     error: dict | None = None
+    # Additive (#175): set when an out-of-set reasoning_effort was coerced to a
+    # stamped tier — {requested_effort, effective_effort, stamped_levels}.
+    effort_substitution: dict | None = None
     # Non-fatal warnings surfaced to the client. Set when the response is
     # technically valid but a chain/coherence/cache-prefix risk applies — e.g.,
     # `previous_response_id` chained a prior response that produced reasoning

@@ -105,3 +105,76 @@ def test_unstamped_bundle_is_untouched(monkeypatch):
     server._apply_stamped_effort_policy(chat, ct, model_key="/tmp/bundle")
     assert ct["reasoning_effort"] == "high"
     assert "reasoning_effort" not in chat
+
+
+# ---------------------------------------------------------------------------
+# Responses-route surface (#175): the non-stream door serializes through
+# pydantic, so the additive records must survive model validation. The
+# nested-incomplete_details pin is a regression test — dict[str, str]
+# rejected the length terminal's context_exhaustion record on the
+# NON-stream door only (the stream terminal snapshot is a raw dict).
+# ---------------------------------------------------------------------------
+
+
+def test_responses_object_accepts_nested_context_exhaustion():
+    from vmlx_engine.api.models import ResponsesObject
+
+    obj = ResponsesObject(
+        model="m",
+        status="incomplete",
+        incomplete_details={
+            "reason": "max_output_tokens",
+            "context_exhaustion": {
+                "prompt_tokens": 5,
+                "requested_max_tokens": 100,
+                "clamped_max_tokens": 50,
+                "declared_context_tokens": 55,
+            },
+        },
+    )
+    dumped = obj.model_dump()
+    assert (
+        dumped["incomplete_details"]["context_exhaustion"]["clamped_max_tokens"]
+        == 50
+    )
+
+
+def test_responses_object_carries_effort_substitution_additively():
+    from vmlx_engine.api.models import ResponsesObject
+
+    record = {
+        "requested_effort": "high",
+        "effective_effort": "medium",
+        "stamped_levels": ["low", "medium", "xhigh"],
+    }
+    obj = ResponsesObject(model="m", effort_substitution=record)
+    assert obj.model_dump()["effort_substitution"] == record
+    # default stays None so unaffected responses are byte-stable
+    assert ResponsesObject(model="m").effort_substitution is None
+
+
+def test_policy_with_request_id_feeds_responses_finalize_pop(monkeypatch):
+    from vmlx_engine.context_limits import pop_effort_substitution
+
+    monkeypatch.setattr(
+        server,
+        "_stamped_reasoning_effort_contract",
+        lambda _p: (("low", "medium", "xhigh"), "medium"),
+    )
+    monkeypatch.setattr(server, "_is_hy3_model", lambda _k: False)
+    monkeypatch.setattr(
+        server, "_model_family_for_defaults", lambda _k="": "qwen3_8"
+    )
+    chat, ct = {}, {"reasoning_effort": "high"}
+    server._apply_stamped_effort_policy(
+        chat, ct, model_key="/tmp/bundle", request_id="resp_deadbeef0001"
+    )
+    assert ct["reasoning_effort"] == "medium"
+    record = pop_effort_substitution("resp_deadbeef0001")
+    assert record == {
+        "requested_effort": "high",
+        "effective_effort": "medium",
+        "stamped_levels": ["low", "medium", "xhigh"],
+    }
+    # pop cleared it — the finalize surface consumes exactly once
+    assert pop_effort_substitution("resp_deadbeef0001") is None

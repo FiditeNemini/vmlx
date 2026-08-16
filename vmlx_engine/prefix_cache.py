@@ -2633,6 +2633,50 @@ class BlockAwarePrefixCache:
         self._allowed_n_kv_heads = allowed
         return allowed
 
+    def _touch_disk_chain_access(
+        self,
+        tokens: List[int],
+        num_tokens: int,
+        cache_extra_keys: Optional[Any] = None,
+    ) -> None:
+        """Refresh L2 LRU access for a chain served from paged RAM.
+
+        A paged/L1 hit never reads the disk store, so the chain's L2 rows
+        keep their store-time access order (the L1-masking class). Under a
+        bounded L2 the global LRU then ranks the HOT conversation's disk
+        backing as cold as stale data and evicts it — measured live: two
+        filler bursts swept a fully readable 382-block recent chain in the
+        paged lane while the disk-only lane (whose reads DO touch L2) kept
+        it. Best-effort: non-blocking enqueues, drops under queue pressure
+        are harmless (LRU freshness, not correctness).
+        """
+        disk_store = getattr(self.paged_cache, "_disk_store", None)
+        if disk_store is None:
+            return
+        touch = getattr(disk_store, "_queue_access_update", None)
+        if not callable(touch):
+            return
+        num_full = max(0, int(num_tokens)) // self.block_size
+        if num_full <= 0:
+            return
+        try:
+            from .paged_cache import compute_block_hash as _compute_chain_hash
+
+            parent_hash = None
+            for idx in range(num_full):
+                start = idx * self.block_size
+                parent_hash = _compute_chain_hash(
+                    parent_hash,
+                    tokens[start : start + self.block_size],
+                    extra_keys=cache_extra_keys,
+                )
+                touch(parent_hash.hex())
+        except Exception:
+            logger.debug(
+                "L2 access touch for a RAM-served chain failed (best-effort)",
+                exc_info=True,
+            )
+
     def fetch_cache(
         self,
         request_id: str,
@@ -2915,6 +2959,11 @@ class BlockAwarePrefixCache:
                 last_access=time.time(),
                 cache_type="assistant",
             )
+            self._touch_disk_chain_access(
+                tokens,
+                block_table.num_tokens,
+                cache_extra_keys,
+            )
             return block_table, remaining
 
         # Try prefix index for longer matches
@@ -3047,6 +3096,11 @@ class BlockAwarePrefixCache:
                 cache_data=None,
                 last_access=time.time(),
                 cache_type="assistant",
+            )
+            self._touch_disk_chain_access(
+                tokens,
+                block_table.num_tokens,
+                cache_extra_keys,
             )
             return block_table, remaining
 

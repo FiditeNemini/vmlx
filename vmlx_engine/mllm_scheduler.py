@@ -5268,8 +5268,8 @@ class MLLMScheduler:
                 )
                 if isinstance(_admission_record, dict) and _admission_record:
                     stats["last_cache_execution"] = dict(_admission_record)
-                elif not getattr(self, "_lce_gap_logged", False):
-                    self._lce_gap_logged = True
+                elif getattr(self, "_lce_gap_logged", 0) < 5:
+                    self._lce_gap_logged = getattr(self, "_lce_gap_logged", 0) + 1
                     logger.info(
                         "MLLM get_stats: no generator lce and no admission "
                         "record (generator=%s, scheduler id=%s)",

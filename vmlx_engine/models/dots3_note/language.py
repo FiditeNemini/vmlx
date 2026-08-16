@@ -78,7 +78,18 @@ class Dots3LatentCache:
         self.window = window
         self.latent: Optional[mx.array] = None
         self.k_pe: Optional[mx.array] = None
+        # Indexer key stream (full/DSA layers only). Unbounded and ordered —
+        # selection needs every past position addressable by its global
+        # index. bf16: 256 B/token/full-layer (~1.7 GB at 512K).
+        self.idx_k: Optional[mx.array] = None
         self.offset = 0
+
+    def update_indexer(self, idx_k: mx.array) -> mx.array:
+        if self.idx_k is None:
+            self.idx_k = idx_k
+        else:
+            self.idx_k = mx.concatenate([self.idx_k, idx_k], axis=1)
+        return self.idx_k
 
     def update_and_fetch(
         self, latent: mx.array, k_pe: mx.array
@@ -127,16 +138,37 @@ def _sliding_causal_mask(
 
 
 class Dots3Indexer(nn.Module):
-    """DSA indexer projections (full/DSA layers only).
+    """DSA indexer (full/DSA layers only) — inference selection path.
 
-    Weights must load so the bundle's strict weight map resolves; the
-    top-2048 selection itself engages only past ``index_topk`` (task #199).
-    ``k_norm`` is a LayerNorm WITH bias run in fp32 — the checkpoint ships a
-    ``.bias`` tensor; RMSNorm here is wrong.
+    Semantics ported from the PR reference (SGLang default fusion path):
+
+    - indexer query = ``wq_b(q_lora)`` per head; indexer key =
+      ``k_norm(wk(hidden))`` where ``k_norm`` is a LayerNorm WITH BIAS run
+      in fp32 (the checkpoint ships a ``.bias`` tensor; RMSNorm is wrong);
+    - 🚨 the ROPE slice comes FIRST in the indexer head layout
+      ([rope | nope]) — the OPPOSITE of the main attention split — and is
+      rotated with the full-attention theta, interleaved/GPT-J form;
+    - per-head scores are ReLU'd then combined with
+      ``weights_proj(hidden) * scale * n_heads**-0.5``, causal-masked, and
+      the top ``index_topk`` key positions are selected per query.
+
+    Deviation, documented: the CUDA reference quantizes q/k to fp8-e4m3
+    (per-tensor amax) for SCORING only, which can shift which near-tie
+    positions are selected. MLX has no e4m3 dtype, so scoring here runs
+    fp32 — internally consistent (cold and warm paths select identically),
+    but not bit-matched to vendor CUDA serving.
     """
+
+    query_chunk_size = 1024
 
     def __init__(self, config: TextConfig):
         super().__init__()
+        self.n_heads = config.index_n_heads
+        self.head_dim = config.index_head_dim
+        self.rope_dim = config.qk_rope_head_dim
+        self.index_topk = config.index_topk
+        self.rope_theta = config.rope_theta
+        self.scale = self.head_dim ** -0.5
         self.wq_b = nn.Linear(
             config.q_lora_rank,
             config.index_n_heads * config.index_head_dim,
@@ -147,6 +179,74 @@ class Dots3Indexer(nn.Module):
             config.hidden_size, config.index_n_heads, bias=False
         )
         self.k_norm = nn.LayerNorm(config.index_head_dim, bias=True)
+
+    def encode_keys(self, hidden: mx.array, past: int) -> mx.array:
+        """[B, S, H] -> roped indexer keys [B, S, head_dim] (bf16)."""
+        key = self.wk(hidden)
+        key = self.k_norm(key.astype(mx.float32))
+        k_rope = key[..., : self.rope_dim][:, None]  # [B,1,S,rope]
+        k_nope = key[..., self.rope_dim :]
+        k_rope = mx.fast.rope(
+            k_rope,
+            self.rope_dim,
+            traditional=True,
+            base=self.rope_theta,
+            scale=1.0,
+            offset=past,
+        )[:, 0]
+        return mx.concatenate([k_rope, k_nope], axis=-1).astype(mx.bfloat16)
+
+    def topk_indices(
+        self,
+        hidden: mx.array,
+        q_lora: mx.array,
+        keys: mx.array,
+        past: int,
+    ) -> mx.array:
+        """Select per-query key positions. Returns int32 [B, S, K]."""
+        B, S, _ = hidden.shape
+        total = keys.shape[1]
+        query = self.wq_b(q_lora).reshape(B, S, self.n_heads, self.head_dim)
+        q_rope = query[..., : self.rope_dim].transpose(0, 2, 1, 3)
+        q_nope = query[..., self.rope_dim :]
+        q_rope = mx.fast.rope(
+            q_rope,
+            self.rope_dim,
+            traditional=True,
+            base=self.rope_theta,
+            scale=1.0,
+            offset=past,
+        ).transpose(0, 2, 1, 3)
+        query = mx.concatenate([q_rope, q_nope], axis=-1).astype(mx.float32)
+        # [B, S, n_heads, 1] combining weights
+        weights = (
+            self.weights_proj(hidden).astype(mx.float32)
+            * self.scale
+            * self.n_heads ** -0.5
+        )
+
+        keys_f = keys.astype(mx.float32)  # [B, total, D]
+        k_positions = mx.arange(total)[None, None, :]
+        topk = min(self.index_topk, total)
+        # Per-head scores materialize [s_chunk, n_heads, total] in fp32 —
+        # bound the transient to ~2 GB by shrinking the query chunk as the
+        # key stream grows (64-head, 100K-key scoring at chunk 1024 would
+        # otherwise transiently need ~26 GB).
+        element_budget = 500_000_000
+        chunk_size = max(1, min(self.query_chunk_size, element_budget // (self.n_heads * max(total, 1))))
+        chunks = []
+        for start in range(0, S, chunk_size):
+            stop = min(start + chunk_size, S)
+            q_chunk = query[:, start:stop]  # [B, s, h, D]
+            # [B, s, h, total]
+            scores = mx.einsum("bshd,btd->bsht", q_chunk, keys_f)
+            scores = mx.maximum(scores, 0.0)
+            combined = (scores * weights[:, start:stop, :, None]).sum(axis=2)
+            q_pos = (past + mx.arange(start, stop))[None, :, None]
+            combined = mx.where(k_positions > q_pos, -mx.inf, combined)
+            idx = mx.argpartition(-combined, kth=topk - 1, axis=-1)[..., :topk]
+            chunks.append(idx.astype(mx.int32))
+        return mx.concatenate(chunks, axis=1)
 
 
 class Dots3MLAAttention(nn.Module):
@@ -257,7 +357,7 @@ class Dots3MLAAttention(nn.Module):
             cache is None and _absorb_enabled()
         ):
             out = self._absorbed_attention(
-                q_nope, q_pe, kv_a, k_pe, cache, mask, S
+                q_nope, q_pe, kv_a, k_pe, cache, mask, S, x, q_lora, past
             )
         else:
             out = self._materialized_attention(
@@ -306,7 +406,7 @@ class Dots3MLAAttention(nn.Module):
         return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
 
     def _absorbed_attention(
-        self, q_nope, q_pe, kv_a, k_pe, cache, mask, S
+        self, q_nope, q_pe, kv_a, k_pe, cache, mask, S, x=None, q_lora=None, past=0
     ) -> mx.array:
         """Latent-cache path: fold kv_b into the query/output sides.
 
@@ -323,8 +423,19 @@ class Dots3MLAAttention(nn.Module):
         w_nope, w_v = self._kb_factors()
 
         latent_kv = kv_a[:, None]  # [B, 1, S, rank]
+        idx_keys = None
+        has_indexer = hasattr(self, "indexer") and x is not None
         if cache is not None:
             latent_kv, k_pe = cache.update_and_fetch(latent_kv, k_pe)
+            if has_indexer:
+                # Full/DSA layers append their indexer key stream on EVERY
+                # call — a stream missing early tokens cannot select them
+                # once the context crosses the dense-equivalence bound.
+                idx_keys = cache.update_indexer(
+                    self.indexer.encode_keys(x, past)
+                )
+        elif has_indexer:
+            idx_keys = self.indexer.encode_keys(x, past)
 
         # [B,h,S,nope] @ [1,h,nope,rank] -> [B,h,S,rank]
         q_eff = mx.matmul(q_nope, w_nope[None].astype(q_nope.dtype))
@@ -332,8 +443,34 @@ class Dots3MLAAttention(nn.Module):
         keys = mx.concatenate([latent_kv, k_pe], axis=-1)
         values = latent_kv
 
-        if mask is None:
-            eff_past = keys.shape[2] - S
+        total = keys.shape[2]
+        if (
+            has_indexer
+            and idx_keys is not None
+            and total > self.indexer.index_topk
+        ):
+            # DSA engages: per-query top-k selection replaces plain causal.
+            # (At total <= index_topk the top-k selects every causal
+            # position, so dense attention is mathematically identical and
+            # the scorer is skipped.)
+            sel = self.indexer.topk_indices(x, q_lora, idx_keys, past)
+            B = x.shape[0]
+            mask = mx.full((B, S, total), -mx.inf, dtype=mx.float32)
+            mask = mx.put_along_axis(
+                mask,
+                sel,
+                mx.zeros(sel.shape, dtype=mx.float32),
+                axis=-1,
+            )
+            # topk over causally -inf'd scores can still return future
+            # positions when fewer than K valid ones exist — re-mask causal
+            # so the scatter cannot unmask the future.
+            q_pos = (past + mx.arange(S))[None, :, None]
+            k_pos = mx.arange(total)[None, None, :]
+            mask = mx.where(k_pos > q_pos, -mx.inf, mask)
+            mask = mask[:, None]  # [B, 1, S, total]
+        elif mask is None:
+            eff_past = total - S
             mask = _sliding_causal_mask(
                 S, eff_past, g.sliding_window, mx.float32
             )
@@ -541,11 +678,18 @@ class Dots3NoteModel(nn.Module):
         if cache is not None and cache[0] is not None:
             past = int(cache[0].offset)
         seq_len = h.shape[1]
-        if past + seq_len > self.config.index_topk:
+        absorbed = (
+            cache is None or isinstance(cache[0], Dots3LatentCache)
+            if cache is not None
+            else _absorb_enabled()
+        )
+        if not absorbed and past + seq_len > self.config.index_topk:
+            # The materialized stage-A path has no indexer stream; past the
+            # dense-equivalence bound it would silently attend wrong.
             raise ValueError(
                 f"dots3_note context {past + seq_len} exceeds the DSA "
-                f"dense-equivalence bound ({self.config.index_topk}); the "
-                "sparse indexer path is not wired yet"
+                f"dense-equivalence bound ({self.config.index_topk}) on the "
+                "materialized (VMLX_DOTS3_MLA_ABSORB=0) path"
             )
 
         if cache is None:

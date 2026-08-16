@@ -174,9 +174,18 @@ class Model(nn.Module):
         apply here; adding it is the trap, not omitting it.
         """
         out: Dict[str, Any] = {}
+        conv_keys = (
+            "vision_encoder.patch_embed.proj.weight",
+            "audio_encoder.dots_encoder.speech_encoder.conv2d1.weight",
+            "audio_encoder.dots_encoder.speech_encoder.conv2d2.weight",
+            "audio_encoder.dots_encoder.speech_encoder.conv2d3.weight",
+        )
         for key, value in weights.items():
             if key.startswith("model.") or key.startswith("lm_head."):
                 out["language_model." + key] = value
+            elif key in conv_keys and getattr(value, "ndim", 0) == 4:
+                # Checkpoint convs are OIHW; MLX Conv2d wants OHWI.
+                out[key] = value.transpose(0, 2, 3, 1)
             else:
                 out[key] = value
         return out

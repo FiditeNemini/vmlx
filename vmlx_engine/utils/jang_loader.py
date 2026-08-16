@@ -1242,17 +1242,37 @@ def _build_dots3_note_vlm_processor(path: Path, eos_token_id=None, model=None):
     (<|imgpad|>, id 151660) and audio through <|audio_comp_pad|> (151720);
     a text-only processor makes the model confabulate instead of erroring.
     """
+    import json as _json
+
     from transformers import AutoTokenizer
 
     from ..models.dots3_note_register import register_dots3_note_runtime
 
     register_dots3_note_runtime()
     from mlx_vlm.models.dots3_note.processor import (  # noqa: WPS433
+        Dots3NoteImageProcessor,
         Dots3NoteProcessor,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(str(path), trust_remote_code=True)
-    processor = Dots3NoteProcessor(tokenizer, model_path=Path(path))
+
+    # Honour the bundle's declared preprocessing (pixel bounds, CLIP
+    # mean/std) rather than class defaults.
+    image_kwargs: dict[str, Any] = {}
+    preprocessor_config = Path(path) / "preprocessor_config.json"
+    if preprocessor_config.is_file():
+        try:
+            declared = _json.loads(preprocessor_config.read_text())
+            image_kwargs = dict(declared.get("vision_config") or {})
+        except (OSError, ValueError):
+            pass
+    for unusable in ("image_processor_type", "processor_class"):
+        image_kwargs.pop(unusable, None)
+
+    processor = Dots3NoteProcessor(
+        tokenizer,
+        image_processor=Dots3NoteImageProcessor(**image_kwargs),
+    )
     _attach_vlm_detokenizer_and_stopping(processor, path, eos_token_id=eos_token_id)
     return processor
 

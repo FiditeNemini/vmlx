@@ -128,11 +128,14 @@ def test_chunked_prefill_matches_single_shot(model):
     assert float(mx.abs(one[:, -4:] - out).max()) < 1e-4
 
 
-def test_context_bound_refuses_loudly(model):
+def test_context_bound_refuses_loudly_on_materialized_path(model):
+    # The absorbed path handles >index_topk via the DSA scorer; only the
+    # materialized (VMLX_DOTS3_MLA_ABSORB=0) path lacks an indexer stream
+    # and must refuse rather than silently attend wrong.
     cfg = model.text_config
     ids = mx.array([[1] * (cfg.index_topk + 1)])
     with pytest.raises(ValueError, match="DSA"):
-        model(ids, cache=_latent_caches(model))
+        model(ids, cache=_materialized_caches(model))
 
 
 def test_sliding_cache_trim_keeps_window(model):
@@ -151,3 +154,62 @@ def test_sliding_cache_trim_keeps_window(model):
         assert cache.latent.shape[2] <= 5 + 4
     finally:
         Dots3LatentCache.trim_step = 256
+
+
+def test_dsa_selection_prefix_matches_dense(model):
+    # index_topk=8 on a 12-token prompt: queries at positions 0..7 have <= 8
+    # causal keys, so selection covers ALL of them and their rows must equal
+    # the dense result exactly — through every layer (causality bounds the
+    # reachable set). Later rows drop their lowest-scoring key and may
+    # legitimately differ.
+    cfg = model.text_config
+    old = cfg.index_topk
+    for layer in model.model.layers:
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None and hasattr(attn, "indexer"):
+            attn.indexer.index_topk = 8
+    cfg.index_topk = 8
+    try:
+        ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8, 11, 4, 61, 2]])
+        sparse = model(ids, cache=_latent_caches(model))
+        cfg.index_topk = 4096
+        for layer in model.model.layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and hasattr(attn, "indexer"):
+                attn.indexer.index_topk = 4096
+        dense = model(ids, cache=_latent_caches(model))
+        assert float(mx.abs(sparse[:, :8] - dense[:, :8]).max()) < 1e-4
+        assert bool(mx.isfinite(sparse).all())
+    finally:
+        cfg.index_topk = old
+        for layer in model.model.layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and hasattr(attn, "indexer"):
+                attn.indexer.index_topk = old
+
+
+def test_dsa_decode_past_bound_runs(model):
+    cfg = model.text_config
+    old = cfg.index_topk
+    cfg.index_topk = 6
+    for layer in model.model.layers:
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None and hasattr(attn, "indexer"):
+            attn.indexer.index_topk = 6
+    try:
+        caches = _latent_caches(model)
+        out = model(mx.array([[3, 17, 42, 9, 55, 20]]), cache=caches)
+        for tok in (31, 8, 11, 4):
+            out = model(mx.array([[tok]]), cache=caches)
+            assert bool(mx.isfinite(out).all())
+        # The full-layer indexer stream covered every token.
+        full_layers = [
+            i for i in range(cfg.num_hidden_layers) if not cfg.is_sliding(i)
+        ]
+        assert caches[full_layers[0]].idx_k.shape[1] == 10
+    finally:
+        cfg.index_topk = old
+        for layer in model.model.layers:
+            attn = getattr(layer, "self_attn", None)
+            if attn is not None and hasattr(attn, "indexer"):
+                attn.indexer.index_topk = old

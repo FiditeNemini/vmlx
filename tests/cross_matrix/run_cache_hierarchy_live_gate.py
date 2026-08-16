@@ -2630,14 +2630,38 @@ def _validate_hybrid_ssm_tq4_hit(
         failures.append(f"{tag}: SSM companion lookup source is not attested")
 
     detail = str(execution.get("cache_detail") or "")
-    if str(execution.get("selection") or "").lower() != "paged":
-        failures.append(f"{tag}: hybrid SSM proof did not select paged cache")
-    if "paged+ssm" not in detail.lower():
-        failures.append(f"{tag}: cache_detail does not identify paged+ssm")
-    if "tq-native" not in detail.lower():
-        failures.append(f"{tag}: cache_detail does not identify native TQ blocks")
-    if _integer(execution.get("tq_native_blocks")) <= 0:
-        failures.append(f"{tag}: execution tq_native_blocks must be positive")
+    if require_paged:
+        if str(execution.get("selection") or "").lower() != "paged":
+            failures.append(
+                f"{tag}: hybrid SSM proof did not select paged cache"
+            )
+        if "paged+ssm" not in detail.lower():
+            failures.append(f"{tag}: cache_detail does not identify paged+ssm")
+    else:
+        # Disk-only lane: the hybrid hit must attest the block-disk selection
+        # with its SSM companion — a paged selection here would mean the lane
+        # under test is not the one that served.
+        if str(execution.get("selection") or "").lower() not in {
+            "block-disk",
+            "paged",
+        }:
+            failures.append(
+                f"{tag}: hybrid SSM proof selection is neither block-disk "
+                "nor paged"
+            )
+        if "+ssm" not in detail.lower():
+            failures.append(
+                f"{tag}: cache_detail does not identify an SSM-typed hit"
+            )
+    if require_tq4:
+        if "tq-native" not in detail.lower():
+            failures.append(
+                f"{tag}: cache_detail does not identify native TQ blocks"
+            )
+        if _integer(execution.get("tq_native_blocks")) <= 0:
+            failures.append(
+                f"{tag}: execution tq_native_blocks must be positive"
+            )
     if execution.get("dequantized") is not True:
         failures.append(f"{tag}: dequantized is not true")
     if execution.get("dequantization_ok") is not True:
@@ -5804,6 +5828,23 @@ def main() -> int:
         raw_path.write_text(raw)
         summary = _summarize(raw, elapsed, code)
         health = _json_get(f"{args.base_url}/health", args.timeout)
+        # The engine publishes the request-correlated cache-execution record
+        # at finish processing, which can trail the SSE terminal by a
+        # scheduler step — a single immediate read races it and captures the
+        # PRIOR request's record (or none on the first request). Poll briefly
+        # for the correlated record; keep the last read either way so a
+        # genuine absence stays observable.
+        _row_response_id = str(summary.get("response_id") or "")
+        _lce_deadline = time.monotonic() + 3.0
+        while _row_response_id and time.monotonic() < _lce_deadline:
+            _lce = (health.get("scheduler") or {}).get("last_cache_execution")
+            if (
+                isinstance(_lce, dict)
+                and str(_lce.get("request_id") or "") == _row_response_id
+            ):
+                break
+            time.sleep(0.25)
+            health = _json_get(f"{args.base_url}/health", args.timeout)
         health_after = health
         health_path = args.artifact_dir / f"{tag}.health.json"
         health_path.write_text(json.dumps(health, indent=2, sort_keys=True) + "\n")

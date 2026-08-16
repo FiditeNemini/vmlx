@@ -1254,3 +1254,26 @@ def test_top_level_reasoning_effort_passthrough_matches_other_dialects():
         chat_template_kwargs={"reasoning_effort": "low"},
     )
     assert to_chat_completion(req3).reasoning_effort == "max"
+
+
+def test_messages_route_forwards_effort_through_the_shared_helper():
+    """#185 second layer: the adapter delivered reasoning_effort to the
+    route, which then dropped it — the effort-forwarding block existed as
+    inline copies on the chat and responses routes only. One shared helper
+    now serves all three; the messages route must call it."""
+    import inspect
+
+    from vmlx_engine import server
+
+    assert callable(server._forward_reasoning_effort_kwargs)
+    src = inspect.getsource(server.create_anthropic_message)
+    assert "_forward_reasoning_effort_kwargs(" in src
+
+    gen: dict = {}
+    ct: dict = {}
+    server._forward_reasoning_effort_kwargs(gen, ct, "low")
+    assert gen["reasoning_effort"] == "low"
+    assert ct["reasoning_effort"] == "low"
+    assert ct["thinking_budget"] == 1024
+    server._forward_reasoning_effort_kwargs(gen, ct, None)  # no-op
+    assert gen["reasoning_effort"] == "low"

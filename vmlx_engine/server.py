@@ -5705,6 +5705,31 @@ _tool_call_parser_disabled_explicitly: bool = False
 _EFFORT_THINKING_BUDGET = {"low": 1024, "medium": 8192, "high": 32768, "max": 131072}
 
 
+def _forward_reasoning_effort_kwargs(
+    gen_kwargs: dict,
+    ct_kwargs: dict,
+    reasoning_effort: str | None,
+) -> None:
+    """Forward a requested reasoning_effort into generation + template kwargs.
+
+    Maps the effort tier to a template-side thinking_budget; output length
+    remains owned by explicit max_tokens, then bundle max_new_tokens. EVERY
+    dialect must route through this — /v1/messages missing this exact block
+    made the same logical request resolve effort None there while
+    chat/responses/ollama resolved the tier (#185, measured live on all
+    three qwen3.8 stamped tiers).
+    """
+    if reasoning_effort is None:
+        return
+    gen_kwargs["reasoning_effort"] = reasoning_effort
+    # Also inject into chat_template_kwargs so Jinja templates can access it
+    # (e.g., Mistral 4's [MODEL_SETTINGS]{"reasoning_effort":"high"} block).
+    ct_kwargs.setdefault("reasoning_effort", reasoning_effort)
+    budget = _EFFORT_THINKING_BUDGET.get(str(reasoning_effort).lower())
+    if budget:
+        ct_kwargs.setdefault("thinking_budget", budget)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """FastAPI lifespan for startup/shutdown events."""
@@ -14822,6 +14847,10 @@ async def create_anthropic_message(
         chat_req.enable_thinking = _et
         _ct_kwargs["enable_thinking"] = _et
 
+    _forward_reasoning_effort_kwargs(
+        _msg_kwargs, _ct_kwargs, chat_req.reasoning_effort
+    )
+
     # Auto-map enable_thinking → reasoning_effort for Mistral 4 (same as OpenAI path)
     if (
         _reasoning_parser
@@ -17974,18 +18003,9 @@ async def create_chat_completion(
         request.enable_thinking = _et
         _ct_kwargs["enable_thinking"] = _et
 
-    # Pass reasoning_effort if provided (for GPT-OSS and models that support thinking levels).
-    # Map it to template-side thinking_budget only; output length remains owned
-    # by explicit max_tokens/max_output_tokens, then bundle max_new_tokens.
-    if request.reasoning_effort is not None:
-        chat_kwargs["reasoning_effort"] = request.reasoning_effort
-        # Also inject into chat_template_kwargs so Jinja templates can access it
-        # (e.g., Mistral 4's [MODEL_SETTINGS]{"reasoning_effort":"high"} block).
-        _ct_kwargs.setdefault("reasoning_effort", request.reasoning_effort)
-        _effort_lower = request.reasoning_effort.lower()
-        _budget = _EFFORT_THINKING_BUDGET.get(_effort_lower)
-        if _budget:
-            _ct_kwargs.setdefault("thinking_budget", _budget)
+    _forward_reasoning_effort_kwargs(
+        chat_kwargs, _ct_kwargs, request.reasoning_effort
+    )
     if getattr(request, "max_thinking_tokens", None) is not None and request.enable_thinking is not False:
         _ct_kwargs["thinking_budget"] = int(request.max_thinking_tokens)
 
@@ -21199,18 +21219,9 @@ async def create_response(
         request.enable_thinking = _et
         _ct_kwargs["enable_thinking"] = _et
 
-    # Pass reasoning_effort if provided (for GPT-OSS and models that support thinking levels).
-    # Map it to template-side thinking_budget only; output length remains owned
-    # by explicit max_tokens/max_output_tokens, then bundle max_new_tokens.
-    if request.reasoning_effort is not None:
-        chat_kwargs["reasoning_effort"] = request.reasoning_effort
-        # Also inject into chat_template_kwargs so Jinja templates can access it
-        # (e.g., Mistral 4's [MODEL_SETTINGS]{"reasoning_effort":"high"} block).
-        _ct_kwargs.setdefault("reasoning_effort", request.reasoning_effort)
-        _effort_lower = request.reasoning_effort.lower()
-        _budget = _EFFORT_THINKING_BUDGET.get(_effort_lower)
-        if _budget:
-            _ct_kwargs.setdefault("thinking_budget", _budget)
+    _forward_reasoning_effort_kwargs(
+        chat_kwargs, _ct_kwargs, request.reasoning_effort
+    )
     if getattr(request, "max_thinking_tokens", None) is not None and request.enable_thinking is not False:
         _ct_kwargs["thinking_budget"] = int(request.max_thinking_tokens)
 

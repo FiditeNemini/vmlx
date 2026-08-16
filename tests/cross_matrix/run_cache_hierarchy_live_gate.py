@@ -5654,6 +5654,46 @@ def _run_store_evict_refault_scenario(
         if attestation_failures:
             break
 
+    recent_retouch_row = None
+    if paged_lane:
+        # Post-pressure re-touch: an idle chain's companion file legitimately
+        # ages out under sustained wall pressure (measured: a one-shot utime
+        # left it one tier older than seven filler bursts). A live user's
+        # LAST turn before shutdown re-stamps both the KV rows and the
+        # companion file; mirror that here so the restart-restore probe
+        # exercises the primary reuse path instead of a stored-then-idle
+        # shape LRU never promised to preserve.
+        recent_retouch_row, health_after = _run_response_observation(
+            base_url=base_url,
+            model=model,
+            tag="l2_recent_retouch",
+            prompt=prompts["recent_probe"],
+            expected_marker=f"CACHE-HIERARCHY-{nonce}-L2-RECENT-PROBE",
+            artifact_dir=artifact_dir,
+            timeout=timeout,
+            request_controls=request_controls,
+        )
+        rows.append(recent_retouch_row)
+        _retouch_lce = recent_retouch_row.get("last_cache_execution")
+        if (
+            not isinstance(_retouch_lce, dict)
+            or _retouch_lce.get("cache_outcome") != "hit"
+        ):
+            failures.append(
+                "store-evict-refault: paged-lane post-filler re-touch did "
+                "not hit the cache"
+            )
+        final_contract, _retouch_attest_failures = _fetch_prefix_attestation(
+            base_url=base_url,
+            model=model,
+            prompts=prompts,
+            pairs=pairs,
+            timeout=timeout,
+            health_attestation=health_attestation,
+            request_controls=request_controls,
+        )
+        failures.extend(_retouch_attest_failures)
+
     _write_path_free_attestation(
         artifact_dir,
         "l2_final_eviction",
@@ -5728,6 +5768,11 @@ def _run_store_evict_refault_scenario(
         "recent_touch_execution": (
             _path_free_execution(recent_touch_row)
             if recent_touch_row is not None
+            else None
+        ),
+        "recent_retouch_execution": (
+            _path_free_execution(recent_retouch_row)
+            if recent_retouch_row is not None
             else None
         ),
         "recent_access_ns_advanced_after_touch": (

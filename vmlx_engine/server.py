@@ -11686,6 +11686,28 @@ def _request_lifecycle_health_snapshot(
 _health_snapshot_cache: dict[str, Any] = {"result": None}
 
 
+def _live_last_cache_execution(scheduler: Any) -> dict[str, Any] | None:
+    """Cheap live read of the newest cache-execution record.
+
+    Pure attribute reads only — safe to call while requests are in flight
+    (unlike the full get_stats assembly, which can race the chunked-prefill
+    loop). Preference order matches get_stats: generator record, then the
+    MLLM admission record, then the text scheduler's own record.
+    """
+    if scheduler is None:
+        return None
+    for source in (
+        getattr(getattr(scheduler, "batch_generator", None), "_stats", None),
+        scheduler,
+    ):
+        for attr in ("last_cache_execution", "_admission_cache_execution",
+                     "_last_cache_execution"):
+            record = getattr(source, attr, None) if source is not None else None
+            if isinstance(record, dict) and record:
+                return dict(record)
+    return None
+
+
 def _health_status_value() -> str:
     if _standby_state:
         return f"standby_{_standby_state}"  # "standby_soft" or "standby_deep"
@@ -11727,6 +11749,18 @@ async def health():
         if isinstance(sched_block, dict):
             sched_block["num_running"] = num_running
             sched_block["num_waiting"] = num_waiting
+            # Request-correlated cache proofs need the CURRENT execution
+            # record, but this cached branch serves whenever a request is
+            # running or waiting — and a finished request lingers in
+            # `running` through its terminal cache cleanup, so pollers that
+            # read health right after a response saw the PRE-request
+            # snapshot (lce null on cold first requests, the prior
+            # request's record otherwise; proven live via the hierarchy
+            # gate on 32k chunked prefills). Overlay the live record — a
+            # cheap attribute read, no expensive stats assembly.
+            _live_lce = _live_last_cache_execution(scheduler_probe)
+            if _live_lce is not None:
+                sched_block["last_cache_execution"] = _live_lce
         result["health_gauges_cached"] = True
         return result
 

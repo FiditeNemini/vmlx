@@ -3337,10 +3337,14 @@ Examples:
     serve_parser.add_argument(
         "--ssm-state-cache-mb",
         type=int,
-        default=_env_int("VMLX_SSM_STATE_CACHE_MB", 512, "VMLINUX_SSM_STATE_CACHE_MB"),
+        default=_env_int("VMLX_SSM_STATE_CACHE_MB", 1536, "VMLINUX_SSM_STATE_CACHE_MB"),
         help="Approximate memory budget in MB for hybrid SSM companion states. "
              "Entries above the budget are skipped; older entries are evicted "
-             "when the total exceeds it. (default: 512)",
+             "when the total exceeds it. A 27B hybrid checkpoint is ~157MB and "
+             "one request can capture up to three (full, N-1, block-floor "
+             "boundaries), so 512MB held barely ONE conversation — a single "
+             "intervening prompt flushed the previous chain's companion and "
+             "with it the hybrid multiturn reuse path. (default: 1536)",
     )
     serve_parser.add_argument(
         "--stream-interval",

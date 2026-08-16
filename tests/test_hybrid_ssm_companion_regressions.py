@@ -674,3 +674,27 @@ def test_l1_companion_hit_touches_the_disk_entry():
     assert len(touched) == 1
     expected_key = cache._key(tokens, 16)
     assert touched[0] == expected_key
+
+
+def test_companion_ram_budget_default_holds_multiple_conversations():
+    """Row 102: the 512MB default held exactly THREE ~157MB 27B checkpoints
+    while one request captures up to three boundaries — a single intervening
+    prompt flushed the previous conversation's companion and with it the
+    hybrid multiturn reuse path (measured live: store_size=3, all three
+    keys belonging to the last fillers). The default must hold several
+    conversations; the env/flag remains the tuning point."""
+    import re
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1] / "vmlx_engine" / "cli.py"
+    ).read_text(encoding="utf-8")
+    m = re.search(
+        r'"VMLX_SSM_STATE_CACHE_MB",\s*(\d+)',
+        src,
+    )
+    assert m, "companion RAM budget default disappeared"
+    assert int(m.group(1)) >= 1536, (
+        f"companion RAM default {m.group(1)}MB again holds ~one 27B "
+        "conversation (3x ~157MB checkpoints per request)"
+    )

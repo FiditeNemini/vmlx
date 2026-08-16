@@ -8495,6 +8495,26 @@ class MLLMBatchGenerator:
                         )
                         cache_for_fix = None
                 if req.prompt_cache is not None:
+                    # Family-owned re-typing of restored caches (duck-typed):
+                    # positional reconstruction returns plain KVCache objects,
+                    # and _fix_hybrid_cache's type-mismatch repair would
+                    # otherwise replace them with fresh template slots for
+                    # families whose native cache class is structurally
+                    # non-attention (dots3 latent caches; the Gemma 4
+                    # wiped-prefix failure shape).
+                    _adopt_model = (
+                        getattr(self, "_cache_model", None) or self.language_model
+                    )
+                    _adopt = getattr(_adopt_model, "adopt_prompt_cache", None)
+                    if callable(_adopt) and isinstance(cache_for_fix, list):
+                        try:
+                            cache_for_fix = _adopt(cache_for_fix) or cache_for_fix
+                        except Exception as _ae:
+                            logger.warning(
+                                "adopt_prompt_cache failed for %s: %s",
+                                req.request_id,
+                                _ae,
+                            )
                     req_cache = _fix_hybrid_cache(
                         cache_for_fix,
                         getattr(self, "_cache_model", None) or self.language_model,

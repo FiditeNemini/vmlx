@@ -975,6 +975,20 @@ class LanguageModel(nn.Module):
     def layers(self):
         return self.model.layers[: self.text_config.num_hidden_layers]
 
+    def adopt_prompt_cache(self, cache: List[Any]) -> List[Any]:
+        """Re-type restored prefix caches BEFORE generic normalization.
+
+        The generator's ``_fix_hybrid_cache`` type-mismatch repair sees a
+        reconstructed plain ``KVCache`` (has .keys) at a slot whose template
+        is ``Dots3LatentCache`` (structurally non-attention) and replaces
+        the ENTIRE restored full-layer prefix with fresh empties — the same
+        failure shape that once wiped Gemma 4's 48-layer prefix. Adopting
+        here keeps the restored state and makes the repair a no-op.
+        """
+        if isinstance(cache, list):
+            self.model._adopt_restored_caches(cache)
+        return cache
+
     # ---- native MTP contract --------------------------------------------
     # The MLLM speculative path requires: a non-null ``mtp`` module, a
     # callable ``mtp_forward``, and a callable ``make_mtp_cache``.

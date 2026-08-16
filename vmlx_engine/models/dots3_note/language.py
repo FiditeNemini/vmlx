@@ -31,7 +31,8 @@ attention is mathematically identical; longer prompts are refused loudly.
 """
 
 import math
-from typing import Any, List, Optional
+import os
+from typing import Any, List, Optional, Tuple
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -39,6 +40,69 @@ import mlx.nn as nn
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from .config import AttnGeom, ModelConfig, TextConfig
+
+
+def _absorb_enabled() -> bool:
+    """MLA absorption (latent KV cache) — default ON.
+
+    VMLX_DOTS3_MLA_ABSORB=0 reverts to the stage-A materialized per-head
+    cache, which is exact but stores 71x (full) / 23x (SWA) more bytes per
+    token and therefore caps practical context (~2K on 128 GB).
+    """
+    return os.environ.get("VMLX_DOTS3_MLA_ABSORB", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+class Dots3LatentCache:
+    """Ordered latent cache for one MLA layer.
+
+    Stores the per-token shared latent (``kv_a`` after norm+rescale, rank
+    values) and the roped MQA rope key (``k_pe``) — 576 values/token on full
+    layers, 1088 on SWA. Ordered concatenation (never a ring) so physical
+    index distance == positional distance and the sliding mask stays a
+    simple ``(q - k) < window`` over the physical layout. Sliding layers
+    trim with HYSTERESIS: an O(window) slice-copy per token would burn
+    ~25 MB/token/layer of bandwidth, so the cache keeps up to
+    ``window - 1 + trim_step`` entries and trims in blocks; the mask makes
+    the extra tail invisible, so trimming is a memory policy, not a
+    correctness event.
+    """
+
+    trim_step = 256
+
+    def __init__(self, window: Optional[int] = None):
+        self.window = window
+        self.latent: Optional[mx.array] = None
+        self.k_pe: Optional[mx.array] = None
+        self.offset = 0
+
+    def update_and_fetch(
+        self, latent: mx.array, k_pe: mx.array
+    ) -> Tuple[mx.array, mx.array]:
+        if self.latent is None:
+            self.latent, self.k_pe = latent, k_pe
+        else:
+            self.latent = mx.concatenate([self.latent, latent], axis=2)
+            self.k_pe = mx.concatenate([self.k_pe, k_pe], axis=2)
+        self.offset += latent.shape[2]
+        fetched = (self.latent, self.k_pe)
+        if self.window is not None:
+            # Trim AFTER capturing this call's return: the current chunk's
+            # oldest query still needs window-1 entries BEFORE itself, but
+            # future queries only ever need the last window-1 stored entries.
+            keep_min = self.window - 1
+            if self.latent.shape[2] > keep_min + self.trim_step:
+                self.latent = self.latent[:, :, -keep_min:]
+                self.k_pe = self.k_pe[:, :, -keep_min:]
+        return fetched
+
+    @property
+    def state(self):
+        return self.latent, self.k_pe
 
 
 def _sliding_causal_mask(
@@ -118,6 +182,33 @@ class Dots3MLAAttention(nn.Module):
         self.g_proj = nn.Linear(config.hidden_size, g.num_heads, bias=False)
         if not config.is_sliding(layer_idx) and layer_idx < config.num_hidden_layers:
             self.indexer = Dots3Indexer(config)
+        # Per-head kv_b factors for the absorbed path, built lazily on first
+        # use (kv_b_proj may be a QuantizedLinear by then; dequantized once,
+        # ~34 MB/full layer at bf16). Underscore-prefixed so nn.Module does
+        # not register them as loadable parameters.
+        self._w_kb_nope: Optional[mx.array] = None
+        self._w_kb_v: Optional[mx.array] = None
+
+    def _kb_factors(self) -> Tuple[mx.array, mx.array]:
+        if self._w_kb_nope is None:
+            g = self.geom
+            w = self.kv_b_proj.weight
+            if hasattr(self.kv_b_proj, "scales"):
+                w = mx.dequantize(
+                    w,
+                    self.kv_b_proj.scales,
+                    getattr(self.kv_b_proj, "biases", None),
+                    group_size=self.kv_b_proj.group_size,
+                    bits=self.kv_b_proj.bits,
+                    mode=getattr(self.kv_b_proj, "mode", "affine"),
+                )
+            w = w.reshape(
+                g.num_heads, g.qk_nope_head_dim + g.v_head_dim, g.kv_lora_rank
+            ).astype(mx.bfloat16)
+            self._w_kb_nope = w[:, : g.qk_nope_head_dim, :]
+            self._w_kb_v = w[:, g.qk_nope_head_dim :, :]
+            mx.eval(self._w_kb_nope, self._w_kb_v)
+        return self._w_kb_nope, self._w_kb_v
 
     def __call__(
         self,
@@ -141,12 +232,6 @@ class Dots3MLAAttention(nn.Module):
         kv_a = self.kv_a_layernorm(latent[..., : g.kv_lora_rank])
         if self.apply_rescale:
             kv_a = kv_a * math.sqrt(H / g.kv_lora_rank)
-        kv = self.kv_b_proj(kv_a)
-        kv = kv.reshape(
-            B, S, g.num_heads, g.qk_nope_head_dim + g.v_head_dim
-        ).transpose(0, 2, 1, 3)
-        k_nope = kv[..., : g.qk_nope_head_dim]
-        values = kv[..., g.qk_nope_head_dim :]
 
         k_pe = latent[..., g.kv_lora_rank :].reshape(B, 1, S, g.qk_rope_head_dim)
         k_pe = self.k_rope_only_layernorm(k_pe)
@@ -167,6 +252,35 @@ class Dots3MLAAttention(nn.Module):
             scale=1.0,
             offset=past,
         )
+
+        if isinstance(cache, Dots3LatentCache) or (
+            cache is None and _absorb_enabled()
+        ):
+            out = self._absorbed_attention(
+                q_nope, q_pe, kv_a, k_pe, cache, mask, S
+            )
+        else:
+            out = self._materialized_attention(
+                q_nope, q_pe, kv_a, k_pe, cache, mask, S, B
+            )
+
+        gate = mx.sigmoid(self.g_proj(x))
+        out = out * gate[..., None]  # headwise
+
+        out = out.reshape(B, S, g.num_heads * g.v_head_dim)
+        return self.o_proj(out)
+
+    def _materialized_attention(
+        self, q_nope, q_pe, kv_a, k_pe, cache, mask, S, B
+    ) -> mx.array:
+        """Stage-A exact path: expand K/V per head and cache them."""
+        g = self.geom
+        kv = self.kv_b_proj(kv_a)
+        kv = kv.reshape(
+            B, S, g.num_heads, g.qk_nope_head_dim + g.v_head_dim
+        ).transpose(0, 2, 1, 3)
+        k_nope = kv[..., : g.qk_nope_head_dim]
+        values = kv[..., g.qk_nope_head_dim :]
 
         queries = mx.concatenate([q_nope, q_pe], axis=-1)
         keys = mx.concatenate(
@@ -189,13 +303,56 @@ class Dots3MLAAttention(nn.Module):
         out = mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=g.scale, mask=mask
         )
-        out = out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
+        return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
 
-        gate = mx.sigmoid(self.g_proj(x))
-        out = out * gate[..., None]  # headwise
+    def _absorbed_attention(
+        self, q_nope, q_pe, kv_a, k_pe, cache, mask, S
+    ) -> mx.array:
+        """Latent-cache path: fold kv_b into the query/output sides.
 
-        out = out.reshape(B, S, g.num_heads * g.v_head_dim)
-        return self.o_proj(out)
+        ``q_nope' = q_nope @ W_kb_nope`` scores directly against the cached
+        latent (identical bilinear form, so the softmax scale is unchanged),
+        and ``W_kb_v`` applies AFTER the attention weights. SDPA runs GQA
+        with ONE kv head of dim rank+rope (the DSV4 MLA shape).
+
+        🚨 fp32 SDPA at S==1 decode: the absorb path in bf16 is a known
+        numerical trap on this stack (project_mla_absorb_bug) — measured
+        zero slowdown in fp32, silent degradation in bf16.
+        """
+        g = self.geom
+        w_nope, w_v = self._kb_factors()
+
+        latent_kv = kv_a[:, None]  # [B, 1, S, rank]
+        if cache is not None:
+            latent_kv, k_pe = cache.update_and_fetch(latent_kv, k_pe)
+
+        # [B,h,S,nope] @ [1,h,nope,rank] -> [B,h,S,rank]
+        q_eff = mx.matmul(q_nope, w_nope[None].astype(q_nope.dtype))
+        queries = mx.concatenate([q_eff, q_pe], axis=-1)
+        keys = mx.concatenate([latent_kv, k_pe], axis=-1)
+        values = latent_kv
+
+        if mask is None:
+            eff_past = keys.shape[2] - S
+            mask = _sliding_causal_mask(
+                S, eff_past, g.sliding_window, mx.float32
+            )
+
+        if S == 1:
+            out = mx.fast.scaled_dot_product_attention(
+                queries.astype(mx.float32),
+                keys.astype(mx.float32),
+                values.astype(mx.float32),
+                scale=g.scale,
+                mask=mask,
+            ).astype(q_nope.dtype)
+        else:
+            out = mx.fast.scaled_dot_product_attention(
+                queries, keys, values, scale=g.scale, mask=mask
+            )
+        # [B,h,S,rank] @ [1,h,rank,v] -> [B,h,S,v]
+        out = mx.matmul(out, w_v[None].swapaxes(-1, -2).astype(out.dtype))
+        return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
 
 
 class Dots3TopkRouter(nn.Module):
@@ -438,15 +595,25 @@ class LanguageModel(nn.Module):
         return logits
 
     def make_cache(self):
-        """One plain KVCache per BACKBONE layer (stage A: materialized).
+        """One cache per BACKBONE layer, matching the layer's attention.
 
-        Sliding layers enforce their window through the additive mask, so a
-        plain cache is exact. The MTP layer (index 46) is NOT part of this
-        list — the speculative path owns its private cache.
+        Default: latent caches (absorbed MLA) — 576 values/token on full
+        layers (7.89 GB at 512K), window-bounded 1088 on sliding layers.
+        VMLX_DOTS3_MLA_ABSORB=0 reverts to plain materialized KVCaches
+        (exact but ~2K practical context). The MTP layer (index 46) is NOT
+        part of this list — the speculative path owns its private cache.
         """
+        cfg = self.text_config
+        if _absorb_enabled():
+            return [
+                Dots3LatentCache(
+                    window=cfg.sliding_window_size if cfg.is_sliding(i) else None
+                )
+                for i in range(cfg.num_hidden_layers)
+            ]
         from mlx_lm.models.cache import KVCache
 
-        return [KVCache() for _ in range(self.text_config.num_hidden_layers)]
+        return [KVCache() for _ in range(cfg.num_hidden_layers)]
 
     @property
     def layers(self):

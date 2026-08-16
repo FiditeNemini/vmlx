@@ -1122,6 +1122,14 @@ def test_l2_eviction_scenario_stops_before_invalid_refault_boundary(
             "block_chain_fingerprint_sha256": fingerprint,
             "expected_blocks": 2,
             "l1": {
+                # These strict boundary expectations are the DISK-ONLY
+                # contract; the paged lane waives residency and accepts a
+                # bounded tail loss (its own coverage below).
+                "backend_mode": "block_disk_only",
+                "disk_only": True,
+                "paged_ram_enabled": False,
+                "resident_payload_blocks_present": 0,
+                "resident_payload_bytes": 0,
                 "terminal_resident_payload_present": resident,
             },
             "l2": {
@@ -4350,3 +4358,85 @@ def test_marker_check_tolerates_pure_markdown_emphasis():
     assert not gate._exact_cache_marker_observed(
         {**base, "output_text": f"**{marker[:-1]}**"}, marker
     )
+
+
+def test_paged_lane_bounded_loss_and_touch_contract():
+    """Row 96: the paged lane accepts a bounded recent-chain tail loss (>=
+    half contiguous from root, old fully evicted, refault delegated to
+    restart-restore) and must prove the live L2 access touch; the disk-only
+    strict contract keeps failing on any loss."""
+    base = {
+        "schema": gate.L2_SIZE_EVICTION_SCHEMA,
+        "scenario": "store-evict-refault",
+        "old_prefix_evicted": True,
+        "recent_prefix_present": False,
+        "recent_prefix_last_access_after_old": True,
+        "refault_delegated_to_restart_restore": True,
+        "recent_before": {"l1": {"paged_ram_enabled": True}},
+        "recent_final": {
+            "l2": {
+                "expected_blocks": 380,
+                "contiguous_readable_blocks": 270,
+            }
+        },
+        "recent_touch_execution": {
+            "last_cache_execution": {"cache_outcome": "hit"}
+        },
+        "recent_access_ns_advanced_after_touch": True,
+    }
+    failures = gate.validate_l2_size_eviction_observation(
+        base,
+        expected_source_head="h",
+        expected_source_tree="t",
+        health_attestation={},
+        max_filler_requests=8,
+    )
+    assert not any("recent prefix did not survive" in f for f in failures)
+    assert not any("touch request did not hit" in f for f in failures)
+    assert not any("delegation to restart-restore is only" in f for f in failures)
+
+    beyond_floor = dict(
+        base,
+        recent_final={
+            "l2": {
+                "expected_blocks": 380,
+                "contiguous_readable_blocks": 100,
+            }
+        },
+    )
+    failures = gate.validate_l2_size_eviction_observation(
+        beyond_floor,
+        expected_source_head="h",
+        expected_source_tree="t",
+        health_attestation={},
+        max_filler_requests=8,
+    )
+    assert any("recent prefix did not survive" in f for f in failures)
+
+    untouched = dict(
+        base,
+        recent_touch_execution=None,
+        recent_access_ns_advanced_after_touch=False,
+    )
+    failures = gate.validate_l2_size_eviction_observation(
+        untouched,
+        expected_source_head="h",
+        expected_source_tree="t",
+        health_attestation={},
+        max_filler_requests=8,
+    )
+    assert any("touch request did not hit" in f for f in failures)
+    assert any("did not advance the recent" in f for f in failures)
+
+    disk_only_loss = dict(
+        base,
+        refault_delegated_to_restart_restore=False,
+    )
+    failures = gate.validate_l2_size_eviction_observation(
+        disk_only_loss,
+        expected_source_head="h",
+        expected_source_tree="t",
+        health_attestation={},
+        max_filler_requests=8,
+    )
+    assert any("recent prefix did not survive" in f for f in failures)

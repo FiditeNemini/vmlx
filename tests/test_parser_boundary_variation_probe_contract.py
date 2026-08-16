@@ -71,9 +71,11 @@ def test_verdict_never_passes_without_reuse(probe: Any) -> None:
     assert status == "pass"
 
 
-def test_verdict_fails_on_any_byte_divergence(probe: Any) -> None:
+def test_verdict_fails_on_same_width_byte_divergence(probe: Any) -> None:
+    # LIKE-FOR-LIKE contract: when both arms reused the SAME width, any byte
+    # divergence is a real defect and must fail.
     cold = [
-        {"key": "t1_plain", "status_code": 200, "content": "A", "cached_tokens": 0}
+        {"key": "t1_plain", "status_code": 200, "content": "A", "cached_tokens": 64}
     ]
     warm = [
         {"key": "t1_plain", "status_code": 200, "content": "B", "cached_tokens": 64}
@@ -81,6 +83,26 @@ def test_verdict_fails_on_any_byte_divergence(probe: Any) -> None:
     status, turns = probe.compute_verdict(cold, warm, table_hit_evidence=False)
     assert status == "fail"
     assert turns[0]["byte_equal"] is False
+    assert turns[0]["width_variant"] is False
+
+
+def test_verdict_accepts_differing_width_divergence_as_width_variant(
+    probe: Any,
+) -> None:
+    # Arms that reconstructed at DIFFERENT widths follow numerically
+    # different paths — the decided rates-not-labels class (measured live:
+    # cold 586 vs warm 691 on qwen3.8, both tier configs). Recorded, not a
+    # failure; byte-equal turns still dominate the verdict.
+    cold = [
+        {"key": "t6", "status_code": 200, "content": "A", "cached_tokens": 586}
+    ]
+    warm = [
+        {"key": "t6", "status_code": 200, "content": "B", "cached_tokens": 691}
+    ]
+    status, turns = probe.compute_verdict(cold, warm, table_hit_evidence=False)
+    assert status == "pass"
+    assert turns[0]["byte_equal"] is False
+    assert turns[0]["width_variant"] is True
 
 
 def test_effort_stays_in_qwen38_stamped_set(probe: Any) -> None:

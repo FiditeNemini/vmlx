@@ -825,12 +825,30 @@ class Dots3NoteModel(nn.Module):
             adopted.offset = int(getattr(c, "offset", keys.shape[2]))
             cache[i] = adopted
             adopted_n += 1
-        if adopted_n:
+        if adopted_n or foreign:
             _logger.info(
                 "dots3 adopted %d restored full-layer cache(s) into "
                 "Dots3LatentCache",
                 adopted_n,
             )
+        elif cache and cache[0] is not None and int(getattr(cache[0], "offset", 0)) > 0:
+            # Continuation entry with pre-populated caches and nothing to
+            # adopt: log ONCE per fresh continuation so restore provenance is
+            # visible (offset>0 on entry means restored or resumed state).
+            if not getattr(cache[0], "_dots3_adoption_logged", False):
+                try:
+                    cache[0]._dots3_adoption_logged = True
+                    _logger.info(
+                        "dots3 continuation entered with typed caches: %s "
+                        "offset=%s idx_k=%s",
+                        type(cache[0]).__name__,
+                        getattr(cache[0], "offset", None),
+                        getattr(
+                            getattr(cache[0], "idx_k", None), "shape", None
+                        ),
+                    )
+                except Exception:
+                    pass
         if foreign:
             # A full layer running a foreign cache class means the absorbed
             # path is OFF for it and the packed streams would be misread —

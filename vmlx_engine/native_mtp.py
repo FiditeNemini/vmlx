@@ -38,6 +38,12 @@ _RUNTIME_SUPPORTED_FAMILIES = {
     "qwen3_5",
     "qwen3_5_moe",
     "hy_v3",
+    # dots3_note: the vendored runtime exposes the full contract (non-null
+    # mtp module = SWA-geometry layer 46, mtp_forward with recursive
+    # drafting through the DEDICATED model.mtp.embed_tokens table,
+    # make_mtp_cache). MLLM lane. Stamp recommends 1 draft; unmeasured on
+    # this artifact until a live depth sweep writes the tuning sidecar.
+    "dots3_note",
 }
 _EAGLE3_NATIVE_MTP_FAMILIES = {
     "minimax_m3",

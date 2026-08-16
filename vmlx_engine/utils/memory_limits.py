@@ -562,6 +562,31 @@ def estimate_kv_bytes_per_token_from_config(config) -> int:
 
     text_config = _cfg_get(config, "text_config")
     candidates = [text_config, config] if text_config is not None else [config]
+
+    # dots3_note stores a per-token SHARED latent (kv_lora + rope key) plus a
+    # DSA indexer key on its 13 full-attention layers; the 33 sliding layers
+    # are window-bounded (513) and add ZERO unbounded growth (their whole
+    # retained state is ~36 MB — noise against the budget). The standard
+    # K+V-per-head geometry below over-charges this family ~50x
+    # (942 KB/token vs the real ~18 KB/token), which capped a 512K-context
+    # bundle at 8,822 tokens on the 128 GB box.
+    for cfg in candidates:
+        if str(_cfg_get(cfg, "model_type") or "") == "dots3_note":
+            kv_lora = _positive_int(_cfg_get(cfg, "kv_lora_rank"), 512)
+            rope_dim = _positive_int(_cfg_get(cfg, "qk_rope_head_dim"), 64)
+            index_dim = _positive_int(_cfg_get(cfg, "index_head_dim"), 128)
+            layer_types = _cfg_get(cfg, "layer_types") or []
+            full_layers = sum(
+                1 for t in layer_types if t != "sliding_attention"
+            ) or 13
+            dtype = (
+                _cfg_get(cfg, "torch_dtype")
+                or _cfg_get(cfg, "dtype")
+                or _cfg_get(cfg, "mlx_dtype")
+            )
+            scalar = _dtype_scalar_bytes(dtype)
+            return full_layers * (kv_lora + rope_dim + index_dim) * scalar
+
     for cfg in candidates:
         n_layers = (
             _cfg_get(cfg, "num_hidden_layers")

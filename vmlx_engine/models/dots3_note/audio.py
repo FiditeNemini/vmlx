@@ -241,10 +241,26 @@ class AudioModel(nn.Module):
     def __call__(
         self,
         input_features,
-        chunk_sample_lens,
-        chunk_token_lens,
-        audio_chunk_counts,
+        chunk_sample_lens=None,
+        chunk_token_lens=None,
+        audio_chunk_counts=None,
     ) -> Tuple[mx.array, np.ndarray]:
+        # Chunk metadata may not survive every serving-plumbing hop. For the
+        # common all-valid case the lens are fully derivable from the mel
+        # shape: samples = frames x hop, tokens = ceil-div by the three
+        # stride-2 convs, one audio per chunk.
+        n_chunks = int(getattr(input_features, "shape", [1])[0])
+        frames = int(getattr(input_features, "shape", [1, 1, 0])[-1])
+        if chunk_sample_lens is None:
+            hop = int(getattr(self.dots_encoder.speech_encoder, "hop", 160))
+            chunk_sample_lens = np.full((n_chunks,), frames * hop, dtype=np.int64)
+        if chunk_token_lens is None:
+            t = frames
+            for _ in range(3):
+                t = (t + 1) // 2
+            chunk_token_lens = np.full((n_chunks,), t, dtype=np.int64)
+        if audio_chunk_counts is None:
+            audio_chunk_counts = np.ones((n_chunks,), dtype=np.int64)
         sample_lens = np.asarray(chunk_sample_lens)
         token_lens = np.asarray(chunk_token_lens)
         counts = np.asarray(audio_chunk_counts)

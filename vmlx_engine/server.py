@@ -3948,8 +3948,15 @@ def _bundle_declares_native_video(bundle_path: str | None) -> bool:
     cfg = _read_bundle_json(bundle_path, "config.json")
     if not cfg:
         return False
-    if _bundle_explicit_modality_flag(bundle_path, "video") is False:
+    explicit = _bundle_explicit_modality_flag(bundle_path, "video")
+    if explicit is False:
         return False
+    if explicit is True:
+        # JANG sidecars are authoritative in BOTH directions: an explicit
+        # capabilities.modalities.video=true (dots3: video rides the image
+        # token path through its own processor) must advertise, not just an
+        # explicit False suppress.
+        return True
     if cfg.get("video_config") is not None:
         return True
     if Path(str(bundle_path or "")).joinpath("video_preprocessor_config.json").is_file():

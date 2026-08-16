@@ -4961,6 +4961,11 @@ class MLLMBatchGenerator:
         self._turn_peak_walk: deque[tuple[int, int]] = deque(
             maxlen=_TURN_PEAK_WALK_MAXLEN
         )
+        # The span whose peak the NEXT deep turn's gauge reading belongs to.
+        # Zeroed on a refusal so the retry's no-forward-ran reading is not
+        # recorded as a walk point (it would drag the fit down and re-admit
+        # the turn that was just declined).
+        self._last_deep_span_tokens: int = 0
         self.paged_cache_manager = paged_cache_manager
         self.block_aware_cache = block_aware_cache
         self.memory_aware_cache = memory_aware_cache
@@ -6193,6 +6198,88 @@ class MLLMBatchGenerator:
             return False
         return self._request_has_media_cache_context(request, token_ids)
 
+    def _turn_peak_walk_admit(self, final_ctx: int) -> None:
+        """Deferred-measure + admission for the cross-turn peak walk.
+
+        Called immediately before EVERY forward, chunked OR single-shot —
+        the branch choice below keys on the NEW-token count, so a deep
+        hit-lane delta (~5.6k new tokens over a ~96k base) predicts a tiny
+        attention buffer and runs single-shot; a valve living only inside
+        the chunked branch never sees the forward that aborts.
+
+        Measurement is DEFERRED one turn because MLX is lazy: a peak read
+        right after a single-shot call reports the pre-forward state (the
+        eval happens at sampling, in the caller). Reading the gauge at the
+        NEXT deep turn's entry captures everything the previous span did —
+        forward, materialise, decode — and resetting it here makes each
+        reading per-span rather than a lifetime cumulative max (the chunked
+        branch already resets per chunk, so lifetime monotonicity was never
+        a property anyone could rely on).
+
+        On refusal ``_last_deep_span_tokens`` is zeroed so the retry's tiny
+        no-forward-ran gauge reading is NOT recorded — one poisoned
+        (deep span, near-zero peak) point would drag the fit down and
+        re-admit the very turn that was just declined.
+        """
+        if not _TURN_PEAK_ADMISSION:
+            return
+        if not (0 < _DEEP_SPAN_CACHE_CLEAR_TOKENS <= final_ctx):
+            return
+        try:
+            peak_now = int(mx.get_peak_memory())
+        except Exception:  # noqa: BLE001
+            return
+        prev_span = int(getattr(self, "_last_deep_span_tokens", 0) or 0)
+        if prev_span > 0 and peak_now > 0:
+            self._turn_peak_walk.append((prev_span, peak_now))
+        try:
+            mx.reset_peak_memory()
+        except Exception:  # noqa: BLE001
+            pass
+        if len(self._turn_peak_walk) >= 2:
+            _walk_fit = fit_peak_model(list(self._turn_peak_walk))
+            if _walk_fit is not None:
+                try:
+                    _, _walk_max_ws = get_effective_metal_working_set_bytes(mx)
+                except Exception:  # noqa: BLE001
+                    _walk_max_ws = 0
+                _walk_last_ctx, _walk_last_peak = self._turn_peak_walk[-1]
+                # The observed-peak floor only applies when this turn is at
+                # least as deep as the observation; flooring a shallower
+                # request at a deeper turn's peak would refuse work the
+                # device serves.
+                _walk_floor = (
+                    _walk_last_peak if final_ctx >= _walk_last_ctx else 0
+                )
+                logger.info(
+                    "Turn-peak admission engaged: context=%d points=%d "
+                    "walk=%.2fGB+%.4fGB/1k-tok last_peak=%.2fGB "
+                    "limit=%.2fGB allowance=%.2fGB",
+                    final_ctx,
+                    len(self._turn_peak_walk),
+                    _walk_fit[0] / (1024**3),
+                    _walk_fit[1] * 1000 / (1024**3),
+                    _walk_last_peak / (1024**3),
+                    _walk_max_ws / (1024**3),
+                    _TURN_PEAK_ALLOWANCE_BYTES / (1024**3),
+                )
+                try:
+                    turn_peak_admission_check(
+                        _walk_max_ws,
+                        _walk_fit,
+                        final_ctx,
+                        last_observed_peak_bytes=_walk_floor,
+                        allowance_bytes=_TURN_PEAK_ALLOWANCE_BYTES,
+                        fitted_max_context=max(
+                            ctx for ctx, _ in self._turn_peak_walk
+                        ),
+                        model_label="hybrid delta",
+                    )
+                except Exception:
+                    self._last_deep_span_tokens = 0
+                    raise
+        self._last_deep_span_tokens = final_ctx
+
     def _run_vision_encoding(self, request: MLLMBatchRequest, cache: Optional[List[Any]] = None) -> mx.array:
         """
         Run the initial VLM forward pass to encode vision and get first logits.
@@ -6280,6 +6367,16 @@ class MLLMBatchGenerator:
         )
         has_media_payload = has_images or has_audio_payload
         seq_len = input_ids.shape[1]
+
+        # Cross-turn peak-walk admission, BEFORE the branch choice below. The
+        # first landing of this valve lived inside the chunked branch only —
+        # and a ~5.6k hit-lane delta predicts a tiny attention buffer, stays
+        # single-shot, and bypassed every check (zero engagement lines, caught
+        # live by the engagement-line protocol). The fatal ~32s single command
+        # buffer WAS the single-shot forward. Placed here it covers both.
+        self._turn_peak_walk_admit(
+            int(getattr(request, "_cached_tokens", 0) or 0) + seq_len
+        )
 
         # vmlx#89 / mlxstudio#83: opt-in chunked prefill for hybrid SSM models
         # on text-only requests. Hybrid models default to one-shot prefill
@@ -6697,70 +6794,10 @@ class MLLMBatchGenerator:
                         _restore_kv_step()
                         raise
 
-                # THIRD VALVE: cross-turn peak walk. The whole-span check above
-                # fits peaks WITHIN one span; on a ~5.6k hit-lane delta that is
-                # 2-3 points at near-identical contexts, slope ~0, silent pass —
-                # confirmed over seven Metal-abort runs with zero refusals. The
-                # per-chunk valve is blind on each span's FIRST chunk, which is
-                # the buffer that aborted. This valve fits the BETWEEN-turn walk
-                # (one point per completed span) and declines the turn the walk
-                # says will cross the measured survivable envelope. Deep
-                # contexts only: no crash was ever observed below the deep-span
-                # threshold, and a shallow request must never be refused by a
-                # walk learned from someone else's deep conversation.
-                _walk_final_ctx = (
-                    int(getattr(request, "_cached_tokens", 0) or 0) + seq_len
-                )
-                if (
-                    _TURN_PEAK_ADMISSION
-                    and len(self._turn_peak_walk) >= 2
-                    and 0 < _DEEP_SPAN_CACHE_CLEAR_TOKENS <= _walk_final_ctx
-                ):
-                    _walk_fit = fit_peak_model(list(self._turn_peak_walk))
-                    if _walk_fit is not None:
-                        try:
-                            _, _walk_max_ws = (
-                                get_effective_metal_working_set_bytes(mx)
-                            )
-                        except Exception:  # noqa: BLE001
-                            _walk_max_ws = 0
-                        _walk_last_ctx, _walk_last_peak = self._turn_peak_walk[-1]
-                        # The observed-peak floor only applies when this turn is
-                        # at least as deep as the observation; flooring a
-                        # shallower request at a deeper turn's peak would refuse
-                        # work the device serves.
-                        _walk_floor = (
-                            _walk_last_peak
-                            if _walk_final_ctx >= _walk_last_ctx
-                            else 0
-                        )
-                        logger.info(
-                            "Turn-peak admission engaged: context=%d points=%d "
-                            "walk=%.2fGB+%.4fGB/1k-tok last_peak=%.2fGB "
-                            "limit=%.2fGB allowance=%.2fGB",
-                            _walk_final_ctx,
-                            len(self._turn_peak_walk),
-                            _walk_fit[0] / (1024**3),
-                            _walk_fit[1] * 1000 / (1024**3),
-                            _walk_last_peak / (1024**3),
-                            _walk_max_ws / (1024**3),
-                            _TURN_PEAK_ALLOWANCE_BYTES / (1024**3),
-                        )
-                        try:
-                            turn_peak_admission_check(
-                                _walk_max_ws,
-                                _walk_fit,
-                                _walk_final_ctx,
-                                last_observed_peak_bytes=_walk_floor,
-                                allowance_bytes=_TURN_PEAK_ALLOWANCE_BYTES,
-                                fitted_max_context=max(
-                                    ctx for ctx, _ in self._turn_peak_walk
-                                ),
-                                model_label="hybrid delta",
-                            )
-                        except Exception:
-                            _restore_kv_step()
-                            raise
+                # The cross-turn peak-walk admission runs at the TOP of this
+                # function (see _turn_peak_walk_admit) — it must cover the
+                # single-shot branch too, which is the one that actually
+                # submitted the fatal command buffer.
                 while processed < seq_len - 1:  # -1: keep last token for final logits
                     chunk_size = min(_tight_text_prefill_step_size, seq_len - 1 - processed)
                     while (
@@ -7210,20 +7247,6 @@ class MLLMBatchGenerator:
                 # conditions; the extrapolation bound above is what protects a
                 # narrow fit from being pushed past its evidence, so the widest
                 # fit no longer has to be retained to be safe.
-                # One point per completed span for the cross-turn walk valve:
-                # (final context, absolute peak during this span). This is the
-                # only place the between-turn +5GB/turn walk becomes visible —
-                # within-span fits cannot see it, and per-request state does not
-                # survive to the next turn.
-                if _observed_chunk_peak_max > 0:
-                    self._turn_peak_walk.append(
-                        (
-                            int(getattr(request, "_cached_tokens", 0) or 0)
-                            + seq_len,
-                            int(_observed_chunk_peak_max),
-                        )
-                    )
-
                 if len(_peak_samples) >= 2:
                     _fitted = fit_peak_model(_peak_samples)
                     if _fitted is not None:

@@ -292,6 +292,27 @@ def test_turn_walk_wiring_in_the_generator():
         "engagement INFO line removed — refusal-free crash runs become "
         "unauditable"
     )
+    # The admit call must run BEFORE the chunked/single-shot branch choice:
+    # the first landing lived inside the chunked branch only, and a ~5.6k
+    # hit-lane delta predicts a tiny attention buffer, stays single-shot, and
+    # bypassed every check — zero engagement lines across an entire R8 build,
+    # caught live by the engagement-line protocol. The single-shot forward IS
+    # the command buffer that aborts.
+    call = src.index("self._turn_peak_walk_admit(")
+    branch = src.index("_allow_hybrid_chunked = (")
+    assert call < branch, (
+        "turn-peak admission moved back below the chunked-branch choice — "
+        "single-shot deltas (the crashing path) would bypass it again"
+    )
+    # And the refusal path must zero the deferred-measurement anchor, or the
+    # retry's no-forward-ran gauge reading poisons the fit and re-admits the
+    # declined turn.
+    helper = src.index("def _turn_peak_walk_admit(")
+    body = src[helper : helper + 4200]
+    assert "self._last_deep_span_tokens = 0" in body, (
+        "refusal no longer zeroes _last_deep_span_tokens — a poisoned "
+        "(deep span, near-zero peak) walk point re-admits the declined turn"
+    )
     m = re.search(r'"VMLX_TURN_PEAK_ALLOWANCE_MB", "(\d+)"', src)
     assert m and int(m.group(1)) == 0, (
         "allowance default must stay 0 — see "

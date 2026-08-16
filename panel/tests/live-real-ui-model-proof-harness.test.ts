@@ -3472,9 +3472,12 @@ describe("real UI model proof harness", () => {
     expect(chatSource.match(/nextLocalRequestCorrelationHeaders\(\)/g)).toHaveLength(3);
     expect(chatSource.match(/requestIds: \[\.\.\.wireRequestIds\]/g)).toHaveLength(2);
     expect(serverSource).toContain("def _request_header_value(request: Any, name: str)");
+    // Three wire routes thread the proof request identity: chat, responses,
+    // and (since the resolved-sampling-kwargs logging landed on it) the
+    // Anthropic-shaped route.
     expect(
       serverSource.match(/proof_request_id=_request_header_value\(/g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
   });
 
   it("binds installed ASAR, release manifest, bundled Python, runtime, and proof HEAD", () => {

@@ -8056,6 +8056,37 @@ class MLLMBatchGenerator:
                                     ):
                                         self.block_aware_cache.release_cache(req.request_id)
                                         continue
+                                if reconstructed is not None and not is_hybrid:
+                                    # A COMPACTED partial reconstruction (KV
+                                    # layers densely packed, cumulative layers
+                                    # deferred) is only restorable for hybrid
+                                    # families whose SSM state arrives from the
+                                    # external companion. For everyone else the
+                                    # layer-index mapping is simply LOST — the
+                                    # repair stage would wipe it to fresh
+                                    # templates and the request would burn a
+                                    # hit-then-reject cycle before its cold
+                                    # prefill (measured live on dots3, ledger
+                                    # row 152). Miss honestly instead.
+                                    _cm = getattr(self, "_cache_model", None) or self.language_model
+                                    _expected = getattr(self, "_expected_cache_layer_count", None)
+                                    if _expected is None:
+                                        try:
+                                            _expected = len(_cm.make_cache())
+                                        except Exception:
+                                            _expected = 0
+                                        self._expected_cache_layer_count = _expected
+                                    if _expected and len(reconstructed) < _expected:
+                                        logger.info(
+                                            "Compacted partial reconstruction (%d/%d "
+                                            "layers) for non-companion family — "
+                                            "declining hit for %s, cold prefill",
+                                            len(reconstructed),
+                                            _expected,
+                                            req.request_id,
+                                        )
+                                        self.block_aware_cache.release_cache(req.request_id)
+                                        continue
                                 if is_hybrid and ssm_states is not None and reconstructed is not None:
                                     # Full hybrid cache reconstruction:
                                     # KV from paged cache + SSM from companion cache

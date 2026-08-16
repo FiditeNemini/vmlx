@@ -2159,7 +2159,22 @@ def _numpy_block_slice(
                 else:
                     block_slices.append(("skip",))
             else:
-                block_slices.append(("skip",))
+                # Windowed dots3 latent layers checkpoint recent NON-terminal
+                # boundaries exactly (ledger row 152) so divergent-prefix
+                # restores keep their sliding state instead of collapsing to
+                # cold prefill.
+                checkpoint = (
+                    _dots3_window_boundary_checkpoint(layer_state, end_idx)
+                    if store_cumulative_state
+                    else None
+                )
+                if checkpoint is not None:
+                    tag, sliced, cmeta, ccls = checkpoint
+                    block_slices.append(
+                        (tag, _copy_mlx_tree(sliced), cmeta, ccls)
+                    )
+                else:
+                    block_slices.append(("skip",))
 
     return block_slices if block_slices else None
 
@@ -2173,6 +2188,69 @@ def _entry_has_native_tq(entry) -> bool:
     if entry[0] == "cache_list" and len(entry) > 1:
         return any(_entry_has_native_tq(sub) for sub in entry[1] or [])
     return False
+
+
+def _dots3_window_boundary_checkpoint(layer_state, boundary: int):
+    """Boundary checkpoint for a windowed dots3 latent layer (ledger row 152).
+
+    dots3 sliding layers store CUMULATIVE state in the terminal block only,
+    which makes every divergent-prefix (non-terminal-boundary) restore
+    impossible — the partial span reconstructs without sliding state and the
+    generator must fall back to cold prefill. The cache deliberately retains
+    ``retain_overhang`` extra masked-out keys, so for block boundaries B
+    within that overhang of the snapshot offset T the exact window state at B
+    (keys B-window+1..B) is still physically present and can be checkpointed
+    into the block itself. Returns a ("cumulative", [latent, k_pe, idx_k],
+    meta, cls) entry with offset rewritten to B, or None when the boundary is
+    not exactly reconstructible (caller falls back to ("skip",)).
+
+    Returns LAZY slices in the input arrays' own representation (MX in both
+    live store paths — bf16 cannot round-trip numpy directly). Callers wrap
+    the result in _copy_mlx_tree, which materializes independent copies the
+    same way the proven terminal-cumulative branch does; the store flow's
+    mx.synchronize() has already run by the time extraction slices.
+    """
+    cls = str(layer_state.get("class_name") or "")
+    if "Dots3LatentCache" not in cls:
+        return None
+    meta = layer_state.get("meta_state") or ()
+    if not isinstance(meta, (tuple, list)) or len(meta) < 2:
+        return None
+    try:
+        total = int(meta[0])
+        window = int(meta[1]) if str(meta[1]) else 0
+    except (TypeError, ValueError):
+        return None
+    if window <= 0 or boundary <= 0 or boundary >= total:
+        return None
+    state = layer_state.get("state")
+    if not isinstance(state, (tuple, list)) or len(state) != 3:
+        return None
+    latent, k_pe, idx_k = state
+    if latent is None or not getattr(latent, "size", 0):
+        return None
+    # A boundary before the window fills needs ALL of its keys, not window-1.
+    keep = min(window - 1, boundary)
+    phys = int(latent.shape[2])
+    drop = total - boundary
+    if phys - drop < keep:
+        return None  # boundary older than the retained overhang
+    lo, hi = phys - drop - keep, phys - drop
+    latent_s = latent[:, :, lo:hi]
+    k_pe_s = (
+        k_pe[:, :, lo:hi]
+        if k_pe is not None and getattr(k_pe, "size", 0)
+        else None
+    )
+    idx_s = None
+    if idx_k is not None and getattr(idx_k, "size", 0):
+        ilen = int(idx_k.shape[1])
+        if ilen == total:
+            idx_s = idx_k[:, :boundary]
+        elif ilen - drop >= keep:
+            idx_s = idx_k[:, ilen - drop - keep : ilen - drop]
+    new_meta = (str(boundary),) + tuple(str(m) for m in meta[1:])
+    return ("cumulative", [latent_s, k_pe_s, idx_s], new_meta, cls)
 
 
 def _block_needs_cumulative_update(cache_data) -> bool:
@@ -5378,7 +5456,22 @@ class BlockAwarePrefixCache:
                         class_name,
                     ))
                 else:
-                    block_slices.append(("skip",))
+                    # Windowed dots3 latent layers can checkpoint recent
+                    # NON-terminal boundaries exactly (ledger row 152) —
+                    # without this every divergent-prefix restore collapses
+                    # to cold prefill.
+                    checkpoint = (
+                        _dots3_window_boundary_checkpoint(layer_state, end_idx)
+                        if store_cumulative_state
+                        else None
+                    )
+                    if checkpoint is not None:
+                        tag, sliced, cmeta, ccls = checkpoint
+                        block_slices.append(
+                            (tag, _copy_mlx_tree(sliced), cmeta, ccls)
+                        )
+                    else:
+                        block_slices.append(("skip",))
 
         if block_slices:
             tag_counts: dict = {}
@@ -6980,6 +7073,27 @@ class BlockAwarePrefixCache:
                             f"({class_name}): no suitable cache class"
                         )
                         return None
+
+                    if "Dots3LatentCache" in class_name:
+                        # A restored snapshot whose offset disagrees with the
+                        # fetched span claims tokens the span does not have
+                        # (terminal snapshots are captured at the STORE's
+                        # offset, boundary checkpoints at their block's).
+                        # Rewind exactly or miss — never restore drifted
+                        # window state silently (ledger row 152).
+                        _target = int(getattr(block_table, "num_tokens", 0) or 0)
+                        _off = int(getattr(cache, "offset", 0) or 0)
+                        if _target and _off != _target:
+                            _trim = getattr(cache, "trim_to_boundary", None)
+                            if not (callable(_trim) and _trim(_target)):
+                                logger.info(
+                                    "dots3 layer %s: snapshot offset %s not "
+                                    "rewindable to span boundary %s — miss",
+                                    layer_idx,
+                                    _off,
+                                    _target,
+                                )
+                                return None
 
                     reconstructed_caches.append(cache)
                     reconstructed_indices.add(layer_idx)

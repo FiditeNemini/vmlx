@@ -141,19 +141,26 @@ def test_context_bound_refuses_loudly_on_materialized_path(model):
 def test_sliding_cache_trim_keeps_window(model):
     cache = Dots3LatentCache(window=6)
     Dots3LatentCache.trim_step = 4
+    _old_overhang = Dots3LatentCache.retain_overhang
+    Dots3LatentCache.retain_overhang = 3
     try:
-        for i in range(20):
+        for i in range(24):
             latent = mx.ones((1, 1, 1, 3)) * i
             k_pe = mx.ones((1, 1, 1, 2)) * i
             fetched_latent, _ = cache.update_and_fetch(latent, k_pe)
             # The fetch must always include at least window-1 past + self
             # (until fewer exist), regardless of trim timing.
             assert fetched_latent.shape[2] >= min(i + 1, 6)
-        assert cache.offset == 20
-        # Stored state is bounded by window-1 + trim_step.
-        assert cache.latent.shape[2] <= 5 + 4
+        assert cache.offset == 24
+        # Stored state is bounded by window-1 + retain_overhang + trim_step
+        # (the overhang keeps recent block boundaries checkpointable,
+        # ledger row 152).
+        assert cache.latent.shape[2] <= 5 + 3 + 4
+        # ... and never trims below window-1 + retain_overhang.
+        assert cache.latent.shape[2] >= 5 + 3
     finally:
         Dots3LatentCache.trim_step = 256
+        Dots3LatentCache.retain_overhang = _old_overhang
 
 
 def test_dsa_selection_prefix_matches_dense(model):
@@ -311,3 +318,166 @@ def test_orphan_media_placeholders_refuse_loudly():
         outer.get_input_embeddings(
             input_ids=mx.array([[3, cfg.image_token_id, 9]])
         )
+
+
+# ---- partial block-restore lane (ledger row 152) -------------------------
+
+
+def _block_store_roundtrip_env(n_tokens, seed, block_size=64, window=129):
+    """Store a 4-layer dots3-shaped stack through the REAL block machinery."""
+    import numpy as np
+
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    from vmlx_engine.models.dots3_note.language import Dots3LatentCache
+    from vmlx_engine.models.dots3_note_register import (
+        register_dots3_note_runtime,
+    )
+
+    register_dots3_note_runtime()
+    mx.random.seed(seed)
+    rope, idx_dim, rank = 16, 32, 48
+    raw, originals = [], []
+    for li in range(4):
+        c = Dots3LatentCache(window=window if li in (1, 3) else None)
+        latent = mx.random.normal((1, 1, n_tokens, rank)).astype(mx.bfloat16)
+        k_pe = mx.random.normal((1, 1, n_tokens, rope)).astype(mx.bfloat16)
+        c.update_and_fetch(latent, k_pe)
+        idx_k = mx.random.normal((1, n_tokens, idx_dim)).astype(mx.bfloat16)
+        c.update_indexer(idx_k)
+        raw.append(c)
+        originals.append((latent, k_pe, idx_k))
+    mgr = PagedCacheManager(block_size=block_size, max_blocks=600)
+    bac = BlockAwarePrefixCache(object(), mgr)
+    tokens = list(range(1000, 1000 + n_tokens))
+    states = [
+        {
+            "state": c.state,
+            "meta_state": c.meta_state,
+            "class_name": type(c).__name__,
+        }
+        for c in raw
+    ]
+    table = bac.store_cache("store-req", tokens, states)
+    assert table is not None
+    return np, bac, tokens, originals, raw
+
+
+def test_partial_block_restore_covered_boundary_is_exact():
+    # A divergent prompt sharing a block-aligned prefix within the retained
+    # overhang restores a FULL-LENGTH cache list whose sliding state is
+    # byte-equal to the original keys ending at the boundary (the live
+    # failure was an EMPTY reconstruction -> forced cold prefill).
+    np, bac, tokens, originals, raw = _block_store_roundtrip_env(
+        n_tokens=512, seed=7
+    )
+    divergent = tokens[:256] + list(range(50000, 50064))
+    table, _ = bac.fetch_cache("fetch-req", divergent)
+    assert table is not None and table.num_tokens == 256
+    rec = bac.reconstruct_cache(table)
+    assert rec is not None and len(rec) == 4
+    assert all(int(c.offset) == 256 for c in rec)
+    # sliding layer (window 129): boundary 256 needs keys 128..255
+    slid = np.array(rec[1].latent.astype(mx.float32))
+    ref = np.array(originals[1][0][:, :, 128:256].astype(mx.float32))
+    assert np.array_equal(slid, ref)
+    # full layer values = latent, positional slice 0..255
+    full = np.array(rec[0].values.astype(mx.float32))
+    fref = np.array(originals[0][0][:, :, :256].astype(mx.float32))
+    assert np.array_equal(full, fref)
+    # indexer stream on the sliding layer trimmed to the boundary
+    idx = np.array(mx.array(rec[1].idx_k).astype(mx.float32))
+    iref = np.array(originals[1][2][:, :256].astype(mx.float32))
+    assert np.array_equal(idx, iref)
+
+
+def test_partial_block_restore_uncovered_boundary_is_honest_miss():
+    # A boundary deeper than the retained overhang can NEVER be rebuilt
+    # exactly - the reconstruction must not hand back full-layer state with
+    # empty sliding windows (silent drift). It comes back compacted (or
+    # None), which the generator declines.
+    np, bac, tokens, originals, raw = _block_store_roundtrip_env(
+        n_tokens=2048, seed=11
+    )
+    slide_phys = int(raw[1].latent.shape[2])
+    assert slide_phys < 2048  # trim engaged, deep history physically gone
+    divergent = tokens[:256] + list(range(70000, 70064))
+    table, _ = bac.fetch_cache("fetch-deep", divergent)
+    if table is None:
+        return  # even better: no hit claimed at all
+    rec = bac.reconstruct_cache(table)
+    assert rec is None or len(rec) < 4
+
+
+def test_exact_restore_still_roundtrips_with_overhang():
+    # The retention overhang must not disturb the exact-match lane.
+    np, bac, tokens, originals, raw = _block_store_roundtrip_env(
+        n_tokens=512, seed=13
+    )
+    table, _ = bac.fetch_cache("fetch-exact", tokens)
+    assert table is not None
+    rec = bac.reconstruct_cache(table)
+    assert rec is not None and len(rec) == 4
+    assert all(int(c.offset) == int(table.num_tokens) for c in rec)
+
+
+def test_trim_to_boundary_semantics():
+    from vmlx_engine.models.dots3_note.language import Dots3LatentCache
+
+    mx.random.seed(3)
+    c = Dots3LatentCache(window=129)
+    latent = mx.random.normal((1, 1, 400, 48)).astype(mx.bfloat16)
+    k_pe = mx.random.normal((1, 1, 400, 16)).astype(mx.bfloat16)
+    c.update_and_fetch(latent, k_pe)
+    assert c.trim_to_boundary(400) is True  # no-op at own offset
+    assert c.trim_to_boundary(300) is True
+    assert int(c.offset) == 300 and int(c.latent.shape[2]) == 128
+    # keys 0..49 were dropped by the 300-rewind (128-key window) — a further
+    # rewind to 50 is NOT reconstructible and must refuse.
+    assert c.trim_to_boundary(50) is False
+    assert c.trim_to_boundary(400) is False  # cannot go forward
+
+    # A fresh untrimmed sliding cache CAN rewind below the window: all keys
+    # are still physically present, and boundary < window keeps all of them.
+    c2 = Dots3LatentCache(window=129)
+    c2.update_and_fetch(
+        mx.random.normal((1, 1, 400, 48)).astype(mx.bfloat16),
+        mx.random.normal((1, 1, 400, 16)).astype(mx.bfloat16),
+    )
+    assert c2.trim_to_boundary(50) is True
+    assert int(c2.offset) == 50 and int(c2.latent.shape[2]) == 50
+
+    full = Dots3LatentCache()
+    full.update_and_fetch(
+        mx.random.normal((1, 1, 100, 48)).astype(mx.bfloat16),
+        mx.random.normal((1, 1, 100, 16)).astype(mx.bfloat16),
+    )
+    assert full.trim_to_boundary(64) is True
+    assert int(full.offset) == 64 and int(full.latent.shape[2]) == 64
+
+
+def test_retention_overhang_does_not_change_outputs(model):
+    # Longer sliding retention is a memory policy: the physical-layout mask
+    # is (q - k) < window, so retained-but-out-of-window keys must be
+    # invisible. Prefill+decode outputs must match a zero-overhang control.
+    from vmlx_engine.models.dots3_note.language import Dots3LatentCache
+
+    lm = model
+    mx.random.seed(21)
+    ids = mx.random.randint(0, 128, (1, 96))
+    step = mx.random.randint(0, 128, (1, 1))
+
+    old = Dots3LatentCache.retain_overhang
+    try:
+        Dots3LatentCache.retain_overhang = 0
+        c0 = lm.make_cache()
+        out0 = lm(ids, cache=c0)
+        d0 = lm(step, cache=c0)
+        Dots3LatentCache.retain_overhang = 64
+        c1 = lm.make_cache()
+        out1 = lm(ids, cache=c1)
+        d1 = lm(step, cache=c1)
+    finally:
+        Dots3LatentCache.retain_overhang = old
+    assert mx.array_equal(out0, out1).item()
+    assert mx.array_equal(d0, d1).item()

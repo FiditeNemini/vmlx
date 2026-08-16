@@ -73,6 +73,17 @@ class Dots3LatentCache:
     """
 
     trim_step = 256
+    # Extra sliding-layer retention BEYOND window-1 so block-boundary
+    # checkpoints inside the retained overhang can be reconstructed for
+    # divergent-prefix restores (the prefix-cache boundary-checkpoint lane,
+    # ledger row 152). Physics: a boundary B is rebuildable from a snapshot
+    # at T only when keys (B-window+1..B) are still physically present, i.e.
+    # T-B <= retained-overhang. 768 = three 256-token blocks ≈ 33 MB across
+    # all sliding layers at bf16 — the mask math is (q-k) < window over the
+    # physical layout, so extra retained keys are provably invisible.
+    retain_overhang = int(
+        os.environ.get("VMLX_DOTS3_SWA_RETAIN_OVERHANG", "768") or 768
+    )
 
     def __init__(self, window: Optional[int] = None):
         self.window = window
@@ -111,11 +122,64 @@ class Dots3LatentCache:
             # Trim AFTER capturing this call's return: the current chunk's
             # oldest query still needs window-1 entries BEFORE itself, but
             # future queries only ever need the last window-1 stored entries.
-            keep_min = self.window - 1
+            # retain_overhang keeps extra masked-out history so recent block
+            # boundaries stay checkpoint-reconstructible (see class comment).
+            keep_min = self.window - 1 + self.retain_overhang
             if self.latent.shape[2] > keep_min + self.trim_step:
                 self.latent = self.latent[:, :, -keep_min:]
                 self.k_pe = self.k_pe[:, :, -keep_min:]
         return fetched
+
+    def trim_to_boundary(self, boundary: int) -> bool:
+        """Rewind this cache's state to logical position ``boundary``.
+
+        Used by the prefix-cache restore lane when a restored snapshot's
+        offset T exceeds the fetched span's token count B: full layers are
+        positionally complete and simply slice; sliding layers rewind only
+        when keys (B-window+1..B) are still inside the retained physical
+        buffer. Returns False (state untouched) when the rewind is not
+        exactly reconstructible — the caller must treat that as a miss.
+        """
+        boundary = int(boundary)
+        if boundary <= 0 or self.latent is None:
+            return False
+        T = int(self.offset)
+        if boundary > T:
+            return False
+        if boundary == T:
+            return True
+        drop = T - boundary
+        phys = int(self.latent.shape[2])
+        if self.window is None:
+            if phys != T:
+                # A positional stream missing early tokens cannot prove the
+                # slice is aligned; refuse rather than guess.
+                return False
+            self.latent = self.latent[:, :, :boundary]
+            self.k_pe = (
+                self.k_pe[:, :, :boundary] if self.k_pe is not None else None
+            )
+            if self.idx_k is not None:
+                self.idx_k = self.idx_k[:, :boundary]
+            self.offset = boundary
+            return True
+        # A boundary before the window fills needs ALL of its keys.
+        keep = min(self.window - 1, boundary)
+        if phys - drop < keep:
+            return False  # boundary older than the retained overhang
+        self.latent = self.latent[:, :, phys - drop - keep : phys - drop]
+        if self.k_pe is not None:
+            self.k_pe = self.k_pe[:, :, phys - drop - keep : phys - drop]
+        if self.idx_k is not None:
+            ilen = int(self.idx_k.shape[1])
+            if ilen == T:
+                self.idx_k = self.idx_k[:, :boundary]
+            elif ilen - drop >= keep:
+                self.idx_k = self.idx_k[:, ilen - drop - keep : ilen - drop]
+            else:
+                self.idx_k = None
+        self.offset = boundary
+        return True
 
     # ---- prefix-cache store/restore protocol ---------------------------
     # The MLLM extractor requires state + meta_state; the presence of a
@@ -789,6 +853,20 @@ class Dots3NoteModel(nn.Module):
         import logging as _logging
 
         _logger = _logging.getLogger("vmlx_engine")
+        if len(cache) < self.config.num_hidden_layers:
+            # A COMPACTED partial reconstruction (KV layers densely packed,
+            # sliding layers dropped) has lost the layer-index mapping —
+            # adopting by list position would bind full-layer state to the
+            # wrong layers. dots3 has no external companion store, so a
+            # compacted list is never restorable; the generator discards it
+            # as a miss (ledger row 152).
+            _logger.warning(
+                "dots3 adopt: compacted cache list (%d entries for %d "
+                "layers) — layer identity lost; refusing adoption",
+                len(cache),
+                self.config.num_hidden_layers,
+            )
+            return
         rope_dim = self.config.qk_rope_head_dim
         idx_dim = self.config.index_head_dim
         rank = self.config.kv_lora_rank

@@ -39,6 +39,20 @@ PREPACKAGE_ALLOWED_BLOCKERS = {
     "issue119_gemma26_memory_stress_open",
     "real_ui_unblocked_non_mimo_missing",
     "real_ui_unblocked_non_mimo_partial",
+    # 2026-08-16 (.32): the same hardware-transition waiver, completed. The
+    # 08-15 entry tolerated the issue175/176/177 COMPONENTS
+    # (issue175_179_release_boundary_audit, issue175_177_live_runtime_audit)
+    # but missed their ledger-blocker ids, so the gate blocked on evidence
+    # whose regeneration needs prior-machine-resident bundles (admin-sleep
+    # probe, Qwen3.6-MTP and MiniMax-Small installed-app probes) — serving
+    # models on the dev machine is prohibited by standing directive. The
+    # underlying issues are CLOSED with live proof recorded 08-15/-16
+    # (#175 notice chips CDP-proven on all doors; #176 M2.7 MTP engaged;
+    # #177 mlx.fast hot paths landed + TTFT rows). Remove with the rest of
+    # the transition set after the post-.29 rebuild.
+    "issue175_live_app_memory_stress_open",
+    "issue176_live_memory_pressure_open",
+    "issue177_live_ttft_paged_turboquant_open",
 }
 
 

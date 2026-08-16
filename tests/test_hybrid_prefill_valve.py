@@ -198,6 +198,13 @@ def test_deep_span_cache_clear_default_and_gate():
         "helper must be called from the fresh-prefill AND hybrid-hit lanes"
     )
     hit = src.index("VLM HYBRID cache FULL HIT")
-    assert "_maybe_clear_deep_span_cache(" in src[hit : hit + 1200], (
+    assert "_maybe_clear_deep_span_cache(" in src[hit : hit + 1600], (
         "hybrid cache-hit delta lane lost its deep-span clear"
+    )
+    # And the hit lane must NOT presize the reconstructed cache: measured
+    # (r6) an up-front span+headroom step there materialized an EXTRA
+    # full-span allocation each turn and moved the deep-span OOM wall TWO
+    # turns earlier (t17 -> t15).
+    assert "_presize_kv_slots_for_span" not in src[hit : hit + 1600], (
+        "hit-lane presize regressed the deep-span wall; keep it reverted"
     )

@@ -7931,28 +7931,17 @@ class MLLMBatchGenerator:
                                     # garbage before it starts. Span from the
                                     # block table, NOT req._cached_tokens
                                     # (reset_cached_tokens paths zero that).
-                                    _hit_span_tokens = int(
-                                        block_table.num_tokens or 0
-                                    ) + len(_full_remaining or [0])
+                                    # NOTE: do NOT presize the
+                                    # reconstructed cache here — measured
+                                    # r6: an up-front span+headroom step on
+                                    # the hit lane materialized an EXTRA
+                                    # full-span allocation early in every
+                                    # turn and moved the deep-span Metal
+                                    # OOM wall TWO turns earlier (t17->t15).
                                     _maybe_clear_deep_span_cache(
-                                        _hit_span_tokens
+                                        int(block_table.num_tokens or 0)
+                                        + len(_full_remaining or [0])
                                     )
-                                    # The reconstructed cache had NO span
-                                    # presize: every delta chunk and the
-                                    # decode start reallocated the full
-                                    # span (the measured fatal spike).
-                                    _hit_presized = _presize_kv_slots_for_span(
-                                        full_cache, _hit_span_tokens
-                                    )
-                                    if _hit_presized:
-                                        logger.info(
-                                            "Pre-sized %d reconstructed KV "
-                                            "slots to %d+%d tokens for the "
-                                            "hybrid-hit delta+decode.",
-                                            _hit_presized,
-                                            _hit_span_tokens,
-                                            _DECODE_PRESIZE_HEADROOM,
-                                        )
                                 elif not is_hybrid and reconstructed is not None:
                                     if not _validate_prompt_cache(
                                         reconstructed,

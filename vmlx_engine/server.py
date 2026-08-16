@@ -18120,6 +18120,7 @@ async def create_chat_completion(
                     messages,
                     request,
                     fastapi_request=fastapi_request,
+                    response_id=response_id,
                     **chat_kwargs,
                 ),
                 required_tool_call=_is_required_tool_choice(request.tool_choice),
@@ -22749,10 +22750,15 @@ async def stream_chat_completion(
     messages: list,
     request: ChatCompletionRequest,
     fastapi_request: Request | None = None,
+    response_id: str | None = None,
     **kwargs,
 ) -> AsyncIterator[str]:
     """Stream chat completion with auto-detection of closed connections."""
-    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    # The chat route mints its id BEFORE the stamped-effort policy and passes
+    # it here so policy-recorded notices pop under the id the terminal
+    # chunk serializes; adapters that call this generator directly still get
+    # a fresh id.
+    response_id = response_id or f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
     # Some adapters (notably Anthropic stream=false) consume this streaming
     # generator inside a non-streaming HTTP handler so they can reuse its
@@ -22832,6 +22838,11 @@ async def stream_chat_completion(
                     "exhausted": _completion
                     >= int(_clamp_record["clamped_max_tokens"]),
                 }
+            from vmlx_engine.context_limits import pop_effort_substitution
+
+            _effort_record = pop_effort_substitution(str(response_id))
+            if _effort_record:
+                payload["effort_substitution"] = _effort_record
         return json.dumps(payload, ensure_ascii=True)
 
     # Stable timestamp for all chunks in this stream (OpenAI spec compliance)

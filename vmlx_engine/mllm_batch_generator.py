@@ -5891,11 +5891,20 @@ class MLLMBatchGenerator:
         Hybrid SSM companion state must exist at the same token count as the
         paged KV block hit. If the clean prompt boundary lands inside a partial
         block, the block cache can only reuse up to the previous full block.
+
+        When the clean boundary is itself EXACTLY block-aligned, return one
+        block below it: a future request that diverges INSIDE the final block
+        matches KV up to the previous block boundary, and without a companion
+        checkpoint there the hybrid guard must discard the whole match
+        (measured live: probe matched 351 of 352 blocks while the only
+        checkpoint sat at the aligned 352-block boundary — full re-prefill).
         """
         block_size = int(getattr(self.block_aware_cache, "block_size", 0) or 0)
         if block_size <= 0 or boundary <= block_size:
             return 0
         block_boundary = (int(boundary) // block_size) * block_size
+        if block_boundary == int(boundary):
+            block_boundary -= block_size
         if 0 < block_boundary < boundary:
             return block_boundary
         return 0

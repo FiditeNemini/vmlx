@@ -620,3 +620,27 @@ def test_clean_prefill_splice_call_uses_the_function_parameter_name():
         "undefined name is back in _prefill_for_clean_path_dependent_cache"
     )
     assert "_complete_hybrid_base_from_companion" in src
+
+
+def test_block_aligned_clean_boundary_captures_one_block_below():
+    """Row 97: when the clean prompt boundary is exactly block-aligned, the
+    capture set must include the PREVIOUS block boundary — a request that
+    diverges inside the final block matches KV up to that boundary, and
+    without a companion checkpoint there the hybrid guard discards the whole
+    match (measured live: 351/352 blocks matched, checkpoint only at 352)."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    gen.block_aware_cache = SimpleNamespace(block_size=64)
+
+    # Aligned boundary -> one block below.
+    assert gen._ssm_block_aligned_boundary(22528) == 22464
+    # Unaligned boundary -> plain floor (unchanged behavior).
+    assert gen._ssm_block_aligned_boundary(24460) == 24448
+    # At or below one block -> nothing to capture.
+    assert gen._ssm_block_aligned_boundary(64) == 0
+    assert gen._ssm_block_aligned_boundary(10) == 0
+    # Aligned at exactly two blocks -> the first block boundary.
+    assert gen._ssm_block_aligned_boundary(128) == 64

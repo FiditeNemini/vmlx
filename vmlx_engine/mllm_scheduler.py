@@ -5251,13 +5251,36 @@ class MLLMScheduler:
             }
 
             if self.batch_generator is not None:
-                batch_stats = self.batch_generator.stats()
-                batch_stats_dict = batch_stats.to_dict()
-                stats["batch_generator"] = batch_stats_dict
-                stats["last_cache_execution"] = batch_stats_dict.get(
-                    "last_cache_execution"
-                )
-                stats["vision_cache"] = self.batch_generator.get_vision_cache_stats()
+                # A mid-prefill stats read can race the chunked-prefill loop
+                # mutating generator structures and THROW; the health
+                # assembler's blanket except then swallowed the whole
+                # scheduler payload (lce and all counters read as null for
+                # the entire prefill — proven live on a 32k chunked cold
+                # request). Degrade to the admission fallback below instead
+                # of unwinding, and log the first failure per exception type
+                # so the degradation is never silent.
+                try:
+                    batch_stats = self.batch_generator.stats()
+                    batch_stats_dict = batch_stats.to_dict()
+                    stats["batch_generator"] = batch_stats_dict
+                    stats["last_cache_execution"] = batch_stats_dict.get(
+                        "last_cache_execution"
+                    )
+                    stats["vision_cache"] = (
+                        self.batch_generator.get_vision_cache_stats()
+                    )
+                except Exception as exc:
+                    if getattr(self, "_gen_stats_err_logged", None) != type(
+                        exc
+                    ).__name__:
+                        self._gen_stats_err_logged = type(exc).__name__
+                        logger.info(
+                            "MLLM get_stats: generator stats read failed "
+                            "mid-flight (%s: %s) — serving admission-record "
+                            "fallback",
+                            type(exc).__name__,
+                            exc,
+                        )
             # Admission-record fallback: the generator is created lazily and
             # its stats can lack a record for the newest request (proven live
             # on qwen3.8 — cold requests published nothing). The scheduler's

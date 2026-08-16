@@ -734,6 +734,39 @@ def register_all(registry=None):
         )
     )
 
+    # ── dots3-note (dots3_note) ── 280B/16B-active omni MoE (RedNote dots
+    # studio), 512K ctx. Hybrid dual-geometry MLA: 13 full/DSA layers (128
+    # heads, kv_lora 512) + 33 sliding layers (64 heads, kv_lora 1024,
+    # window 513); DSA indexer past 2048; MTP layer 46; vision MoE-ViT +
+    # whisper-shape audio tower — video rides the IMAGE token path. Thinking
+    # ON by default (template sets enable_thinking=true when undefined; OFF
+    # is a <no_think> user marker PLUS a prefilled closed think block). Tool
+    # dialect is dots XML (<dots_function_call>) — parser "dots"; template
+    # natively renders tool_calls and wraps results in
+    # <dots_function_response> inside user turns. Vendored runtime under
+    # mlx_vlm.models.dots3_note (models/dots3_note_register.py).
+    _register(
+        ModelConfig(
+            family_name="dots3_note",
+            model_types=["dots3_note"],
+            cache_type="kv",
+            cache_subtype="dots3_hybrid_full_swa",
+            eos_tokens=["<|endoftext|>", "<|endofassistant|>"],
+            tool_parser="dots",
+            supports_native_tools=True,
+            reasoning_parser="dots3",
+            think_in_template=True,
+            supports_thinking=True,
+            is_mllm=True,
+            architecture_hints={
+                "inject_pixel_values": True,
+                "default_enable_thinking": True,
+            },
+            description="dots3-note omni MoE (hybrid MLA full+SWA, DSA, MTP)",
+            priority=20,
+        )
+    )
+
     # ── openPangu-2.0-Flash (openpangu_v2) ── 92B MoE (6B active), 512K ctx.
     # MLA + 3 stateful causal convs + 128 attention sinks + DSA/SWA hybrid 1:2
     # + mHC 4-stream hyper-connections + sandwich norm + MTP depth 3 (dropped

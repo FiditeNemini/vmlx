@@ -129,6 +129,14 @@ def _install_mlx_vlm_registry_patches() -> None:
     except Exception:
         pass
     try:
+        from vmlx_engine.models.dots3_note_register import (
+            register_dots3_note_runtime as _register_dots3_note_runtime,
+        )
+
+        _register_dots3_note_runtime()
+    except Exception:
+        pass
+    try:
         from mlx_vlm.prompt_utils import (
             MODEL_CONFIG as _VLM_MODEL_CONFIG,
             MessageFormat as _VLMMF,

@@ -5676,6 +5676,20 @@ class MLLMBatchGenerator:
         input_features = request.extra_kwargs.pop("input_features", None)
         input_features_mask = request.extra_kwargs.pop("input_features_mask", None)
         audio_features = request.extra_kwargs.pop("audio_features", None)
+        # Chunked-audio metadata (dots3-style processors): padded mel chunks
+        # are useless to the tower without the true per-chunk sample/token
+        # lengths and the chunks-per-audio grouping — deriving them from the
+        # PADDED shape produced a loud 38-vs-750 scatter mismatch.
+        request.audio_chunk_meta = {
+            key: request.extra_kwargs.pop(key)
+            for key in (
+                "chunk_sample_lens",
+                "chunk_token_lens",
+                "audio_chunk_counts",
+                "chunk_audio_indices",
+            )
+            if key in request.extra_kwargs
+        } or None
         request.audio_features = _ensure_mx_array(
             input_features if input_features is not None else audio_features
         )
@@ -6375,6 +6389,8 @@ class MLLMBatchGenerator:
                 kwargs["input_features"] = request.audio_features
                 if request.audio_features_mask is not None:
                     kwargs["input_features_mask"] = request.audio_features_mask
+                if getattr(request, "audio_chunk_meta", None):
+                    kwargs.update(request.audio_chunk_meta)
             else:
                 # Some processors name already-computed audio embeddings
                 # `audio_features`. Treat them as precomputed embeddings for the

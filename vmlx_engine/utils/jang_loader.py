@@ -1283,6 +1283,12 @@ def _build_dots3_note_vlm_processor(path: Path, eos_token_id=None, model=None):
         image_processor=Dots3NoteImageProcessor(**image_kwargs),
     )
     _attach_vlm_detokenizer_and_stopping(processor, path, eos_token_id=eos_token_id)
+    try:
+        from jang_tools.load_jangtq_vlm import _install_video_fallback
+
+        _install_video_fallback(processor)
+    except Exception as _vfe:
+        logger.debug(f"dots3 video fallback not installed: {_vfe}")
     return processor
 
 

@@ -52,8 +52,16 @@ class Model(nn.Module):
         audio_chunk_sample_lens: Optional[Any] = None,
         audio_chunk_token_lens: Optional[Any] = None,
         audio_chunk_counts: Optional[Any] = None,
+        chunk_sample_lens: Optional[Any] = None,
+        chunk_token_lens: Optional[Any] = None,
         **kwargs,
     ) -> mx.array:
+        # Accept both the tower-facing spellings (processor output, forwarded
+        # by the generator) and the audio_-prefixed direct-call spellings.
+        if audio_chunk_sample_lens is None:
+            audio_chunk_sample_lens = chunk_sample_lens
+        if audio_chunk_token_lens is None:
+            audio_chunk_token_lens = chunk_token_lens
         embeds = self.language_model.model.embed_tokens(input_ids)
 
         if pixel_values is not None:
@@ -148,6 +156,8 @@ class Model(nn.Module):
             audio_chunk_sample_lens=kwargs.get("audio_chunk_sample_lens"),
             audio_chunk_token_lens=kwargs.get("audio_chunk_token_lens"),
             audio_chunk_counts=kwargs.get("audio_chunk_counts"),
+            chunk_sample_lens=kwargs.get("chunk_sample_lens"),
+            chunk_token_lens=kwargs.get("chunk_token_lens"),
             grid_thw=kwargs.get("grid_thw"),
         )
         return self.language_model(

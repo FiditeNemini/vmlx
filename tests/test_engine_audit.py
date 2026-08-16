@@ -6255,8 +6255,11 @@ class TestV4FixHybridCacheDequantize:
         assert idx != -1
         # Look at the nearby prefill branch before this call. Keep the window
         # wide enough to include the explicit dequantize failure guard without
-        # becoming a whole-file substring assertion.
-        before = source[max(0, idx - 2000):idx]
+        # becoming a whole-file substring assertion. (Widened from 2000 when
+        # the family adopt_prompt_cache dispatch landed between the dequantize
+        # guard and the _fix_hybrid_cache call — the required ORDER is
+        # unchanged: dequantize -> validate -> adopt -> fix.)
+        before = source[max(0, idx - 3500):idx]
         assert "_dequantize_cache" in before, (
             "Must call _dequantize_cache before _fix_hybrid_cache in prefill path"
         )

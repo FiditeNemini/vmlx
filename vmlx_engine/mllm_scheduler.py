@@ -2923,6 +2923,10 @@ class MLLMScheduler:
             # Hold the record on the scheduler; get_stats falls back to it
             # whenever the generator stats carry none.
             self._admission_cache_execution = dict(_admission_execution)
+            logger.debug(
+                "MLLM admission telemetry record set for %s",
+                request.request_id,
+            )
             _admission_stats = getattr(
                 getattr(self, "batch_generator", None), "_stats", None
             )
@@ -5263,6 +5267,14 @@ class MLLMScheduler:
                 )
                 if isinstance(_admission_record, dict) and _admission_record:
                     stats["last_cache_execution"] = dict(_admission_record)
+                else:
+                    logger.debug(
+                        "MLLM get_stats: no generator lce and no admission "
+                        "record (generator=%s)",
+                        type(self.batch_generator).__name__
+                        if self.batch_generator is not None
+                        else None,
+                    )
 
             # Cache stats for all cache modes
             if self.block_aware_cache is not None:

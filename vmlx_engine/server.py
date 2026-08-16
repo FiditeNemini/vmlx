@@ -11793,17 +11793,35 @@ async def health():
         if isinstance(_companion_block, dict) and "last_prefix_lookup" in (
             _companion_block
         ):
-            _live_lookup = _live_ssm_prefix_lookup(scheduler_probe)
+            # The request-BOUND lookup lives embedded in the execution
+            # record (the generator stamps the request id there); the
+            # companion cache's own attribute is constructed without one,
+            # so an attr-vs-lce id comparison can never bind. Source from
+            # the embedded copy first — the same record the non-cached
+            # health path exposes via _request_bound_ssm_prefix_lookup.
+            _live_lookup = None
             _live_lce_id = (
                 _live_lce.get("request_id")
                 if isinstance(_live_lce, dict)
                 else None
             )
-            if (
-                isinstance(_live_lookup, dict)
-                and _live_lce_id
-                and _live_lookup.get("request_id") == _live_lce_id
-            ):
+            if isinstance(_live_lce, dict):
+                _embedded_lookup = _live_lce.get("ssm_prefix_lookup")
+                if (
+                    isinstance(_embedded_lookup, dict)
+                    and _embedded_lookup
+                    and _embedded_lookup.get("request_id") == _live_lce_id
+                ):
+                    _live_lookup = dict(_embedded_lookup)
+            if _live_lookup is None:
+                _attr_lookup = _live_ssm_prefix_lookup(scheduler_probe)
+                if (
+                    isinstance(_attr_lookup, dict)
+                    and _live_lce_id
+                    and _attr_lookup.get("request_id") == _live_lce_id
+                ):
+                    _live_lookup = _attr_lookup
+            if _live_lookup is not None:
                 _companion_block["last_prefix_lookup"] = _live_lookup
             else:
                 _companion_block.pop("last_prefix_lookup", None)

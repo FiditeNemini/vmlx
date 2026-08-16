@@ -11708,6 +11708,25 @@ def _live_last_cache_execution(scheduler: Any) -> dict[str, Any] | None:
     return None
 
 
+def _live_ssm_prefix_lookup(scheduler: Any) -> dict[str, Any] | None:
+    """Cheap live read of the SSM companion's newest prefix lookup.
+
+    Same attribute-read-only discipline as _live_last_cache_execution; the
+    companion cache resolves through the scheduler or its batch generator.
+    """
+    if scheduler is None:
+        return None
+    ssm_cache = getattr(scheduler, "_ssm_state_cache", None)
+    if ssm_cache is None:
+        ssm_cache = getattr(
+            getattr(scheduler, "batch_generator", None),
+            "_ssm_state_cache",
+            None,
+        )
+    lookup = getattr(ssm_cache, "last_prefix_lookup", None)
+    return dict(lookup) if isinstance(lookup, dict) and lookup else None
+
+
 def _health_status_value() -> str:
     if _standby_state:
         return f"standby_{_standby_state}"  # "standby_soft" or "standby_deep"
@@ -11761,6 +11780,33 @@ async def health():
             _live_lce = _live_last_cache_execution(scheduler_probe)
             if _live_lce is not None:
                 sched_block["last_cache_execution"] = _live_lce
+        # Same staleness applies to the SSM companion prefix lookup the
+        # cache-correlation gates read: overlay the live lookup when it is
+        # BOUND to the live execution record, and drop the cached one when
+        # it is not — a stale lookup mislabels the row, absence is honest.
+        _cache_block = result.get("cache")
+        _companion_block = (
+            _cache_block.get("ssm_companion")
+            if isinstance(_cache_block, dict)
+            else None
+        )
+        if isinstance(_companion_block, dict) and "last_prefix_lookup" in (
+            _companion_block
+        ):
+            _live_lookup = _live_ssm_prefix_lookup(scheduler_probe)
+            _live_lce_id = (
+                _live_lce.get("request_id")
+                if isinstance(_live_lce, dict)
+                else None
+            )
+            if (
+                isinstance(_live_lookup, dict)
+                and _live_lce_id
+                and _live_lookup.get("request_id") == _live_lce_id
+            ):
+                _companion_block["last_prefix_lookup"] = _live_lookup
+            else:
+                _companion_block.pop("last_prefix_lookup", None)
         result["health_gauges_cached"] = True
         return result
 

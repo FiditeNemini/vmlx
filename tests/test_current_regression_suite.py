@@ -59,13 +59,10 @@ def test_current_regression_suite_keeps_declared_known_blockers_open(tmp_path, m
 
 
 def test_current_regression_suite_carries_non_mimo_matrix_gap_with_rationale():
-    """2026-08-15 hardware-transition carryover: the May-era clearance was
-    proven on the previous machine's bundle set. On current bundles the
-    matrix holds green rows for qwen38/gemma4/zaya/nemotron/step37/minimax-m1
-    and the residual reds are attributed (Qwen3.6 full-tool-catalog temp-0
-    degeneracy, LFM/Zaya bundle-quality re-quants, installed-row parity), so
-    the row is EXPECTED open until those carriers clear. The expected-open
-    entry must keep its written rationale."""
+    """2026-08-16 (ledger row 151) retirement pass: the row stays EXPECTED
+    open until the Group-1/Group-2 regen sessions land the current-worktree
+    real-UI proof reruns (including the new dsv4 0731 rows). The expected-open
+    entry must keep a written rationale for its closure condition."""
     import inspect
 
     from tests.cross_matrix import run_current_regression_suite as suite
@@ -75,8 +72,11 @@ def test_current_regression_suite_carries_non_mimo_matrix_gap_with_rationale():
         in suite.EXPECTED_OPEN_REQUIREMENTS
     )
     source = inspect.getsource(suite)
-    assert "full-tool-catalog temp-0" in source, (
-        "the expected-open entry must document its carrier tasks"
+    assert "ledger row 151" in source, (
+        "the expected-open entry must cite the retirement-pass ledger row"
+    )
+    assert "incl. the new dsv4 rows" in source, (
+        "the expected-open entry must document its closure condition"
     )
 
 
@@ -94,11 +94,16 @@ def test_current_regression_suite_keeps_dsv4_safe_default_and_historical_tool_di
 
 
 def test_current_regression_suite_tracks_n2_pro_397b_as_known_open_requirement():
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
         "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared"
-        in suite.EXPECTED_OPEN_REQUIREMENTS
+        not in suite.EXPECTED_OPEN_REQUIREMENTS
+    )
+    assert (
+        "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared"
+        not in suite.DEFERRED_RELEASE_OPEN_REQUIREMENTS
     )
 
 
@@ -187,32 +192,18 @@ def test_decode_speed_gate_error_artifact_preserves_partial_live_rows():
 
 
 def test_current_regression_suite_carries_qwen_speed_rows_as_transition_open():
-    """2026-08-15 hardware-transition carryover: the three Qwen speed
-    clearances were proven 2026-06-06 against the retired 27B JANG_4M bundle;
-    the current drive carries the 35B MXFP8 CRACK MTP bundle whose speed
-    campaign has not run. The rows are EXPECTED open, and the entry must
-    document the reopen condition (35B speed artifacts + digest retarget)."""
-    import inspect
-
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the 27B JANG_4M prompt-processing row rode the retired bundle and
+    # is out of expected-open with the rest of the retirement scope; the two
+    # rows cleared 2026-08-15 on 35B artifacts stay OUT as before.
     from tests.cross_matrix import run_current_regression_suite as suite
 
-    assert (
-        "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared"
-        in suite.EXPECTED_OPEN_REQUIREMENTS
-    )
-    # Two rows CLEARED 2026-08-15 on 35B artifacts and must stay OUT of
-    # expected-open: packaged MX matmul speed (source + installed-app pass)
-    # and the native-MTP A/B (depth 2, 1.63x, full equivalence with
-    # --disable-prompt-reuse).
     for requirement in (
+        "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
         "Qwen/JANG packaged MX matmul speed is release-cleared",
         "Qwen native MTP live decode speed and output equivalence are release-cleared",
     ):
         assert requirement not in suite.EXPECTED_OPEN_REQUIREMENTS
-    source = inspect.getsource(suite)
-    assert "35B" in source, (
-        "the expected-open entries must document the reopen condition"
-    )
 
 
 def test_current_regression_suite_does_not_keep_proven_dsv4_one_tool_stop_open():

@@ -31,43 +31,36 @@ def test_objective_proof_digest_uses_current_noheavy_api_cache_contract():
 
 
 def test_objective_proof_digest_tracks_n2_pro_397b_release_blocker():
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the N2 Pro 397B row cannot launch on a 128GB host; the digest
+    # must no longer emit it (noheavy family-policy coverage stays).
     from tests.cross_matrix import summarize_objective_proof as objective
 
     digest = objective.build_digest(Path("."))
     rows = {item["requirement"]: item for item in digest["requirements"]}
-    row = rows[
-        "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared"
-    ]
 
-    assert row["status"] == "open"
-    assert "JANG1L" in row["caveat"]
-    assert "JANGTQ" in row["caveat"]
-    probe = row["details"]["local_artifact_probe"]
-    assert isinstance(probe["artifact_present"], bool)
-    if probe["artifact_present"]:
-        assert probe["memory_preflight_decision"] == "do_not_launch"
-    else:
-        assert probe["memory_preflight_decision"] is None
-        assert (
-            objective.N2_PRO_JANG1L_LOCAL_MEMORY_PREFLIGHT_REL
-            in row["details"]["missing_evidence"]
-        )
-    contracts = row["details"]["noheavy_contracts"]
-    assert isinstance(contracts["n2_family_policy"], bool)
-    if not row["details"]["missing_evidence"]:
-        assert contracts["n2_family_policy"] is True
-    assert "runtime_cache_api_ui_live_proof" in row["details"]["required_next_evidence"]
+    assert (
+        "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared"
+        not in rows
+    )
 
 
 def test_objective_proof_digest_live_smoke_pointers_match_release_manifest_current_map():
     from tests.cross_matrix import release_regression_manifest as manifest
     from tests.cross_matrix import summarize_objective_proof as objective
 
-    assert objective.ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_JANGTQ4_REL == (
-        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["zaya_vl_jangtq4"]
+    # 2026-08-16 (ledger row 151): zaya_vl_jangtq4 / ling_flash_tq smoke rows
+    # retired; parity is pinned on the surviving 20260815 filtered rows.
+    assert "zaya_vl_jangtq4" not in manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS
+    assert "ling_flash_tq" not in manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS
+    assert objective.ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL == (
+        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["zaya_text_mxfp4"]
     )
-    assert objective.ALL_LOCAL_MODEL_SMOKE_LING_BAILING_JANGTQ_REL == (
-        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["ling_flash_tq"]
+    assert objective.ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL == (
+        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["gemma4_crack"]
+    )
+    assert objective.ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL == (
+        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["nemotron_omni_tq2_system_nomedia"]
     )
     assert objective.ALL_LOCAL_MODEL_SMOKE_QWEN36_MXFP4_CRACK_REL == (
         manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["qwen36_moe_crack"]
@@ -81,8 +74,11 @@ def test_objective_proof_digest_dsv4_source_preflight_pointer_matches_release_ma
     assert objective.DSV4_CURRENT_SOURCE_MEMORY_PREFLIGHT_REL == (
         manifest.CURRENT_DSV4_SOURCE_MEMORY_PREFLIGHT_ARTIFACT
     )
-    assert objective.ALL_LOCAL_MODEL_SMOKE_HY3_JANGTQ2_REL == (
-        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["hy3_preview_jangtq2"]
+    # 2026-08-16 (ledger row 151): hy3_preview_jangtq2 smoke row retired; the
+    # dsv4 pointer parity moves to the 0731 filtered row.
+    assert "hy3_preview_jangtq2" not in manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS
+    assert objective.ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL == (
+        manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["dsv4_jang_local"]
     )
     assert objective.ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL == (
         manifest.CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["minimax_m27_tq_k"]
@@ -138,96 +134,17 @@ def test_objective_digest_tracks_minimax_issue179_root_cause_blocker(tmp_path):
 
     digest = objective.build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
-    row = rows[
+
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): #179 reporter-parity forensics are unrecoverable; even a manifest
+    # artifact still carrying the blocker cannot resurrect the digest row.
+    # (The variants "uses current artifact without blocker" and "prefers
+    # current open artifact over stale manifest sweep" were deleted -- this
+    # inverse pin covers the retirement.)
+    assert (
         "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared"
-    ]
-
-    assert row["status"] == "open"
-    assert row["evidence"] == [
-        objective.CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-        "build/current-issue179-minimax-k-root-cause-audit-20260527.json",
-    ]
-    assert "reporter model shard/codebook hashes" in row["caveat"]
-    assert row["details"]["release_blocker_id"] == "issue179_minimax_k_root_cause_audit"
-
-
-def test_objective_digest_uses_current_minimax_issue179_artifact_without_blocker(
-    tmp_path,
-):
-    from tests.cross_matrix import release_regression_manifest as manifest
-    from tests.cross_matrix import summarize_objective_proof as objective
-
-    _write_json(
-        tmp_path,
-        objective.CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-        {"release_blockers": [], "current_proof_sweep": {}},
+        not in rows
     )
-    _write_json(
-        tmp_path,
-        manifest.CURRENT_ISSUE179_MINIMAX_K_ROOT_CAUSE_AUDIT_ARTIFACT,
-        {
-            "status": "open",
-            "not_proven": ["reporter installed app bundle hash matches public/local server.py route proof"],
-            "release_boundary": "#179 remains open on reporter parity.",
-        },
-    )
-
-    digest = objective.build_digest(tmp_path)
-    rows = {item["requirement"]: item for item in digest["requirements"]}
-    row = rows[
-        "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared"
-    ]
-
-    assert row["status"] == "open"
-    assert row["evidence"] == [
-        objective.CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-        manifest.CURRENT_ISSUE179_MINIMAX_K_ROOT_CAUSE_AUDIT_ARTIFACT,
-    ]
-    assert row["details"]["audit_status"] == "open"
-    assert "reporter installed app bundle hash" in row["caveat"]
-
-
-def test_objective_digest_prefers_current_issue179_open_artifact_over_stale_manifest_sweep(
-    tmp_path,
-):
-    from tests.cross_matrix import release_regression_manifest as manifest
-    from tests.cross_matrix import summarize_objective_proof as objective
-
-    _write_json(
-        tmp_path,
-        objective.CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-        {
-            "release_blockers": [],
-            "current_proof_sweep": {
-                "issue179_minimax_k_root_cause_audit": {
-                    "status": "missing",
-                    "not_proven": [],
-                }
-            },
-        },
-    )
-    _write_json(
-        tmp_path,
-        manifest.CURRENT_ISSUE179_MINIMAX_K_ROOT_CAUSE_AUDIT_ARTIFACT,
-        {
-            "status": "open",
-            "not_proven": ["reporter parity metadata capture is still missing"],
-            "release_boundary": "#179 remains open on reporter parity.",
-        },
-    )
-
-    digest = objective.build_digest(tmp_path)
-    rows = {item["requirement"]: item for item in digest["requirements"]}
-    row = rows[
-        "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared"
-    ]
-
-    assert row["status"] == "open"
-    assert row["details"]["audit_status"] == "open"
-    assert row["details"]["not_proven"] == [
-        "reporter parity metadata capture is still missing"
-    ]
-    assert "reporter parity metadata capture" in row["caveat"]
 
 
 def _write_passing_base_artifacts(tmp_path: Path) -> None:
@@ -1249,9 +1166,11 @@ def test_objective_proof_digest_keeps_dsv4_long_quality_open(tmp_path):
     assert rows["DSV4 product sessions default to fail-closed full prefill"][
         "status"
     ] == "pass"
-    assert rows["Ling/Bailing multilingual output quality is release-cleared"][
-        "status"
-    ] == "pass"
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
+    assert "Ling/Bailing multilingual output quality is release-cleared" not in rows
+    assert "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared" not in rows
+    assert "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared" not in rows
+    assert "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared" not in rows
     open_requirements = [
         item["requirement"] for item in digest["requirements"] if item["status"] == "open"
     ]
@@ -1260,9 +1179,6 @@ def test_objective_proof_digest_keeps_dsv4_long_quality_open(tmp_path):
         "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
         "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
         "Cross-family live multi-turn smoke matrix is release-cleared",
-        "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-        "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
-        "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
         "Real Electron UI cross-family live model matrix is release-cleared",
         "DSV4 long-output/code/file-generation quality is release-cleared",
     ]
@@ -1529,22 +1445,10 @@ def test_objective_proof_digest_tracks_ling_multilingual_cjk_leakage(tmp_path):
     digest = build_digest(tmp_path)
     rows = {item["requirement"]: item for item in digest["requirements"]}
 
-    ling = rows["Ling/Bailing multilingual output quality is release-cleared"]
-    assert ling["status"] == "pass"
-    assert ling["details"]["max_cjk_chars"] == 17
-    assert ling["details"]["clearance_artifacts"] == [
-        "build/current-production-family-live-ling-bundled-current-20260606.json"
-    ]
-    assert ling["details"]["clearance_artifacts_with_cjk"] == []
-    assert ling["details"]["artifacts_with_cjk"] == [
-        "build/current-ling-jangtq-strict-russian-nocache-bundled-4850c9c2-20260524.json",
-        "build/current-ling-mxfp4-crack-strict-russian-nocache-bundled-4850c9c2-20260524.json",
-        "build/current-ling-jangtq-russian-prompt-variant-probe-20260524.json",
-        "build/current-ling-jangtq-server-repeat-russian-bundled-prefill-stream-20260524.json",
-        "build/current-production-family-live-ling-bundled-native-rerun-20260524.json",
-        "build/current-ling-jangtq-cold-skipcache-repeat-bundled-native-20260524.json",
-        "build/current-ling-jangtq-batchgen-temp0-repeat-bundled-native-20260524.json",
-    ]
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): no Ling bundle exists on current hardware -- even with the full
+    # CJK-leak artifact set present the retired row cannot reappear.
+    assert "Ling/Bailing multilingual output quality is release-cleared" not in rows
 
 
 def test_objective_proof_digest_surfaces_current_dsv4_identifier_canary(tmp_path):
@@ -8310,7 +8214,9 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
     )
     _write_json(
         tmp_path,
-        "build/current-all-local-model-smoke-dsv4-jangtq-k-tools-cache-20260606/summary.json",
+        # 2026-08-16 (ledger row 151): dsv4 smoke evidence lives on the 0731
+        # filtered-live-smoke row.
+        "build/current-filtered-live-smoke-dsv4-flash-0731-20260815/summary.json",
         {
             "completed": 1,
             "row_count": 1,
@@ -8318,7 +8224,7 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
                 {
                     "status": "pass",
                     "row": {
-                        "name": "DeepSeek-V4-Flash-JANGTQ-K",
+                        "name": "DeepSeek-V4-Flash-0731-JANG-CRACK",
                         "model_type": "deepseek_v4",
                         "cache_family": "deepseek_v4_composite",
                         "is_mllm": False,
@@ -8365,30 +8271,25 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_on_non_mimo_g
     row = rows[
         "Cross-family live multi-turn smoke matrix is release-cleared"
     ]
+    # 2026-08-16 (ledger row 151): required families trimmed to the eight
+    # bundles on current hardware (hy3/ling_bailing/mimo_v2/zaya_vl retired).
     assert row["status"] == "open"
     assert row["details"]["covered_family_keys"] == [
         "dsv4",
         "gemma4",
         "minimax",
+        "qwen36",
         "zaya_text",
-        "zaya_vl",
     ]
     assert row["details"]["missing_required_family_keys"] == [
-        "hy3",
         "lfm",
-        "ling_bailing",
-        "mimo_v2",
         "nemotron",
-        "qwen36",
         "step3p7",
     ]
     assert row["details"]["non_mimo_status"] == "open"
     assert row["details"]["non_mimo_missing_required_family_keys"] == [
-        "hy3",
         "lfm",
-        "ling_bailing",
         "nemotron",
-        "qwen36",
         "step3p7",
     ]
     assert row["details"]["non_mimo_not_pass_artifacts"] == []
@@ -8404,20 +8305,19 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_when_only_mim
     )
 
     _write_passing_base_artifacts(tmp_path)
+    # 2026-08-16 (ledger row 151): family roster trimmed to the eight bundles
+    # on current hardware (hy3/ling_bailing/zaya_vl retired with mimo_v2).
     family_rows = {
-        "dsv4": ("DeepSeek-V4-Flash-JANGTQ-K", "deepseek_v4"),
-        "gemma4": ("Gemma-4-26B-A4B-JANG_4M-CRACK", "gemma4"),
-        "hy3": ("Hy3-JANGTQ2", "hy3"),
-        "lfm": ("LFM2.5-8B-A1B-MXFP4-CRACK", "lfm2_moe"),
-        "ling_bailing": ("Ling-Bailing-JANGTQ", "ling"),
-        "minimax": ("MiniMax-Small-JANGTQ", "minimax"),
+        "dsv4": ("DeepSeek-V4-Flash-0731-JANG-CRACK", "deepseek_v4"),
+        "gemma4": ("Gemma-4-26B-A4B-it-JANG_4M-CRACK", "gemma4"),
+        "lfm": ("LFM2.5-8B-A1B-MXFP8-CRACK", "lfm2_moe"),
+        "minimax": ("MiniMax-M2.7-JANG_K-CRACK", "minimax_m2"),
         "nemotron": ("Nemotron-Omni-Nano-JANGTQ-CRACK", "nemotron_h"),
-        "qwen36": ("Qwen3.6-27B-MXFP4-CRACK", "qwen3_5"),
-        "step3p7": ("Step-3.7-Flash-JANG_2L-CRACK", "step3p7"),
-        "zaya_text": ("ZAYA1-8B-MXFP4", "zaya"),
-        "zaya_vl": ("ZAYA1-VL-8B-JANGTQ4", "zaya1_vl"),
+        "qwen36": ("Qwen3.6-35B-A3B-MXFP8-CRACK-MTP", "qwen3_5_moe"),
+        "step3p7": ("Step-3.7-Flash-JANG_K-CRACK", "step3p7"),
+        "zaya_text": ("Zaya-8B-JANG_4M", "zaya"),
     }
-    reasoning_families = {"dsv4", "gemma4", "hy3", "minimax", "qwen36", "step3p7"}
+    reasoning_families = {"dsv4", "gemma4", "minimax", "qwen36", "step3p7"}
     for family, (name, model_type) in family_rows.items():
         requests = [
             {
@@ -8511,13 +8411,10 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_when_only_mim
             "step3p7",
         ),
         "build/current-all-local-model-smoke-ling-hy3-nemotron-tools-media-20260606/summary.json": (
-            "hy3",
-            "ling_bailing",
             "nemotron",
         ),
         "build/current-all-local-model-smoke-zaya-text-vl-tools-media-after-reasoning-budget-20260606/summary.json": (
             "zaya_text",
-            "zaya_vl",
         ),
     }.items():
         _write_json(
@@ -8578,20 +8475,23 @@ def test_objective_proof_digest_keeps_cross_family_live_smoke_open_when_only_mim
     rows = {item["requirement"]: item for item in digest["requirements"]}
     row = rows["Cross-family live multi-turn smoke matrix is release-cleared"]
 
+    # 2026-08-16 (ledger row 151): mimo_v2 is no longer a required family, so
+    # a red retired-MiMo artifact cannot hold the matrix; all eight current
+    # families green clears every family gap.
     assert row["status"] == "open"
     assert row["details"]["non_mimo_status"] == "pass"
     assert row["details"]["release_boundary"] == (
-        "non_mimo_live_smoke_clear_mimo_v2_deferred"
+        "global_matrix_all_families_pass"
     )
-    assert row["details"]["mimo_v2_deferred"] is True
     assert row["details"]["not_pass_required_family_artifacts"] == {}
-    assert row["details"]["missing_required_family_keys"] == ["mimo_v2"]
+    assert row["details"]["missing_required_family_keys"] == []
     assert row["details"]["non_mimo_missing_required_family_keys"] == []
     assert row["details"]["non_mimo_not_pass_artifacts"] == []
-    mimo_row = rows[
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
+    assert (
         "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared"
-    ]
-    assert mimo_row["status"] == "open"
+        not in rows
+    )
 
 
 def test_all_local_smoke_digest_revalidates_cjk_visible_text_from_stale_artifacts(
@@ -8758,9 +8658,9 @@ def test_objective_digest_includes_current_real_ui_unblocked_non_mimo_matrix(
         "dsv4": [
             "build/current-real-ui-dsv4-memory-preflight-20260530-local-refresh.json"
         ],
-        "mimo_v2": [
-            "build/current-all-local-model-smoke-mimo-v25-jang2l-live-refresh-20260608/summary.json"
-        ],
+        # 2026-08-16 (ledger row 151): the retired MiMo smoke pointer no
+        # longer backs the mimo_v2 exclusion.
+        "mimo_v2": [],
     }
     assert row["details"]["real_ui_live_model_matrix"][
         "unblocked_non_mimo_excluded_families"
@@ -8994,7 +8894,9 @@ def test_objective_proof_digest_requires_dsv4_smoke_cache_hit(tmp_path):
     _write_passing_base_artifacts(tmp_path)
     _write_json(
         tmp_path,
-        "build/current-all-local-model-smoke-dsv4-jangtq-k-tools-cache-20260606/summary.json",
+        # 2026-08-16 (ledger row 151): dsv4 smoke evidence lives on the 0731
+        # filtered-live-smoke row.
+        "build/current-filtered-live-smoke-dsv4-flash-0731-20260815/summary.json",
         {
             "completed": 1,
             "row_count": 1,
@@ -9002,7 +8904,7 @@ def test_objective_proof_digest_requires_dsv4_smoke_cache_hit(tmp_path):
                 {
                     "status": "pass",
                     "row": {
-                        "name": "DeepSeek-V4-Flash-JANGTQ-K",
+                        "name": "DeepSeek-V4-Flash-0731-JANG-CRACK",
                         "model_type": "deepseek_v4",
                         "cache_family": "deepseek_v4_composite",
                     },
@@ -10342,14 +10244,12 @@ def test_objective_proof_digest_accepts_dsv4_quality_clearance_artifact(tmp_path
     open_requirements = [
         item["requirement"] for item in digest["requirements"] if item["status"] == "open"
     ]
+    # 2026-08-16 (ledger row 151): MiMo / N2 Pro / MiniMax-K rows retired.
     assert open_requirements == [
         "DSV4 native composite same-process reuse is cold-prefill equivalent",
         "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
         "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
         "Cross-family live multi-turn smoke matrix is release-cleared",
-        "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-        "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
-        "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
         "Real Electron UI cross-family live model matrix is release-cleared",
         "DSV4 long-output/code/file-generation quality is release-cleared",
     ]

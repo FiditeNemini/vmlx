@@ -251,6 +251,11 @@ def test_packaged_integrity_accepts_current_release_gate_unit_count(monkeypatch,
     monkeypatch.setattr(runner, "_check_staged_app_engine_source_hash_parity", lambda _root: True)
     monkeypatch.setattr(runner, "dry_release_gate_used_current_objective_digest", lambda _step: True)
     monkeypatch.setattr(runner, "_package_signing_preflight", lambda _root: _signed_preflight())
+    # 2026-08-16 (ledger row 151): the hardened-runtime entitlements check is
+    # now emitted by build_artifact; stub it like the other packaged checks.
+    monkeypatch.setattr(
+        runner, "_check_release_dmg_hardened_runtime_contract", lambda _root: True
+    )
 
     artifact = runner.build_artifact(tmp_path)
 
@@ -305,6 +310,11 @@ def test_packaged_integrity_sets_clean_jang_source_env_for_bundle_checks(monkeyp
     monkeypatch.setattr(runner, "_check_staged_app_engine_source_hash_parity", lambda _root: True)
     monkeypatch.setattr(runner, "dry_release_gate_used_current_objective_digest", lambda _step: True)
     monkeypatch.setattr(runner, "_package_signing_preflight", lambda _root: _signed_preflight())
+    # 2026-08-16 (ledger row 151): the hardened-runtime entitlements check is
+    # now emitted by build_artifact; stub it like the other packaged checks.
+    monkeypatch.setattr(
+        runner, "_check_release_dmg_hardened_runtime_contract", lambda _root: True
+    )
 
     artifact = runner.build_artifact(tmp_path, jang_tools_source=clean_jang)
 
@@ -649,13 +659,15 @@ def test_release_dmg_hardened_runtime_contract_rejects_weak_final_codesign(tmp_p
 
 
 def test_release_dmg_hardened_runtime_contract_accepts_runtime_entitlements(tmp_path):
+    # 2026-08-16 (ledger row 151): the contract now matches the pinned
+    # $APPLE_CODESIGN invocation form (unshadowed-tool hardening, --timestamp).
     script = tmp_path / "panel/scripts/build-release-dmgs.sh"
     script.parent.mkdir(parents=True)
     script.write_text(
         "finalize_release_app_signature() {\n"
         'local entitlements="$PANEL_DIR/build/entitlements.mac.plist"\n'
-        'codesign --force --deep --options runtime --entitlements "$entitlements" --sign "$identity" "$app_path"\n'
-        'codesign --verify --deep --strict --verbose=2 "$app_path"\n'
+        '"$APPLE_CODESIGN" --force --deep --timestamp --options runtime --entitlements "$entitlements" --sign "$identity" "$app_path"\n'
+        '"$APPLE_CODESIGN" --verify --deep --strict --verbose=2 "$app_path"\n'
         "}\n"
         "find_staged_app() {\n"
         "}\n",

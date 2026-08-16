@@ -142,9 +142,14 @@ def _passing_generation_defaults_payload():
 
 
 def test_release_regression_manifest_tracks_n2_pro_397b_known_open_requirement():
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
     assert (
         "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared"
-        in EXPECTED_CURRENT_OPEN_REQUIREMENTS
+        not in EXPECTED_CURRENT_OPEN_REQUIREMENTS
+    )
+    assert (
+        "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared"
+        not in DEFERRED_RELEASE_OPEN_REQUIREMENTS
     )
 
 
@@ -1224,6 +1229,17 @@ def _write_passing_real_ui_live_model_proof_artifacts(root: Path) -> None:
                     "Stored Cache Quantization",
                 ],
             }
+        if row["proof"].endswith(
+            "dsv4-flash-0731-responses-tools-cachecontrols-20260816-proof.json"
+        ):
+            # 2026-08-16 (ledger row 151): dsv4 real-UI rows added on the
+            # current 0731 JANG-CRACK bundle; this row carries the responses/
+            # tools/reasoning/settings surfaces for the dsv4 family.
+            proof["rendererWireApi"] = "responses"
+            proof["eventCounts"] = {"complete": 2, "tool": 4, "reasoningDone": 1}
+            proof["requestedBuiltinTools"] = True
+            proof["chatOverrides"] = {"builtinToolsEnabled": True}
+            proof["persistedReasoningCount"] = 1
         if row["proof"].endswith(
             "hy3-jangtq2-responses-tools-filesemantic-20260530-proof.json"
         ):
@@ -2600,22 +2616,11 @@ def test_current_proof_sweep_surfaces_issue179_open_not_proven_details(tmp_path)
         "#179 remains open until reporter bundle hash provenance is proven."
     )
     assert result["failures"] == []
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
+    # -- the #179 reporter-parity blocker binding is retired; the audit result
+    # stays surfaced (asserts above) but the blocker id can never be emitted.
     blockers = {gap["id"]: gap for gap in sweep["release_blocker_ledger"]["blockers"]}
-    assert blockers["issue179_minimax_k_root_cause_audit"]["details"][
-        "not_proven"
-    ] == [not_proven]
-    assert blockers["issue179_minimax_k_root_cause_audit"]["details"][
-        "release_boundary"
-    ] == "#179 remains open until reporter bundle hash provenance is proven."
-    assert blockers["issue179_minimax_k_root_cause_audit"]["details"][
-        "reporter_server_hash_parity"
-    ]["failure"] == "reporter_installed_server_hash_drift"
-    assert "reporter installed app bundle hash provenance" in blockers[
-        "issue179_minimax_k_root_cause_audit"
-    ]["next_proof"]
-    assert "broad cache/model probes" in blockers[
-        "issue179_minimax_k_root_cause_audit"
-    ]["next_proof"]
+    assert "issue179_minimax_k_root_cause_audit" not in blockers
 
 
 def test_current_proof_sweep_requires_issue179_memory_preflight_when_open(tmp_path):
@@ -4057,28 +4062,20 @@ def test_release_regression_manifest_tracks_multifamily_live_workflow_gate():
 
 
 def test_release_regression_manifest_tracks_covered_live_smoke_artifacts():
-    artifacts = set(CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS.values())
-
-    assert (
-        "build/current-filtered-live-smoke-ling-flash-jangtq-20260607/summary.json"
-        in artifacts
-    )
-    assert (
-        "build/current-filtered-live-smoke-gemma4-26b-jang4m-20260815/summary.json"
-        in artifacts
-    )
-    assert (
-        "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json"
-        in artifacts
-    )
-    assert (
-        "build/current-filtered-live-smoke-dsv4-flash-0731-20260815/summary.json"
-        in artifacts
-    )
-    assert (
-        "build/current-filtered-live-smoke-nemotron-omni-jangtq-20260815/summary.json"
-        in artifacts
-    )
+    # 2026-08-16 (ledger row 151): trimmed to the six bundles present on
+    # current hardware; ling_flash_tq / hy3_preview_jangtq2 / zaya_vl_jangtq4
+    # retired with the absent-bundle retirement pass.
+    assert CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS == {
+        "zaya_text_mxfp4": "build/current-filtered-live-smoke-zaya-text-jang4m-20260815/summary.json",
+        "gemma4_crack": "build/current-filtered-live-smoke-gemma4-26b-jang4m-20260815/summary.json",
+        "qwen36_moe_crack": "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json",
+        "minimax_m27_tq_k": "build/current-filtered-live-smoke-minimax-m27-jangk-20260815/summary.json",
+        "nemotron_omni_tq2_system_nomedia": "build/current-filtered-live-smoke-nemotron-omni-jangtq-20260815/summary.json",
+        "dsv4_jang_local": "build/current-filtered-live-smoke-dsv4-flash-0731-20260815/summary.json",
+    }
+    for retired_row_id in ("ling_flash_tq", "hy3_preview_jangtq2", "zaya_vl_jangtq4"):
+        assert retired_row_id not in CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS
+        assert retired_row_id not in CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS
 
 
 def test_release_regression_manifest_tracks_current_post_budget_edge_proof_sweep():
@@ -4910,25 +4907,40 @@ def test_release_regression_manifest_current_sweep_rejects_missing_real_ui_live_
         "build/private-evidence/current-real-ui-live-model-zaya-text-cachecontrols-20260527-proof.json"
         in result["real_ui_live_model_proof"]["missing"]
     )
+    # 2026-08-16 (ledger row 151): retired zaya_vl / ling_bailing / hy3 rows
+    # must no longer be demanded as evidence; the new dsv4 0731 rows are.
     assert (
         "build/private-evidence/current-real-ui-live-model-zaya-vl-image-current-source-20260531-proof.json"
-        in result["real_ui_live_model_proof"]["missing"]
+        not in result["real_ui_live_model_proof"]["missing"]
     )
     assert (
         "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-20260526-proof.json"
-        in result["real_ui_live_model_proof"]["missing"]
+        not in result["real_ui_live_model_proof"]["missing"]
     )
     assert (
         "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-20260526-proof.json"
-        in result["real_ui_live_model_proof"]["missing"]
+        not in result["real_ui_live_model_proof"]["missing"]
     )
     assert (
         "build/private-evidence/current-real-ui-live-model-qwen36-35b-mxfp8-mtp-responses-tools-cachecontrols-deterministic-mtp-20260815-proof.json"
         in result["real_ui_live_model_proof"]["missing"]
     )
+    # dsv4 stays a deferred release family (20260602 emergency scope), so its
+    # absent 0731 rows are tracked as skipped_missing rather than hard-missing.
+    assert (
+        "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-20260816-proof.json"
+        in result["real_ui_live_model_proof"]["skipped_missing"]
+    )
+    assert (
+        "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-responses-tools-cachecontrols-20260816-proof.json"
+        in result["real_ui_live_model_proof"]["skipped_missing"]
+    )
 
 
-def test_release_regression_manifest_real_ui_live_model_rows_include_ling_bailing_slice():
+def test_release_regression_manifest_real_ui_live_model_rows_match_current_bundle_inventory():
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the ling_bailing / zaya_vl / hy3 slices are gone (bundles absent);
+    # the surviving row pins and the new dsv4 0731 rows are kept below.
     rows = CURRENT_REAL_UI_LIVE_MODEL_PROOF_ROWS
 
     assert rows["zaya_text"]["model_name"] == "Zaya-8B-JANG_4M"
@@ -4944,27 +4956,11 @@ def test_release_regression_manifest_real_ui_live_model_rows_include_ling_bailin
         rows["zaya_text_responses_tools"]["proof"]
         == "build/private-evidence/current-real-ui-live-model-zaya-text-responses-tools-cachecontrols-20260815-proof.json"
     )
-    assert rows["zaya_vl_image"]["model_path"] == "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4"
-    assert rows["zaya_vl_image"]["model_name"] == "ZAYA1-VL-8B-JANGTQ4"
-    assert rows["zaya_vl_image"]["family"] == "zaya_vl"
-    assert (
-        rows["zaya_vl_image"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-zaya-vl-image-current-source-20260531-proof.json"
-    )
-    assert rows["zaya_vl_cachecontrols"]["model_path"] == "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4"
-    assert rows["zaya_vl_cachecontrols"]["model_name"] == "ZAYA1-VL-8B-JANGTQ4"
-    assert rows["zaya_vl_cachecontrols"]["family"] == "zaya_vl"
-    assert (
-        rows["zaya_vl_cachecontrols"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-zaya-vl-cachecontrols-20260527-proof.json"
-    )
-    assert rows["zaya_vl_responses_tools_cachecontrols"]["model_path"] == "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4"
-    assert rows["zaya_vl_responses_tools_cachecontrols"]["model_name"] == "ZAYA1-VL-8B-JANGTQ4"
-    assert rows["zaya_vl_responses_tools_cachecontrols"]["family"] == "zaya_vl"
-    assert (
-        rows["zaya_vl_responses_tools_cachecontrols"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-zaya-vl-responses-stricttools-cachecontrols-20260530-proof.json"
-    )
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
+    assert "zaya_vl_image" not in rows
+    assert "zaya_vl_cachecontrols" not in rows
+    assert "zaya_vl_responses_tools_cachecontrols" not in rows
+    assert all(row["family"] != "zaya_vl" for row in rows.values())
     assert all(
         "point-leak" not in row["proof"]
         for row in rows.values()
@@ -4973,19 +4969,10 @@ def test_release_regression_manifest_real_ui_live_model_rows_include_ling_bailin
         "zaya-vl-responses-tools-cachecontrols-localonly" not in row["proof"]
         for row in rows.values()
     )
-    assert rows["ling_bailing_jangtq"]["model_path"] == "/Users/example/models/JANGQ/Ling-2.6-flash-JANGTQ"
-    assert rows["ling_bailing_jangtq"]["model_name"] == "Ling-2.6-flash-JANGTQ"
-    assert (
-        rows["ling_bailing_jangtq"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-20260526-proof.json"
-    )
-    assert rows["ling_bailing_jangtq_responses_tools_cachecontrols"]["model_path"] == "/Users/example/models/JANGQ/Ling-2.6-flash-JANGTQ"
-    assert rows["ling_bailing_jangtq_responses_tools_cachecontrols"]["model_name"] == "Ling-2.6-flash-JANGTQ"
-    assert rows["ling_bailing_jangtq_responses_tools_cachecontrols"]["family"] == "ling_bailing"
-    assert (
-        rows["ling_bailing_jangtq_responses_tools_cachecontrols"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-responses-filesemantic-20260530-proof.json"
-    )
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
+    assert "ling_bailing_jangtq" not in rows
+    assert "ling_bailing_jangtq_responses_tools_cachecontrols" not in rows
+    assert all(row["family"] != "ling_bailing" for row in rows.values())
     assert (
         rows["gemma4"]["model_path"]
         == "/Volumes/EricsLLMDrive/dealignai/Gemma-4-26B-A4B-it-JANG_4M-CRACK"
@@ -5160,21 +5147,32 @@ def test_release_regression_manifest_real_ui_live_model_rows_include_ling_bailin
         rows["nemotron_omni_nano_responses_reasoning"]["proof"]
         == "build/private-evidence/current-real-ui-live-model-nemotron-omni-nano-responses-reasoning-20260815-proof.json"
     )
-    assert rows["hy3_jangtq2"]["model_path"] == "/Users/example/models/JANGQ/Hy3-preview-JANGTQ2"
-    assert rows["hy3_jangtq2"]["model_name"] == "Hy3-preview-JANGTQ2"
-    assert rows["hy3_jangtq2"]["family"] == "hy3"
-    assert (
-        rows["hy3_jangtq2"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-20260526-proof.json"
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row 151)
+    assert "hy3_jangtq2" not in rows
+    assert "hy3_jangtq2_responses_tools_cachecontrols" not in rows
+    assert all(row["family"] != "hy3" for row in rows.values())
+    # 2026-08-16 (ledger row 151): new dsv4 real-UI rows on the current 0731
+    # JANG-CRACK bundle.
+    assert rows["dsv4_flash_0731"]["model_path"] == (
+        "/Volumes/EricsLLMDrive/dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK"
     )
-    assert rows["hy3_jangtq2_responses_tools_cachecontrols"]["model_path"] == (
-        "/Users/example/models/JANGQ/Hy3-preview-JANGTQ2"
-    )
-    assert rows["hy3_jangtq2_responses_tools_cachecontrols"]["model_name"] == "Hy3-preview-JANGTQ2"
-    assert rows["hy3_jangtq2_responses_tools_cachecontrols"]["family"] == "hy3"
+    assert rows["dsv4_flash_0731"]["model_name"] == "DeepSeek-V4-Flash-0731-JANG-CRACK"
+    assert rows["dsv4_flash_0731"]["family"] == "dsv4"
     assert (
-        rows["hy3_jangtq2_responses_tools_cachecontrols"]["proof"]
-        == "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-tools-filesemantic-20260530-proof.json"
+        rows["dsv4_flash_0731"]["proof"]
+        == "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-20260816-proof.json"
+    )
+    assert rows["dsv4_flash_0731_responses_tools_cachecontrols"]["model_path"] == (
+        "/Volumes/EricsLLMDrive/dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK"
+    )
+    assert (
+        rows["dsv4_flash_0731_responses_tools_cachecontrols"]["model_name"]
+        == "DeepSeek-V4-Flash-0731-JANG-CRACK"
+    )
+    assert rows["dsv4_flash_0731_responses_tools_cachecontrols"]["family"] == "dsv4"
+    assert (
+        rows["dsv4_flash_0731_responses_tools_cachecontrols"]["proof"]
+        == "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-responses-tools-cachecontrols-20260816-proof.json"
     )
     assert rows["step37_flash_jang2l"]["model_path"] == (
         "/Volumes/EricsLLMDrive/dealignai/Step-3.7-Flash-JANG_K-CRACK"
@@ -5484,19 +5482,22 @@ def test_release_regression_manifest_real_ui_matrix_tracks_mixed_minimax_identit
     result = validate_current_proof_sweep_artifacts(tmp_path)
     matrix = result["real_ui_live_model_matrix"]
 
-    assert matrix["status"] == "open"
+    # 2026-08-16 (ledger row 151): retired families (ling_bailing, zaya_vl,
+    # hy3) dropped; dsv4 is now a covered family via the 0731 rows, so the
+    # fully-green fixture yields a passing matrix with no resource blockers.
+    assert matrix["status"] == "pass"
     assert matrix["release_blocker"] == "Real Electron UI cross-family live model matrix is release-cleared"
     assert matrix["covered_families"]["zaya_text"]["status"] == "pass"
     assert "chat_completions" in matrix["covered_families"]["zaya_text"]["covered_surfaces"]
     assert "cache_hit_telemetry" in matrix["covered_families"]["zaya_text"]["covered_surfaces"]
-    assert matrix["covered_families"]["ling_bailing"]["status"] == "pass"
+    assert "ling_bailing" not in matrix["covered_families"]
+    assert "zaya_vl" not in matrix["covered_families"]
+    assert "hy3" not in matrix["covered_families"]
     assert "responses_api" not in matrix["missing_surfaces"]
     assert "responses_delta_streaming" not in matrix["missing_surfaces"]
     assert "long_tool_loop" not in matrix["missing_surfaces"]
     assert "server_cache_controls" not in matrix["missing_surfaces"]
     assert "vl_image" not in matrix["missing_surfaces"]
-    assert matrix["covered_families"]["zaya_vl"]["status"] == "pass"
-    assert "vl_image" in matrix["covered_families"]["zaya_vl"]["covered_surfaces"]
     assert "gemma4" in matrix["covered_families"]
     assert matrix["covered_families"]["gemma4"]["status"] == "pass"
     assert "qwen36" not in matrix["missing_families"]
@@ -5512,13 +5513,17 @@ def test_release_regression_manifest_real_ui_matrix_tracks_mixed_minimax_identit
     assert matrix["covered_families"]["minimax"]["mixed_model_identity_union"] is False
     assert matrix["mixed_model_identity_families"] == []
     assert matrix["covered_families"]["nemotron_omni"]["status"] == "pass"
-    assert matrix["covered_families"]["hy3"]["status"] == "pass"
-    assert matrix["missing_families"] == ["dsv4"]
-    assert matrix["resource_blockers"]["dsv4"]["reason"] == "insufficient_memory"
+    assert matrix["covered_families"]["dsv4"]["status"] == "pass"
+    assert matrix["covered_families"]["dsv4"]["modelNames"] == [
+        "DeepSeek-V4-Flash-0731-JANG-CRACK",
+    ]
+    assert matrix["missing_families"] == []
+    assert matrix["partial_families"] == []
+    assert "resource_blockers" not in matrix
     assert matrix["unblocked_non_mimo_status"] == "pass"
     assert matrix["unblocked_non_mimo_missing_families"] == []
     assert matrix["unblocked_non_mimo_partial_families"] == []
-    assert matrix["unblocked_non_mimo_excluded_families"] == ["dsv4"]
+    assert matrix["unblocked_non_mimo_excluded_families"] == []
 
 
 def test_release_regression_manifest_current_sweep_requires_dsv4_memory_preflight_when_real_ui_missing(tmp_path):
@@ -5573,49 +5578,19 @@ def test_release_regression_manifest_real_ui_matrix_records_dsv4_memory_blocker(
 
     result = validate_current_proof_sweep_artifacts(tmp_path)
 
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the old JANGTQ-K memory-blocker escape hatch is inert now that
+    # dsv4 is a covered family on the 0731 rows -- a do-not-launch preflight
+    # can no longer mask a covered dsv4 lane behind a resource blocker.
     assert result["real_ui_dsv4_memory_preflight"]["status"] == "pass"
-    assert result["real_ui_live_model_matrix"]["resource_blockers"]["dsv4"] == {
-        "artifact": CURRENT_REAL_UI_DSV4_MEMORY_PREFLIGHT_ARTIFACT,
-        "reason": "insufficient_memory",
-        "model_path": "/Users/example/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K",
-        "model_size_gb": 80.0,
-        "required_available_gb": 120.0,
-        "required_free_gb": 120.0,
-        "min_free_gb": 120.0,
-        "preflight_memory_source": "vm_stat_free_plus_speculative_purgeable",
-        "free_plus_speculative_purgeable_gb": 39.15,
-        "available_for_gate_gb": 39.15,
-        "memory_gap_gb": 80.85,
-        "psutil_available_gb": 104.0,
-        "psutil_memory_gap_gb": 16.0,
-        "memory_pressure_free_percent": 95,
-        "inactive_file_cache_gb": 30.0,
-        "did_not_launch": True,
-        "launch_decision": "do_not_launch",
-        "launch_allowed": False,
-        "launch_blockers": ["insufficient_memory"],
-        "active_heavy_process_count": 0,
-        "active_heavy_processes": [],
-        "top_memory_processes": [
-            {"pid": 1001, "rss_gb": 10.0, "command": "vMLX"}
-        ],
-    }
-    assert result["real_ui_live_model_matrix"]["unblocked_non_mimo_status"] == "pass"
-    assert (
-        result["real_ui_live_model_matrix"][
-            "unblocked_non_mimo_missing_families"
-        ]
-        == []
-    )
-    assert (
-        result["real_ui_live_model_matrix"][
-            "unblocked_non_mimo_partial_families"
-        ]
-        == []
-    )
-    assert result["real_ui_live_model_matrix"][
-        "unblocked_non_mimo_excluded_families"
-    ] == ["dsv4"]
+    matrix = result["real_ui_live_model_matrix"]
+    assert matrix["covered_families"]["dsv4"]["status"] == "pass"
+    assert "dsv4" not in matrix["missing_families"]
+    assert "dsv4" not in matrix.get("resource_blockers", {})
+    assert matrix["unblocked_non_mimo_status"] == "pass"
+    assert matrix["unblocked_non_mimo_missing_families"] == []
+    assert matrix["unblocked_non_mimo_partial_families"] == []
+    assert matrix["unblocked_non_mimo_excluded_families"] == []
 
 
 def test_release_regression_manifest_real_ui_unblocked_non_mimo_status_fails_on_missing_family(
@@ -6116,7 +6091,7 @@ def test_release_regression_manifest_real_ui_matrix_uses_family_specific_media_r
             "status": "pass",
             "proofs": {
                 "zaya_text": complete_proof(),
-                "zaya_vl_image": complete_proof(image=True),
+                "gemma4": complete_proof(),
                 "qwen36_mxfp4_crack": complete_proof(image=True),
             },
         }
@@ -6125,11 +6100,15 @@ def test_release_regression_manifest_real_ui_matrix_uses_family_specific_media_r
     assert "vl_image" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY["zaya_text"]
     assert "video_where_supported" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY["zaya_text"]
     assert "reasoning_display" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY["zaya_text"]
-    assert "reasoning_display" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY["ling_bailing"]
+    # 2026-08-16 (ledger row 151): ling_bailing retired; lfm25 keeps the
+    # no-reasoning-display family carve-out pinned.
+    assert "ling_bailing" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY
+    assert "zaya_vl" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY
+    assert "reasoning_display" not in REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY["lfm25"]
     assert matrix["covered_families"]["zaya_text"]["status"] == "pass"
     assert "vl_image" not in matrix["covered_families"]["zaya_text"]["missing_surfaces"]
-    assert matrix["covered_families"]["zaya_vl"]["status"] == "pass"
-    assert "video_where_supported" not in matrix["covered_families"]["zaya_vl"]["missing_surfaces"]
+    assert matrix["covered_families"]["gemma4"]["status"] == "pass"
+    assert "vl_image" not in matrix["covered_families"]["gemma4"]["missing_surfaces"]
     assert matrix["covered_families"]["qwen36"]["status"] == "partial"
     assert "video_where_supported" in matrix["covered_families"]["qwen36"]["missing_surfaces"]
 
@@ -9254,7 +9233,6 @@ def test_release_regression_manifest_validates_current_proof_sweep_artifacts(tmp
     deferred = {gap["id"]: gap for gap in ledger["deferred_release_gaps"]}
     assert set(deferred) >= {
         "dsv4_long_output_code_exactness_open",
-        "real_ui_dsv4_memory_blocked",
     }
 
     dsv4_blocker = deferred["dsv4_long_output_code_exactness_open"]
@@ -9305,32 +9283,11 @@ def test_release_regression_manifest_validates_current_proof_sweep_artifacts(tmp
     assert "memory" in dsv4_details["commands"]
     assert "memory_pressure" in dsv4_details["commands"]
 
-    real_ui_blocker = deferred["real_ui_dsv4_memory_blocked"]
-    assert real_ui_blocker["status"] == "deferred"
-    assert real_ui_blocker["evidence"] == CURRENT_REAL_UI_DSV4_MEMORY_PREFLIGHT_ARTIFACT
-    assert (
-        real_ui_blocker["next_proof"]
-        == "Run DSV4 real Electron UI proof on a local machine/session with enough free memory."
-    )
-    real_ui_details = real_ui_blocker["details"]
-    assert real_ui_details["artifact"] == CURRENT_REAL_UI_DSV4_MEMORY_PREFLIGHT_ARTIFACT
-    assert real_ui_details["reason"] == "insufficient_memory"
-    assert (
-        real_ui_details["model_path"]
-        == "/Users/example/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K"
-    )
-    assert real_ui_details["preflight_memory_source"] == (
-        "vm_stat_free_plus_speculative_purgeable"
-    )
-    assert real_ui_details["did_not_launch"] is True
-    assert real_ui_details["launch_decision"] == "do_not_launch"
-    assert real_ui_details["launch_allowed"] is False
-    assert real_ui_details["launch_blockers"] == ["insufficient_memory"]
-    assert real_ui_details["active_heavy_process_count"] == 0
-    assert real_ui_details["active_heavy_processes"] == []
-    assert real_ui_details["available_for_gate_gb"] < real_ui_details["required_available_gb"]
-    assert real_ui_details["memory_gap_gb"] > 0
-    assert real_ui_details["top_memory_processes"]
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): dsv4 is a covered real-UI family on the 0731 rows, so the
+    # memory-blocked deferral (old JANGTQ-K path semantics) can no longer be
+    # emitted for a fully-green root.
+    assert "real_ui_dsv4_memory_blocked" not in deferred
 
 
 def test_release_blocker_ledger_tracks_mimo_as_current_release_blocker():
@@ -9351,8 +9308,11 @@ def test_release_blocker_ledger_tracks_mimo_as_current_release_blocker():
         real_ui_live_model_matrix={"status": "open", "missing_families": []},
     )
 
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the MiMo blocker binding is retired -- even an open MiMo
+    # root-cause payload can never emit the blocker id.
     blocker_ids = [blocker["id"] for blocker in ledger["blockers"]]
-    assert "mimo_v2_jang2l_runtime_quality_open" in blocker_ids
+    assert "mimo_v2_jang2l_runtime_quality_open" not in blocker_ids
     assert not any(
         item["family"] == "mimo_v2"
         for item in ledger["deferred_release_families"]
@@ -9405,11 +9365,14 @@ def test_release_blocker_ledger_does_not_use_remote_max2_artifacts_as_release_ev
         real_ui_live_model_matrix={"status": "pass", "missing_families": []},
     )
 
-    assert ledger["status"] == "open"
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the MiMo blocker binding is retired, so remote-max2-only evidence
+    # produces no blocker at all -- and no blocker may ever cite remote-max2.
     for blocker in ledger["blockers"]:
         assert "remote-max2" not in blocker["evidence"]
     blockers = {blocker["id"]: blocker for blocker in ledger["blockers"]}
-    assert set(blockers) == {"mimo_v2_jang2l_runtime_quality_open"}
+    assert "mimo_v2_jang2l_runtime_quality_open" not in blockers
+    assert set(blockers) == set()
     assert ledger["deferred_release_families"] == [{"family": "dsv4", "reason": "deferred_per_20260602_emergency_release_scope"}]
 
 
@@ -9433,8 +9396,11 @@ def test_release_blocker_ledger_tracks_missing_local_mimo_root_cause_artifacts()
         real_ui_live_model_matrix={"status": "pass", "missing_families": []},
     )
 
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): even missing local MiMo root-cause artifacts can never emit the
+    # retired MiMo blocker id.
     blockers = {blocker["id"]: blocker for blocker in ledger["blockers"]}
-    assert "mimo_v2_jang2l_runtime_quality_open" in blockers
+    assert "mimo_v2_jang2l_runtime_quality_open" not in blockers
     assert ledger["deferred_release_families"] == [{"family": "dsv4", "reason": "deferred_per_20260602_emergency_release_scope"}]
 
 
@@ -9477,13 +9443,11 @@ def test_release_blocker_ledger_reports_mimo_exactness_next_proof_without_stale_
         real_ui_live_model_matrix={"status": "pass", "missing_families": []},
     )
 
+    # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
+    # 151): the exactness-blocked payload can never emit the retired MiMo
+    # blocker id (next_proof wording retired with it).
     blockers = {blocker["id"]: blocker for blocker in ledger["blockers"]}
-    next_proof = blockers["mimo_v2_jang2l_runtime_quality_open"]["next_proof"]
-    assert "JANGTQ2 artifact exactness" in next_proof
-    assert "JANG_2L artifact exactness" in next_proof
-    assert "long-prompt" not in next_proof
-    assert "tool protocol" not in next_proof
-    assert "cache" not in next_proof
+    assert "mimo_v2_jang2l_runtime_quality_open" not in blockers
 
 
 def test_release_blocker_ledger_tracks_packaged_signing_blocker():
@@ -10997,13 +10961,15 @@ def test_release_regression_manifest_rejects_source_python_live_smoke_surface(
 ):
     from tests.cross_matrix import release_regression_manifest as manifest
 
-    artifact = CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["ling_flash_tq"]
+    # 2026-08-16 (ledger row 151): ling_flash_tq retired; the gemma4 row now
+    # carries the bundled-python surface rejection fixture.
+    artifact = CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS["gemma4_crack"]
     monkeypatch.setattr(
         manifest,
         "CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS",
-        {"ling_flash_tq": artifact},
+        {"gemma4_crack": artifact},
     )
-    row = dict(CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS["ling_flash_tq"])
+    row = dict(CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS["gemma4_crack"])
     path = tmp_path / artifact
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -11028,7 +10994,7 @@ def test_release_regression_manifest_rejects_source_python_live_smoke_surface(
                         "requests": [
                             {"label": label, "validation_failures": []}
                             for label in _required_live_smoke_request_labels(
-                                "ling_flash_tq",
+                                "gemma4_crack",
                                 {"row": row},
                             )
                         ],
@@ -11217,7 +11183,9 @@ def test_release_regression_manifest_rejects_live_smoke_missing_required_request
                     {
                         "row": {
                             "name": "Qwen3.6-35B-A3B-MXFP8-CRACK-MTP",
-                            "model_type": "qwen3_5",
+                            # 2026-08-16 (ledger row 151): current bundle
+                            # config model_type is qwen3_5_moe.
+                            "model_type": "qwen3_5_moe",
                             "is_mllm": True,
                             "supports_video": True,
                             "supports_thinking": True,
@@ -11730,7 +11698,9 @@ def test_release_regression_manifest_rejects_live_smoke_wrong_capability_family(
                     "identity_mismatches": {},
                     "capability_mismatches": {
                         "family": {
-                            "expected": "qwen3_5",
+                            # 2026-08-16 (ledger row 151): current bundle
+                            # config model_type is qwen3_5_moe.
+                            "expected": "qwen3_5_moe",
                             "actual": "gemma4",
                         },
                         "reasoning_parser": {
@@ -11776,7 +11746,9 @@ def test_release_regression_manifest_rejects_live_smoke_wrong_runtime_parsers(
             "failed": 0,
             "failing_results": [
                 {
-                    "model": "DeepSeek-V4-Flash-JANGTQ-K",
+                    # 2026-08-16 (ledger row 151): current dsv4 lane is the
+                    # 0731 JANG-CRACK bundle.
+                    "model": "DeepSeek-V4-Flash-0731-JANG-CRACK",
                     "status": "pass",
                     "failures": [],
                     "missing_request_labels": [],

@@ -308,7 +308,7 @@ def test_turn_walk_wiring_in_the_generator():
     # retry's no-forward-ran gauge reading poisons the fit and re-admits the
     # declined turn.
     helper = src.index("def _turn_peak_walk_admit(")
-    body = src[helper : helper + 4200]
+    body = src[helper : helper + 9000]
     assert "self._last_deep_span_tokens = 0" in body, (
         "refusal no longer zeroes _last_deep_span_tokens — a poisoned "
         "(deep span, near-zero peak) walk point re-admits the declined turn"
@@ -384,6 +384,132 @@ def test_turn_walk_admit_state_machine(monkeypatch):
     assert list(self._turn_peak_walk) == points_after_refusal, (
         "the no-forward-ran reading was recorded — the poisoned point will "
         "drag the fit down and re-admit the fatal turn"
+    )
+
+
+def test_turn_walk_interleaved_conversations_keep_protection(monkeypatch):
+    """Adversarial finding 2: the walk deque is generator-global, so a second
+    deep conversation at a different depth scatters ctx-vs-peak points and a
+    whole-deque fit can collapse to slope<=0 (valve silent, abort returns).
+    The fix fits only the longest strictly-increasing-ctx SUFFIX. Drive the
+    real admit through X-grow, Y-interleave, X-continue-to-wall and assert
+    the wall turn is STILL refused and the shallow turn is NOT."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    import vmlx_engine.mllm_batch_generator as gen
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    GIB_ = 1024**3
+    limit = int(107.52 * GIB_)
+    readings = iter(
+        [
+            int(93.3 * GIB_),    # entry X@79k: X@73k's peak
+            int(98.6 * GIB_),    # entry X@84.7k: X@79k's peak
+            int(104.2 * GIB_),   # entry Y@40k: X@84.7k's peak
+            int(104.5 * GIB_),   # entry X@90.3k: Y@40k's peak (X resident)
+            int(109.2 * GIB_),   # entry X@95,994: X@90.3k's peak
+        ]
+    )
+    fake_mx = SimpleNamespace(
+        get_peak_memory=lambda: next(readings),
+        reset_peak_memory=lambda: None,
+    )
+    monkeypatch.setattr(gen, "mx", fake_mx)
+    monkeypatch.setattr(
+        gen, "get_effective_metal_working_set_bytes", lambda _mx: (0, limit)
+    )
+    monkeypatch.setattr(gen, "_TURN_PEAK_ADMISSION", True)
+    monkeypatch.setattr(gen, "_TURN_PEAK_ALLOWANCE_BYTES", 0)
+
+    self = SimpleNamespace(
+        _turn_peak_walk=deque(maxlen=8), _last_deep_span_tokens=73_398
+    )
+    admit = MLLMBatchGenerator._turn_peak_walk_admit
+
+    admit(self, 79_047)
+    admit(self, 84_696)
+    # Conversation Y at 40k: the deque now holds X's deep points, whose fit
+    # projects far above anything 40k costs — Y must NOT be refused by X's
+    # walk (the over-refusal direction of finding 2).
+    admit(self, 40_000)
+    # Back to X at 90.3k: the depth switch truncated the monotone suffix to
+    # one point — a one-turn protection GAP, by design, not a poisoned fit.
+    admit(self, 90_345)
+    # X at the five-crash ordinal: the suffix has re-accumulated two points
+    # and, with the observed-peak floor, must refuse — a whole-deque fit
+    # flattened by the 40k point is what the suffix rule exists to prevent.
+    with pytest.raises(PrefillAdmissionError):
+        admit(self, 95_994)
+
+
+def test_turn_walk_aux_clean_path_prefill_is_exempt(monkeypatch):
+    """Adversarial finding 8: the clean-media-prefix N-1 re-prefill runs
+    NESTED inside a real turn; its gauge read/reset would corrupt the real
+    span's deferred measurement and a refusal would silently skip the media
+    prefix store. Exempt requests must not touch the gauge or the walk."""
+    from collections import deque
+    from types import SimpleNamespace
+
+    import vmlx_engine.mllm_batch_generator as gen
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    def _must_not_read():
+        raise AssertionError("exempt aux prefill consumed the peak gauge")
+
+    monkeypatch.setattr(
+        gen, "mx", SimpleNamespace(
+            get_peak_memory=_must_not_read, reset_peak_memory=_must_not_read
+        )
+    )
+    monkeypatch.setattr(gen, "_TURN_PEAK_ADMISSION", True)
+    self = SimpleNamespace(
+        _turn_peak_walk=deque(maxlen=8), _last_deep_span_tokens=90_345
+    )
+    aux_req = SimpleNamespace(_aux_clean_path_prefill=True)
+    MLLMBatchGenerator._turn_peak_walk_admit(self, 90_000, request=aux_req)
+    assert self._last_deep_span_tokens == 90_345, "aux prefill moved the anchor"
+    assert not self._turn_peak_walk, "aux prefill recorded a walk point"
+
+
+def test_turn_walk_hardening_source_pins():
+    """Findings 1, 3, 4, 7 are branch-embedded; pin their presence.
+
+    1: a sub-threshold CHUNKED prefill resets the gauge per chunk — it must
+       drop the deep anchor (one-turn gap instead of a deflated deep point).
+    3: the broadcast retry prefills the full prompt — stale hit-lane
+       _cached_tokens would double-count every span-derived decision.
+    4: any prefill failure reaches the per-request handler with the anchor
+       set — it must zero it there.
+    7: a malformed allowance env must not kill the engine at import."""
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "vmlx_engine"
+        / "mllm_batch_generator.py"
+    ).read_text(encoding="utf-8")
+    assert "one-turn recording gap" in src and src.count(
+        "self._last_deep_span_tokens = 0"
+    ) >= 3, (
+        "anchor zeroing lost from one of: valve refusal, sub-threshold "
+        "chunked span, per-request failure handler"
+    )
+    # Anchor on the broadcast retry itself, not the log line — an inner
+    # ValueError retry logs a similar message but resets via
+    # _discard_request_cache_hit instead.
+    retry = src.index("on broadcast retry we do full prefill from scratch")
+    assert "req._cached_tokens = 0" in src[retry - 800 : retry + 200], (
+        "broadcast retry no longer clears the stale hit-lane _cached_tokens"
+    )
+    handler = src.index("Per-request prefill failure (bad image, OOM, etc.)")
+    assert "self._last_deep_span_tokens = 0" in src[handler : handler + 1600], (
+        "failure handler no longer zeroes the walk anchor"
+    )
+    env = src.index('VMLX_TURN_PEAK_ALLOWANCE_MB')
+    assert "except ValueError" in src[env - 200 : env + 400], (
+        "allowance env parse is a bare int() again — a malformed value "
+        "kills the engine at import"
     )
 
 

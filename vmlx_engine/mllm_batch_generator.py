@@ -1862,9 +1862,14 @@ def _maybe_clear_deep_span_cache(total_span_tokens: int) -> None:
 _TURN_PEAK_ADMISSION = os.environ.get(
     "VMLX_TURN_PEAK_ADMISSION", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
-_TURN_PEAK_ALLOWANCE_BYTES = int(
-    os.environ.get("VMLX_TURN_PEAK_ALLOWANCE_MB", "0") or "0"
-) * 1024 * 1024
+try:
+    _TURN_PEAK_ALLOWANCE_BYTES = int(
+        os.environ.get("VMLX_TURN_PEAK_ALLOWANCE_MB", "0") or "0"
+    ) * 1024 * 1024
+except ValueError:
+    # A malformed override must not kill the engine at import; the safe
+    # default is the measured one.
+    _TURN_PEAK_ALLOWANCE_BYTES = 0
 # Recent turns only: residency changes (eviction, an unload, a pool-config
 # change) shift the walk's intercept, and stale points from a heavier regime
 # would over-project and refuse servable turns.
@@ -6198,7 +6203,9 @@ class MLLMBatchGenerator:
             return False
         return self._request_has_media_cache_context(request, token_ids)
 
-    def _turn_peak_walk_admit(self, final_ctx: int) -> None:
+    def _turn_peak_walk_admit(
+        self, final_ctx: int, request: "MLLMBatchRequest | None" = None
+    ) -> None:
         """Deferred-measure + admission for the cross-turn peak walk.
 
         Called immediately before EVERY forward, chunked OR single-shot —
@@ -6223,6 +6230,16 @@ class MLLMBatchGenerator:
         """
         if not _TURN_PEAK_ADMISSION:
             return
+        # Auxiliary prefills (the clean-media-prefix store's N-1 re-prefill)
+        # run NESTED inside a real turn, before its sampling eval: their gauge
+        # reading would pair the real span's anchor with a partially
+        # unmaterialized peak, their reset would clobber the real span's
+        # measurement, and a refusal here would silently skip the media
+        # prefix store. They are bookkeeping, not user turns — exempt.
+        if request is not None and getattr(
+            request, "_aux_clean_path_prefill", False
+        ):
+            return
         if not (0 < _DEEP_SPAN_CACHE_CLEAR_TOKENS <= final_ctx):
             return
         try:
@@ -6236,14 +6253,31 @@ class MLLMBatchGenerator:
             mx.reset_peak_memory()
         except Exception:  # noqa: BLE001
             pass
-        if len(self._turn_peak_walk) >= 2:
-            _walk_fit = fit_peak_model(list(self._turn_peak_walk))
+        # Fit only the longest strictly-increasing-context SUFFIX of the walk
+        # — i.e. the current growing conversation. Adversarial review: the
+        # deque is generator-global, so interleaving two deep conversations at
+        # different depths produces ctx-vs-peak points with no correlation —
+        # the fit's slope collapses to <=0 and the valve goes silent (the
+        # abort returns), or a shallow conversation inherits a deep one's
+        # residency and over-refuses. A depth switch truncates the suffix to
+        # one point, which yields a one-turn protection gap in mixed traffic —
+        # a gap, not a poisoned fit.
+        _walk_pts = list(self._turn_peak_walk)
+        _suffix_start = len(_walk_pts) - 1
+        while (
+            _suffix_start > 0
+            and _walk_pts[_suffix_start - 1][0] < _walk_pts[_suffix_start][0]
+        ):
+            _suffix_start -= 1
+        _walk_pts = _walk_pts[_suffix_start:]
+        if len(_walk_pts) >= 2:
+            _walk_fit = fit_peak_model(_walk_pts)
             if _walk_fit is not None:
                 try:
                     _, _walk_max_ws = get_effective_metal_working_set_bytes(mx)
                 except Exception:  # noqa: BLE001
                     _walk_max_ws = 0
-                _walk_last_ctx, _walk_last_peak = self._turn_peak_walk[-1]
+                _walk_last_ctx, _walk_last_peak = _walk_pts[-1]
                 # The observed-peak floor only applies when this turn is at
                 # least as deep as the observation; flooring a shallower
                 # request at a deeper turn's peak would refuse work the
@@ -6256,7 +6290,7 @@ class MLLMBatchGenerator:
                     "walk=%.2fGB+%.4fGB/1k-tok last_peak=%.2fGB "
                     "limit=%.2fGB allowance=%.2fGB",
                     final_ctx,
-                    len(self._turn_peak_walk),
+                    len(_walk_pts),
                     _walk_fit[0] / (1024**3),
                     _walk_fit[1] * 1000 / (1024**3),
                     _walk_last_peak / (1024**3),
@@ -6270,9 +6304,7 @@ class MLLMBatchGenerator:
                         final_ctx,
                         last_observed_peak_bytes=_walk_floor,
                         allowance_bytes=_TURN_PEAK_ALLOWANCE_BYTES,
-                        fitted_max_context=max(
-                            ctx for ctx, _ in self._turn_peak_walk
-                        ),
+                        fitted_max_context=max(ctx for ctx, _ in _walk_pts),
                         model_label="hybrid delta",
                     )
                 except Exception:
@@ -6375,7 +6407,8 @@ class MLLMBatchGenerator:
         # live by the engagement-line protocol). The fatal ~32s single command
         # buffer WAS the single-shot forward. Placed here it covers both.
         self._turn_peak_walk_admit(
-            int(getattr(request, "_cached_tokens", 0) or 0) + seq_len
+            int(getattr(request, "_cached_tokens", 0) or 0) + seq_len,
+            request=request,
         )
 
         # vmlx#89 / mlxstudio#83: opt-in chunked prefill for hybrid SSM models
@@ -6681,6 +6714,22 @@ class MLLMBatchGenerator:
                 )
                 if _hoisted_all_tokens is None and _sorted_boundaries:
                     _hoisted_all_tokens = input_ids[0].tolist()
+                # This chunked span resets the peak gauge per chunk below. If
+                # the span is SUB-THRESHOLD for the turn-peak walk (a mid-size
+                # fresh prompt: big enough to auto-chunk, too small for the
+                # valve), those resets clobber the deferred measurement a deep
+                # conversation left in the gauge — pairing its stale anchor
+                # with this span's tail reading would append a deflated deep
+                # point, collapse the fit's slope, and silence the valve on
+                # the turns approaching the wall (adversarial review, finding
+                # 1). Dropping the anchor converts that poisoning into a
+                # one-turn recording gap. Single-shot sub-threshold turns need
+                # no such handling: they only RAISE the gauge, which inflates
+                # the next point in the conservative direction.
+                if (
+                    int(getattr(request, "_cached_tokens", 0) or 0) + seq_len
+                ) < _DEEP_SPAN_CACHE_CLEAR_TOKENS:
+                    self._last_deep_span_tokens = 0
                 # Adaptive chunk sizing from MEASURED per-chunk transient.
                 # A modelled budget was tried and failed (a3cedb29f): it assumed
                 # fp16 scores only, while the real forward holds several fp32
@@ -9045,6 +9094,14 @@ class MLLMBatchGenerator:
                             pass
                     req.prompt_cache = None
                     req.input_ids = mx.array([req._original_token_ids])
+                    # The retry prefills the FULL prompt from scratch — the
+                    # stale hit-lane value would double-count the context
+                    # (cached + full prompt) in every consumer of
+                    # _cached_tokens + seq_len: the turn-peak walk, the
+                    # deep-span clear, and the whole-span admission all see a
+                    # span up to ~2x the real one (adversarial review,
+                    # finding 3).
+                    req._cached_tokens = 0
                     # Reset vision fields — on broadcast retry we do full prefill from scratch
                     req.pixel_values = None
                     req.attention_mask = None
@@ -9167,6 +9224,14 @@ class MLLMBatchGenerator:
                 req.image_grid_thw = None
                 req.extra_kwargs = {}
                 mx.clear_cache()
+                # A deep span that FAILED did not produce the peak its anchor
+                # promises — the turn-peak valve zeroes this on its own
+                # refusal, but a failure from any other source (media error,
+                # sibling valve, broadcast) reaches here with the anchor still
+                # set, and the next deep admit would record a poisoned
+                # (full ctx, partial-span peak) walk point (adversarial
+                # review, finding 4).
+                self._last_deep_span_tokens = 0
                 # Queue an immediate error response instead of killing the entire batch.
                 # Issue #56 Bug 1: use finish_reason="error" + error string so the
                 # scheduler → server path can raise an HTTP 500 with the real
@@ -10863,6 +10928,11 @@ class MLLMBatchGenerator:
                 except Exception:
                     clean_req.attention_mask = request.attention_mask
             clean_req.vision_encoded = False
+            # Nested bookkeeping prefill, not a user turn: exempt from the
+            # turn-peak walk (its mid-turn gauge read/reset would corrupt the
+            # real span's deferred measurement, and a refusal here would
+            # silently skip the media prefix store).
+            clean_req._aux_clean_path_prefill = True
             logits = self._run_vision_encoding(clean_req, cache=fresh_cache)
             materialize: List[Any] = []
 

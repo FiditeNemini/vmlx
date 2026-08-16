@@ -706,7 +706,7 @@ def test_mimo_v2_media_prefill_does_not_forward_processor_attention_mask(
         # The forward's first act is turn-peak admission (it must run before
         # the chunked/single-shot branch choice); a 3-token span is far below
         # its deep-context gate, so a no-op stands in for the real method.
-        _turn_peak_walk_admit=lambda final_ctx: None,
+        _turn_peak_walk_admit=lambda final_ctx, request=None: None,
     )
     request = MLLMBatchRequest(uid=1, request_id="mimo-media", prompt="p")
     request.input_ids = mx.array([[1, 151655, 2]], dtype=mx.int32)

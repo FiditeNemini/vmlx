@@ -564,6 +564,30 @@ ROWS: list[ModelRow] = [
             "modules where config.json claimed uniform 4-bit.",
         ],
     ),
+    ModelRow(
+        id="dots3_note_jang2d",
+        label="dots3-note-prev JANG2D (omni MoE)",
+        path="/Volumes/EricsLLMDrive/models/dots3-note-prev-JANG",
+        family="dots3_note",
+        kind="omni",
+        slow=True,
+        expect_reasoning=True,
+        expect_tool_parser="dots",
+        cache_profile="default",
+        notes=[
+            "280B/16B-active omni MoE, hybrid dual-geometry MLA (13 full/DSA "
+            "+ 33 SWA window 513), DSA indexer past 2048, MTP layer 46 (SWA "
+            "geometry, dedicated embed table). Absorbed latent cache is the "
+            "default (VMLX_DOTS3_MLA_ABSORB=0 reverts); prefix cache = "
+            "positional full layers + cumulative SWA with the "
+            "adopt_prompt_cache re-typing hook — a hit is only valid if the "
+            "temp-0 answer text matches the cold run (the 30-vs-24 drift "
+            "class). Thinking ON by default, NO effort tiers; tool dialect "
+            "dots XML; video rides the IMAGE token path; audio via 60s mel "
+            "chunks with forwarded chunk metadata. Enabled 2026-08-16, "
+            "ledger rows 142-146.",
+        ],
+    ),
 ]
 
 

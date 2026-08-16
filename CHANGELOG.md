@@ -68,6 +68,10 @@ All notable changes to vMLX Engine will be documented in this file.
 - Panel: raw database error replaced with a clear message when a port is
   held by another session; MTP mode/depth and all restart-required settings
   verified to persist across engine restart, sleep/wake, and app relaunch.
+- Native-MTP text models (stock batch generator) wedged every request in a
+  TypeError retry loop after the cold-prefill-split change; the scheduler
+  now probes the active generator's insert() capability and omits the
+  kwarg where it does not apply.
 
 ### Release-note catch-up (1.6.29 - 1.6.31, shipped 2026-08-15)
 

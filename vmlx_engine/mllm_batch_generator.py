@@ -1760,6 +1760,28 @@ _HYBRID_PREFILL_DRAIN = os.environ.get(
     "VMLX_HYBRID_PREFILL_DRAIN", "0"
 ).strip().lower() not in {"0", "false", "no", "off"}
 
+# Deep-span cache relief. The MLX allocator cache retains freed buffers up
+# to its limit (25% of the working set — 26.9GB on a 128GB box). Across a
+# long multiturn session that cache fills with dead buffers, and a deep
+# span's peak (block reconstruction transient + full-span KV presize +
+# chunk transients + MTP buffers) then lands ON TOP of it — Metal aborts
+# with an UNCATCHABLE command-buffer OOM. MEASURED: a 16-turn incremental
+# grow crashed at a ~94k-token turn while the IDENTICAL request (same
+# restored 88,918-token chain, same delta prefill) completed cleanly on a
+# fresh process whose cache started empty. Clearing the cache before a
+# deep span returns that garbage exactly when the room is needed; a span
+# this size runs for seconds, so one clear is noise. 0 disables.
+try:
+    _DEEP_SPAN_CACHE_CLEAR_TOKENS = max(
+        0,
+        int(
+            os.environ.get("VMLX_DEEP_SPAN_CACHE_CLEAR_TOKENS", "32768")
+            or "0"
+        ),
+    )
+except (TypeError, ValueError):
+    _DEEP_SPAN_CACHE_CLEAR_TOKENS = 32768
+
 _HYBRID_PREFILL_MEM_TRACE = os.environ.get(
     "VMLX_HYBRID_PREFILL_MEM_TRACE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -6456,6 +6478,35 @@ class MLLMBatchGenerator:
                 # reallocations, zero per-chunk garbage. It must be restored
                 # afterwards or the first decode token would allocate another
                 # full-width buffer.
+                # Deep spans: return the allocator cache's dead buffers
+                # BEFORE the full-span presize and reconstruction copies land
+                # (see _DEEP_SPAN_CACHE_CLEAR_TOKENS — measured Metal OOM
+                # abort at ~94k after 16 turns of in-process accumulation;
+                # identical request clean on an empty-cache process).
+                if _DEEP_SPAN_CACHE_CLEAR_TOKENS > 0:
+                    _total_span_tokens = (
+                        int(getattr(request, "_cached_tokens", 0) or 0)
+                        + seq_len
+                    )
+                    if _total_span_tokens >= _DEEP_SPAN_CACHE_CLEAR_TOKENS:
+                        try:
+                            mx.synchronize()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            _clear_cache = getattr(mx, "clear_cache", None) or (
+                                mx.metal.clear_cache
+                            )
+                            _clear_cache()
+                            logger.info(
+                                "Deep-span prefill: cleared MLX allocator "
+                                "cache before a %d-token span (threshold %d)",
+                                _total_span_tokens,
+                                _DEEP_SPAN_CACHE_CLEAR_TOKENS,
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+
                 _presized_kv_slots: List[Any] = []
                 if _KV_PRESIZE_SPAN and seq_len > 0:
                     for _slot in (cache or []):

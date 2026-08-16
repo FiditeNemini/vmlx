@@ -160,3 +160,36 @@ def test_a_degenerate_observation_context_cannot_veto_everything():
     projected = project_span_peak_bytes(int(2.86 * GIB), 1, 2048)
     assert projected / GIB > 1000, "sanity: this IS the degenerate case"
     # ...which is exactly why the caller must never pass a start-of-span context.
+
+
+def test_deep_span_cache_clear_default_and_gate():
+    """Row 110/111: 16 turns of in-process accumulation filled the MLX
+    allocator cache (26.9GB limit) and a ~94k span's peak then aborted Metal
+    with an uncatchable command-buffer OOM; the identical request on an
+    empty-cache process completed with ~90GB headroom. The deep-span clear
+    must default ON with a threshold well below the measured crash point."""
+    import re
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "vmlx_engine"
+        / "mllm_batch_generator.py"
+    ).read_text(encoding="utf-8")
+    m = re.search(
+        r'"VMLX_DEEP_SPAN_CACHE_CLEAR_TOKENS", "(\d+)"',
+        src,
+    )
+    assert m, "deep-span cache clear env default disappeared"
+    assert 0 < int(m.group(1)) <= 65536, (
+        f"threshold {m.group(1)} must sit well below the measured ~94k crash"
+    )
+    anchor = src.index("_DEEP_SPAN_CACHE_CLEAR_TOKENS > 0:")
+    window = src[anchor : anchor + 1400]
+    assert "mx.synchronize()" in window, (
+        "must synchronize before clearing or freed buffers are not reclaimable"
+    )
+    assert "clear_cache" in window
+    assert "_presized_kv_slots" in src[anchor : anchor + 2400], (
+        "the clear must run BEFORE the full-span KV presize allocates"
+    )

@@ -774,6 +774,45 @@ class Dots3NoteModel(nn.Module):
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mtp = Dots3MTPEmbeddings(config)
 
+    def _adopt_restored_caches(self, cache: List[Any]) -> None:
+        """Re-type prefix-cache restores that came back as generic KVCache.
+
+        The block machinery's positional reconstruction builds a plain
+        ``KVCache`` (class identity is not stored per kv block), so a
+        restored full-attention layer would otherwise hit the MATERIALIZED
+        attention branch with packed latent streams misread as per-head
+        K/V — plausible-but-wrong output, no exception (measured live:
+        a 30-entry recall answered 24 on the restored path). Convert in
+        place; the list object is shared with the scheduler, so the typed
+        cache also flows into later stores.
+        """
+        rope_dim = self.config.qk_rope_head_dim
+        idx_dim = self.config.index_head_dim
+        rank = self.config.kv_lora_rank
+        for i in range(self.config.num_hidden_layers):
+            if self.config.is_sliding(i) or i >= len(cache):
+                continue
+            c = cache[i]
+            if c is None or isinstance(c, Dots3LatentCache):
+                continue
+            keys = getattr(c, "keys", None)
+            values = getattr(c, "values", None)
+            if (
+                keys is None
+                or values is None
+                or getattr(keys, "ndim", 0) != 4
+                or keys.shape[1] != 1
+                or keys.shape[-1] != rope_dim + idx_dim
+                or values.shape[-1] != rank
+            ):
+                continue
+            adopted = Dots3LatentCache()
+            adopted._rope_dim = rope_dim
+            adopted._idx_dim = idx_dim
+            adopted.state = (keys, values)
+            adopted.offset = int(getattr(c, "offset", keys.shape[2]))
+            cache[i] = adopted
+
     def __call__(
         self,
         inputs: Optional[mx.array] = None,
@@ -807,6 +846,8 @@ class Dots3NoteModel(nn.Module):
 
         if cache is None:
             cache = [None] * n_backbone
+        else:
+            self._adopt_restored_caches(cache)
 
         full_mask = None
         swa_mask = None

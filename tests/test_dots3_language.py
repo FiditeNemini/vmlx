@@ -233,3 +233,35 @@ def test_chunked_prefill_past_window_with_trim(model):
         assert float(mx.abs(a - b).max()) < 1e-4
     finally:
         Dots3LatentCache.trim_step = 256
+
+
+def test_restored_generic_kvcache_is_adopted(model):
+    # The prefix-cache positional reconstruction returns plain KVCache
+    # objects (class identity is not stored per kv block). The model must
+    # re-type them before attention, or packed latent streams get misread
+    # as per-head K/V — plausible-but-wrong output, no exception.
+    from mlx_lm.models.cache import KVCache
+
+    cfg = model.text_config
+    ref = _latent_caches(model)
+    ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8]])
+    model(ids, cache=ref)
+
+    mixed = []
+    for i, c in enumerate(ref):
+        if not cfg.is_sliding(i):
+            fake = KVCache()
+            packed, latent = c.state
+            fake.keys = packed
+            fake.values = latent
+            fake.offset = c.offset
+            mixed.append(fake)
+        else:
+            mixed.append(Dots3LatentCache.from_state(c.state, c.meta_state))
+
+    step = mx.array([[11]])
+    ref_step_caches = ref
+    a = model(step, cache=ref_step_caches)
+    b = model(step, cache=mixed)
+    assert isinstance(mixed[0], Dots3LatentCache), "adoption did not happen"
+    assert float(mx.abs(a - b).max()) < 1e-4

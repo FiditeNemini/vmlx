@@ -5847,13 +5847,35 @@ def main() -> int:
         # for the correlated record; keep the last read either way so a
         # genuine absence stays observable.
         _row_response_id = str(summary.get("response_id") or "")
-        _lce_deadline = time.monotonic() + 3.0
+        _lce_deadline = time.monotonic() + 6.0
         while _row_response_id and time.monotonic() < _lce_deadline:
             _lce = (health.get("scheduler") or {}).get("last_cache_execution")
-            if (
+            _lce_bound = (
                 isinstance(_lce, dict)
                 and str(_lce.get("request_id") or "") == _row_response_id
-            ):
+            )
+            # The execution record can correlate EARLY (the admission-time
+            # record lands before prefill) while the SSM companion lookup is
+            # written at prefill — accepting on the execution match alone
+            # captures a row with a dropped/absent lookup. Require BOTH
+            # correlations when a companion block is exposed; a pure-miss
+            # row that never produces a lookup exits at the deadline with
+            # the execution-correlated read.
+            _companion = (
+                (health.get("cache") or {}).get("ssm_companion") or {}
+            )
+            _lookup = (
+                _companion.get("last_prefix_lookup")
+                if isinstance(_companion, dict)
+                else None
+            )
+            _lookup_bound = (
+                isinstance(_lookup, dict)
+                and str(_lookup.get("request_id") or "") == _row_response_id
+            )
+            if _lce_bound and (_lookup_bound or not _companion):
+                break
+            if _lce_bound and time.monotonic() > _lce_deadline - 2.0:
                 break
             time.sleep(0.25)
             health = _json_get(f"{args.base_url}/health", args.timeout)

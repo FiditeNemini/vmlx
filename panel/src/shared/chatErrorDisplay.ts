@@ -41,12 +41,29 @@ export function promptTooLongChatErrorContent(
     /* already plain text */
   }
 
+  // A turn-peak admission decline shares the 413/prompt_too_long envelope
+  // but has the OPPOSITE remedy: the conversation is too DEEP for this
+  // process (Metal peak walks up across turns), not too large per message —
+  // "shorten this message" cannot fix it, while restarting the model can
+  // (the conversation's cache restores from disk and the fresh process
+  // serves the same turn; proven live at 101k tokens).
+  if (PREFILL_ADMISSION_DECLINED_RE.test(raw) || PREFILL_ADMISSION_DECLINED_RE.test(detail)) {
+    return (
+      `${PROMPT_TOO_LONG_BUBBLE_PREFIX}${detail}\n\n` +
+      "In the app: restart this model from the Server tab and resend — the " +
+      "conversation restores from the disk cache — or start a new chat."
+    )
+  }
+
   return (
     `${PROMPT_TOO_LONG_BUBBLE_PREFIX}${detail}\n\n` +
     "In the app: shorten this message, remove large attachments, raise the " +
     "session's max context in Settings, or start a new chat."
   )
 }
+
+const PREFILL_ADMISSION_DECLINED_RE =
+  /prefill_admission_declined|turn-peak admission declined/i
 
 export const PROMPT_TOO_LONG_BUBBLE_PREFIX = "Message not sent — "
 export const METAL_HEADROOM_BUBBLE_PREFIX = "Generation blocked: "

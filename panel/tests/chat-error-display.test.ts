@@ -105,6 +105,34 @@ describe('chat error display policy', () => {
     )
   })
 
+  it('a turn-peak admission decline gets the restart remedy, not shorten-message', () => {
+    // The engine's first live refusal (turn-peak valve, ctx 101,678) shares
+    // the 413/prompt_too_long envelope but has the OPPOSITE remedy: the
+    // conversation is too deep for the current process, and restarting the
+    // model serves the same turn (cache restores from disk — proven live).
+    const body = JSON.stringify({
+      error: {
+        message:
+          'hybrid delta: turn-peak admission declined a delta forward at a ' +
+          'context of 101678 tokens — the cross-turn Metal peak walk projects ' +
+          '108.7GB against a refusal threshold of 107.5GB. Growing this ' +
+          'conversation further in-process would abort the engine; start a ' +
+          'new conversation, restart the engine to continue this one, or ' +
+          'reduce the prefix-cache memory settings.',
+        type: 'prompt_too_long',
+        code: 'prefill_admission_declined',
+      },
+    })
+    const bubble = promptTooLongChatErrorContent(`API error: 413 - ${body}`)
+    expect(bubble).toContain('turn-peak admission declined')
+    expect(bubble).toContain('restart this model from the Server tab')
+    expect(bubble).toContain('restores from the disk cache')
+    expect(bubble).not.toContain('shorten this message')
+    // Still an error bubble the replay filter recognises — the annotation
+    // must never be replayed to the model as assistant history.
+    expect(isPromptTooLongBubbleContent(bubble)).toBe(true)
+  })
+
   it('does not convert unrelated errors into prompt_too_long bubbles', () => {
     expect(promptTooLongChatErrorContent('fetch failed')).toBeNull()
     expect(promptTooLongChatErrorContent('Server connection lost')).toBeNull()

@@ -3344,6 +3344,7 @@ def _validate_execution_prefix_bounds(
     binding: Any,
     *,
     label: str,
+    allow_exact_replay: bool = False,
 ) -> list[str]:
     if not isinstance(execution, dict) or not isinstance(binding, dict):
         return [f"{label}: execution/prefix binding is missing"]
@@ -3384,14 +3385,28 @@ def _validate_execution_prefix_bounds(
             )
         bound_tokens = matched_tokens
         bound_field = "matched_tokens"
-    if not reusable_floor <= bound_tokens <= lcp_ceiling:
+    # A delegated probe-prompt replay is an EXACT restore of the retouched
+    # chain, including its terminal PARTIAL block (the N-1 store keeps
+    # sub-block terminal tokens), so attempted == cached may legitimately
+    # exceed the store<->probe LCP ceiling and need not be block-aligned.
+    # Strictly fail-closed: only a full exact restore at or above the
+    # block-aligned floor qualifies.
+    exact_replay = bool(
+        allow_exact_replay
+        and cached_tokens == attempted_tokens
+        and reusable_floor > 0
+        and attempted_tokens >= reusable_floor
+    )
+    if not exact_replay and not reusable_floor <= bound_tokens <= lcp_ceiling:
         failures.append(
             f"{label}: {bound_field}={bound_tokens} is outside the exact "
             f"block-aligned prefix range [{reusable_floor}, {lcp_ceiling}]"
         )
     if block_size <= 0:
         failures.append(f"{label}: source block size is invalid")
-    elif attempted_tokens <= 0 or attempted_tokens % block_size != 0:
+    elif not exact_replay and (
+        attempted_tokens <= 0 or attempted_tokens % block_size != 0
+    ):
         failures.append(
             f"{label}: attempted_cached_tokens={attempted_tokens} is not "
             f"positive and block-aligned to {block_size}"
@@ -3401,7 +3416,9 @@ def _validate_execution_prefix_bounds(
             f"{label}: accepted cached_tokens={cached_tokens} is not within "
             f"(0, {attempted_tokens}]"
         )
-    elif block_size > 0 and cached_tokens % block_size != 0:
+    elif not exact_replay and (
+        block_size > 0 and cached_tokens % block_size != 0
+    ):
         failures.append(
             f"{label}: accepted cached_tokens={cached_tokens} is not "
             f"block-aligned to {block_size}"
@@ -4222,11 +4239,22 @@ def validate_l2_restart_restore_observation(
             ),
         )
     )
+    _store_obs_for_replay = (
+        store_observation if isinstance(store_observation, dict) else {}
+    )
+    _delegated_replay = (
+        (
+            _store_obs_for_replay.get("l2_size_eviction_observation")
+            or _store_obs_for_replay
+        ).get("refault_delegated_to_restart_restore")
+        is True
+    )
     failures.extend(
         _validate_execution_prefix_bounds(
             observation.get("restart_execution"),
             pre,
             label="L2 restart restore",
+            allow_exact_replay=_delegated_replay,
         )
     )
     execution = observation.get("restart_execution")

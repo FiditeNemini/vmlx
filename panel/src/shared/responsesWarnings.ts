@@ -143,7 +143,7 @@ export function categorizeResponsesWarning(warning: string): string {
   if (lower.startsWith('reasoning effort ')) {
     return 'effort_substitution'
   }
-  if (lower.startsWith('model context limit reached')) {
+  if (lower.startsWith('model context limit')) {
     return 'context_exhaustion'
   }
   if (lower.includes('cache') || lower.includes('prefix')) {
@@ -173,6 +173,11 @@ export interface ContextExhaustionLike {
   requested_max_tokens?: unknown
   clamped_max_tokens?: unknown
   declared_context_tokens?: unknown
+  /** Chat-dialect doors set this: true = the clamped budget was consumed
+   * (a length stop AT the ceiling). false = clamped at admission but the
+   * turn completed inside the budget. The Responses length terminal omits
+   * it (that record only surfaces on a length stop — treat as exhausted). */
+  exhausted?: unknown
 }
 
 export function effortSubstitutionNotice(
@@ -210,10 +215,22 @@ export function contextExhaustionNotice(
       ? ` Output was capped at ${clamped.toLocaleString('en-US')} tokens ` +
         `(requested ${requested.toLocaleString('en-US')}).`
       : ''
+  // Strong wording only when the clamped budget was actually consumed
+  // (exhausted true, or absent — the Responses length terminal omits the
+  // flag and only surfaces on a length stop). A clamped-but-completed turn
+  // gets an informational capacity notice instead of a false alarm.
+  if (record.exhausted === false) {
+    return (
+      `Model context limit pressure: the prompt (${prompt.toLocaleString('en-US')} tokens) ` +
+      `leaves limited room in the model's ${declared.toLocaleString('en-US')}-token context.` +
+      clampedPart +
+      ' This turn completed within the cap; if a later response cuts off there, shorten the chat history or serve a larger-context bundle.'
+    )
+  }
   return (
     `Model context limit reached: the prompt (${prompt.toLocaleString('en-US')} tokens) ` +
     `fills part of the model's ${declared.toLocaleString('en-US')}-token context.` +
     clampedPart +
-    ' A length stop here means context exhaustion — shorten the chat history or serve a larger-context bundle.'
+    ' Generation ran to the context ceiling — shorten the chat history or serve a larger-context bundle.'
   )
 }

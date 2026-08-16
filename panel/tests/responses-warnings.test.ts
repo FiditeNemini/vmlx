@@ -288,18 +288,43 @@ describe('effortSubstitutionNotice (#175)', () => {
 })
 
 describe('contextExhaustionNotice (#175)', () => {
-  it('builds the rail string from a full clamp record', () => {
+  it('builds the strong rail string when exhausted (or when the flag is absent — responses length terminal)', () => {
+    for (const record of [
+      {
+        prompt_tokens: 5875,
+        requested_max_tokens: 32768,
+        clamped_max_tokens: 26893,
+        declared_context_tokens: 32768,
+      },
+      {
+        prompt_tokens: 5875,
+        requested_max_tokens: 32768,
+        clamped_max_tokens: 26893,
+        declared_context_tokens: 32768,
+        exhausted: true,
+      },
+    ]) {
+      const notice = contextExhaustionNotice(record)!
+      expect(notice).toContain('Model context limit reached')
+      expect(notice).toContain('5,875 tokens')
+      expect(notice).toContain('32,768-token context')
+      expect(notice).toContain('capped at 26,893 tokens')
+      expect(notice).toContain('requested 32,768')
+      expect(categorizeResponsesWarning(notice)).toBe('context_exhaustion')
+    }
+  })
+
+  it('renders the informational capacity flavor for a clamped-but-completed turn (exhausted: false)', () => {
     const notice = contextExhaustionNotice({
-      prompt_tokens: 5875,
+      prompt_tokens: 30000,
       requested_max_tokens: 32768,
-      clamped_max_tokens: 26893,
+      clamped_max_tokens: 2768,
       declared_context_tokens: 32768,
+      exhausted: false,
     })!
-    expect(notice).toContain('Model context limit reached')
-    expect(notice).toContain('5,875 tokens')
-    expect(notice).toContain('32,768-token context')
-    expect(notice).toContain('capped at 26,893 tokens')
-    expect(notice).toContain('requested 32,768')
+    expect(notice).toContain('Model context limit pressure')
+    expect(notice).toContain('completed within the cap')
+    expect(notice).not.toContain('context limit reached')
     expect(categorizeResponsesWarning(notice)).toBe('context_exhaustion')
   })
 

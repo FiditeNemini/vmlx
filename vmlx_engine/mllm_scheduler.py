@@ -2918,6 +2918,11 @@ class MLLMScheduler:
                 "cache_reuse_applied": False,
             }
             request._cache_execution = dict(_admission_execution)
+            # The batch generator is created lazily at first prefill — a
+            # batch-stats write here silently no-ops on the first request.
+            # Hold the record on the scheduler; get_stats falls back to it
+            # whenever the generator stats carry none.
+            self._admission_cache_execution = dict(_admission_execution)
             _admission_stats = getattr(
                 getattr(self, "batch_generator", None), "_stats", None
             )
@@ -5248,6 +5253,16 @@ class MLLMScheduler:
                     "last_cache_execution"
                 )
                 stats["vision_cache"] = self.batch_generator.get_vision_cache_stats()
+            # Admission-record fallback: the generator is created lazily and
+            # its stats can lack a record for the newest request (proven live
+            # on qwen3.8 — cold requests published nothing). The scheduler's
+            # admission-time record keeps request-correlated proofs possible.
+            if not stats.get("last_cache_execution"):
+                _admission_record = getattr(
+                    self, "_admission_cache_execution", None
+                )
+                if isinstance(_admission_record, dict) and _admission_record:
+                    stats["last_cache_execution"] = dict(_admission_record)
 
             # Cache stats for all cache modes
             if self.block_aware_cache is not None:

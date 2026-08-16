@@ -87,6 +87,12 @@ ROWS: list[ModelRow] = [
         expect_reasoning=False,
         expect_tool_parser="zaya_xml",
         cache_profile="zaya_cca",
+        live_supported=False,
+        unsupported_reason=(
+            "Bundle discontinued 2026-08: the JANGTQ2 ZAYA line was retired "
+            "from the shipping set (Zaya-8B-JANG_4M is the shipping zaya). "
+            "No copy exists on the serving box; declared skip, not silent."
+        ),
         defer_failure_reason=(
             "ZAYA1 JANGTQ2 is a low-bit CCA row with intermittent Responses "
             "tool-history/tool-choice failures: it can emit raw Zyphra tool "
@@ -149,6 +155,11 @@ ROWS: list[ModelRow] = [
         expect_reasoning=True,
         expect_tool_parser="zaya_xml",
         cache_profile="zaya_cca",
+        live_supported=False,
+        unsupported_reason=(
+            "Bundle discontinued 2026-08: no ZAYA-VL bundle remains on the "
+            "shipping drive. Declared skip, not silent."
+        ),
         notes=[
             "ZAYA-VL routed 4-bit control row. Validates JANGTQ MLLM fast path, "
             "ZAYA CCA text cache, and media-prefix cache isolation."
@@ -300,6 +311,12 @@ ROWS: list[ModelRow] = [
         expect_reasoning=True,
         expect_tool_parser="hunyuan",
         slow=True,
+        live_supported=False,
+        unsupported_reason=(
+            "Bundle discontinued 2026-08: the Hy3 preview line was retired "
+            "(MTP dropped from the shipping 2L bundle; no Hy3 bundle on the "
+            "serving box). Declared skip, not silent."
+        ),
         notes=[
             "Hy3/Hunyuan reasoning row. UI/API contract is reasoning_effort "
             "low/high with no Medium; runtime parser is qwen3 text extraction "
@@ -377,6 +394,11 @@ ROWS: list[ModelRow] = [
         expect_reasoning=False,
         cache_profile="hybrid_ssm",
         slow=True,
+        live_supported=False,
+        unsupported_reason=(
+            "Bundle discontinued 2026-08: Ling-2.6-flash JANGTQ was removed "
+            "from the shipping drive. Declared skip, not silent."
+        ),
         notes=[
             "Bailing/Ling hybrid row. This catches the repeated emoji/token-loop "
             "failure seen in panel chat and validates SSM companion-cache budgets."
@@ -501,8 +523,8 @@ ROWS: list[ModelRow] = [
     ),
     ModelRow(
         id="minimax_m27_tq_k",
-        label="MiniMax-M2.7 JANGTQ_K mixed-bit",
-        path="/Users/example/models/JANGQ/MiniMax-M2.7-JANGTQ_K",
+        label="MiniMax-M2.7 JANG_K mixed-bit (CRACK successor)",
+        path="/Volumes/EricsLLMDrive/dealignai/MiniMax-M2.7-JANG_K-CRACK",
         family="minimax",
         expect_reasoning=True,
         expect_tool_parser="minimax",
@@ -1881,13 +1903,33 @@ def cache_exact_hit_probe(row: ModelRow) -> dict[str, Any]:
     """Return the prompt and visible-content assertion for cache reuse."""
 
     if row.family == "deepseek_v4":
+        # DSV4's extended store keeps NOTHING for sub-256-token turns by
+        # design (#168: the extended-store prompt cap is conditional and the
+        # store works in 256-token blocks) — the original ~28-token probe
+        # could never observe a hit and failed the row against the engine's
+        # own documented contract. Deterministic filler pads the prompt past
+        # 300 tokens; the question and expected answer are unchanged.
+        _dsv4_filler = " ".join(
+            f"ledger row {i}: the {w} shipment cleared checkpoint {i * 7}."
+            for i, w in enumerate(
+                (
+                    "amber", "basalt", "cedar", "damson", "ember", "fennel",
+                    "garnet", "hazel", "indigo", "juniper", "kestrel", "larch",
+                    "mallow", "nettle", "ochre", "poplar", "quince", "rowan",
+                    "sorrel", "tamarind", "umber", "vetch", "walnut", "yarrow",
+                ),
+                start=1,
+            )
+        )
         return {
             "messages": [
                 {
                     "role": "user",
                     "content": (
-                        "Cache audit exact-hit check. What is 17 plus 28? "
-                        "Think briefly, then answer with the final number."
+                        "Cache audit exact-hit check. Context notes (for length "
+                        "only, no action needed): " + _dsv4_filler + " "
+                        "Now: what is 17 plus 28? Think briefly, then answer "
+                        "with the final number."
                     ),
                 }
             ],
@@ -2669,8 +2711,22 @@ def live_audit(row: ModelRow, py: Path, port: int, timeout_load: int, keep_runni
             {"native_cache": native_caps},
         )
     elif row.cache_profile == "hybrid_ssm":
-        qwen_selective_live_tq = row.family in {"qwen3_5", "qwen3_5_moe"}
+        # TQ-KV expectations are gated on the serve's ATTESTED storage-quant
+        # state, not on family membership alone: uncalibrated CRACK bundles
+        # attest storage-quant OFF and can never satisfy the TQ profile
+        # (engine rule 910ab86ff; re-confirmed live on Qwen3.6-35B CRACK
+        # where family-based expectation red-flagged a correctly-attesting
+        # exact-KV serve). Family selects ELIGIBILITY; attestation decides.
         live_tq = native_caps.get("live_attention_tq_kv", {}) if isinstance(native_caps, dict) else {}
+        _storage_quant = (
+            native_caps.get("attention_kv_storage_quantization", {})
+            if isinstance(native_caps, dict)
+            else {}
+        )
+        qwen_tq_eligible = row.family in {"qwen3_5", "qwen3_5_moe"}
+        qwen_selective_live_tq = qwen_tq_eligible and (
+            bool(live_tq.get("enabled")) or bool(_storage_quant.get("enabled"))
+        )
         check(
             "hybrid_native_cache_capabilities",
             isinstance(native_caps, dict)
@@ -2688,7 +2744,9 @@ def live_audit(row: ModelRow, py: Path, port: int, timeout_load: int, keep_runni
             ),
             {
                 "native_cache": native_caps,
+                "qwen_tq_eligible_family": qwen_tq_eligible,
                 "qwen_selective_live_tq_expected": qwen_selective_live_tq,
+                "attested_storage_quant": _storage_quant,
             },
         )
 

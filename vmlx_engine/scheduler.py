@@ -3342,6 +3342,36 @@ class Scheduler:
             return False
         return SequenceStateMachine.current_state(state) == "reasoning"
 
+    def _insert_accepts_gen_prompt_lens(self) -> bool:
+        """Does the ACTIVE generator's insert() take gen_prompt_lens?
+
+        The cold-prefill-split kwarg exists on SingleBatchGenerator and
+        DSV4BatchGenerator, but native-MTP text models run the stock
+        mlx_lm.BatchGenerator, which does not take it. Passing it
+        unconditionally raised TypeError on EVERY insert for such models and
+        the retry path re-queued the request forever (caught live by the
+        release soak on Nemotron-Omni). Probed once per generator instance.
+        """
+        cached = getattr(self, "_gen_prompt_lens_supported_for", None)
+        gen = self.batch_generator
+        if cached is not None and cached[0] is gen:
+            return cached[1]
+        import inspect
+
+        try:
+            supported = "gen_prompt_lens" in inspect.signature(gen.insert).parameters
+        except (TypeError, ValueError):
+            supported = False
+        if not supported:
+            logger.info(
+                "Generator %s.insert() does not take gen_prompt_lens — "
+                "cold-prefill split kwarg omitted (generator owns its own "
+                "prefill)",
+                type(gen).__name__,
+            )
+        self._gen_prompt_lens_supported_for = (gen, supported)
+        return supported
+
     def _create_batch_generator(
         self, sampling_params: SamplingParams
     ) -> BatchGenerator:
@@ -8003,6 +8033,21 @@ class Scheduler:
                             insert_kwargs["logits_processors"] = [
                                 request_processors
                             ]
+                    # Where a warm turn would re-feed after restoring. Lets
+                    # the cold prefill split at the same boundary so the two
+                    # arms are numerically equivalent. CAPABILITY-PROBED:
+                    # native-MTP text models use the stock mlx_lm
+                    # BatchGenerator, whose insert() does not take this kwarg
+                    # — passing it unconditionally wedged EVERY request on
+                    # such models in a TypeError retry loop (caught live by
+                    # the release soak on Nemotron-Omni; the qwen MTP line
+                    # serves via the MLLM lane and never hit this). The
+                    # split feature simply does not apply to a generator
+                    # that owns its own prefill.
+                    if self._insert_accepts_gen_prompt_lens():
+                        insert_kwargs["gen_prompt_lens"] = [
+                            int(getattr(request, "_gen_prompt_len", 0) or 0)
+                        ]
                     uids = self.batch_generator.insert(
                         [tokens_to_process],
                         # Remaining budget, not the full cap: a cache-error
@@ -8011,12 +8056,6 @@ class Scheduler:
                         # Request.remaining_output_budget).
                         max_tokens=[request.remaining_output_budget],
                         caches=[cache_to_use] if cache_to_use else None,
-                        # Where a warm turn would re-feed after restoring. Lets
-                        # the cold prefill split at the same boundary so the two
-                        # arms are numerically equivalent.
-                        gen_prompt_lens=[
-                            int(getattr(request, "_gen_prompt_len", 0) or 0)
-                        ],
                         **insert_kwargs,
                     )
                 except Exception as e:

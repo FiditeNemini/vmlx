@@ -336,15 +336,23 @@ def _block_store_roundtrip_env(n_tokens, seed, block_size=64, window=129):
 
     register_dots3_note_runtime()
     mx.random.seed(seed)
-    rope, idx_dim, rank = 16, 32, 48
+    rope, idx_dim, rank_full, rank_swa = 16, 32, 48, 96
     raw, originals = [], []
     for li in range(4):
-        c = Dots3LatentCache(window=window if li in (1, 3) else None)
+        sliding = li in (1, 3)
+        c = Dots3LatentCache(window=window if sliding else None)
+        # Live truth: sliding (SWA-geometry) layers use a DIFFERENT latent
+        # rank than full layers and never run the indexer — the first live
+        # failure of this lane was a latent/k_pe SWAP that only a
+        # rank-asymmetric, indexer-less sliding layer exposes.
+        rank = rank_swa if sliding else rank_full
         latent = mx.random.normal((1, 1, n_tokens, rank)).astype(mx.bfloat16)
         k_pe = mx.random.normal((1, 1, n_tokens, rope)).astype(mx.bfloat16)
         c.update_and_fetch(latent, k_pe)
-        idx_k = mx.random.normal((1, n_tokens, idx_dim)).astype(mx.bfloat16)
-        c.update_indexer(idx_k)
+        idx_k = None
+        if not sliding:
+            idx_k = mx.random.normal((1, n_tokens, idx_dim)).astype(mx.bfloat16)
+            c.update_indexer(idx_k)
         raw.append(c)
         originals.append((latent, k_pe, idx_k))
     mgr = PagedCacheManager(block_size=block_size, max_blocks=600)
@@ -377,18 +385,23 @@ def test_partial_block_restore_covered_boundary_is_exact():
     rec = bac.reconstruct_cache(table)
     assert rec is not None and len(rec) == 4
     assert all(int(c.offset) == 256 for c in rec)
-    # sliding layer (window 129): boundary 256 needs keys 128..255
+    # sliding layer (window 129, rank 96): boundary 256 needs keys 128..255;
+    # the latent stream must keep ITS rank (a latent/k_pe swap is the live
+    # failure mode this pins)
     slid = np.array(rec[1].latent.astype(mx.float32))
+    assert slid.shape[-1] == 96
     ref = np.array(originals[1][0][:, :, 128:256].astype(mx.float32))
     assert np.array_equal(slid, ref)
+    kpe = np.array(rec[1].k_pe.astype(mx.float32))
+    assert kpe.shape[-1] == 16
+    kref = np.array(originals[1][1][:, :, 128:256].astype(mx.float32))
+    assert np.array_equal(kpe, kref)
+    # sliding layers run no indexer: the restored stream must be absent
+    assert rec[1].idx_k is None
     # full layer values = latent, positional slice 0..255
     full = np.array(rec[0].values.astype(mx.float32))
     fref = np.array(originals[0][0][:, :, :256].astype(mx.float32))
     assert np.array_equal(full, fref)
-    # indexer stream on the sliding layer trimmed to the boundary
-    idx = np.array(mx.array(rec[1].idx_k).astype(mx.float32))
-    iref = np.array(originals[1][2][:, :256].astype(mx.float32))
-    assert np.array_equal(idx, iref)
 
 
 def test_partial_block_restore_uncovered_boundary_is_honest_miss():

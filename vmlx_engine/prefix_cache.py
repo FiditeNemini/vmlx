@@ -2236,13 +2236,23 @@ def _dots3_window_boundary_checkpoint(layer_state, boundary: int):
     if phys - drop < keep:
         return None  # boundary older than the retained overhang
     lo, hi = phys - drop - keep, phys - drop
+    # Absent streams MUST be size-0 arrays, never None: the cache's own
+    # ``state`` property uses the same convention, the restore setter's
+    # ``_real()`` maps them back to None, and a None that gets dropped in
+    # transport turns the 3-tuple into a 2-tuple that the setter misparses
+    # as the POSITIONAL presentation (measured live: sliding latent replaced
+    # by the 64-dim rope stream, concat shape blowup on the next chunk).
+    # float32 empty: a size-0 bf16 array cannot cross the numpy buffer
+    # protocol on the disk-serialization path, and the restore setter maps
+    # ANY size-0 array to None regardless of dtype.
+    empty = mx.zeros((0,), dtype=mx.float32)
     latent_s = latent[:, :, lo:hi]
     k_pe_s = (
         k_pe[:, :, lo:hi]
         if k_pe is not None and getattr(k_pe, "size", 0)
-        else None
+        else empty
     )
-    idx_s = None
+    idx_s = empty
     if idx_k is not None and getattr(idx_k, "size", 0):
         ilen = int(idx_k.shape[1])
         if ilen == total:

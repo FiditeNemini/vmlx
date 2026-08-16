@@ -47,3 +47,24 @@ describe('chat SSE error propagation', () => {
     )
   })
 })
+
+describe('detail keeps the machine code (ledger row 152)', () => {
+  it('appends [code] when the message lacks it', () => {
+    expect(
+      chatStreamServerEventErrorDetail({
+        error: {
+          message: 'prefill admission rejected chunk [0:2048)',
+          code: 'prefill_admission_declined',
+        },
+      }),
+    ).toBe('prefill admission rejected chunk [0:2048) [prefill_admission_declined]')
+  })
+
+  it('does not duplicate a code already present', () => {
+    expect(
+      chatStreamServerEventErrorDetail({
+        error: { message: 'x prefill_admission_declined y', code: 'prefill_admission_declined' },
+      }),
+    ).toBe('x prefill_admission_declined y')
+  })
+})

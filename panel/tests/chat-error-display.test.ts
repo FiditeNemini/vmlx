@@ -145,3 +145,28 @@ describe('chat error display policy', () => {
     expect(promptTooLongChatErrorContent(null)).toBeNull()
   })
 })
+
+describe('valve decline persistent bubble (ledger row 152)', () => {
+  it('classifies the live valve message WITHOUT any prompt_too_long wording', () => {
+    const live =
+      'dots3-note-prev-JANG: prefill admission rejected chunk [0:2048) — ' +
+      'active Metal working set 96.51GB plus projected transient 11.12GB ' +
+      'exceeds the device working-set limit 107.50GB. A context of this ' +
+      'length cannot be served on this hardware; reduce the prompt or context size.'
+    const bubble = promptTooLongChatErrorContent(live)
+    expect(bubble).not.toBeNull()
+    expect(bubble).toContain('restart this model')
+  })
+
+  it('classifies via the machine code suffix appended by the stream detail', () => {
+    const bubble = promptTooLongChatErrorContent(
+      'some future wording we did not predict [prefill_admission_declined]',
+    )
+    expect(bubble).not.toBeNull()
+    expect(bubble).toContain('restart this model')
+  })
+
+  it('still returns null for unrelated errors', () => {
+    expect(promptTooLongChatErrorContent('ECONNRESET while reading')).toBeNull()
+  })
+})

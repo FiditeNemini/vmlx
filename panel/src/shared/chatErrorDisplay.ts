@@ -23,7 +23,13 @@ export function promptTooLongChatErrorContent(
   message: string | undefined | null,
 ): string | null {
   const raw = String(message || "").trim()
-  if (!PROMPT_TOO_LONG_RE.test(raw)) return null
+  // A valve decline must qualify on its OWN patterns: the engine's message
+  // ("prefill admission rejected chunk ... exceeds the device working-set
+  // limit") contains neither "prompt too long" nor the machine code, so
+  // gating the admission branch behind PROMPT_TOO_LONG_RE left the decline
+  // with no persistent chat surface (only a vanishing toast) — reproduced
+  // twice in the dots3 live CDP proof.
+  if (!PROMPT_TOO_LONG_RE.test(raw) && !PREFILL_ADMISSION_DECLINED_RE.test(raw)) return null
 
   let detail = raw
     .replace(/^Failed to send message:\s*/i, "")
@@ -63,7 +69,7 @@ export function promptTooLongChatErrorContent(
 }
 
 const PREFILL_ADMISSION_DECLINED_RE =
-  /prefill_admission_declined|turn-peak admission declined/i
+  /prefill_admission_declined|turn-peak admission declined|prefill admission rejected/i
 
 export const PROMPT_TOO_LONG_BUBBLE_PREFIX = "Message not sent — "
 export const METAL_HEADROOM_BUBBLE_PREFIX = "Generation blocked: "

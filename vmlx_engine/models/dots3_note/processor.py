@@ -439,6 +439,14 @@ class Dots3NoteVideoProcessor(Dots3NoteImageProcessor):
         from PIL import Image
 
         frames = list(frames)
+        # The engine's video fallback hands per-video containers: frames may
+        # arrive as [[frame, ...]] and fps as [fps] for a single video.
+        if len(frames) == 1 and isinstance(frames[0], (list, tuple)):
+            frames = list(frames[0])
+        if isinstance(fps, (list, tuple)):
+            fps = fps[0] if fps else None
+        if hasattr(fps, "item"):
+            fps = fps.item()
         if not frames:
             return np.zeros((0, 0), dtype=np.float32), []
         fps = max(float(fps or 1.0), 1e-6)  # decoded-frame metadata default

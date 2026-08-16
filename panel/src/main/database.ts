@@ -1791,25 +1791,43 @@ class DatabaseManager {
       INSERT INTO sessions (id, model_path, model_name, host, port, pid, status, config, created_at, updated_at, last_started_at, last_stopped_at, type, remote_url, remote_api_key, remote_model, remote_organization)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    stmt.run(
-      session.id,
-      session.modelPath,
-      session.modelName,
-      session.host,
-      session.port,
-      session.pid,
-      session.status,
-      session.config,
-      session.createdAt,
-      session.updatedAt,
-      session.lastStartedAt,
-      session.lastStoppedAt,
-      session.type || "local",
-      session.remoteUrl,
-      session.remoteApiKey ? encryptValue(session.remoteApiKey) : null,
-      session.remoteModel,
-      session.remoteOrganization,
-    );
+    try {
+      stmt.run(
+        session.id,
+        session.modelPath,
+        session.modelName,
+        session.host,
+        session.port,
+        session.pid,
+        session.status,
+        session.config,
+        session.createdAt,
+        session.updatedAt,
+        session.lastStartedAt,
+        session.lastStoppedAt,
+        session.type || "local",
+        session.remoteUrl,
+        session.remoteApiKey ? encryptValue(session.remoteApiKey) : null,
+        session.remoteModel,
+        session.remoteOrganization,
+      );
+    } catch (e: any) {
+      // #191 UI pass: the raw "UNIQUE constraint failed: sessions.port"
+      // surfaced verbatim in the Create Session dialog. The port is taken
+      // even by a STOPPED session (the index spans all rows), so tell the
+      // user which session holds it and what to do.
+      if (String(e?.message || "").includes("UNIQUE constraint failed: sessions.port")) {
+        const holder = this.db
+          .prepare("SELECT model_name, status FROM sessions WHERE port = ?")
+          .get(session.port) as any;
+        throw new Error(
+          `Port ${session.port} is already assigned to session ` +
+          `"${holder?.model_name ?? "unknown"}" (${holder?.status ?? "unknown"}). ` +
+          `Pick a different port, or delete that session to free it.`,
+        );
+      }
+      throw e;
+    }
   }
 
   getSession(id: string): Session | undefined {

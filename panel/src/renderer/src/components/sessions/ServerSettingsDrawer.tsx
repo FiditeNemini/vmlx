@@ -422,7 +422,12 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
 
       {/* Footer Actions */}
       <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-border flex-shrink-0">
+        {/* data-testid on all three: the CDP proof harness text-matches
+            buttons, and "Save & Restart" also appears in an info div — a
+            text mclick hit the div and reported success with no handler
+            fired (#191 lead 6). Stable selectors end that trap. */}
         <button
+          data-testid="server-settings-save"
           onPointerDown={commitActiveSettingsInput}
           onClick={handleSave}
           disabled={!dirty || saving || restarting}
@@ -434,6 +439,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         </button>
         {isRunning && !isRemote && (
           <button
+            data-testid="server-settings-save-restart"
             onPointerDown={commitActiveSettingsInput}
             onClick={handleSaveAndRestart}
             disabled={saving || restarting}
@@ -443,6 +449,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           </button>
         )}
         <button
+          data-testid="server-settings-reset"
           onClick={handleReset}
           disabled={restarting}
           className="px-3 py-1.5 text-sm border border-border rounded hover:bg-accent disabled:opacity-40"

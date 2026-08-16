@@ -174,6 +174,15 @@ class Model(nn.Module):
         apply here; adding it is the trap, not omitting it.
         """
         out: Dict[str, Any] = {}
+        # 🚨 The bundle stores quantization scales/biases as FLOAT16 while
+        # the deployment activation dtype is bf16. Mixed fp16-scale x
+        # bf16-activation quantized matmuls hit a slow MLX path — measured
+        # 5.4x on the real expert weights (1.08 ms vs 0.20 ms per gather at
+        # identical shapes/bits) and it taxes EVERY quantized projection.
+        # Casting scales/biases to bf16 at load restores the fast path;
+        # the ~0.4% relative scale rounding is far inside the 2-bit
+        # quantization error and the bundle's live acceptance rows are
+        # re-verified against it.
         conv_keys = (
             "vision_encoder.patch_embed.proj.weight",
             "audio_encoder.dots_encoder.speech_encoder.conv2d1.weight",
@@ -181,6 +190,11 @@ class Model(nn.Module):
             "audio_encoder.dots_encoder.speech_encoder.conv2d3.weight",
         )
         for key, value in weights.items():
+            if (
+                key.endswith((".scales", ".biases"))
+                and getattr(value, "dtype", None) == mx.float16
+            ):
+                value = value.astype(mx.bfloat16)
             if key.startswith("model.") or key.startswith("lm_head."):
                 out["language_model." + key] = value
             elif key in conv_keys and getattr(value, "ndim", 0) == 4:

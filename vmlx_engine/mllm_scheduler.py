@@ -2904,6 +2904,27 @@ class MLLMScheduler:
             # NOTE: prompt token count is NOT known yet at scheduling time
             # (it comes from batch generator's first response).
             # Tracking is done at request finish time instead.
+            # Publish an admission-time miss record (text-scheduler parity:
+            # "Publish misses and discarded hits too") so a cold request can
+            # never leave a stale/absent last_cache_execution — the finish
+            # handler overwrites it with the real per-request record when the
+            # generator supplies one.
+            _admission_execution = {
+                "request_id": request.request_id,
+                "cache_detail": None,
+                "attempted_cached_tokens": 0,
+                "cached_tokens": 0,
+                "cache_outcome": "miss",
+                "cache_reuse_applied": False,
+            }
+            request._cache_execution = dict(_admission_execution)
+            _admission_stats = getattr(
+                getattr(self, "batch_generator", None), "_stats", None
+            )
+            if _admission_stats is not None:
+                _admission_stats.last_cache_execution = dict(
+                    _admission_execution
+                )
             scheduled.append(request)
 
         # Merge per-request stop_token_ids into batch generator stop tokens.
@@ -3072,7 +3093,23 @@ class MLLMScheduler:
                 self.total_prompt_tokens += request.num_prompt_tokens
                 self.total_completion_tokens += request.num_output_tokens
                 self.num_requests_processed += 1
-                self._record_cache_hit(response_for_usage, request)
+                # The finish response is not guaranteed to carry the
+                # execution record (proven live on qwen3.8) — scan the whole
+                # burst for the newest record-carrying response as fallback.
+                _burst_execution = next(
+                    (
+                        getattr(r, "cache_execution", None)
+                        for r in reversed(burst)
+                        if isinstance(getattr(r, "cache_execution", None), dict)
+                        and getattr(r, "cache_execution", None)
+                    ),
+                    None,
+                )
+                self._record_cache_hit(
+                    response_for_usage,
+                    request,
+                    execution_fallback=_burst_execution,
+                )
 
             return output
 
@@ -3302,28 +3339,52 @@ class MLLMScheduler:
 
         return outputs, finished_ids
 
-    def _record_cache_hit(self, response: MLLMBatchResponse, request: MLLMRequest) -> None:
+    def _record_cache_hit(
+        self,
+        response: MLLMBatchResponse,
+        request: MLLMRequest,
+        execution_fallback: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Aggregate per-request cache hits for /v1/cache/stats and /health.
 
         MLLM responses already expose cached_tokens in per-request API usage.
         Keep scheduler-level telemetry in sync so the panel and release gates
         do not report "0 cached tokens" while the response usage proves a hit.
+
+        Publication of ``last_cache_execution`` runs BEFORE the
+        already-recorded short-circuit and accepts a fallback record: live
+        gate runs proved that the finish-time response can arrive WITHOUT its
+        cache_execution dict (cold requests then publish nothing at all, and
+        an earlier record-less call permanently blocked a later
+        record-carrying one via the recorded marker). The marker now guards
+        only the once-per-request counter increments; the record publication
+        is idempotent.
         """
-        if getattr(request, "_cache_hit_recorded", False):
-            return
         try:
             cached_tokens = int(getattr(response, "cached_tokens", 0) or 0)
         except Exception:
             cached_tokens = 0
-        request._cached_tokens = cached_tokens
         response_execution = getattr(response, "cache_execution", None)
-        if isinstance(response_execution, dict):
+        if not (isinstance(response_execution, dict) and response_execution):
+            if isinstance(execution_fallback, dict) and execution_fallback:
+                response_execution = execution_fallback
+            else:
+                _req_execution = getattr(request, "_cache_execution", None)
+                response_execution = (
+                    _req_execution
+                    if isinstance(_req_execution, dict) and _req_execution
+                    else None
+                )
+        if isinstance(response_execution, dict) and response_execution:
             request._cache_execution = dict(response_execution)
             batch_stats = getattr(
                 getattr(self, "batch_generator", None), "_stats", None
             )
             if batch_stats is not None:
                 batch_stats.last_cache_execution = dict(response_execution)
+        if getattr(request, "_cache_hit_recorded", False):
+            return
+        request._cached_tokens = cached_tokens
         if cached_tokens <= 0:
             request._cache_hit_recorded = True
             return

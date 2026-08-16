@@ -74,6 +74,7 @@ from .gemma3_tool_parser import Gemma3ToolParser
 from .zaya_tool_parser import ZayaToolParser
 from .hunyuan_tool_parser import HunyuanToolParser  # Hy3 / hy_v3
 from .xml_function_tool_parser import XMLFunctionToolParser
+from .dots_tool_parser import DotsToolParser  # dots3_note dots XML dialect
 
 __all__ = [
     # Base classes
@@ -104,4 +105,5 @@ __all__ = [
     "ZayaToolParser",
     "HunyuanToolParser",
     "XMLFunctionToolParser",
+    "DotsToolParser",
 ]

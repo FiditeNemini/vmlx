@@ -110,6 +110,12 @@ def _register_builtin_parsers():
     register_parser("gemma4", Gemma4ReasoningParser)
     # MiniMax-M3 uses <mm:think>...</mm:think> plain-XML think blocks
     register_parser("minimax_m3", MiniMaxM3ReasoningParser)
+    # dots3_note: plain <think>...</think>, thinking ON by default (the model
+    # emits <think> itself off a bare assistant header; token 151721).
+    # Thinking OFF is a template-side prefilled CLOSED block plus a
+    # <no_think> user marker, so off-mode output carries no think tags at
+    # all — the qwen3 think-tag contract matches both modes exactly.
+    register_parser("dots3", Qwen3ReasoningParser)
     # Muse Glimmer routes by RECIPIENT, not by an inline think pair or a
     # named channel: "<|start|>assistant to=self<|message|>" is the reasoning
     # rail and "to=user" (or no recipient) is the visible answer.

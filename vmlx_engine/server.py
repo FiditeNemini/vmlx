@@ -4990,6 +4990,8 @@ _TOOL_CALL_MARKERS = [
     "<function=",
     "<minimax:tool_call>",
     "]<]minimax[>[",  # MiniMax-M3 namespace separator before native XML elements
+    "<dots_function_call>",  # dots3_note dots XML dialect wrapper
+    "<dots_function_call",  # split-delta opener before '>' flushes
     # Muse Glimmer's ATEM dialect. Its absence here is why Muse was the ONE
     # family whose native markup reached the user: this list is what keeps
     # tool-control payload out of visible text, and every other dialect above
@@ -5057,6 +5059,7 @@ _TOOL_MARKUP_RESIDUE_PATTERNS.extend(
         r"</?arg_key>?",
         r"</?arg_value>?",
         r"</?minimax:tool_call>?",
+        r"</?dots_function_call>?",
         r"\]<\]minimax\[>\[?",  # complete M3 namespace or terminally missing '['
         r"</?zyphra_tool_call[^>\n]*>?",
         r"</?function[^>\n]*>?",

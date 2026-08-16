@@ -1782,6 +1782,37 @@ try:
 except (TypeError, ValueError):
     _DEEP_SPAN_CACHE_CLEAR_TOKENS = 32768
 
+
+def _maybe_clear_deep_span_cache(total_span_tokens: int) -> None:
+    """Synchronize + clear the MLX allocator cache ahead of a deep span.
+
+    Must be called from EVERY lane that runs a large forward: the fresh
+    chunked-prefill lane AND the hybrid cache-hit delta lane — the first
+    landing of this fix covered only the fresh lane and the 16-turn grow
+    crashed again at ~96k with ZERO engagement lines (the standing
+    one-of-two-lanes failure class, proven by the r2 rerun).
+    """
+    if _DEEP_SPAN_CACHE_CLEAR_TOKENS <= 0:
+        return
+    span = int(total_span_tokens or 0)
+    if span < _DEEP_SPAN_CACHE_CLEAR_TOKENS:
+        return
+    try:
+        mx.synchronize()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _clear = getattr(mx, "clear_cache", None) or mx.metal.clear_cache
+        _clear()
+        logger.info(
+            "Deep-span prefill: cleared MLX allocator cache before a "
+            "%d-token span (threshold %d)",
+            span,
+            _DEEP_SPAN_CACHE_CLEAR_TOKENS,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
 _HYBRID_PREFILL_MEM_TRACE = os.environ.get(
     "VMLX_HYBRID_PREFILL_MEM_TRACE", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -6479,33 +6510,10 @@ class MLLMBatchGenerator:
                 # afterwards or the first decode token would allocate another
                 # full-width buffer.
                 # Deep spans: return the allocator cache's dead buffers
-                # BEFORE the full-span presize and reconstruction copies land
-                # (see _DEEP_SPAN_CACHE_CLEAR_TOKENS — measured Metal OOM
-                # abort at ~94k after 16 turns of in-process accumulation;
-                # identical request clean on an empty-cache process).
-                if _DEEP_SPAN_CACHE_CLEAR_TOKENS > 0:
-                    _total_span_tokens = (
-                        int(getattr(request, "_cached_tokens", 0) or 0)
-                        + seq_len
-                    )
-                    if _total_span_tokens >= _DEEP_SPAN_CACHE_CLEAR_TOKENS:
-                        try:
-                            mx.synchronize()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        try:
-                            _clear_cache = getattr(mx, "clear_cache", None) or (
-                                mx.metal.clear_cache
-                            )
-                            _clear_cache()
-                            logger.info(
-                                "Deep-span prefill: cleared MLX allocator "
-                                "cache before a %d-token span (threshold %d)",
-                                _total_span_tokens,
-                                _DEEP_SPAN_CACHE_CLEAR_TOKENS,
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
+                # BEFORE the full-span presize and reconstruction copies land.
+                _maybe_clear_deep_span_cache(
+                    int(getattr(request, "_cached_tokens", 0) or 0) + seq_len
+                )
 
                 _presized_kv_slots: List[Any] = []
                 if _KV_PRESIZE_SPAN and seq_len > 0:
@@ -7827,6 +7835,16 @@ class MLLMBatchGenerator:
                                             f"VLM HYBRID cache FULL HIT for {req.request_id}: "
                                             f"{block_table.num_tokens} cached (KV+SSM)"
                                         )
+                                    # The delta forward over a deep base is
+                                    # exactly the peak that aborted Metal at
+                                    # ~94-96k; free the accumulated allocator
+                                    # garbage before it starts. Span from the
+                                    # block table, NOT req._cached_tokens
+                                    # (reset_cached_tokens paths zero that).
+                                    _maybe_clear_deep_span_cache(
+                                        int(block_table.num_tokens or 0)
+                                        + len(_full_remaining or [0])
+                                    )
                                 elif not is_hybrid and reconstructed is not None:
                                     if not _validate_prompt_cache(
                                         reconstructed,

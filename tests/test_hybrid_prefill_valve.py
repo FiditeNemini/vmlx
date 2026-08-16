@@ -184,12 +184,20 @@ def test_deep_span_cache_clear_default_and_gate():
     assert 0 < int(m.group(1)) <= 65536, (
         f"threshold {m.group(1)} must sit well below the measured ~94k crash"
     )
-    anchor = src.index("_DEEP_SPAN_CACHE_CLEAR_TOKENS > 0:")
-    window = src[anchor : anchor + 1400]
+    helper = src.index("def _maybe_clear_deep_span_cache(")
+    window = src[helper : helper + 1600]
     assert "mx.synchronize()" in window, (
         "must synchronize before clearing or freed buffers are not reclaimable"
     )
     assert "clear_cache" in window
-    assert "_presized_kv_slots" in src[anchor : anchor + 2400], (
-        "the clear must run BEFORE the full-span KV presize allocates"
+    # BOTH lanes must call it: the fresh chunked-prefill lane (before the
+    # full-span presize) AND the hybrid cache-hit delta lane (the r2 rerun
+    # crashed at ~96k with ZERO engagement because only the fresh lane was
+    # wired — the one-of-two-lanes class).
+    assert src.count("_maybe_clear_deep_span_cache(") >= 3, (
+        "helper must be called from the fresh-prefill AND hybrid-hit lanes"
+    )
+    hit = src.index("VLM HYBRID cache FULL HIT")
+    assert "_maybe_clear_deep_span_cache(" in src[hit : hit + 1200], (
+        "hybrid cache-hit delta lane lost its deep-span clear"
     )

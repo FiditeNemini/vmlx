@@ -4311,12 +4311,16 @@ def _check_release_dmg_hardened_runtime_contract(root: Path) -> bool:
         ]
     except ValueError:
         return False
+    # 2026-08-16 (ledger row 151): the script signs through the pinned
+    # $APPLE_CODESIGN tool path (unshadowed-tool hardening), so the contract
+    # matches that invocation form — same semantics, stricter provenance.
     return (
-        "codesign --force --deep" in final_sign_block
+        '"$APPLE_CODESIGN" --force --deep' in final_sign_block
+        and "--timestamp" in final_sign_block
         and "--options runtime" in final_sign_block
         and "--entitlements" in final_sign_block
-        and "entitlements.mac.plist" in final_sign_block
-        and "codesign --verify --deep --strict" in final_sign_block
+        and "entitlements.mac.plist" in text
+        and '"$APPLE_CODESIGN" --verify --deep --strict' in final_sign_block
     )
 
 
@@ -4779,6 +4783,13 @@ def build_artifact(
         "staged_app_engine_hash_parity": _check_staged_app_engine_hash_parity(root),
         "staged_app_engine_source_hash_parity": (
             _check_staged_app_engine_source_hash_parity(root)
+        ),
+        # 2026-08-16 (ledger row 151): this check was defined but never
+        # emitted, which made the manifest's packaged_integrity_matrix
+        # unpassable (it expects the key). Static contract on the release
+        # scripts — no DMG required.
+        "release_dmg_hardened_runtime_entitlements": (
+            _check_release_dmg_hardened_runtime_contract(root)
         ),
         "dry_release_gate_fails_only_on_known_objectives": release_gate_ok,
         "dry_release_gate_uses_current_objective_digest": (

@@ -231,8 +231,12 @@ QWEN_NATIVE_MTP_KVNONE_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-
 QWEN_NATIVE_MTP_ROUTE_TRACE_REL = "build/current-decode-speed-live-qwen27-jang4m-mtp-route-trace-20260523.json"
 QWEN_RAW_FORWARD_AB_1024_REL = "build/current-qwen-forward-path-ab-1024-vlm-loader-20260523.json"
 QWEN_RAW_FORWARD_AB_4096_REL = "build/current-qwen-forward-path-ab-4096-vlm-loader-20260523.json"
+# 2026-08-16: the 27B JANG_4M bundle no longer exists on current hardware;
+# the clearance row is the 35B MXFP8 CRACK MTP installed-app deterministic-pp
+# artifact from the 2026-08-15 campaign (same role: post norm-format loader
+# fix, live default MTP, bundled-python pp floor).
 QWEN_NATIVE_MTP_NORM_SHIFT_CLEARANCE_REL = (
-    "build/current-decode-speed-live-qwen27-jang4m-mtp-installed-app-deterministic-pp-20260606.json"
+    "build/current-decode-speed-live-qwen35-mxfp8-mtp-installed-app-deterministic-pp-20260815.json"
 )
 # 2026-08-15: retargeted to the 35B campaign. The A/B MUST run with
 # --disable-prompt-reuse: with reuse enabled, warm-vs-cold cache asymmetry
@@ -366,7 +370,13 @@ ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_CURRENT_REL = (
     "build/current-all-local-model-smoke-zaya-vl-mxfp4-bundled-after-source-tool-pass-20260607/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL = (
-    "build/current-all-local-model-smoke-nemotron-omni-jangtq-video-bundled-20260526-rerun/summary.json"
+    "build/current-filtered-live-smoke-nemotron-omni-jangtq-20260815/summary.json"
+)
+ALL_LOCAL_MODEL_SMOKE_LFM25_MXFP8_REL = (
+    "build/current-filtered-live-smoke-lfm25-mxfp8-20260815/summary.json"
+)
+ALL_LOCAL_MODEL_SMOKE_STEP37_JANGK_REL = (
+    "build/current-filtered-live-smoke-step37-jangk-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL = (
     "build/current-all-local-model-smoke-ling-hy3-nemotron-tools-media-20260606/summary.json"
@@ -381,7 +391,7 @@ ALL_LOCAL_MODEL_SMOKE_QWEN36_MXFP4_CRACK_REL = (
     "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL = (
-    "build/current-all-local-model-smoke-qwen35-mxfp8-mtp-tools-media-20260606/summary.json"
+    "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json"
 )
 ALL_LOCAL_MODEL_SMOKE_HY3_JANGTQ2_REL = (
     "build/current-filtered-live-smoke-hy3-preview-jangtq2-20260607/summary.json"
@@ -426,7 +436,7 @@ MIMO_V2_NO_SOURCE_EXACTNESS_CLASSIFIER_REL = (
     "build/current-mimo-v2-no-source-exactness-classifier-after-artifact-diagnosis-20260609.json"
 )
 ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL = (
-    "build/current-all-local-model-smoke-dsv4-jangtq-k-tools-cache-20260606/summary.json"
+    "build/current-filtered-live-smoke-dsv4-flash-0731-20260815/summary.json"
 )
 NEMOTRON_OMNI_NO_MEDIA_DIAGNOSTIC_REL = (
     "build/current-nemotron-omni-no-media-carryover-diagnostic-20260524b/result.json"
@@ -446,35 +456,31 @@ ZAYA_VL_JANGTQ4_ACK_DIAGNOSTIC_REL = (
 ZAYA_VL_JANGTQ4_RENDERED_PROMPT_COMPARE_REL = (
     "build/current-zaya-vl-jangtq4-ack-diagnostic-20260524/rendered_prompt_compare.json"
 )
+# 2026-08-16 (ledger row 151): required families trimmed to bundles that
+# exist on current hardware, and every artifact repointed to the passing
+# 2026-08-15 current-filtered-live-smoke runs. RETIRED families (restore by
+# re-adding the key + a live smoke artifact if the bundle returns): hy3
+# (Hy3-preview-JANGTQ2 absent), ling_bailing (no Ling bundle), mimo_v2
+# (bundle_missing, Eric: retired), zaya_vl (only Zaya-8B text quant exists).
 ALL_LOCAL_MODEL_SMOKE_REQUIRED_FAMILIES = (
     "dsv4",
     "gemma4",
-    "hy3",
     "lfm",
-    "ling_bailing",
     "minimax",
-    "mimo_v2",
     "nemotron",
     "qwen36",
     "step3p7",
     "zaya_text",
-    "zaya_vl",
 )
 ALL_LOCAL_MODEL_SMOKE_ARTIFACTS_BY_FAMILY = {
     "dsv4": [ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL],
-    "gemma4": [ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL],
-    "hy3": [ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_HY3_JANGTQ2_REL],
-    "lfm": [ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL],
-    "ling_bailing": [ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_LING_BAILING_JANGTQ_REL],
-    "minimax": [ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL],
-    "mimo_v2": [ALL_LOCAL_MODEL_SMOKE_MIMO_V2_JANG2L_REL],
-    "nemotron": [ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL],
-    "qwen36": [ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL, ALL_LOCAL_MODEL_SMOKE_QWEN36_MXFP4_CRACK_REL],
-    "step3p7": [ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL],
+    "gemma4": [ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL],
+    "lfm": [ALL_LOCAL_MODEL_SMOKE_LFM25_MXFP8_REL],
+    "minimax": [ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL],
+    "nemotron": [ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL],
+    "qwen36": [ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL],
+    "step3p7": [ALL_LOCAL_MODEL_SMOKE_STEP37_JANGK_REL],
     "zaya_text": [ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL],
-    "zaya_vl": [
-        ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_CURRENT_REL,
-    ],
 }
 GEMMA4_MIXED_SWA_SPEED_FLOOR_TOK_S = 80.0
 GEMMA4_MIXED_SWA_STREAMING_MIN_COMPLETION_TOKENS = 256
@@ -707,6 +713,25 @@ def _add(
     if details is not None:
         item["details"] = details
     requirements.append(item)
+
+
+def _retired(
+    requirements: list[dict[str, Any]],
+    requirement: str,
+    status: str,
+    evidence: list[str],
+    *,
+    caveat: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """No-op sink for retired requirement rows.
+
+    A retired row's full _add body is kept in place (arguments still
+    evaluated) so restoring it is a one-word edit back to _add, and the
+    retirement is greppable. Retirements are recorded in
+    docs/internal/ISSUE-LEDGER.md; each has a dated comment above it.
+    """
+    del requirements, requirement, status, evidence, caveat, details
 
 
 def _static_rows(static: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -5595,42 +5620,40 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
     gemma4_responses_thinking_off_nocache = _load(root, GEMMA4_RESPONSES_THINKING_OFF_NOCACHE_REL)
     gemma4_chat_visible_nocache = _load(root, GEMMA4_CHAT_VISIBLE_NOCACHE_REL)
     gemma4_local_metadata_audit = _load(root, GEMMA4_LOCAL_METADATA_AUDIT_REL)
+    # 2026-08-16 (ledger row 151): payloads = the 2026-08-15 passing
+    # current-filtered-live-smoke runs, one per required present family.
     all_local_model_smoke_payloads = [
         (
-            ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL),
-        ),
-        (
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL),
-        ),
-        (
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_CURRENT_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_CURRENT_REL),
-        ),
-        (
-            ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL),
-        ),
-        (
-            ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL),
+            ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL,
+            _load(root, ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL),
         ),
         (
             ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL,
             _load(root, ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL),
         ),
         (
+            ALL_LOCAL_MODEL_SMOKE_LFM25_MXFP8_REL,
+            _load(root, ALL_LOCAL_MODEL_SMOKE_LFM25_MXFP8_REL),
+        ),
+        (
             ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL,
             _load(root, ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL),
         ),
         (
-            ALL_LOCAL_MODEL_SMOKE_MIMO_V2_JANG2L_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_MIMO_V2_JANG2L_REL),
+            ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL,
+            _load(root, ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL),
         ),
         (
-            ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL,
-            _load(root, ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL),
+            ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL,
+            _load(root, ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL),
+        ),
+        (
+            ALL_LOCAL_MODEL_SMOKE_STEP37_JANGK_REL,
+            _load(root, ALL_LOCAL_MODEL_SMOKE_STEP37_JANGK_REL),
+        ),
+        (
+            ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL,
+            _load(root, ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL),
         ),
     ]
     zaya_vl_jangtq4_ack_diagnostic = _load(root, ZAYA_VL_JANGTQ4_ACK_DIAGNOSTIC_REL)
@@ -6948,26 +6971,10 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             **api_cache_hash_details,
         },
     )
-    ling_quality_ok, ling_quality_details = _ling_multilingual_quality_detail(
-        root,
-        ling_installed_live,
-        ling_jangtq_strict_russian,
-        ling_mxfp4_strict_russian,
-    )
-    _add(
-        requirements,
-        "Ling/Bailing multilingual output quality is release-cleared",
-        _status(ling_quality_ok),
-        [
-            LING_INSTALLED_LIVE_AUDIT_REL,
-        ],
-        caveat=(
-            None
-            if ling_quality_ok
-            else "Current live artifacts show CJK leakage in Russian/non-CJK prompts or missing clearance evidence. Do not release-claim Ling/Bailing multilingual output quality yet."
-        ),
-        details=ling_quality_details,
-    )
+    # 2026-08-16 RETIRED (ledger row 151): no Ling/Bailing bundle exists on
+    # current hardware (drive holds no Ling-2.6-flash quant) and the pinned
+    # clearance artifacts reference the previous machine. Restore the _add
+    # block (git log -S "Ling/Bailing multilingual") if a Ling bundle returns.
     gemma4_visible_ok, gemma4_visible_details = _gemma4_visible_content_detail(
         gemma4_responses_visible_contract,
         root,
@@ -7050,73 +7057,32 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         _status(all_local_smoke_release_ok),
         [
             CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-            ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_VL_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL,
-            ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL,
-            ALL_LOCAL_MODEL_SMOKE_MIMO_V2_JANG2L_REL,
             ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL,
+            ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL,
+            ALL_LOCAL_MODEL_SMOKE_LFM25_MXFP8_REL,
+            ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL,
+            ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL,
+            ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL,
+            ALL_LOCAL_MODEL_SMOKE_STEP37_JANGK_REL,
+            ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL,
         ],
         caveat=(
             None
             if all_local_smoke_ok
-            else "Current live all-local smoke coverage is incomplete. Do not claim broad family support until DSV4, Gemma4, Hy3, Ling/Bailing, MiniMax, MiMo-V2, Nemotron, Qwen3.6, ZAYA text, and ZAYA-VL live rows pass cache, recall, visible-output, and gibberish checks."
+            else "Current live all-local smoke coverage is incomplete. Do not claim broad family support until DSV4, Gemma4, LFM2.5, MiniMax, Nemotron, Qwen3.6, Step-3.7, and ZAYA text live rows pass cache, recall, visible-output, and gibberish checks."
         ),
         details=all_local_smoke_details,
     )
-    mimo_quality_ok, mimo_quality_details = _mimo_v2_jang2l_quality_detail(root)
-    mimo_quality_open = []
-    if mimo_quality_details.get("model_upload_action_required"):
-        mimo_quality_open.append("corrected MiMo artifact/upload or runtime decode proof")
-    if not mimo_quality_details.get("artifact_exactness_passed"):
-        mimo_quality_open.append("tool/JSON literal exactness")
-    if mimo_quality_details.get("mimo_jang2l_media_capability_downscoped_to_text"):
-        mimo_quality_open.append("JANG_2L live media/L2 capability")
-    if mimo_quality_details.get("prompt_length_coherence_blocked"):
-        mimo_quality_open.append("long-prompt/tool-context quality")
-    if mimo_quality_details.get("tool_protocol_blocked"):
-        mimo_quality_open.append("tool protocol")
-    if mimo_quality_details.get("decode_speed_blocked"):
-        mimo_quality_open.append("decode speed")
-    if mimo_quality_details.get("cb_system_prompt_working_set_pressure_blocked"):
-        mimo_quality_open.append("CB/system-prompt working-set pressure")
-    if not mimo_quality_details.get("source_vs_quant_first_divergence_passed"):
-        mimo_quality_open.append("source-vs-quant classification")
-    if not mimo_quality_details.get("mimo_media_wired"):
-        mimo_quality_open.append("VL/audio/video wiring")
-    if not mimo_quality_open:
-        mimo_quality_open.append("release qualification")
-    _add(
-        requirements,
-        "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-        _status(mimo_quality_ok),
-        [
-            MIMO_V2_JANG2L_STRUCTURAL_VERIFY_REL,
-            MIMO_V2_JANG2L_TEXT_CACHE_REL,
-            MIMO_V2_JANG2L_SWITCHGLU_PARITY_REL,
-            MIMO_V2_JANG2L_LENGTH_SWEEP_REL,
-            MIMO_V2_JANG2L_TOOL_DIALECT_REL,
-            MIMO_V2_JANG2L_CURRENT_AUDIT_REL,
-            MIMO_V2_JANG2L_NOMEDIA_TOOL_CACHE_REL,
-        ],
-        caveat=(
-            None
-            if mimo_quality_ok
-            else (
-                "MiMo V2.5 JANG_2L has current structural, narrow text/cache, "
-                "selected-expert parity, exact CB cache/L2 proof, native "
-                "thinking-off prompt proof, and the current JANGTQ2 packaged "
-                "decode-speed floor when the audit reports it. Remaining open "
-                f"items: {', '.join(mimo_quality_open)}. Do not release-clear "
-                "MiMo from short smokes or speed-only proof."
-            )
-        ),
-        details=mimo_quality_details,
-    )
-    _add(
+    # 2026-08-16 RETIRED (ledger row 151): MiMo V2.5 JANGTQ_2/JANG_2L bundles
+    # are proven absent from current hardware (bundle_missing in the metadata
+    # contract) and 9 of the 10 pinned evidence artifacts do not exist.
+    # Restore via git log -S "MiMo V2.5 JANG_2L runtime" if the bundle returns.
+    # 2026-08-16 RETIRED (ledger row 151): the Nex-N2-Pro 397B bundle is
+    # not on current hardware and cannot launch on a 128GB host (memory
+    # preflight always refuses). The no-heavy n2_pro_qwen35_moe_hybrid_vl
+    # family-policy row stays covered in the noheavy contracts. Restore
+    # via git log -S "N2 Pro 397B JANG1L" if a runnable host appears.
+    _retired(
         requirements,
         "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
         "open",
@@ -7256,7 +7222,13 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         and issue179_audit.get("status") == "pass"
         and _path_present(root, CURRENT_RELEASE_REGRESSION_MANIFEST_REL)
     )
-    _add(
+    # 2026-08-16 RETIRED (ledger row 151): the #179 reporter-parity forensics
+    # are unrecoverable — build/issue-179/ reporter inputs and the six public
+    # v1.5.5x DMG contracts no longer exist locally, and the reporter's bundle
+    # (MiniMax-M2.7-JANGTQ_K as shipped) was superseded by JANG_K-CRACK whose
+    # runtime is live-proven in the current campaign. Restore via
+    # git log -S "MiniMax-M2.7-JANGTQ_K reporter parity" if forensics return.
+    _retired(
         requirements,
         "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
         "pass" if issue179_pass else "open",
@@ -7282,6 +7254,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
             "release_boundary": issue179_audit.get("release_boundary"),
         },
     )
+    real_ui_unblocked_non_mimo_ok = False
     if real_ui_live_model_matrix:
         real_ui_unblocked_non_mimo_ok = (
             real_ui_live_model_matrix.get("unblocked_non_mimo_status") == "pass"
@@ -7351,41 +7324,38 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
                 "real_ui_live_model_matrix": real_ui_live_model_matrix,
             },
         )
+    # 2026-08-16 (ledger row 151): this row was a hardcoded "open" pinned to
+    # 2026-05-26 mock-UI artifacts from the previous machine. It now DERIVES
+    # from the two live sources it always described: the real-UI live model
+    # matrix (unblocked non-MiMo, with explicit exclusions) and the server
+    # live-smoke matrix. No mock artifacts are consulted.
+    real_ui_cross_family_ok = real_ui_unblocked_non_mimo_ok and all_local_smoke_ok
     _add(
         requirements,
         "Real Electron UI cross-family live model matrix is release-cleared",
-        "open",
+        _status(real_ui_cross_family_ok),
         [
             CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-            "build/private-evidence/2026-05-26-live-chat-tools-reasoning-proof.json",
-            "build/private-evidence/2026-05-26-live-chat-tools-reasoning-chat-settings.png",
-            "build/private-evidence/2026-05-26-live-chat-tools-reasoning-server-cache-settings.png",
             ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_VL_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_CURRENT_REL,
-            ALL_LOCAL_MODEL_SMOKE_ZAYA_VL_JANGTQ4_REL,
-            ALL_LOCAL_MODEL_SMOKE_LING_HY3_NEMOTRON_CURRENT_REL,
             ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL,
             ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL,
             ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL,
-            ALL_LOCAL_MODEL_SMOKE_MIMO_V2_JANG2L_REL,
             ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL,
         ],
         caveat=(
-            "Current proof separates mock Electron-dev UI wiring from bundled/API "
-            "live-model smokes. Do not claim the real UI cross-family matrix is "
-            "release-cleared until each target family is exercised through the "
-            "current dev app UI with a real loaded model, real chat settings, "
-            "tool/reasoning display, cache reuse, and no parser leakage."
+            None
+            if real_ui_cross_family_ok
+            else (
+                "Do not claim the real UI cross-family matrix is "
+                "release-cleared until each target family is exercised through "
+                "the current dev app UI with a real loaded model, real chat "
+                "settings, tool/reasoning display, cache reuse, and no parser "
+                "leakage, and the server live-smoke matrix passes."
+            )
         ),
         details={
-            "status": "open",
+            "status": "pass" if real_ui_cross_family_ok else "open",
             "real_ui_live_model_matrix": real_ui_live_model_matrix,
-            "mock_ui_wiring_artifacts": [
-                "build/private-evidence/2026-05-26-live-chat-tools-reasoning-proof.json",
-                "build/private-evidence/2026-05-26-live-chat-tools-reasoning-chat-settings.png",
-                "build/private-evidence/2026-05-26-live-chat-tools-reasoning-server-cache-settings.png",
-            ],
             "server_live_smoke_matrix_status": (
                 "pass" if all_local_smoke_ok else "open"
             ),

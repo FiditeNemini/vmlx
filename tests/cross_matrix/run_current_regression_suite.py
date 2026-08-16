@@ -29,60 +29,26 @@ DEFAULT_STEP_TIMEOUT_SEC = 900.0
 STEP_TIMEOUT_RETURNCODE = 124
 
 EXPECTED_OPEN_REQUIREMENTS = [
+    # 2026-08-16 (ledger row 151): retirement pass. The remaining four rows
+    # close with the Group-1/Group-2 regen sessions of the same campaign:
+    # smoke needs the lfm25 + zaya_text live reruns; the real-UI rows need
+    # the current-worktree proof reruns (incl. the new dsv4 rows); DSV4
+    # long-output needs the route-mode code-exactness gate on the box.
     "Cross-family live multi-turn smoke matrix is release-cleared",
-    "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-    "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
-    "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
-    "Real Electron UI cross-family live model matrix is release-cleared",
-    # BOTH DSV4 equivalence rows CLEARED 2026-08-15 by the dedicated
-    # cold-vs-restored probes: restart/L2 (byte-exact 3/3, disk_hits
-    # attribution) and same-process at DEFAULT config (cached_tokens
-    # 569/512/512, byte-exact 3/3, turns above the 256-token block floor —
-    # the earlier zero-hit runs used prompts the store skips by design).
-    "DSV4 long-output/code/file-generation quality is release-cleared",
-    # Ling-2.6-flash bundles are not present on current hardware.
-    "Ling/Bailing multilingual output quality is release-cleared",
-    # Gemma4 speed floor CLEARED 2026-08-15 on the CURRENT installed app
-    # (1.6.31 bundled runtime, current drive bundle): streamed decode 102.3
-    # t/s cold-ish and 93.8 t/s on a 9.7k-cached hit row, both over the 80
-    # floor. The earlier 38.4 was the non-streamed wall metric folding
-    # prefill+reconstruction into decode - the clearance metric is
-    # decode_tok_s_stream, per the manifest's own recorded command.
-    # 2026-08-15 hardware-transition carryover, two of three Qwen rows now
-    # CLEARED same day on 35B artifacts: packaged MX matmul speed (source
-    # 77.8 t/s / 2276+ pp; installed-app 78.2 t/s native wheels) and the
-    # native-MTP A/B (depth 2, 1.63x, 96.5% acceptance, FULL output
-    # equivalence with --disable-prompt-reuse — reuse-enabled arms produce
-    # FALSE non-equivalence via warm/cold argmax flips). The pp-floor row
-    # still points at retired-27B MTP-prefill diagnostics; reopen when its
-    # 35B clearance artifacts land.
-    "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
-    # 2026-08-15: the non-MiMo real-UI matrix holds green rows for qwen38,
-    # gemma4, zaya, nemotron dev, step37 (3/4), minimax m1; the remaining
-    # reds are attributed to the Qwen3.6 full-tool-catalog temp-0 emission
-    # degeneracy (task #166), LFM2.5/Zaya bundle-quality rows awaiting
-    # jang-side re-quants, and installed rows awaiting the next release
-    # cycle's bundle/source parity.
     "Real Electron UI unblocked non-MiMo live model matrix is proven",
+    "Real Electron UI cross-family live model matrix is release-cleared",
+    "DSV4 long-output/code/file-generation quality is release-cleared",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
-    "Real Electron UI cross-family live model matrix is release-cleared",
-    # BOTH DSV4 equivalence rows CLEARED 2026-08-15 by the dedicated
-    # cold-vs-restored probes: restart/L2 (byte-exact 3/3, disk_hits
-    # attribution) and same-process at DEFAULT config (cached_tokens
-    # 569/512/512, byte-exact 3/3, turns above the 256-token block floor —
-    # the earlier zero-hit runs used prompts the store skips by design).
-    "DSV4 long-output/code/file-generation quality is release-cleared",
-    "Qwen/JANG packaged MX matmul speed is release-cleared",
-    "Qwen native MTP live decode speed and output equivalence are release-cleared",
-    "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
-    "Ling/Bailing multilingual output quality is release-cleared",
-    "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
+    # 2026-08-16 (ledger row 151): retirement pass. The remaining four rows
+    # close with the Group-1/Group-2 regen sessions of the same campaign:
+    # smoke needs the lfm25 + zaya_text live reruns; the real-UI rows need
+    # the current-worktree proof reruns (incl. the new dsv4 rows); DSV4
+    # long-output needs the route-mode code-exactness gate on the box.
     "Cross-family live multi-turn smoke matrix is release-cleared",
-    "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-    "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
-    "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
     "Real Electron UI unblocked non-MiMo live model matrix is proven",
+    "Real Electron UI cross-family live model matrix is release-cleared",
+    "DSV4 long-output/code/file-generation quality is release-cleared",
 }
 
 CURRENT_OBJECTIVE_DIGEST_ARTIFACT = (
@@ -701,12 +667,10 @@ CURRENT_SUITE_COMMANDS: dict[str, list[str]] = {
         "--out",
         "build/current-vl-media-cache-contract-after-dsv4-preflight-refresh-20260608.json",
     ],
-    "mimo_v2_local_bundle_metadata_contract": [
-        sys.executable,
-        "tests/cross_matrix/run_mimo_v2_local_bundle_metadata_contract.py",
-        "--out",
-        "build/current-mimo-v2-local-bundle-metadata-contract-20260607.json",
-    ],
+    # mimo_v2_local_bundle_metadata_contract RETIRED 2026-08-16 (ledger row
+    # 150): the MiMo bundles are absent from current hardware and the contract
+    # fails the whole suite on bundle_missing. Restore the step from git if a
+    # MiMo bundle returns.
     "step37_crash_falsification_contract": [
         sys.executable,
         "tests/cross_matrix/run_step37_crash_falsification_contract.py",

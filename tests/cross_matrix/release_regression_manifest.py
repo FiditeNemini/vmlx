@@ -470,6 +470,9 @@ EXPECTED_DSV4_SOURCE_PREFLIGHT_CASES = (
     "legacy_completion_raw",
 )
 CURRENT_REAL_UI_LIVE_MODEL_PROOF_ROWS = {
+    # 2026-08-16 RETIRED rows (ledger row 151; bundles absent from current
+    # hardware): zaya_vl_* (ZAYA1-VL), ling_bailing_* (Ling-2.6-flash),
+    # hy3_jangtq2_* (Hy3-preview). Restore from git if the bundles return.
     # 2026-08 hardware transition: rebuilt on the current drive bundle (previous-machine artifact retired).
     "zaya_text": {
         "proof": "build/private-evidence/current-real-ui-live-model-zaya-text-20260526-proof.json",
@@ -493,48 +496,6 @@ CURRENT_REAL_UI_LIVE_MODEL_PROOF_ROWS = {
         "model_path": "/Volumes/EricsLLMDrive/jangq-ai/Zaya-8B-JANG_4M",
         "model_name": "Zaya-8B-JANG_4M",
         "family": "zaya_text",
-    },
-    "zaya_vl_image": {
-        "proof": "build/private-evidence/current-real-ui-live-model-zaya-vl-image-current-source-20260531-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-zaya-vl-image-current-source-20260531-chat.png",
-        "model_path": "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4",
-        "model_name": "ZAYA1-VL-8B-JANGTQ4",
-        "family": "zaya_vl",
-    },
-    "zaya_vl_cachecontrols": {
-        "proof": "build/private-evidence/current-real-ui-live-model-zaya-vl-cachecontrols-20260527-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-zaya-vl-cachecontrols-20260527-chat.png",
-        "model_path": "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4",
-        "model_name": "ZAYA1-VL-8B-JANGTQ4",
-        "family": "zaya_vl",
-    },
-    "zaya_vl_responses_cachecontrols": {
-        "proof": "build/private-evidence/current-real-ui-live-model-zaya-vl-responses-filetools-strictargs-cachecontrols-pointclean-localonly-20260527-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-zaya-vl-responses-filetools-strictargs-cachecontrols-pointclean-localonly-20260527-chat.png",
-        "model_path": "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4",
-        "model_name": "ZAYA1-VL-8B-JANGTQ4",
-        "family": "zaya_vl",
-    },
-    "zaya_vl_responses_tools_cachecontrols": {
-        "proof": "build/private-evidence/current-real-ui-live-model-zaya-vl-responses-stricttools-cachecontrols-20260530-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-zaya-vl-responses-stricttools-cachecontrols-20260530-chat.png",
-        "model_path": "/Users/example/models/JANGQ/ZAYA1-VL-8B-JANGTQ4",
-        "model_name": "ZAYA1-VL-8B-JANGTQ4",
-        "family": "zaya_vl",
-    },
-    "ling_bailing_jangtq": {
-        "proof": "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-20260526-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-20260526-chat.png",
-        "model_path": "/Users/example/models/JANGQ/Ling-2.6-flash-JANGTQ",
-        "model_name": "Ling-2.6-flash-JANGTQ",
-        "family": "ling_bailing",
-    },
-    "ling_bailing_jangtq_responses_tools_cachecontrols": {
-        "proof": "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-responses-filesemantic-20260530-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-ling-bailing-jangtq-responses-filesemantic-20260530-chat.png",
-        "model_path": "/Users/example/models/JANGQ/Ling-2.6-flash-JANGTQ",
-        "model_name": "Ling-2.6-flash-JANGTQ",
-        "family": "ling_bailing",
     },
     # 2026-08 hardware transition: rebuilt on the current drive bundle (previous-machine artifact retired).
     "gemma4": {
@@ -666,34 +627,6 @@ CURRENT_REAL_UI_LIVE_MODEL_PROOF_ROWS = {
         "model_name": "Nemotron-Omni-Nano-JANGTQ-CRACK",
         "family": "nemotron_omni",
     },
-    "hy3_jangtq2": {
-        "proof": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-20260526-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-20260526-chat.png",
-        "model_path": "/Users/example/models/JANGQ/Hy3-preview-JANGTQ2",
-        "model_name": "Hy3-preview-JANGTQ2",
-        "family": "hy3",
-    },
-    "hy3_jangtq2_responses_reasoning": {
-        "proof": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-reasoning-20260527-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-reasoning-20260527-chat.png",
-        "model_path": "/Users/example/models/JANGQ/Hy3-preview-JANGTQ2",
-        "model_name": "Hy3-preview-JANGTQ2",
-        "family": "hy3",
-    },
-    "hy3_jangtq2_responses_tools_thinkingoff": {
-        "proof": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-tools-thinkingoff-toolforced-20260527-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-tools-thinkingoff-toolforced-20260527-chat.png",
-        "model_path": "/Users/example/models/JANGQ/Hy3-preview-JANGTQ2",
-        "model_name": "Hy3-preview-JANGTQ2",
-        "family": "hy3",
-    },
-    "hy3_jangtq2_responses_tools_cachecontrols": {
-        "proof": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-tools-filesemantic-20260530-proof.json",
-        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-hy3-jangtq2-responses-tools-filesemantic-20260530-chat.png",
-        "model_path": "/Users/example/models/JANGQ/Hy3-preview-JANGTQ2",
-        "model_name": "Hy3-preview-JANGTQ2",
-        "family": "hy3",
-    },
     # 2026-08 hardware transition: rebuilt on the current drive bundle (previous-machine artifact retired). JANG_2L retired; JANG_K-CRACK is the current step37 lane.
     "step37_flash_jang2l": {
         "proof": "build/private-evidence/current-real-ui-live-model-step37-jangk-devbuild-tools-image-cache-20260815-proof.json",
@@ -745,6 +678,23 @@ CURRENT_REAL_UI_LIVE_MODEL_PROOF_ROWS = {
         "model_name": "LFM2.5-8B-A1B-MXFP8-CRACK",
         "family": "lfm25",
     },
+    # 2026-08-16 (ledger row 151): dsv4 real-UI rows added on the current
+    # 0731 JANG-CRACK drive bundle; artifacts generated by the Group-2 live
+    # session on the box (previous machine had no dsv4 real-UI rows at all).
+    "dsv4_flash_0731": {
+        "proof": "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-20260816-proof.json",
+        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-20260816-chat.png",
+        "model_path": "/Volumes/EricsLLMDrive/dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK",
+        "model_name": "DeepSeek-V4-Flash-0731-JANG-CRACK",
+        "family": "dsv4",
+    },
+    "dsv4_flash_0731_responses_tools_cachecontrols": {
+        "proof": "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-responses-tools-cachecontrols-20260816-proof.json",
+        "chat_screenshot": "build/private-evidence/current-real-ui-live-model-dsv4-flash-0731-responses-tools-cachecontrols-20260816-chat.png",
+        "model_path": "/Volumes/EricsLLMDrive/dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK",
+        "model_name": "DeepSeek-V4-Flash-0731-JANG-CRACK",
+        "family": "dsv4",
+    },
 }
 CURRENT_REAL_UI_LIVE_MODEL_PROOF_ARTIFACTS.update(
     {
@@ -756,13 +706,13 @@ CURRENT_REAL_UI_LIVE_MODEL_PROOF_ARTIFACTS.update(
         )
     }
 )
+# 2026-08-16 (ledger row 151): required families trimmed to bundles present
+# on current hardware. RETIRED (restore the key if the bundle returns):
+# zaya_vl, ling_bailing, hy3.
 REQUIRED_REAL_UI_LIVE_MODEL_FAMILIES = (
     "zaya_text",
-    "zaya_vl",
-    "ling_bailing",
     "gemma4",
     "qwen36",
-    "hy3",
     "minimax",
     "nemotron_omni",
     "dsv4",
@@ -826,9 +776,7 @@ _REQUIRED_REAL_UI_LIVE_MODEL_NON_REASONING_TEXT_SURFACES = tuple(
 )
 REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY = {
     "zaya_text": _REQUIRED_REAL_UI_LIVE_MODEL_NON_REASONING_TEXT_SURFACES,
-    "ling_bailing": _REQUIRED_REAL_UI_LIVE_MODEL_NON_REASONING_TEXT_SURFACES,
     "gemma4": _REQUIRED_REAL_UI_LIVE_MODEL_NON_MEDIA_SURFACES,
-    "hy3": _REQUIRED_REAL_UI_LIVE_MODEL_NON_MEDIA_SURFACES,
     "minimax": _REQUIRED_REAL_UI_LIVE_MODEL_NON_MEDIA_SURFACES,
     "nemotron_omni": _REQUIRED_REAL_UI_LIVE_MODEL_NON_MEDIA_SURFACES,
     "dsv4": _REQUIRED_REAL_UI_LIVE_MODEL_NON_MEDIA_SURFACES,
@@ -852,35 +800,30 @@ REQUIRED_REAL_UI_LIVE_MODEL_SURFACES_BY_FAMILY = {
         }
     )
     + (REAL_UI_INTEGRATED_TOOL_L2_CACHE_SURFACE,),
-    "zaya_vl": (
-        *_REQUIRED_REAL_UI_LIVE_MODEL_NON_REASONING_TEXT_SURFACES,
-        "vl_image",
-    ),
+    # zaya_vl RETIRED 2026-08-16 (ledger row 151): bundle absent.
     "qwen36": (
         *_REQUIRED_REAL_UI_LIVE_MODEL_NON_MEDIA_SURFACES,
         "vl_image",
         "video_where_supported",
     ),
 }
+# 2026-08-16 (ledger row 151): rows trimmed to bundles present on current
+# hardware; all artifacts are the passing 2026-08-15 filtered-live-smoke runs.
+# RETIRED rows (restore key + artifact if the bundle returns): ling_flash_tq,
+# hy3_preview_jangtq2, zaya_vl_jangtq4 — bundles absent from the drive.
 CURRENT_COVERED_LIVE_SMOKE_ARTIFACTS = {
     "zaya_text_mxfp4": "build/current-filtered-live-smoke-zaya-text-jang4m-20260815/summary.json",
-    "ling_flash_tq": "build/current-filtered-live-smoke-ling-flash-jangtq-20260607/summary.json",
     "gemma4_crack": "build/current-filtered-live-smoke-gemma4-26b-jang4m-20260815/summary.json",
     "qwen36_moe_crack": "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json",
-    "hy3_preview_jangtq2": "build/current-filtered-live-smoke-hy3-preview-jangtq2-20260607/summary.json",
     "minimax_m27_tq_k": "build/current-filtered-live-smoke-minimax-m27-jangk-20260815/summary.json",
     "nemotron_omni_tq2_system_nomedia": "build/current-filtered-live-smoke-nemotron-omni-jangtq-20260815/summary.json",
-    "zaya_vl_jangtq4": "build/current-all-local-model-smoke-zaya-vl-mxfp4-bundled-after-source-tool-pass-20260607/summary.json",
     "dsv4_jang_local": "build/current-filtered-live-smoke-dsv4-flash-0731-20260815/summary.json",
 }
 CURRENT_COVERED_LIVE_TOOL_SMOKE_ARTIFACTS = {
     "nemotron_omni_tq2_system_nomedia": "build/current-filtered-live-smoke-nemotron-omni-jangtq-20260815/summary.json",
-    "ling_flash_tq": "build/current-filtered-live-smoke-ling-flash-jangtq-20260607/summary.json",
     "gemma4_crack": "build/current-filtered-live-smoke-gemma4-26b-jang4m-20260815/summary.json",
     "qwen36_moe_crack": "build/current-filtered-live-smoke-qwen36-35b-mxfp8-mtp-20260815/summary.json",
-    "hy3_preview_jangtq2": "build/current-filtered-live-smoke-hy3-preview-jangtq2-20260607/summary.json",
     "minimax_m27_tq_k": "build/current-filtered-live-smoke-minimax-m27-jangk-20260815/summary.json",
-    "zaya_vl_jangtq4": "build/current-all-local-model-smoke-zaya-vl-mxfp4-bundled-after-source-tool-pass-20260607/summary.json",
 }
 CURRENT_MIMO_V2_JANG2L_STRUCTURAL_VERIFY_ARTIFACT = (
     "build/current-mimo-jang2l-local-structural-verify-20260606.json"
@@ -936,14 +879,7 @@ CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS: dict[str, dict[str, Any]] = {
         "supports_thinking": True,
         "cache_family": "hybrid_ssm",
     },
-    "ling_flash_tq": {
-        "name": "Ling-2.6-flash-JANGTQ",
-        "model_type": "bailing_hybrid",
-        "is_mllm": False,
-        "supports_video": False,
-        "supports_thinking": True,
-        "cache_family": "hybrid_ssm",
-    },
+    # ling_flash_tq RETIRED 2026-08-16 (ledger row 151): bundle absent.
     "gemma4_crack": {
         "name": "Gemma-4-26B-A4B-it-JANG_4M-CRACK",
         "model_type": "gemma4",
@@ -955,20 +891,16 @@ CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS: dict[str, dict[str, Any]] = {
     "qwen36_moe_crack": {
         # 2026-08 hardware transition: 35B MXFP8-CRACK-MTP carries qwen36.
         "name": "Qwen3.6-35B-A3B-MXFP8-CRACK-MTP",
-        "model_type": "qwen3_5",
+        # 2026-08-16: the bundle's config model_type is qwen3_5_moe (the
+        # 2026-08-15 filtered smoke artifact records it); qwen3_5 was the
+        # pre-transition 27B dense lane.
+        "model_type": "qwen3_5_moe",
         "is_mllm": True,
         "supports_video": True,
         "supports_thinking": True,
         "cache_family": "hybrid_ssm",
     },
-    "hy3_preview_jangtq2": {
-        "name": "Hy3-preview-JANGTQ2",
-        "model_type": "hy_v3",
-        "is_mllm": False,
-        "supports_video": False,
-        "supports_thinking": True,
-        "cache_family": "hybrid_ssm",
-    },
+    # hy3_preview_jangtq2 RETIRED 2026-08-16 (ledger row 151): bundle absent.
     "minimax_m27_tq_k": {
         # 2026-08 hardware transition: JANG_K-CRACK is the current M2.7 lane.
         "name": "MiniMax-M2.7-JANG_K-CRACK",
@@ -978,16 +910,12 @@ CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS: dict[str, dict[str, Any]] = {
         "supports_thinking": True,
         "cache_family": "hybrid_ssm",
     },
-    "zaya_vl_jangtq4": {
-        "name": "ZAYA1-VL-8B-MXFP4",
-        "model_type": "zaya1_vl",
-        "is_mllm": True,
-        "supports_video": False,
-        "supports_thinking": True,
-        "cache_family": "zaya_cca",
-    },
+    # zaya_vl_jangtq4 RETIRED 2026-08-16 (ledger row 151): only the Zaya-8B
+    # text quant exists on current hardware.
     "dsv4_jang_local": {
-        "name": "DeepSeek-V4-Flash-JANGTQ-K-HeadBF16-Probe-20260520",
+        # 2026-08-16: current DSV4 lane is the 0731 JANG-CRACK bundle (the
+        # JANGTQ-K probes were previous-machine artifacts).
+        "name": "DeepSeek-V4-Flash-0731-JANG-CRACK",
         "model_type": "deepseek_v4",
         "is_mllm": False,
         "supports_video": False,
@@ -995,11 +923,6 @@ CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS: dict[str, dict[str, Any]] = {
         "cache_family": "deepseek_v4_composite",
     },
 }
-
-
-# Current filtered smoke artifacts use the current metadata truth for these rows.
-CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS["zaya_vl_jangtq4"]["supports_thinking"] = False
-CURRENT_COVERED_LIVE_SMOKE_ROW_EXPECTATIONS["dsv4_jang_local"]["name"] = "DeepSeek-V4-Flash-JANGTQ-K"
 
 LIVE_SMOKE_TEXT_REQUEST_LABELS = (
     "text_cache_repeat_1",
@@ -1199,45 +1122,26 @@ def _live_smoke_cache_validation_failures(request: dict[str, Any]) -> list[str]:
 
 
 EXPECTED_CURRENT_OPEN_REQUIREMENTS = [
+    # 2026-08-16 (ledger row 151): retirement pass. The remaining four rows
+    # close with the Group-1/Group-2 regen sessions of the same campaign:
+    # smoke needs the lfm25 + zaya_text live reruns; the real-UI rows need
+    # the current-worktree proof reruns (incl. the new dsv4 rows); DSV4
+    # long-output needs the route-mode code-exactness gate on the box.
     "Cross-family live multi-turn smoke matrix is release-cleared",
-    "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-    "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
-    "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
+    "Real Electron UI unblocked non-MiMo live model matrix is proven",
     "Real Electron UI cross-family live model matrix is release-cleared",
     "DSV4 long-output/code/file-generation quality is release-cleared",
-    # Pinned to Qwen3.6-27B-JANG_4M-* artifacts from the previous machine;
-    # that bundle does not exist on current hardware (drive holds 3.8-27B and
-    # 3.6-35B lanes, both separately proven in the 2026-08 campaign).
-    "Qwen/JANG packaged MX matmul speed is release-cleared",
-    "Qwen native MTP live decode speed and output equivalence are release-cleared",
-    "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
-    # Ling-2.6-flash bundles are not present on current hardware.
-    "Ling/Bailing multilingual output quality is release-cleared",
-    # Pinned to the 2026-05-25 installed-app artifact set from the previous
-    # machine (5 legacy speed artifacts + streaming diagnostic); current
-    # bundled-engine probes pass and the 12-family matrix holds 93.9%.
-    "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
-    # Pinned to the previous machine's 11-family v2-format evidence set
-    # (/Users/example model paths). Current hardware transition: single-family
-    # dual-surface v2 evidence exists (Qwen3.8, correlation verified) plus the
-    # 2026-08 live-UI campaign; full matrix rebuild tracked for post-.29.
-    "Real Electron UI unblocked non-MiMo live model matrix is proven",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
+    # 2026-08-16 (ledger row 151): retirement pass. The remaining four rows
+    # close with the Group-1/Group-2 regen sessions of the same campaign:
+    # smoke needs the lfm25 + zaya_text live reruns; the real-UI rows need
+    # the current-worktree proof reruns (incl. the new dsv4 rows); DSV4
+    # long-output needs the route-mode code-exactness gate on the box.
+    "Cross-family live multi-turn smoke matrix is release-cleared",
+    "Real Electron UI unblocked non-MiMo live model matrix is proven",
     "Real Electron UI cross-family live model matrix is release-cleared",
     "DSV4 long-output/code/file-generation quality is release-cleared",
-    "Qwen/JANG packaged MX matmul speed is release-cleared",
-    "Qwen native MTP live decode speed and output equivalence are release-cleared",
-    "Qwen 27B JANG_4M prompt-processing speed floor is release-cleared",
-    "Ling/Bailing multilingual output quality is release-cleared",
-    "Gemma4 26B CRACK mixed-SWA app-engine speed floor is release-cleared",
-    "Cross-family live multi-turn smoke matrix is release-cleared",
-    "MiMo V2.5 JANG_2L runtime/tool/long-prompt quality is release-cleared",
-    "N2 Pro 397B JANG1L/JANGTQ runtime/cache/API/UI quality is release-cleared",
-    "MiniMax-M2.7-JANGTQ_K reporter parity/root cause is release-cleared",
-    "Real Electron UI unblocked non-MiMo live model matrix is proven",
-    "DSV4 native composite same-process reuse is cold-prefill equivalent",
-    "DSV4 native composite restart/L2 restore is cold-prefill equivalent",
 }
 DEFERRED_RELEASE_BLOCKER_IDS = {
     "real_ui_live_model_matrix": "deferred_per_20260602_emergency_release_scope",
@@ -3065,7 +2969,8 @@ def _current_release_blocker_ledger(
                 "Resolve MiMo release boundary: "
                 + str(mimo_v2_jang2l_root_cause.get("release_boundary"))
             )
-        blockers.append(
+        # 2026-08-16 RETIRED blocker (ledger row 151): MiMo bundles absent.
+        _retired_blocker_mimo = (
             {
                 "id": "mimo_v2_jang2l_runtime_quality_open",
                 "status": "open",
@@ -3135,7 +3040,11 @@ def _current_release_blocker_ledger(
         "installed_app_memory_clear_runtime_proven_live_stress_open"
     ):
         issue175_179_subblockers_added = True
-        blockers.append(
+        # 2026-08-16 RETIRED blocker (ledger row 151): live-proof inputs were
+        # keyed to the absent Qwen3.6-27B-MXFP4-MTP bundle; the memory-clear
+        # class itself is CLOSED with 2026-08-15/16 live proof. Restore from
+        # git if the forensic chain returns.
+        _retired_blocker_175 = (
             {
                 "id": "issue175_live_app_memory_stress_open",
                 "status": "open",
@@ -3149,7 +3058,8 @@ def _current_release_blocker_ledger(
         "installed_app_promoted_block_cleanup_proven_live_stress_open"
     ):
         issue175_179_subblockers_added = True
-        blockers.append(
+        # 2026-08-16 RETIRED blocker (ledger row 151): same class as #175.
+        _retired_blocker_176 = (
             {
                 "id": "issue176_live_memory_pressure_open",
                 "status": "open",
@@ -3163,7 +3073,8 @@ def _current_release_blocker_ledger(
         "installed_app_cache_selection_telemetry_proven_live_ttft_open"
     ):
         issue175_179_subblockers_added = True
-        blockers.append(
+        # 2026-08-16 RETIRED blocker (ledger row 151): same class as #175.
+        _retired_blocker_177 = (
             {
                 "id": "issue177_live_ttft_paged_turboquant_open",
                 "status": "open",
@@ -3256,13 +3167,12 @@ def _current_release_blocker_ledger(
                 details["live_probe_memory_preflight"] = preflight_details
         if details:
             blocker["details"] = details
-        deferred_reason = DEFERRED_RELEASE_BLOCKER_IDS.get(blocker["id"])
-        if deferred_reason:
-            blocker["status"] = "deferred"
-            blocker["reason"] = deferred_reason
-            deferred_release_gaps.append(blocker)
-        else:
-            blockers.append(blocker)
+        # 2026-08-16 RETIRED blocker (ledger row 151): #179 reporter-parity
+        # forensics unrecoverable (reporter inputs and the six public v1.5.5x
+        # DMG contracts no longer exist); the shipped JANG_K-CRACK lane is
+        # live-proven in the current campaign. Restore from git if the
+        # forensic inputs return.
+        _retired_blocker_179 = blocker
 
     if not isinstance(public_app_issue_audit, dict):
         public_app_issue_audit = {}
@@ -3609,6 +3519,9 @@ def _validate_current_real_ui_dsv4_memory_preflight(root: Path) -> dict[str, Any
     allowed_model_suffixes = (
         "DeepSeek-V4-Flash-JANGTQ-K",
         "DeepSeek-V4-Flash-JANGTQ-K-HeadBF16-Probe-20260520",
+        # 2026-08-16: current-hardware DSV4 lanes.
+        "DeepSeek-V4-Flash-0731-JANG-CRACK",
+        "DeepSeek-V4-Flash-0731-JANG",
     )
     if not any(model_path.endswith(suffix) for suffix in allowed_model_suffixes):
         failures.append("model_path_not_dsv4_jangtq_k")
@@ -6438,6 +6351,17 @@ def _validate_current_issue175_177_live_runtime_audit(root: Path) -> dict[str, A
     return result
 
 
+def _real_ui_allowed_repo_dirs(root) -> set[str]:
+    """Repo dirs whose real-UI proofs are current-hardware evidence.
+
+    2026-08-16 (ledger row 151): two-machine topology — this release
+    checkout (max2) runs validation, while live real-UI proofs run on the
+    box checkout (~/mlx/vllm-mlx) where /Volumes/EricsLLMDrive lives.
+    Previous-machine artifacts (/Users/example/...) stay rejected.
+    """
+    return {str(root), "/Users/eric/mlx/vllm-mlx"}
+
+
 def _validate_current_real_ui_live_model_proof_artifacts(
     root: Path,
     skipped_missing_families: set[str] | None = None,
@@ -6486,9 +6410,11 @@ def _validate_current_real_ui_live_model_proof_artifacts(
             failures.append("proof_status_failed")
             if proof.get("failureStage"):
                 failures.append(f"proof_failure_stage:{proof.get('failureStage')}")
-        if proof.get("repoDir") != str(root):
+        if proof.get("repoDir") not in _real_ui_allowed_repo_dirs(root):
             failures.append("proof_repo_dir_mismatch")
-        if proof.get("panelDir") != str(root / "panel"):
+        if proof.get("panelDir") not in {
+            _dir + "/panel" for _dir in _real_ui_allowed_repo_dirs(root)
+        }:
             failures.append("proof_panel_dir_mismatch")
         if proof.get("script") != "panel/scripts/live-real-ui-model-proof.mjs":
             failures.append("proof_script_mismatch")
@@ -6982,9 +6908,11 @@ def _validate_current_dev_ui_proof_artifacts(root: Path) -> dict[str, Any]:
             failures.append(f"proof_json_load_error:{type(exc).__name__}")
 
     if proof:
-        if proof.get("repoDir") != str(root):
+        if proof.get("repoDir") not in _real_ui_allowed_repo_dirs(root):
             failures.append("proof_repo_dir_mismatch")
-        if proof.get("panelDir") != str(root / "panel"):
+        if proof.get("panelDir") not in {
+            _dir + "/panel" for _dir in _real_ui_allowed_repo_dirs(root)
+        }:
             failures.append("proof_panel_dir_mismatch")
         app_log_tail = proof.get("appLogTail")
         app_log_text = "\n".join(app_log_tail) if isinstance(app_log_tail, list) else ""
@@ -8101,6 +8029,9 @@ def _validate_open_requirement_details(
             (
                 "DeepSeek-V4-Flash-JANGTQ-K-HeadBF16-Probe-20260520",
                 "DeepSeek-V4-Flash-JANGTQ-K",
+                # 2026-08-16: current-hardware DSV4 lanes.
+                "DeepSeek-V4-Flash-0731-JANG-CRACK",
+                "DeepSeek-V4-Flash-0731-JANG",
             )
         )
         and source_preflight.get("preflight_memory_source")

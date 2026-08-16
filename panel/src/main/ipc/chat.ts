@@ -26,7 +26,9 @@ import { detectModelConfigFromDir } from "../model-config-registry";
 import { getAuthHeaders } from "./utils";
 import {
   appendOutputTruncationWarning,
+  contextExhaustionNotice,
   dropSupersededRecoveryWarnings,
+  effortSubstitutionNotice,
   extractResponsesWarnings,
   responsesTerminalFinishReason,
 } from "../../shared/responsesWarnings";
@@ -3107,6 +3109,21 @@ export function registerChatHandlers(
                     new Set([...(responseWarnings || []), ...completedWarnings]),
                   );
                 }
+                // Structured engine notices (#175): effort substitution rides
+                // the terminal snapshot; context exhaustion rides
+                // incomplete_details on a length terminal. Rendered through
+                // the same persisted warnings rail.
+                const structuredNotices = [
+                  effortSubstitutionNotice(parsed.response?.effort_substitution),
+                  contextExhaustionNotice(
+                    parsed.response?.incomplete_details?.context_exhaustion,
+                  ),
+                ].filter((n): n is string => !!n);
+                if (structuredNotices.length > 0) {
+                  responseWarnings = Array.from(
+                    new Set([...(responseWarnings || []), ...structuredNotices]),
+                  );
+                }
                 // Track status for truncation detection
                 const respStatus = parsed.response?.status;
                 lastFinishReason =
@@ -3175,6 +3192,19 @@ export function registerChatHandlers(
                 if (parsed.usage.prompt_tokens != null)
                   promptTokens = parsed.usage.prompt_tokens;
                 recordCacheUsage(parsed.usage.prompt_tokens_details);
+              }
+
+              // Structured engine notices (#175): the chat-dialect terminal
+              // chunk carries effort_substitution / context_exhaustion
+              // top-level (popped at _dump_chat_chunk terminal_usage).
+              const chatStructuredNotices = [
+                effortSubstitutionNotice(parsed.effort_substitution),
+                contextExhaustionNotice(parsed.context_exhaustion),
+              ].filter((n): n is string => !!n);
+              if (chatStructuredNotices.length > 0) {
+                responseWarnings = Array.from(
+                  new Set([...(responseWarnings || []), ...chatStructuredNotices]),
+                );
               }
 
               // Track finish_reason (length = truncated, content_filter = filtered)

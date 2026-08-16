@@ -6,6 +6,8 @@ import {
   dropSupersededRecoveryWarnings,
   OUTPUT_TRUNCATED_WARNING,
   categorizeResponsesWarning,
+  contextExhaustionNotice,
+  effortSubstitutionNotice,
   responsesTerminalFinishReason,
 } from '../src/renderer/src/lib/responsesWarnings'
 
@@ -248,5 +250,64 @@ describe('Responses warnings panel wiring', () => {
     expect(messageBubble).toContain('{warnings && warnings.length > 0 && (')
     expect(messageBubble).toContain('warnings.map((warning, index) => (')
     expect(messageBubble).toContain('{warning}</span>')
+  })
+})
+
+describe('effortSubstitutionNotice (#175)', () => {
+  it('builds the rail string from a full record', () => {
+    expect(
+      effortSubstitutionNotice({
+        requested_effort: 'high',
+        effective_effort: 'medium',
+        stamped_levels: ['low', 'medium', 'xhigh'],
+      }),
+    ).toBe(
+      'Reasoning effort "high" is not supported by this model; it ran at "medium" (supported: low, medium, xhigh).',
+    )
+  })
+
+  it('omits the supported clause when levels are absent and rejects malformed records', () => {
+    expect(
+      effortSubstitutionNotice({ requested_effort: 'high', effective_effort: 'low' }),
+    ).toBe('Reasoning effort "high" is not supported by this model; it ran at "low".')
+    expect(effortSubstitutionNotice(null)).toBeNull()
+    expect(effortSubstitutionNotice({ requested_effort: 'high' })).toBeNull()
+    expect(
+      effortSubstitutionNotice({ requested_effort: 42 as unknown as string, effective_effort: 'low' }),
+    ).toBeNull()
+  })
+
+  it('categorizes as effort_substitution', () => {
+    const notice = effortSubstitutionNotice({
+      requested_effort: 'high',
+      effective_effort: 'medium',
+      stamped_levels: [],
+    })!
+    expect(categorizeResponsesWarning(notice)).toBe('effort_substitution')
+  })
+})
+
+describe('contextExhaustionNotice (#175)', () => {
+  it('builds the rail string from a full clamp record', () => {
+    const notice = contextExhaustionNotice({
+      prompt_tokens: 5875,
+      requested_max_tokens: 32768,
+      clamped_max_tokens: 26893,
+      declared_context_tokens: 32768,
+    })!
+    expect(notice).toContain('Model context limit reached')
+    expect(notice).toContain('5,875 tokens')
+    expect(notice).toContain('32,768-token context')
+    expect(notice).toContain('capped at 26,893 tokens')
+    expect(notice).toContain('requested 32,768')
+    expect(categorizeResponsesWarning(notice)).toBe('context_exhaustion')
+  })
+
+  it('rejects malformed records', () => {
+    expect(contextExhaustionNotice(null)).toBeNull()
+    expect(contextExhaustionNotice({})).toBeNull()
+    expect(
+      contextExhaustionNotice({ prompt_tokens: 5, declared_context_tokens: 0 }),
+    ).toBeNull()
   })
 })

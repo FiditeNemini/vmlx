@@ -140,8 +140,80 @@ export function categorizeResponsesWarning(warning: string): string {
   if (lower.includes('no visible response') || lower.includes('empty_model_response')) {
     return 'empty_visible_response'
   }
+  if (lower.startsWith('reasoning effort ')) {
+    return 'effort_substitution'
+  }
+  if (lower.startsWith('model context limit reached')) {
+    return 'context_exhaustion'
+  }
   if (lower.includes('cache') || lower.includes('prefix')) {
     return 'cache_alignment'
   }
   return 'other'
+}
+
+/**
+ * Structured notice records the engine attaches additively (#175):
+ * `effort_substitution` on chat terminal chunks / Responses terminal
+ * snapshots, and `context_exhaustion` top-level on chat responses or inside
+ * `incomplete_details` on Responses length terminals. These builders turn
+ * them into the per-message warning strings the existing rail renders and
+ * persists; both return null on malformed/absent records so callers can
+ * merge unconditionally.
+ */
+
+export interface EffortSubstitutionLike {
+  requested_effort?: unknown
+  effective_effort?: unknown
+  stamped_levels?: unknown
+}
+
+export interface ContextExhaustionLike {
+  prompt_tokens?: unknown
+  requested_max_tokens?: unknown
+  clamped_max_tokens?: unknown
+  declared_context_tokens?: unknown
+}
+
+export function effortSubstitutionNotice(
+  record: EffortSubstitutionLike | null | undefined,
+): string | null {
+  if (!record) return null
+  const requested =
+    typeof record.requested_effort === 'string' ? record.requested_effort.trim() : ''
+  const effective =
+    typeof record.effective_effort === 'string' ? record.effective_effort.trim() : ''
+  if (!requested || !effective) return null
+  const levels = Array.isArray(record.stamped_levels)
+    ? record.stamped_levels.filter((l): l is string => typeof l === 'string' && !!l.trim())
+    : []
+  const supported = levels.length > 0 ? ` (supported: ${levels.join(', ')})` : ''
+  return (
+    `Reasoning effort "${requested}" is not supported by this model; ` +
+    `it ran at "${effective}"${supported}.`
+  )
+}
+
+export function contextExhaustionNotice(
+  record: ContextExhaustionLike | null | undefined,
+): string | null {
+  if (!record) return null
+  const prompt = Number(record.prompt_tokens)
+  const requested = Number(record.requested_max_tokens)
+  const clamped = Number(record.clamped_max_tokens)
+  const declared = Number(record.declared_context_tokens)
+  if (!Number.isFinite(prompt) || !Number.isFinite(declared) || declared <= 0) {
+    return null
+  }
+  const clampedPart =
+    Number.isFinite(requested) && Number.isFinite(clamped)
+      ? ` Output was capped at ${clamped.toLocaleString('en-US')} tokens ` +
+        `(requested ${requested.toLocaleString('en-US')}).`
+      : ''
+  return (
+    `Model context limit reached: the prompt (${prompt.toLocaleString('en-US')} tokens) ` +
+    `fills part of the model's ${declared.toLocaleString('en-US')}-token context.` +
+    clampedPart +
+    ' A length stop here means context exhaustion — shorten the chat history or serve a larger-context bundle.'
+  )
 }

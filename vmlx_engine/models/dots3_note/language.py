@@ -786,9 +786,14 @@ class Dots3NoteModel(nn.Module):
         place; the list object is shared with the scheduler, so the typed
         cache also flows into later stores.
         """
+        import logging as _logging
+
+        _logger = _logging.getLogger("vmlx_engine")
         rope_dim = self.config.qk_rope_head_dim
         idx_dim = self.config.index_head_dim
         rank = self.config.kv_lora_rank
+        adopted_n = 0
+        foreign: dict = {}
         for i in range(self.config.num_hidden_layers):
             if self.config.is_sliding(i) or i >= len(cache):
                 continue
@@ -805,6 +810,13 @@ class Dots3NoteModel(nn.Module):
                 or keys.shape[-1] != rope_dim + idx_dim
                 or values.shape[-1] != rank
             ):
+                foreign.setdefault(type(c).__name__, []).append(
+                    (
+                        i,
+                        tuple(getattr(keys, "shape", ()) or ()),
+                        tuple(getattr(values, "shape", ()) or ()),
+                    )
+                )
                 continue
             adopted = Dots3LatentCache()
             adopted._rope_dim = rope_dim
@@ -812,6 +824,21 @@ class Dots3NoteModel(nn.Module):
             adopted.state = (keys, values)
             adopted.offset = int(getattr(c, "offset", keys.shape[2]))
             cache[i] = adopted
+            adopted_n += 1
+        if adopted_n:
+            _logger.info(
+                "dots3 adopted %d restored full-layer cache(s) into "
+                "Dots3LatentCache",
+                adopted_n,
+            )
+        if foreign:
+            # A full layer running a foreign cache class means the absorbed
+            # path is OFF for it and the packed streams would be misread —
+            # this must be LOUD, never silent.
+            _logger.warning(
+                "dots3 full layers carry UNADOPTABLE foreign caches: %s",
+                {k: v[:2] for k, v in foreign.items()},
+            )
 
     def __call__(
         self,

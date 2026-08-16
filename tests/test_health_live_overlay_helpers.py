@@ -53,3 +53,28 @@ def test_live_ssm_lookup_resolves_scheduler_then_generator_cache():
     )
     assert _live_ssm_prefix_lookup(scheduler2) == lookup
     assert _live_ssm_prefix_lookup(None) is None
+
+
+def test_companion_overlay_is_not_gated_on_prior_key_presence():
+    """Row 94: a cached snapshot taken BEFORE the request legitimately has no
+    last_prefix_lookup key; gating the overlay on prior presence suppressed
+    the bound live lookup for exactly the rows that need it (r4 refault: lce
+    bound with a bound embedded lookup, companion field null)."""
+    from pathlib import Path
+    import re
+
+    src = (
+        Path(__file__).resolve().parents[1] / "vmlx_engine" / "server.py"
+    ).read_text(encoding="utf-8")
+    anchor = src.index("Same staleness applies to the SSM companion")
+    window = src[anchor : anchor + 2400]
+    assert re.search(
+        r"if isinstance\(_companion_block, dict\):", window
+    ), "companion overlay guard changed shape"
+    assert '"last_prefix_lookup" in' not in window.split(
+        "_live_lookup = None"
+    )[0], (
+        "the companion overlay is again gated on the cached snapshot already "
+        "having a lookup key — pre-request snapshots lack it and the bound "
+        "live lookup gets suppressed"
+    )

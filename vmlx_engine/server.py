@@ -11790,15 +11790,18 @@ async def health():
             if isinstance(_cache_block, dict)
             else None
         )
-        if isinstance(_companion_block, dict) and "last_prefix_lookup" in (
-            _companion_block
-        ):
+        if isinstance(_companion_block, dict):
             # The request-BOUND lookup lives embedded in the execution
             # record (the generator stamps the request id there); the
             # companion cache's own attribute is constructed without one,
             # so an attr-vs-lce id comparison can never bind. Source from
             # the embedded copy first — the same record the non-cached
             # health path exposes via _request_bound_ssm_prefix_lookup.
+            # Runs even when the cached snapshot has NO lookup key: a
+            # snapshot taken BEFORE the request legitimately lacks it, and
+            # gating on prior presence suppressed the bound live lookup for
+            # exactly the rows that need it (observed live: r4 refault lce
+            # bound with a bound embedded lookup, companion field null).
             _live_lookup = None
             _live_lce_id = (
                 _live_lce.get("request_id")

@@ -2536,7 +2536,17 @@ def _validate_hybrid_ssm_tq4_hit(
     ssm_companion = row.get("ssm_companion")
     if not isinstance(ssm_companion, dict):
         ssm_companion = {}
-    lookup = ssm_companion.get("last_prefix_lookup")
+    # The request-stamped lookup lives EMBEDDED in the execution record;
+    # the top-level companion field depends on which /health branch served
+    # the read. Prefer the embedded copy when it is bound to this execution
+    # so validation is deterministic; the top-level field stays the
+    # fallback for older serves.
+    lookup = execution.get("ssm_prefix_lookup")
+    if not (
+        isinstance(lookup, dict)
+        and str(lookup.get("request_id") or "") == execution_request_id
+    ):
+        lookup = ssm_companion.get("last_prefix_lookup")
     if not isinstance(lookup, dict):
         lookup = {}
     lookup_request_id = str(lookup.get("request_id") or "")

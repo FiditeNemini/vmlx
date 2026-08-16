@@ -86,6 +86,21 @@ class Model(nn.Module):
                 "image/video",
             )
 
+        if pixel_values is None:
+            # 🚨 The inverse of the scatter-mismatch guard: placeholders in
+            # the prompt with NO payload forwarded. _scatter_at never runs in
+            # that case, so without this check the model reads
+            # embed_tokens(<placeholder>) rows as if they were media and
+            # confabulates FLUENTLY (measured live: 38 orphaned audio pads
+            # made a 440 Hz sine "pure unbroken silence" with zero errors —
+            # a stale engine that didn't forward input_features). Decode
+            # steps route through language_model directly, and a generated
+            # placeholder id is broken output anyway, so raising here can
+            # only fire on a genuinely dropped payload.
+            self._assert_no_orphan_placeholders(
+                input_ids, int(self.config.image_token_id), "image/video"
+            )
+
         if input_features is not None:
             if self.audio_encoder is None:
                 raise ValueError(
@@ -105,8 +120,25 @@ class Model(nn.Module):
                 int(self.config.audio_token_id),
                 "audio",
             )
+        else:
+            self._assert_no_orphan_placeholders(
+                input_ids, int(self.config.audio_token_id), "audio"
+            )
 
         return embeds
+
+    @staticmethod
+    def _assert_no_orphan_placeholders(
+        input_ids: mx.array, token_id: int, label: str
+    ) -> None:
+        count = int(mx.sum(input_ids == token_id).item())
+        if count:
+            raise ValueError(
+                f"dots3_note: {count} {label} placeholder token(s) "
+                f"(id {token_id}) in input_ids but no {label} payload reached "
+                "the model — the media was dropped in plumbing; refusing to "
+                "confabulate from pad-token embeddings"
+            )
 
     def _scatter_at(
         self,

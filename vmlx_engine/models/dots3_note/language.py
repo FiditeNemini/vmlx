@@ -894,6 +894,31 @@ class Dots3NoteModel(nn.Module):
         else:
             self._adopt_restored_caches(cache)
 
+        if mask is not None and mask.ndim == 2:
+            # 🚨 The MLLM generator forwards the processor's PADDING mask
+            # ([B, S] of ones) as ``mask=`` on every media forward (text
+            # forwards go through language_model directly and never pass
+            # one). Consuming it VERBATIM as an ADDITIVE attention mask is
+            # wrong twice over: a uniform +1 per key cancels in softmax, and
+            # the -inf causal structure it displaced is GONE — the whole
+            # media prefill runs bidirectional. Measured on the real bundle:
+            # temp-0 media answers change between mask=[[1]*S] and mask=None
+            # (same weights, same mel). 2-D masks carry key-VALIDITY
+            # semantics here, never attention structure: all-valid means
+            # "build the causal masks yourself"; actual padding would need a
+            # physical-layout-aware merge with the sliding lane and this
+            # single-sequence engine never produces it — fail loud instead
+            # of attending wrong.
+            if bool(mx.all(mask == 1).item()):
+                mask = None
+            else:
+                raise ValueError(
+                    "dots3_note: 2-D attention mask with masked positions "
+                    "(padding) is not supported; this lane serves one "
+                    "sequence at a time and refuses to guess an additive "
+                    "mask from key-validity input"
+                )
+
         full_mask = None
         swa_mask = None
         if seq_len > 1 or mask is not None:

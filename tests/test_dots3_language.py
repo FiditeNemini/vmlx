@@ -265,3 +265,49 @@ def test_restored_generic_kvcache_is_adopted(model):
     b = model(step, cache=mixed)
     assert isinstance(mixed[0], Dots3LatentCache), "adoption did not happen"
     assert float(mx.abs(a - b).max()) < 1e-4
+
+
+def test_padding_mask_all_ones_equals_causal(model):
+    # The MLLM generator forwards the processor's [B, S] all-ones PADDING
+    # mask as `mask=` on every media forward. Consumed verbatim as an
+    # ADDITIVE mask it cancels in softmax and deletes causality (measured on
+    # the real bundle: temp-0 media answers changed). All-valid 2-D masks
+    # must produce EXACTLY the causal output.
+    ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8]])
+    a = model(ids, cache=_latent_caches(model))
+    b = model(
+        ids,
+        mask=mx.ones((1, ids.shape[1]), dtype=mx.int32),
+        cache=_latent_caches(model),
+    )
+    assert float(mx.abs(a - b).max()) == 0.0
+
+
+def test_padding_mask_with_zeros_refuses_loudly(model):
+    # Real padding needs a physical-layout-aware merge with the sliding
+    # lane; this single-sequence engine never produces it. Attending wrong
+    # is worse than erroring.
+    ids = mx.array([[3, 17, 42, 9]])
+    mask = mx.array([[1, 1, 1, 0]], dtype=mx.int32)
+    with pytest.raises(ValueError, match="padding"):
+        model(ids, mask=mask, cache=_latent_caches(model))
+
+
+def test_orphan_media_placeholders_refuse_loudly():
+    # Placeholders in input_ids with NO payload forwarded: _scatter_at never
+    # runs, so without the guard the model reads pad-token embeddings as
+    # media and confabulates fluently (live: 38 orphaned audio pads made a
+    # 440 Hz sine "pure unbroken silence" with zero errors).
+    from vmlx_engine.models.dots3_note.config import ModelConfig
+    from vmlx_engine.models.dots3_note.dots3_note import Model
+
+    cfg = ModelConfig(text_config=_tiny_config())
+    outer = Model(cfg)
+    with pytest.raises(ValueError, match="audio placeholder"):
+        outer.get_input_embeddings(
+            input_ids=mx.array([[3, cfg.audio_token_id, 9]])
+        )
+    with pytest.raises(ValueError, match="image/video placeholder"):
+        outer.get_input_embeddings(
+            input_ids=mx.array([[3, cfg.image_token_id, 9]])
+        )

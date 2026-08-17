@@ -26,7 +26,25 @@ from urllib import request
 DEFAULT_OUT = Path(
     "build/current-issue179-minimax-k-responses-cancel-probe-20260527.json"
 )
-DEFAULT_MODEL = Path("/Users/example/models/JANGQ/MiniMax-M2.7-JANGTQ_K")
+#: Scrubbed placeholder, in line with every other cross_matrix runner: real
+#: model paths are private and must not live in this repo. The regression suite
+#: invokes this probe with no --model, so without an override the row can only
+#: ever report `model_path_missing` — and because the suite REGENERATES the
+#: artifact on every run, supplying the path by hand is undone the next time the
+#: suite executes. Set VMLINUX_ISSUE179_MODEL_PATH (or the VMLX_ alias) on the
+#: machine that holds the bundle so the suite produces a real verdict.
+_PLACEHOLDER_MODEL = Path("/Users/example/models/JANGQ/MiniMax-M2.7-JANGTQ_K")
+
+
+def _default_model() -> Path:
+    for name in ("VMLINUX_ISSUE179_MODEL_PATH", "VMLX_ISSUE179_MODEL_PATH"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return Path(value).expanduser()
+    return _PLACEHOLDER_MODEL
+
+
+DEFAULT_MODEL = _default_model()
 DEFAULT_INSTALLED_PYTHON = Path(
     "/Applications/vMLX.app/Contents/Resources/bundled-python/python/bin/python3"
 )

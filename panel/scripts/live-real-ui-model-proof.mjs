@@ -10444,6 +10444,15 @@ async function main() {
               // and the flip silently did nothing. Capturing the real labels
               // turns that into a visible answer to "which reasoning
               // enforcement buttons does this model have".
+              // Capture the drawer TEXT too: when a family's template does not
+              // read enable_thinking the panel deliberately renders an honest
+              // notice (chat.settings.thinkingNotConfigurable) INSTEAD of the
+              // Auto/On/Off buttons. A button-only capture cannot tell that
+              // correct behaviour apart from a missing control.
+              const drawerTextHead = (drawer?.innerText || '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 700);
               const drawerButtonLabels = [...(drawer?.querySelectorAll('button') || [])]
                 .filter((b) => isVisible(b))
                 .map((b) => (b.textContent || '').replace(/\\s+/g, ' ').trim())
@@ -10505,6 +10514,7 @@ async function main() {
                 targetLabels,
                 buttonFound: !!btn,
                 drawerButtonLabels,
+                drawerTextHead,
                 ariaPressedBefore: pressedBefore,
                 ariaPressedAfter: btn ? btn.getAttribute('aria-pressed') : null,
                 saved,

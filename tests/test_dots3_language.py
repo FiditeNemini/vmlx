@@ -734,3 +734,32 @@ def test_dsa_gather_query_tiling_matches_single_tile(model):
     finally:
         Dots3MLAAttention.gather_element_budget = budget
         _set_topk(model, old)
+
+
+def test_dsa_gather_defaults_on_for_depth():
+    """The gather path is DEFAULT ON, and that default is deliberate.
+
+    2026-08-16 (ledger 173): it shipped OFF for a day because it was judged
+    on speed, where the gain is percent-level. The real value is DEPTH — the
+    dense [B,1,S,total] mask transient grows with context and is what
+    exhausts prefill headroom. Matched A/B: dense 413'd at 12,608 context on
+    two independent runs while gather served 16,384 (and was 8.7% faster at
+    8k). Pin the default so a future edit cannot quietly hand users back the
+    hard 413 at 16k.
+    """
+    import importlib
+
+    from vmlx_engine.models.dots3_note import language as lang
+
+    key = "VMLX_DOTS3_DSA_GATHER"
+    old = os.environ.pop(key, None)
+    try:
+        importlib.reload(lang)
+        assert lang._dsa_gather_enabled() is True
+        os.environ[key] = "0"
+        assert lang._dsa_gather_enabled() is False  # the escape hatch still works
+    finally:
+        if old is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = old

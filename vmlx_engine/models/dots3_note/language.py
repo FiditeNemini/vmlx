@@ -86,15 +86,32 @@ def _dsa_gather_enabled() -> bool:
     number. Isolated, the win is real and GROWS: gathered attention is
     FLAT ~23 ms/chunk/layer vs dense 18.7 (4k) -> 117.7 (25k)
     ms/chunk/layer — but end to end the served bottleneck past ~8k is the
-    indexer's own O(S*total) scoring, which both arms pay. 25k pairs were
-    unmeasurable: BOTH arms (incl. stock dense) Metal-OOM'd 6/6 within
-    the first engaged chunks (~96GB resident + ~11GB headroom box state;
-    arm-independent — the day's one fresh-boot dense 25k did 133.7 pp/s,
-    decode 21.5 t/s). Default OFF until the indexer scorer and the
-    long-context residency picture stop dominating; this is the correct
-    structure for the 400k target once they do.
+    indexer's own O(S*total) scoring, which both arms pay.
+
+    NOW DEFAULT **ON** (2026-08-16, ledger row 173). Speed was the wrong
+    yardstick and kept this OFF for a day: the real value is DEPTH. The
+    dense path's [B,1,S,total] mask transient GROWS with context and is
+    what exhausts prefill headroom, so bounding attention at O(S*topk)
+    buys ceiling, not milliseconds. Matched A/B, same ladder, one serve
+    per arm, answers 'ack' in every completed rung:
+
+        depth    dense                       gather
+        8,192    407.1 pp/s                  442.5 pp/s   (+8.7%)
+       16,384    413 DECLINED @12,608 ctx    PASSES, 188.5 pp/s
+       24,576    (not reached)               413 @16,704 ctx
+
+    Dense declined at EXACTLY 12,608 context on two independent runs, so
+    the +33% usable-depth gain is reproducible, not box drift. A user
+    hitting 16k previously got a hard 413; they now get an answer.
+    `VMLX_DOTS3_DSA_GATHER=0` restores the dense path.
+
+    The remaining ceiling is NOT this code: `iogpu.wired_limit_mb` is
+    unset on the test box, so macOS caps the working set at 84% of RAM
+    (115.4 of 137.4 GB) against a ~97 GB-resident model. Raising that
+    sysctl adds transient headroom on top of this fix; 400k additionally
+    needs the indexer's own O(S*total) scoring addressed.
     """
-    return os.environ.get("VMLX_DOTS3_DSA_GATHER", "0").lower() in {
+    return os.environ.get("VMLX_DOTS3_DSA_GATHER", "1").lower() in {
         "1",
         "true",
         "yes",

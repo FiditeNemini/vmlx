@@ -305,12 +305,21 @@ def _has_chat_epipe_raw_diagnostic_guard(panel_main: str) -> bool:
     )
     if not logs:
         return False
+    # 2026-08-16 (ledger row 159): repointed to the current guard shape. GH #253
+    # added graceful in-chat content conjuncts (projected-Metal-headroom and
+    # prompt_too_long), so the raw [CHAT] diagnostic log is now guarded by a
+    # compound `if (!a && !b && !isExpectedChatBackendDisconnectError(error))`;
+    # the old single-condition shape exists in neither the packaged app nor
+    # source. The guarantee is unchanged and still enforced: the disconnect
+    # check must be a negated conjunct of the `if` ending immediately before
+    # the log, so an expected backend disconnect can never log raw diagnostics.
     guard_re = re.compile(
-        r"if\s*\(\s*!\s*isExpectedChatBackendDisconnectError\s*\(\s*error\s*\)\s*\)\s*\{?\s*$",
+        r"if\s*\(\s*(?:!\s*[A-Za-z_$][\w$]*(?:\([^()]*\))?\s*&&\s*)*"
+        r"!\s*isExpectedChatBackendDisconnectError\s*\(\s*error\s*\)\s*\)\s*\{?\s*$",
         re.DOTALL,
     )
     for match in logs:
-        prefix = panel_main[max(0, match.start() - 180) : match.start()]
+        prefix = panel_main[max(0, match.start() - 300) : match.start()]
         if not guard_re.search(prefix):
             return False
     return True
@@ -714,10 +723,19 @@ def build_audit(
         r"const proxyReq = [^(]+\(proxyOpts, \(proxyRes\) => \{[\s\S]*?proxyReq\.on\(\"error\"",
         panel_main,
     )
+    # 2026-08-16 (ledger row 159): repointed to the current marker. The
+    # per-handler inline `proxyRes.on("error", ...)` listeners were refactored
+    # into the shared guardProxyResponseLifecycle helper (which attaches
+    # end/aborted/error/close on the proxy response) plus
+    # abortProxyResponseOnClientClose; the old inline listener exists in
+    # neither the packaged app nor source. Each Ollama proxy handler must call
+    # both helpers, and the check below verifies the helper itself still
+    # attaches the proxy-response failure listeners.
     installed_ollama_guarded_proxy_handlers = [
         handler
         for handler in installed_ollama_proxy_handlers
-        if 'proxyRes.on("error"' in handler
+        if "guardProxyResponseLifecycle(" in handler
+        and "abortProxyResponseOnClientClose(" in handler
     ]
     installed_child_stdio_aggregate_guard = _has_child_stdio_aggregate_disconnect_guard(
         panel_main
@@ -883,7 +901,16 @@ def build_audit(
             panel_result["returncode"] == 0
             and "cachedTokens" in panel_main
             and "cacheDetail" in panel_main
-            and "respUsage.input_tokens_details.cache_detail" in panel_main
+            # 2026-08-16 (ledger row 159): repointed to the current markers.
+            # The cache_detail read moved from the inline
+            # `respUsage.input_tokens_details.cache_detail` expression into the
+            # shared recordCacheUsage(...) helper (mergeCacheDetails over
+            # details.cache_detail); the old dotted expression exists in
+            # neither the packaged app nor source. Both Responses usage feeds
+            # (stream usage events + terminal respUsage) must route through it.
+            and "recordCacheUsage(respUsage.input_tokens_details)" in panel_main
+            and "recordCacheUsage(parsed.usage.input_tokens_details)" in panel_main
+            and "mergeCacheDetails(cacheDetail, details.cache_detail)" in panel_main
             and panel_main.count("cacheDetail") >= 4
         ),
         "installed_panel_gateway_guarded_proxy_forwarding": (
@@ -943,7 +970,14 @@ def build_audit(
             and "--max-prompt-tokens" in panel_renderer
             and "does not change prompt/context length" in panel_renderer
             and "does not cap generated output" in panel_renderer
-            and "Model-owned" in panel_renderer
+            # 2026-08-16 (ledger row 159): repointed "Model-owned" to the
+            # current marker. Commit 41f40c045 (2026-07-24) renamed the Max
+            # Output Tokens unlimited label to "Bundle / engine default"
+            # (now i18n key sessions.config.bundleEngineDefault); the old
+            # string exists in neither the packaged app nor source. The
+            # guarantee is the same: leaving the slider unlimited defers the
+            # output cap to the bundle/engine instead of a synthesized cap.
+            and "Bundle / engine default" in panel_renderer
         ),
         "installed_panel_model_owned_generation_defaults_wired": (
             renderer_result["returncode"] == 0
@@ -986,6 +1020,12 @@ def build_audit(
             and len(installed_ollama_proxy_handlers) >= 3
             and len(installed_ollama_guarded_proxy_handlers)
             == len(installed_ollama_proxy_handlers)
+            # 2026-08-16 (ledger row 159): the shared lifecycle guard must
+            # actually attach the proxy-response failure listeners, otherwise
+            # a per-handler guard call would be a no-op.
+            and 'proxyRes.once("error"' in panel_main
+            and 'proxyRes.once("aborted"' in panel_main
+            and 'proxyRes.once("close"' in panel_main
         ),
         "installed_vmlx_user_data_no_raw_disconnect_errors": (
             user_data_disconnect_errors["exists"] is True
@@ -1089,10 +1129,14 @@ def build_audit(
             "has_unsupported_reasoning_parser_guard": (
                 "unsupported reasoning parser" in panel_main
             ),
+            # 2026-08-16 (ledger row 159): repointed with the check above; the
+            # dotted respUsage expression exists in neither the packaged app
+            # nor source since the recordCacheUsage refactor.
             "has_responses_stream_cache_detail_metrics": (
                 "cachedTokens" in panel_main
                 and "cacheDetail" in panel_main
-                and "respUsage.input_tokens_details.cache_detail" in panel_main
+                and "recordCacheUsage(respUsage.input_tokens_details)" in panel_main
+                and "mergeCacheDetails(cacheDetail, details.cache_detail)" in panel_main
             ),
             "ollama_json_write_count": installed_ollama_json_writes,
             "guarded_ollama_json_write_count": installed_guarded_ollama_json_writes,
@@ -1116,7 +1160,12 @@ def build_audit(
                 "does not change prompt/context length" in panel_renderer
                 and "does not cap generated output" in panel_renderer
             ),
-            "has_model_owned_label": "Model-owned" in panel_renderer,
+            # 2026-08-16 (ledger row 159): repointed with the check above;
+            # "Model-owned" was renamed to "Bundle / engine default" in
+            # 41f40c045 and exists in neither the packaged app nor source.
+            "has_bundle_engine_default_label": (
+                "Bundle / engine default" in panel_renderer
+            ),
             "has_generation_config_note": "generation_config.json/jang_config"
             in panel_renderer,
             "has_no_synthesized_sampling_note": (

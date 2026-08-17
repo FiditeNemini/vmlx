@@ -6122,6 +6122,51 @@ describe("native MTP surface / engine parity", () => {
   });
 });
 
+describe("reasoning rail: dangling TeX delimiter", () => {
+  // Three consecutive LFM2.5 runs failed on nothing but the rail-linkage check.
+  // The model's reasoning wrote an unpaired escaped paren; markdown rendered it
+  // as a literal "(" while the persisted record kept the backslash, so the whole
+  // diff was five backslashes. Comparing against a baseline where both sides
+  // already agree isolates the delimiter handling from the rest of the fixture.
+  const failuresFor = (persistedText: string, renderedText: string) => {
+    const result = structuredClone(goodResult());
+    const messageId = result.assistantMessageIds[0];
+    result.persistedReasoningByMessage = [[persistedText], [], []];
+    const domMessage = result.renderedDom.messages[0];
+    domMessage.messageId = messageId;
+    domMessage.reasoningSegments = [renderedText];
+    domMessage.reasoningLinkedSegments = [renderedText];
+    domMessage.reasoningText = renderedText;
+    return validateReasoningEvidence(result, "optional");
+  };
+
+  it("treats an unpaired escaped paren as the paren on both sides", () => {
+    const escaped = failuresFor(
+      "Receipt line. Math: \\(2 + 2 = 4 and then done.",
+      "Receipt line. Math: (2 + 2 = 4 and then done.",
+    );
+    const baseline = failuresFor(
+      "Receipt line. Math: (2 + 2 = 4 and then done.",
+      "Receipt line. Math: (2 + 2 = 4 and then done.",
+    );
+    // The delimiter difference must change NOTHING about the outcome. (This
+    // fixture does not satisfy every other rail invariant, which is precisely
+    // why the assertion is a comparison against the same fixture rather than an
+    // empty-failure claim — that would be testing the fixture, not the change.)
+    expect(escaped).toEqual(baseline);
+  });
+
+  it("still reports a rail segment whose text genuinely differs", () => {
+    const failures = failuresFor(
+      "Receipt line. Math: \\(2 + 2 = 4 and then done.",
+      "Something else entirely.",
+    ).join("\n");
+    expect(failures).toMatch(
+      /normalized visible reasoning rail segments are not linked/,
+    );
+  });
+});
+
 describe("tool loop: per-turn protocol resolution", () => {
   it("rejects the qwen36 batched case where turn 1 made NO call at all", () => {
     // Verbatim shape from a stored artifact: message 0 has ZERO calls, both

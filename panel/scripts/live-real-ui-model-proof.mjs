@@ -3394,6 +3394,20 @@ function normalizeVisibleLinkText(value) {
       .replace(/\[([^\]]+)]\(([^)]+)\)/g, '$1'),
   )
     .replace(/\\([×÷·≈≤≥≠±→←∞π])/g, '$1')
+    // A DANGLING TeX delimiter is markdown-escaped punctuation by the time it
+    // reaches the rail, so unescape it on both sides of the comparison exactly
+    // as the symbol rules above do. Terminated math never reaches here — it has
+    // already been swapped for a VMLXPROOFMATH placeholder — so this only ever
+    // touches an opener or closer the model never paired.
+    //
+    // Found on three consecutive LFM2.5 runs whose ONLY failure was
+    // "normalized visible reasoning rail segments are not linked to persisted
+    // reasoning segments". The whole diff was five backslashes and two
+    // newlines: the model's reasoning wrote `Math: \(2 + 2 = 4` with no closing
+    // `\)`, markdown rendered the escaped paren as a literal `(`, and the
+    // persisted text kept the backslash. Same failure on the gemma4
+    // cachecontrols row.
+    .replace(/\\([()[\]])/g, '$1')
     .replace(/\\times\b/g, '×')
     .replace(/\\div\b/g, '÷')
     .replace(/\\cdot\b/g, '·')

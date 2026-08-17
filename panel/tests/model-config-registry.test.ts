@@ -133,6 +133,54 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detectModelConfigFromDir(dir).isMultimodal).toBe(false)
   })
 
+  it('renders native MTP for dots3-note, whose MTP the engine actually runs', () => {
+    // The app ran MTP for this bundle and showed the user NOTHING: engine health
+    // reported index_has_mtp_tensors true, 3 MTP tensors, runtime_active true,
+    // effective_depth 1, "native MTP runtime is active for text+vl" — while the
+    // Server Settings drawer rendered no label, no mode selector and no mention
+    // of MTP. Cause was the supportedFamilies allowlist, not the bundle.
+    const dir = makeModelDir(
+      {
+        model_type: 'dots3_note',
+        vision_config: { model_type: 'dots3_vision' },
+      },
+      {
+        format: 'jang',
+        runtime: { bundle_has_mtp: true, mtp_layers: 1 },
+        capabilities: { family: 'dots3_note', modality: 'vision', cache_type: 'hybrid' },
+      },
+    )
+    // Verbatim key shape from the shipped bundle's index.
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model.safetensors',
+        'vision_tower.patch_embed.proj.weight': 'model.safetensors',
+        'model.mtp.embed_tokens.weight': 'model.safetensors',
+        'model.mtp.embed_tokens.scales': 'model.safetensors',
+        'model.mtp.embed_tokens.biases': 'model.safetensors',
+      },
+    }))
+    // Its sidecar carries best_depth at TOP level with no nested native_mtp
+    // block and no validated/output_equivalent keys ("UNMEASURED default").
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({
+      best_depth: 1,
+      blocked: false,
+      model_types: ['dots3_note'],
+      reason: 'stamped by stamp_dots3; recommendation, not measurement',
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.nativeMtp).toMatchObject({
+      supported: true,
+      depth: 1,
+      runtimeScope: 'text+vl',
+      // Matches the engine's reported native_cache schema for this bundle.
+      nativeCacheType: 'hybrid_ssm_v1',
+      requiresDeterministicSampling: true,
+    })
+  })
+
   it('marks Qwen3.6 VL JANG bundles with indexed MTP tensors as native MTP capable', () => {
     const dir = makeModelDir(
       {

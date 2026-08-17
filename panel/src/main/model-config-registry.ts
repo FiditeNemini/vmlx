@@ -1067,12 +1067,23 @@ function detectNativeMtpCapability(
   if (jangCfg?.drop_mtp === true || jangCfg?.mtp?.enabled === false || jangCfg?.mtp?.kept === false) {
     return undefined
   }
+  // Adding a family here is what makes the Native MTP control EXIST for it.
+  // dots3-note was missing, so the app ran MTP for that bundle and showed the
+  // user nothing: the engine reported index_has_mtp_tensors true, 3 MTP
+  // tensors, runtime_active true and effective_depth 1 ("native MTP runtime is
+  // active for text+vl") while the drawer rendered no label, no mode selector
+  // and no mention of MTP at all. Every other value the branch below computes
+  // already matches what the engine reports for this bundle — native_cache
+  // schema hybrid_ssm_v1, runtime scope text+vl, and depth 1 from its
+  // vmlx_mtp_tuning.json best_depth — so the allowlist was the only thing
+  // holding the control back.
   const supportedFamilies = new Set([
     'qwen3_5',
     'qwen3_5_text',
     'qwen3_5_moe',
     'qwen3_5_moe_text',
     'hy_v3',
+    'dots3_note',
   ])
   const modelTypes = [
     parsedConfig.model_type,

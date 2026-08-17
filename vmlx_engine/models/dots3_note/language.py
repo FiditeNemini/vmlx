@@ -57,6 +57,9 @@ def _absorb_enabled() -> bool:
     }
 
 
+_PREFILL_PATH_LOGGED = False
+
+
 def _prefill_materialize_max_keys() -> int:
     """Key-count ceiling for materializing K/V from the latent at prefill.
 
@@ -650,6 +653,20 @@ class Dots3MLAAttention(nn.Module):
             and total <= _prefill_materialize_max_keys()
             and w_nope is not None
         )
+        # A guard that silently declines turns an A/B into stock-vs-stock.
+        # Say ONCE per process which prefill path the engine actually took.
+        global _PREFILL_PATH_LOGGED
+        if S > 1 and not _PREFILL_PATH_LOGGED:
+            _PREFILL_PATH_LOGGED = True
+            import logging as _lg
+
+            _lg.getLogger("vmlx_engine").info(
+                "dots3 prefill attention path: %s (S=%d total=%d ceiling=%d)",
+                "MATERIALIZED-from-latent" if materialize else "absorbed-latent",
+                S,
+                total,
+                _prefill_materialize_max_keys(),
+            )
 
         if not materialize:
             # [B,h,S,nope] @ [1,h,nope,rank] -> [B,h,S,rank]

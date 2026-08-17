@@ -53,6 +53,48 @@ const ORPHAN_TOOL_TAG_REGEX = new RegExp(
 );
 
 /**
+ * Every complete orphan/container tag this module strips while streaming.
+ * Openings of paired dialects are deliberately NOT here: those activate
+ * speculative tool buffering upstream, which already suppresses them.
+ */
+const STREAM_STRIPPABLE_TAGS = [
+  ...TOOL_MARKUP_TAG_NAMES.map((name) => `</${name}>`),
+  "<tool_calls>",
+  "<arg_key>",
+  "<arg_value>",
+];
+
+/**
+ * How many trailing characters of a streamed chunk must be withheld because
+ * they could still grow into a tool tag.
+ *
+ * Models tokenize `</parameter>` as several tokens ("</", "parameter", ">"), so
+ * stripping per-delta without a holdback misses the split case - which is the
+ * common case, not the rare one. Same technique as the <think> marker holdback.
+ */
+export function toolMarkupHoldbackLength(content: string): number {
+  let hold = 0;
+  for (const tag of STREAM_STRIPPABLE_TAGS) {
+    const max = Math.min(tag.length - 1, content.length);
+    for (let len = 1; len <= max; len++) {
+      if (content.endsWith(tag.slice(0, len))) hold = Math.max(hold, len);
+    }
+  }
+  return hold;
+}
+
+/**
+ * Remove complete orphan/container tool tags from streamed content.
+ *
+ * Paired blocks are NOT touched here: mid-stream the closing half has not
+ * arrived yet, and speculative tool buffering already withholds an opening
+ * marker. This only drops tags that are complete and cannot be prose.
+ */
+export function stripStreamingToolTags(content: string): string {
+  return content.replace(ORPHAN_TOOL_TAG_REGEX, "");
+}
+
+/**
  * Strip textual tool-call markup the server did not parse.
  *
  * Shared by the final-save path and the abort/partial-save path: those two were

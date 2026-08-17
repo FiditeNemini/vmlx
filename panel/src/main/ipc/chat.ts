@@ -72,7 +72,11 @@ import {
   resolveNeverEmptyAssistantAnswer,
   TOOL_CALL_MARKER_LINE_START,
 } from "../../shared/responsesStreamRecovery";
-import { stripLeakedToolMarkup } from "../../shared/toolMarkupSanitizer";
+import {
+  stripLeakedToolMarkup,
+  stripStreamingToolTags,
+  toolMarkupHoldbackLength,
+} from "../../shared/toolMarkupSanitizer";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import {
   calculatePrefillTps,
@@ -2592,6 +2596,11 @@ export function registerChatHandlers(
         // when the server doesn't provide reasoning_content (fallback for all parser types)
         let clientSideThinkParsing = false;
         let clientSideThinkHoldback = "";
+        // Trailing characters withheld from the renderer because they could
+        // still grow into a tool tag (models tokenize "</parameter>" as several
+        // tokens). Flushed at every iteration boundary and before finalize, so
+        // ordinary prose that merely ends in "<" is never lost.
+        let toolTagHoldback = "";
 
         const normalizeThinkingMarkers = (content: string) =>
           content
@@ -2675,6 +2684,22 @@ export function registerChatHandlers(
           // Strip U+FFFD replacement characters
           delta = delta.replace(/\uFFFD/g, "");
           if (!delta) return;
+
+          // Complete orphan tool tags must never reach the renderer, or the
+          // user watches </parameter> stream into the answer and the live view
+          // disagrees with what gets persisted. Withhold any trailing fragment
+          // that could still become a tag; bypassed emissions are our own
+          // notices and are already clean.
+          if (!isReasoningDelta && !bypassToolMarkerDetection) {
+            const merged = toolTagHoldback + delta;
+            const hold = toolMarkupHoldbackLength(merged);
+            toolTagHoldback = hold > 0 ? merged.slice(merged.length - hold) : "";
+            const emittable = hold > 0
+              ? merged.slice(0, merged.length - hold)
+              : merged;
+            delta = stripStreamingToolTags(emittable);
+            if (!delta) return;
+          }
 
           // === State updates (always, no throttle) ===
           const now = Date.now();
@@ -3528,6 +3553,17 @@ export function registerChatHandlers(
           }
         };
 
+        // Release whatever is still withheld. A fragment that never grew into a
+        // tag is ordinary prose (an answer ending in "<" holds back one char),
+        // so it must be emitted, not dropped - and it has to reach the renderer
+        // as well as fullContent or the live view and the saved record diverge.
+        const flushToolTagHoldback = () => {
+          if (!toolTagHoldback) return;
+          const pending = toolTagHoldback;
+          toolTagHoldback = "";
+          emitDelta(pending, false, true, true);
+        };
+
         const reconcileResponsesToolBuffer = () => {
           const reconciliation = reconcileResponsesToolBufferAtStreamEnd({
             useResponsesApi,
@@ -4053,6 +4089,7 @@ export function registerChatHandlers(
               );
             }
             // Preserve content before tool execution so abort can recover it
+            flushToolTagHoldback();
             if (fullContent.trim()) {
               allGeneratedContent +=
                 (allGeneratedContent ? "\n\n" : "") + fullContent.trim();
@@ -4192,6 +4229,7 @@ export function registerChatHandlers(
             // 2. Model hit the length limit with a brief/incomplete response
             autoContinueCount++;
             finalAnswerRecovery = true;
+            flushToolTagHoldback();
             const hasContent = fullContent.trim().length > 0;
             console.log(
               `[CHAT] Auto-continue ${autoContinueCount}/${MAX_AUTO_CONTINUES}: model stopped with ${iterationTokenCount} tokens (iteration), content=${hasContent}`,
@@ -4373,6 +4411,8 @@ export function registerChatHandlers(
           serverUsageKnown: serverSendsUsage,
         });
 
+        // Release any withheld tail before the final content is assembled.
+        flushToolTagHoldback();
         // Combine content from all tool iterations into the final message
         if (allGeneratedContent && fullContent.trim()) {
           fullContent = allGeneratedContent + "\n\n" + fullContent;

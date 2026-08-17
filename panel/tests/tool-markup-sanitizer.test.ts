@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   stripLeakedToolMarkup,
+  stripStreamingToolTags,
+  toolMarkupHoldbackLength,
   TOOL_MARKUP_TAG_NAMES,
 } from "../src/shared/toolMarkupSanitizer";
 
@@ -90,6 +92,54 @@ describe("leaked tool-markup sanitizer", () => {
     ]) {
       expect(stripLeakedToolMarkup(text)).toBe(text);
     }
+  });
+
+  it("withholds only fragments that could still become a tool tag", () => {
+    expect(toolMarkupHoldbackLength("answer</parameter")).toBe(
+      "</parameter".length,
+    );
+    expect(toolMarkupHoldbackLength("done<")).toBe(1);
+    expect(toolMarkupHoldbackLength("done</")).toBe(2);
+    // A complete tag needs no holdback — it is strippable right now.
+    expect(toolMarkupHoldbackLength("answer</parameter>")).toBe(0);
+    // Ordinary prose is untouched.
+    expect(toolMarkupHoldbackLength("a normal sentence.")).toBe(0);
+    expect(toolMarkupHoldbackLength("2 < 3 and more")).toBe(0);
+  });
+
+  it("never shows an orphan tag to the renderer even when split across deltas", () => {
+    // Models tokenize "</parameter>" as several tokens; this is the common
+    // case, so per-delta stripping alone is not enough.
+    const deltas = ["The answer.", "</", "parameter", ">", " done"];
+    let holdback = "";
+    let shown = "";
+    for (const raw of deltas) {
+      const merged = holdback + raw;
+      const hold = toolMarkupHoldbackLength(merged);
+      holdback = hold > 0 ? merged.slice(merged.length - hold) : "";
+      const emittable = hold > 0 ? merged.slice(0, merged.length - hold) : merged;
+      shown += stripStreamingToolTags(emittable);
+    }
+    shown += holdback; // end-of-stream flush
+    expect(shown).toBe("The answer. done");
+    expect(RELEASE_PROOF_LEAK_REGEX.test(shown)).toBe(false);
+  });
+
+  it("flushes a held fragment that turned out to be prose", () => {
+    // An answer ending in "<" holds back one character; dropping it would
+    // silently truncate the answer.
+    const merged = "compare 2 <";
+    const hold = toolMarkupHoldbackLength(merged);
+    expect(hold).toBe(1);
+    const shown = merged.slice(0, merged.length - hold) + merged.slice(-hold);
+    expect(shown).toBe("compare 2 <");
+  });
+
+  it("streaming strip leaves paired openings for the tool buffer to handle", () => {
+    // Mid-stream the closing half has not arrived; suppressing the opening is
+    // speculative tool buffering's job, not this function's.
+    expect(stripStreamingToolTags("<tool_call>{")).toBe("<tool_call>{");
+    expect(stripStreamingToolTags("x</tool_call>")).toBe("x");
   });
 
   it("is used by BOTH the final-save and abort/partial-save paths", () => {

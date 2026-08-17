@@ -16065,3 +16065,32 @@ def test_release_regression_manifest_tracks_native_mtp_with_runner_artifact():
     assert "same-artifact AR-vs-MTP" in joined
     assert "MTP decode is not the MLLM prefill bottleneck" in joined
     assert "prefill" in joined
+
+
+def test_manifest_documents_the_media_row_regeneration_envs():
+    """The env that makes videoVerified reachable was recorded NOWHERE.
+
+    videoSemanticVerified requires a non-empty expect regex, so a run started
+    without one can never record video_where_supported and the cascade looks
+    like a product defect. That cost a full run on 2026-08-17 (ledger 209).
+    """
+    from tests.cross_matrix.release_regression_manifest import (
+        MEDIA_ROW_REGENERATION_ENVS,
+    )
+
+    source = Path("tests/cross_matrix/release_regression_manifest.py").read_text()
+
+    for env in (
+        "VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX",
+        "VMLINUX_REAL_UI_VIDEO_DATA_URL",
+        "VMLINUX_REAL_UI_AUDIO_EXPECT_REGEX",
+        "VMLINUX_REAL_UI_IMAGE_EXPECT_REGEX",
+    ):
+        assert env in MEDIA_ROW_REGENERATION_ENVS, f"{env} must be documented"
+        assert env in source
+
+    # The harness must still read every env the manifest advertises, or the
+    # documentation is a lie that sends the next operator down a dead end.
+    harness = Path("panel/scripts/live-real-ui-model-proof.mjs").read_text()
+    for env in MEDIA_ROW_REGENERATION_ENVS:
+        assert env in harness, f"{env} is documented but the harness never reads it"

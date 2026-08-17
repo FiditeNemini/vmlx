@@ -770,6 +770,38 @@ REQUIRED_REAL_UI_LIVE_MODEL_SURFACES = (
     "vl_image",
     "video_where_supported",
 )
+# HOW TO REGENERATE A MEDIA ROW — read this before concluding a media surface is
+# broken. `videoVerified` in panel/scripts/live-real-ui-model-proof.mjs is gated
+# on `videoSemanticVerified`, which requires a NON-EMPTY expect regex, so a run
+# started without one can never record `video_where_supported` no matter which
+# fixture or model is used. The resulting cascade looks exactly like a product
+# defect; it cost a full run on 2026-08-17 and again later the same day when the
+# surface only appeared once the regex was supplied (false -> true).
+#
+#   video:  VMLINUX_REAL_UI_CHECK_VIDEO=1
+#           VMLINUX_REAL_UI_VIDEO_DATA_URL=<data:video/mp4;base64,...>
+#           VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX='\bblue\b'
+#   image:  VMLINUX_REAL_UI_CHECK_MEDIA=1
+#           VMLINUX_REAL_UI_IMAGE_EXPECT_REGEX='\bred\b'   (empty = structural only)
+#   audio:  VMLINUX_REAL_UI_CHECK_AUDIO=1
+#           VMLINUX_REAL_UI_AUDIO_DATA_URL=<data:audio/wav;base64,...>
+#           VMLINUX_REAL_UI_AUDIO_EXPECT_REGEX=<phrase>
+#
+# Fixtures without ffmpeg on the box: cv2 4.13 `VideoWriter` with 'avc1' makes a
+# valid clip (224x224, 8fps, 2s solid blue = 16 decodable frames, ~2KB) that
+# verifies against '\bblue\b'; audio via python `wave` + a 440Hz sine (1s, 16kHz
+# mono). The audio turn needs a BIG budget — at 512 tokens it produced 1334
+# reasoning chars and zero content.
+MEDIA_ROW_REGENERATION_ENVS = (
+    "VMLINUX_REAL_UI_CHECK_VIDEO",
+    "VMLINUX_REAL_UI_VIDEO_DATA_URL",
+    "VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX",
+    "VMLINUX_REAL_UI_CHECK_MEDIA",
+    "VMLINUX_REAL_UI_IMAGE_EXPECT_REGEX",
+    "VMLINUX_REAL_UI_CHECK_AUDIO",
+    "VMLINUX_REAL_UI_AUDIO_DATA_URL",
+    "VMLINUX_REAL_UI_AUDIO_EXPECT_REGEX",
+)
 REAL_UI_INTEGRATED_TOOL_L2_CACHE_SURFACE = "tool_l2_cache_integrated"
 REAL_UI_INTEGRATED_VL_TOOL_L2_CACHE_SURFACE = "vl_tool_l2_cache_integrated"
 _REQUIRED_REAL_UI_LIVE_MODEL_GENERIC_SURFACES = tuple(

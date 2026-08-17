@@ -1716,6 +1716,19 @@ _HYBRID_ADAPTIVE_CHUNK = os.environ.get(
 
 _HYBRID_MIN_CHUNK = max(1, int(os.environ.get("VMLX_HYBRID_MIN_CHUNK", "64") or 64))
 
+# Ceiling on the PROJECTED tight-memory prefill step.
+#
+# Bigger is not simply better: the per-chunk admission valve projects the
+# next chunk's transient by the context ratio, so a step that merely fits
+# the current context is declined a chunk later. Measured on dots3: at
+# step 2048 a 2015-token prompt ran at 591.6 pp/s but an 8k prompt was
+# 413'd at chunk [2048:4096); step 1024 was independently measured FASTER
+# than 2048 at 12k context while halving the transient. So the cap buys
+# depth AND speed.
+_TIGHT_PROJECTED_STEP_CAP = max(
+    64, int(os.environ.get("VMLX_TIGHT_PROJECTED_STEP_CAP", "1024") or 1024)
+)
+
 # One-shot attention buffer size above which a hybrid prefill switches to the
 # chunked path (and above which the SSM clean re-derive declines) rather than
 # ask Metal for a single allocation it will refuse.
@@ -6574,15 +6587,22 @@ class MLLMBatchGenerator:
                         _t_head = max(0, _t_limit - _t_active)
                     except Exception:  # noqa: BLE001
                         _t_head = 0
-                    # Spend at most a third of live headroom on the score
-                    # buffer; the per-chunk valve still guards the rest.
+                    # Spend at most a QUARTER of live headroom on the score
+                    # buffer. The per-chunk valve projects the NEXT chunk by
+                    # the context ratio, so a step sized to just fit the
+                    # current context gets declined one chunk later — measured:
+                    # a 2048 step served 2015 tokens at 591.6 pp/s and then
+                    # 413'd an 8k prompt at chunk [2048:4096). Leaving room for
+                    # that forward projection is what keeps depth WORKING, and
+                    # a decline is worse than a smaller chunk.
                     _t_budget = (
-                        int(_t_head / 3) if _t_head > 0 else None
+                        int(_t_head / 4) if _t_head > 0 else None
                     )
                     _tight_text_prefill_step_size = max(
                         _HYBRID_MIN_CHUNK,
                         min(
                             int(self.prefill_step_size),
+                            _TIGHT_PROJECTED_STEP_CAP,
                             int(
                                 max_prefill_chunk_tokens(
                                     _tight_heads,

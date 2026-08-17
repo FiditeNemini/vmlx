@@ -490,6 +490,9 @@ const checkServerCacheControls = envBool('VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CON
 const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
 const checkAudio = envBool('VMLINUX_REAL_UI_CHECK_AUDIO', false)
+// Flip the reasoning mode mid-conversation (after turn 1). Default OFF so
+// every existing row is byte-unchanged.
+const toggleThinkingMidConv = envBool('VMLINUX_REAL_UI_TOGGLE_THINKING_MIDCONV', false)
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
 // Select the SSD-only lane (block-disk L2 WITHOUT the RAM paged pool) before
@@ -10196,6 +10199,69 @@ async function main() {
             'first_visible_ui_send',
             ${JSON.stringify(selectedPromptOne)},
           );
+          // MID-CONVERSATION reasoning flip. The harness otherwise sets the
+          // thinking mode once per run, so "reasoning toggled mid-convo" — a
+          // real user action, and one that interacts with the per-iteration
+          // reasoning rail reset and the never-empty resolver's reasoning
+          // input — had never been exercised here at all.
+          let midConvReasoningFlip = null;
+          if (${JSON.stringify(toggleThinkingMidConv)} && firstSent) {
+            try {
+              const openBtn = [...document.querySelectorAll('[data-vmlx-control="chat-settings"]')]
+                .find((b) => b instanceof HTMLButtonElement && isVisible(b));
+              if (!openBtn) throw new Error('chat-settings control not visible');
+              openBtn.scrollIntoView({ block: 'center' });
+              openBtn.click();
+              const drawer = await waitFor(
+                () => {
+                  const d = document.querySelector('[data-vmlx-surface="chat-settings"]');
+                  return d instanceof HTMLElement && isVisible(d) ? d : null;
+                },
+                'chat-settings drawer for mid-conversation reasoning flip',
+              );
+              // Flip to the OPPOSITE of what this run started with.
+              const targetLabels = ${JSON.stringify(enableThinkingOverride === true
+                ? ['Off', 'Instruct']
+                : ['On', 'Reasoning'])};
+              const btn = [...(drawer?.querySelectorAll('button') || [])]
+                .find((b) => isVisible(b) && !b.disabled
+                  && targetLabels.includes((b.textContent || '').replace(/\\s+/g, ' ').trim()));
+              const pressedBefore = btn ? btn.getAttribute('aria-pressed') : null;
+              if (btn) {
+                btn.scrollIntoView({ block: 'center' });
+                btn.click();
+                await new Promise((r) => setTimeout(r, 120));
+              }
+              const saveBtn = document.querySelector('[data-vmlx-control="chat-settings-save"]');
+              let saved = false;
+              if (saveBtn instanceof HTMLButtonElement && isVisible(saveBtn) && !saveBtn.disabled) {
+                saveBtn.click();
+                saved = true;
+                await new Promise((r) => setTimeout(r, 300));
+              }
+              // Confirm the SIDE EFFECT on the persisted chat overrides rather
+              // than trusting the clicks.
+              let persistedAfter = null;
+              try {
+                const reread = await window.api.chat.get(chat.id);
+                persistedAfter = reread?.enableThinking ?? reread?.overrides?.enableThinking ?? null;
+              } catch (_) {}
+              midConvReasoningFlip = {
+                requested: true,
+                targetLabels,
+                buttonFound: !!btn,
+                ariaPressedBefore: pressedBefore,
+                ariaPressedAfter: btn ? btn.getAttribute('aria-pressed') : null,
+                saved,
+                persistedEnableThinkingAfterSave: persistedAfter,
+              };
+            } catch (error) {
+              midConvReasoningFlip = {
+                requested: true,
+                error: String(error?.message || error),
+              };
+            }
+          }
           let secondSent = false;
           if (firstSent && uiTurnCount >= 2) {
             secondSent = await sendMessageThroughVisibleComposer(
@@ -10513,6 +10579,7 @@ async function main() {
             rendererGenerationDefaults,
             chatSettingsDom,
             chatSettingsInteraction,
+            midConvReasoningFlip,
             uiTurnEvidence,
             cacheRequestEvidence,
             sendErrors,

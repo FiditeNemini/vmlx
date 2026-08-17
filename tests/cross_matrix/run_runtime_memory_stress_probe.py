@@ -570,7 +570,30 @@ def build_serve_cmd(row: Row, python: Path, port: int, timeout: int, extra_args:
     return cmd
 
 
-def snapshot(label: str, port: int, proc: subprocess.Popen[str]) -> dict[str, Any]:
+def _health_is_live(body: Any) -> bool:
+    """True when /health returned the FULL payload, not the cached snapshot.
+
+    /health serves a cheap cached copy whenever the scheduler reports anything
+    running or waiting, and a finished request lingers in `running` through its
+    terminal cache cleanup. A snapshot taken immediately after a response is
+    therefore the PRE-request payload with `health_gauges_cached: true`, whose
+    `scheduler.last_cache_selection` is null and whose cache counters are all
+    zero. Request-correlated proofs (cold paged selection, execution timing,
+    hit counters) need the live payload.
+    """
+    if not isinstance(body, dict):
+        return False
+    return body.get("health_gauges_cached") is not True
+
+
+def snapshot(
+    label: str,
+    port: int,
+    proc: subprocess.Popen[str],
+    *,
+    require_live_health: bool = False,
+    live_health_timeout: float = 20.0,
+) -> dict[str, Any]:
     snap: dict[str, Any] = {
         "label": label,
         "time": time.time(),
@@ -580,6 +603,19 @@ def snapshot(label: str, port: int, proc: subprocess.Popen[str]) -> dict[str, An
     for name, path in (("health", "/health"), ("cache_stats", "/v1/cache/stats")):
         try:
             code, body = http_json("GET", f"http://127.0.0.1:{port}{path}", timeout=5)
+            if name == "health" and require_live_health:
+                deadline = time.time() + live_health_timeout
+                attempts = 1
+                while not _health_is_live(body) and time.time() < deadline:
+                    time.sleep(0.5)
+                    code, body = http_json(
+                        "GET", f"http://127.0.0.1:{port}{path}", timeout=5
+                    )
+                    attempts += 1
+                snap["health_live_poll"] = {
+                    "attempts": attempts,
+                    "live": _health_is_live(body),
+                }
             snap[name] = {"code": code, "body": body}
         except Exception as exc:  # noqa: BLE001
             snap[name] = {"error": repr(exc)}
@@ -1083,7 +1119,12 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
                 stage["status"] = "request_exception"
                 stage["error"] = repr(exc)
                 stage["elapsed_s"] = round(time.time() - started, 3)
-            stage["after"] = snapshot(f"after_{target}", args.port, proc)
+            # Request-correlated: poll until /health stops serving the cached
+            # pre-request snapshot, otherwise last_cache_selection is null and
+            # every cache counter reads zero.
+            stage["after"] = snapshot(
+                f"after_{target}", args.port, proc, require_live_health=True
+            )
             add_memory_metrics(stage)
             add_cache_capacity_projection(
                 stage,

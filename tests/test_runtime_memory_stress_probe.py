@@ -680,3 +680,32 @@ def test_run_probe_artifact_marks_cache_salt_as_not_capacity_proof(monkeypatch):
         "prefix_paged_l2_bypassed": True,
         "capacity_projection_valid": False,
     }
+
+
+def test_health_is_live_rejects_the_cached_snapshot():
+    """2026-08-17 (ledger row 256): /health serves a cheap cached copy whenever
+    anything is running or waiting, and a finished request lingers in `running`
+    through terminal cache cleanup. The post-request snapshot was therefore the
+    PRE-request payload: last_cache_selection null, every cache counter zero,
+    and `cold_paged_cache_selection_observed` unprovable. The tell is
+    health_gauges_cached."""
+    from tests.cross_matrix.run_runtime_memory_stress_probe import _health_is_live
+
+    assert _health_is_live({"scheduler": {}}) is True
+    assert _health_is_live({"health_gauges_cached": True}) is False
+    assert _health_is_live({"health_gauges_cached": False}) is True
+    assert _health_is_live(None) is False
+    assert _health_is_live("not-a-dict") is False
+
+
+def test_after_stage_snapshot_requires_live_health():
+    """The per-stage `after` snapshot must poll for the live payload; a cached
+    one silently zeroes the request-correlated cache proof."""
+    import inspect
+
+    import tests.cross_matrix.run_runtime_memory_stress_probe as probe
+
+    source = inspect.getsource(probe)
+    assert 'snapshot(\n                f"after_{target}", args.port, proc, require_live_health=True\n            )' in source, (
+        "the after-stage snapshot must request a live health payload"
+    )

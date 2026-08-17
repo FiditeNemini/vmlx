@@ -6761,6 +6761,89 @@ def test_release_regression_manifest_real_ui_matrix_accepts_step37_family_alias_
     assert _real_ui_architecture_cache_policy_ok("step37", proof) is True
 
 
+def _step37_exact_stored_kv_proof(**native_overrides):
+    """Mixed-SWA proof in the EXACT-stored-KV shape the engine picks on auto.
+
+    Startup line from a controlled serve of Step-3.7-Flash-JANG_K-CRACK at
+    HEAD: "KV cache auto mode: TurboQuant enabled for compatible models;
+    stored prefix cache quantization=none (mixed sliding/full attention:
+    exact stored KV required for answer-stable reuse)".
+    """
+    native = {
+        "family": "mixed_attention",
+        "schema": "mixed_swa_kv_v1",
+        "cache_type": "mixed_swa_kv",
+        "components": [
+            "full_attention_kv",
+            "sliding_window_kv",
+            "rotating_window_metadata",
+        ],
+        "generic_turboquant_kv": {"enabled": False, "reason": "not_active"},
+        "storage_quantization": {
+            "enabled": False,
+            "mode": "storage_boundary",
+            "bits": None,
+            "group_size": None,
+            "applies_to": "full_and_sliding_attention_kv",
+            "metadata_policy": "preserve_rotating_window_metadata",
+        },
+        "prefix": True,
+        "paged": True,
+        "block_disk_l2": True,
+    }
+    native.update(native_overrides)
+    return {
+        "server": {
+            "health": {
+                "native_cache": native,
+                "kv_cache_quantization": {"enabled": False},
+            }
+        }
+    }
+
+
+def test_step37_architecture_policy_accepts_exact_stored_kv_for_answer_stability():
+    # Demanding 4-bit stored KV made this row unsatisfiable except by
+    # re-enabling a setting that CHANGED WARM ANSWERS on a RotatingKVCache,
+    # which is the opposite of what the gate exists for.
+    assert (
+        _real_ui_architecture_cache_policy_ok(
+            "step37", _step37_exact_stored_kv_proof()
+        )
+        is True
+    )
+
+
+def test_step37_architecture_policy_still_rejects_wrong_architecture():
+    # The exact-storage arm relaxes ONLY the stored-quantization bits. Family,
+    # schema, cache type, components, generic-TQ-off and the presence of the
+    # storage-boundary quantizer all still bind.
+    for overrides in (
+        {"schema": "wrong_schema"},
+        {"cache_type": "dense_kv"},
+        {"components": ["full_attention_kv"]},
+        {"generic_turboquant_kv": {"enabled": True, "reason": "runtime"}},
+        {
+            "storage_quantization": {
+                "enabled": False,
+                "mode": "not_storage_boundary",
+                "metadata_policy": "preserve_rotating_window_metadata",
+            }
+        },
+        {
+            "storage_quantization": {
+                "enabled": False,
+                "mode": "storage_boundary",
+                "metadata_policy": "dropped_rotating_window_metadata",
+            }
+        },
+    ):
+        proof = _step37_exact_stored_kv_proof(**overrides)
+        assert (
+            _real_ui_architecture_cache_policy_ok("step37", proof) is False
+        ), f"accepted a broken mixed-SWA architecture: {overrides}"
+
+
 def test_release_regression_manifest_real_ui_matrix_rejects_hybrid_ssm_full_prefill_fallback():
     proof = {
         "modelName": "LFM2.5-8B-A1B-MXFP8-CRACK",

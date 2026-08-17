@@ -4306,6 +4306,43 @@ def _real_ui_architecture_cache_policy_ok(
             and _real_ui_ssm_companion_l2_seen(proof)
         )
     if family_id == "step37":
+        storage = (
+            native.get("storage_quantization")
+            if isinstance(native.get("storage_quantization"), dict)
+            else {}
+        )
+        # Two stored-KV policies are BOTH architecturally correct for mixed-SWA,
+        # and the engine now chooses the second one on `auto`:
+        #
+        #   quantized storage : kv_cache_quantization enabled at 4 bits / group 64
+        #   exact storage     : quantization off, storage-boundary quantizer
+        #                       present but disabled
+        #
+        # The engine states the choice at startup — "KV cache auto mode:
+        # TurboQuant enabled for compatible models; stored prefix cache
+        # quantization=none (mixed sliding/full attention: exact stored KV
+        # required for answer-stable reuse)" — and it is a deliberate
+        # correctness decision, not a regression: stored q8 on a RotatingKVCache
+        # CHANGED WARM ANSWERS (the mixed-SWA hazard), so exact stored KV is the
+        # safer default for this family. Demanding 4/64 here made the row
+        # unsatisfiable except by re-enabling a setting known to alter answers,
+        # which is the opposite of what this gate is for.
+        #
+        # Everything architectural still binds in both arms: family, schema,
+        # cache_type, the three components, generic runtime TQ off with an
+        # approved reason, and the storage-boundary quantizer being present.
+        quantized_storage = (
+            kv_cache_quantization.get("enabled") is True
+            and kv_cache_quantization.get("bits") == 4
+            and kv_cache_quantization.get("group_size") == 64
+            and _real_ui_mixed_swa_storage_quantization_seen(native, proof)
+        )
+        exact_storage = (
+            kv_cache_quantization.get("enabled") is False
+            and storage.get("enabled") is False
+            and storage.get("mode") == "storage_boundary"
+            and storage.get("metadata_policy") == "preserve_rotating_window_metadata"
+        )
         return (
             native.get("family") in {"mixed_attention", "step3p7", "step-3.7-flash"}
             and native.get("schema") == "mixed_swa_kv_v1"
@@ -4322,10 +4359,7 @@ def _real_ui_architecture_cache_policy_ok(
             # engine emits it whenever storage quant is active; same semantic
             # bar as the older reasons (2026-08-16, ledger row 151).
             and generic_tq.get("reason") in {"not_active", "mixed_swa_kv", "storage_only"}
-            and kv_cache_quantization.get("enabled") is True
-            and kv_cache_quantization.get("bits") == 4
-            and kv_cache_quantization.get("group_size") == 64
-            and _real_ui_mixed_swa_storage_quantization_seen(native, proof)
+            and (quantized_storage or exact_storage)
         )
     return False
 

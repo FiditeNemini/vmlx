@@ -71,17 +71,25 @@ def _prefill_materialize_max_keys() -> int:
     Materializing from the fetched latent is O(total) per chunk and buys
     back O(S*total) — the DSV4 MLA split.
 
-    Bounded because materialized K/V is a genuine transient
-    (heads x total x (nope+rope+v) bf16, ~1 GB/layer at 16K on full
-    layers) and long context must stay on the latent path that makes 512K
-    affordable. 0 disables materialization entirely (pure absorbed).
+    🚨 MEASURED NEGATIVE — DEFAULT OFF (ledger row 156). The FLOP argument
+    above is correct and still buys nothing: live on the box (temp 0, cold
+    prefill, engagement proven in BOTH arms by the path log below,
+    answer text byte-identical) materialization scored 1.03x @1k,
+    1.02x @2k, 0.97x @4k, 0.88x @6k — a wash that turns into a LOSS as the
+    key block grows. dots3 prefill sustains only ~4.6 effective TFLOPS
+    against a 16B-active MoE, so it is not attention-FLOP-bound at all and
+    trading O(S*total) score FLOPs for an O(total) materialization
+    transient just adds allocation pressure. Same shape as the fp16-indexer
+    result (2.26x isolated, -22% end to end). Kept, gated OFF, with its
+    equivalence pins, because it is the right structure if the real
+    bottleneck is ever removed. Set a positive key ceiling to re-enable.
     """
     try:
         return int(
-            os.environ.get("VMLX_DOTS3_PREFILL_MATERIALIZE_MAX_KEYS", "8192")
+            os.environ.get("VMLX_DOTS3_PREFILL_MATERIALIZE_MAX_KEYS", "0")
         )
     except ValueError:
-        return 8192
+        return 0
 
 
 class Dots3LatentCache:

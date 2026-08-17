@@ -6799,6 +6799,15 @@ class MLLMBatchGenerator:
                 _adaptive_chunk_active = (
                     _HYBRID_ADAPTIVE_CHUNK or _tight_adaptive_growth
                 )
+                # (chunk_tokens, transient_bytes) samples for the AFFINE fit
+                # below. A per-chunk transient is NOT proportional to the
+                # chunk: a MoE restreams its whole expert set every chunk, so
+                # a 64-token probe is almost all fixed cost. Dividing that by
+                # 64 to get a per-token rate over-estimates it by orders of
+                # magnitude and pins the chunk small forever — the same
+                # dropped-constant error fit_peak_model() was written for.
+                _chunk_transient_samples: list[tuple[int, int]] = []
+                _adaptive_growth_logged = False
                 _prefill_keep_alloc = prefill_keep_alloc_enabled()
                 # Pre-size the KV slots for the WHOLE span before chunking.
                 #
@@ -7145,12 +7154,51 @@ class MLLMBatchGenerator:
                                 _max_active_seen = _active_now
                             _headroom = _limit - _max_active_seen
                             if _limit > 0 and _transient > 0 and chunk_size > 0:
-                                _per_token = max(1, _transient // max(1, chunk_size))
-                                _fit = int(_headroom / 1.25) // _per_token
+                                _chunk_transient_samples.append(
+                                    (int(chunk_size), int(_transient))
+                                )
+                                _budget = int(_headroom / 1.25)
+                                _affine = fit_peak_model(_chunk_transient_samples)
+                                if _affine is not None and _affine[1] > 0:
+                                    # transient(tokens) = fixed + slope*tokens
+                                    _fixed, _slope = _affine
+                                    _fit = int(
+                                        (_budget - max(0.0, _fixed)) / _slope
+                                    )
+                                else:
+                                    # Single sample: no way to separate the
+                                    # fixed term, so stay conservative and
+                                    # grow geometrically instead of dividing.
+                                    _fit = (
+                                        chunk_size * 4
+                                        if _transient * 4 < _budget
+                                        else max(
+                                            _HYBRID_MIN_CHUNK,
+                                            int(_budget)
+                                            // max(1, _transient // chunk_size),
+                                        )
+                                    )
                                 _adaptive_chunk_cap = max(
                                     _HYBRID_MIN_CHUNK,
                                     min(_chunk_ceiling, int(_fit)),
                                 )
+                                if (
+                                    _tight_adaptive_growth
+                                    and not _adaptive_growth_logged
+                                    and _adaptive_chunk_cap > chunk_size
+                                ):
+                                    _adaptive_growth_logged = True
+                                    logger.info(
+                                        "Tight-memory prefill chunk grows "
+                                        "%d -> %d (transient %.2fGB at %d tok, "
+                                        "headroom %.2fGB, ceiling %d)",
+                                        chunk_size,
+                                        _adaptive_chunk_cap,
+                                        _transient / (1024**3),
+                                        chunk_size,
+                                        _headroom / (1024**3),
+                                        _chunk_ceiling,
+                                    )
                         except Exception:  # noqa: BLE001
                             pass
                     processed += chunk_size

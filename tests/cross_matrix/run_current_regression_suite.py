@@ -29,26 +29,26 @@ DEFAULT_STEP_TIMEOUT_SEC = 900.0
 STEP_TIMEOUT_RETURNCODE = 124
 
 EXPECTED_OPEN_REQUIREMENTS = [
-    # 2026-08-16 (ledger row 151): retirement pass. The remaining four rows
-    # close with the Group-1/Group-2 regen sessions of the same campaign:
-    # smoke needs the lfm25 + zaya_text live reruns; the real-UI rows need
-    # the current-worktree proof reruns (incl. the new dsv4 rows); DSV4
-    # long-output needs the route-mode code-exactness gate on the box.
+    # 2026-08-16 (ledger row 155): the remaining three rows are all held by
+    # the SAME two bundle-quality defects, reproduced deterministically twice
+    # at temp 0 on the box (lfm25 exact-code truncation; zaya_text
+    # AppleScript-idiom answers + empty tool-continuation visible). Closing
+    # them requires Eric's jang-side Zaya-8B + LFM2.5-8B re-quants — runtime
+    # is not at fault (all other families pass the same bars).
     "Cross-family live multi-turn smoke matrix is release-cleared",
     "Real Electron UI unblocked non-MiMo live model matrix is proven",
     "Real Electron UI cross-family live model matrix is release-cleared",
-    "DSV4 long-output/code/file-generation quality is release-cleared",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
-    # 2026-08-16 (ledger row 151): retirement pass. The remaining four rows
-    # close with the Group-1/Group-2 regen sessions of the same campaign:
-    # smoke needs the lfm25 + zaya_text live reruns; the real-UI rows need
-    # the current-worktree proof reruns (incl. the new dsv4 rows); DSV4
-    # long-output needs the route-mode code-exactness gate on the box.
+    # 2026-08-16 (ledger row 155): the remaining three rows are all held by
+    # the SAME two bundle-quality defects, reproduced deterministically twice
+    # at temp 0 on the box (lfm25 exact-code truncation; zaya_text
+    # AppleScript-idiom answers + empty tool-continuation visible). Closing
+    # them requires Eric's jang-side Zaya-8B + LFM2.5-8B re-quants — runtime
+    # is not at fault (all other families pass the same bars).
     "Cross-family live multi-turn smoke matrix is release-cleared",
     "Real Electron UI unblocked non-MiMo live model matrix is proven",
     "Real Electron UI cross-family live model matrix is release-cleared",
-    "DSV4 long-output/code/file-generation quality is release-cleared",
 }
 
 CURRENT_OBJECTIVE_DIGEST_ARTIFACT = (

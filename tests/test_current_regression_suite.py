@@ -59,10 +59,11 @@ def test_current_regression_suite_keeps_declared_known_blockers_open(tmp_path, m
 
 
 def test_current_regression_suite_carries_non_mimo_matrix_gap_with_rationale():
-    """2026-08-16 (ledger row 151) retirement pass: the row stays EXPECTED
-    open until the Group-1/Group-2 regen sessions land the current-worktree
-    real-UI proof reruns (including the new dsv4 0731 rows). The expected-open
-    entry must keep a written rationale for its closure condition."""
+    """2026-08-16 (ledger row 155): after the box live sessions, the three
+    remaining expected-open rows are all held by the SAME two bundle-quality
+    defects (lfm25 exact-code truncation, zaya_text AppleScript-idiom
+    answers) and close only with Eric's jang-side re-quants. The entry must
+    keep a written rationale citing that closure condition."""
     import inspect
 
     from tests.cross_matrix import run_current_regression_suite as suite
@@ -72,10 +73,10 @@ def test_current_regression_suite_carries_non_mimo_matrix_gap_with_rationale():
         in suite.EXPECTED_OPEN_REQUIREMENTS
     )
     source = inspect.getsource(suite)
-    assert "ledger row 151" in source, (
-        "the expected-open entry must cite the retirement-pass ledger row"
+    assert "ledger row 155" in source, (
+        "the expected-open entry must cite the consolidating ledger row"
     )
-    assert "incl. the new dsv4 rows" in source, (
+    assert "re-quants" in source, (
         "the expected-open entry must document its closure condition"
     )
 

@@ -25,10 +25,15 @@ from typing import Any, Iterable
 
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_PY = (
+_RELEASE_APP_PY = (
     REPO
     / "panel/release/mac-arm64/vMLX.app/Contents/Resources/bundled-python/python/bin/python3"
 )
+_DEV_BUNDLE_PY = REPO / "panel/bundled-python/python/bin/python3"
+# 2026-08-16 (ledger row 155): the release-app python only exists after a DMG
+# stage; on a proof box the dev bundled python is the runtime-equivalent
+# fallback. Without it the gate crashed before writing its artifact.
+DEFAULT_PY = _RELEASE_APP_PY if _RELEASE_APP_PY.exists() else _DEV_BUNDLE_PY
 DSV4_AFFINE_MODEL_CANDIDATES = (
     "/Users/example/models/JANGQ/"
     "DeepSeek-V4-Flash-JANG_DQ2-Token8-DownG32-Gate3Math6-NoMTP",

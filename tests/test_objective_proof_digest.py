@@ -3064,6 +3064,9 @@ def test_objective_proof_digest_summarizes_dsv4_direct_off_exactness_boundary(
     from tests.cross_matrix.summarize_objective_proof import build_digest
 
     _write_passing_base_artifacts(tmp_path)
+    # 2026-08-16 (ledger row 151): the bundled-after artifact now leads the
+    # prompt-rail chain (the 20260524-1418 explicit-off subset is dead), so
+    # the completion-route direct/off failure lives here too.
     _write_json(
         tmp_path,
         "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
@@ -3074,8 +3077,9 @@ def test_objective_proof_digest_summarizes_dsv4_direct_off_exactness_boundary(
                 "chat_on_rep1",
                 "responses_off_rep1",
                 "responses_on_rep1",
+                "legacy_completion_raw",
             ],
-            "case_count": 4,
+            "case_count": 5,
             "cases": [
                 {
                     "name": "chat_off_rep1",
@@ -3125,46 +3129,16 @@ def test_objective_proof_digest_summarizes_dsv4_direct_off_exactness_boundary(
                         "dsv4_policy_reason": "requested_thinking",
                     },
                 },
-            ],
-        },
-    )
-
-    _write_json(
-        tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-source-explicit-off-subset-20260524-1418.json",
-        {
-            "status": "fail",
-            "selected_cases": ["chat_off", "responses_off", "legacy_completion_raw"],
-            "case_count": 3,
-            "cases": [
-                {
-                    "name": "chat_off",
-                    "route": "chat",
-                    "exact": False,
-                    "missing": ["THREE.WebGLRenderer"],
-                    "corrupt_patterns": ["WebWebGLRenderer"],
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                    },
-                },
-                {
-                    "name": "responses_off",
-                    "route": "responses",
-                    "exact": False,
-                    "missing": ["THREE.WebGLRenderer"],
-                    "corrupt_patterns": ["WebWebGLRenderer"],
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                    },
-                },
                 {
                     "name": "legacy_completion_raw",
                     "route": "completion",
                     "exact": False,
+                    "normalized_exact": False,
                     "missing": ["THREE.WebGLRenderer"],
                     "corrupt_patterns": ["WebWebGLRenderer"],
                     "effective_prompt_diagnostics": {
                         "assistant_suffix_kind": "thinking_closed",
+                        "dsv4_policy_reason": "thinking_disabled",
                     },
                 },
             ],
@@ -3240,9 +3214,13 @@ def test_objective_proof_digest_summarizes_dsv4_direct_off_exactness_boundary(
     summary = quality["details"]["direct_off_exactness_boundary"]
 
     assert quality["status"] == "open"
+    # 2026-08-16 (ledger row 151): legacy_completion_raw moved into the
+    # bundled-after artifact (shared prompt-rail/token-tail gate), so it now
+    # shows up in the token-tail failing list too.
     assert summary["direct_off_failing_cases"] == [
         "chat_off_rep1",
         "responses_off_rep1",
+        "legacy_completion_raw",
     ]
     assert summary["requested_thinking_exact_cases"] == [
         "chat_on_rep1",
@@ -3568,15 +3546,9 @@ def test_objective_proof_digest_summarizes_dsv4_exact_code_root_boundary(
                         "assistant_suffix_kind": "thinking_open",
                     },
                 },
-            ],
-        },
-    )
-    _write_json(
-        tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-source-explicit-off-subset-20260524-1418.json",
-        {
-            "status": "fail",
-            "cases": [
+                # 2026-08-16 (ledger row 151): the completion-route failure
+                # moved here — the bundled-after artifact leads the prompt-rail
+                # chain and the 20260524-1418 explicit-off subset is dead.
                 {
                     "name": "legacy_completion_raw",
                     "route": "completion",
@@ -3586,7 +3558,7 @@ def test_objective_proof_digest_summarizes_dsv4_exact_code_root_boundary(
                     "effective_prompt_diagnostics": {
                         "assistant_suffix_kind": "thinking_closed",
                     },
-                }
+                },
             ],
         },
     )
@@ -3631,25 +3603,10 @@ def test_objective_proof_digest_summarizes_dsv4_exact_code_root_boundary(
             ],
         },
     )
-    _write_json(
-        tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-bundle-defaults-source-20260525.json",
-        {
-            "status": "fail",
-            "cases": [
-                {
-                    "name": "chat_off_bundle_defaults",
-                    "route": "chat",
-                    "exact": False,
-                    "missing": ["THREE.WebGLRenderer"],
-                    "corrupt_patterns": [],
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                    },
-                }
-            ],
-        },
-    )
+    # 2026-08-16 (ledger row 151): the 20260525 bundle-defaults artifact is
+    # retired; the bundle-defaults gate now reads the bundled-after artifact
+    # written above, whose failing thinking_closed cases keep
+    # bundle_defaults_do_not_clear_direct_off asserted below.
     _write_json(
         tmp_path,
         "build/current-dsv4-route-mode-code-exactness-preflight-after-mimo-classifier-refresh-20260608.json",
@@ -3866,9 +3823,13 @@ def test_objective_proof_digest_surfaces_current_source_dsv4_bundle_defaults(tmp
     from tests.cross_matrix.summarize_objective_proof import build_digest
 
     _write_passing_base_artifacts(tmp_path)
+    # 2026-08-16 (ledger row 151): the 20260525 bundle-defaults artifact is
+    # retired; DSV4_CURRENT_SOURCE_BUNDLE_DEFAULTS_EXACTNESS_REL now points at
+    # the bundled-after gate, so the failing payload the probe must read is
+    # written there.
     _write_json(
         tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-bundle-defaults-source-20260525.json",
+        "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
         {
             "status": "fail",
             "selected_cases": [
@@ -9930,97 +9891,10 @@ def test_objective_proof_digest_accepts_dsv4_quality_clearance_artifact(tmp_path
             ],
         },
     )
-    _write_json(
-        tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-source-explicit-off-subset-20260524-1418.json",
-        {
-            "status": "pass",
-            "selected_cases": [
-                "chat_off",
-                "responses_off",
-                "legacy_completion_raw",
-            ],
-            "case_count": 3,
-            "cases": [
-                {
-                    "name": "chat_off",
-                    "route": "chat",
-                    "exact": True,
-                    "normalized_exact": True,
-                    "missing": [],
-                    "corrupt_patterns": [],
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                        "dsv4_policy_reason": "thinking_disabled",
-                    },
-                },
-                {
-                    "name": "responses_off",
-                    "route": "responses",
-                    "exact": True,
-                    "normalized_exact": True,
-                    "missing": [],
-                    "corrupt_patterns": [],
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                        "dsv4_policy_reason": "thinking_disabled",
-                    },
-                },
-                {
-                    "name": "legacy_completion_raw",
-                    "route": "completion",
-                    "exact": True,
-                    "normalized_exact": True,
-                    "missing": [],
-                    "corrupt_patterns": [],
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                        "dsv4_policy_reason": "thinking_not_requested",
-                    },
-                },
-            ],
-        },
-    )
-    _write_json(
-        tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-bundle-defaults-source-20260525.json",
-        {
-            "status": "pass",
-            "selected_cases": [
-                "chat_off_bundle_defaults",
-                "responses_off_bundle_defaults",
-            ],
-            "case_count": 2,
-            "cases": [
-                {
-                    "name": "chat_off_bundle_defaults",
-                    "route": "chat",
-                    "exact": True,
-                    "normalized_exact": True,
-                    "missing": [],
-                    "corrupt_patterns": [],
-                    "content": "const renderer = new THREE.WebGLRenderer();",
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                        "dsv4_policy_reason": "thinking_disabled",
-                    },
-                },
-                {
-                    "name": "responses_off_bundle_defaults",
-                    "route": "responses",
-                    "exact": True,
-                    "normalized_exact": True,
-                    "missing": [],
-                    "corrupt_patterns": [],
-                    "content": "const renderer = new THREE.WebGLRenderer();",
-                    "effective_prompt_diagnostics": {
-                        "assistant_suffix_kind": "thinking_closed",
-                        "dsv4_policy_reason": "thinking_disabled",
-                    },
-                },
-            ],
-        },
-    )
+    # 2026-08-16 (ledger row 151): the 20260524-1418 explicit-off subset and
+    # the 20260525 bundle-defaults artifact are dead under the new chain —
+    # the bundled-after artifact (written passing below) now serves the
+    # prompt-rail, token-tail, and bundle-defaults gates.
     _write_json(
         tmp_path,
         "build/current-dsv4-route-mode-code-exactness-bundle-defaults-dryrun-20260525.json",
@@ -10241,6 +10115,16 @@ def test_objective_proof_digest_accepts_dsv4_quality_clearance_artifact(tmp_path
     quality = rows["DSV4 long-output/code/file-generation quality is release-cleared"]
     assert quality["status"] == "open", quality["details"]
     assert quality["details"]["clearance_checks"]["identifier_integrity"] is True
+    # 2026-08-16 (ledger row 151): the 2026-05-21 hand-assembled clearance is
+    # recorded informationally and no longer gates the row; with every live
+    # gate passing here, the row stays open only because the listed current
+    # evidence gate files are absent from the fixture.
+    assert quality["details"]["legacy_clearance_gating_retired"] is False
+    assert not quality["details"]["direct_off_exactness_boundary"][
+        "direct_off_failing_cases"
+    ]
+    assert quality["details"]["missing_evidence"]
+    assert quality["caveat"] == "Listed evidence files are missing or empty."
     open_requirements = [
         item["requirement"] for item in digest["requirements"] if item["status"] == "open"
     ]
@@ -10254,9 +10138,13 @@ def test_objective_proof_digest_accepts_dsv4_quality_clearance_artifact(tmp_path
         "DSV4 long-output/code/file-generation quality is release-cleared",
     ]
 
+    # 2026-08-16 (ledger row 151): the failing live exactness payload goes
+    # into the bundled-after artifact — the new head of the prompt-rail chain
+    # (also serving the token-tail and bundle-defaults gates) — and it must
+    # still hold the row open on its own.
     _write_json(
         tmp_path,
-        "build/current-dsv4-route-mode-code-exactness-source-explicit-off-subset-20260524-1418.json",
+        "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
         {
             "status": "fail",
             "cases": [
@@ -10288,7 +10176,19 @@ def test_objective_proof_digest_accepts_dsv4_quality_clearance_artifact(tmp_path
     assert quality["details"]["failed_quality_gates"] == [
         {
             "gate": "current_installed_prompt_rail_exactness_probe",
-            "artifact": "build/current-dsv4-route-mode-code-exactness-source-explicit-off-subset-20260524-1418.json",
+            "artifact": "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
+            "status": "fail",
+            "failed_cases": ["chat_off"],
+        },
+        {
+            "gate": "current_source_token_tail_direct_vs_requested_thinking_exactness_subset",
+            "artifact": "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
+            "status": "fail",
+            "failed_cases": ["chat_off"],
+        },
+        {
+            "gate": "current_source_bundle_defaults_exactness_subset",
+            "artifact": "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
             "status": "fail",
             "failed_cases": ["chat_off"],
         },

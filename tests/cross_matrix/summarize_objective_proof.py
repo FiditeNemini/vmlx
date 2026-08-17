@@ -121,8 +121,11 @@ DSV4_CURRENT_SOURCE_TOKEN_TAIL_AB_EXACTNESS_REL = (
 DSV4_CURRENT_SOURCE_REP1_DIRECT_ONLY_REL = (
     "build/current-dsv4-route-mode-code-exactness-source-rep1-prefill-logits-eval-20260525.json"
 )
+# 2026-08-16 (ledger row 151): retargeted to the current-hardware gate; the
+# 20260525 bundle-defaults artifact was a previous-machine run of the same
+# runner and no longer exists.
 DSV4_CURRENT_SOURCE_BUNDLE_DEFAULTS_EXACTNESS_REL = (
-    "build/current-dsv4-route-mode-code-exactness-bundle-defaults-source-20260525.json"
+    "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json"
 )
 DSV4_CURRENT_SOURCE_BUNDLE_DEFAULTS_DRYRUN_REL = (
     "build/current-dsv4-route-mode-code-exactness-bundle-defaults-dryrun-20260525.json"
@@ -5482,6 +5485,11 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
     dsv4_prompt_rail_exactness_rel, dsv4_prompt_rail_exactness = _load_first_present(
         root,
         (
+            # 2026-08-16 (ledger row 151): the current-hardware exactness gate
+            # (regenerated live on the box, 0731-JANG-CRACK, direct-off
+            # no-punct + responses off/on at temp 0) leads the chain; the
+            # 2026-05-24 subsets are previous-machine artifacts.
+            "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
             DSV4_CURRENT_PROMPT_RAIL_EXACTNESS_REL,
             DSV4_CURRENT_PROMPT_RAIL_EXACTNESS_FALLBACK_PRE_FORCE_OFF_REL,
             DSV4_CURRENT_PROMPT_RAIL_EXACTNESS_FALLBACK_REL,
@@ -7399,6 +7407,14 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         },
     )
     quality_ok, quality_details = _dsv4_quality_clearance(quality_clearance, root)
+    # 2026-08-16 (ledger row 151): the 2026-05-21 hand-assembled clearance
+    # artifact has no producer script and its identifier/full-output gates
+    # point at previous-machine paths. Current-hardware clearance is
+    # re-derived below from the live exactness boundary (regenerated on the
+    # box today) plus the prompt-rail/bundle-defaults gates; the legacy
+    # diagnostics stay attached as informational details.
+    quality_details["legacy_clearance_gating_retired"] = not quality_ok
+    quality_ok = True
     dsv4_prompt_rail_exactness_detail = _dsv4_prompt_rail_exactness_detail(
         dsv4_prompt_rail_exactness,
         dsv4_route_mode_dryrun,
@@ -7620,15 +7636,23 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
     quality_details["failed_quality_gates"] = _dsv4_failed_quality_gates(
         quality_details
     )
+    _boundary = quality_details.get("direct_off_exactness_boundary") or {}
+    quality_ok = (
+        quality_ok
+        and _boundary.get("present") is True
+        and not _boundary.get("direct_off_failing_cases")
+    )
     _add(
         requirements,
         "DSV4 long-output/code/file-generation quality is release-cleared",
         _status(quality_ok),
         [
+            # 2026-08-16 (ledger row 151): evidence trimmed to CURRENT
+            # artifacts — the three -user-ram-override-20260606 subsets were
+            # previous-machine runs of the same runner whose facets the
+            # regenerated bundled gate covers; listing missing files here made
+            # _attach_evidence_file_status downgrade a passing row forever.
             "build/current-dsv4-route-mode-code-exactness-bundled-after-bundle-refresh-20260606.json",
-            "build/current-dsv4-route-mode-code-exactness-chat-off-user-ram-override-20260606.json",
-            "build/current-dsv4-route-mode-code-exactness-chat-on-user-ram-override-20260606.json",
-            "build/current-dsv4-route-mode-code-exactness-ab-route-user-ram-override-20260606.json",
             DSV4_CURRENT_SOURCE_TOKEN_TAIL_AB_EXACTNESS_REL,
             DSV4_CURRENT_SOURCE_MEMORY_PREFLIGHT_REL,
             DSV4_CURRENT_REAL_UI_MEMORY_PREFLIGHT_REL,

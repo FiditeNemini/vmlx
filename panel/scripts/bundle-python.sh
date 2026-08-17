@@ -281,6 +281,14 @@ MLX_VLM_VERSION="0.5.0"
 MFLUX_VERSION="0.17.5"
 OPENCV_VERSION="4.13.0.92"
 MLX_AUDIO_VERSION="0.4.6"
+# The MCP SDK was installed as an unpinned "mcp>=1.0.0", so every re-bundle took
+# whatever PyPI had latest — which is how the shipped bundle silently moved to a
+# MAJOR version (2.0.0) while uv.lock still records 1.26.0. Nothing broke,
+# because vmlx_engine/mcp/client.py only uses ClientSession,
+# StdioServerParameters, stdio_client and sse_client, all of which exist in both
+# — but a future 3.x would land the same way, unchosen and unverified. Pin it to
+# the version we actually ship and test, like every other dependency here.
+MCP_VERSION="2.0.0"
 
 detect_mlx_wheel_platform() {
   local requested="${VMLX_BUNDLE_MLX_PLATFORM:-${VMLINUX_BUNDLE_MLX_PLATFORM:-compat}}"
@@ -335,7 +343,7 @@ echo "==> Installing dependencies..."
   "numpy>=1.24.0" "pillow>=10.0.0" \
   "opencv-python==$OPENCV_VERSION" \
   "fastapi>=0.100.0" "uvicorn>=0.23.0" \
-  "mcp>=1.0.0" "jsonschema>=4.0.0" \
+  "mcp==$MCP_VERSION" "jsonschema>=4.0.0" \
   "psutil>=5.9.0" "tqdm>=4.66.0" "pyyaml>=6.0" \
   "requests>=2.28.0" "tabulate>=0.9.0" "mlx-embeddings>=0.0.5" \
   "tiktoken>=0.7.0" \

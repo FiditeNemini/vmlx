@@ -1403,3 +1403,56 @@ def test_r20_release_builder_rejects_single_flavor_python_override_and_wrong_tea
     )
     assert foreign_venv.returncode == 1
     assert "pyvenv.cfg" in foreign_venv.stderr
+
+
+def test_bundle_python_pins_the_mcp_sdk_instead_of_a_floor():
+    """An unpinned floor let the shipped MCP SDK cross a MAJOR version silently.
+
+    The bundler installed "mcp>=1.0.0", so every re-bundle took whatever PyPI
+    had latest; that is how panel/bundled-python moved to 2.0.0 while uv.lock
+    still records 1.26.0. Nothing broke - vmlx_engine/mcp/client.py only uses
+    ClientSession, StdioServerParameters, stdio_client and sse_client, which
+    exist in both - but a future 3.x would land the same way, unchosen.
+    """
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+
+    assert 'MCP_VERSION="' in bundler, "the MCP SDK version must be pinned in one place"
+    assert '"mcp==$MCP_VERSION"' in bundler
+    # Check INSTALL lines only: the comment above the pin quotes the old floor
+    # verbatim to explain it, and a whole-file search flags that explanation.
+    install_lines = [
+        line
+        for line in bundler.splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert not [line for line in install_lines if '"mcp>=' in line], (
+        "an unpinned MCP floor lets a re-bundle change majors"
+    )
+
+
+def test_bundled_python_ships_the_pinned_mcp_sdk():
+    """The pin has to match what the shipped bundle actually contains."""
+    import re
+    import subprocess
+
+    bundled = Path("panel/bundled-python/python/bin/python3")
+    if not bundled.exists():
+        return
+
+    bundler = Path("panel/scripts/bundle-python.sh").read_text()
+    match = re.search(r'MCP_VERSION="([^"]+)"', bundler)
+    assert match, "MCP_VERSION pin not found"
+
+    shipped = subprocess.run(
+        [
+            str(bundled),
+            "-c",
+            "import importlib.metadata as m; print(m.version('mcp'))",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if shipped.returncode != 0:
+        return
+    assert shipped.stdout.strip() == match.group(1)

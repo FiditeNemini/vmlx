@@ -62,6 +62,11 @@ _OVERHEAD_FALLBACK = 96
 _IMAGE_TOKEN_ID = 151660  # <|imgpad|>
 _VIDEO_TOKEN_ID = 151680  # <|video_pad|> — consumed here, never emitted
 _AUDIO_TOKEN_ID = 151720  # <|audio_comp_pad|>
+# Negative, so it can never collide with a real vocabulary id. Video frames are
+# expanded into this first and converted to <|imgpad|> only after the image
+# placeholders have been resolved — otherwise the image expansion counts the
+# video's own expanded tokens as unexpanded placeholders.
+_VIDEO_EXPANSION_SENTINEL = -991680
 
 
 # --------------------------------------------------------------------- shared
@@ -769,16 +774,48 @@ class Dots3NoteProcessor:
             if len(text) != 1:
                 raise ValueError("dots3_note processor handles one prompt at a time.")
             text = text[0]
-        if videos is not None and (images is not None or audio is not None):
-            # PR restriction: a native video cannot mix with separate
-            # image/audio inputs (its frames already own the image path).
+        # A video and separate images CAN coexist — a multiturn chat that showed
+        # a video on one turn and an image on a later turn sends both, because
+        # media is collected across the whole message history. What must not
+        # happen is the two branches overwriting each other's `pixel_values`:
+        # both expand to image_token_id, so the tower's features have to arrive
+        # in the SAME ORDER as the placeholders in the prompt or the scatter
+        # reads shifted features as real ones (silent garbage, the row-148
+        # class). Order is therefore taken from the PROMPT below, never from
+        # the order these branches happen to run in.
+        #
+        # Audio still cannot mix with video: audio has its own token id and
+        # feature path, and no ordering evidence has been gathered for it.
+        if videos is not None and audio is not None:
             raise ValueError(
                 "dots3_note does not support mixing a video with separate "
-                "image/audio inputs"
+                "audio inputs"
             )
 
         ids = list(self.tokenizer.encode(text or "", add_special_tokens=False))
         out: Dict[str, Any] = {}
+        # (placeholder_position, patches, grids) per visual payload. Merged in
+        # prompt order below so the tower's rows line up with the scatter.
+        _visual_parts: list = []
+
+        _first_video_at = (
+            ids.index(self.video_token_id) if self.video_token_id in ids else None
+        )
+        _first_image_at = (
+            ids.index(self.image_token_id) if self.image_token_id in ids else None
+        )
+        if (
+            videos is not None
+            and images is not None
+            and (_first_video_at is None or _first_image_at is None)
+        ):
+            # Both payloads present but the prompt does not carry both kinds of
+            # placeholder: we cannot know where the features belong. Refusing is
+            # the only safe answer.
+            raise ValueError(
+                "dots3_note: video and image payloads were both supplied but the "
+                "prompt does not contain both a video and an image placeholder"
+            )
         merge = self.image_processor.merge_size
         expected_image_tokens = 0
 
@@ -799,11 +836,11 @@ class Dots3NoteProcessor:
                 ids,
                 self.video_token_id,
                 [total],
-                emit_id=self.image_token_id,
+                emit_id=_VIDEO_EXPANSION_SENTINEL,
                 modality="video",
             )
-            out["pixel_values"] = patches
-            out["image_grid_thw"] = np.asarray(grids, dtype=np.int64)
+            _visual_parts.append((_first_video_at if _first_video_at is not None else 0,
+                                  patches, list(grids)))
             expected_image_tokens += total
 
         if images is not None:
@@ -814,8 +851,8 @@ class Dots3NoteProcessor:
             ids = expand_media_placeholders(
                 ids, self.image_token_id, counts, modality="image"
             )
-            out["pixel_values"] = patches
-            out["image_grid_thw"] = np.asarray(grids, dtype=np.int64)
+            _visual_parts.append((_first_image_at if _first_image_at is not None else 0,
+                                  patches, list(grids)))
             expected_image_tokens += sum(counts)
 
         if audio is not None:
@@ -838,6 +875,28 @@ class Dots3NoteProcessor:
                     f"dots3_note: {placed} audio token(s) in the prompt but the "
                     f"tower will emit {sum(token_lengths)} embedding row(s)"
                 )
+
+        if _VIDEO_EXPANSION_SENTINEL in ids:
+            # Video frames ride the IMAGE token path; the sentinel existed only
+            # so the image branch above could tell a real <|imgpad|> apart from
+            # an already-expanded video frame.
+            ids = [
+                self.image_token_id if t == _VIDEO_EXPANSION_SENTINEL else t
+                for t in ids
+            ]
+
+        if _visual_parts:
+            _visual_parts.sort(key=lambda part: part[0])
+            _all_patches = [p for _, p, _ in _visual_parts]
+            _all_grids: list = []
+            for _, _, grids_part in _visual_parts:
+                _all_grids.extend(grids_part)
+            out["pixel_values"] = (
+                _all_patches[0]
+                if len(_all_patches) == 1
+                else np.concatenate([np.asarray(p) for p in _all_patches], axis=0)
+            )
+            out["image_grid_thw"] = np.asarray(_all_grids, dtype=np.int64)
 
         if expected_image_tokens:
             placed = sum(1 for t in ids if t == self.image_token_id)

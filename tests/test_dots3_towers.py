@@ -328,12 +328,23 @@ class TestVideoProcessor:
         assert grids[0] == (1, 22, 22)
         assert sum(merged_token_count(g, 2) for g in grids) == 968
 
-    def test_video_cannot_mix_with_images(self):
+    def test_image_payload_without_an_image_placeholder_is_refused(self):
+        """An image we have nowhere to put must still be refused.
+
+        2026-08-17: this used to assert a BLANKET ban on video+image, which
+        broke real multiturn chats — media is collected across the whole
+        history, so showing a video on one turn and an image on a later turn
+        legitimately sends both (see tests/test_dots3_mixed_media.py). The ban
+        was replaced by an ordered merge, but the underlying safety still
+        holds and is now stated precisely: this prompt carries ONLY a video
+        placeholder, so there is no position for the image's features and
+        guessing would scatter shifted rows.
+        """
         from PIL import Image
 
         tokenizer = FakeTokenizer({"vid": [1, VID_ID, 2]})
         processor = Dots3NoteProcessor(tokenizer)
-        with pytest.raises(ValueError, match="mixing"):
+        with pytest.raises(ValueError, match="placeholder"):
             processor(
                 text="vid",
                 videos=np.zeros((4, 224, 224, 3), dtype=np.uint8),

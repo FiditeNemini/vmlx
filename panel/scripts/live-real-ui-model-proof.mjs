@@ -11173,6 +11173,44 @@ async function main() {
                 mentionedInDrawer: /native mtp/i.test(bodyText),
               };
             })(),
+            // MCP had ZERO coverage in this harness — every MCP claim so far
+            // came from the policy-contract artifact and the API, never from
+            // the app. Same gap that audio and the SSD-only lane had. Captured
+            // from the same open drawer as the cache and MTP controls: the
+            // config-file field, both policy textareas (servers / tools) and
+            // any discovered server rows with their transport, state and tool
+            // count. Read-only for now; an assertion follows once the shape is
+            // observed both with MCP configured and without.
+            // (No backticks anywhere in here: this block is inside the in-page
+            // evaluate() template literal and one would end the literal.)
+            mcpControls: (() => {
+              const labels = [...(drawer?.querySelectorAll('label') || [])];
+              const configLabel = labels.find((l) => /mcp config file/i.test(l.innerText || ''));
+              const serversLabel = labels.find((l) => /enabled mcp servers|mcp servers/i.test(l.innerText || ''));
+              const toolsLabel = labels.find((l) => /enabled mcp tools|mcp tools/i.test(l.innerText || ''));
+              const configInput = [...(drawer?.querySelectorAll('input') || [])]
+                .find((i) => /mcp-config\\.json/i.test(i.placeholder || ''));
+              const areas = [...(drawer?.querySelectorAll('textarea') || [])];
+              const serversArea = areas.find((a) => /filesystem,github/i.test(a.placeholder || ''));
+              const toolsArea = areas.find((a) => /filesystem__read_file/i.test(a.placeholder || ''));
+              const serverRows = [...(drawer?.querySelectorAll('span') || [])]
+                .filter((s) => /\\u00b7/.test(s.innerText || '') && /(stdio|http|sse|mcp)/i.test(s.innerText || ''))
+                .map((s) => (s.innerText || '').replace(/\\s+/g, ' ').trim())
+                .slice(0, 6);
+              return {
+                sectionVisible: /mcp tools/i.test(bodyText),
+                configFieldVisible: !!configLabel,
+                configInputPresent: !!configInput,
+                configValue: configInput ? String(configInput.value || '') : null,
+                enabledServersFieldVisible: !!serversLabel,
+                enabledServersPresent: !!serversArea,
+                enabledServersValue: serversArea ? String(serversArea.value || '') : null,
+                enabledToolsFieldVisible: !!toolsLabel,
+                enabledToolsPresent: !!toolsArea,
+                enabledToolsValue: toolsArea ? String(toolsArea.value || '') : null,
+                discoveredServerRows: serverRows,
+              };
+            })(),
             textHead: bodyText.slice(0, 1600),
           };
         })()

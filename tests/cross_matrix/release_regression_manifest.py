@@ -21,6 +21,8 @@ from tests.cross_matrix.run_model_family_detection_contract import (
 from tests.cross_matrix.run_current_regression_suite import (
     CURRENT_OBJECTIVE_DIGEST_ARTIFACT,
     CURRENT_SUITE_SOURCE_HASH_FILES,
+    DEFERRED_RELEASE_OPEN_REQUIREMENTS,
+    EXPECTED_OPEN_REQUIREMENTS as EXPECTED_CURRENT_OPEN_REQUIREMENTS,
 )
 
 CURRENT_RELEASE_REGRESSION_MANIFEST_ARTIFACT = (
@@ -1168,28 +1170,12 @@ def _live_smoke_cache_validation_failures(request: dict[str, Any]) -> list[str]:
     return failures
 
 
-EXPECTED_CURRENT_OPEN_REQUIREMENTS = [
-    # 2026-08-16 (ledger row 155): the remaining three rows are all held by
-    # the SAME two bundle-quality defects, reproduced deterministically twice
-    # at temp 0 on the box (lfm25 exact-code truncation; zaya_text
-    # AppleScript-idiom answers + empty tool-continuation visible). Closing
-    # them requires Eric's jang-side Zaya-8B + LFM2.5-8B re-quants — runtime
-    # is not at fault (all other families pass the same bars).
-    "Cross-family live multi-turn smoke matrix is release-cleared",
-    "Real Electron UI unblocked non-MiMo live model matrix is proven",
-    "Real Electron UI cross-family live model matrix is release-cleared",
-]
-DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
-    # 2026-08-16 (ledger row 155): the remaining three rows are all held by
-    # the SAME two bundle-quality defects, reproduced deterministically twice
-    # at temp 0 on the box (lfm25 exact-code truncation; zaya_text
-    # AppleScript-idiom answers + empty tool-continuation visible). Closing
-    # them requires Eric's jang-side Zaya-8B + LFM2.5-8B re-quants — runtime
-    # is not at fault (all other families pass the same bars).
-    "Cross-family live multi-turn smoke matrix is release-cleared",
-    "Real Electron UI unblocked non-MiMo live model matrix is proven",
-    "Real Electron UI cross-family live model matrix is release-cleared",
-}
+# EXPECTED_CURRENT_OPEN_REQUIREMENTS and DEFERRED_RELEASE_OPEN_REQUIREMENTS are
+# imported from run_current_regression_suite above — that module owns them.
+# They used to be duplicated here and drifted on 2026-08-17 (ledger row 253):
+# this file dropped a closed requirement while the runner kept it, so the
+# regression-suite artifact and the objective digest disagreed and no gate
+# could pass. Do not re-declare them here.
 DEFERRED_RELEASE_BLOCKER_IDS = {
     "real_ui_live_model_matrix": "deferred_per_20260602_emergency_release_scope",
 }
@@ -8203,12 +8189,24 @@ def _validate_objective_digest_open_requirement_details(
 def _validate_open_requirement_details(
     open_requirement_details: dict[str, Any],
 ) -> list[dict[str, str]]:
+    # Each block below validates the OPEN-requirement detail row for one
+    # requirement. A row that is PRESENT is always validated in full. A row
+    # that is ABSENT is only a failure while the requirement is still expected
+    # open: a requirement that has since been PROVEN carries no open detail
+    # row, and demanding one turns a closure into a permanent gate failure
+    # (2026-08-17, ledger row 253). A requirement that reopens without being
+    # declared here is still caught by the separate
+    # unexpected_open_requirements check, so nothing is weakened.
     failures: list[dict[str, str]] = []
     real_ui_requirement = (
         "Real Electron UI cross-family live model matrix is release-cleared"
     )
     real_ui_row = open_requirement_details.get(real_ui_requirement)
-    if not isinstance(real_ui_row, dict):
+    if not isinstance(real_ui_row, dict) and (
+        real_ui_requirement not in EXPECTED_CURRENT_OPEN_REQUIREMENTS
+    ):
+        pass
+    elif not isinstance(real_ui_row, dict):
         failures.append(
             {
                 "requirement": real_ui_requirement,
@@ -8273,12 +8271,15 @@ def _validate_open_requirement_details(
     requirement = "DSV4 long-output/code/file-generation quality is release-cleared"
     row = open_requirement_details.get(requirement)
     if not isinstance(row, dict):
-        failures.append(
-            {
-                "requirement": requirement,
-                "reason": "missing_or_stale_exact_code_root_boundary",
-            }
-        )
+        # Absent row: only a failure while the requirement is still expected
+        # open. Once proven it has no open-requirement detail to carry.
+        if requirement in EXPECTED_CURRENT_OPEN_REQUIREMENTS:
+            failures.append(
+                {
+                    "requirement": requirement,
+                    "reason": "missing_or_stale_exact_code_root_boundary",
+                }
+            )
         return failures
     details = row.get("details")
     if not isinstance(details, dict):

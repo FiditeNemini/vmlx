@@ -59,26 +59,71 @@ def test_current_regression_suite_keeps_declared_known_blockers_open(tmp_path, m
 
 
 def test_current_regression_suite_carries_non_mimo_matrix_gap_with_rationale():
-    """2026-08-16 (ledger row 155): after the box live sessions, the three
-    remaining expected-open rows are all held by the SAME two bundle-quality
-    defects (lfm25 exact-code truncation, zaya_text AppleScript-idiom
-    answers) and close only with Eric's jang-side re-quants. The entry must
-    keep a written rationale citing that closure condition."""
+    """2026-08-16 (ledger row 155): the remaining expected-open rows are held
+    by the SAME two bundle-quality defects (lfm25 exact-code truncation,
+    zaya_text AppleScript-idiom answers) and close only with Eric's jang-side
+    re-quants. The entries must keep a written rationale citing that closure
+    condition.
+
+    2026-08-17 (ledger row 253): the non-MiMo real-UI matrix row CLOSED — the
+    objective digest records it pass with eight real-UI proof artifacts — so it
+    must NOT be listed as expected-open any more. Keeping it there let the
+    regression-suite artifact contradict the digest and pinned the gate red.
+    """
     import inspect
 
     from tests.cross_matrix import run_current_regression_suite as suite
 
     assert (
         "Real Electron UI unblocked non-MiMo live model matrix is proven"
-        in suite.EXPECTED_OPEN_REQUIREMENTS
-    )
+        not in suite.EXPECTED_OPEN_REQUIREMENTS
+    ), "the non-MiMo real-UI matrix row is proven; it must not be expected-open"
+    assert suite.EXPECTED_OPEN_REQUIREMENTS == [
+        "Cross-family live multi-turn smoke matrix is release-cleared",
+        "Real Electron UI cross-family live model matrix is release-cleared",
+    ]
     source = inspect.getsource(suite)
     assert "ledger row 155" in source, (
         "the expected-open entry must cite the consolidating ledger row"
     )
+    assert "ledger row 253" in source, (
+        "the closure of the non-MiMo real-UI row must cite its ledger row"
+    )
     assert "re-quants" in source, (
         "the expected-open entry must document its closure condition"
     )
+
+
+def test_expected_open_requirements_have_exactly_one_definition():
+    """2026-08-17 (ledger row 253): release_regression_manifest.py kept its own
+    copy of these two constants and they drifted from the runner's, so the
+    regression-suite artifact and the objective digest disagreed about which
+    requirements were open and every gate stayed red. The manifest must import
+    them, never re-declare them."""
+    import inspect
+
+    from tests.cross_matrix import release_regression_manifest as manifest
+    from tests.cross_matrix import run_current_regression_suite as suite
+
+    assert (
+        manifest.EXPECTED_CURRENT_OPEN_REQUIREMENTS is suite.EXPECTED_OPEN_REQUIREMENTS
+    ), "the manifest must reuse the runner's list object, not a copy"
+    assert (
+        manifest.DEFERRED_RELEASE_OPEN_REQUIREMENTS
+        is suite.DEFERRED_RELEASE_OPEN_REQUIREMENTS
+    ), "the manifest must reuse the runner's deferred set object, not a copy"
+
+    manifest_source = inspect.getsource(manifest)
+    for line in manifest_source.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert not stripped.startswith("EXPECTED_CURRENT_OPEN_REQUIREMENTS = "), (
+            "the manifest must not re-declare EXPECTED_CURRENT_OPEN_REQUIREMENTS"
+        )
+        assert not stripped.startswith("DEFERRED_RELEASE_OPEN_REQUIREMENTS = "), (
+            "the manifest must not re-declare DEFERRED_RELEASE_OPEN_REQUIREMENTS"
+        )
 
 
 def test_current_regression_suite_keeps_dsv4_safe_default_and_historical_tool_diagnostic_closed():

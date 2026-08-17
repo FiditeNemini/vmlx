@@ -28,26 +28,33 @@ DEFAULT_OUT = Path(
 DEFAULT_STEP_TIMEOUT_SEC = 900.0
 STEP_TIMEOUT_RETURNCODE = 124
 
+# SINGLE SOURCE OF TRUTH for the expected-open / deferred release requirement
+# sets. release_regression_manifest.py imports these instead of keeping its own
+# copy: the two lists silently drifted once (2026-08-17, ledger row 253), which
+# left the regression-suite artifact declaring a requirement open that the
+# objective digest had already recorded as proven, and no gate could pass.
 EXPECTED_OPEN_REQUIREMENTS = [
-    # 2026-08-16 (ledger row 155): the remaining three rows are all held by
-    # the SAME two bundle-quality defects, reproduced deterministically twice
-    # at temp 0 on the box (lfm25 exact-code truncation; zaya_text
-    # AppleScript-idiom answers + empty tool-continuation visible). Closing
-    # them requires Eric's jang-side Zaya-8B + LFM2.5-8B re-quants — runtime
-    # is not at fault (all other families pass the same bars).
+    # 2026-08-16 (ledger row 155): the remaining rows are held by the SAME two
+    # bundle-quality defects, reproduced deterministically twice at temp 0 on
+    # the box (lfm25 exact-code truncation; zaya_text AppleScript-idiom answers
+    # + empty tool-continuation visible). Closing them requires Eric's
+    # jang-side Zaya-8B + LFM2.5-8B re-quants — runtime is not at fault (all
+    # other families pass the same bars).
+    #
+    # 2026-08-17 (ledger row 253): "Real Electron UI unblocked non-MiMo live
+    # model matrix is proven" CLOSED and removed. The objective digest records
+    # it `status: pass` with eight real-UI proof artifacts and
+    # `excluded_families: ["zaya_text"]` carried by the evidence-gated runtime
+    # blocker. Removing it TIGHTENS the gate: a reopen now surfaces as an
+    # UNEXPECTED open requirement instead of being tolerated.
     "Cross-family live multi-turn smoke matrix is release-cleared",
-    "Real Electron UI unblocked non-MiMo live model matrix is proven",
     "Real Electron UI cross-family live model matrix is release-cleared",
 ]
 DEFERRED_RELEASE_OPEN_REQUIREMENTS = {
-    # 2026-08-16 (ledger row 155): the remaining three rows are all held by
-    # the SAME two bundle-quality defects, reproduced deterministically twice
-    # at temp 0 on the box (lfm25 exact-code truncation; zaya_text
-    # AppleScript-idiom answers + empty tool-continuation visible). Closing
-    # them requires Eric's jang-side Zaya-8B + LFM2.5-8B re-quants — runtime
-    # is not at fault (all other families pass the same bars).
+    # Same provenance as EXPECTED_OPEN_REQUIREMENTS above; the non-MiMo real-UI
+    # matrix requirement was removed here too on 2026-08-17 because it is
+    # proven, not deferred.
     "Cross-family live multi-turn smoke matrix is release-cleared",
-    "Real Electron UI unblocked non-MiMo live model matrix is proven",
     "Real Electron UI cross-family live model matrix is release-cleared",
 }
 

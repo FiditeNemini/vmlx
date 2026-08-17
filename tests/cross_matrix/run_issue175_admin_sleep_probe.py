@@ -17,6 +17,9 @@ from typing import Any
 
 
 DEFAULT_OUT = Path("build/current-issue175-admin-sleep-probe-installed-20260527.json")
+# Room for an actual answer after any reasoning preamble; 32 was too small and
+# made every visible-content check unsatisfiable on reasoning models.
+DEFAULT_MAX_TOKENS = 256
 DEFAULT_MODEL = Path("/Users/example/models/JANGQ/ZAYA1-8B-MXFP4")
 DEFAULT_INSTALLED_PYTHON = Path(
     "/Applications/vMLX.app/Contents/Resources/bundled-python/python/bin/python3"
@@ -98,17 +101,35 @@ def _visible_from_chat_response(body: Any) -> bool:
     return isinstance(content, str) and bool(content.strip())
 
 
-def _chat(base: str, prompt: str, timeout: float) -> dict[str, Any]:
+def _chat(
+    base: str,
+    prompt: str,
+    timeout: float,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    enable_thinking: bool | None = False,
+) -> dict[str, Any]:
+    # 2026-08-17 (ledger row 255): this probe asserts VISIBLE content after each
+    # wake, but it used to send max_tokens=32 with thinking left at the bundle
+    # default. On any reasoning-capable model the whole budget goes to
+    # reasoning_content, the response comes back finish_reason=length with
+    # content=null, and every visible-content check fails no matter how healthy
+    # the sleep/wake lifecycle is (observed live on Gemma-4-26B: 32/32
+    # completion tokens, all reasoning). Turn thinking off and give the answer
+    # room, so the check measures the lifecycle it claims to measure.
+    body: dict[str, Any] = {
+        "model": "ZAYA1-8B-MXFP4",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "top_p": 1,
+    }
+    if enable_thinking is not None:
+        body["enable_thinking"] = enable_thinking
+        body["chat_template_kwargs"] = {"enable_thinking": enable_thinking}
     result = _request_json(
         "POST",
         f"{base}/v1/chat/completions",
-        {
-            "model": "ZAYA1-8B-MXFP4",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 32,
-            "temperature": 0,
-            "top_p": 1,
-        },
+        body,
         timeout=timeout,
     )
     return {**result, "ok": result["code"] == 200, "visible": _visible_from_chat_response(result.get("body"))}
@@ -161,16 +182,16 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             health_ready = _wait_health(port, proc, args.load_timeout)
             payload: dict[str, Any] = {
                 "health_ready": health_ready,
-                "initial_request": _chat(base, "Reply with the word READY.", args.request_timeout),
+                "initial_request": _chat(base, "Reply with the word READY.", args.request_timeout, args.max_tokens, args.enable_thinking),
                 "cache_before_sleep": _request_json("GET", f"{base}/v1/cache/stats", timeout=5),
                 "soft_sleep": _request_json("POST", f"{base}/admin/soft-sleep", {}, timeout=20),
                 "health_soft_sleep": _request_json("GET", f"{base}/health", timeout=5),
                 "soft_wake": _request_json("POST", f"{base}/admin/wake", {}, timeout=args.wake_timeout),
-                "after_soft_request": _chat(base, "Reply with the word SOFTWAKE.", args.request_timeout),
+                "after_soft_request": _chat(base, "Reply with the word SOFTWAKE.", args.request_timeout, args.max_tokens, args.enable_thinking),
                 "deep_sleep": _request_json("POST", f"{base}/admin/deep-sleep", {}, timeout=30),
                 "health_deep_sleep": _request_json("GET", f"{base}/health", timeout=5),
                 "deep_wake": _request_json("POST", f"{base}/admin/wake", {}, timeout=args.wake_timeout),
-                "after_deep_request": _chat(base, "Reply with the word DEEPWAKE.", args.request_timeout),
+                "after_deep_request": _chat(base, "Reply with the word DEEPWAKE.", args.request_timeout, args.max_tokens, args.enable_thinking),
                 "cache_after_wake": _request_json("GET", f"{base}/v1/cache/stats", timeout=5),
             }
             payload["classification"] = classify_probe(payload)
@@ -196,6 +217,11 @@ def main() -> int:
     parser.add_argument("--load-timeout", type=float, default=120)
     parser.add_argument("--request-timeout", type=float, default=60)
     parser.add_argument("--wake-timeout", type=int, default=120)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    thinking = parser.add_mutually_exclusive_group()
+    thinking.add_argument("--enable-thinking", dest="enable_thinking", action="store_true")
+    thinking.add_argument("--disable-thinking", dest="enable_thinking", action="store_false")
+    parser.set_defaults(enable_thinking=False)
     args = parser.parse_args()
     result = run_probe(args)
     args.out.parent.mkdir(parents=True, exist_ok=True)

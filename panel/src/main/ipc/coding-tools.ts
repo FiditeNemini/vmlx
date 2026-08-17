@@ -1,10 +1,12 @@
 // MLX Studio — Coding Tool Integration IPC
-// Non-destructive config management for Claude Code, Codex CLI, OpenCode, OpenClaw
+// Non-destructive config management for Claude Code, Codex CLI, OpenCode,
+// OpenClaw, and Hermes Agent
 import { ipcMain } from 'electron'
 import { execFileSync } from 'child_process'
 import { homedir } from 'os'
 import { join } from 'path'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { dump as dumpYAML, load as loadYAML } from 'js-yaml'
 
 const MLXSTUDIO_TAG = '_mlxstudio'  // Tag to identify our entries
 
@@ -423,9 +425,122 @@ const openClaw: ToolConfig = {
   },
 }
 
+// ═══ Hermes Agent (NousResearch) ═══
+// Config: ~/.hermes/config.yaml — a `providers` MAP (not a list). Verified
+// against the official docs, not guessed:
+//   providers:
+//     <id>:
+//       base_url: "https://host/v1"
+//       api_key: "..."
+//       models: { <model>: { timeout_seconds: N } }
+// Hermes appends /chat/completions itself, so base_url must END at /v1 — a URL
+// that already includes the path (or a trailing slash) 404s. Setting base_url
+// makes Hermes call that endpoint directly instead of a built-in provider.
+//
+// Parsed with a real YAML library rather than regex: this file belongs to the
+// user and may hold arbitrary unrelated settings, and the regex-edited TOML
+// path in this same module is exactly the fragility worth not repeating.
+const HERMES_YAML = join(homedir(), '.hermes', 'config.yaml')
+const HERMES_PROVIDER_KEY = 'mlxstudio'
+
+function readHermesConfig(path: string, forDisplay: boolean): any {
+  if (!existsSync(path)) return null
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf-8')
+  } catch (err) {
+    if (forDisplay) return null
+    throw new UnreadableConfigError(path, err)
+  }
+  if (!raw.trim()) return null
+  try {
+    const doc = loadYAML(raw)
+    // A YAML scalar/list at the root is not a config we can safely merge into.
+    if (doc === null || doc === undefined) return null
+    if (typeof doc !== 'object' || Array.isArray(doc)) {
+      throw new Error('expected a YAML mapping at the document root')
+    }
+    return doc
+  } catch (err) {
+    if (forDisplay) return null
+    throw new UnreadableConfigError(path, err)
+  }
+}
+
+function writeHermesConfig(path: string, doc: any): void {
+  if (existsSync(path)) {
+    try { copyFileSync(path, path + '.bak') } catch {}
+  }
+  const dir = path.substring(0, path.lastIndexOf('/'))
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  writeFileSync(path, dumpYAML(doc, { lineWidth: 120, noRefs: true }), {
+    encoding: 'utf-8',
+    mode: 0o600,
+  })
+  try { chmodSync(path, 0o600) } catch {}
+}
+
+const hermesAgent: ToolConfig = {
+  detect: () => commandExists('hermes'),
+  installCmd: 'npm',
+  installArgs: ['install', '-g', '@nousresearch/hermes-agent'],
+  configPath: HERMES_YAML,
+  getEntries: () => {
+    const doc = readHermesConfig(HERMES_YAML, true)
+    const provider = doc?.providers?.[HERMES_PROVIDER_KEY]
+    if (!provider?.[MLXSTUDIO_TAG]) return []
+    const models = provider.models && typeof provider.models === 'object'
+      ? Object.keys(provider.models)
+      : []
+    const baseUrl = typeof provider.base_url === 'string' ? provider.base_url : ''
+    return models.length
+      ? models.map(m => ({ label: m, baseUrl }))
+      : [{ label: HERMES_PROVIDER_KEY, baseUrl }]
+  },
+  addEntry: (baseUrl, modelName) => {
+    const doc = readHermesConfig(HERMES_YAML, false) || {}
+    if (!doc.providers || typeof doc.providers !== 'object' || Array.isArray(doc.providers)) {
+      doc.providers = {}
+    }
+    const existing = doc.providers[HERMES_PROVIDER_KEY]
+    // Keep sibling models: like OpenClaw, one provider holds many models, so
+    // adding a second must not silently drop the first.
+    const models =
+      existing?.models && typeof existing.models === 'object' && !Array.isArray(existing.models)
+        ? { ...existing.models }
+        : {}
+    models[modelName] = { ...(models[modelName] || {}) }
+    doc.providers[HERMES_PROVIDER_KEY] = {
+      ...(existing && typeof existing === 'object' ? existing : {}),
+      // Hermes appends /chat/completions — end at /v1.
+      base_url: `${baseUrl}/v1`,
+      api_key: 'mlxstudio',
+      models,
+      [MLXSTUDIO_TAG]: true,
+    }
+    writeHermesConfig(HERMES_YAML, doc)
+  },
+  removeEntry: (label) => {
+    const doc = readHermesConfig(HERMES_YAML, false)
+    const provider = doc?.providers?.[HERMES_PROVIDER_KEY]
+    if (!provider) return
+    // Drop just this model when others remain; drop the provider when it was
+    // the last one, so no empty shell is left referencing our endpoint.
+    if (provider.models && typeof provider.models === 'object' && label in provider.models) {
+      delete provider.models[label]
+    }
+    if (!provider.models || Object.keys(provider.models).length === 0) {
+      delete doc.providers[HERMES_PROVIDER_KEY]
+      if (Object.keys(doc.providers).length === 0) delete doc.providers
+    }
+    writeHermesConfig(HERMES_YAML, doc)
+  },
+}
+
 const TOOLS: Record<string, ToolConfig> = {
   'claude-code': claudeCode,
   'codex': codexCli,
+  'hermes': hermesAgent,
   'opencode': openCode,
   'openclaw': openClaw,
 }

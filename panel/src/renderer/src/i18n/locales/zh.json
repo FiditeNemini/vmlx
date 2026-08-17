@@ -120,6 +120,7 @@
       "codexDesc": "OpenAI 编码代理",
       "opencodeDesc": "终端编码助手",
       "openclawDesc": "AI 代理框架",
+      "hermesDesc": "Nous Research 的 AI 代理",
       "install": "安装",
       "installed": "已安装",
       "autoConfigure": "自动配置",

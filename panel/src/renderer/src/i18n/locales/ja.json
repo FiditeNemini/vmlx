@@ -120,6 +120,7 @@
       "codexDesc": "OpenAI製コーディングエージェント",
       "opencodeDesc": "ターミナル用コーディングアシスタント",
       "openclawDesc": "AIエージェントフレームワーク",
+      "hermesDesc": "Nous Research の AI エージェント",
       "install": "インストール",
       "installed": "インストール済み",
       "autoConfigure": "自動設定",

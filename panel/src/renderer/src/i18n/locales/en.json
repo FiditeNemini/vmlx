@@ -120,6 +120,7 @@
       "codexDesc": "OpenAI coding agent",
       "opencodeDesc": "Terminal coding assistant",
       "openclawDesc": "AI agent framework",
+      "hermesDesc": "AI agent from Nous Research",
       "install": "Install",
       "installed": "Installed",
       "autoConfigure": "Auto-Configure",

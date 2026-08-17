@@ -120,6 +120,7 @@
       "codexDesc": "OpenAI 코딩 에이전트",
       "opencodeDesc": "터미널 코딩 어시스턴트",
       "openclawDesc": "AI 에이전트 프레임워크",
+      "hermesDesc": "Nous Research의 AI 에이전트",
       "install": "설치",
       "installed": "설치됨",
       "autoConfigure": "자동 구성",

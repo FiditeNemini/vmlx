@@ -116,6 +116,9 @@ export function CodingToolIntegration({ baseUrl, modelName, port }: CodingToolIn
     { id: 'codex', name: 'Codex CLI', descKey: 'api.codingTools.codexDesc', install: 'npm install -g @openai/codex\n# Or: brew install --cask codex', verify: 'codex --version', link: 'https://github.com/openai/codex' },
     { id: 'opencode', name: 'OpenCode', descKey: 'api.codingTools.opencodeDesc', install: 'npm install -g opencode', verify: 'opencode --version', link: 'https://opencode.ai' },
     { id: 'openclaw', name: 'OpenClaw', descKey: 'api.codingTools.openclawDesc', install: 'npm install -g openclaw@latest\nopenclaw onboard --install-daemon', verify: 'openclaw --version\nopenclaw doctor  # Validate config', link: 'https://github.com/openclaw/openclaw' },
+    // Hermes writes ~/.hermes/config.yaml (a providers MAP) and appends
+    // /chat/completions itself, so the base_url we store ends at /v1.
+    { id: 'hermes', name: 'Hermes Agent', descKey: 'api.codingTools.hermesDesc', install: 'npm install -g @nousresearch/hermes-agent', verify: 'hermes --version', link: 'https://hermes-agent.nousresearch.com' },
   ]
 
   return (

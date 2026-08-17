@@ -180,3 +180,88 @@ describe('coding tool config safety', () => {
     expect(text).toContain('claude-code')
   })
 })
+
+describe('hermes agent config', () => {
+  let home: string
+  const oldHome = process.env.HOME
+  const oldPath = process.env.PATH
+  const oldFetch = global.fetch
+  const BASE = 'http://127.0.0.1:8080'
+
+  beforeEach(async () => {
+    home = mkTempHome()
+    process.env.HOME = home
+    process.env.PATH = `${join(home, '.local', 'bin')}:${oldPath || ''}`
+    global.fetch = vi.fn(async () => ({ ok: false, json: async () => ({}) })) as any
+    mkdirSync(join(home, '.local', 'bin'), { recursive: true })
+    writeFileSync(join(home, '.local', 'bin', 'hermes'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    electronMock.handlers.clear()
+    vi.resetModules()
+    const mod = await import('../src/main/ipc/coding-tools')
+    mod.registerCodingToolHandlers()
+  })
+
+  afterEach(() => {
+    process.env.HOME = oldHome
+    process.env.PATH = oldPath
+    global.fetch = oldFetch
+    rmSync(home, { recursive: true, force: true })
+  })
+
+  const add = () => electronMock.handlers.get('tools:addCodingToolConfig')!
+  const remove = () => electronMock.handlers.get('tools:removeCodingToolConfig')!
+  const yamlPath = () => join(home, '.hermes', 'config.yaml')
+  const readYaml = async () => {
+    const { load } = await import('js-yaml')
+    return load(readFileSync(yamlPath(), 'utf8')) as any
+  }
+
+  it('writes a providers MAP with base_url ending at /v1', async () => {
+    expect((await add()({}, 'hermes', BASE, 'my-model', 8080))?.success).toBe(true)
+    const doc = await readYaml()
+    const p = doc.providers.mlxstudio
+    // Hermes appends /chat/completions itself — a URL past /v1 would 404.
+    expect(p.base_url).toBe(`${BASE}/v1`)
+    expect(p.base_url.endsWith('/v1')).toBe(true)
+    expect(Object.keys(p.models)).toEqual(['my-model'])
+    expect(p._mlxstudio).toBe(true)
+  })
+
+  it("preserves the user's unrelated hermes settings", async () => {
+    mkdirSync(join(home, '.hermes'), { recursive: true })
+    writeFileSync(
+      yamlPath(),
+      'auxiliary:\n  compression:\n    model: glm-4.7\nproviders:\n  theirs:\n    base_url: https://api.z.ai/v4\n',
+    )
+    expect((await add()({}, 'hermes', BASE, 'my-model', 8080))?.success).toBe(true)
+    const doc = await readYaml()
+    expect(doc.auxiliary.compression.model).toBe('glm-4.7')
+    expect(doc.providers.theirs.base_url).toBe('https://api.z.ai/v4')
+    expect(doc.providers.mlxstudio).toBeTruthy()
+  })
+
+  it('keeps both models, and removing one leaves the other', async () => {
+    await add()({}, 'hermes', BASE, 'model-a', 8080)
+    await add()({}, 'hermes', BASE, 'model-b', 8080)
+    expect(Object.keys((await readYaml()).providers.mlxstudio.models).sort()).toEqual([
+      'model-a', 'model-b',
+    ])
+
+    expect((await remove()({}, 'hermes', 'model-a'))?.success).toBe(true)
+    expect(Object.keys((await readYaml()).providers.mlxstudio.models)).toEqual(['model-b'])
+
+    // Removing the last model drops the provider rather than leaving a shell.
+    expect((await remove()({}, 'hermes', 'model-b'))?.success).toBe(true)
+    const doc = await readYaml()
+    expect(doc?.providers?.mlxstudio).toBeUndefined()
+  })
+
+  it('REFUSES to overwrite malformed hermes yaml', async () => {
+    mkdirSync(join(home, '.hermes'), { recursive: true })
+    const bad = 'providers:\n  - this is a list not a map\n\tbad_tab: 1\n'
+    writeFileSync(yamlPath(), bad)
+    const result = await add()({}, 'hermes', BASE, 'my-model', 8080)
+    expect(result?.success).toBe(false)
+    expect(readFileSync(yamlPath(), 'utf8')).toBe(bad)
+  })
+})

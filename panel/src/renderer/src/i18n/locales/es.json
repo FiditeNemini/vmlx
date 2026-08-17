@@ -120,6 +120,7 @@
       "codexDesc": "Agente de código de OpenAI",
       "opencodeDesc": "Asistente de código para terminal",
       "openclawDesc": "Framework de agentes de IA",
+      "hermesDesc": "Agente de IA de Nous Research",
       "install": "Instalar",
       "installed": "Instalado",
       "autoConfigure": "Configurar automáticamente",

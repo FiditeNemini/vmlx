@@ -10949,7 +10949,13 @@ async function main() {
                 ) && /mtp/i.test((sel.closest('label,div')?.innerText || '')));
               return {
                 labelVisible: !!label,
-                labelText: (label?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+                // \\s, not \s: this string is inside the outer evaluate()
+                // template literal, so a single backslash collapses and the
+                // page runs /s+/g — which replaces every letter "s" with a
+                // space. That produced "Determini tic override" and
+                // "Auto (bundle default )" and nearly had me report a UI typo
+                // that does not exist.
+                labelText: (label?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
                 modeSelectPresent: !!select,
                 selectedMode: select ? String(select.value || '') : null,
                 modeOptions: select ? [...select.options].map((o) => String(o.value)) : null,

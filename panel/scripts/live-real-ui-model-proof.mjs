@@ -491,6 +491,18 @@ const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
+// Whether the paged expectation was stated at all. Paged cache is DEFAULT ON
+// for every autodetected family except M3/openpangu_v2, so a hardcoded
+// default-false expectation asserts the operator's memory rather than the
+// product: it fails any paged-on family whose invocation forgets the flag,
+// which is exactly how the zaya_text row on disk became unreproducible from
+// its own documented command. When the flag is absent, the expectation is
+// taken from the engine's live /health native_cache instead, which makes this
+// a real visible-UI vs running-engine parity assertion.
+const expectPagedCacheExplicit = [
+  process.env.VMLINUX_REAL_UI_EXPECT_PAGED_CACHE,
+  process.env.VMLX_REAL_UI_EXPECT_PAGED_CACHE,
+].some((value) => value != null && value !== '')
 const expectDsv4PoolQuant = (
   process.env.VMLINUX_REAL_UI_EXPECT_DSV4_POOL_QUANT != null
   || process.env.VMLX_REAL_UI_EXPECT_DSV4_POOL_QUANT != null
@@ -10637,12 +10649,15 @@ async function main() {
           ]
             .filter((label) => bodyText.includes(label));
           const cacheExpectationMatches = !cacheExpectRegex || new RegExp(cacheExpectRegex, 'i').test(bodyText);
+          // The paged comparison is deliberately NOT folded in here: it is
+          // settled outside this page context against the engine's live
+          // /health native_cache, which is only available after this drawer
+          // read. See the pagedCache parity block below.
           const verified = initialCacheControls.enablePrefixCache === true
             && initialCacheControls.enableBlockDiskCache === true
             && initialCacheControls.blockDiskCachePresent === true
             && !!prefixInput
             && !!pagedInput
-            && initialCacheControls.usePagedCache === expectPagedCache
             && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
             && cacheExpectationMatches;
           const close = [...(drawer?.querySelectorAll('button') || [])]
@@ -10819,8 +10834,31 @@ async function main() {
         persistedConfig: rendererResult.effectiveSessionConfig || {},
         healthNativeCache: healthAfter?.native_cache || {},
       }
+      // Visible paged toggle vs the engine that is actually running. An
+      // explicit expectation still wins so a run can assert an intended
+      // configuration; otherwise the engine's own report is the expectation,
+      // so a paged-default-ON family cannot fail merely because the
+      // invocation omitted a flag.
+      const enginePagedCache = healthAfter?.native_cache?.paged === true
+      const pagedCacheExpected = expectPagedCacheExplicit
+        ? expectPagedCache
+        : enginePagedCache
+      const visiblePagedCache = (
+        serverCacheControls.initialCacheControls?.usePagedCache === true
+      )
+      serverCacheControls = {
+        ...serverCacheControls,
+        pagedCacheExpected,
+        pagedCacheExpectationSource: expectPagedCacheExplicit
+          ? 'explicit_env'
+          : 'engine_health',
+        enginePagedCache,
+        visiblePagedCache,
+        pagedCacheParity: visiblePagedCache === pagedCacheExpected,
+      }
       serverCacheControls.verified = (
         serverCacheControls.verified === true
+        && serverCacheControls.pagedCacheParity === true
         && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
         && argv.includes('--enable-block-disk-cache')
         && healthAfter?.native_cache?.block_disk_l2 === true

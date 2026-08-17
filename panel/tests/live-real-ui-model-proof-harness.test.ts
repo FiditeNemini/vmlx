@@ -6208,6 +6208,22 @@ describe("tool loop: per-turn protocol resolution", () => {
     );
   });
 
+  it("surfaces a VISIBLE tool status whose call was never persisted", () => {
+    // Observed live on a 30-call lfm25 churn run: calling status call_ee7e26d2
+    // had no persisted call, meaning the user saw a tool call absent from the
+    // saved conversation. Positional pairing buried this under a cascade of
+    // "call ID/order does not match" noise.
+    const result = structuredClone(goodResult());
+    result.persistedToolsByMessage[0] = [
+      ...result.persistedToolsByMessage[0],
+      { phase: "calling", toolName: "run_command", toolCallId: "call_orphan" },
+      { phase: "result", toolName: "run_command", toolCallId: "call_orphan" },
+    ];
+    expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
+      /visible tool status call_orphan has no persisted tool call/,
+    );
+  });
+
   it("rejects reaching ahead to the second probe on ANY turn-one call", () => {
     // Strengthened: the ordering rule used to be checked only on the call that
     // was positionally first, so a model could reach ahead in a later turn-one

@@ -4370,22 +4370,6 @@ export function validateExactToolLoopEvidence(result) {
   if (calls.length < expectedToolCalls) {
     failures.push(`expected at least ${expectedToolCalls} tool calls, got ${calls.length}`)
   }
-  if (results.length !== calls.length) {
-    failures.push(`expected one tool result per call (${calls.length}), got ${results.length}`)
-  }
-  if (statusCalls.length !== calls.length) {
-    failures.push(`expected one visible calling status per call (${calls.length}), got ${statusCalls.length}`)
-  }
-  statusCalls.forEach((status, index) => {
-    const call = calls[index]
-    if (!call) return
-    if (String(status.toolCallId || '') !== String(call.id || '')) {
-      failures.push(`visible tool status ${index + 1} call ID/order does not match persisted call`)
-    }
-    if (String(status.toolName || '') !== String(call?.function?.name || '')) {
-      failures.push(`visible tool status ${index + 1} name/order does not match persisted call`)
-    }
-  })
   const expected = [
     {
       file: 'real_ui_tool_probe_1.txt',
@@ -4462,6 +4446,49 @@ export function validateExactToolLoopEvidence(result) {
   )
   if (protocolErrors.length) {
     failures.push(`tool loop contains ${protocolErrors.length} error status entries`)
+  }
+  // Correspondence is by ID, never by list position. An extensive-churn row can
+  // emit dozens of calls and the visible status stream does not interleave in
+  // the same order as the persisted arrays, so positional pairing produced a
+  // cascade of meaningless "call ID/order does not match" failures on a 30-call
+  // run — and buried the one finding that mattered: a VISIBLE calling status
+  // (call_ee7e26d2) whose call was never persisted, i.e. the user saw a tool
+  // call that is absent from the saved conversation.
+  const persistedCallIds = new Set(
+    calls.map((call) => String(call.id || call.toolCallId || call.callId || '')),
+  )
+  for (const status of statusCalls) {
+    const statusId = String(status.toolCallId || '')
+    if (!statusId || !persistedCallIds.has(statusId)) {
+      failures.push(`visible tool status ${statusId || '(no id)'} has no persisted tool call`)
+    }
+  }
+  for (const call of calls) {
+    const id = String(call.id || call.toolCallId || call.callId || '')
+    const own = statuses.filter((status) => String(status?.toolCallId || '') === id)
+    if (!own.some((status) => status?.phase === 'calling')) {
+      failures.push(`tool call ${id} has no visible calling status`)
+    }
+    const terminal = own.filter(
+      (status) => status?.phase === 'result' || status?.phase === 'error',
+    )
+    if (terminal.length !== 1) {
+      failures.push(`tool call ${id} did not reach exactly one terminal status, got ${terminal.length}`)
+    }
+    const statusName = String(
+      own.find((status) => status?.phase === 'calling')?.toolName || '',
+    )
+    if (statusName !== String(call?.function?.name || call?.toolName || call?.name || '')) {
+      failures.push(`tool call ${id} visible status name does not match the persisted call`)
+    }
+    if (!protocolCallIds.has(id)) {
+      const matching = results.filter(
+        (item) => String(item.tool_call_id || item.toolCallId || item.callId || '') === id,
+      )
+      if (matching.length !== 1) {
+        failures.push(`tool call ${id} expected exactly one persisted result, got ${matching.length}`)
+      }
+    }
   }
   protocolCalls.forEach((call, index) => {
     if (!call) {

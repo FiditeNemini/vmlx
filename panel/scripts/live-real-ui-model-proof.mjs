@@ -4348,16 +4348,16 @@ export function validateExactToolLoopEvidence(result) {
     }
     return failures
   }
-  if (calls.length !== expectedToolCalls) {
-    failures.push(`expected exactly ${expectedToolCalls} tool calls, got ${calls.length}`)
+  if (calls.length < expectedToolCalls) {
+    failures.push(`expected at least ${expectedToolCalls} tool calls, got ${calls.length}`)
   }
-  if (results.length !== expectedToolCalls) {
-    failures.push(`expected exactly ${expectedToolCalls} tool results, got ${results.length}`)
+  if (results.length !== calls.length) {
+    failures.push(`expected one tool result per call (${calls.length}), got ${results.length}`)
   }
-  if (statusCalls.length !== expectedToolCalls) {
-    failures.push(`expected exactly ${expectedToolCalls} visible calling statuses, got ${statusCalls.length}`)
+  if (statusCalls.length !== calls.length) {
+    failures.push(`expected one visible calling status per call (${calls.length}), got ${statusCalls.length}`)
   }
-  statusCalls.slice(0, expectedToolCalls).forEach((status, index) => {
+  statusCalls.forEach((status, index) => {
     const call = calls[index]
     if (!call) return
     if (String(status.toolCallId || '') !== String(call.id || '')) {
@@ -4367,7 +4367,6 @@ export function validateExactToolLoopEvidence(result) {
       failures.push(`visible tool status ${index + 1} name/order does not match persisted call`)
     }
   })
-  if (errors.length) failures.push(`tool loop contains ${errors.length} error status entries`)
   const expected = [
     {
       file: 'real_ui_tool_probe_1.txt',
@@ -4387,26 +4386,82 @@ export function validateExactToolLoopEvidence(result) {
       failures.push(`tool probe ${spec.file} did not contain exactly ${spec.token}`)
     }
   }
-  calls.slice(0, expectedToolCalls).forEach((call, index) => {
+  // Models legitimately add EXTRA read-only verification calls. LFM2.5-8B and
+  // Step37 both ran the correct step-1 command on turn 1, then re-read the file
+  // two or three more times (`cat real_ui_tool_probe_1.txt`, `wc -c …`) before
+  // answering, and ran the correct dependent step-2 command on turn 2. The
+  // probe files ended up byte-exact and the per-turn chain this surface asserts
+  // is exactly what happened — yet demanding EXACTLY N calls and matching them
+  // POSITIONALLY failed all of it and withheld tool_loop/long_tool_loop from
+  // three families whose tool loops demonstrably worked.
+  //
+  // So resolve each protocol step to the call that satisfied it ON ITS OWN
+  // TURN, and let the surplus be surplus. This still fails the qwen36 case
+  // (ledger 220) rather than papering over it: there turn 1 produced NO tool
+  // call at all and both calls landed on turn 2, one a single batched command
+  // doing both steps, so the per-turn chain never happened. Extra calls are
+  // tolerated; a missing step on its own turn is not.
+  const callsByTurn = new Map()
+  for (const call of calls) {
+    const turn = call.messageIndex ?? -1
+    if (!callsByTurn.has(turn)) callsByTurn.set(turn, [])
+    callsByTurn.get(turn).push(call)
+  }
+  const commandOf = (call) => extractToolCommand(
+    call?.function?.arguments || call.detail || call.arguments,
+  )
+  const protocolCalls = expectedExecuted.map((spec, index) => {
+    const turnCalls = callsByTurn.get(index) || []
+    return turnCalls.find((call) => {
+      const command = commandOf(call)
+      if (!command.includes(spec.file) || !command.includes(spec.token)) return false
+      if (spec.forbidden && command.includes(spec.forbidden)) return false
+      if (spec.requiredAlso && !command.includes(spec.requiredAlso)) return false
+      return true
+    }) || null
+  })
+  // The ordering guarantee has to hold for EVERY call on the step's turn, not
+  // only the one chosen: a model that reaches ahead to the second probe on turn
+  // one has broken the dependency the chain is meant to prove.
+  expectedExecuted.forEach((spec, index) => {
+    if (!spec.forbidden) return
+    for (const call of (callsByTurn.get(index) || [])) {
+      if (commandOf(call).includes(spec.forbidden)) {
+        failures.push(`tool call ${index + 1} referenced the second-turn probe prematurely`)
+        break
+      }
+    }
+  })
+  const protocolCallIds = new Set(
+    protocolCalls.filter(Boolean).map((call) => String(call.id || call.toolCallId || call.callId || '')),
+  )
+  const extraCalls = calls.filter(
+    (call) => !protocolCallIds.has(String(call.id || call.toolCallId || call.callId || '')),
+  )
+  const protocolErrors = errors.filter(
+    (status) => protocolCallIds.has(String(status?.toolCallId || '')),
+  )
+  if (protocolErrors.length) {
+    failures.push(`tool loop contains ${protocolErrors.length} error status entries`)
+  }
+  protocolCalls.forEach((call, index) => {
+    if (!call) {
+      failures.push(`tool call ${index + 1} was not persisted on assistant turn ${index + 1}`)
+      return
+    }
     const name = String(call?.function?.name || call.toolName || call.name || '')
     if (name !== 'run_command') failures.push(`tool call ${index + 1} used ${name || 'missing name'}`)
-    if ((call.messageIndex ?? -1) !== index) {
-      failures.push(`tool call ${index + 1} was not persisted on assistant turn ${index + 1}`)
-    }
     const callId = String(call.id || call.toolCallId || call.callId || '')
     if (!callId) failures.push(`tool call ${index + 1} has no call ID`)
     const command = extractToolCommand(
       call?.function?.arguments || call.detail || call.arguments,
     )
     const spec = expected[index]
+    // The resolver already required file/token/forbidden/requiredAlso to match,
+    // so re-checking them here would be dead weight — except for the ordering
+    // rule, which is enforced above across every call on the turn.
     if (!command.includes(spec.file) || !command.includes(spec.token)) {
       failures.push(`tool call ${index + 1} arguments do not contain its exact probe file/token`)
-    }
-    if (spec.forbidden && command.includes(spec.forbidden)) {
-      failures.push(`tool call ${index + 1} referenced the second-turn probe prematurely`)
-    }
-    if (spec.requiredAlso && !command.includes(spec.requiredAlso)) {
-      failures.push(`tool call ${index + 1} did not read the first-turn probe`)
     }
     const matchingResults = results.filter(
       (item) => String(item.tool_call_id || item.toolCallId || item.callId || '') === callId,
@@ -4463,8 +4518,12 @@ export function validateExactToolLoopEvidence(result) {
   if (resultIds.some((callId) => !callIds.includes(callId))) {
     failures.push('tool result exists without its exact persisted call')
   }
-  if (domCards.length !== expectedToolCalls) {
-    failures.push(`expected exactly ${expectedToolCalls} rendered tool cards, got ${domCards.length}`)
+  // One card per call the model actually made, protocol or surplus — every
+  // call must be VISIBLE to the user, but only the protocol calls have to show
+  // successful completion. A surplus verification call that errored is the
+  // model's business; hiding it would be the product's.
+  if (domCards.length !== calls.length) {
+    failures.push(`expected one rendered tool card per call (${calls.length}), got ${domCards.length}`)
   }
   for (const callId of callIds) {
     const matchingCards = domCards.filter((card) => String(card?.callId || '') === callId)
@@ -4476,7 +4535,10 @@ export function validateExactToolLoopEvidence(result) {
     if (card.visible !== true) {
       failures.push(`tool call ${callId} rendered card was not visible`)
     }
-    if (!['result', 'done', 'complete'].includes(String(card.phase || ''))) {
+    if (
+      protocolCallIds.has(callId)
+      && !['result', 'done', 'complete'].includes(String(card.phase || ''))
+    ) {
       failures.push(`tool call ${callId} rendered card did not show successful completion`)
     }
     const result = results.find(

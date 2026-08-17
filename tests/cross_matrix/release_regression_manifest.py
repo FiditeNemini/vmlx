@@ -4548,6 +4548,52 @@ def _real_ui_model_id_matches(row: dict[str, Any], model_id: Any) -> bool:
     )
 
 
+def _normalize_chat_override_wire_api(value: Any) -> Any:
+    """Translate the renderer's chat-override wire-API token into row vocabulary.
+
+    The persisted chat override speaks ``'completions' | 'responses'``
+    (``CHAT_OVERRIDE_WIRE_APIS`` in ``panel/src/main/chat-override-policy.ts``),
+    while the manifest rows and the proof harness say ``'chat' | 'responses'``.
+    Both spellings name the same door -- ``/v1/chat/completions`` -- so comparing
+    the raw strings reported ``chatOverrides.wireApi`` mismatches on EVERY
+    chat-door row (zaya, gemma4 cachecontrols, minimax, nemotron omni, step37,
+    dsv4) while ``requestedWireApi`` and ``rendererWireApi`` agreed on the same
+    runs. Normalising keeps the check meaningful: an override that genuinely
+    disagrees with the row still fails.
+    """
+    if isinstance(value, str) and value == "completions":
+        return "chat"
+    return value
+
+
+def _real_ui_correlated_cache_reuse_tokens(proof: dict[str, Any]) -> int:
+    """Largest request-correlated cached-token count recorded by the proof.
+
+    ``cache.cacheHitTokens`` is derived from ``/health`` counters, which are a
+    pre-request snapshot by design, so it reads 0 on runs whose own
+    request-correlated observations show real reuse (gemma4 strict-tools:
+    ``cacheHitTokens 0`` against ``cached_tokens 3221`` with
+    ``cache_outcome: hit``). The correlated observation is the stronger evidence
+    because it is tied to a specific request id, so prefer it and keep the
+    health-derived summary as a fallback.
+    """
+    best = 0
+    evidence = proof.get("cacheRequestEvidence")
+    if not isinstance(evidence, list):
+        return best
+    for entry in evidence:
+        if not isinstance(entry, dict):
+            continue
+        observation = entry.get("serverObservation")
+        if not isinstance(observation, dict):
+            continue
+        for field in ("cached_tokens", "matched_tokens", "checkpoint_tokens"):
+            value = observation.get(field)
+            if isinstance(value, (int, float)) and value > best:
+                best = int(value)
+    return best
+
+
 def _validate_real_ui_request_contract(
     row_id: str,
     proof: dict[str, Any],
@@ -4574,7 +4620,9 @@ def _validate_real_ui_request_contract(
         mismatch("requestedWireApi")
     if proof.get("rendererWireApi") not in {None, expected_wire_api}:
         mismatch("rendererWireApi")
-    if chat_overrides.get("wireApi") not in {None, expected_wire_api}:
+    if _normalize_chat_override_wire_api(
+        chat_overrides.get("wireApi")
+    ) not in {None, expected_wire_api}:
         mismatch("chatOverrides.wireApi")
 
     expected_builtin_tools = request_contract.get("builtinToolsEnabled")
@@ -6501,16 +6549,40 @@ def _validate_current_real_ui_live_model_proof_artifacts(
             failures.append("visible_multi_turn_chat_not_proven")
 
         cache_hit_tokens = _json_number(proof, "cache", "cacheHitTokens")
-        if cache_hit_tokens is None or cache_hit_tokens <= 0:
+        correlated_reuse = _real_ui_correlated_cache_reuse_tokens(proof)
+        if (
+            cache_hit_tokens is None or cache_hit_tokens <= 0
+        ) and correlated_reuse <= 0:
             failures.append("cache_hit_tokens_missing")
 
+        # A screenshot is evidence because the FILE ships in the evidence
+        # directory and a human can look at it -- not because of the absolute
+        # path the generating machine happened to write into the JSON. Proof runs
+        # execute on the box (models live on /Volumes/EricsLLMDrive) and write to
+        # VMLX_PRIVATE_EVIDENCE_ROOT, while this manifest runs from the release
+        # checkout, so comparing absolute path strings failed on EVERY family
+        # including runs with zero assertion failures. Assert what matters: the
+        # shipped file exists and is non-empty, the proof really recorded a chat
+        # screenshot, and if the recorded path also resolves here the two are the
+        # same image.
         screenshots = (
             proof.get("screenshots")
             if isinstance(proof.get("screenshots"), dict)
             else {}
         )
-        expected_chat = str((root / screenshot_artifact).resolve())
-        if screenshots.get("chat") != expected_chat:
+        shipped_chat = root / screenshot_artifact
+        recorded_chat = screenshots.get("chat")
+        if not shipped_chat.is_file() or shipped_chat.stat().st_size <= 0:
+            failures.append("screenshot_missing_or_empty:chat")
+        if not isinstance(recorded_chat, str) or not recorded_chat.endswith(
+            "-chat.png"
+        ):
+            failures.append("screenshot_not_recorded:chat")
+        elif (
+            shipped_chat.is_file()
+            and Path(recorded_chat).is_file()
+            and Path(recorded_chat).stat().st_size != shipped_chat.stat().st_size
+        ):
             failures.append("screenshot_path_mismatch:chat")
 
     return {

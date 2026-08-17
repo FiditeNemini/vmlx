@@ -4082,7 +4082,10 @@ describe("real UI model proof harness", () => {
     result.persistedToolsByMessage[1] = [];
     result.renderedDom.messages[1].toolCards = [];
     expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
-      /expected exactly 2 tool calls|expected exactly 2 tool results|expected exactly 2 visible calling statuses|expected exactly 2 rendered tool cards/,
+      // Surplus verification calls are tolerated now, so the count rule is a
+      // FLOOR — but a run that made only one call still has to fail, and the
+      // second protocol step still has to be missing from its own turn.
+      /expected at least 2 tool calls|tool call 2 was not persisted on assistant turn 2/,
     );
   });
 
@@ -6116,5 +6119,119 @@ describe("native MTP surface / engine parity", () => {
     expect(
       validateNativeMtpSurfaceParity({ requestedServerCacheControls: false }),
     ).toEqual([]);
+  });
+});
+
+describe("tool loop: surplus verification calls vs a broken chain", () => {
+  // Both shapes are verbatim from stored release artifacts. The point of this
+  // block is that the two cases must NOT be treated the same: one is a working
+  // chain with extra read-only calls, the other never chained at all.
+  const chainWithSurplus = () => {
+    const result = structuredClone(goodResult());
+    // LFM2.5-8B / Step37: correct step-1 command on turn 1, then two redundant
+    // read-only re-reads, then the correct dependent step-2 command on turn 2.
+    result.persistedOaiCallsByMessage[0] = [
+      {
+        id: "call_step1",
+        function: {
+          name: "run_command",
+          arguments: JSON.stringify({
+            command:
+              "printf %s REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt && cat real_ui_tool_probe_1.txt",
+          }),
+        },
+      },
+      {
+        id: "call_extra_cat",
+        function: {
+          name: "run_command",
+          arguments: JSON.stringify({ command: "cat real_ui_tool_probe_1.txt" }),
+        },
+      },
+      {
+        id: "call_extra_wc",
+        function: {
+          name: "run_command",
+          arguments: JSON.stringify({ command: "wc -c real_ui_tool_probe_1.txt" }),
+        },
+      },
+    ];
+    result.persistedOaiResultsByMessage[0] = [
+      { tool_call_id: "call_step1", content: "REAL_UI_LIVE_TOOL_ONE" },
+      { tool_call_id: "call_extra_cat", content: "REAL_UI_LIVE_TOOL_ONE" },
+      { tool_call_id: "call_extra_wc", content: "21 real_ui_tool_probe_1.txt" },
+    ];
+    result.persistedToolsByMessage[0] = [
+      { phase: "calling", toolName: "run_command", toolCallId: "call_step1" },
+      { phase: "result", toolName: "run_command", toolCallId: "call_step1" },
+      { phase: "calling", toolName: "run_command", toolCallId: "call_extra_cat" },
+      { phase: "result", toolName: "run_command", toolCallId: "call_extra_cat" },
+      { phase: "calling", toolName: "run_command", toolCallId: "call_extra_wc" },
+      { phase: "result", toolName: "run_command", toolCallId: "call_extra_wc" },
+    ];
+    result.renderedDom.messages[0].toolCards = [
+      { callId: "call_step1", name: "run_command", phase: "result", visible: true },
+      { callId: "call_extra_cat", name: "run_command", phase: "result", visible: true },
+      { callId: "call_extra_wc", name: "run_command", phase: "result", visible: true },
+    ];
+    const trace = result.messageEventTrace.find(
+      (row: any) => row.messageId === result.assistantMessageIds[0],
+    );
+    trace.events = [
+      { event: "tool", payload: { phase: "calling", toolCallId: "call_step1" } },
+      { event: "tool", payload: { phase: "result", toolCallId: "call_step1" } },
+      { event: "tool", payload: { phase: "calling", toolCallId: "call_extra_cat" } },
+      { event: "tool", payload: { phase: "result", toolCallId: "call_extra_cat" } },
+      { event: "tool", payload: { phase: "calling", toolCallId: "call_extra_wc" } },
+      { event: "tool", payload: { phase: "result", toolCallId: "call_extra_wc" } },
+    ];
+    return result;
+  };
+
+  it("accepts a chained loop that added surplus read-only verification calls", () => {
+    expect(validateExactToolLoopEvidence(chainWithSurplus())).toEqual([]);
+  });
+
+  it("still requires the surplus calls to be visible to the user", () => {
+    const result = chainWithSurplus();
+    result.renderedDom.messages[0].toolCards[1].visible = false;
+    expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
+      /call_extra_cat rendered card was not visible/,
+    );
+  });
+
+  it("rejects the qwen36 batched case where turn 1 made NO call at all", () => {
+    // Verbatim shape: message 0 has ZERO calls, both calls landed on message 1,
+    // and the successful one is a single command doing BOTH steps. The chain
+    // this surface asserts never happened, so it must still fail.
+    const result = structuredClone(goodResult());
+    result.persistedOaiCallsByMessage[0] = [];
+    result.persistedOaiResultsByMessage[0] = [];
+    result.persistedToolsByMessage[0] = [];
+    result.renderedDom.messages[0].toolCards = [];
+    result.persistedOaiCallsByMessage[1] = [
+      {
+        id: "call_batched",
+        function: {
+          name: "run_command",
+          arguments: JSON.stringify({
+            command:
+              "touch real_ui_tool_probe_1.txt && echo -n REAL_UI_LIVE_TOOL_ONE > real_ui_tool_probe_1.txt && printf %s REAL_UI_LIVE_TOOL_TWO > real_ui_tool_probe_2.txt && cat real_ui_tool_probe_2.txt",
+          }),
+        },
+      },
+    ];
+    const failures = validateExactToolLoopEvidence(result).join("\n");
+    expect(failures).toMatch(/tool call 1 was not persisted on assistant turn 1/);
+  });
+
+  it("still rejects reaching ahead to the second probe on turn one", () => {
+    const result = chainWithSurplus();
+    result.persistedOaiCallsByMessage[0][1].function.arguments = JSON.stringify({
+      command: "cat real_ui_tool_probe_2.txt",
+    });
+    expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
+      /referenced the second-turn probe prematurely/,
+    );
   });
 });

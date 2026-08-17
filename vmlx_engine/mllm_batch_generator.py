@@ -6549,7 +6549,18 @@ class MLLMBatchGenerator:
                     # flat 64 -> 174.4 pp/s, probe-then-grow -> 199.9,
                     # projected/full 2048 -> 510.6 pp/s (2.93x). At 4096:
                     # 145.2 / 160.5 / 309.4.
-                    _tight_ctx = max(int(seq_len), 1)
+                    # Context, NOT chunk width: attention scores are
+                    # chunk x CONTEXT, and on a continuation the context is
+                    # the restored prefix plus this span. Using bare seq_len
+                    # here would under-count a 20k-cached turn by 10x and
+                    # pick a step that is safe only for the first turn — the
+                    # same distinction the peak-walk admission makes just
+                    # above with _cached_tokens + seq_len.
+                    _tight_ctx = max(
+                        int(getattr(request, "_cached_tokens", 0) or 0)
+                        + int(seq_len),
+                        1,
+                    )
                     _tight_heads = max(
                         1,
                         _infer_attention_heads_for_hybrid_oom_guard(

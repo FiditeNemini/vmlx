@@ -489,6 +489,7 @@ const promptThree = promptThreeOverride || defaultPromptThree
 const checkServerCacheControls = envBool('VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CONTROLS', false)
 const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
+const checkAudio = envBool('VMLINUX_REAL_UI_CHECK_AUDIO', false)
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
 // Select the SSD-only lane (block-disk L2 WITHOUT the RAM paged pool) before
@@ -542,6 +543,16 @@ const imageExpectRegex = process.env.VMLINUX_REAL_UI_IMAGE_EXPECT_REGEX
   || '\\bred\\b'
 const videoDataUrl = process.env.VMLINUX_REAL_UI_VIDEO_DATA_URL
   || process.env.VMLX_REAL_UI_VIDEO_DATA_URL
+  || ''
+// Audio attachments are a real product capability — the renderer carries
+// kind: 'audio' through InputBox/ChatInterface/chat-utils/MessageBubble — but
+// this harness had NO audio path at all, so audio through the Electron UI had
+// never been proven for any omni model.
+const audioDataUrl = process.env.VMLINUX_REAL_UI_AUDIO_DATA_URL
+  || process.env.VMLX_REAL_UI_AUDIO_DATA_URL
+  || ''
+const audioExpectRegex = process.env.VMLINUX_REAL_UI_AUDIO_EXPECT_REGEX
+  || process.env.VMLX_REAL_UI_AUDIO_EXPECT_REGEX
   || ''
 const videoExpectRegex = process.env.VMLINUX_REAL_UI_VIDEO_EXPECT_REGEX
   || process.env.VMLX_REAL_UI_VIDEO_EXPECT_REGEX
@@ -7628,6 +7639,9 @@ function assertResult(result) {
   if (result.requestedVideo === true && !result.provenSurfaces?.includes('video_where_supported')) {
     failures.push('requested real video media but proof did not record video_where_supported surface')
   }
+  if (result.requestedAudio === true && !result.provenSurfaces?.includes('audio_where_supported')) {
+    failures.push('requested real audio media but proof did not record audio_where_supported surface')
+  }
   failures.push(...validateRenderedDomEvidence(result))
   failures.push(...validateReasoningEvidence(result, result.reasoningExpectation || 'optional'))
   failures.push(...validateExactToolLoopEvidence(result))
@@ -7752,6 +7766,9 @@ export function deriveProvenSurfaces(result) {
   }
   if (result.media?.videoVerified === true) {
     surfaces.add('video_where_supported')
+  }
+  if (result.media?.audioVerified === true) {
+    surfaces.add('audio_where_supported')
   }
   const correlationVerified = isServerRequestCorrelationVerified(result)
   if (
@@ -8591,6 +8608,9 @@ async function main() {
         const imageExpectRegex = ${JSON.stringify(imageExpectRegex)};
         const videoDataUrl = ${JSON.stringify(videoDataUrl)};
         const videoExpectRegex = ${JSON.stringify(videoExpectRegex)};
+        const checkAudio = ${JSON.stringify(checkAudio)};
+        const audioDataUrl = ${JSON.stringify(audioDataUrl)};
+        const audioExpectRegex = ${JSON.stringify(audioExpectRegex)};
         const workingDirectory = ${JSON.stringify(workingDirectory)};
         const samplingOverrides = ${JSON.stringify(samplingOverrides)};
         const independentBundleDefaults = ${JSON.stringify(bundleGenerationContract.defaults)};
@@ -10220,6 +10240,27 @@ async function main() {
               ]);
             }
           }
+          // Audio turn. Same shape as the video turn, on turn 6 so it never
+          // displaces an existing row's turn numbering.
+          if (checkAudio && !rendererFailureStage) {
+            if (!audioDataUrl) {
+              rendererFailureStage = 'audio_data_url_missing';
+              sendErrors.push({
+                turn: 6,
+                stage: 'audio_data_url_missing',
+                message: 'VMLINUX_REAL_UI_CHECK_AUDIO requires VMLINUX_REAL_UI_AUDIO_DATA_URL',
+              });
+            } else {
+              await sendMessageWithCapture(6, 'audio_send_message', 'Describe the attached audio briefly in English.', [
+                {
+                  name: 'real-ui-proof-audio.wav',
+                  type: 'audio/wav',
+                  kind: 'audio',
+                  dataUrl: audioDataUrl,
+                },
+              ]);
+            }
+          }
           const preloadHealthAfter = await window.api.performance.health(endpoint)
             .catch((error) => ({ error: String(error?.message || error) }));
           const cacheAfter = await window.api.cache.stats(endpoint, created.session.id)
@@ -10399,19 +10440,36 @@ async function main() {
           const hasVideoAttachment = contentPartsByMessage.some((parts) =>
             parts.some((part) => part?.type === 'video_url' && part?.video_url?.url)
           );
+          // Audio rides as input_audio (or audio_url); see chat-utils.ts and the
+          // main-process normaliser in ipc/chat.ts.
+          const hasAudioAttachment = contentPartsByMessage.some((parts) =>
+            parts.some((part) => (
+              (part?.type === 'input_audio' && (part?.input_audio?.data || part?.audio?.data))
+              || (part?.type === 'audio' && part?.audio?.data)
+              || (part?.type === 'audio_url' && part?.audio_url?.url)
+            ))
+          );
           const imageSemanticVerified = checkMedia && new RegExp(imageExpectRegex, 'i').test(allAssistantText);
           const videoSemanticVerified = checkVideo && !!videoExpectRegex && new RegExp(videoExpectRegex, 'i').test(allAssistantText);
+          // Same non-empty-regex rule as video: without an expectation there is
+          // nothing to verify, and silently "passing" would be worse.
+          const audioSemanticVerified = checkAudio && !!audioExpectRegex && new RegExp(audioExpectRegex, 'i').test(allAssistantText);
           const mediaEvidence = {
             requestedImage: checkMedia,
             requestedVideo: checkVideo,
+            requestedAudio: checkAudio,
             imageExpectedRegex: imageExpectRegex,
             videoExpectedRegex: videoExpectRegex,
+            audioExpectedRegex: audioExpectRegex,
             imageSemanticVerified,
             videoSemanticVerified,
+            audioSemanticVerified,
             imageVerified: checkMedia && hasImageAttachment && imageSemanticVerified && !sendErrors.some((item) => item.turn === 4),
             videoVerified: checkVideo && hasVideoAttachment && videoSemanticVerified && !sendErrors.some((item) => item.turn === 5),
+            audioVerified: checkAudio && hasAudioAttachment && audioSemanticVerified && !sendErrors.some((item) => item.turn === 6),
             persistedImageAttachment: hasImageAttachment,
             persistedVideoAttachment: hasVideoAttachment,
+            persistedAudioAttachment: hasAudioAttachment,
           };
           let effectiveSessionConfig = {};
           try {
@@ -10559,6 +10617,7 @@ async function main() {
         requestedServerCacheControls: checkServerCacheControls,
         requestedMedia: checkMedia,
         requestedVideo: checkVideo,
+        requestedAudio: checkAudio,
         requestContract: {
           uiActionProfile,
           uiTurnCount,
@@ -11400,6 +11459,7 @@ async function main() {
       expectedDsv4PoolQuant: expectDsv4PoolQuant,
       requestedMedia: checkMedia,
       requestedVideo: checkVideo,
+      requestedAudio: checkAudio,
       requestedRetainedPids: releaseRetainedPids,
       requestContract: {
         uiActionProfile,

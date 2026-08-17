@@ -58,6 +58,48 @@ def _absorb_enabled() -> bool:
 
 
 _PREFILL_PATH_LOGGED = False
+_DSA_PATH_LOGGED = False
+
+
+def _dsa_gather_enabled() -> bool:
+    """DSA gather-attention — measured non-negative, kept DEFAULT OFF.
+
+    When DSA selection engages (total > index_topk) the dense-mask path
+    still runs SDPA over ALL ``total`` keys with a [B, 1, S, total]
+    additive mask: O(S*total) attention FLOPs plus an O(S*total) fp32 mask
+    transient, which puts context length right back into attention cost and
+    throws away what selection just bought. Gathering the selected keys
+    instead bounds the attention call at O(S*topk) — past the topk bound,
+    context length stops driving attention cost (the indexer's own
+    O(S*total) scoring pass is inherent to DSA and remains).
+
+    MEASURED LIVE 2026-08-16 (erics-m5-max 128GB, dots3-note-prev bundle,
+    temp 0, cold prefill, admission valve off, one serve per arm,
+    engagement proven by the path log in BOTH arms, temp-0 answer text
+    BYTE-IDENTICAL at 4k and 12k): same-session like-for-like pairs, all
+    non-negative — chunk-2048 ladder +3.3% @4k / +6.3% @8k / +3.3% @12k
+    pp/s; chunk-1024 pair +9.5% pp/s @12k (359.8 vs 328.7); decode
+    +8.5% @4k (32.58 vs 30.03 t/s) and +2.8% @12k engaged (31.44 vs
+    30.59). All of it sits inside session-to-session box drift (the SAME
+    dense 4k baseline measured 510 / 461 / 415 pp/s across the day), so
+    the honest claim is "never slower, structurally right", not a speedup
+    number. Isolated, the win is real and GROWS: gathered attention is
+    FLAT ~23 ms/chunk/layer vs dense 18.7 (4k) -> 117.7 (25k)
+    ms/chunk/layer — but end to end the served bottleneck past ~8k is the
+    indexer's own O(S*total) scoring, which both arms pay. 25k pairs were
+    unmeasurable: BOTH arms (incl. stock dense) Metal-OOM'd 6/6 within
+    the first engaged chunks (~96GB resident + ~11GB headroom box state;
+    arm-independent — the day's one fresh-boot dense 25k did 133.7 pp/s,
+    decode 21.5 t/s). Default OFF until the indexer scorer and the
+    long-context residency picture stop dominating; this is the correct
+    structure for the 400k target once they do.
+    """
+    return os.environ.get("VMLX_DOTS3_DSA_GATHER", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _prefill_materialize_max_keys() -> int:
@@ -445,6 +487,12 @@ class Dots3Indexer(nn.Module):
 
 
 class Dots3MLAAttention(nn.Module):
+    # Element budget for the gathered-key transient [B, T, K, rank+rope]
+    # (the indexer's element-budget pattern): the query tile T shrinks as
+    # K*D grows. 256M elements = 512 MB bf16 gathered keys per full layer
+    # per tile at deploy shapes (K=2048, D=576 -> T~=217).
+    gather_element_budget = 268_435_456
+
     def __init__(
         self,
         config: TextConfig,
@@ -609,6 +657,110 @@ class Dots3MLAAttention(nn.Module):
         )
         return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
 
+    def _dsa_gather_attention(
+        self,
+        queries: mx.array,
+        keys: mx.array,
+        sel: mx.array,
+        past: int,
+        S: int,
+    ) -> mx.array:
+        """Attention over the SELECTED keys only — O(S*topk), not O(S*total).
+
+        ``queries``: absorbed queries [B, h, S, rank+rope]; ``keys``: the
+        MQA latent stream [B, 1, total, rank+rope] whose first ``rank``
+        dims ARE the values (the absorbed identity this path relies on);
+        ``sel``: int32 [B, S, K] per-query key positions from the indexer.
+
+        Each query row attends its OWN key set, so SDPA cannot see one
+        shared key axis — the query position folds into the BATCH. Two
+        measured traps shaped the formulation (M5 Max, deploy shapes
+        T=227 K=2048 D=576, 10 tiles x 13 full layers per 2048 chunk):
+
+        - ``mx.take_along_axis`` with [B, T*K, 1] indices gathers at
+          34 GB/s (it broadcasts the index across D); ``mx.take`` on the
+          flattened row axis is the embedding-lookup path and runs the
+          SAME gather at 785 GB/s (23x, verified byte-identical).
+        - presenting the tile as vector-decode ``q [B*T, h, 1, D]`` costs
+          104.6 ms/chunk/layer (128 one-row vector ops per tile row);
+          relabeling HEADS AS QUERY ROWS — ``q [B*T, 1, h, D]`` against
+          ``k [B*T, 1, K, D]`` — is legal because every head of a query
+          shares that query's key set and softmax is per-row, and it hits
+          the full tiled kernel at 15.8 ms/chunk/layer (6.6x).
+
+        Together they put gathered attention at ~23 ms/chunk/layer FLAT
+        vs the dense path's 18.7 (4k) -> 117.7 (25k) ms/chunk/layer.
+        The gathered transient is O(T*K*D) and head-independent; T comes
+        from ``gather_element_budget`` (the indexer's element-budget
+        pattern).
+
+        The causal guard survives the representation change: topk over
+        causally -inf'd scores can return future positions when fewer than
+        K valid ones exist, so gathered entries with sel > q_pos are
+        additive-masked -inf (every query has >= 1 valid entry — ReLU'd
+        finite scores always outrank -inf, and self is always causal).
+
+        S==1 keeps the dense path's fp32 SDPA convention (the bf16 absorb
+        trap, project_mla_absorb_bug).
+        """
+        g = self.geom
+        B, n_heads, _, D = queries.shape
+        rank = g.kv_lora_rank
+        K = int(sel.shape[-1])
+        kv_flat = keys[:, 0]  # [B, total, D]
+        total = int(kv_flat.shape[1])
+        fp32 = S == 1
+        tile = max(1, min(S, self.gather_element_budget // max(K * D, 1)))
+        outs = []
+        for s0 in range(0, S, tile):
+            s1 = min(s0 + tile, S)
+            T = s1 - s0
+            sel_t = sel[:, s0:s1]  # [B, T, K]
+            if B == 1:
+                # Row-take on the flattened key axis (the fast path above).
+                gath = mx.take(kv_flat[0], sel_t.reshape(T * K), axis=0)
+            else:
+                flat = (
+                    sel_t.reshape(B, T * K)
+                    + (mx.arange(B, dtype=sel_t.dtype) * total)[:, None]
+                ).reshape(B * T * K)
+                gath = mx.take(kv_flat.reshape(B * total, D), flat, axis=0)
+            k_t = gath.reshape(B * T, 1, K, D)
+            v_t = k_t[..., :rank]
+            # HEADS AS QUERY ROWS: [B, h, T, D] -> [B*T, 1, h, D].
+            q_t = (
+                queries[:, :, s0:s1]
+                .transpose(0, 2, 1, 3)
+                .reshape(B * T, 1, n_heads, D)
+            )
+            q_pos = (past + mx.arange(s0, s1))[None, :, None]
+            mask_t = mx.where(
+                sel_t > q_pos,
+                mx.array(-mx.inf, dtype=mx.float32),
+                mx.array(0.0, dtype=mx.float32),
+            ).reshape(B * T, 1, 1, K)
+            if fp32:
+                out_t = mx.fast.scaled_dot_product_attention(
+                    q_t.astype(mx.float32),
+                    k_t.astype(mx.float32),
+                    v_t.astype(mx.float32),
+                    scale=g.scale,
+                    mask=mask_t,
+                ).astype(queries.dtype)
+            else:
+                out_t = mx.fast.scaled_dot_product_attention(
+                    q_t,
+                    k_t,
+                    v_t,
+                    scale=g.scale,
+                    mask=mask_t.astype(queries.dtype),
+                )
+            # [B*T, 1, h, rank] -> [B, h, T, rank]
+            outs.append(
+                out_t.reshape(B, T, n_heads, rank).transpose(0, 2, 1, 3)
+            )
+        return outs[0] if len(outs) == 1 else mx.concatenate(outs, axis=2)
+
     def _absorbed_attention(
         self, q_nope, q_pe, kv_a, k_pe, cache, mask, S, x=None, q_lora=None, past=0
     ) -> mx.array:
@@ -712,6 +864,35 @@ class Dots3MLAAttention(nn.Module):
             # position, so dense attention is mathematically identical and
             # the scorer is skipped.)
             sel = self.indexer.topk_indices(x, q_lora, idx_keys, past)
+            # Gather path composes with the ABSORBED representation only:
+            # its keys are one MQA stream shared by all heads and its
+            # values are that stream's first `rank` dims, so a single
+            # gathered tensor serves K and V for every head. The
+            # materialized form is per-head — gathering it would multiply
+            # the transient by num_heads and need a second gather for V.
+            use_gather = _dsa_gather_enabled() and not materialize
+            # A guard that silently declines turns an A/B into
+            # stock-vs-stock — say ONCE per process which DSA attention
+            # path actually ran.
+            global _DSA_PATH_LOGGED
+            if not _DSA_PATH_LOGGED:
+                _DSA_PATH_LOGGED = True
+                import logging as _lg
+
+                _lg.getLogger("vmlx_engine").info(
+                    "dots3 DSA attention path: %s (S=%d total=%d topk=%d)",
+                    "GATHER-topk" if use_gather else "dense-mask",
+                    S,
+                    total,
+                    self.indexer.index_topk,
+                )
+            if use_gather:
+                out = self._dsa_gather_attention(queries, keys, sel, past, S)
+                # [B,h,S,rank] @ [1,h,rank,v] -> [B,h,S,v]
+                out = mx.matmul(
+                    out, w_v[None].swapaxes(-1, -2).astype(out.dtype)
+                )
+                return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
             B = x.shape[0]
             mask = mx.full((B, S, total), -mx.inf, dtype=mx.float32)
             mask = mx.put_along_axis(

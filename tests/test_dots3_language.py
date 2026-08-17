@@ -601,3 +601,136 @@ def test_decode_never_materializes(model):
     finally:
         lang.mx.einsum = real_einsum
     assert hits == [], "decode step materialized K/V"
+
+
+# ---- DSA gather-attention: O(S*topk) instead of O(S*total) -----------------
+
+
+def _dsa_gather_env(value):
+    """Context-managed override of the DSA gather-attention gate."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        key = "VMLX_DOTS3_DSA_GATHER"
+        old = os.environ.get(key)
+        os.environ[key] = str(value)
+        try:
+            yield
+        finally:
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+    return _ctx()
+
+
+def _set_topk(model, k):
+    model.text_config.index_topk = k
+    for layer in model.model.layers:
+        attn = getattr(layer, "self_attn", None)
+        if attn is not None and hasattr(attn, "indexer"):
+            attn.indexer.index_topk = k
+
+
+def test_dsa_gather_matches_dense_mask_prefill(model):
+    # Same selection, two attention representations: outputs must match on
+    # EVERY row (unlike sparse-vs-dense, which only pins fully-covered
+    # rows — here BOTH arms use the same selected keys). topk=8 on a
+    # 12-token single shot also exercises the causal guard: rows 0..6 have
+    # fewer than 8 valid keys, so the indexer returns future positions the
+    # gather must re-mask -inf.
+    old = model.text_config.index_topk
+    _set_topk(model, 8)
+    try:
+        ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8, 11, 4, 61, 2]])
+        dense = model(ids, cache=_latent_caches(model))
+        with _dsa_gather_env("1"):
+            gather = model(ids, cache=_latent_caches(model))
+        assert float(mx.abs(dense - gather).max()) < 1e-4
+        assert (mx.argmax(dense, -1) == mx.argmax(gather, -1)).all()
+        assert bool(mx.isfinite(gather).all())
+    finally:
+        _set_topk(model, old)
+
+
+def test_dsa_gather_matches_dense_mask_decode(model):
+    # Stepwise decode past the bound. Cache content is path-independent
+    # (writes happen before the attention-path split), so per-step logits
+    # must match between the dense-mask and gather arms.
+    old = model.text_config.index_topk
+    _set_topk(model, 6)
+    try:
+        prefix = mx.array([[3, 17, 42, 9, 55, 20]])
+        dense_caches = _latent_caches(model)
+        gather_caches = _latent_caches(model)
+        a = model(prefix, cache=dense_caches)
+        with _dsa_gather_env("1"):
+            b = model(prefix, cache=gather_caches)
+        assert float(mx.abs(a - b).max()) < 1e-4
+        for tok in (31, 8, 11, 4, 90, 33):
+            step = mx.array([[tok]])
+            a = model(step, cache=dense_caches)
+            with _dsa_gather_env("1"):
+                b = model(step, cache=gather_caches)
+            assert float(mx.abs(a - b).max()) < 1e-4, f"diverged at {tok}"
+    finally:
+        _set_topk(model, old)
+
+
+def test_dsa_gather_engages_and_declines(model):
+    # ENGAGEMENT proof: the gather method must actually run when the gate
+    # is on and DSA engages, and must NOT run when the gate is off or DSA
+    # is not engaged — a silently-declining guard makes an A/B compare
+    # stock to stock.
+    from vmlx_engine.models.dots3_note.language import Dots3MLAAttention
+
+    calls = []
+    real = Dots3MLAAttention._dsa_gather_attention
+
+    def _spy(self, *args, **kwargs):
+        calls.append(1)
+        return real(self, *args, **kwargs)
+
+    Dots3MLAAttention._dsa_gather_attention = _spy
+    old = model.text_config.index_topk
+    _set_topk(model, 8)
+    try:
+        ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8, 11, 4, 61, 2]])
+        with _dsa_gather_env("1"):
+            model(ids, cache=_latent_caches(model))
+        assert calls, "gather path never engaged with the gate on"
+        calls.clear()
+        with _dsa_gather_env("0"):
+            model(ids, cache=_latent_caches(model))
+        assert not calls, "gather path ran with the gate off"
+        _set_topk(model, 4096)  # total <= topk: DSA itself must not engage
+        with _dsa_gather_env("1"):
+            model(ids, cache=_latent_caches(model))
+        assert not calls, "gather path ran without DSA engagement"
+    finally:
+        Dots3MLAAttention._dsa_gather_attention = real
+        _set_topk(model, old)
+
+
+def test_dsa_gather_query_tiling_matches_single_tile(model):
+    # Force multiple tiles (tiny element budget -> tile of ~2 queries) and
+    # pin against the one-tile result: tiling is a memory policy, never a
+    # math change.
+    from vmlx_engine.models.dots3_note.language import Dots3MLAAttention
+
+    old = model.text_config.index_topk
+    _set_topk(model, 8)
+    budget = Dots3MLAAttention.gather_element_budget
+    ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8, 11, 4, 61, 2]])
+    try:
+        with _dsa_gather_env("1"):
+            one = model(ids, cache=_latent_caches(model))
+            # K=8, D=kv_lora_rank(16)+rope(4)=20 -> tile = 320//160 = 2.
+            Dots3MLAAttention.gather_element_budget = 320
+            tiled = model(ids, cache=_latent_caches(model))
+        assert float(mx.abs(one - tiled).max()) < 1e-4
+    finally:
+        Dots3MLAAttention.gather_element_budget = budget
+        _set_topk(model, old)

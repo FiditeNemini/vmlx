@@ -124,8 +124,14 @@ def test_mllm_tight_memory_text_prefill_chunks_short_tool_prompts():
     source = inspect.getsource(mbg)
 
     assert "VMLINUX_TIGHT_MEMORY_PREFILL_STEP_SIZE" in source
-    assert 'os.environ.get("VMLINUX_TIGHT_MEMORY_PREFILL_STEP_SIZE", "64")' in source
     assert "seq_len > _tight_text_prefill_step_size + 1" in source
+    # 2026-08-16 (ledger row 157): the tight step is PROJECTED from the
+    # attention-score budget (max_prefill_chunk_tokens) rather than collapsed
+    # to a flat 64 — measured 2.93x on dots3, and probing for it is itself
+    # expensive because every chunk re-streams the expert set. The env
+    # override must still be honoured exactly when an operator sets it.
+    assert "max_prefill_chunk_tokens(" in source
+    assert "_tight_env_step" in source
     # 2026-08-16 (ledger row 157): the tight step is now the conservative
     # FIRST chunk and the measured fitter may grow back toward the configured
     # step (a smaller chunk does not reduce weight streaming, it multiplies

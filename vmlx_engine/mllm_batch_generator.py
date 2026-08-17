@@ -6525,14 +6525,62 @@ class MLLMBatchGenerator:
             and cache is not None
             and bool(getattr(self, "_tight_memory_prefill_drain", False))
         ):
+            _tight_env_step = os.environ.get(
+                "VMLINUX_TIGHT_MEMORY_PREFILL_STEP_SIZE"
+            )
             try:
-                _tight_text_prefill_step_size = max(
-                    16,
-                    min(
-                        int(self.prefill_step_size),
-                        int(os.environ.get("VMLINUX_TIGHT_MEMORY_PREFILL_STEP_SIZE", "64")),
-                    ),
-                )
+                if _tight_env_step is not None:
+                    # Explicit operator override wins, exactly as written.
+                    _tight_text_prefill_step_size = max(
+                        16,
+                        min(int(self.prefill_step_size), int(_tight_env_step)),
+                    )
+                else:
+                    # PROJECT the safe step instead of collapsing to a flat 64.
+                    #
+                    # The step must bound the per-chunk attention-score buffer,
+                    # which grows with the CONTEXT, not with the chunk — that
+                    # is exactly what max_prefill_chunk_tokens() computes and
+                    # why "a step size that is safe at 10k is fatal at 100k".
+                    # Projecting it needs no probe chunks, and probing is not
+                    # free: every chunk re-streams the whole expert set, so on
+                    # a MoE the chunk COUNT is the cost. Measured on dots3
+                    # (1928-token cold prefill, temp 0, answers identical):
+                    # flat 64 -> 174.4 pp/s, probe-then-grow -> 199.9,
+                    # projected/full 2048 -> 510.6 pp/s (2.93x). At 4096:
+                    # 145.2 / 160.5 / 309.4.
+                    _tight_ctx = max(int(seq_len), 1)
+                    _tight_heads = max(
+                        1,
+                        _infer_attention_heads_for_hybrid_oom_guard(
+                            self.language_model
+                        ),
+                    )
+                    try:
+                        _t_active, _t_limit = (
+                            get_effective_metal_working_set_bytes(mx)
+                        )
+                        _t_head = max(0, _t_limit - _t_active)
+                    except Exception:  # noqa: BLE001
+                        _t_head = 0
+                    # Spend at most a third of live headroom on the score
+                    # buffer; the per-chunk valve still guards the rest.
+                    _t_budget = (
+                        int(_t_head / 3) if _t_head > 0 else None
+                    )
+                    _tight_text_prefill_step_size = max(
+                        _HYBRID_MIN_CHUNK,
+                        min(
+                            int(self.prefill_step_size),
+                            int(
+                                max_prefill_chunk_tokens(
+                                    _tight_heads,
+                                    _tight_ctx,
+                                    budget_bytes=_t_budget,
+                                )
+                            ),
+                        ),
+                    )
             except Exception:
                 _tight_text_prefill_step_size = min(int(self.prefill_step_size), 64)
             # 🚨 A SMALLER CHUNK DOES NOT REDUCE WEIGHT STREAMING — IT

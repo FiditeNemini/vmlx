@@ -11091,6 +11091,10 @@ async function main() {
           };
           await clickSection('Prefix Cache');
           await clickSection('In-Memory Paged Cache');
+          // MCP lives in its own collapsed section, so the first capture read
+          // an unopened accordion and reported every MCP field absent. Open it
+          // the same way as the cache sections before reading.
+          await clickSection('MCP Tools');
           const labelFor = (text) => [...(drawer?.querySelectorAll('label') || [])]
             .find((label) => (label.innerText || '').includes(text));
           const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');

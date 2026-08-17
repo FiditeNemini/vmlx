@@ -1872,6 +1872,23 @@ def serve_command(args):
     #      chat_template.jinja or tokenizer_config.json for a literal
     #      `<think>` sentinel. Catches any new thinking model family
     #      we haven't catalogued yet.
+    # Unconditional (every family, not just unknown ones): a bundle whose
+    # chat_template.jinja disagrees with the copy embedded in
+    # tokenizer_config.json is serving fine here — transformers prefers the
+    # .jinja — while handing every OTHER consumer a different template. Make
+    # that visible at load instead of letting it surface as unexplained model
+    # behaviour later (ledger row 163).
+    try:
+        from pathlib import Path as _AuditPath
+
+        from .utils.jang_loader import log_bundle_chat_template_audit
+
+        _audit_dir = _AuditPath(args.model)
+        if _audit_dir.is_dir():
+            log_bundle_chat_template_audit(_audit_dir)
+    except Exception:
+        pass
+
     _chat_template_has_think = False
     _registry_known = False
     try:

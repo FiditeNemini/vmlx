@@ -10,6 +10,7 @@ so existing models on HuggingFace continue to work.
 """
 
 import gc
+import hashlib
 import importlib
 import inspect
 import json
@@ -1107,6 +1108,87 @@ def _resolve_vlm_processor_eos_token_ids(path: Path, model) -> list[int]:
         pass
 
     return resolved
+
+
+def audit_bundle_chat_template_sources(path: Path) -> dict[str, Any]:
+    """Compare a bundle's two chat-template locations and report divergence.
+
+    A bundle can carry the template in `chat_template.jinja` AND in
+    `tokenizer_config.json`'s `chat_template` field. transformers >= 5 loads
+    the `.jinja` and it takes precedence, so a stale embedded copy changes
+    nothing for this engine — and that is exactly why it stays invisible.
+
+    Observed 2026-08-16 (ledger row 163): Zaya-8B-JANG_4M's embedded template
+    is byte-identical to its own `chat_template.jinja.bak-preitemsfix`, i.e.
+    the authored fix lives ONLY in the `.jinja`; LFM2.5-8B-A1B-MXFP8-CRACK
+    carries no embedded template at all. Any consumer that reads
+    `tokenizer_config.json` instead — older transformers, conversion tooling,
+    third-party loaders — silently gets the PRE-FIX template or none, and the
+    failure surfaces as inexplicable model behaviour rather than an error.
+
+    Returns a status dict; never raises.
+    """
+    result: dict[str, Any] = {
+        "status": "unknown",
+        "jinja": None,
+        "embedded": None,
+    }
+    try:
+        jinja_path = path / "chat_template.jinja"
+        jinja_text = jinja_path.read_text() if jinja_path.is_file() else None
+
+        embedded_text = None
+        tok_cfg = path / "tokenizer_config.json"
+        if tok_cfg.is_file():
+            embedded = json.loads(tok_cfg.read_text()).get("chat_template")
+            if isinstance(embedded, str) and embedded:
+                embedded_text = embedded
+
+        def _digest(text: str | None) -> str | None:
+            if text is None:
+                return None
+            return hashlib.sha256(text.strip().encode()).hexdigest()[:12]
+
+        result["jinja"] = _digest(jinja_text)
+        result["embedded"] = _digest(embedded_text)
+
+        if jinja_text is None and embedded_text is None:
+            result["status"] = "no_template"
+        elif jinja_text is None:
+            result["status"] = "embedded_only"
+        elif embedded_text is None:
+            result["status"] = "jinja_only"
+        elif jinja_text.strip() == embedded_text.strip():
+            result["status"] = "consistent"
+        else:
+            result["status"] = "divergent"
+    except Exception:
+        result["status"] = "unreadable"
+    return result
+
+
+def log_bundle_chat_template_audit(path: Path) -> dict[str, Any]:
+    """Run the template-source audit and make a divergence LOUD in the log."""
+    audit = audit_bundle_chat_template_sources(path)
+    status = audit.get("status")
+    if status == "divergent":
+        logger.warning(
+            "chat template DIVERGENT: chat_template.jinja (%s) != the copy "
+            "embedded in tokenizer_config.json (%s). This engine uses the "
+            ".jinja, so serving is unaffected — but any consumer reading "
+            "tokenizer_config.json gets the OTHER template. Re-sync the "
+            "bundle before trusting a template fix elsewhere.",
+            audit.get("jinja"),
+            audit.get("embedded"),
+        )
+    elif status == "jinja_only":
+        logger.info(
+            "chat template: chat_template.jinja (%s) only; "
+            "tokenizer_config.json carries none — consumers that read the "
+            "embedded field alone will find NO template for this bundle.",
+            audit.get("jinja"),
+        )
+    return audit
 
 
 def _load_chat_template_text(path: Path) -> str | None:

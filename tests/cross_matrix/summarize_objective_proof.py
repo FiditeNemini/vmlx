@@ -7342,13 +7342,27 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         requirements,
         "Real Electron UI cross-family live model matrix is release-cleared",
         _status(real_ui_cross_family_ok),
+        # This list is where a reader is sent to LOOK; the requirement's status
+        # is derived above from real_ui_unblocked_non_mimo_ok and
+        # all_local_smoke_ok, not from these paths. It used to lead with
+        # ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL, a pre-hardware-transition
+        # AGGREGATE artifact from the previous machine that no longer exists and
+        # never will — objective_digest reported it under
+        # missing_evidence_requirements every run, i.e. the row pointed a reader
+        # at a dead end. Its four siblings already resolve to current per-model
+        # smokes, so the aggregate is replaced by the per-model summaries for the
+        # families it used to cover (lfm25, nemotron omni, step37, zaya text),
+        # every one of which exists on disk. No status computation changes.
         [
             CURRENT_RELEASE_REGRESSION_MANIFEST_REL,
-            ALL_LOCAL_MODEL_SMOKE_LIVE_SLICE_CURRENT_REL,
             ALL_LOCAL_MODEL_SMOKE_GEMMA4_26B_CRACK_REL,
             ALL_LOCAL_MODEL_SMOKE_QWEN35_MXFP8_MTP_CURRENT_REL,
             ALL_LOCAL_MODEL_SMOKE_MINIMAX_SMALL_JANGTQ_REL,
             ALL_LOCAL_MODEL_SMOKE_DSV4_JANGTQ_K_REL,
+            ALL_LOCAL_MODEL_SMOKE_LFM25_MXFP8_REL,
+            ALL_LOCAL_MODEL_SMOKE_NEMOTRON_OMNI_JANGTQ_REL,
+            ALL_LOCAL_MODEL_SMOKE_STEP37_JANGK_REL,
+            ALL_LOCAL_MODEL_SMOKE_ZAYA_TEXT_REL,
         ],
         caveat=(
             None

@@ -61,11 +61,14 @@ GEMMA4_CURRENT_INSTALLED_SPEED_ARTIFACT = Path(
 GEMMA4_CURRENT_MEMORY_STRESS_ARTIFACT = Path(
     "build/private-evidence/current-gemma4-mixed-swa-live-gate.json"
 )
+# 2026-08-16 (ledger row 151): repointed to the current-hardware gemma4
+# real-UI rows (CRACK drive bundle); the old -api-proof/-ui-proof names were
+# previous-machine artifacts that no longer exist.
 GEMMA4_CURRENT_API_PROOF = Path(
-    "build/private-evidence/current-gemma4-mixed-swa-api-proof.json"
+    "build/private-evidence/current-real-ui-live-model-gemma4-responses-reasoningonly-max768-visible-20260815-proof.json"
 )
 GEMMA4_CURRENT_UI_PROOF = Path(
-    "build/private-evidence/current-gemma4-mixed-swa-ui-proof.json"
+    "build/private-evidence/current-real-ui-live-model-gemma4-cachecontrols-l2storage-20260815-proof.json"
 )
 QWEN35_INSTALLED_SPEED_ARTIFACT = Path(
     "build/current-decode-speed-live-qwen35-4bit-issue115-installed-app-after-decode-position-20260601.json"
@@ -815,8 +818,8 @@ def _issue119_checks(root: Path) -> dict[str, bool]:
         "gemma26_real_ui_artifacts_indexed": (
             gemma_responses.exists()
             and gemma_cache.exists()
-            and "gemma-4-26B-A4B-it-qat-JANG_4M" in _read(gemma_responses)
-            and "gemma-4-26B-A4B-it-qat-JANG_4M" in _read(gemma_cache)
+            and "Gemma-4-26B-A4B-it-JANG_4M-CRACK" in _read(gemma_responses)
+            and "Gemma-4-26B-A4B-it-JANG_4M-CRACK" in _read(gemma_cache)
             and "responses_api" in response_surfaces
             and "language_leak_check" in response_surfaces
             and "l2_disk_storage" in cache_surfaces

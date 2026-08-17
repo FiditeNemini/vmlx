@@ -72,6 +72,7 @@ from tests.cross_matrix.release_regression_manifest import (
     _current_release_blocker_ledger,
     _live_smoke_gap_is_expected_mimo_open,
     _real_ui_architecture_cache_policy_ok,
+    _real_ui_reasoning_leak_counts,
     _real_ui_named_tool_probe_semantics_ok,
     _validate_current_issue175_179_release_boundary_audit,
     _validate_current_issue181_183_runtime_audit,
@@ -6759,6 +6760,39 @@ def test_release_regression_manifest_real_ui_matrix_accepts_step37_family_alias_
     }
 
     assert _real_ui_architecture_cache_policy_ok("step37", proof) is True
+
+
+def test_reasoning_numeric_leak_ignores_deliberate_counting_but_flags_spew():
+    """The manifest recomputes its own failures, so this rule has to match the
+    harness. Step-3.7 wrote "1 2 3 ... 21" to check a byte count: one 66-char run
+    inside 10,153 chars of English."""
+    counting = _real_ui_reasoning_leak_counts(
+        {},
+        {
+            "reasoningText": "coherent English " * 200,
+            "reasoningNumericRunCount": 1,
+            "reasoningNumericRunChars": 66,
+            "reasoningTextLength": 10153,
+        },
+    )
+    assert counting["numeric"] == 0
+
+    spew = _real_ui_reasoning_leak_counts(
+        {},
+        {
+            "reasoningText": "1 2 3 4 5 6 7 8 9 10 11 12",
+            "reasoningNumericRunCount": 12,
+            "reasoningNumericRunChars": 900,
+            "reasoningTextLength": 1000,
+        },
+    )
+    assert spew["numeric"] == 12
+
+    # An older artifact without the measurements keeps the count-only rule.
+    legacy = _real_ui_reasoning_leak_counts(
+        {}, {"reasoningText": "x", "reasoningNumericRunCount": 3}
+    )
+    assert legacy["numeric"] == 3
 
 
 def _step37_exact_stored_kv_proof(**native_overrides):

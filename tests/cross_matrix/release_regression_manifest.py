@@ -3827,6 +3827,10 @@ REASONING_NUMERIC_GARBAGE_RE = re.compile(
     r"(?:^|[\s([{,;:])(?:\d{1,4}[\s,;:|\-/.]+){8,}\d{1,4}(?=$|[\s)\]},;:.])",
     re.MULTILINE,
 )
+# Share of the reasoning text that long numeric runs must occupy before they
+# count as spew rather than deliberate arithmetic. Kept in step with
+# REASONING_NUMERIC_SPEW_SHARE in panel/scripts/live-real-ui-model-proof.mjs.
+REASONING_NUMERIC_SPEW_SHARE = 0.15
 
 
 def _real_ui_reasoning_text(proof: dict[str, Any], chat: dict[str, Any]) -> str:
@@ -3868,6 +3872,25 @@ def _real_ui_reasoning_leak_counts(
     numeric = chat.get("reasoningNumericRunCount")
     if not isinstance(numeric, int):
         numeric = len(REASONING_NUMERIC_GARBAGE_RE.findall(text))
+    # Degenerate numeric spew DOMINATES the text it appears in; a model counting
+    # on purpose does not. Step-3.7 wrote out "1 2 3 ... 21" to check a byte
+    # count against the length of REAL_UI_LIVE_TOOL_ONE — one 66-character run
+    # inside 10,153 characters of coherent English — and the raw count called it
+    # garbage. This mirrors reasoningNumericRunIsSpew() in
+    # panel/scripts/live-real-ui-model-proof.mjs; the manifest recomputes its own
+    # failures, so refining only the harness left this check firing on the same
+    # artifact the harness had already exonerated.
+    run_chars = chat.get("reasoningNumericRunChars")
+    text_length = chat.get("reasoningTextLength")
+    if (
+        numeric
+        and isinstance(run_chars, (int, float))
+        and isinstance(text_length, (int, float))
+        and run_chars > 0
+        and text_length > 0
+        and (run_chars / text_length) < REASONING_NUMERIC_SPEW_SHARE
+    ):
+        numeric = 0
     return {
         "raw": raw,
         "cjk": cjk,

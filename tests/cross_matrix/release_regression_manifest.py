@@ -6876,6 +6876,57 @@ def _real_ui_visible_assistant_turns_complete(
     return saw_user
 
 
+RENDERER_LOCALE_REL = Path("panel/src/renderer/src/i18n/locales/en.json")
+
+# i18n keys for the server cache controls this gate requires to be visible.
+# The control set is the contract; the wording is not. Two of these strings had
+# been renamed in the UI ("Use Paged KV Cache" -> "In-Memory Paged Cache (RAM)",
+# "Block Disk Cache (L2)" -> "Block Disk Cache (SSD / L2)") while the gate still
+# pinned the old literals, so the check could never pass no matter how healthy
+# the UI was.
+SERVER_CACHE_LABEL_I18N_KEYS = (
+    "sessions.config.enablePrefixCache",
+    "sessions.config.pagedKVCache",
+    "sessions.cache.blockDiskCache",
+    "sessions.config.enableDiskCache",
+    "sessions.config.storedCacheQuantization",
+)
+
+
+def _renderer_locale_string(root: Path, dotted_key: str) -> str:
+    """Resolve one renderer label from en.json, or raise.
+
+    Resolved against the SOURCE tree this module lives in, not the artifact
+    root: the labels are a property of the checked-out renderer, while `root`
+    is where proof artifacts live (and is a synthetic directory under test).
+    That also makes the assertion the right one — the artifact must match the
+    labels of THIS checkout.
+
+    Deliberately no fallback: a missing/renamed key must break loudly rather
+    than silently relax the gate to an empty expectation.
+    """
+    source_root = Path(__file__).resolve().parents[2]
+    payload = json.loads(
+        (source_root / RENDERER_LOCALE_REL).read_text(encoding="utf-8")
+    )
+    node: Any = payload
+    for part in dotted_key.split("."):
+        if not isinstance(node, dict) or part not in node:
+            raise KeyError(
+                f"{RENDERER_LOCALE_REL}: missing i18n key {dotted_key!r}"
+            )
+        node = node[part]
+    if not isinstance(node, str) or not node.strip():
+        raise KeyError(f"{RENDERER_LOCALE_REL}: i18n key {dotted_key!r} is not a string")
+    return node
+
+
+def expected_server_cache_labels(root: Path) -> tuple[str, ...]:
+    return tuple(
+        _renderer_locale_string(root, key) for key in SERVER_CACHE_LABEL_I18N_KEYS
+    )
+
+
 def _validate_current_dev_ui_proof_artifacts(root: Path) -> dict[str, Any]:
     root = root.resolve()
     missing = [
@@ -6920,7 +6971,14 @@ def _validate_current_dev_ui_proof_artifacts(root: Path) -> dict[str, Any]:
             failures.append("proof_panel_dir_mismatch")
         app_log_tail = proof.get("appLogTail")
         app_log_text = "\n".join(app_log_tail) if isinstance(app_log_tail, list) else ""
-        if "http://localhost:5173/" not in app_log_text:
+        # Vite increments its port when 5173 is already taken, so a perfectly
+        # healthy dev launch commonly serves the renderer on 5174+. Pinning the
+        # literal 5173 turned that into "renderer URL missing". The property
+        # that matters is that the renderer came from the LOCAL dev server (as
+        # opposed to an installed app's file:// bundle); the exact port is an
+        # accident of what else was listening. The companion
+        # "start electron app" assertion below still proves the dev launch.
+        if not re.search(r"http://localhost:\d+/", app_log_text):
             failures.append("electron_dev_renderer_url_missing")
         if "start electron app" not in app_log_text:
             failures.append("electron_dev_launch_log_missing")
@@ -7019,13 +7077,7 @@ def _validate_current_dev_ui_proof_artifacts(root: Path) -> dict[str, Any]:
 
         if server_ui.get("visible") is not True:
             failures.append("server_cache_ui_not_visible")
-        for label in (
-            "Enable Prefix Cache",
-            "Use Paged KV Cache",
-            "Block Disk Cache (L2)",
-            "Enable Disk Cache",
-            "Stored Cache Quantization",
-        ):
+        for label in expected_server_cache_labels(root):
             if label not in (server_ui.get("labels") or []):
                 failures.append(f"server_cache_label_missing:{label}")
         block_toggle = (
@@ -7038,8 +7090,21 @@ def _validate_current_dev_ui_proof_artifacts(root: Path) -> dict[str, Any]:
             if isinstance(server_ui.get("afterDiskToggle"), dict)
             else {}
         )
-        for key in ("enablePrefixCache", "usePagedCache", "enableBlockDiskCache"):
-            if block_toggle.get(key) is not True:
+        # Block Disk Cache is a STANDALONE SSD tier: enabling it turns Prefix
+        # Cache on and keeps legacy disk off, but deliberately does NOT engage
+        # the In-Memory Paged Cache (RAM) tier — pure-SSD is a supported lane
+        # (resolveCacheControlPolicy's blockDiskOnlyAlternative in
+        # shared/cacheControlPolicy.ts, and the same assertion the proof script
+        # itself makes). This gate previously demanded usePagedCache is True
+        # here, which contradicted the interlock and the SSD-only lane, so it
+        # could never pass against a correct artifact.
+        for key, expected in (
+            ("enablePrefixCache", True),
+            ("usePagedCache", False),
+            ("enableBlockDiskCache", True),
+            ("enableDiskCache", False),
+        ):
+            if block_toggle.get(key) is not expected:
                 failures.append(f"block_disk_toggle_mismatch:{key}")
         if disk_toggle.get("enablePrefixCache") is not True:
             failures.append("legacy_disk_toggle_prefix_not_enabled")

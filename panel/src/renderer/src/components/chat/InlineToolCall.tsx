@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Check, X, Square, ChevronRight, Loader2 } from 'lucide-react'
 import { parseToolArgs, getToolSummary, formatJson } from './chat-utils'
 
@@ -13,7 +13,25 @@ interface InlineToolCallProps {
 }
 
 export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
+  const [userToggled, setUserToggled] = useState(false)
   const [expanded, setExpanded] = useState(false)
+
+  // A FAILED call explains itself; a successful one stays compact. Measured
+  // live 2026-08-16: a stale Working Directory made dots3 emit ten `List .`
+  // calls that all failed, and the user saw ten collapsed "failed" chips and
+  // an empty answer — while the executor's own actionable text ("The
+  // configured working directory does not exist: … Set an existing folder in
+  // Chat Settings → Built-in Coding Tools → Working Directory") sat one
+  // unexplained click away.
+  //
+  // This runs as an effect, not a useState initialiser: the card mounts while
+  // the call is still `calling`, so the error phase arrives on a LATER render
+  // and an initial value would never see it. An explicit click wins forever
+  // after, so the noise can be collapsed once it has been read.
+  const hasError = group.statuses.some(s => s.phase === 'error')
+  useEffect(() => {
+    if (hasError && !userToggled) setExpanded(true)
+  }, [hasError, userToggled])
 
   if (group.statuses.length === 0) return null
 
@@ -36,7 +54,7 @@ export function InlineToolCall({ group, isStreaming }: InlineToolCallProps) {
       !isDone && isStreaming ? 'border-warning/40 border-l-warning border-l-2' : 'border-border/60'
     } bg-popover/80`}>
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={() => { setUserToggled(true); setExpanded(!expanded) }}
         className="w-full px-2.5 py-1.5 flex items-center gap-1.5 text-xs hover:bg-accent/30 transition-colors"
       >
         {/* Status indicator */}

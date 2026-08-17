@@ -155,7 +155,12 @@ describe("Responses speculative tool-buffer reconciliation", () => {
       "executedToolCallCount: receivedToolCalls.filter(Boolean).length,",
     );
     expect(source).toContain("[CHAT] Never-empty guard (${neverEmptyAnswer.reason})");
-    expect(source).toContain("fullContent = neverEmptyAnswer.content;");
+    // The notice must be STREAMED, not only persisted: a notice that appears
+    // solely in the final save leaves the live turn blank and makes the wire
+    // trace disagree with the persisted record.
+    expect(source).toContain(
+      "emitDelta(neverEmptyAnswer.content, false, true, true);",
+    );
     // Speculative "generating" statuses must NOT mask the guard.
     expect(source).not.toContain(
       "collectedToolStatuses.length === 0 &&\n          preSanitizeContent",

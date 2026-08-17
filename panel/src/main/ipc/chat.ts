@@ -4470,7 +4470,16 @@ export function registerChatHandlers(
               `preSanitize=${preSanitizeContent.length}ch rejectedMarkup=${rejectedControlMarkupText.length}ch ` +
               `toolIterations=${toolIteration}`,
           );
-          fullContent = neverEmptyAnswer.content;
+          // Emit it, don't just persist it: a notice that only appears after the
+          // final save leaves the live turn blank and makes the wire trace
+          // disagree with the persisted record. skipClientCount keeps it out of
+          // the token count (it is not model output); bypass keeps the marker
+          // detector from re-suppressing it.
+          fullContent = "";
+          rawAccumulated = "";
+          emitDelta(neverEmptyAnswer.content, false, true, true);
+          // emitDelta restarts periodic saving when nothing had streamed yet.
+          stopPeriodicSave();
         }
         // If no main content but reasoning was produced, keep them separate.
         // Reasoning stays in reasoningContent for the reasoning box; content stays empty.

@@ -651,6 +651,50 @@ function sha256File(filePath) {
   return crypto.createHash('sha256').update(readFileSync(filePath)).digest('hex')
 }
 
+/**
+ * The never-empty notices the panel substitutes when a turn produced no
+ * renderable model answer (all-markup Responses payload, or a tool loop the
+ * model never followed up on). Such a turn is a MODEL failure that must still
+ * be legible to the user, so it is asserted non-empty, stream-equal to its
+ * persisted record, and visibly rendered — but it carries no streamed model
+ * answer, so the progressive-delta assertion cannot apply to it.
+ *
+ * Read out of the shared source instead of duplicated here: a copied string
+ * would silently stop matching the moment the notice is reworded, and this
+ * exemption must never widen by accident.
+ */
+function readNeverEmptyNotices() {
+  const sourcePath = path.join(
+    repoDir,
+    'panel/src/shared/responsesStreamRecovery.ts',
+  )
+  const source = readFileSync(sourcePath, 'utf8')
+  const notices = []
+  for (const name of [
+    'REJECTED_CONTROL_MARKUP_NOTICE',
+    'TOOL_WITHOUT_ANSWER_NOTICE',
+  ]) {
+    const match = source.match(
+      new RegExp(`export const ${name}\\s*=\\s*\\n?\\s*"((?:[^"\\\\]|\\\\.)*)";`),
+    )
+    if (!match) {
+      throw new Error(
+        `Could not read ${name} from ${sourcePath}; the never-empty notice exemption would silently stop matching`,
+      )
+    }
+    notices.push(JSON.parse(`"${match[1]}"`))
+  }
+  return notices
+}
+
+const NEVER_EMPTY_NOTICES = readNeverEmptyNotices()
+
+function isNeverEmptyNoticeTurn(content) {
+  const trimmed = String(content || '').trim()
+  if (!trimmed) return false
+  return NEVER_EMPTY_NOTICES.some((notice) => notice.trim() === trimmed)
+}
+
 function pythonSourceTreeDigest(root, relativeBase = repoDir) {
   const files = []
   const walk = (directory) => {
@@ -3816,6 +3860,9 @@ export function upsertBoundedDomSample(samples, state, sample, maxSamples, force
 
 export function validateReasoningEvidence(result, expectation = 'optional') {
   const failures = []
+  // Recorded on the result so a run that leaned on never-empty notices is
+  // visible in the artifact rather than reading as a clean pass.
+  const neverEmptyNoticeTurns = []
   const expectedTurns = expectedUiTurnCount(result)
   const assistantIds = new Set(
     (Array.isArray(result?.assistantMessageIds)
@@ -3962,7 +4009,22 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
         failures.push(`message ${row?.messageId || 'unknown'} leaked parser markers across ${channel} stream boundaries`)
       }
     }
-    if (progressiveContentDeltaCount < 2) {
+    // A never-empty notice is the panel telling the user the model produced no
+    // usable answer. It is one substituted sentence, not a generated one, so
+    // "streamed in at least two deltas" is not a property it can have. Every
+    // other assertion still binds it (non-empty, stream-equals-persisted,
+    // visibly rendered), and the surfaces the model failed to prove —
+    // responses_delta_streaming, tool_loop — stay unrecorded, so a family
+    // cannot pass the gate by emitting notices.
+    const noticeTurn = isNeverEmptyNoticeTurn(
+      result?.assistantRecords?.[
+        (result?.assistantMessageIds || [])
+          .map(String)
+          .indexOf(String(row?.messageId || ''))
+      ]?.content,
+    )
+    if (noticeTurn) neverEmptyNoticeTurns.push(String(row?.messageId || ''))
+    if (progressiveContentDeltaCount < 2 && !noticeTurn) {
       failures.push(`message ${row?.messageId || 'unknown'} content was not progressively streamed`)
     }
     // The DOM sampler runs at a 125ms floor; a short answer from a fast model
@@ -4202,6 +4264,9 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
   }
   if (expectation === 'none' && domMessages.some((message) => String(message?.reasoningText || '').trim())) {
     failures.push('reasoning was disabled but a visible reasoning rail was rendered')
+  }
+  if (result && typeof result === 'object') {
+    result.neverEmptyNoticeTurns = neverEmptyNoticeTurns
   }
   return failures
 }

@@ -9,6 +9,8 @@ window, and the hysteresis trim — in float32 so any divergence is a math
 bug, not quantization noise.
 """
 
+import os
+
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
@@ -494,3 +496,108 @@ def test_retention_overhang_does_not_change_outputs(model):
         Dots3LatentCache.retain_overhang = old
     assert mx.array_equal(out0, out1).item()
     assert mx.array_equal(d0, d1).item()
+
+
+# ---- prefill materialization from the latent (DSV4 split, ledger row 156) --
+
+
+def _prefill_materialize_env(value):
+    """Context-managed override of the prefill materialization ceiling."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        key = "VMLX_DOTS3_PREFILL_MATERIALIZE_MAX_KEYS"
+        old = os.environ.get(key)
+        os.environ[key] = str(value)
+        try:
+            yield
+        finally:
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+
+    return _ctx()
+
+
+def test_prefill_materialization_engages_and_is_equivalent(model):
+    # A guard that silently declines makes an A/B compare stock to stock, so
+    # prove ENGAGEMENT first: the materialized branch must actually be taken
+    # for the ceiling-on arm and skipped for the ceiling-off arm.
+    from vmlx_engine.models.dots3_note import language as lang
+
+    ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8, 61, 4, 77, 12]])
+    seen = {"materialize": [], "absorb": []}
+    real_einsum = lang.mx.einsum
+
+    def _spy(spec, *args, **kwargs):
+        if spec == "bltr,hnr->bhtn":
+            seen["materialize"].append(spec)
+        return real_einsum(spec, *args, **kwargs)
+
+    lang.mx.einsum = _spy
+    try:
+        with _prefill_materialize_env(4096):
+            hot = model(ids, cache=_latent_caches(model))
+        engaged = len(seen["materialize"])
+        seen["materialize"].clear()
+        with _prefill_materialize_env(0):
+            cold = model(ids, cache=_latent_caches(model))
+        declined = len(seen["materialize"])
+    finally:
+        lang.mx.einsum = real_einsum
+
+    assert engaged > 0, "materialized prefill branch never ran with the ceiling on"
+    assert declined == 0, "materialized branch ran with the ceiling at 0"
+    # Same keys, two representations of the same math: argmax must match and
+    # the residual stays inside the bf16 association-order noise floor.
+    assert (mx.argmax(hot, -1) == mx.argmax(cold, -1)).all()
+    assert float(mx.abs(hot - cold).max()) < 1e-3
+
+
+def test_prefill_materialization_respects_the_key_ceiling(model):
+    # Above the ceiling the long-context latent path must stay in charge —
+    # the 512K economics depend on never materializing a huge key block.
+    from vmlx_engine.models.dots3_note import language as lang
+
+    ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8]])
+    hits = []
+    real_einsum = lang.mx.einsum
+
+    def _spy(spec, *args, **kwargs):
+        if spec == "bltr,hnr->bhtn":
+            hits.append(spec)
+        return real_einsum(spec, *args, **kwargs)
+
+    lang.mx.einsum = _spy
+    try:
+        with _prefill_materialize_env(4):  # 8 tokens > ceiling 4
+            model(ids, cache=_latent_caches(model))
+    finally:
+        lang.mx.einsum = real_einsum
+    assert hits == [], "materialization ignored the key ceiling"
+
+
+def test_decode_never_materializes(model):
+    # S == 1 must stay on the absorbed path (that is what the latent cache
+    # exists for, and the fp32 S==1 SDPA trap lives there).
+    from vmlx_engine.models.dots3_note import language as lang
+
+    caches = _latent_caches(model)
+    model(mx.array([[3, 17, 42, 9]]), cache=caches)
+    hits = []
+    real_einsum = lang.mx.einsum
+
+    def _spy(spec, *args, **kwargs):
+        if spec == "bltr,hnr->bhtn":
+            hits.append(spec)
+        return real_einsum(spec, *args, **kwargs)
+
+    lang.mx.einsum = _spy
+    try:
+        with _prefill_materialize_env(1_000_000):
+            model(mx.array([[55]]), cache=caches)
+    finally:
+        lang.mx.einsum = real_einsum
+    assert hits == [], "decode step materialized K/V"

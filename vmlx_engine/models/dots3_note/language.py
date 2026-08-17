@@ -57,6 +57,30 @@ def _absorb_enabled() -> bool:
     }
 
 
+def _prefill_materialize_max_keys() -> int:
+    """Key-count ceiling for materializing K/V from the latent at prefill.
+
+    Absorption is a DECODE optimization: scoring against the latent costs
+    (kv_lora_rank + rope) per key where materialized K costs
+    (qk_nope + rope), and the value side costs rank instead of v_head_dim.
+    On dots3 that is 2.8x the attention FLOPs on full layers (576 vs 192,
+    512 vs 128) and 5.5x on the 33 SWA layers (1088 vs 256, 1024 vs 128).
+    Materializing from the fetched latent is O(total) per chunk and buys
+    back O(S*total) — the DSV4 MLA split.
+
+    Bounded because materialized K/V is a genuine transient
+    (heads x total x (nope+rope+v) bf16, ~1 GB/layer at 16K on full
+    layers) and long context must stay on the latent path that makes 512K
+    affordable. 0 disables materialization entirely (pure absorbed).
+    """
+    try:
+        return int(
+            os.environ.get("VMLX_DOTS3_PREFILL_MATERIALIZE_MAX_KEYS", "8192")
+        )
+    except ValueError:
+        return 8192
+
+
 class Dots3LatentCache:
     """Ordered latent cache for one MLA layer.
 
@@ -606,13 +630,53 @@ class Dots3MLAAttention(nn.Module):
         elif has_indexer:
             idx_keys = self.indexer.encode_keys(x, past)
 
-        # [B,h,S,nope] @ [1,h,nope,rank] -> [B,h,S,rank]
-        q_eff = mx.matmul(q_nope, w_nope[None].astype(q_nope.dtype))
-        queries = mx.concatenate([q_eff, q_pe], axis=-1)
-        keys = mx.concatenate([latent_kv, k_pe], axis=-1)
-        values = latent_kv
+        total = int(latent_kv.shape[2])
+        # 🚨 ABSORPTION IS A DECODE OPTIMIZATION, NOT A PREFILL ONE. Scoring
+        # against the latent costs (rank+rope) per key instead of
+        # (nope+rope), and the value side costs rank instead of v_head_dim:
+        # 2.8x the attention FLOPs on full layers and 5.5x on SWA layers
+        # (rank 1024 vs nope 192). Materializing K/V from the FETCHED latent
+        # once per chunk is O(total) and buys back O(S*total) — exactly what
+        # the DSV4 MLA path does (`if L == 1: absorb else: materialize`,
+        # runtime_patches/deepseek_v3_patched.py, 2276 pp/s on this box).
+        # The cache write above is untouched, so the prefix-cache contract
+        # and every stored-block invariant are unchanged; this only changes
+        # how the SAME keys are represented for one SDPA call. Bounded by
+        # key count because the materialized K/V is a real transient
+        # (128 heads x total x 320 dims bf16) and long context must stay on
+        # the latent path the 512K economics depend on.
+        materialize = (
+            S > 1
+            and total <= _prefill_materialize_max_keys()
+            and w_nope is not None
+        )
 
-        total = keys.shape[2]
+        if not materialize:
+            # [B,h,S,nope] @ [1,h,nope,rank] -> [B,h,S,rank]
+            q_eff = mx.matmul(q_nope, w_nope[None].astype(q_nope.dtype))
+            queries = mx.concatenate([q_eff, q_pe], axis=-1)
+            keys = mx.concatenate([latent_kv, k_pe], axis=-1)
+            values = latent_kv
+        else:
+            queries = mx.concatenate([q_nope, q_pe], axis=-1)
+            # [B,1,total,rank] x [h,nope,rank] -> [B,h,total,nope]
+            k_nope = mx.einsum(
+                "bltr,hnr->bhtn", latent_kv, w_nope.astype(latent_kv.dtype)
+            )
+            keys = mx.concatenate(
+                [
+                    k_nope,
+                    mx.broadcast_to(
+                        k_pe,
+                        (k_nope.shape[0], g.num_heads, total, g.qk_rope_head_dim),
+                    ),
+                ],
+                axis=-1,
+            )
+            values = mx.einsum(
+                "bltr,hvr->bhtv", latent_kv, w_v.astype(latent_kv.dtype)
+            )
+
         if (
             has_indexer
             and idx_keys is not None
@@ -660,8 +724,10 @@ class Dots3MLAAttention(nn.Module):
                 scale=g.scale,
                 mask=mask if mask is None else mask.astype(queries.dtype),
             )
-        # [B,h,S,rank] @ [1,h,rank,v] -> [B,h,S,v]
-        out = mx.matmul(out, w_v[None].swapaxes(-1, -2).astype(out.dtype))
+        if not materialize:
+            # [B,h,S,rank] @ [1,h,rank,v] -> [B,h,S,v]
+            out = mx.matmul(out, w_v[None].swapaxes(-1, -2).astype(out.dtype))
+        # materialized: values were already v_head_dim, W_kb_v folded in above
         return out.transpose(0, 2, 1, 3)  # [B, S, heads, v]
 
 

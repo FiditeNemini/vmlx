@@ -6631,8 +6631,12 @@ class MLLMBatchGenerator:
             # and peak-aware headroom. Growth is measurement-driven, the
             # per-chunk valve still refuses anything that will not fit, and
             # VMLX_TIGHT_PREFILL_ADAPTIVE_GROWTH=0 restores the flat 64.
+            # Default OFF: growth measured only 1.15x AND grew the second
+            # chunk into a valve decline at 8k (chunk [1024:3072) refused).
+            # The projected step above is the real fix; growth is kept for
+            # study behind the flag.
             _tight_adaptive_growth = (
-                os.environ.get("VMLX_TIGHT_PREFILL_ADAPTIVE_GROWTH", "1")
+                os.environ.get("VMLX_TIGHT_PREFILL_ADAPTIVE_GROWTH", "0")
                 .strip()
                 .lower()
                 not in {"0", "false", "no", "off"}
@@ -7107,6 +7111,31 @@ class MLLMBatchGenerator:
                                 chunk_end=processed + chunk_size,
                                 model_label="hybrid prefill",
                             )
+                        except PrefillAdmissionError:
+                            # A decline used to fail the whole request with a
+                            # 413. Halving and retrying is strictly better:
+                            # the span the device CAN serve is served, just in
+                            # smaller pieces, and only a chunk already at the
+                            # floor is genuinely unservable. Measured: an 8k
+                            # prompt was refused outright at chunk
+                            # [1024:3072) while the same span completes in
+                            # narrower chunks.
+                            if chunk_size > _HYBRID_MIN_CHUNK:
+                                _halved = max(_HYBRID_MIN_CHUNK, chunk_size // 2)
+                                logger.info(
+                                    "Prefill chunk declined at [%d:%d) — "
+                                    "halving %d -> %d and retrying",
+                                    processed,
+                                    processed + chunk_size,
+                                    chunk_size,
+                                    _halved,
+                                )
+                                _adaptive_chunk_cap = _halved
+                                _chunk_ceiling = min(_chunk_ceiling, _halved)
+                                _adaptive_chunk_active = True
+                                continue
+                            _restore_kv_step()
+                            raise
                         except Exception:
                             # A decline leaves the prefill; restore step first or
                             # the slot keeps span width into decode.

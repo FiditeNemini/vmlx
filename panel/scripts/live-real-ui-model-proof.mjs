@@ -4653,6 +4653,23 @@ export function validateGenerationDefaultsEvidence(result) {
       }
     }
   }
+  // A temperature-0 request is greedy, and the engine deliberately refuses to
+  // forward omitted bundle sampler filters on it:
+  // _normalize_deterministic_sampling_filters() forces top_p=1.0 and drops
+  // top_k so logs, MTP policy checks, and exact-output gates see an
+  // unambiguous deterministic request (pinned by
+  // test_engine_audit.py::test_temperature_zero_omits_bundle_sampling_filters_at_route_layer).
+  // Asserting bundle parity on those two fields for a greedy turn would
+  // contradict the engine contract - and this proof's own manifest row runs at
+  // temperature 0, so the assertion could never hold as specified. Explicit
+  // request overrides are still asserted exactly; only omitted values relax.
+  const explicitTemperatureEntry = explicitFields.find(
+    ([key]) => key === 'temperature',
+  )
+  const effectiveTemperature = explicitTemperatureEntry
+    ? explicitTemperatureEntry[1]
+    : defaults.temperature
+  const greedyRequest = Number(effectiveTemperature) === 0
   for (const [bundleKey, engineKey, uiKey, resolvedKey] of mapping) {
     const expected = defaults[bundleKey]
     if (expected == null) continue
@@ -4688,14 +4705,25 @@ export function validateGenerationDefaultsEvidence(result) {
       failures.push(`health effective ${engineKey}=${healthValue} does not match bundle ${expected}`)
     }
     if (requestCorrelationVerified) {
-      const resolvedExpected = requestOverride ?? expected
+      // Greedy neutralization applies only to values the request did NOT set.
+      const greedyNeutralized = greedyRequest && requestOverride == null
+      const resolvedExpected = greedyNeutralized && engineKey === 'top_p'
+        ? 1
+        : requestOverride ?? expected
+      const greedyOmitted = greedyNeutralized && engineKey === 'top_k'
       const resolvedValue = numericField(resolved, resolvedKey, engineKey, bundleKey, uiKey)
       const resolvedSentinelOmitted = (
         (engineKey === 'top_k' || engineKey === 'min_p')
         && Number(resolvedExpected) === 0
         && (resolvedValue === undefined || resolvedValue === null)
       )
-      if (!resolvedSentinelOmitted && !approximatelyEqual(Number(resolvedValue), Number(resolvedExpected))) {
+      const resolvedGreedyOmitted = greedyOmitted
+        && (resolvedValue === undefined || resolvedValue === null)
+      if (
+        !resolvedSentinelOmitted
+        && !resolvedGreedyOmitted
+        && !approximatelyEqual(Number(resolvedValue), Number(resolvedExpected))
+      ) {
         failures.push(`resolved request ${engineKey}=${resolvedValue} does not match ${resolvedExpected}`)
       }
       resolvedRecords.forEach((record, index) => {
@@ -4711,7 +4739,13 @@ export function validateGenerationDefaultsEvidence(result) {
           && Number(resolvedExpected) === 0
           && (turnValue === undefined || turnValue === null)
         )
-        if (!turnSentinelOmitted && !approximatelyEqual(Number(turnValue), Number(resolvedExpected))) {
+        const turnGreedyOmitted = greedyOmitted
+          && (turnValue === undefined || turnValue === null)
+        if (
+          !turnSentinelOmitted
+          && !turnGreedyOmitted
+          && !approximatelyEqual(Number(turnValue), Number(resolvedExpected))
+        ) {
           failures.push(
             `resolved request record ${index + 1} ${engineKey}=${turnValue} does not match ${resolvedExpected}`,
           )

@@ -10399,6 +10399,19 @@ async function main() {
           const persistedTools = persistedToolsByMessage.flat();
           const allAssistantText = assistants.map((m) => m.content || '').join('\\n');
           const visible = allAssistantText;
+          // The media turns (image/video/audio) live PAST uiTurnCount, so they
+          // appear in neither assistantRecords nor the DOM sample. Their answers
+          // were therefore invisible in the artifact, which made an unmatched
+          // media expect-regex impossible to diagnose without re-running the
+          // model. Record the tail answers verbatim.
+          const mediaTurnAnswers = assistants
+            .slice(uiTurnCount)
+            .map((m, index) => ({
+              indexAfterUiTurns: index,
+              messageId: m.id,
+              length: String(m.content || '').length,
+              text: String(m.content || '').slice(0, 600),
+            }));
           const streamTraceByMessage = [...streamTraceState.values()];
           const messageEventTrace = Object.values(eventTrace.reduce((acc, event) => {
             const key = event.messageId || 'unknown';
@@ -10470,6 +10483,7 @@ async function main() {
             persistedImageAttachment: hasImageAttachment,
             persistedVideoAttachment: hasVideoAttachment,
             persistedAudioAttachment: hasAudioAttachment,
+            mediaTurnAnswers,
           };
           let effectiveSessionConfig = {};
           try {

@@ -6518,6 +6518,7 @@ class MLLMBatchGenerator:
         # silently skipped chunking, falling through to the OOM-prone
         # single-shot `self.model(input_ids, **kwargs)` at the bottom.
         _tight_text_prefill_step_size = self.prefill_step_size
+        _tight_adaptive_growth = False
         if (
             not has_images
             and not has_audio_payload
@@ -6534,6 +6535,29 @@ class MLLMBatchGenerator:
                 )
             except Exception:
                 _tight_text_prefill_step_size = min(int(self.prefill_step_size), 64)
+            # 🚨 A SMALLER CHUNK DOES NOT REDUCE WEIGHT STREAMING — IT
+            # MULTIPLIES IT. The tight step bounds the terms that scale with
+            # the chunk (activations, attention scores); the weights are
+            # re-read in FULL every chunk regardless. On a MoE that is
+            # catastrophic: dots3 restreams ~85GB of expert weights per
+            # chunk, so 64-token chunks paid it 32x more often than the
+            # configured 2048 and prefill measured 152 pp/s where the bare
+            # forward does 806. Measured end to end (dots3, same serve args,
+            # step the ONLY change): 2048 tok 151.7 -> 420.3 pp/s (2.77x),
+            # 4096 144.7 -> 268.2, 6144 119.9 -> 221.0, answers identical.
+            #
+            # So the tight step stays as the conservative FIRST chunk, and
+            # the measured adaptive fitter below is allowed to GROW it back
+            # toward the configured step from observed per-chunk transients
+            # and peak-aware headroom. Growth is measurement-driven, the
+            # per-chunk valve still refuses anything that will not fit, and
+            # VMLX_TIGHT_PREFILL_ADAPTIVE_GROWTH=0 restores the flat 64.
+            _tight_adaptive_growth = (
+                os.environ.get("VMLX_TIGHT_PREFILL_ADAPTIVE_GROWTH", "1")
+                .strip()
+                .lower()
+                not in {"0", "false", "no", "off"}
+            )
 
         _mimo_tight_text_prefill_requires_chunking = (
             not has_images
@@ -6763,6 +6787,18 @@ class MLLMBatchGenerator:
                 _prefill_valve_min_margin = prefill_valve_min_margin_bytes()
                 _max_active_seen = 0
                 _adaptive_chunk_cap = _tight_text_prefill_step_size
+                # Growth ceiling: the tight step is only the FIRST chunk when
+                # adaptive growth is on; the fitter may climb back to the
+                # configured step from measured headroom (see the tight-step
+                # comment above for the measured 2.77x).
+                _chunk_ceiling = (
+                    int(self.prefill_step_size)
+                    if _tight_adaptive_growth
+                    else _tight_text_prefill_step_size
+                )
+                _adaptive_chunk_active = (
+                    _HYBRID_ADAPTIVE_CHUNK or _tight_adaptive_growth
+                )
                 _prefill_keep_alloc = prefill_keep_alloc_enabled()
                 # Pre-size the KV slots for the WHOLE span before chunking.
                 #
@@ -6864,7 +6900,11 @@ class MLLMBatchGenerator:
                 # single-shot branch too, which is the one that actually
                 # submitted the fatal command buffer.
                 while processed < seq_len - 1:  # -1: keep last token for final logits
-                    chunk_size = min(_tight_text_prefill_step_size, seq_len - 1 - processed)
+                    chunk_size = min(_chunk_ceiling, seq_len - 1 - processed)
+                    if _adaptive_chunk_active:
+                        chunk_size = min(
+                            chunk_size, max(1, _adaptive_chunk_cap)
+                        )
                     while (
                         _boundary_idx < len(_sorted_boundaries)
                         and (
@@ -6883,7 +6923,7 @@ class MLLMBatchGenerator:
                         next_ssm_boundary = _sorted_boundaries[_boundary_idx]
                     if next_ssm_boundary is not None:
                         chunk_size = next_ssm_boundary - processed
-                    if _HYBRID_ADAPTIVE_CHUNK and _adaptive_chunk_cap < chunk_size:
+                    if _adaptive_chunk_active and _adaptive_chunk_cap < chunk_size:
                         logger.info(
                             "Hybrid prefill chunk %d -> %d at processed=%d "
                             "(measured transient %.2fGB per chunk)",
@@ -6946,7 +6986,7 @@ class MLLMBatchGenerator:
                             # the slot keeps span width into decode.
                             _restore_kv_step()
                             raise
-                    if _HYBRID_ADAPTIVE_CHUNK:
+                    if _adaptive_chunk_active:
                         try:
                             _active_before_chunk = int(mx.get_active_memory())
                             mx.reset_peak_memory()
@@ -7087,7 +7127,7 @@ class MLLMBatchGenerator:
                             )
                         except Exception:  # noqa: BLE001
                             pass
-                    if _HYBRID_ADAPTIVE_CHUNK and _active_before_chunk > 0:
+                    if _adaptive_chunk_active and _active_before_chunk > 0:
                         try:
                             _peak = int(mx.get_peak_memory())
                             _, _limit = get_effective_metal_working_set_bytes(mx)
@@ -7109,7 +7149,7 @@ class MLLMBatchGenerator:
                                 _fit = int(_headroom / 1.25) // _per_token
                                 _adaptive_chunk_cap = max(
                                     _HYBRID_MIN_CHUNK,
-                                    min(_tight_text_prefill_step_size, int(_fit)),
+                                    min(_chunk_ceiling, int(_fit)),
                                 )
                         except Exception:  # noqa: BLE001
                             pass

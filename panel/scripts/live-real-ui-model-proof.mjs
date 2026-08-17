@@ -4348,8 +4348,8 @@ export function validateExactToolLoopEvidence(result) {
     }
     return failures
   }
-  if (calls.length < expectedToolCalls) {
-    failures.push(`expected at least ${expectedToolCalls} tool calls, got ${calls.length}`)
+  if (calls.length !== expectedToolCalls) {
+    failures.push(`expected exactly ${expectedToolCalls} tool calls, got ${calls.length}`)
   }
   if (results.length !== calls.length) {
     failures.push(`expected one tool result per call (${calls.length}), got ${results.length}`)
@@ -4386,21 +4386,21 @@ export function validateExactToolLoopEvidence(result) {
       failures.push(`tool probe ${spec.file} did not contain exactly ${spec.token}`)
     }
   }
-  // Models legitimately add EXTRA read-only verification calls. LFM2.5-8B and
-  // Step37 both ran the correct step-1 command on turn 1, then re-read the file
-  // two or three more times (`cat real_ui_tool_probe_1.txt`, `wc -c …`) before
-  // answering, and ran the correct dependent step-2 command on turn 2. The
-  // probe files ended up byte-exact and the per-turn chain this surface asserts
-  // is exactly what happened — yet demanding EXACTLY N calls and matching them
-  // POSITIONALLY failed all of it and withheld tool_loop/long_tool_loop from
-  // three families whose tool loops demonstrably worked.
+  // Resolve each protocol step to the call that satisfied it ON ITS OWN TURN
+  // rather than by list position. With the default prompt (one run_command per
+  // turn) this is equivalent to positional matching, but it reports the real
+  // failure instead of a cascade: the qwen36 case (ledger 220) made NO call on
+  // turn 1 and put both calls on turn 2 — one a single batched command doing
+  // both steps — and positional matching turned that into ten separate
+  // failures that hid which step was actually missing.
   //
-  // So resolve each protocol step to the call that satisfied it ON ITS OWN
-  // TURN, and let the surplus be surplus. This still fails the qwen36 case
-  // (ledger 220) rather than papering over it: there turn 1 produced NO tool
-  // call at all and both calls landed on turn 2, one a single batched command
-  // doing both steps, so the per-turn chain never happened. Extra calls are
-  // tolerated; a missing step on its own turn is not.
+  // The exact-count rule above stays. The stored LFM2.5/Step37 artifacts that
+  // carried five to seven calls were produced with a VMLINUX_REAL_UI_PROMPT_1
+  // override that demanded four separate calls on turn 1, while
+  // expectedUiToolCallCount derives 2 from the profile — an operator/expectation
+  // mismatch, not models adding calls of their own accord. Those rows are
+  // regenerated with the default prompt, so tolerating surplus calls would
+  // weaken the gate for no real case.
   const callsByTurn = new Map()
   for (const call of calls) {
     const turn = call.messageIndex ?? -1

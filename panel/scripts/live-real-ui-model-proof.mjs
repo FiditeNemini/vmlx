@@ -10438,6 +10438,16 @@ async function main() {
               const targetLabels = ${JSON.stringify(enableThinkingOverride === true
                 ? ['Off', 'Instruct']
                 : ['On', 'Reasoning'])};
+              // The drawer renders "Loading saved chat settings and model
+              // defaults…" before the thinking control exists, so reading it
+              // immediately finds only Save/Reset and makes a present control
+              // look missing — which is exactly how I first misread dots3-note.
+              // Wait for the loading state to clear before deciding anything.
+              await waitFor(
+                () => !/loading saved chat settings/i.test(drawer?.innerText || ''),
+                'chat settings to finish loading before the reasoning flip',
+                60000,
+              ).catch(() => null);
               // Record what this family ACTUALLY offers before trying to click
               // one. The target labels are a cross-family guess, and dots3-note
               // renders neither "Off" nor "Instruct", so buttonFound was false
@@ -10449,8 +10459,13 @@ async function main() {
               // notice (chat.settings.thinkingNotConfigurable) INSTEAD of the
               // Auto/On/Off buttons. A button-only capture cannot tell that
               // correct behaviour apart from a missing control.
+              // \\s, not \s — this is inside the evaluate() template literal, so
+              // a single backslash collapses and the page runs /s+/g, deleting
+              // every letter "s" from the captured text. It produced
+              // "Loading aved chat etting" on the first run. Ledger row 217 is
+              // the same trap; a Python heredoc collapsed the escape this time.
               const drawerTextHead = (drawer?.innerText || '')
-                .replace(/\s+/g, ' ')
+                .replace(/\\s+/g, ' ')
                 .trim()
                 .slice(0, 700);
               const drawerButtonLabels = [...(drawer?.querySelectorAll('button') || [])]

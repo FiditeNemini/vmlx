@@ -10438,6 +10438,17 @@ async function main() {
               const targetLabels = ${JSON.stringify(enableThinkingOverride === true
                 ? ['Off', 'Instruct']
                 : ['On', 'Reasoning'])};
+              // Record what this family ACTUALLY offers before trying to click
+              // one. The target labels are a cross-family guess, and dots3-note
+              // renders neither "Off" nor "Instruct", so buttonFound was false
+              // and the flip silently did nothing. Capturing the real labels
+              // turns that into a visible answer to "which reasoning
+              // enforcement buttons does this model have".
+              const drawerButtonLabels = [...(drawer?.querySelectorAll('button') || [])]
+                .filter((b) => isVisible(b))
+                .map((b) => (b.textContent || '').replace(/\\s+/g, ' ').trim())
+                .filter((text) => text && text.length <= 24)
+                .slice(0, 30);
               const btn = [...(drawer?.querySelectorAll('button') || [])]
                 .find((b) => isVisible(b) && !b.disabled
                   && targetLabels.includes((b.textContent || '').replace(/\\s+/g, ' ').trim()));
@@ -10493,6 +10504,7 @@ async function main() {
                 requested: true,
                 targetLabels,
                 buttonFound: !!btn,
+                drawerButtonLabels,
                 ariaPressedBefore: pressedBefore,
                 ariaPressedAfter: btn ? btn.getAttribute('aria-pressed') : null,
                 saved,

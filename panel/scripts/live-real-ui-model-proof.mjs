@@ -685,6 +685,7 @@ function readNeverEmptyNotices() {
   for (const name of [
     'REJECTED_CONTROL_MARKUP_NOTICE',
     'TOOL_WITHOUT_ANSWER_NOTICE',
+    'REASONING_WITHOUT_ANSWER_NOTICE',
   ]) {
     const match = source.match(
       new RegExp(`export const ${name}\\s*=\\s*\\n?\\s*"((?:[^"\\\\]|\\\\.)*)";`),

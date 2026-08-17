@@ -99,10 +99,16 @@ def _result(name: str, returncode: int, stdout_tail: list[str], passed: int | No
 
 
 def _expected_open_digest_line() -> str:
+    """The line the REAL release gate prints when objectives are open.
+
+    Deliberately does NOT subtract DEFERRED_RELEASE_OPEN_REQUIREMENTS. The gate
+    names every open objective; it knows nothing about the suite's deferral
+    list. This helper used to apply that subtraction, which made it agree with
+    the production code's equally-wrong prediction and disagree with reality —
+    so the reconciliation bug was invisible to these tests.
+    """
     return "[FAIL] objective proof digest: " + "; ".join(
-        item
-        for item in runner.EXPECTED_OPEN_REQUIREMENTS
-        if item not in runner.SUITE_DEFERRED_RELEASE_OPEN_REQUIREMENTS
+        runner.EXPECTED_OPEN_REQUIREMENTS
     )
 
 
@@ -162,6 +168,40 @@ def test_packaged_integrity_accepts_release_gate_known_objectives_plus_manifest_
     )
 
     assert runner.release_gate_failure_is_expected(step, tmp_path)
+
+
+def test_packaged_integrity_rejects_a_new_unknown_open_objective(tmp_path):
+    """The reconciliation must not launder an objective nobody has signed off.
+
+    This is the property that makes membership-based judging safe: a gate
+    failure naming something outside EXPECTED_OPEN_REQUIREMENTS is NOT an
+    expected failure, however many known objectives sit beside it.
+    """
+    step = _result(
+        "release_gate_skip_app",
+        1,
+        [
+            "[FAIL] objective proof digest: "
+            + "; ".join(
+                [
+                    *runner.EXPECTED_OPEN_REQUIREMENTS,
+                    "Brand new objective nobody has proven",
+                ]
+            )
+        ],
+    )
+
+    assert runner.release_gate_failure_is_expected(step, tmp_path) is False
+
+
+def test_packaged_integrity_rejects_a_non_objective_first_failure(tmp_path):
+    step = _result(
+        "release_gate_skip_app",
+        1,
+        ["[FAIL] panel typecheck: 2 errors"],
+    )
+
+    assert runner.release_gate_failure_is_expected(step, tmp_path) is False
 
 
 def test_packaged_integrity_rejects_release_ready_manifest_crash_as_expected_failure(

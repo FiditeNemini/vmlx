@@ -46,6 +46,9 @@ from tests.cross_matrix.run_current_regression_suite import (  # noqa: E402
 from tests.cross_matrix.run_current_regression_suite import (  # noqa: E402
     EXPECTED_OPEN_REQUIREMENTS as SUITE_EXPECTED_OPEN_REQUIREMENTS,
 )
+from tests.cross_matrix.run_current_regression_suite import (  # noqa: E402
+    release_gate_digest_failure_is_known,
+)
 
 DEFAULT_OUT = Path(
     "build/current-packaged-integrity-contract-after-bundled-python-sync-20260608.json"
@@ -4676,11 +4679,6 @@ def release_gate_failure_is_expected(
         return True
     text = "\n".join(step.get("stdout_tail", []))
     fail_lines = [line for line in text.splitlines() if line.startswith("[FAIL]")]
-    expected_digest = (
-        "[FAIL] objective proof digest: "
-        + "; ".join(current_objective_open_requirements(root))
-    )
-    expected_release_ready_prefix = "[FAIL] release-ready manifest: exit=1;"
     forbidden = (
         "bundled python import gate: FAIL",
         "[FAIL] bundled python import gate:",
@@ -4697,10 +4695,15 @@ def release_gate_failure_is_expected(
         "FileNotFoundError:",
         "No such file or directory",
     )
-    expected_fail_lines = [expected_digest]
-    if len(fail_lines) == 2 and fail_lines[1].startswith(expected_release_ready_prefix):
-        expected_fail_lines.append(fail_lines[1])
-    return fail_lines == expected_fail_lines and not any(item in text for item in forbidden)
+    # Shared with the regression suite: judged by membership in the known
+    # objective set, not by string-equality against a predicted line that
+    # subtracted the deferred objectives and could never match.
+    return release_gate_digest_failure_is_known(
+        fail_lines,
+        text,
+        forbidden,
+        require_release_ready_line=False,
+    )
 
 
 def dry_release_gate_used_current_objective_digest(step: dict[str, Any]) -> bool:

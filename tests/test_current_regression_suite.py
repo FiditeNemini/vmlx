@@ -1040,6 +1040,47 @@ def test_current_regression_suite_rejects_release_gate_crash_as_expected_failure
     assert suite._release_gate_failure_is_expected(step) is False
 
 
+def test_release_gate_known_objectives_are_an_expected_failure():
+    from tests.cross_matrix import run_current_regression_suite as suite
+
+    """The real gate names every open objective; it applies no deferral.
+
+    This shape - the known objectives, then the release-ready rollup - is what a
+    live dry gate actually emits, and it must read as expected. Previously the
+    reconciliation rebuilt the line from EXPECTED_OPEN_REQUIREMENTS minus the
+    deferred set, which is empty, so this exact real-world output was reported
+    as an UNKNOWN failure and blocked the proof sweep.
+    """
+    step = {
+        "returncode": 1,
+        "stdout_tail": [
+            "[PASS] panel typecheck: 2.5s",
+            "[FAIL] objective proof digest: "
+            + "; ".join(suite.EXPECTED_OPEN_REQUIREMENTS),
+            "[FAIL] release-ready manifest: exit=1; log=/tmp/release-ready.log",
+        ],
+    }
+
+    assert suite._release_gate_failure_is_expected(step) is True
+
+
+def test_release_gate_rejects_a_new_unknown_open_objective():
+    from tests.cross_matrix import run_current_regression_suite as suite
+
+    step = {
+        "returncode": 1,
+        "stdout_tail": [
+            "[FAIL] objective proof digest: "
+            + "; ".join(
+                [*suite.EXPECTED_OPEN_REQUIREMENTS, "Unproven new objective"]
+            ),
+            "[FAIL] release-ready manifest: exit=1; log=/tmp/release-ready.log",
+        ],
+    }
+
+    assert suite._release_gate_failure_is_expected(step) is False
+
+
 def test_noheavy_api_cache_contract_includes_live_dsv4_nested_name_repair():
     from tests.cross_matrix.run_noheavy_api_cache_contract import COMMANDS
 

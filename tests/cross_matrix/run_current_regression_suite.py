@@ -376,27 +376,72 @@ def _open_requirement_details(digest: dict[str, Any]) -> dict[str, dict[str, Any
     return details
 
 
+OBJECTIVE_DIGEST_FAIL_PREFIX = "[FAIL] objective proof digest: "
+RELEASE_READY_MANIFEST_FAIL_PREFIX = "[FAIL] release-ready manifest: exit=1;"
+
+
+def objectives_named_in_digest_failure(fail_line: str) -> list[str] | None:
+    """Objectives the release gate actually named, or None if not that line."""
+    if not fail_line.startswith(OBJECTIVE_DIGEST_FAIL_PREFIX):
+        return None
+    body = fail_line[len(OBJECTIVE_DIGEST_FAIL_PREFIX):]
+    return [item.strip() for item in body.split(";") if item.strip()]
+
+
+def release_gate_digest_failure_is_known(
+    fail_lines: list[str],
+    text: str,
+    forbidden: tuple[str, ...],
+    *,
+    require_release_ready_line: bool,
+) -> bool:
+    """Is a failing dry release gate failing ONLY on already-known objectives?
+
+    Judged by MEMBERSHIP, not by string-equality against a predicted line.
+
+    Both callers used to rebuild the expected "[FAIL] objective proof digest:"
+    line from EXPECTED_OPEN_REQUIREMENTS minus DEFERRED_RELEASE_OPEN_REQUIREMENTS.
+    Every known objective is currently deferred, so that subtraction produced an
+    EMPTY list and the predicted line was the bare prefix - which can never equal
+    what the gate prints, because the gate does not apply the deferral. The
+    reconciliation was therefore unsatisfiable while any deferred objective was
+    open, and it reported a purely-known failure as an unknown one.
+
+    Their unit tests could not catch it: the fixtures built the expected line
+    with the same subtraction, so fixture and code agreed with each other and
+    both disagreed with the real gate.
+
+    A NEW objective still fails this check, as does any forbidden output or any
+    additional [FAIL] line, so nothing is waived that was not already known.
+    """
+    if any(pattern in text for pattern in forbidden):
+        return False
+    if not fail_lines:
+        return False
+    named = objectives_named_in_digest_failure(fail_lines[0])
+    if named is None:
+        return False
+    if any(item not in EXPECTED_OPEN_REQUIREMENTS for item in named):
+        return False
+    remaining = fail_lines[1:]
+    if require_release_ready_line:
+        return (
+            len(remaining) == 1
+            and remaining[0].startswith(RELEASE_READY_MANIFEST_FAIL_PREFIX)
+        )
+    if not remaining:
+        return True
+    return (
+        len(remaining) == 1
+        and remaining[0].startswith(RELEASE_READY_MANIFEST_FAIL_PREFIX)
+    )
+
+
 def _release_gate_failure_is_expected(step: dict[str, Any]) -> bool:
     if step["returncode"] == 0:
         return True
     text = "\n".join(step.get("stdout_tail", []))
     fail_lines = [line for line in text.splitlines() if line.startswith("[FAIL]")]
-    expected_effective_open = [
-        item
-        for item in EXPECTED_OPEN_REQUIREMENTS
-        if item not in DEFERRED_RELEASE_OPEN_REQUIREMENTS
-    ]
-    expected_digest = (
-        "[FAIL] objective proof digest: "
-        + "; ".join(expected_effective_open)
-    )
-    expected_release_ready_prefix = "[FAIL] release-ready manifest: exit=1;"
-    if not (
-        len(fail_lines) == 2
-        and fail_lines[0] == expected_digest
-        and fail_lines[1].startswith(expected_release_ready_prefix)
-    ):
-        return False
     forbidden = (
         "bundled python import gate: FAIL",
         "panel typecheck: FAIL",
@@ -407,7 +452,12 @@ def _release_gate_failure_is_expected(step: dict[str, Any]) -> bool:
         "FileNotFoundError:",
         "No such file or directory",
     )
-    return not any(pattern in text for pattern in forbidden)
+    return release_gate_digest_failure_is_known(
+        fail_lines,
+        text,
+        forbidden,
+        require_release_ready_line=True,
+    )
 
 
 def _release_manifest_failure_is_expected(step: dict[str, Any], root: Path) -> bool:

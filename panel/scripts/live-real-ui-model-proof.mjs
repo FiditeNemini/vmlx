@@ -9322,6 +9322,34 @@ async function main() {
               pagedPre.click();
               await new Promise((r) => setTimeout(r, 150));
             }
+            // The session record already exists at this point, and the drawer
+            // says as much ("Session is running. Save changes and use Save &
+            // Restart to apply them"), so an unchecked box alone never reaches
+            // the config Start uses. Commit it, then CONFIRM THE SIDE EFFECT by
+            // re-reading the persisted session rather than trusting the click.
+            let savedVia = null;
+            const saveCandidates = [...(preDrawer?.querySelectorAll('button') || [])]
+              .filter((b) => /^(save|save & restart|save and restart)$/i.test(
+                (b.innerText || '').replace(/\\s+/g, ' ').trim(),
+              ) && isVisible(b) && !b.disabled);
+            // Prefer the plain Save that sits beside Reset (the Save & Restart
+            // variant would tear the session down mid-proof).
+            const plainSave = saveCandidates.find(
+              (b) => /^save$/i.test((b.innerText || '').trim()),
+            ) || saveCandidates[0] || null;
+            if (plainSave) {
+              plainSave.scrollIntoView({ block: 'center' });
+              plainSave.click();
+              savedVia = (plainSave.innerText || '').trim();
+              await new Promise((r) => setTimeout(r, 400));
+            }
+            let persistedAfterSave = null;
+            try {
+              const reread = await window.api.sessions.get(created.session.id);
+              persistedAfterSave = JSON.parse(reread?.config || '{}');
+            } catch (_) {
+              persistedAfterSave = null;
+            }
             ssdOnlyLaneSelection = {
               requested: true,
               pagedControlFound: !!pagedPre,
@@ -9332,6 +9360,14 @@ async function main() {
                 enableBlockDiskCache: !!preInputFor('Block Disk Cache (SSD / L2)')?.checked,
                 pagedDisabled: !!preInputFor('In-Memory Paged Cache (RAM)')?.disabled,
               },
+              savedVia,
+              saveCandidateCount: saveCandidates.length,
+              persistedUsePagedCacheAfterSave: persistedAfterSave
+                ? persistedAfterSave.usePagedCache
+                : null,
+              persistedBlockDiskAfterSave: persistedAfterSave
+                ? persistedAfterSave.enableBlockDiskCache
+                : null,
             };
           }
           const singleModelToggle = await waitFor(() => {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   reconcileResponsesToolBufferAtStreamEnd,
+  REASONING_WITHOUT_ANSWER_NOTICE,
   REJECTED_CONTROL_MARKUP_NOTICE,
   resolveNeverEmptyAssistantAnswer,
   TOOL_CALL_MARKER_LINE_START,
@@ -263,6 +264,45 @@ describe("Never-empty assistant answer resolution", () => {
       rejectedControlMarkupText: "<tool_call>x",
     });
     expect(resolved?.reason).toBe("sanitized_to_empty");
+  });
+
+  it("explains a reasoning-only turn that never started an answer", () => {
+    // Found live on qwen36 (reasoning required + tools, Responses door): 3 of 4
+    // runs gave a first turn with zero content, tool phases of only
+    // generating/done, and 7-8 persisted reasoning segments. Every other case
+    // declined it, so the bubble stayed blank while the reasoning rail filled.
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      reasoningContent: "Let me work through the probe steps...",
+    });
+    expect(resolved?.reason).toBe("reasoning_without_answer");
+    expect(resolved?.content).toBe(REASONING_WITHOUT_ANSWER_NOTICE);
+  });
+
+  it("prefers the tool notice over the reasoning notice when both apply", () => {
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      toolIterations: 1,
+      executedToolCallCount: 1,
+      reasoningContent: "thinking...",
+    });
+    expect(resolved?.reason).toBe("tool_without_answer");
+  });
+
+  it("does not fire the reasoning notice when the turn has content", () => {
+    expect(
+      resolveNeverEmptyAssistantAnswer({
+        ...base,
+        visibleAfterSanitize: "a real answer",
+        reasoningContent: "thinking...",
+      }),
+    ).toBeNull();
+  });
+
+  it("ignores whitespace-only reasoning", () => {
+    expect(
+      resolveNeverEmptyAssistantAnswer({ ...base, reasoningContent: "   \n " }),
+    ).toBeNull();
   });
 
   it("returns null when there is genuinely nothing to report", () => {

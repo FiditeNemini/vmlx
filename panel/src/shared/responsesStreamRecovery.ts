@@ -71,7 +71,8 @@ export function reconcileResponsesToolBufferAtStreamEnd(args: {
 export type NeverEmptyAnswerReason =
   | "sanitized_to_empty"
   | "rejected_control_markup"
-  | "tool_without_answer";
+  | "tool_without_answer"
+  | "reasoning_without_answer";
 
 export interface NeverEmptyAnswerResolution {
   content: string;
@@ -90,15 +91,26 @@ export const REJECTED_CONTROL_MARKUP_NOTICE =
 export const TOOL_WITHOUT_ANSWER_NOTICE =
   "_The tool call above completed, but the model produced no visible answer for this turn._";
 
+export const REASONING_WITHOUT_ANSWER_NOTICE =
+  "_The model produced reasoning but no answer for this turn — it may have run out of output budget._";
+
 /**
  * Decide what an assistant turn shows when nothing renderable survived.
  *
  * A blank assistant bubble is the worst available outcome: the user cannot tell
- * whether the app broke or the model misbehaved. Three distinct ways a turn can
- * arrive here, all previously ending empty:
+ * whether the app broke or the model misbehaved. Four distinct ways a turn can
+ * arrive here, all of which previously ended empty:
  *  - the leaked-markup sanitizer stripped an answer down to nothing
  *  - the Responses reconciler rejected an all-markup terminal payload
  *  - a tool ran and the model never followed up with an answer
+ *  - the model emitted ONLY reasoning and never started an answer
+ *
+ * The reasoning-only case was found live on qwen36 (reasoning required + tools,
+ * Responses door): 3 of 4 runs produced a first turn with zero content, tool
+ * phases of only "generating"/"done" (so no tool call to blame) and 7-8
+ * persisted reasoning segments. Every earlier case declined it — nothing to
+ * fence, no rejected markup, no tool iterations — so the bubble stayed blank
+ * while the reasoning rail filled up.
  *
  * One resolver so a fix in one path cannot be inert in the others.
  */
@@ -109,6 +121,7 @@ export function resolveNeverEmptyAssistantAnswer(args: {
   executedToolCallCount: number;
   priorIterationContent: string;
   toolIterations: number;
+  reasoningContent?: string;
 }): NeverEmptyAnswerResolution | null {
   if (args.visibleAfterSanitize.trim()) return null;
   if (args.priorIterationContent.trim()) return null;
@@ -136,6 +149,16 @@ export function resolveNeverEmptyAssistantAnswer(args: {
     return {
       content: TOOL_WITHOUT_ANSWER_NOTICE,
       reason: "tool_without_answer",
+    };
+  }
+
+  // Last: reasoning happened but no answer ever started. Checked after the tool
+  // case because a tool card is the more useful thing to point at when both are
+  // true.
+  if ((args.reasoningContent || "").trim()) {
+    return {
+      content: REASONING_WITHOUT_ANSWER_NOTICE,
+      reason: "reasoning_without_answer",
     };
   }
 

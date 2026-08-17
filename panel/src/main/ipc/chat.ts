@@ -4469,6 +4469,9 @@ export function registerChatHandlers(
           executedToolCallCount: receivedToolCalls.filter(Boolean).length,
           priorIterationContent: allGeneratedContent,
           toolIterations: toolIteration,
+          // A reasoning-only turn (reasoning rail fills, answer never starts)
+          // otherwise falls through every case above and persists blank.
+          reasoningContent: currentReasoningContent(),
         });
         if (neverEmptyAnswer) {
           console.log(

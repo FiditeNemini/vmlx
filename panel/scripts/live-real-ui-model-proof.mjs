@@ -11092,9 +11092,12 @@ async function main() {
           await clickSection('Prefix Cache');
           await clickSection('In-Memory Paged Cache');
           // MCP lives in its own collapsed section, so the first capture read
-          // an unopened accordion and reported every MCP field absent. Open it
-          // the same way as the cache sections before reading.
-          await clickSection('MCP Tools');
+          // an unopened accordion and reported every MCP field absent. The
+          // section's title is the i18n string 'Tool Integration (MCP)' — my
+          // first guess, 'MCP Tools', is a different key entirely and matched
+          // no button (sectionClickResults recorded found: false, which is why
+          // that guess was visible rather than silent).
+          await clickSection('Tool Integration (MCP)');
           const labelFor = (text) => [...(drawer?.querySelectorAll('label') || [])]
             .find((label) => (label.innerText || '').includes(text));
           const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');
@@ -11197,6 +11200,11 @@ async function main() {
               const areas = [...(drawer?.querySelectorAll('textarea') || [])];
               const serversArea = areas.find((a) => /filesystem,github/i.test(a.placeholder || ''));
               const toolsArea = areas.find((a) => /filesystem__read_file/i.test(a.placeholder || ''));
+              // The DISABLED lists are the ones the policy actually enforces
+              // server-side (mcp_policy_filters_servers_tools_before_schema_merge),
+              // so capture them too rather than only the allow-lists.
+              const disabledServersArea = areas.find((a) => /browser_automation/i.test(a.placeholder || ''));
+              const disabledToolsArea = areas.find((a) => /filesystem__write_file/i.test(a.placeholder || ''));
               const serverRows = [...(drawer?.querySelectorAll('span') || [])]
                 .filter((s) => /\\u00b7/.test(s.innerText || '') && /(stdio|http|sse|mcp)/i.test(s.innerText || ''))
                 .map((s) => (s.innerText || '').replace(/\\s+/g, ' ').trim())
@@ -11212,6 +11220,10 @@ async function main() {
                 enabledToolsFieldVisible: !!toolsLabel,
                 enabledToolsPresent: !!toolsArea,
                 enabledToolsValue: toolsArea ? String(toolsArea.value || '') : null,
+                disabledServersPresent: !!disabledServersArea,
+                disabledServersValue: disabledServersArea ? String(disabledServersArea.value || '') : null,
+                disabledToolsPresent: !!disabledToolsArea,
+                disabledToolsValue: disabledToolsArea ? String(disabledToolsArea.value || '') : null,
                 discoveredServerRows: serverRows,
               };
             })(),

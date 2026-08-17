@@ -59,6 +59,7 @@ import {
   validateReasoningEvidence,
   validateRenderedDomEvidence,
   validateRequestCorrelatedCacheEvidence,
+  validateNativeMtpSurfaceParity,
   validateServerCacheEvidence,
   validateUiRuntimeProvenance,
   uiProfileRequiresPositiveCacheReuse,
@@ -1600,6 +1601,16 @@ function goodResult(): Record<string, any> {
         enableBlockDiskCache: true,
       },
       argv: ["--use-paged-cache", "--enable-block-disk-cache"],
+      // Base fixture is a bundle WITHOUT MTP weights, so the Native MTP
+      // control must be absent — the dead-toggle arm of the parity rule.
+      nativeMtpControl: {
+        labelVisible: false,
+        modeSelectPresent: false,
+        selectedMode: null,
+        modeOptions: null,
+        blockedFallbackNoticeShown: false,
+        mentionedInDrawer: false,
+      },
     },
     session: {
       effective_config: {
@@ -1747,6 +1758,12 @@ function goodResult(): Record<string, any> {
           block_disk_only: false,
           block_disk_l2: true,
         },
+        mtp: {
+          index_has_mtp_tensors: false,
+          mtp_tensor_count: 0,
+          runtime_active: false,
+          status: "not_configured",
+        },
       },
     },
     uiRuntimeProvenance: {
@@ -1823,6 +1840,14 @@ function dsv4EnabledResult(): Record<string, any> {
       enableBlockDiskCache: true,
     },
     argv: ["--no-paged-cache", "--enable-block-disk-cache"],
+    nativeMtpControl: {
+      labelVisible: false,
+      modeSelectPresent: false,
+      selectedMode: null,
+      modeOptions: null,
+      blockedFallbackNoticeShown: false,
+      mentionedInDrawer: false,
+    },
   };
   result.session.effective_config = {
     ...result.session.effective_config,
@@ -5962,5 +5987,134 @@ describe("real UI model proof harness", () => {
     expect(surfaces).not.toContain("generation_defaults_visible_ui");
     expect(surfaces).not.toContain("generation_defaults_applied");
     expect(surfaces).not.toContain("cache_hit_telemetry");
+  });
+});
+
+describe("native MTP surface / engine parity", () => {
+  // Both shapes below are verbatim from live Electron CDP runs on 2026-08-17,
+  // which is why this rule could be pinned at all: before observing the
+  // non-MTP arm, "the control renders for MTP bundles" was an inference.
+  const mtpBundleResult = () => ({
+    requestedServerCacheControls: true,
+    serverCacheControls: {
+      nativeMtpControl: {
+        labelVisible: true,
+        labelText:
+          "Native MTP Mode ? Auto (bundle defaults) Deterministic override Off",
+        modeSelectPresent: true,
+        selectedMode: "auto",
+        modeOptions: ["auto", "deterministic", "off"],
+        blockedFallbackNoticeShown: false,
+        mentionedInDrawer: true,
+      },
+    },
+    // Qwen3.6-35B-A3B-MXFP8-CRACK-MTP
+    server: {
+      health: {
+        mtp: {
+          index_has_mtp_tensors: true,
+          mtp_tensor_count: 31,
+          runtime_active: true,
+          effective_depth: 2,
+          status: "native_runtime_active",
+        },
+      },
+    },
+  });
+
+  // Nemotron-Omni-Nano-JANGTQ-CRACK
+  const nonMtpBundleResult = () => ({
+    requestedServerCacheControls: true,
+    serverCacheControls: {
+      nativeMtpControl: {
+        labelVisible: false,
+        labelText: "",
+        modeSelectPresent: false,
+        selectedMode: null,
+        modeOptions: null,
+        blockedFallbackNoticeShown: false,
+        mentionedInDrawer: false,
+      },
+    },
+    server: {
+      health: {
+        mtp: {
+          index_has_mtp_tensors: false,
+          mtp_tensor_count: 0,
+          runtime_active: false,
+          status: "not_configured",
+        },
+      },
+    },
+  });
+
+  it("accepts an MTP bundle that renders the control", () => {
+    expect(validateNativeMtpSurfaceParity(mtpBundleResult())).toEqual([]);
+  });
+
+  it("accepts a non-MTP bundle that renders no control", () => {
+    expect(validateNativeMtpSurfaceParity(nonMtpBundleResult())).toEqual([]);
+  });
+
+  it("rejects an MTP bundle whose control never rendered", () => {
+    const result = mtpBundleResult();
+    result.serverCacheControls.nativeMtpControl.labelVisible = false;
+    result.serverCacheControls.nativeMtpControl.modeSelectPresent = false;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
+      /engine reports MTP weights in the bundle but the UI rendered no Native MTP control/,
+    );
+  });
+
+  it("rejects a DEAD control on a bundle with no MTP weights", () => {
+    // The failure mode that made four families render a dead Thinking toggle.
+    const result = nonMtpBundleResult();
+    result.serverCacheControls.nativeMtpControl.labelVisible = true;
+    result.serverCacheControls.nativeMtpControl.modeSelectPresent = true;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
+      /engine reports no MTP weights in the bundle but the UI rendered a Native MTP control/,
+    );
+  });
+
+  it("rejects a mode selector missing one of the three modes", () => {
+    const result = mtpBundleResult();
+    result.serverCacheControls.nativeMtpControl.modeOptions = ["auto", "off"];
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
+      /missing the deterministic option/,
+    );
+  });
+
+  it("rejects a blocked-fallback notice while the engine says the runtime is ACTIVE", () => {
+    const result = mtpBundleResult();
+    result.serverCacheControls.nativeMtpControl.blockedFallbackNoticeShown = true;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
+      /runtime ACTIVE but the UI showed the blocked-fallback notice/,
+    );
+  });
+
+  it("fails loudly when the surface or the engine report is missing", () => {
+    // A silently-skipped check is indistinguishable from a passing one.
+    expect(
+      validateNativeMtpSurfaceParity({
+        requestedServerCacheControls: true,
+        serverCacheControls: {},
+        server: { health: { mtp: { index_has_mtp_tensors: false } } },
+      }).join("\n"),
+    ).toMatch(/Native MTP surface was not captured/);
+    const noHealth = mtpBundleResult();
+    (noHealth.server as any).health = {};
+    expect(validateNativeMtpSurfaceParity(noHealth).join("\n")).toMatch(
+      /omitted the mtp block/,
+    );
+    const notBoolean = mtpBundleResult();
+    (notBoolean.server.health.mtp as any).index_has_mtp_tensors = "yes";
+    expect(validateNativeMtpSurfaceParity(notBoolean).join("\n")).toMatch(
+      /is not a boolean/,
+    );
+  });
+
+  it("stays inert when the run never opened the cache drawer", () => {
+    expect(
+      validateNativeMtpSurfaceParity({ requestedServerCacheControls: false }),
+    ).toEqual([]);
   });
 });

@@ -4932,6 +4932,60 @@ export function validateServerCacheEvidence(result) {
     }
   }
   failures.push(...validateRequestCorrelatedCacheEvidence(result))
+  failures.push(...validateNativeMtpSurfaceParity(result))
+  return failures
+}
+
+// The Native MTP control must render exactly when the ENGINE says the bundle
+// carries MTP weights — not when the bundle NAME happens to say so. A control
+// on a model that cannot use it is the dead-toggle class of bug; a missing
+// control on a model that can is an unreachable feature. Both arms were
+// observed live before this was pinned:
+//   Qwen3.6-35B-A3B-MXFP8-CRACK-MTP  index_has_mtp_tensors=true,  31 tensors
+//     -> label visible, selector present, options [auto, deterministic, off]
+//   Nemotron-Omni-Nano-JANGTQ-CRACK  index_has_mtp_tensors=false, 0 tensors
+//     -> no label, no selector, no mention anywhere in the drawer
+// Deliberately NOT asserted: the blocked-fallback direction. A bundle whose
+// weights are present but whose compatibility gate fails has never been
+// observed here, and pinning an unobserved expectation is what made two
+// earlier rows unpassable. It is recorded instead, so the first real
+// occurrence shows up in the artifact rather than as a mystery failure.
+export function validateNativeMtpSurfaceParity(result) {
+  const failures = []
+  if (result?.requestedServerCacheControls !== true) return failures
+  const surface = result?.serverCacheControls?.nativeMtpControl
+  const mtp = result?.server?.health?.mtp
+  if (!surface || typeof surface !== 'object') {
+    failures.push('server cache controls were inspected but the Native MTP surface was not captured')
+    return failures
+  }
+  if (!mtp || typeof mtp !== 'object') {
+    failures.push('/health omitted the mtp block, so the Native MTP surface could not be checked against the engine')
+    return failures
+  }
+  if (typeof mtp.index_has_mtp_tensors !== 'boolean') {
+    failures.push('/health mtp.index_has_mtp_tensors is not a boolean, so UI/engine MTP parity is unverifiable')
+    return failures
+  }
+  if (mtp.index_has_mtp_tensors === true) {
+    if (surface.labelVisible !== true) {
+      failures.push('engine reports MTP weights in the bundle but the UI rendered no Native MTP control')
+    }
+    if (surface.modeSelectPresent !== true) {
+      failures.push('engine reports MTP weights in the bundle but the UI rendered no Native MTP mode selector')
+    }
+    const options = Array.isArray(surface.modeOptions) ? surface.modeOptions.map(String) : []
+    for (const mode of ['auto', 'deterministic', 'off']) {
+      if (options.length && !options.includes(mode)) {
+        failures.push(`Native MTP mode selector is missing the ${mode} option`)
+      }
+    }
+    if (mtp.runtime_active === true && surface.blockedFallbackNoticeShown === true) {
+      failures.push('engine reports the native MTP runtime ACTIVE but the UI showed the blocked-fallback notice')
+    }
+  } else if (surface.labelVisible === true || surface.modeSelectPresent === true) {
+    failures.push('engine reports no MTP weights in the bundle but the UI rendered a Native MTP control')
+  }
   return failures
 }
 

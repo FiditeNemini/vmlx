@@ -4107,7 +4107,12 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     if (progressiveReasoningDeltaCount < 2) {
       failures.push(`message ${row.messageId} reasoning was not progressively streamed`)
     }
-    if (progressiveContentDeltaCount < 2) {
+    // Same never-empty-notice exemption as the content-channel check above: a
+    // reasoning-only turn whose ANSWER is a substituted notice reaches THIS
+    // branch (it is reasoning-bearing), and one substituted sentence cannot
+    // arrive in two progressive deltas. Exempting only the other site left the
+    // notice turn still failing here.
+    if (progressiveContentDeltaCount < 2 && !noticeTurn) {
       failures.push(`message ${row.messageId} visible content was not progressively streamed`)
     }
     if (reasoningEvents.some((event) => event?.payload?.isReasoning !== true)) {

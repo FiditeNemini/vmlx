@@ -6152,6 +6152,21 @@ describe("reasoning numeric runs: spew vs deliberate counting", () => {
     expect(reasoningNumericRunIsSpew({ reasoningNumericRunCount: 3 })).toBe(true);
   });
 
+  it("passes the measurements through to the object the validator reads", () => {
+    // The in-page capture and the chat object handed to the validator are two
+    // different places. Recording chars/length in only the first left the
+    // refinement inert and a step37 run kept failing with the numbers that
+    // exonerate it sitting in the artifact.
+    const source = readFileSync(
+      new URL("../scripts/live-real-ui-model-proof.mjs", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain(
+      "reasoningNumericRunChars: rendererResult.reasoningNumericRunChars",
+    );
+    expect(source).toContain("reasoningTextLength: rendererResult.reasoningTextLength");
+  });
+
   it("stays quiet when there is no numeric run at all", () => {
     expect(
       reasoningNumericRunIsSpew({

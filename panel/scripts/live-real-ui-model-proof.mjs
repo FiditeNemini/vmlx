@@ -11845,6 +11845,14 @@ async function main() {
         reasoningCjkLeakCount: rendererResult.reasoningCjkLeakCount || 0,
         reasoningKoreanLeakCount: rendererResult.reasoningKoreanLeakCount || 0,
         reasoningNumericRunCount: rendererResult.reasoningNumericRunCount || 0,
+        // Carry the measurements too, or reasoningNumericRunIsSpew() falls back
+        // to its count-only rule and the refinement is inert: the in-page
+        // capture recorded chars 66 of textLength 10153 while this object still
+        // handed the validator an undefined, so a step37 run kept failing with
+        // the numbers that exonerate it sitting in the artifact.
+        reasoningNumericRunChars: rendererResult.reasoningNumericRunChars || 0,
+        reasoningTextLength: rendererResult.reasoningTextLength
+          || String(rendererResult.persistedReasoningText || '').length,
       },
       screenshots: {
         chat: chatScreenshot,

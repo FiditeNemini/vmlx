@@ -578,6 +578,13 @@ const releaseSentinelTimeoutSeconds = Math.max(
   envNumber('VMLINUX_REAL_UI_RELEASE_TIMEOUT_SECONDS')
     ?? Math.max(pairedApiHoldSeconds, 900),
 )
+// How long to wait for the composer's Send control to become enabled before a
+// turn. The default 30s is fine for ordinary bundles but too tight for a very
+// large one still settling after a tool loop.
+const sendReadyTimeoutMs = Math.max(
+  5_000,
+  envNumber('VMLINUX_REAL_UI_SEND_READY_TIMEOUT_MS') ?? 120_000,
+)
 const installedReleaseManifestPath = (
   process.env.VMLINUX_REAL_UI_RELEASE_MANIFEST
   || process.env.VMLX_REAL_UI_RELEASE_MANIFEST
@@ -10267,7 +10274,14 @@ async function main() {
                   && isVisible(sibling)
                   ? sibling
                   : null;
-              }, 'enabled visible Send control for turn ' + turn);
+              // The terminal-event wait below allows 10 minutes, but this one
+              // used the 30s default, so a very large model that was still
+              // settling (Stop still showing) failed the RUN rather than the
+              // turn: dots3-note (280B) timed out here on turn 2 with
+              // "Timed out waiting for enabled visible Send control".
+              // Bounded, and still far below the completion wait, so a
+              // genuinely wedged composer is still caught.
+              }, 'enabled visible Send control for turn ' + turn, ${JSON.stringify(sendReadyTimeoutMs)});
               sendButton.scrollIntoView({ block: 'center' });
               sendButton.click();
               await waitFor(

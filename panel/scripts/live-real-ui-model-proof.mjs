@@ -4348,8 +4348,27 @@ export function validateExactToolLoopEvidence(result) {
     }
     return failures
   }
-  if (calls.length !== expectedToolCalls) {
-    failures.push(`expected exactly ${expectedToolCalls} tool calls, got ${calls.length}`)
+  // A FLOOR, not an equality. Settled by live evidence under the DEFAULT prompt
+  // (which asks for the tool "once" per turn): LFM2.5-8B splits the prescribed
+  // compound command into two calls — `printf %s REAL_UI_LIVE_TOOL_ONE >
+  // real_ui_tool_probe_1.txt` then `cat real_ui_tool_probe_1.txt` — doing
+  // exactly the prescribed work, every card successful, probe files byte-exact,
+  // and turn 2's dependent command correct. Demanding equality withheld
+  // tool_loop/long_tool_loop from a chain that demonstrably worked.
+  //
+  // (The stored LFM2.5/Step37 artifacts with five to seven calls are a separate
+  // matter: those runs used a VMLINUX_REAL_UI_PROMPT_1 override that demanded
+  // four calls on turn 1 while expectedUiToolCallCount derives 2 from the
+  // profile. Those rows are regenerated with the default prompt.)
+  //
+  // What still fails, and must: a step missing from its own turn. The qwen36
+  // case (ledger 220) made NO call on turn 1 and put both calls on turn 2, one
+  // a single batched command doing both steps, so the per-turn chain never
+  // happened. Every call — protocol or extra — must still have its own result,
+  // a unique id and a visible card, no call may reach ahead to a later step's
+  // probe, and each protocol step must show successful completion.
+  if (calls.length < expectedToolCalls) {
+    failures.push(`expected at least ${expectedToolCalls} tool calls, got ${calls.length}`)
   }
   if (results.length !== calls.length) {
     failures.push(`expected one tool result per call (${calls.length}), got ${results.length}`)

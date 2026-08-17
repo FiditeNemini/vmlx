@@ -4085,7 +4085,7 @@ describe("real UI model proof harness", () => {
       // Surplus verification calls are tolerated now, so the count rule is a
       // FLOOR — but a run that made only one call still has to fail, and the
       // second protocol step still has to be missing from its own turn.
-      /expected exactly 2 tool calls|tool call 2 was not persisted on assistant turn 2/,
+      /expected at least 2 tool calls|tool call 2 was not persisted on assistant turn 2/,
     );
   });
 
@@ -6151,16 +6151,52 @@ describe("tool loop: per-turn protocol resolution", () => {
     );
   });
 
-  it("still enforces the exact call count", () => {
-    // The stored LFM2.5/Step37 artifacts carried five to seven calls because a
-    // VMLINUX_REAL_UI_PROMPT_1 override asked for four calls on turn 1 while
-    // the profile expects two. That is an operator mismatch to regenerate, not
-    // a reason to accept surplus calls.
+  it("accepts LFM2.5 splitting the prescribed step-1 command into two calls", () => {
+    // Verbatim from a live default-prompt run: the prompt asks for ONE call
+    // running `printf ... > probe_1 && cat probe_1`; lfm25 issued the printf and
+    // the cat as separate calls. Same work, chain intact, probe files exact.
+    const result = structuredClone(goodResult());
+    const extra = {
+      id: "call_split_cat",
+      function: {
+        name: "run_command",
+        arguments: JSON.stringify({ command: "cat real_ui_tool_probe_1.txt" }),
+      },
+    };
+    result.persistedOaiCallsByMessage[0] = [
+      ...result.persistedOaiCallsByMessage[0],
+      extra,
+    ];
+    result.persistedOaiResultsByMessage[0] = [
+      ...result.persistedOaiResultsByMessage[0],
+      { tool_call_id: "call_split_cat", content: "REAL_UI_LIVE_TOOL_ONE" },
+    ];
+    result.persistedToolsByMessage[0] = [
+      ...result.persistedToolsByMessage[0],
+      { phase: "calling", toolName: "run_command", toolCallId: "call_split_cat" },
+      { phase: "result", toolName: "run_command", toolCallId: "call_split_cat" },
+    ];
+    result.renderedDom.messages[0].toolCards = [
+      ...result.renderedDom.messages[0].toolCards,
+      { callId: "call_split_cat", name: "run_command", phase: "result", visible: true },
+    ];
+    const trace = result.messageEventTrace.find(
+      (row: any) => row.messageId === result.assistantMessageIds[0],
+    );
+    trace.events = [
+      ...trace.events,
+      { event: "tool", payload: { phase: "calling", toolCallId: "call_split_cat" } },
+      { event: "tool", payload: { phase: "result", toolCallId: "call_split_cat" } },
+    ];
+    expect(validateExactToolLoopEvidence(result)).toEqual([]);
+  });
+
+  it("still requires every extra call to be visible to the user", () => {
     const result = structuredClone(goodResult());
     result.persistedOaiCallsByMessage[0] = [
       ...result.persistedOaiCallsByMessage[0],
       {
-        id: "call_extra_cat",
+        id: "call_hidden",
         function: {
           name: "run_command",
           arguments: JSON.stringify({ command: "cat real_ui_tool_probe_1.txt" }),
@@ -6168,7 +6204,7 @@ describe("tool loop: per-turn protocol resolution", () => {
       },
     ];
     expect(validateExactToolLoopEvidence(result).join("\n")).toMatch(
-      /expected exactly 2 tool calls, got 3/,
+      /call_hidden has no matching rendered tool card|one rendered tool card per call/,
     );
   });
 

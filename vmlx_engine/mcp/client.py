@@ -20,6 +20,54 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
+# --- MCP SDK 1.x / 2.x compatibility -----------------------------------------
+#
+# The SDK renamed its public surface to snake_case in 2.0.0. This module was
+# written against 1.x, and the field reported it: the app bundles 2.0.0 while
+# the dev venv had 1.26.0, so every http-transport server failed for users
+# while every test passed locally. `mcp>=1.0.0` in pyproject has no upper
+# bound, so a user's environment can legitimately hold either major.
+#
+# Support BOTH rather than pinning users to an old SDK. Each shim tries the
+# 2.x name first (that is what ships) and falls back to the 1.x name.
+
+_STREAMABLE_HTTP_FACTORY_NAMES = ("streamable_http_client", "streamablehttp_client")
+
+
+def _resolve_streamable_http_client():
+    """Return the streamable-HTTP client factory from either SDK major."""
+    import mcp.client.streamable_http as _mod
+
+    for name in _STREAMABLE_HTTP_FACTORY_NAMES:
+        factory = getattr(_mod, name, None)
+        if factory is not None:
+            return factory
+    raise ImportError(
+        f"none of {_STREAMABLE_HTTP_FACTORY_NAMES} exist in "
+        f"mcp.client.streamable_http"
+    )
+
+
+def _sdk_attr(obj, *names, default=None):
+    """Read the first attribute that exists, 2.x name first.
+
+    Renamed in 2.0.0 and all four of these are load-bearing:
+      protocolVersion -> protocol_version   (handshake logging)
+      serverInfo      -> server_info        (handshake logging)
+      inputSchema     -> input_schema       (TOOL DISCOVERY - a miss here
+                                             reports 0 tools from a healthy
+                                             server, which is exactly what
+                                             users saw)
+      isError         -> is_error           (tool-result error handling - a
+                                             miss here silently treats a
+                                             failed call as success)
+    """
+    for name in names:
+        if hasattr(obj, name):
+            return getattr(obj, name)
+    return default
+
+
 class MCPClient:
     """
     Client for connecting to a single MCP server.
@@ -212,12 +260,19 @@ class MCPClient:
         """Connect via Streamable HTTP transport (modern remote MCP servers)."""
         try:
             from mcp import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
-        except ImportError:
+
+            streamablehttp_client = _resolve_streamable_http_client()
+        except ImportError as exc:
+            # The old message here said "Upgrade with: pip install -U mcp",
+            # which pointed users the WRONG WAY: the observed failure in the
+            # field was an SDK that was too NEW (2.0.0 renamed the factory),
+            # so upgrading could not have helped. Report what was actually
+            # searched for instead of guessing at the cause.
             raise ImportError(
-                "MCP SDK with streamable_http support required. "
-                "Upgrade with: pip install -U mcp"
-            )
+                "MCP streamable-HTTP transport not found in the installed MCP "
+                f"SDK (tried {', '.join(_STREAMABLE_HTTP_FACTORY_NAMES)} in "
+                f"mcp.client.streamable_http): {exc}"
+            ) from exc
 
         _kwargs: Dict[str, Any] = {}
         if self.config.headers:
@@ -250,8 +305,8 @@ class MCPClient:
         result = await self._session.initialize()
         logger.debug(
             f"MCP server '{self.name}' initialized: "
-            f"protocol={result.protocolVersion}, "
-            f"server={result.serverInfo.name if result.serverInfo else 'unknown'}"
+            f"protocol={_sdk_attr(result, 'protocol_version', 'protocolVersion')}, "
+            f"server={getattr(_sdk_attr(result, 'server_info', 'serverInfo'), 'name', 'unknown')}"
         )
 
     async def _discover_tools(self):
@@ -269,7 +324,7 @@ class MCPClient:
                     name=tool.name,
                     description=tool.description or "",
                     input_schema=(
-                        tool.inputSchema if hasattr(tool, "inputSchema") else {}
+                        _sdk_attr(tool, "input_schema", "inputSchema", default={})
                     ),
                 )
                 self._tools.append(mcp_tool)
@@ -354,7 +409,9 @@ class MCPClient:
             return MCPToolResult(
                 tool_name=tool_name,
                 content=content,
-                is_error=result.isError if hasattr(result, "isError") else False,
+                is_error=bool(
+                    _sdk_attr(result, "is_error", "isError", default=False)
+                ),
             )
 
         except asyncio.TimeoutError:

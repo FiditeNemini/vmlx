@@ -9231,57 +9231,13 @@ def test_release_regression_manifest_validates_current_proof_sweep_artifacts(tmp
     blockers = {blocker["id"]: blocker for blocker in ledger["blockers"]}
     assert blockers == {}
     deferred = {gap["id"]: gap for gap in ledger["deferred_release_gaps"]}
-    assert set(deferred) >= {
-        "dsv4_long_output_code_exactness_open",
-    }
-
-    dsv4_blocker = deferred["dsv4_long_output_code_exactness_open"]
-    assert dsv4_blocker["status"] == "deferred"
-    assert dsv4_blocker["evidence"] == CURRENT_DSV4_SOURCE_MEMORY_PREFLIGHT_ARTIFACT
-    assert (
-        dsv4_blocker["next_proof"]
-        == "Run and pass DSV4 long-output/code exactness with current source/app in a memory-safe local session."
-    )
-    dsv4_details = dsv4_blocker["details"]
-    assert dsv4_details["artifact_present"] is True
-    assert dsv4_details["status"] == "skipped"
-    assert dsv4_details["reason"] == "insufficient_vm_stat_memory"
-    assert (
-        dsv4_details["model"]
-        == "/Users/example/models/JANGQ/DeepSeek-V4-Flash-JANGTQ-K"
-    )
-    assert dsv4_details["preflight_memory_source"] == (
-        "vm_stat_free_plus_speculative_purgeable"
-    )
-    assert dsv4_details["did_not_launch"] is True
-    assert dsv4_details["launch_decision"] == "do_not_launch"
-    assert dsv4_details["launch_allowed"] is False
-    assert dsv4_details["launch_blockers"] == ["insufficient_memory"]
-    assert dsv4_details["active_heavy_process_count"] == 0
-    assert dsv4_details["active_heavy_processes"] == []
-    assert dsv4_details["case_count"] == 14
-    assert dsv4_details["selected_cases"] == [
-        "chat_off",
-        "chat_off_rep1",
-        "chat_off_no_punct_rep1",
-        "chat_off_bundle_defaults",
-        "chat_on",
-        "chat_on_rep1",
-        "chat_max",
-        "responses_off",
-        "responses_off_rep1",
-        "responses_off_no_punct_rep1",
-        "responses_off_bundle_defaults",
-        "responses_on",
-        "responses_on_rep1",
-        "legacy_completion_raw",
-    ]
-    assert dsv4_details["available_for_gate_gb"] < dsv4_details["required_available_gb"]
-    assert dsv4_details["memory_gap_gb"] > 0
-    assert dsv4_details["strict_vm_stat_memory_gap_gb"] > 0
-    assert dsv4_details["top_memory_processes"]
-    assert "memory" in dsv4_details["commands"]
-    assert "memory_pressure" in dsv4_details["commands"]
+    # 2026-08-16 (ledger row 155): the DSV4 long-output row is no longer
+    # gated by the producer-less 2026-05-21 clearance fossil — it is governed
+    # by the live temp-0 exactness boundary, which passes on the
+    # current-hardware 0731 bundle. A fully-green root therefore emits NO
+    # deferred gap for it. The machinery that surfaces deferred gaps when
+    # they DO exist stays pinned by the ledger tests below.
+    assert "dsv4_long_output_code_exactness_open" not in deferred
 
     # 2026-08-16 retired with the absent-bundle retirement pass (ledger row
     # 151): dsv4 is a covered real-UI family on the 0731 rows, so the

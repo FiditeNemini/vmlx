@@ -491,6 +491,14 @@ const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
+// Select the SSD-only lane (block-disk L2 WITHOUT the RAM paged pool) before
+// Start. Until this existed the harness could only ASSERT the lane
+// (EXPECT_PAGED_CACHE) and never CHOOSE it, so every live-UI proof ran the
+// app-default L1+L2 lane and the SSD-only lane — what disk-only users actually
+// run, and the lane where MiniMax-M3 once scored 9 stores / 0 hits while every
+// L1+L2 family looked healthy — was never exercised through the UI at all.
+// Default OFF so existing rows are byte-unchanged.
+const forceSsdOnlyLane = envBool('VMLINUX_REAL_UI_FORCE_SSD_ONLY_LANE', false)
 // Whether the paged expectation was stated at all. Paged cache is DEFAULT ON
 // for every autodetected family except M3/openpangu_v2, so a hardcoded
 // default-false expectation asserts the operator's memory rather than the
@@ -9275,6 +9283,57 @@ async function main() {
               && isVisible(drawer)
             ) ? drawer : null;
           }, 'visibly open Server settings drawer before Start');
+          // Optional lane selection, before Start so the session is CREATED in
+          // the SSD-only configuration rather than toggled afterwards.
+          let ssdOnlyLaneSelection = null;
+          if (${JSON.stringify(forceSsdOnlyLane)}) {
+            const preDrawer = document.querySelector(
+              '[data-vmlx-surface="server-settings"]'
+            );
+            const expandSection = async (title) => {
+              const btn = [...(preDrawer?.querySelectorAll('button') || [])]
+                .find((b) => (b.innerText || '').replace(/\\s+/g, ' ').trim().includes(title));
+              if (btn) {
+                btn.scrollIntoView({ block: 'center' });
+                btn.click();
+                await new Promise((r) => setTimeout(r, 150));
+              }
+              return !!btn;
+            };
+            await expandSection('Prefix Cache');
+            await expandSection('In-Memory Paged Cache');
+            const preLabelFor = (text) => [...(preDrawer?.querySelectorAll('label') || [])]
+              .find((label) => (label.innerText || '').includes(text));
+            const preInputFor = (text) => preLabelFor(text)?.querySelector('input[type="checkbox"]');
+            const pagedPre = preInputFor('In-Memory Paged Cache (RAM)');
+            const blockPre = preInputFor('Block Disk Cache (SSD / L2)');
+            const before = {
+              usePagedCache: !!pagedPre?.checked,
+              enableBlockDiskCache: !!blockPre?.checked,
+              pagedDisabled: !!pagedPre?.disabled,
+            };
+            if (blockPre && !blockPre.checked && !blockPre.disabled) {
+              blockPre.scrollIntoView({ block: 'center' });
+              blockPre.click();
+              await new Promise((r) => setTimeout(r, 150));
+            }
+            if (pagedPre && pagedPre.checked && !pagedPre.disabled) {
+              pagedPre.scrollIntoView({ block: 'center' });
+              pagedPre.click();
+              await new Promise((r) => setTimeout(r, 150));
+            }
+            ssdOnlyLaneSelection = {
+              requested: true,
+              pagedControlFound: !!pagedPre,
+              blockDiskControlFound: !!blockPre,
+              before,
+              after: {
+                usePagedCache: !!preInputFor('In-Memory Paged Cache (RAM)')?.checked,
+                enableBlockDiskCache: !!preInputFor('Block Disk Cache (SSD / L2)')?.checked,
+                pagedDisabled: !!preInputFor('In-Memory Paged Cache (RAM)')?.disabled,
+              },
+            };
+          }
           const singleModelToggle = await waitFor(() => {
             const candidate = document.querySelector(
               '[data-vmlx-control="gateway-single-model-mode"]'
@@ -10340,6 +10399,7 @@ async function main() {
             preStartStopControl,
             uiStartControl,
             gatewaySingleModelMode,
+            ssdOnlyLaneSelection,
             chatId: chat.id,
             chatOverrides,
             rendererGenerationDefaults,

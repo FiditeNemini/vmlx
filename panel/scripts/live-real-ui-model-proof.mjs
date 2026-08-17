@@ -487,6 +487,12 @@ const promptOne = promptOneOverride || defaultPromptOne
 const promptTwo = promptTwoOverride || defaultPromptTwo
 const promptThree = promptThreeOverride || defaultPromptThree
 const checkServerCacheControls = envBool('VMLINUX_REAL_UI_CHECK_SERVER_CACHE_CONTROLS', false)
+// Point this at an mcp-config.json to prove MCP servers and tools are actually
+// DISCOVERED in the app, not merely that the section renders. Default empty, so
+// existing rows are untouched.
+const mcpConfigPath = process.env.VMLINUX_REAL_UI_MCP_CONFIG
+  || process.env.VMLX_REAL_UI_MCP_CONFIG
+  || ''
 const checkMedia = envBool('VMLINUX_REAL_UI_CHECK_MEDIA', false)
 const checkVideo = envBool('VMLINUX_REAL_UI_CHECK_VIDEO', false)
 const checkAudio = envBool('VMLINUX_REAL_UI_CHECK_AUDIO', false)
@@ -11098,6 +11104,41 @@ async function main() {
           // no button (sectionClickResults recorded found: false, which is why
           // that guess was visible rather than silent).
           await clickSection('Tool Integration (MCP)');
+          // Optionally load a REAL MCP config and import it, so the proof shows
+          // servers and tools actually discovered in the app rather than an
+          // empty section. Typing the path is not enough — Import is what reads
+          // the file and populates the discovered list, and a synthetic value
+          // assignment without the native setter never reaches React.
+          const mcpConfigPath = ${JSON.stringify(mcpConfigPath || '')};
+          let mcpConfigLoad = null;
+          if (mcpConfigPath) {
+            const mcpInput = [...(drawer?.querySelectorAll('input') || [])]
+              .find((i) => /mcp-config\\.json/i.test(i.placeholder || ''));
+            const setter = Object.getOwnPropertyDescriptor(
+              HTMLInputElement.prototype,
+              'value',
+            )?.set;
+            let imported = false;
+            if (mcpInput && setter) {
+              setter.call(mcpInput, mcpConfigPath);
+              mcpInput.dispatchEvent(new Event('input', { bubbles: true }));
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              const importButton = [...(drawer?.querySelectorAll('button') || [])]
+                .find((b) => /^import$/i.test((b.innerText || '').trim()));
+              if (importButton) {
+                importButton.scrollIntoView({ block: 'center' });
+                importButton.click();
+                imported = true;
+                await new Promise((resolve) => setTimeout(resolve, 2500));
+              }
+            }
+            mcpConfigLoad = {
+              requestedPath: mcpConfigPath,
+              inputFound: !!mcpInput,
+              importClicked: imported,
+              valueAfter: mcpInput ? String(mcpInput.value || '') : null,
+            };
+          }
           const labelFor = (text) => [...(drawer?.querySelectorAll('label') || [])]
             .find((label) => (label.innerText || '').includes(text));
           const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');
@@ -11190,6 +11231,7 @@ async function main() {
             // observed both with MCP configured and without.
             // (No backticks anywhere in here: this block is inside the in-page
             // evaluate() template literal and one would end the literal.)
+            mcpConfigLoad,
             mcpControls: (() => {
               const labels = [...(drawer?.querySelectorAll('label') || [])];
               const configLabel = labels.find((l) => /mcp config file/i.test(l.innerText || ''));

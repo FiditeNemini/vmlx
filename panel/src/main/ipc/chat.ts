@@ -72,6 +72,7 @@ import {
   resolveNeverEmptyAssistantAnswer,
   TOOL_CALL_MARKER_LINE_START,
 } from "../../shared/responsesStreamRecovery";
+import { stripLeakedToolMarkup } from "../../shared/toolMarkupSanitizer";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import {
   calculatePrefillTps,
@@ -4398,45 +4399,10 @@ export function registerChatHandlers(
           /(?:analysis|final)\s*(?:assistant\s*){1,3}/gi,
           "",
         );
-        // Strip leaked tool call blocks that server didn't parse (various model formats)
-        fullContent = fullContent.replace(
-          /<zyphra_tool_call>[\s\S]*?<\/zyphra_tool_call>/g,
-          "",
-        );
-        fullContent = fullContent.replace(
-          /<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g,
-          "",
-        );
-        fullContent = fullContent.replace(
-          /<tool_call>[\s\S]*?<\/tool_call>/g,
-          "",
-        );
-        fullContent = fullContent.replace(
-          /\[Calling tool:\s*\w+\(\{[\s\S]*?\}\)\]/g,
-          "",
-        );
-        fullContent = fullContent.replace(
-          /<invoke\b[^>]*>[\s\S]*?<\/invoke>/g,
-          "",
-        );
-        fullContent = fullContent.replace(
-          /<function(?:=|\b)[\s\S]*?(?:<\/function>|$)/g,
-          "",
-        );
-        fullContent = fullContent.replace(
-          /<parameter\b[^>]*>[\s\S]*?<\/parameter>/g,
-          "",
-        );
-        // Strip hallucinated Claude-style tool calls (models trained on Anthropic data)
-        fullContent = fullContent.replace(
-          /<(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)\b[^>]*>[\s\S]*?(?:<\/(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)>|$)/g,
-          "",
-        );
-        // Strip self-closing hallucinated tool calls like <read_file path="..." />
-        fullContent = fullContent.replace(
-          /<(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)\b[^>]*\/>/g,
-          "",
-        );
+        // Strip leaked tool call blocks that server didn't parse (various model
+        // formats), including orphan closing tags with no opening tag — those
+        // were reaching the screen as visible prose.
+        fullContent = stripLeakedToolMarkup(fullContent);
         // Strip leaked Harmony protocol channel markers (GLM, GPT-OSS)
         fullContent = fullContent.replace(/<\|start\|>assistant/g, "");
         fullContent = fullContent.replace(
@@ -4808,42 +4774,7 @@ export function registerChatHandlers(
         }
         if (partialContent) {
           partialContent = partialContent.replace(TEMPLATE_TOKEN_REGEX, "");
-          partialContent = partialContent.replace(
-            /<zyphra_tool_call>[\s\S]*?<\/zyphra_tool_call>/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<minimax:tool_call>[\s\S]*?<\/minimax:tool_call>/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<tool_call>[\s\S]*?<\/tool_call>/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /\[Calling tool:\s*\w+\(\{[\s\S]*?\}\)\]/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<invoke\b[^>]*>[\s\S]*?<\/invoke>/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<function(?:=|\b)[\s\S]*?(?:<\/function>|$)/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<parameter\b[^>]*>[\s\S]*?<\/parameter>/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)\b[^>]*>[\s\S]*?(?:<\/(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)>|$)/g,
-            "",
-          );
-          partialContent = partialContent.replace(
-            /<(?:read_file|write_file|run_command|search_files|edit_file|list_directory|execute_command|bash)\b[^>]*\/>/g,
-            "",
-          );
+          partialContent = stripLeakedToolMarkup(partialContent);
           partialContent = partialContent.replace(/<\|start\|>assistant/g, "");
           partialContent = partialContent.replace(
             /<\|channel\|>(?:analysis|final)<\|message\|>/g,

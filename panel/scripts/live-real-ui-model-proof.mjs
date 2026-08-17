@@ -10274,7 +10274,13 @@ async function main() {
             .filter((segment) => typeof segment === 'string')
             .filter(Boolean)
             .join('\\n');
-          const rawParserLeakRegex = /<think>|<\\/think>|<tool_call>|<\\/tool_call>|<function>|<invoke>|<minimax:tool_call>|<zyphra_tool_call>|<\\|point_start\\|>|<\\|point_end\\|>|<\\|box_start\\|>|<\\|box_end\\|>|<\\|tool_call_start\\|>|<\\|tool_call_end\\|>|\\[THINK\\]|\\[\\/THINK\\]|<mm:think>|<\\/mm:think>/i;
+          // Closing tags are listed explicitly for every dialect, not just
+          // think/tool_call. A Zaya-8B turn rendered </parameter>, </function>
+          // and </zyphra_tool_call> as visible prose and this detector scored
+          // it clean, because only the OPENING forms were listed. The paired
+          // sanitizer never removed them either: it strips whole blocks, and an
+          // orphan tail has no opening tag to pair with.
+          const rawParserLeakRegex = /<think>|<\\/think>|<tool_calls?>|<\\/tool_calls?>|<function\\b|<\\/function>|<invoke\\b|<\\/invoke>|<parameter\\b|<\\/parameter>|<arg_key>|<\\/arg_key>|<arg_value>|<\\/arg_value>|<minimax:tool_call>|<\\/minimax:tool_call>|<zyphra_tool_call>|<\\/zyphra_tool_call>|<\\|point_start\\|>|<\\|point_end\\|>|<\\|box_start\\|>|<\\|box_end\\|>|<\\|tool_call_start\\|>|<\\|tool_call_end\\|>|\\[THINK\\]|\\[\\/THINK\\]|<mm:think>|<\\/mm:think>/i;
           const countRegex = (text, regex) => (text.match(regex) || []).length;
           const numericRunRegex = /(?:^|[\\s([{,;:])(?:\\d{1,4}[\\s,;:|\\-/.]+){8,}\\d{1,4}(?=$|[\\s)\\]},;:.])/gm;
           const contentPartsByMessage = messages.map((m) => {

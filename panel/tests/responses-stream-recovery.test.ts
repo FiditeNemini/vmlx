@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   reconcileResponsesToolBufferAtStreamEnd,
+  REJECTED_CONTROL_MARKUP_NOTICE,
+  resolveNeverEmptyAssistantAnswer,
   TOOL_CALL_MARKER_LINE_START,
+  TOOL_WITHOUT_ANSWER_NOTICE,
 } from "../src/shared/responsesStreamRecovery";
 
 describe("Responses speculative tool-buffer reconciliation", () => {
@@ -56,6 +59,9 @@ describe("Responses speculative tool-buffer reconciliation", () => {
       clearSpeculativeBuffering: true,
       authoritativeText: null,
       rejectedControlMarkup: true,
+      rejectedText:
+        "<tool_calls>\n<tool_call>file_info<arg_key>\n" +
+        "<arg_key>path</arg_key>\n<arg_value>panel/package.json",
     });
   });
 
@@ -142,15 +148,119 @@ describe("Responses speculative tool-buffer reconciliation", () => {
     // than persisting a blank assistant turn.
     expect(source).toContain("const preSanitizeContent = fullContent.trim();");
     expect(source).toContain("const visibleAfterSanitize = fullContent");
+    // The guard is one shared resolver, not an inline condition, so a fix to
+    // one blank-turn path cannot be inert in the others.
+    expect(source).toContain("resolveNeverEmptyAssistantAnswer({");
     expect(source).toContain(
-      "Sanitizer emptied a ${preSanitizeContent.length}-char answer",
+      "executedToolCallCount: receivedToolCalls.filter(Boolean).length,",
     );
-    expect(source).toContain(
-      "receivedToolCalls.filter(Boolean).length === 0",
-    );
+    expect(source).toContain("[CHAT] Never-empty guard (${neverEmptyAnswer.reason})");
+    expect(source).toContain("fullContent = neverEmptyAnswer.content;");
     // Speculative "generating" statuses must NOT mask the guard.
     expect(source).not.toContain(
       "collectedToolStatuses.length === 0 &&\n          preSanitizeContent",
     );
+  });
+
+  it("retains rejected markup text so the finalizer can explain the blank turn", () => {
+    const source = readFileSync(
+      new URL("../src/main/ipc/chat.ts", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("let rejectedControlMarkupText = \"\";");
+    expect(source).toContain(
+      "rejectedControlMarkupText = reconciliation.rejectedText || \"\";",
+    );
+    expect(source).toContain("rejectedControlMarkupText,");
+  });
+});
+
+describe("Never-empty assistant answer resolution", () => {
+  const base = {
+    visibleAfterSanitize: "",
+    preSanitizeContent: "",
+    rejectedControlMarkupText: "",
+    executedToolCallCount: 0,
+    priorIterationContent: "",
+    toolIterations: 0,
+  };
+
+  it("leaves a turn alone when it has visible content", () => {
+    expect(
+      resolveNeverEmptyAssistantAnswer({
+        ...base,
+        visibleAfterSanitize: "the real answer",
+        rejectedControlMarkupText: "<tool_call>x",
+      }),
+    ).toBeNull();
+  });
+
+  it("leaves a turn alone when an earlier tool iteration produced content", () => {
+    expect(
+      resolveNeverEmptyAssistantAnswer({
+        ...base,
+        priorIterationContent: "answer from iteration 1",
+        toolIterations: 2,
+      }),
+    ).toBeNull();
+  });
+
+  it("preserves prose the leak sanitizer stripped to nothing", () => {
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      preSanitizeContent: "<read_file path=\"a.txt\" />",
+    });
+    expect(resolved?.reason).toBe("sanitized_to_empty");
+    expect(resolved?.content).toBe(
+      "```text\n<read_file path=\"a.txt\" />\n```",
+    );
+  });
+
+  it("explains an all-markup Responses payload instead of rendering blank", () => {
+    // The exact zaya_text release-blocker shape: 1024 generated tokens, every
+    // one of them rejected control markup, previously a blank bubble.
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      rejectedControlMarkupText: "<tool_call>\n{\"a\":1}\n</tool_call>",
+    });
+    expect(resolved?.reason).toBe("rejected_control_markup");
+    expect(resolved?.content).toBe(REJECTED_CONTROL_MARKUP_NOTICE);
+  });
+
+  it("never echoes rejected markup back into the answer", () => {
+    // Echoing it would satisfy never-empty by creating parser leakage, which
+    // the release proof counts as a failure.
+    const leaky = "<tool_call>{}</tool_call>\n<invoke name=\"x\">\n<function=y>";
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      rejectedControlMarkupText: leaky,
+    });
+    const leakRegex =
+      /<think>|<\/think>|<tool_call>|<\/tool_call>|<function>|<invoke>|<minimax:tool_call>|<zyphra_tool_call>/i;
+    expect(leakRegex.test(resolved?.content || "")).toBe(false);
+  });
+
+  it("explains a tool loop that produced no answer", () => {
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      executedToolCallCount: 1,
+      toolIterations: 1,
+    });
+    expect(resolved?.reason).toBe("tool_without_answer");
+    expect(resolved?.content).toBe(TOOL_WITHOUT_ANSWER_NOTICE);
+  });
+
+  it("prefers the sanitizer fence over a notice when real prose exists", () => {
+    const resolved = resolveNeverEmptyAssistantAnswer({
+      ...base,
+      preSanitizeContent: "real prose the sanitizer ate",
+      rejectedControlMarkupText: "<tool_call>x",
+    });
+    expect(resolved?.reason).toBe("sanitized_to_empty");
+  });
+
+  it("returns null when there is genuinely nothing to report", () => {
+    expect(resolveNeverEmptyAssistantAnswer(base)).toBeNull();
   });
 });

@@ -2,6 +2,12 @@ export interface ResponsesToolBufferReconciliation {
   clearSpeculativeBuffering: boolean;
   authoritativeText: string | null;
   rejectedControlMarkup?: boolean;
+  /**
+   * The rejected text itself. It must never be rendered as prose, but the
+   * finalizer needs to know rejection happened with a non-empty payload so the
+   * turn can carry an explicit notice instead of persisting visibly empty.
+   */
+  rejectedText?: string;
 }
 
 /**
@@ -52,6 +58,7 @@ export function reconcileResponsesToolBufferAtStreamEnd(args: {
       clearSpeculativeBuffering: true,
       authoritativeText: null,
       rejectedControlMarkup: true,
+      rejectedText: args.finalText,
     };
   }
 
@@ -59,4 +66,78 @@ export function reconcileResponsesToolBufferAtStreamEnd(args: {
     clearSpeculativeBuffering: true,
     authoritativeText: args.finalText.length > 0 ? args.finalText : null,
   };
+}
+
+export type NeverEmptyAnswerReason =
+  | "sanitized_to_empty"
+  | "rejected_control_markup"
+  | "tool_without_answer";
+
+export interface NeverEmptyAnswerResolution {
+  content: string;
+  reason: NeverEmptyAnswerReason;
+}
+
+/**
+ * Notices are deliberately prose, not the model's raw payload. Rejected control
+ * markup can contain `<tool_call>`/`<function>`/`<invoke>`, which the release
+ * proof counts as parser leakage — echoing it back to satisfy never-empty would
+ * trade a blank turn for a leaking one.
+ */
+export const REJECTED_CONTROL_MARKUP_NOTICE =
+  "_The model emitted tool-call markup that could not be parsed or executed, so it produced no answer for this turn._";
+
+export const TOOL_WITHOUT_ANSWER_NOTICE =
+  "_The tool call above completed, but the model produced no visible answer for this turn._";
+
+/**
+ * Decide what an assistant turn shows when nothing renderable survived.
+ *
+ * A blank assistant bubble is the worst available outcome: the user cannot tell
+ * whether the app broke or the model misbehaved. Three distinct ways a turn can
+ * arrive here, all previously ending empty:
+ *  - the leaked-markup sanitizer stripped an answer down to nothing
+ *  - the Responses reconciler rejected an all-markup terminal payload
+ *  - a tool ran and the model never followed up with an answer
+ *
+ * One resolver so a fix in one path cannot be inert in the others.
+ */
+export function resolveNeverEmptyAssistantAnswer(args: {
+  visibleAfterSanitize: string;
+  preSanitizeContent: string;
+  rejectedControlMarkupText: string;
+  executedToolCallCount: number;
+  priorIterationContent: string;
+  toolIterations: number;
+}): NeverEmptyAnswerResolution | null {
+  if (args.visibleAfterSanitize.trim()) return null;
+  if (args.priorIterationContent.trim()) return null;
+
+  // Existing precedent: real prose over-stripped by the leak sanitizer is
+  // preserved verbatim in a fence, because that text IS the model's answer.
+  if (args.preSanitizeContent.trim() && args.executedToolCallCount === 0) {
+    const preserved = args.preSanitizeContent
+      .replace(/```[^\n`]*\n?/g, "")
+      .trim();
+    return {
+      content: "```text\n" + (preserved || args.preSanitizeContent) + "\n```",
+      reason: "sanitized_to_empty",
+    };
+  }
+
+  if (args.rejectedControlMarkupText.trim()) {
+    return {
+      content: REJECTED_CONTROL_MARKUP_NOTICE,
+      reason: "rejected_control_markup",
+    };
+  }
+
+  if (args.toolIterations > 0 || args.executedToolCallCount > 0) {
+    return {
+      content: TOOL_WITHOUT_ANSWER_NOTICE,
+      reason: "tool_without_answer",
+    };
+  }
+
+  return null;
 }

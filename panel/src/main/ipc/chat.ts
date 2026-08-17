@@ -69,6 +69,7 @@ import {
 } from "../../shared/chatErrorDisplay";
 import {
   reconcileResponsesToolBufferAtStreamEnd,
+  resolveNeverEmptyAssistantAnswer,
   TOOL_CALL_MARKER_LINE_START,
 } from "../../shared/responsesStreamRecovery";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
@@ -2582,6 +2583,9 @@ export function registerChatHandlers(
         // Must check RAW content before template token stripping, since markers like
         // <minimax:tool_call> get stripped by TEMPLATE_TOKEN_REGEX and never reach fullContent.
         let clientToolCallBuffering = false;
+        // Set when the Responses reconciler rejects an all-markup terminal
+        // payload. Never rendered; drives the never-empty notice at finalize.
+        let rejectedControlMarkupText = "";
         let rawAccumulated = ""; // Tracks unstripped content for tool call detection
         // Client-side <think> tag extraction: tracks whether we're inside a <think> block
         // when the server doesn't provide reasoning_content (fallback for all parser types)
@@ -3534,6 +3538,9 @@ export function registerChatHandlers(
 
           clientToolCallBuffering = false;
           if (reconciliation.rejectedControlMarkup) {
+            // Retained (never rendered as prose) so the finalizer can tell the
+            // user why this turn has no answer instead of leaving it blank.
+            rejectedControlMarkupText = reconciliation.rejectedText || "";
             const warning =
               "The model emitted parser-rejected tool control markup. It was hidden instead of being shown as assistant content.";
             console.warn(`[CHAT] ${warning}`);
@@ -4449,19 +4456,21 @@ export function registerChatHandlers(
         // "No executed tool" must key on REAL tool calls / completed tool
         // iterations — the speculative buffering "Generating tool call..."
         // status also lands in collectedToolStatuses and would mask the guard.
-        if (
-          !visibleAfterSanitize &&
-          preSanitizeContent &&
-          receivedToolCalls.filter(Boolean).length === 0 &&
-          !allGeneratedContent
-        ) {
+        const neverEmptyAnswer = resolveNeverEmptyAssistantAnswer({
+          visibleAfterSanitize,
+          preSanitizeContent,
+          rejectedControlMarkupText,
+          executedToolCallCount: receivedToolCalls.filter(Boolean).length,
+          priorIterationContent: allGeneratedContent,
+          toolIterations: toolIteration,
+        });
+        if (neverEmptyAnswer) {
           console.log(
-            `[CHAT] Sanitizer emptied a ${preSanitizeContent.length}-char answer with no executed tool — preserving verbatim in a fence`,
+            `[CHAT] Never-empty guard (${neverEmptyAnswer.reason}): turn would have persisted blank; ` +
+              `preSanitize=${preSanitizeContent.length}ch rejectedMarkup=${rejectedControlMarkupText.length}ch ` +
+              `toolIterations=${toolIteration}`,
           );
-          const preserved = preSanitizeContent
-            .replace(/```[^\n`]*\n?/g, "")
-            .trim();
-          fullContent = "```text\n" + (preserved || preSanitizeContent) + "\n```";
+          fullContent = neverEmptyAnswer.content;
         }
         // If no main content but reasoning was produced, keep them separate.
         // Reasoning stays in reasoningContent for the reasoning box; content stays empty.

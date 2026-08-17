@@ -10241,10 +10241,15 @@ async function main() {
               }
               // Confirm the SIDE EFFECT on the persisted chat overrides rather
               // than trusting the clicks.
+              // Read the same source the harness already trusts for persisted
+              // chat state (chat.getOverrides), not a guessed shape — my first
+              // attempt used window.api.chat.get and returned null, which
+              // proved nothing.
               let persistedAfter = null;
+              let overridesAfter = null;
               try {
-                const reread = await window.api.chat.get(chat.id);
-                persistedAfter = reread?.enableThinking ?? reread?.overrides?.enableThinking ?? null;
+                overridesAfter = await window.api.chat.getOverrides(chat.id);
+                persistedAfter = overridesAfter?.enableThinking ?? null;
               } catch (_) {}
               midConvReasoningFlip = {
                 requested: true,
@@ -10254,6 +10259,9 @@ async function main() {
                 ariaPressedAfter: btn ? btn.getAttribute('aria-pressed') : null,
                 saved,
                 persistedEnableThinkingAfterSave: persistedAfter,
+                overrideKeysAfterSave: overridesAfter && typeof overridesAfter === 'object'
+                  ? Object.keys(overridesAfter).sort()
+                  : null,
               };
             } catch (error) {
               midConvReasoningFlip = {

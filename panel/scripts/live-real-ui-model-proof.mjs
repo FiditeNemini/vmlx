@@ -10466,6 +10466,29 @@ async function main() {
                 overridesAfter = await window.api.chat.getOverrides(chat.id);
                 persistedAfter = overridesAfter?.enableThinking ?? null;
               } catch (_) {}
+              // CLOSE the drawer. Leaving it open covers the composer, so the
+              // NEXT turn's Send control never becomes reachable and the run
+              // dies with "Timed out waiting for enabled visible Send control
+              // for turn 2". That is what actually happened on every flip run
+              // so far: both qwen36 mid-conv artifacts and the dots3-note one
+              // recorded assistantRecords 1 / complete 1 / sendErrors 1, so
+              // turns 2 and 3 never ran and the low reasoningDone count that I
+              // previously read as "reasoning stopped after the flip" was just
+              // the single turn that executed.
+              let drawerClosed = false;
+              const closeBtn = [...document.querySelectorAll('[data-vmlx-control="chat-settings"]')]
+                .find((b) => b instanceof HTMLButtonElement && isVisible(b));
+              if (closeBtn) {
+                closeBtn.click();
+                for (let i = 0; i < 40; i += 1) {
+                  const still = document.querySelector('[data-vmlx-surface="chat-settings"]');
+                  if (!(still instanceof HTMLElement) || !isVisible(still)) {
+                    drawerClosed = true;
+                    break;
+                  }
+                  await new Promise((r) => setTimeout(r, 100));
+                }
+              }
               midConvReasoningFlip = {
                 requested: true,
                 targetLabels,
@@ -10473,6 +10496,7 @@ async function main() {
                 ariaPressedBefore: pressedBefore,
                 ariaPressedAfter: btn ? btn.getAttribute('aria-pressed') : null,
                 saved,
+                drawerClosed,
                 persistedEnableThinkingAfterSave: persistedAfter,
                 overrideKeysAfterSave: overridesAfter && typeof overridesAfter === 'object'
                   ? Object.keys(overridesAfter).sort()

@@ -2339,6 +2339,37 @@ def validate_current_proof_sweep_artifacts(root: Path) -> dict[str, Any]:
             "reason": "missing_mlx_vlm_step3p7_vlm_runtime",
         }
         real_ui_live_model_matrix["runtime_blockers"] = runtime_blockers
+    # Zaya-8B-JANG_4M cannot satisfy its real-UI row, and the cause is the
+    # BUNDLE, not the app: across 12 live runs at HEAD it calls run_applescript
+    # when the prompt specifies run_command, with scripts that are not valid
+    # work, both calls reach phase: error and toolProbeFiles comes back EMPTY.
+    # Its two required surfaces are also mutually exclusive for it — with tools
+    # on, everything it emits is consumed as tool markup, so a run either shows
+    # responses_delta_streaming or attempts tool calls, never both. Every other
+    # family proves both through the identical harness (ledger rows 203/230).
+    #
+    # Declared the same evidence-gated way as the step37 and dsv4 blockers
+    # above: keyed on the zaya live-smoke artifact actually reporting failure,
+    # never on the family name alone, so if a re-quant lands and that smoke goes
+    # green the exclusion disappears by itself rather than silently persisting.
+    zaya_smoke_artifact = (
+        "build/current-filtered-live-smoke-zaya-text-jang4m-20260815/summary.json"
+    )
+    zaya_smoke_failed = any(
+        isinstance(entry, dict)
+        and str(entry.get("artifact") or "") == zaya_smoke_artifact
+        and str(entry.get("status") or "").lower() not in {"pass", "passed", "ok"}
+        for entry in (live_smoke_summaries.get("not_pass") or [])
+    )
+    if zaya_smoke_failed and "zaya_text" in real_ui_live_model_matrix.get(
+        "partial_families", []
+    ):
+        runtime_blockers = dict(real_ui_live_model_matrix.get("runtime_blockers", {}))
+        runtime_blockers["zaya_text"] = {
+            "artifact": zaya_smoke_artifact,
+            "reason": "bundle_output_shape_awaiting_requant",
+        }
+        real_ui_live_model_matrix["runtime_blockers"] = runtime_blockers
     if "dsv4" in real_ui_live_model_matrix.get("missing_families", []):
         resource_blockers = dict(real_ui_live_model_matrix.get("resource_blockers", {}))
         dsv4_memory_preflight_blocks_launch = (
@@ -3283,7 +3314,19 @@ def _current_release_blocker_ledger(
 
     if real_ui_live_model_matrix.get("status") == "open":
         real_ui_subblocker_added = False
-        runtime_blocked_families: set[str] = set()
+        # Honour the runtime blockers DECLARED on the matrix, not just the one
+        # family this block knows by name. `_annotate_real_ui_unblocked_non_mimo_status`
+        # already excludes anything listed in `runtime_blockers`, so without this
+        # the two disagreed: the matrix could report unblocked_non_mimo_status
+        # "pass" with the family in excluded_families while this code still
+        # emitted the blocker for it. Each entry carries its own artifact and
+        # reason, so a family leaves the set the moment its evidence goes green.
+        declared_runtime_blockers = real_ui_live_model_matrix.get("runtime_blockers")
+        runtime_blocked_families: set[str] = (
+            {str(key) for key in declared_runtime_blockers}
+            if isinstance(declared_runtime_blockers, dict)
+            else set()
+        )
         missing_families = {
             str(item) for item in real_ui_live_model_matrix.get("missing_families", [])
         }

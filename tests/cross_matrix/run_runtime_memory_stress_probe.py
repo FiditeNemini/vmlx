@@ -91,7 +91,15 @@ ROWS: dict[str, Row] = {
     ),
     "qwen36_27b_mxfp4_mtp": Row(
         "qwen36_27b_mxfp4_mtp",
-        "/Users/example/models/JANGQ/Qwen3.6-27B-MXFP4-MTP",
+        # 2026-08-17 hardware transition (ledger row 254): retargeted to the
+        # current drive, same as gemma4_26b_jang4m was on 2026-08-15. The
+        # original Qwen3.6-27B-MXFP4-MTP bundle is no longer on
+        # /Volumes/EricsLLMDrive; Qwen3.6-35B-A3B-MXFP8-CRACK-MTP is the only
+        # remaining Qwen3.6 MTP bundle and is the lane the rest of the
+        # campaign proves (see the qwen36-35b-mxfp8-mtp real-UI artifact).
+        # The row KEY stays as-is because the manifest and the #175-#177 audit
+        # pin it; only the path moves.
+        "/Volumes/EricsLLMDrive/dealignai/Qwen3.6-35B-A3B-MXFP8-CRACK-MTP",
         is_mllm=True,
         tool_parser="qwen",
         reasoning_parser="qwen3",
@@ -118,7 +126,9 @@ ROWS: dict[str, Row] = {
     ),
     "minimax_m27_small_jangtq": Row(
         "minimax_m27_small_jangtq",
-        "/Users/example/models/JANGQ/MiniMax-M2.7-Small-JANGTQ",
+        # 2026-08-17 hardware transition (ledger row 254): same bundle, current
+        # drive location.
+        "/Volumes/EricsLLMDrive/jangq-ai/MiniMax-M2.7-Small-JANGTQ",
         tool_parser="minimax",
         reasoning_parser="minimax_m2",
         cache_args=COMMON_PAGED_CACHE,

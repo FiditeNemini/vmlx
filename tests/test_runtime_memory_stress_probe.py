@@ -95,9 +95,13 @@ def test_make_prompt_speed_floor_asks_for_sustained_decode_and_identifiers():
 
 
 def test_runtime_memory_probe_includes_minimax_small_jangtq_row():
+    """2026-08-17 (ledger row 254): retargeted to the current drive. The old
+    placeholder path made the probe unrunnable, which is why the #175-#177 live
+    artifacts were missing on both machines. The row KEY is pinned by the
+    manifest and the audit, so only the path moves."""
     row = ROWS["minimax_m27_small_jangtq"]
 
-    assert row.path == "/Users/example/models/JANGQ/MiniMax-M2.7-Small-JANGTQ"
+    assert row.path == "/Volumes/EricsLLMDrive/jangq-ai/MiniMax-M2.7-Small-JANGTQ"
     assert row.tool_parser == "minimax"
     assert row.reasoning_parser == "minimax_m2"
     assert "--use-paged-cache" in row.cache_args

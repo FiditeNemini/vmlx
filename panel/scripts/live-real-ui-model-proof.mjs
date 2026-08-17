@@ -10933,6 +10933,30 @@ async function main() {
             labels,
             initialCacheControls,
             sectionClickResults,
+            // Does the UI actually SHOW the MTP surface? An MTP bundle must
+            // render the Native MTP controls; the harness never looked, so
+            // "MTP visible in the app" had only ever been inferred from the
+            // registry. Captured from the same open drawer as the cache
+            // controls: whether the labelled control exists, which mode is
+            // selected, and whether the blocked-fallback notice is up
+            // (weights detected but the runtime compatibility gate not passed).
+            nativeMtpControl: (() => {
+              const label = [...(drawer?.querySelectorAll('label') || [])]
+                .find((l) => /native mtp/i.test(l.innerText || ''));
+              const select = [...(drawer?.querySelectorAll('select') || [])]
+                .find((sel) => [...sel.options].some(
+                  (o) => /auto|deterministic|off/i.test(o.value || o.textContent || ''),
+                ) && /mtp/i.test((sel.closest('label,div')?.innerText || '')));
+              return {
+                labelVisible: !!label,
+                labelText: (label?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+                modeSelectPresent: !!select,
+                selectedMode: select ? String(select.value || '') : null,
+                modeOptions: select ? [...select.options].map((o) => String(o.value)) : null,
+                blockedFallbackNoticeShown: /native mtp weights were detected/i.test(bodyText),
+                mentionedInDrawer: /native mtp/i.test(bodyText),
+              };
+            })(),
             textHead: bodyText.slice(0, 1600),
           };
         })()

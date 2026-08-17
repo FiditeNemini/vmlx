@@ -6806,8 +6806,46 @@ class MLLMBatchGenerator:
                 # 64 to get a per-token rate over-estimates it by orders of
                 # magnitude and pins the chunk small forever — the same
                 # dropped-constant error fit_peak_model() was written for.
-                _chunk_transient_samples: list[tuple[int, int]] = []
+                _chunk_transient_samples: list[tuple[int, int]] = list(
+                    getattr(self, "_tight_chunk_samples", []) or []
+                )
                 _adaptive_growth_logged = False
+                # A chunk costs a full re-stream of the expert set, so the
+                # PROBE chunks are themselves expensive (measured: 3 chunks
+                # instead of 1 cost ~5s on a 1928-token dots3 prompt —
+                # effective MoE weight streaming is ~35GB/s, not peak
+                # bandwidth). Only the FIRST request on this generator should
+                # pay for probing: carry the fitted transient model forward
+                # and start later requests at the fitted chunk directly.
+                if _tight_adaptive_growth and _chunk_transient_samples:
+                    try:
+                        _seed_fit = fit_peak_model(_chunk_transient_samples)
+                        _seed_active, _seed_limit = (
+                            get_effective_metal_working_set_bytes(mx)
+                        )
+                        _seed_head = max(0, _seed_limit - _seed_active)
+                        if _seed_fit is not None and _seed_fit[1] > 0:
+                            _seed_budget = int(_seed_head / 1.25)
+                            _seed_tokens = int(
+                                (_seed_budget - max(0.0, _seed_fit[0]))
+                                / _seed_fit[1]
+                            )
+                            if _seed_tokens > _HYBRID_MIN_CHUNK:
+                                _adaptive_chunk_cap = max(
+                                    _HYBRID_MIN_CHUNK,
+                                    min(_chunk_ceiling, _seed_tokens),
+                                )
+                                logger.info(
+                                    "Tight-memory prefill chunk seeded at %d "
+                                    "from %d earlier transient sample(s) "
+                                    "(headroom %.2fGB, ceiling %d)",
+                                    _adaptive_chunk_cap,
+                                    len(_chunk_transient_samples),
+                                    _seed_head / (1024**3),
+                                    _chunk_ceiling,
+                                )
+                    except Exception:  # noqa: BLE001
+                        pass
                 _prefill_keep_alloc = prefill_keep_alloc_enabled()
                 # Pre-size the KV slots for the WHOLE span before chunking.
                 #
@@ -7157,6 +7195,18 @@ class MLLMBatchGenerator:
                                 _chunk_transient_samples.append(
                                     (int(chunk_size), int(_transient))
                                 )
+                                # Keep a bounded, distinct-size history on the
+                                # generator so later requests skip the probe.
+                                try:
+                                    _hist = {
+                                        int(c): int(t)
+                                        for c, t in _chunk_transient_samples
+                                    }
+                                    self._tight_chunk_samples = sorted(
+                                        _hist.items()
+                                    )[-8:]
+                                except Exception:  # noqa: BLE001
+                                    pass
                                 _budget = int(_headroom / 1.25)
                                 _affine = fit_peak_model(_chunk_transient_samples)
                                 if _affine is not None and _affine[1] > 0:

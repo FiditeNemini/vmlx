@@ -4354,6 +4354,21 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
   if (result && typeof result === 'object') {
     result.neverEmptyNoticeTurns = neverEmptyNoticeTurns
   }
+  // A run where EVERY visible answer is a never-empty notice produced no real
+  // answers at all, and must not read as healthy. dots3-note tools-off did
+  // exactly that across three budgets — reasoning of 11.4k then 23.9k
+  // characters with every answer exactly the 98-character notice — and the run
+  // still looked reasonable enough that I called it clean. The notice is the
+  // correct product behaviour (it replaces a blank bubble); a run made ENTIRELY
+  // of them is not a proof of anything the model said.
+  const answeredTurns = (result?.assistantRecords || []).filter(
+    (record) => String(record?.content || '').trim(),
+  ).length
+  if (answeredTurns > 0 && neverEmptyNoticeTurns.length >= answeredTurns) {
+    failures.push(
+      `every visible answer (${answeredTurns}) was a never-empty notice, so the model produced no answer text`,
+    )
+  }
   return failures
 }
 

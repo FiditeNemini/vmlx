@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { REASONING_WITHOUT_ANSWER_NOTICE } from "../src/shared/responsesStreamRecovery";
+
 // @ts-expect-error The production proof harness is deliberately plain Node ESM.
 import {
   applyAssertionFailureStatus,
@@ -6120,6 +6122,31 @@ describe("native MTP surface / engine parity", () => {
     expect(
       validateNativeMtpSurfaceParity({ requestedServerCacheControls: false }),
     ).toEqual([]);
+  });
+});
+
+describe("a run made entirely of never-empty notices is not a clean run", () => {
+  it("fails when every visible answer is the notice", () => {
+    // dots3-note tools-off did this across three budgets: reasoning of 11.4k
+    // then 23.9k characters with every answer exactly the 98-character notice.
+    // The notice itself is correct product behaviour - it replaces a blank
+    // bubble - but a run made entirely of them proves nothing the model said,
+    // and it read as healthy enough that I called it clean.
+    const result = structuredClone(goodResult());
+    result.assistantRecords = result.assistantMessageIds.map(() => ({
+      content: REASONING_WITHOUT_ANSWER_NOTICE,
+    }));
+    (result.renderedDom.messages || []).forEach((message: any) => {
+      message.answerText = REASONING_WITHOUT_ANSWER_NOTICE;
+    });
+    const failures = validateReasoningEvidence(result, "optional").join("\n");
+    expect(failures).toMatch(/every visible answer .* was a never-empty notice/);
+  });
+
+  it("stays quiet when the model actually answered", () => {
+    const result = structuredClone(goodResult());
+    const failures = validateReasoningEvidence(result, "optional").join("\n");
+    expect(failures).not.toMatch(/never-empty notice, so the model produced no answer/);
   });
 });
 

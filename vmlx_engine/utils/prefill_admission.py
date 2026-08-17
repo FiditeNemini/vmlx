@@ -475,6 +475,7 @@ def span_admission_check(
     safety: float = 1.10,
     fitted_max_context: int = 0,
     max_extrapolation: float = 4.0,
+    degradable_chunks: bool = False,
 ) -> None:
     """Decline a whole prefill span that cannot finish, BEFORE burning the work.
 
@@ -526,6 +527,17 @@ def span_admission_check(
         return
     padded = int(projected * safety)
     if padded <= max_ws_bytes:
+        return
+    # The fit was learned at the chunk size the previous span used. When the
+    # caller's per-chunk path can DEGRADE — halving a declined chunk and
+    # retrying rather than failing the request — the projection is an upper
+    # bound on work that will not actually be attempted at that width, and
+    # this check's own rule applies with full force: rejecting a span the
+    # device would have served is the failure it must never cause. So defer
+    # to the adaptive per-chunk path unless the span is over the limit by a
+    # wide margin. Measured: an 8,033-token prefill that this check would
+    # have refused completes at 357 pp/s once the chunk path can adapt.
+    if degradable_chunks and padded < max_ws_bytes * 2:
         return
     raise PrefillAdmissionError(
         f"{model_label}: prefill admission declined a {fresh_tokens}-token span "

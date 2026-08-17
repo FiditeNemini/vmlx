@@ -7020,6 +7020,11 @@ class MLLMBatchGenerator:
                             fresh_tokens=seq_len,
                             model_label="hybrid prefill",
                             fitted_max_context=self._span_peak_max_context,
+                            # This loop halves a declined chunk and retries,
+                            # so a span over the fitted projection is not
+                            # automatically unservable — it just runs in
+                            # narrower pieces.
+                            degradable_chunks=True,
                         )
                     except Exception:
                         _restore_kv_step()

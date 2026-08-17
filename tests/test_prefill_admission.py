@@ -686,3 +686,46 @@ class TestBlockDiskWriteDropReasons:
         assert count_mirrored >= count_sites, (
             f"{count_sites} byte-budget drop sites but only {count_mirrored} recorded"
         )
+
+
+def test_span_admission_defers_to_a_degradable_chunk_path():
+    """A span over the fitted projection is not unservable when the chunk
+    path can halve and retry — measured: an 8,033-token prefill this check
+    would have refused completes at 357 pp/s once chunks adapt (ledger 157).
+    The wide-margin guard still refuses spans that are hopeless."""
+    from vmlx_engine.utils.prefill_admission import (
+        PrefillAdmissionError,
+        span_admission_check,
+    )
+
+    limit = 100 * 1024**3
+    # slope/intercept projecting ~1.4x the limit at the target context
+    model = (10 * 1024**3, (130 * 1024**3 - 10 * 1024**3) / 16000)
+
+    # Non-degradable caller: refuses, as before.
+    with pytest.raises(PrefillAdmissionError):
+        span_admission_check(
+            limit, model, 16000, fresh_tokens=16000, fitted_max_context=8000
+        )
+
+    # Degradable caller: defers to the adaptive per-chunk path.
+    span_admission_check(
+        limit,
+        model,
+        16000,
+        fresh_tokens=16000,
+        fitted_max_context=8000,
+        degradable_chunks=True,
+    )
+
+    # ... but a hopeless span (>2x the limit) is still refused.
+    hopeless = (10 * 1024**3, (300 * 1024**3 - 10 * 1024**3) / 16000)
+    with pytest.raises(PrefillAdmissionError):
+        span_admission_check(
+            limit,
+            hopeless,
+            16000,
+            fresh_tokens=16000,
+            fitted_max_context=8000,
+            degradable_chunks=True,
+        )

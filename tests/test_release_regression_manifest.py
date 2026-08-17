@@ -72,6 +72,7 @@ from tests.cross_matrix.release_regression_manifest import (
     _current_release_blocker_ledger,
     _live_smoke_gap_is_expected_mimo_open,
     _real_ui_architecture_cache_policy_ok,
+    _real_ui_prefix_reuse_is_physically_possible,
     _real_ui_reasoning_leak_counts,
     _real_ui_named_tool_probe_semantics_ok,
     _validate_current_issue175_179_release_boundary_audit,
@@ -6760,6 +6761,42 @@ def test_release_regression_manifest_real_ui_matrix_accepts_step37_family_alias_
     }
 
     assert _real_ui_architecture_cache_policy_ok("step37", proof) is True
+
+
+def test_cache_hit_requirement_skips_runs_shorter_than_one_paged_block():
+    """dsv4-flash-0731 runs 19/72/161-token turns against a 256-token block, so
+    no block can be stored and none can be hit."""
+
+    def proof(block_size, prompts):
+        return {
+            "session": {"effective_config": {"pagedCacheBlockSize": block_size}},
+            "cacheRequestEvidence": [
+                {"serverObservation": {"prompt_tokens": n}} for n in prompts
+            ],
+        }
+
+    assert (
+        _real_ui_prefix_reuse_is_physically_possible(proof(256, [19, 72, 161]))
+        is False
+    )
+    # A conversation that does reach a block must still show reuse.
+    assert (
+        _real_ui_prefix_reuse_is_physically_possible(proof(256, [19, 300, 900]))
+        is True
+    )
+    assert (
+        _real_ui_prefix_reuse_is_physically_possible(proof(64, [19, 72, 161]))
+        is True
+    )
+    # Unknown block size or missing evidence keeps the requirement in force,
+    # rather than excusing a run we cannot reason about.
+    assert _real_ui_prefix_reuse_is_physically_possible({}) is True
+    assert (
+        _real_ui_prefix_reuse_is_physically_possible(
+            {"session": {"effective_config": {}}, "cacheRequestEvidence": []}
+        )
+        is True
+    )
 
 
 def test_reasoning_numeric_leak_ignores_deliberate_counting_but_flags_spew():

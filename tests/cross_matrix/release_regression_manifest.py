@@ -4623,6 +4623,49 @@ def _normalize_chat_override_wire_api(value: Any) -> Any:
     return value
 
 
+def _real_ui_prefix_reuse_is_physically_possible(proof: dict[str, Any]) -> bool:
+    """Could this run have produced a cache hit at all?
+
+    A paged block is the unit of reuse, so a conversation whose longest prompt
+    never reaches one full block can never store a block and therefore can never
+    hit one. The `dsv4-flash-0731` row is exactly that: `pagedCacheBlockSize` is
+    **256** while its three turns are **19, 72 and 161** tokens, so demanding
+    cache-hit tokens there asks for something the row's own prompts make
+    impossible — the same unsatisfiable-expectation class as the mixed-SWA 4/64
+    requirement.
+
+    Deliberately narrow: this only exempts a run where reuse is PHYSICALLY out of
+    reach. Any run with a prompt at or above the block size still has to show
+    reuse, so a genuine cache failure on a real conversation still fails.
+    """
+    config = proof.get("session")
+    config = config.get("effective_config") if isinstance(config, dict) else None
+    block_size = None
+    if isinstance(config, dict):
+        raw_block = config.get("pagedCacheBlockSize")
+        if isinstance(raw_block, (int, float)) and raw_block > 0:
+            block_size = int(raw_block)
+    if block_size is None:
+        # Unknown block size: keep requiring reuse rather than excusing it.
+        return True
+    evidence = proof.get("cacheRequestEvidence")
+    if not isinstance(evidence, list) or not evidence:
+        return True
+    longest_prompt = 0
+    for entry in evidence:
+        if not isinstance(entry, dict):
+            continue
+        observation = entry.get("serverObservation")
+        if not isinstance(observation, dict):
+            continue
+        tokens = observation.get("prompt_tokens")
+        if isinstance(tokens, (int, float)) and tokens > longest_prompt:
+            longest_prompt = int(tokens)
+    if longest_prompt <= 0:
+        return True
+    return longest_prompt >= block_size
+
+
 def _real_ui_correlated_cache_reuse_tokens(proof: dict[str, Any]) -> int:
     """Largest request-correlated cached-token count recorded by the proof.
 
@@ -6608,8 +6651,10 @@ def _validate_current_real_ui_live_model_proof_artifacts(
         cache_hit_tokens = _json_number(proof, "cache", "cacheHitTokens")
         correlated_reuse = _real_ui_correlated_cache_reuse_tokens(proof)
         if (
-            cache_hit_tokens is None or cache_hit_tokens <= 0
-        ) and correlated_reuse <= 0:
+            (cache_hit_tokens is None or cache_hit_tokens <= 0)
+            and correlated_reuse <= 0
+            and _real_ui_prefix_reuse_is_physically_possible(proof)
+        ):
             failures.append("cache_hit_tokens_missing")
 
         # A screenshot is evidence because the FILE ships in the evidence

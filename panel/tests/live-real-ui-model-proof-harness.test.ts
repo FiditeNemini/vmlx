@@ -59,6 +59,7 @@ import {
   validateReasoningEvidence,
   validateRenderedDomEvidence,
   validateRequestCorrelatedCacheEvidence,
+  reasoningNumericRunIsSpew,
   validateNativeMtpSurfaceParity,
   validateServerCacheEvidence,
   validateUiRuntimeProvenance,
@@ -6119,6 +6120,46 @@ describe("native MTP surface / engine parity", () => {
     expect(
       validateNativeMtpSurfaceParity({ requestedServerCacheControls: false }),
     ).toEqual([]);
+  });
+});
+
+describe("reasoning numeric runs: spew vs deliberate counting", () => {
+  it("does not flag one counting run inside long coherent reasoning", () => {
+    // Verbatim proportions from a step37 run: the model wrote
+    // "1 2 3 ... 21" to check `wc -c` against REAL_UI_LIVE_TOOL_ONE,
+    // a 55-character run inside 8,536 characters of English.
+    expect(
+      reasoningNumericRunIsSpew({
+        reasoningNumericRunCount: 1,
+        reasoningNumericRunChars: 55,
+        reasoningTextLength: 8536,
+      }),
+    ).toBe(false);
+  });
+
+  it("flags runs that dominate the reasoning text", () => {
+    expect(
+      reasoningNumericRunIsSpew({
+        reasoningNumericRunCount: 12,
+        reasoningNumericRunChars: 900,
+        reasoningTextLength: 1000,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the count-only rule when an older artifact lacks the measurements", () => {
+    // Silently passing something unmeasured would be worse than a false alarm.
+    expect(reasoningNumericRunIsSpew({ reasoningNumericRunCount: 3 })).toBe(true);
+  });
+
+  it("stays quiet when there is no numeric run at all", () => {
+    expect(
+      reasoningNumericRunIsSpew({
+        reasoningNumericRunCount: 0,
+        reasoningNumericRunChars: 0,
+        reasoningTextLength: 4000,
+      }),
+    ).toBe(false);
   });
 });
 

@@ -3582,6 +3582,25 @@ function expectedUiTurnCount(result) {
     : 3
 }
 
+// Share of the reasoning text that long numeric runs must occupy before they
+// count as degenerate spew rather than deliberate arithmetic. Step37 counted
+// "1 2 3 ... 21" to check `wc -c` against the length of REAL_UI_LIVE_TOOL_ONE:
+// one 55-character run inside 8,536 characters of coherent English, 0.6% of the
+// text, which the raw count flagged as garbage. Real spew is the bulk of what it
+// appears in, not a rounding error.
+export const REASONING_NUMERIC_SPEW_SHARE = 0.15
+
+export function reasoningNumericRunIsSpew(chat) {
+  const count = Number(chat?.reasoningNumericRunCount || 0)
+  if (count <= 0) return false
+  const runChars = Number(chat?.reasoningNumericRunChars || 0)
+  const textLength = Number(chat?.reasoningTextLength || 0)
+  // An older artifact records the count but neither length: fall back to the
+  // original count-only rule rather than silently passing something unmeasured.
+  if (!runChars || !textLength) return true
+  return runChars / textLength >= REASONING_NUMERIC_SPEW_SHARE
+}
+
 export function expectedUiToolCallCount(result) {
   const profile = String(result?.requestContract?.uiActionProfile || '')
   if (profile === 'primary-tool-restart-probe') return 1
@@ -7642,7 +7661,7 @@ function assertResult(result) {
   if ((chat.reasoningCjkLeakCount || 0) > 0 || (chat.reasoningKoreanLeakCount || 0) > 0) {
     failures.push('wrong-language text leaked into reasoning segments')
   }
-  if ((chat.reasoningNumericRunCount || 0) > 0) {
+  if (reasoningNumericRunIsSpew(chat)) {
     failures.push('numeric/list-like garbage leaked into reasoning segments')
   }
   if ((result.eventCounts?.complete || 0) < expectedTurns) {
@@ -7875,7 +7894,7 @@ export function deriveProvenSurfaces(result) {
     && chat.koreanLeakCount === 0
     && chat.reasoningCjkLeakCount === 0
     && chat.reasoningKoreanLeakCount === 0
-    && chat.reasoningNumericRunCount === 0
+    && !reasoningNumericRunIsSpew(chat)
   ) surfaces.add('language_leak_check')
   surfaces.add('electron_ui')
   if (
@@ -10796,6 +10815,21 @@ async function main() {
             reasoningCjkLeakCount: countRegex(reasoningText, /[\\u3400-\\u9FFF]/g),
             reasoningKoreanLeakCount: countRegex(reasoningText, /[\\uAC00-\\uD7AF]/g),
             reasoningNumericRunCount: countRegex(reasoningText, numericRunRegex),
+            // Degenerate numeric spew DOMINATES the text it appears in; a model
+            // counting on purpose does not. Step37 wrote out "1 2 3 ... 21" to
+            // check a byte count against the length of REAL_UI_LIVE_TOOL_ONE
+            // inside 8.5k characters of otherwise coherent English, which
+            // tripped the run detector on its own. Record how much of the
+            // reasoning those runs actually occupy so the assertion can tell
+            // spew from arithmetic instead of guessing from a raw count.
+            // (No backticks in here: this whole block lives inside the in-page
+            // evaluate() template literal and one would end the literal.)
+            reasoningNumericRunChars: (() => {
+              const matches = String(reasoningText || '').match(numericRunRegex);
+              if (!matches) return 0;
+              return matches.reduce((total, item) => total + item.length, 0);
+            })(),
+            reasoningTextLength: String(reasoningText || '').length,
             preloadHealthBefore,
             preloadHealthAfter,
             cacheBefore,

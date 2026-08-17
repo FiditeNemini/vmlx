@@ -4317,7 +4317,11 @@ def _real_ui_architecture_cache_policy_ok(
             }
             <= components
             and generic_tq.get("enabled") is False
-            and generic_tq.get("reason") in {"not_active", "mixed_swa_kv"}
+            # "storage_only" (server.py health): generic runtime TQ stays off
+            # because the storage-boundary quantizer owns the KV encode — the
+            # engine emits it whenever storage quant is active; same semantic
+            # bar as the older reasons (2026-08-16, ledger row 151).
+            and generic_tq.get("reason") in {"not_active", "mixed_swa_kv", "storage_only"}
             and kv_cache_quantization.get("enabled") is True
             and kv_cache_quantization.get("bits") == 4
             and kv_cache_quantization.get("group_size") == 64

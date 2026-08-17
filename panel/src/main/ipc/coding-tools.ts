@@ -60,11 +60,65 @@ async function getCodingToolModelLimits(baseUrl: string, modelName: string): Pro
   return limits
 }
 
+/**
+ * Thrown when a user's config file exists but cannot be parsed.
+ *
+ * This distinction is load-bearing. `safeReadJSON` used to collapse "absent"
+ * and "unparseable" into the same `null`, and every addEntry does
+ * `safeReadJSON(path) || {}` before `safeWriteJSON` — so an existing config we
+ * merely failed to PARSE was overwritten by our single entry. That destroys
+ * real user data, and it is reachable without any corruption: openclaw.json is
+ * documented as JSON5, so comments or a trailing comma are perfectly legal
+ * there and JSON.parse rejects them.
+ *
+ * Absent is safe to create. Unparseable must REFUSE and say so.
+ */
+export class UnreadableConfigError extends Error {
+  constructor(
+    readonly path: string,
+    readonly cause: unknown,
+  ) {
+    super(
+      `Config file exists but could not be parsed: ${path} — ` +
+        `${cause instanceof Error ? cause.message : String(cause)}. ` +
+        `Refusing to overwrite it. Fix or move the file, then retry.`,
+    )
+    this.name = 'UnreadableConfigError'
+  }
+}
+
+/** Read a JSON config. Returns null ONLY when the file does not exist. */
 function safeReadJSON(path: string): any {
+  if (!existsSync(path)) return null
+  let raw: string
   try {
-    if (!existsSync(path)) return null
-    return JSON.parse(readFileSync(path, 'utf-8'))
-  } catch { return null }
+    raw = readFileSync(path, 'utf-8')
+  } catch (err) {
+    throw new UnreadableConfigError(path, err)
+  }
+  // An empty/whitespace-only file is treated as absent: nothing to preserve,
+  // and JSON.parse would reject it.
+  if (!raw.trim()) return null
+  try {
+    return JSON.parse(raw)
+  } catch (err) {
+    throw new UnreadableConfigError(path, err)
+  }
+}
+
+/**
+ * Read a JSON config for DISPLAY only — never for a read-modify-write.
+ *
+ * getEntries must not explode the settings panel just because one unrelated
+ * tool has a malformed file, so it degrades to "no entries". Writers must use
+ * safeReadJSON so they refuse instead.
+ */
+function readJSONForDisplay(path: string): any {
+  try {
+    return safeReadJSON(path)
+  } catch {
+    return null
+  }
 }
 
 function safeReadTOML(path: string): string | null {
@@ -129,19 +183,46 @@ function commandExists(cmd: string): boolean {
 // Config: ~/.claude/settings.json — env vars (ANTHROPIC_BASE_URL, ANTHROPIC_MODEL)
 // Claude Code requires Anthropic Messages API format (/v1/messages) — vMLX supports this
 const CLAUDE_SETTINGS = join(homedir(), '.claude', 'settings.json')
+/** env keys we overwrite, and therefore must be able to hand back. */
+const CLAUDE_MANAGED_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_API_KEY',
+] as const
+/** Where the user's pre-vMLX values are parked so remove can restore them. */
+const CLAUDE_PREV_KEY = `${MLXSTUDIO_TAG}_prev`
 const claudeCode: ToolConfig = {
   detect: () => commandExists('claude'),
   installCmd: 'npm',
   installArgs: ['install', '-g', '@anthropic-ai/claude-code'],
   configPath: CLAUDE_SETTINGS,
   getEntries: () => {
-    const cfg = safeReadJSON(CLAUDE_SETTINGS)
+    const cfg = readJSONForDisplay(CLAUDE_SETTINGS)
     if (!cfg?.env?.ANTHROPIC_BASE_URL || !cfg?.env?.[MLXSTUDIO_TAG]) return []
     return [{ label: cfg.env.ANTHROPIC_MODEL || 'default', baseUrl: cfg.env.ANTHROPIC_BASE_URL }]
   },
   addEntry: (baseUrl, modelName) => {
     const cfg = safeReadJSON(CLAUDE_SETTINGS) || {}
     if (!cfg.env) cfg.env = {}
+
+    // Snapshot whatever the user already had, ONCE, before we clobber it.
+    // Without this, a user with a real ANTHROPIC_API_KEY (or their own
+    // BASE_URL/MODEL) lost it permanently: addEntry overwrote the key with
+    // 'mlxstudio' and removeEntry then DELETED it. Toggling vMLX on and off
+    // must leave the user exactly where they started.
+    //
+    // Guarded by absence so a second add (e.g. switching model) does not
+    // snapshot our OWN values over the user's originals.
+    if (cfg.env[CLAUDE_PREV_KEY] === undefined) {
+      const prev: Record<string, string | null> = {}
+      for (const key of CLAUDE_MANAGED_ENV_KEYS) {
+        prev[key] = Object.prototype.hasOwnProperty.call(cfg.env, key)
+          ? cfg.env[key]
+          : null // null = "the user did not have this key at all"
+      }
+      cfg.env[CLAUDE_PREV_KEY] = prev
+    }
+
     // Claude Code appends /v1/messages itself — base URL should NOT include /v1
     cfg.env.ANTHROPIC_BASE_URL = baseUrl
     cfg.env.ANTHROPIC_MODEL = modelName
@@ -152,9 +233,23 @@ const claudeCode: ToolConfig = {
   removeEntry: () => {
     const cfg = safeReadJSON(CLAUDE_SETTINGS)
     if (!cfg?.env) return
-    delete cfg.env.ANTHROPIC_BASE_URL
-    delete cfg.env.ANTHROPIC_MODEL
-    delete cfg.env.ANTHROPIC_API_KEY
+
+    const prev = cfg.env[CLAUDE_PREV_KEY]
+    if (prev && typeof prev === 'object') {
+      // Restore the user's originals rather than deleting blindly.
+      for (const key of CLAUDE_MANAGED_ENV_KEYS) {
+        const value = prev[key]
+        if (value === null || value === undefined) delete cfg.env[key]
+        else cfg.env[key] = value
+      }
+      delete cfg.env[CLAUDE_PREV_KEY]
+    } else {
+      // No snapshot (config predates this fix): fall back to the old
+      // delete-only behaviour, which is still correct when the user had
+      // nothing of their own here.
+      for (const key of CLAUDE_MANAGED_ENV_KEYS) delete cfg.env[key]
+    }
+
     delete cfg.env[MLXSTUDIO_TAG]
     // Clean up empty env object
     if (Object.keys(cfg.env).length === 0) delete cfg.env
@@ -218,7 +313,7 @@ const openCode: ToolConfig = {
   installArgs: ['install', '-g', 'opencode'],
   configPath: join(homedir(), '.config', 'opencode', 'opencode.json'),
   getEntries: () => {
-    const cfg = safeReadJSON(join(homedir(), '.config', 'opencode', 'opencode.json'))
+    const cfg = readJSONForDisplay(join(homedir(), '.config', 'opencode', 'opencode.json'))
     if (!cfg?.provider) return []
     return Object.entries(cfg.provider)
       .filter(([_, v]: any) => v?.[MLXSTUDIO_TAG])
@@ -263,7 +358,7 @@ const openClaw: ToolConfig = {
   installArgs: ['install', '-g', 'openclaw@latest'],
   configPath: OPENCLAW_JSON,
   getEntries: () => {
-    const cfg = safeReadJSON(OPENCLAW_JSON)
+    const cfg = readJSONForDisplay(OPENCLAW_JSON)
     if (!cfg?.models?.providers) return []
     const entries: Array<{ label: string; baseUrl: string }> = []
     for (const [name, provider] of Object.entries(cfg.models.providers)) {
@@ -283,19 +378,32 @@ const openClaw: ToolConfig = {
     if (!cfg.agents.defaults.models) cfg.agents.defaults.models = {}
     const providerKey = `mlxstudio`
     const fqModel = `${providerKey}/${modelName}`
+    const model = {
+      id: modelName,
+      name: modelName,
+      reasoning: false,
+      input: ['text'],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: limits.context,
+      maxTokens: limits.output,
+    }
+
+    // OpenClaw keeps ONE provider holding a LIST of models, so configuring a
+    // second model must APPEND to that list. Replacing the whole provider
+    // (the previous behaviour) silently dropped model A when model B was
+    // added, while the allowlist below kept BOTH — leaving an allowlist entry
+    // pointing at a model the provider no longer declared.
+    const existing = cfg.models.providers[providerKey]
+    const models: any[] = Array.isArray(existing?.models) ? [...existing.models] : []
+    const at = models.findIndex(m => m?.id === modelName)
+    if (at >= 0) models[at] = model
+    else models.push(model)
+
     cfg.models.providers[providerKey] = {
       baseUrl: `${baseUrl}/v1`,
       apiKey: 'mlxstudio',
       api: 'openai-completions',
-      models: [{
-        id: modelName,
-        name: modelName,
-        reasoning: false,
-        input: ['text'],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: limits.context,
-        maxTokens: limits.output,
-      }],
+      models,
       [MLXSTUDIO_TAG]: true,
     }
     cfg.agents.defaults.models[fqModel] = { alias: modelName }

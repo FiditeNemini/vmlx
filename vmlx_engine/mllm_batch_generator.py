@@ -6440,6 +6440,48 @@ class MLLMBatchGenerator:
             request=request,
         )
 
+        # Media prefill is the one path that can die WITHOUT a catchable error:
+        # a Metal command-buffer OOM raises std::runtime_error inside a
+        # completion handler, so it reaches std::terminate and kills the engine
+        # (observed 2026-08-17 in-app on dots3 — the user saw only "Model is not
+        # running", ledger row 181). Nothing here can prevent that, so make it
+        # ATTRIBUTABLE: name media as a factor with the numbers, at the moment
+        # of risk. Warn only — never decline — because the measured media
+        # working set was ~3.5 GB while that crash had 12.9 GB free, so the
+        # mechanism is not yet understood and a guard keyed on the measurement
+        # would fire in the wrong conditions.
+        if has_media_payload:
+            try:
+                _active, _max_ws = get_effective_metal_working_set_bytes(mx)
+                _free = max(0, _max_ws - _active) if _max_ws > 0 else 0
+                _gb = 1024 ** 3
+                # Measured on dots3: one 448x448 image peaks ~3.5 GB over the
+                # resident baseline, and a SECOND image adds only ~0.1 GB — the
+                # vision tower's working set is near-fixed, not per-image.
+                _media_ws_hint_gb = 3.5
+                _msg = (
+                    "media prefill: images=%s audio=%s seq_len=%s "
+                    "active=%.1fGB max_ws=%.1fGB free=%.1fGB "
+                    "(measured vision-tower working set ~%.1fGB)"
+                )
+                _args = (
+                    bool(has_images), bool(has_audio_payload), seq_len,
+                    _active / _gb, (_max_ws / _gb) if _max_ws else 0.0,
+                    _free / _gb, _media_ws_hint_gb,
+                )
+                if _max_ws > 0 and _free < _media_ws_hint_gb * 2 * _gb:
+                    logger.warning(
+                        _msg + " — headroom is thin for a media forward; a "
+                        "Metal OOM here TERMINATES the engine and cannot be "
+                        "caught. Raise iogpu.wired_limit_mb or close other GPU "
+                        "apps.",
+                        *_args,
+                    )
+                else:
+                    logger.info(_msg, *_args)
+            except Exception:
+                pass  # never let observability break a request
+
         # vmlx#89 / mlxstudio#83: opt-in chunked prefill for hybrid SSM models
         # on text-only requests. Hybrid models default to one-shot prefill
         # because their mask computation uses cache-position indexing

@@ -68,6 +68,32 @@ describe("leaked tool-markup sanitizer", () => {
     ).toBe("the real answer survives");
   });
 
+  it("removes a bare think marker that survived into visible content", () => {
+    // Verbatim from an omni AUDIO turn (nemotron-omni-nano): the server had
+    // already emitted reasoning separately and a stray close tag still reached
+    // the answer, which the release proof correctly flagged as a parser leak.
+    const rendered = [
+      "A synthetic electronic tone is heard.",
+      "</think>",
+      "A synthetic electronic tone is heard.",
+    ].join("\n");
+    const cleaned = stripLeakedToolMarkup(rendered);
+    expect(cleaned).toContain("synthetic electronic tone");
+    expect(/<\/?think>/.test(cleaned)).toBe(false);
+  });
+
+  it("leaves a paired think block to the reasoning extraction path", () => {
+    // Only BARE markers are residue; a complete block is the reasoning
+    // parser's business, not this function's.
+    const paired = "<think>deliberating</think>the answer";
+    expect(stripLeakedToolMarkup(paired)).toBe(paired);
+  });
+
+  it("does not eat the word think from prose", () => {
+    const prose = "I think the answer is four.";
+    expect(stripLeakedToolMarkup(prose)).toBe(prose);
+  });
+
   it("still drops the tail of an unterminated tool call", () => {
     // An opening tag with no close is a broken tool call, not prose: the tail
     // belongs to the call and must not be shown.

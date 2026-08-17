@@ -133,5 +133,16 @@ export function stripLeakedToolMarkup(content: string): string {
   // Orphans last: the paired rules above have already taken whole blocks, so
   // whatever tail remains had no opening tag to pair with.
   text = text.replace(ORPHAN_TOOL_TAG_REGEX, "");
+  // Reasoning markers are owned by the reasoning parser, not by this function —
+  // but by FINALIZE any that survive into visible content are residue, and a
+  // lone marker is never legitimate prose. Observed live on an omni AUDIO turn
+  // (nemotron-omni-nano), which rendered:
+  //   A synthetic electronic tone is heard.
+  //   </think>
+  //   A synthetic electronic tone is heard.
+  // i.e. the server had already emitted reasoning separately and a stray close
+  // tag still reached the answer. Paired <think>…</think> blocks are left to the
+  // reasoning extraction path; only bare markers are removed here.
+  text = text.replace(/(?:^|\n)\s*<\/?think>\s*(?=\n|$)/g, "\n");
   return text;
 }

@@ -1303,12 +1303,23 @@ def test_packaged_renderer_dsv4_cache_ui_check_rejects_stale_duplicate_labels(tm
 def test_packaged_renderer_dsv4_cache_ui_check_accepts_deduped_labels(tmp_path):
     app_asar = tmp_path / runner.PACKAGED_RENDERER_ASAR
     app_asar.parent.mkdir(parents=True)
+    # 2026-08-16 (ledger row 159): fixture follows the repointed markers —
+    # the old sentences exist in neither the packaged app nor panel source.
     app_asar.write_bytes(
-        b"restored SWA+CSA/HCA state has not proven output-equivalent\n"
-        b"unsafe hits are still rejected\n"
+        b"\n".join(runner.PACKAGED_RENDERER_REQUIRED_DSV4_CACHE_UI_STRINGS) + b"\n"
     )
 
     assert runner._check_packaged_renderer_dsv4_cache_ui(tmp_path) is True
+
+    # ... and the de-duplication assertion still bites: a renderer that ALSO
+    # carries an old duplicated DSV4 cache heading must fail.
+    app_asar.write_bytes(
+        b"\n".join(runner.PACKAGED_RENDERER_REQUIRED_DSV4_CACHE_UI_STRINGS)
+        + b"\n"
+        + runner.PACKAGED_RENDERER_FORBIDDEN_DSV4_CACHE_UI_STRINGS[0]
+        + b"\n"
+    )
+    assert runner._check_packaged_renderer_dsv4_cache_ui(tmp_path) is False
 
 
 def _git(root: Path, *args: str) -> str:

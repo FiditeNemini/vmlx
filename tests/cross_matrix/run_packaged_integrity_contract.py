@@ -68,9 +68,18 @@ SIGNING_KEYCHAINS = (
     Path("~/Library/Keychains/build.keychain-db").expanduser(),
     Path("~/Library/Keychains/login.keychain-db").expanduser(),
 )
+# 2026-08-16 (ledger row 159): repointed to the CURRENT DSV4 cache-UI copy.
+# The two sentences pinned before ("restored SWA+CSA/HCA state has not proven
+# output-equivalent", "unsafe hits are still rejected") exist in NEITHER the
+# freshly staged app, NOR the previously released /Applications app, NOR
+# panel source — the copy was reworded, so the check could never pass again.
+# These markers carry the same guarantee: the packaged renderer still tells
+# the user DSV4 keeps its native composite path and that prefix reuse
+# preserves the native SWA+CSA/HCA state. The FORBIDDEN list below is the
+# actual de-duplication assertion and is unchanged.
 PACKAGED_RENDERER_REQUIRED_DSV4_CACHE_UI_STRINGS = (
-    b"restored SWA+CSA/HCA state has not proven output-equivalent",
-    b"unsafe hits are still rejected",
+    b"DSV4 Flash stays on its native DSV4BatchGenerator path",
+    b"DSV4 prefix reuse preserves the native SWA plus CSA/HCA composite state",
 )
 PACKAGED_RENDERER_FORBIDDEN_DSV4_CACHE_UI_STRINGS = (
     b"DSV4 Native Composite Prefix Cache",

@@ -202,7 +202,16 @@ export function ToolCallStatus({ statuses, isStreaming }: ToolCallStatusProps) {
 
             const lastPhase = group.statuses[group.statuses.length - 1]
             const isDone = lastPhase.phase === 'result' || lastPhase.phase === 'error'
-            const isItemExpanded = expanded[gi] ?? false
+            // A FAILED call explains itself by default; a successful one stays
+            // compact. Measured live 2026-08-16: a stale Working Directory made
+            // dots3 emit ten `List .` calls that all failed, and the user saw
+            // ten collapsed "failed" chips and an empty answer — while the
+            // executor's own actionable text ("The configured working directory
+            // does not exist: … Set an existing folder in Chat Settings") sat
+            // one unexplained click away. An explicit toggle still wins, so a
+            // user can collapse the noise once they have read it.
+            const isItemExpanded =
+              expanded[gi] ?? group.statuses.some(s => s.phase === 'error')
 
             const callingStatus = group.statuses.find(s => s.phase === 'calling')
             const resultStatus = group.statuses.find(s => s.phase === 'result' || s.phase === 'error')

@@ -4698,7 +4698,19 @@ export class SessionManager extends EventEmitter {
           : nativeMtp.depth
         const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 3))
         args.push('--native-mtp-depth', depth.toString())
-        args.push('--native-mtp-sampling-policy', mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only')
+        // 2026-08-17 — `auto` used to map to `compatible-only`, which runs MTP
+        // ONLY on requests that are already greedy. Bundles carrying MTP heads
+        // ship temperature 1.0, so on default settings the engine logged
+        //   "native MTP skipped for request=...: temperature=1.0 is not deterministic"
+        // on EVERY turn and nobody ever got MTP. Measured in the app: Qwen3.8
+        // 4D decoding at 19.5 t/s with `Native MTP: READY D3` in the same log.
+        //
+        // A bundle with MTP heads now gets greedy defaults from the engine, so
+        // the feature actually runs, and the temperature 0 that Chat Settings
+        // shows is the temperature the engine really uses. Previously the panel
+        // displayed 0 while the request went out at 1.0 — a UI/API parity lie.
+        // `off` is handled above and remains the way to keep bundle sampling.
+        args.push('--native-mtp-sampling-policy', 'deterministic-defaults')
       }
     }
 

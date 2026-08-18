@@ -3,6 +3,10 @@ import { app } from "electron";
 import { join } from "path";
 import { existsSync, unlinkSync, renameSync } from "fs";
 import { migrateLegacySessionStartupConfig } from "../shared/sessionConfigMigrations";
+import {
+  staleSessionCountSql,
+  staleSessionResetSql,
+} from "../shared/sessionStatusReconcile";
 import { decryptValue, encryptValue } from "./secretStorage";
 
 export interface Chat {
@@ -1191,6 +1195,46 @@ class DatabaseManager {
     `);
     }); // end runMigrations transaction
     runMigrations();
+    this.reconcileStaleSessionStatuses();
+  }
+
+  /**
+   * Reset session rows left in a transient RUNTIME status by a previous run.
+   *
+   * 2026-08-17 (ledger row 275): reproduced live in the dev app — the Sessions
+   * view showed a red **Error** badge on two models that then loaded cleanly on
+   * the first try (qwen3_5 and nemotron_h both reached `model_loaded: true`),
+   * and one of those cards additionally displayed a DIFFERENT model's name than
+   * the bundle at its path. Nothing ever cleared those rows, so the badge and
+   * title survived app restarts until the user happened to start that session
+   * again. Users read that as "the app logs errors when loading my model".
+   *
+   * `running` / `loading` / `standby` / `error` all describe THIS process's
+   * runtime. After the app exits, no engine child survives, so on the next boot
+   * none of them can still be true — a start has not even been attempted yet.
+   * Reset them to `stopped` and drop the stale pid. This runs on EVERY boot,
+   * not as a one-time keyed migration, because a crash can strand the state at
+   * any time.
+   *
+   * Deliberately NOT touched: the session's model_name, which the start path
+   * re-resolves from the bundle, and any status not in the transient set.
+   */
+  private reconcileStaleSessionStatuses(): void {
+    try {
+      const stale = this.db
+        .prepare(staleSessionCountSql())
+        .get() as { cnt: number } | undefined;
+      if (!stale || stale.cnt === 0) return;
+      const result = this.db
+        .prepare(staleSessionResetSql())
+        .run();
+      console.log(
+        `[DB] Reconciled ${result.changes} session row(s) left in a transient runtime status by a previous run -> stopped`,
+      );
+    } catch (error) {
+      // Never block startup on reconciliation.
+      console.warn("[DB] Session status reconciliation skipped:", error);
+    }
   }
 
   // Downloads

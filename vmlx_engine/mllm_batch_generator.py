@@ -3327,52 +3327,31 @@ _NATIVE_MTP_STOCHASTIC_ACCEPT = os.environ.get(
     "VMLX_MTP_STOCHASTIC_ACCEPT", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+from .native_mtp_acceptance import accepted_count as _shared_accepted_count
+
 
 def _native_mtp_accepted_count(
     draft_ids: List[int],
     target_ids: List[int],
     draft_lps: List[Optional[mx.array]],
     target_lps: List[Optional[mx.array]],
+    sampler: Optional[Callable[[mx.array], mx.array]] = None,
 ) -> int:
     """Count leading accepted drafts for one MTP verify cycle.
 
-    Matching tokens are always accepted.  When stochastic acceptance is enabled
-    and both sides exposed a distribution, a mismatched draft still gets its
-    min(1, p_target/p_draft) chance instead of ending the cycle outright.
+    Delegates to the shared rule so this path and the text path
+    (``patches/mlx_lm_mtp/batch_generator.py``) can never disagree about how a
+    draft is accepted — that divergence is what forced ``--is-mllm`` bundles to
+    pin temperature to 0 while text bundles ran fine at any temperature.
     """
-    accepted = 0
-    for idx, draft_id in enumerate(draft_ids):
-        draft_id = int(draft_id)
-        if int(target_ids[idx]) == draft_id:
-            accepted += 1
-            continue
-        if not _NATIVE_MTP_STOCHASTIC_ACCEPT:
-            break
-        target_lp = target_lps[idx] if idx < len(target_lps) else None
-        draft_lp = draft_lps[idx] if idx < len(draft_lps) else None
-        if target_lp is None or draft_lp is None:
-            # Greedy and compact-top-k samplers expose no distribution; for
-            # them exact match already is the correct acceptance test.
-            break
-        # MLX does not raise on an out-of-range index, so a short or ragged row
-        # would silently read as log_ratio 0.0 and ACCEPT the draft.  Check the
-        # width explicitly rather than relying on an exception.
-        if (
-            draft_id < 0
-            or int(target_lp.shape[-1]) <= draft_id
-            or int(draft_lp.shape[-1]) <= draft_id
-        ):
-            break
-        try:
-            log_ratio = float(target_lp[draft_id]) - float(draft_lp[draft_id])
-        except Exception:
-            break
-        if log_ratio < 0.0:
-            draw = float(mx.random.uniform(shape=(1,)).item())
-            if draw <= 0.0 or math.log(draw) > log_ratio:
-                break
-        accepted += 1
-    return accepted
+    return _shared_accepted_count(
+        draft_ids,
+        target_ids,
+        draft_lps,
+        target_lps,
+        stochastic=_NATIVE_MTP_STOCHASTIC_ACCEPT,
+        sampler=sampler,
+    )
 
 
 def _sample_mllm_prefill_logits(
@@ -10382,6 +10361,7 @@ class MLLMBatchGenerator:
             target_ids,
             state.draft_lps,
             target_lps,
+            sampler,
         )
 
         state.stats.cycles += 1

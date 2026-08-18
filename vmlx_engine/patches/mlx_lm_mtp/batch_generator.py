@@ -575,38 +575,14 @@ def _accept_lp_for(sampler, lp):
     acceptance ratio (and residual distribution) match the distribution the
     sampler actually drew from.
 
-    Reads sampling params off the callable as function attributes. For stock
-    mlx-lm/vMLX samplers without reusable filter helpers, returns `lp`
-    unchanged so behavior matches the pre-PR-990 raw-lp acceptance.
+    Thin delegate: the rule lives in ``vmlx_engine.native_mtp_acceptance`` so
+    this text path and the MLLM path cannot drift apart.  They already did once
+    — /health advertised rejection-sampling acceptance while the MLLM path was
+    exact-match only.
     """
-    import mlx.core as mx
+    from ...native_mtp_acceptance import accept_lp_for
 
-    try:
-        from omlx.utils.sampling import apply_min_p, apply_top_k, apply_top_p
-    except Exception:
-        return lp
-
-    temp = float(getattr(sampler, "temp", 0.0) or 0.0)
-    if temp == 0.0:
-        # Greedy / unknown sampler — raw lp is the acceptance distribution.
-        return lp
-
-    out = lp
-    top_p = float(getattr(sampler, "top_p", 0.0) or 0.0)
-    if 0.0 < top_p < 1.0:
-        out = apply_top_p(out, top_p)
-    min_p = float(getattr(sampler, "min_p", 0.0) or 0.0)
-    if min_p != 0.0:
-        min_keep = int(getattr(sampler, "min_tokens_to_keep", 1) or 1)
-        out = apply_min_p(out, min_p, min_keep)
-    top_k = int(getattr(sampler, "top_k", 0) or 0)
-    if top_k > 0:
-        out = apply_top_k(out, top_k)
-
-    # Temperature scale + renormalize so the output is a proper logprob
-    # distribution that can be indexed by token id for the acceptance check.
-    scaled = out * (1.0 / temp)
-    return scaled - mx.logsumexp(scaled, axis=-1, keepdims=True)
+    return accept_lp_for(sampler, lp)
 
 
 def _trim_token_buffer(gen_batch: Any, n: int) -> None:

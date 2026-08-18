@@ -131,3 +131,54 @@ class TestStochasticArm:
     def test_malformed_distribution_does_not_raise(self):
         """A short/ragged row must end the cycle, never propagate an error."""
         assert _accepted([5], [6], draft_lps=[mx.array([0.0])], target_lps=[mx.array([0.0])]) == 0
+
+    def test_impossible_draft_is_rejected_not_accepted(self):
+        """p_draft == 0 (-inf) means the draft could never have been drawn.
+
+        The ratio is meaningless there, so it must reject rather than produce a
+        non-finite comparison that slips through as an accept.
+        """
+        draft = mx.array([0.0, float("-inf")])
+        target = mx.array([0.0, 0.0])
+        assert _accepted([1], [0], draft_lps=[draft], target_lps=[target]) == 0
+
+
+class TestBothSchedulersShareOneRule:
+    """The MLLM path and the text path must not drift apart.
+
+    They already did once: /health advertised
+    'stochastic=rejection-sampling-acceptance' while the MLLM generator was
+    exact-match only, which is why --is-mllm bundles had to pin temperature 0.
+    """
+
+    def test_text_path_delegates_to_the_shared_helper(self):
+        from vmlx_engine import native_mtp_acceptance
+        from vmlx_engine.patches.mlx_lm_mtp import batch_generator as text_gen
+
+        sentinel = object()
+        captured = {}
+
+        def _fake(sampler, lp):
+            captured["called"] = True
+            return sentinel
+
+        original = native_mtp_acceptance.accept_lp_for
+        native_mtp_acceptance.accept_lp_for = _fake
+        try:
+            assert text_gen._accept_lp_for(None, mx.array([0.0])) is sentinel
+        finally:
+            native_mtp_acceptance.accept_lp_for = original
+        assert captured.get("called"), "text path must route through the shared rule"
+
+    def test_mllm_path_delegates_to_the_shared_helper(self):
+        assert gen._shared_accepted_count is not None
+        from vmlx_engine.native_mtp_acceptance import accepted_count
+
+        assert gen._shared_accepted_count is accepted_count
+
+    def test_greedy_sampler_leaves_the_distribution_untouched(self):
+        """temp 0 means raw lp already is the acceptance distribution."""
+        from vmlx_engine.native_mtp_acceptance import accept_lp_for
+
+        row = mx.array([-1.0, -2.0, -3.0])
+        assert accept_lp_for(None, row) is row

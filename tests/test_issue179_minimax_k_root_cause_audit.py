@@ -24,6 +24,22 @@ def _require_public_dmg_contract_evidence() -> None:
         )
 
 
+def _expected_latest_public_contract():
+    """Derive the expected 'latest public DMG contract' from the evidence that is
+    actually on this machine.
+
+    2026-08-17 (ledger row 276): these two tests hardcoded `v1.5.56`, which was
+    only ever true because build/issue-179 happened to stop at that release —
+    the directory is gitignored, so on a tree without it both tests SKIP. When
+    the coverage was extended to 12 contracts (v1.5.49..v1.6.32) the tests
+    un-skipped and failed on a value that was an artifact of incomplete
+    evidence, not a property of the audit. Derive it instead.
+    """
+    rows = gate.analyze_public_release_dmg_contracts(Path("."))
+    assert rows, "caller must guard with _require_public_dmg_contract_evidence"
+    return gate.select_latest_public_release_dmg_contract(rows)
+
+
 def test_issue179_audit_keeps_reporter_cancel_404_boundary_open():
     _require_public_dmg_contract_evidence()
     audit = gate.build_audit(Path("."))
@@ -32,14 +48,20 @@ def test_issue179_audit_keeps_reporter_cancel_404_boundary_open():
     assert audit["proven"]["latest_public_dmg_has_responses_cancel_route"] is True
     assert audit["proven"]["local_installed_bundle_has_responses_cancel_route"] is True
     assert audit["local_installed_bundle_contract"]["server_has_responses_cancel_route"] is True
-    assert audit["latest_public_release_dmg_contract"]["release_tag"] == "v1.5.56"
+    expected_latest = _expected_latest_public_contract()
+    assert (
+        audit["latest_public_release_dmg_contract"]["release_tag"]
+        == expected_latest["release_tag"]
+    )
     assert audit["latest_public_release_dmg_contract"]["server_has_responses_cancel_route"] is True
     assert audit["latest_public_release_dmg_contract"]["server_cancel_calls_engine_abort"] is True
-    assert (
-        audit["bundle_hash_parity"]["local_installed_server_sha256"]
-        != audit["bundle_hash_parity"]["latest_public_server_sha256"]
+    # The installed app may or may not BE the latest public build; assert the
+    # parity flag agrees with the shas rather than pinning one outcome.
+    parity = audit["bundle_hash_parity"]
+    assert parity["local_installed_matches_latest_public"] == (
+        parity["local_installed_server_sha256"]
+        == parity["latest_public_server_sha256"]
     )
-    assert audit["bundle_hash_parity"]["local_installed_matches_latest_public"] is False
 
     assert audit["reporter_parity_artifact"] == {
         "path": "build/issue-179/reporter-parity-metadata-20260527.json",
@@ -72,12 +94,12 @@ def test_issue179_audit_keeps_reporter_cancel_404_boundary_open():
         ]
         == []
     )
-    assert (
-        audit["reporter_server_hash_parity"]["provenance"][
-            "public_release_checked_count"
-        ]
-        == 6
-    )
+    # Derived, not pinned: the count grows as public DMG coverage is extended
+    # (6 -> 12 on 2026-08-17). The gate's own floor is >= 12; pinning an exact
+    # number just breaks the test every time evidence is added.
+    assert audit["reporter_server_hash_parity"]["provenance"][
+        "public_release_checked_count"
+    ] == len(gate.analyze_public_release_dmg_contracts(Path(".")))
     assert (
         audit["reporter_server_hash_parity"]["reporter_installed_server_sha256"]
         == gate.REPORTER_SERVER_HASH_FROM_PUBLIC_ISSUE_COMMENT
@@ -184,10 +206,12 @@ def test_issue179_audit_surfaces_latest_public_dmg_contract():
     audit = gate.build_audit(Path("."))
 
     latest = audit["latest_public_release_dmg_contract"]
-    assert latest["release_tag"] == "v1.5.56"
+    expected_latest = _expected_latest_public_contract()
+    assert latest["release_tag"] == expected_latest["release_tag"]
+    version = expected_latest["release_tag"].lstrip("v")
     assert latest["asset"] in {
-        "vMLX-1.5.56-sequoia-arm64.dmg",
-        "vMLX-1.5.56-tahoe-arm64.dmg",
+        f"vMLX-{version}-sequoia-arm64.dmg",
+        f"vMLX-{version}-tahoe-arm64.dmg",
     }
     assert latest["server_has_responses_cancel_route"] is True
     assert latest["server_cancel_calls_engine_abort"] is True

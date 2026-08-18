@@ -3,36 +3,11 @@
 
 from __future__ import annotations
 
-import os
 from functools import partial
 from typing import Callable
 
 import mlx.core as mx
 from mlx_lm.sample_utils import make_sampler as _mlx_make_sampler
-
-# Bounded candidate count for the compact top-p path (see make_sampler).
-_COMPACT_TOP_P_DEFAULT_CANDIDATES = 1024
-
-
-def _env_flag(*names: str, default: bool = False) -> bool:
-    for name in names:
-        raw = os.environ.get(name)
-        if raw is not None and raw != "":
-            return raw not in ("0", "false", "False")
-    return default
-
-
-def _env_int(default: int, *names: str) -> int:
-    for name in names:
-        raw = os.environ.get(name)
-        if raw:
-            try:
-                value = int(raw)
-            except ValueError:
-                continue
-            if value > 0:
-                return value
-    return default
 
 
 class _SamplerWrapper:
@@ -106,43 +81,6 @@ def make_sampler(
                 temp=float(temp),
                 top_p=float(top_p or 0.0),
                 top_k=int(top_k),
-            ),
-            accepts_logits=True,
-        )
-
-    # 2026-08-17 — compact top-p, OPT-IN (VMLX_COMPACT_TOP_P=1), default OFF.
-    #
-    # The compact path above is guarded on `top_k > 0`, so the far more common
-    # bundle shape — `top_k: 0` with a `top_p` — fell through to the generic
-    # MLX-LM nucleus, which builds full-vocabulary logprobs and SORTS the whole
-    # vocabulary on every token. dots3-note ships `top_p 0.95, top_k 0` over a
-    # 152,064-token vocab, and measured live in the app the sampler is worth
-    # ~30% of decode: greedy (which skips the sampler entirely) ran 26.5 t/s
-    # against 18.9 t/s sampled on the same model and prompt.
-    #
-    # Bounding the candidate set to the top N logits is exact whenever the
-    # nucleus mass falls inside those N — for top_p 0.95 on a 152k vocab that
-    # is overwhelmingly the case, but it is NOT unconditionally exact, which is
-    # why this is opt-in until a fixed-seed byte-identical A/B proves the token
-    # stream is unchanged for the bundles we ship. Probabilities themselves stay
-    # exact: _make_compact_top_k_sampler normalises with logsumexp over the FULL
-    # logits, so only the candidate set is truncated, not the distribution.
-    if (
-        int(top_k or 0) == 0
-        and float(min_p or 0.0) == 0.0
-        and 0.0 < float(top_p or 0.0) < 1.0
-        and _env_flag("VMLX_COMPACT_TOP_P", "VMLINUX_COMPACT_TOP_P", default=False)
-    ):
-        candidates = _env_int(
-            _COMPACT_TOP_P_DEFAULT_CANDIDATES,
-            "VMLX_COMPACT_TOP_P_CANDIDATES",
-            "VMLINUX_COMPACT_TOP_P_CANDIDATES",
-        )
-        return _SamplerWrapper(
-            _make_compact_top_k_sampler(
-                temp=float(temp),
-                top_p=float(top_p),
-                top_k=int(candidates),
             ),
             accepts_logits=True,
         )

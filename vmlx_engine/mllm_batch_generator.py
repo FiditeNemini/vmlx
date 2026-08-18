@@ -3373,14 +3373,31 @@ def _sample_mllm_prefill_logits(
     return sampled, logprobs
 
 
-# One device fence per MTP verify cycle. Default ON: measured 2026-08-15 on
-# 35B MXFP8 MTP depth 2, the fence recovers the cache-on async-accumulation
-# stall (1.45x -> 1.68x, MTP arm 108.5 -> 128.0 t/s, byte-equal) and is free
-# where the stall is absent (cache-off 1.932x fenced vs 1.943x unfenced,
-# within run noise, byte-equal). VMLX_MTP_CYCLE_FENCE=0 reverts.
-_NATIVE_MTP_CYCLE_FENCE = os.environ.get(
-    "VMLX_MTP_CYCLE_FENCE", "1"
-).lower() not in {"0", "false", "no", "off"}
+# One device fence per MTP verify cycle, defaulted BY DEPTH.
+#
+# depth >= 2 — fence ON.  Measured 2026-08-15 on 35B MXFP8 MTP depth 2: the
+# fence recovers the cache-on async-accumulation stall (1.45x -> 1.68x, MTP arm
+# 108.5 -> 128.0 t/s, byte-equal) and is free where the stall is absent
+# (cache-off 1.932x fenced vs 1.943x unfenced, within run noise, byte-equal).
+#
+# depth == 1 — fence OFF.  Measured 2026-08-18 live in the app on
+# Qwen3.8-27B-JANG_4D-CRACK, 64 prompt, fresh chat, IDENTICAL 4139-token
+# output: fenced 26.5 t/s vs unfenced 37.9 / 37.5 t/s = +43%.  A depth-1 cycle
+# issues one draft forward and one 2-token verify, so there is almost no lazy
+# work for the barrier to bound — only its cost lands, and it lands every
+# single cycle.  Fencing depth 1 was costing more than MTP itself was winning.
+#
+# VMLX_MTP_CYCLE_FENCE=1/0 forces either way and overrides the depth default.
+_NATIVE_MTP_CYCLE_FENCE_ENV = os.environ.get("VMLX_MTP_CYCLE_FENCE", "").strip().lower()
+
+
+def _native_mtp_cycle_fence_enabled(depth: int) -> bool:
+    """Whether to issue the per-cycle device fence at this draft depth."""
+    if _NATIVE_MTP_CYCLE_FENCE_ENV in {"0", "false", "no", "off"}:
+        return False
+    if _NATIVE_MTP_CYCLE_FENCE_ENV in {"1", "true", "yes", "on"}:
+        return True
+    return int(depth or 1) >= 2
 
 
 def _native_mtp_trace_enabled() -> bool:
@@ -10369,7 +10386,7 @@ class MLLMBatchGenerator:
         # stalls later forwards. One fence per cycle bounds the outstanding
         # queue. Gated for A/B; flips default only on byte-equal + speedup
         # proof at the app-default cache shape.
-        if _NATIVE_MTP_CYCLE_FENCE:
+        if _native_mtp_cycle_fence_enabled(depth):
             try:
                 mx.synchronize()
             except Exception:

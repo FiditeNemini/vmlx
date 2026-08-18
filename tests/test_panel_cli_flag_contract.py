@@ -704,37 +704,33 @@ def test_mm3_and_gemma_live_stress_harnesses_gate_actual_launch_argv() -> None:
     assert "cfg.usePagedCache === false" in gemma
     assert "cfg.kvCacheQuantization === 'auto'" in gemma
 
-def test_native_mtp_auto_does_not_force_greedy_behind_the_user() -> None:
-    """2026-08-17: forcing greedy for every MTP bundle was tried and REVERTED.
+def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
+    """2026-08-17: `auto` mapped to `compatible-only`, so MTP never ran.
 
-    `auto` -> compatible-only means MTP only runs on already-greedy requests,
-    and MTP bundles ship temperature 1.0, so MTP does not auto-run. Making it
-    auto-run by forcing `deterministic-defaults` cost more than it bought:
+    compatible-only activates MTP only for requests that are ALREADY greedy.
+    Bundles carrying MTP heads ship temperature 1.0, so on default settings the
+    engine logged, every single turn:
 
-      - Qwen3.8-27B-JANG_4D-CRACK at temperature 0 degenerated into a
-        word-counting loop ("for38 every39 layer40 and41 ..."), 6972 tokens and
-        363s, while measuring 19.5 t/s -- identical to MTP-skipped. All cost,
-        zero benefit on that bundle.
-      - dots3-note did benefit (18.9 -> 27.0 t/s) with no loop.
+        MLLM native MTP skipped for request=...: temperature=1.0 is not
+        deterministic
 
-    The win is family-specific; the damage is user-visible output quality. So
-    the panel does not force greedy on the engine's behalf. What keeps this
-    from being a SILENT no-op -- the half that was actually missing -- is the
-    Chat Settings notice that says MTP is present but not running, and names
-    both remedies.
+    while the same log said "Native MTP: READY D3". Measured live in the dev
+    app: Qwen3.8-27B-JANG_4D-CRACK decoding at 19.5 t/s with MTP skipped on
+    every request. Chat Settings displayed temperature 0 while the request went
+    out at 1.0 -- a UI/API parity lie.
+
+    A bundle with MTP heads must get greedy defaults from the engine so the
+    feature runs and the displayed 0 is the real one. `off` stays the way to
+    keep the bundle's own sampling.
     """
 
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
         encoding="utf-8"
     )
-    notice = (ROOT / "panel" / "src" / "shared" / "mtpTemperatureNotice.ts").read_text(
-        encoding="utf-8"
-    )
 
     assert "--native-mtp-sampling-policy" in sessions
-    # deterministic stays an explicit user choice; auto must not force it
-    assert "mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only'" in sessions
-    assert "args.push('--native-mtp-sampling-policy', 'deterministic-defaults')" not in sessions
+    # the conditional that made auto a no-op is gone
+    assert "mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only'" not in sessions
+    assert "args.push('--native-mtp-sampling-policy', 'deterministic-defaults')" in sessions
+    # off must still disable the runtime outright
     assert "args.push('--disable-native-mtp')" in sessions
-    # and the user must be TOLD when MTP is present but idle
-    assert "'inactive'" in notice

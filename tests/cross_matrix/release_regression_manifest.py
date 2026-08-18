@@ -5914,7 +5914,13 @@ def _validate_current_mimo_v2_jang2l_host_availability(root: Path) -> dict[str, 
         result["failures"].append("json_load_error")
         return result
 
-    status = str(payload.get("status"))
+    # 2026-08-17 (ledger row 270): read the DEDICATED host-availability field,
+    # not the structural `status`. The structural artifact's `status` is a
+    # pass/fail verdict on bundle METADATA and never used this vocabulary, so
+    # this check could not be satisfied by any real run. The producer now emits
+    # `host_availability_status` alongside live_launch_decision /
+    # launch_allowed / launch_blockers.
+    status = str(payload.get("host_availability_status"))
     launch_decision = payload.get("live_launch_decision")
     launch_allowed = payload.get("launch_allowed")
     launch_blockers = payload.get("launch_blockers")

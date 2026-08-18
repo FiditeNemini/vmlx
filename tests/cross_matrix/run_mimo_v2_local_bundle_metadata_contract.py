@@ -281,6 +281,54 @@ def build_artifact() -> dict[str, Any]:
     }
 
 
+def build_host_availability(structural: dict[str, Any]) -> dict[str, Any]:
+    """Record whether this host can even attempt a MiMo launch.
+
+    2026-08-17 (ledger row 270): the release manifest's
+    `_validate_current_mimo_v2_jang2l_host_availability` reads this artifact and
+    requires `host_availability_status` in {missing_model_weights,
+    invalid_model_metadata, skipped_active_heavy_process, model_available} plus
+    `live_launch_decision`, `launch_allowed` (bool) and `launch_blockers`
+    (list). NOTHING emitted any of those fields — that vocabulary existed only
+    inside the validator — so the check could never be satisfied by a real run
+    and reported launch_blockers_not_list / unexpected_status /
+    unexpected_launch_decision / launch_allowed_not_bool forever.
+
+    The structural `status` stays pass/fail: it is a different contract (bundle
+    metadata), pinned by
+    test_mimo_v2_local_bundle_metadata_contract_builds_noheavy_structural_proof.
+    """
+    missing = sorted(
+        str(path) for path in MIMO_LOCAL_BUNDLES.values() if not path.exists()
+    )
+    if missing:
+        return {
+            "host_availability_status": "missing_model_weights",
+            "live_launch_decision": "do_not_launch",
+            "launch_allowed": False,
+            "launch_blockers": [f"model_weights_absent:{path}" for path in missing],
+        }
+    invalid = sorted(
+        name
+        for name, row in structural.items()
+        if not (isinstance(row, dict) and row.get("status") == "pass")
+    )
+    if invalid or not structural:
+        return {
+            "host_availability_status": "invalid_model_metadata",
+            "live_launch_decision": "do_not_launch",
+            "launch_allowed": False,
+            "launch_blockers": [f"structural_metadata_invalid:{name}" for name in invalid]
+            or ["structural_metadata_absent"],
+        }
+    return {
+        "host_availability_status": "model_available",
+        "live_launch_decision": "available_for_preflight",
+        "launch_allowed": True,
+        "launch_blockers": [],
+    }
+
+
 def build_structural_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
     structural = artifact.get("structural")
     structural = structural if isinstance(structural, dict) else {}
@@ -298,6 +346,7 @@ def build_structural_artifact(artifact: dict[str, Any]) -> dict[str, Any]:
             "live text exactness, tool-result continuation, media E2E, or app UI."
         ),
         "bundles": structural,
+        **build_host_availability(structural),
     }
 
 

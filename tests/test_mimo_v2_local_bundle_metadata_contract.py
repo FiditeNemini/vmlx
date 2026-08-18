@@ -158,3 +158,41 @@ def test_mimo_v2_local_bundle_metadata_contract_builds_noheavy_structural_proof(
     assert structural["bundles"]["jang2l"]["reasoning"]["parser"] == "think_xml"
     assert structural["bundles"]["jang2l"]["tools"]["parser"] == "xml_function"
     assert "jangtq2/config.json" in manifest.read_text(encoding="utf-8")
+
+
+def test_structural_artifact_emits_the_host_availability_fields_the_manifest_reads():
+    """2026-08-17 (ledger row 270): the manifest's host-availability validator
+    required host_availability_status / live_launch_decision / launch_allowed /
+    launch_blockers, and NOTHING emitted them — that vocabulary lived only
+    inside the validator, so the check reported launch_blockers_not_list,
+    unexpected_status, unexpected_launch_decision and launch_allowed_not_bool
+    on every run and could never pass. Pin the producer/consumer contract."""
+    from tests.cross_matrix import run_mimo_v2_local_bundle_metadata_contract as gate
+    from tests.cross_matrix.release_regression_manifest import (
+        _validate_current_mimo_v2_jang2l_host_availability,
+    )
+    import inspect
+
+    # absent bundles -> honest "cannot launch" record
+    absent = gate.build_host_availability({})
+    assert absent["host_availability_status"] == "missing_model_weights"
+    assert absent["live_launch_decision"] == "do_not_launch"
+    assert absent["launch_allowed"] is False
+    assert isinstance(absent["launch_blockers"], list) and absent["launch_blockers"]
+
+    # the structural artifact must carry them through
+    artifact = gate.build_structural_artifact({"created_at": "x", "structural": {}})
+    for key in (
+        "host_availability_status",
+        "live_launch_decision",
+        "launch_allowed",
+        "launch_blockers",
+    ):
+        assert key in artifact, f"structural artifact must emit {key}"
+
+    # the validator must read the dedicated field, not the structural status
+    source = inspect.getsource(_validate_current_mimo_v2_jang2l_host_availability)
+    assert 'payload.get("host_availability_status")' in source, (
+        "the validator must read host_availability_status, not the pass/fail "
+        "structural status, which is a different contract"
+    )

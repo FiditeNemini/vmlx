@@ -25,6 +25,10 @@ import {
   sanitizeTopPOverride,
   shouldWarnDsv4TopP,
 } from '../../../../shared/samplingParameterDomain'
+import {
+  parseSessionNativeMtpMode,
+  resolveMtpTemperatureNotice,
+} from '../../../../shared/mtpTemperatureNotice'
 
 interface ChatProfile {
   id: string
@@ -118,6 +122,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   // supportsThinking (does it reason at all). Muse reasons but reads only
   // reasoning_strength, so Auto/On were byte-identical — a dead control.
   const [detectedHonorsEnableThinking, setDetectedHonorsEnableThinking] = useState<boolean | undefined>(undefined)
+  const [detectedNativeMtpSupported, setDetectedNativeMtpSupported] = useState<boolean | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
   const loadRequestRef = useRef(0)
@@ -153,6 +158,14 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const enableThinkingHonored = detectedHonorsEnableThinking !== false
   const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined
   const displayedTemperature = displayedOverrides.temperature ?? displayedModelDefaults.temperature
+  // MTP is a property of the BUNDLE; whether it actually runs is decided by the
+  // session's nativeMtpMode plus the effective temperature. Both are needed, so
+  // neither a capable bundle nor a deterministic session alone is enough.
+  const mtpTemperatureNotice = resolveMtpTemperatureNotice({
+    nativeMtpSupported: detectedNativeMtpSupported === true,
+    mode: parseSessionNativeMtpMode(session.config),
+    temperature: displayedTemperature,
+  })
   const displayedTopP = displayedOverrides.topP ?? displayedModelDefaults.topP
   const displayedTopKValue = displayedOverrides.topK ?? displayedModelDefaults.topK
   const displayedTopK = displayedTopKValue == null
@@ -241,6 +254,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
       setDetectedSupportsThinking(detected?.supportsThinking)
       setDetectedSupportsInstructMode(detected?.supportsInstructMode)
       setDetectedHonorsEnableThinking(detected?.honorsEnableThinking)
+      setDetectedNativeMtpSupported((detected as any)?.nativeMtp?.supported === true)
       setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
       setDetectedDefaultReasoningEffort(detected?.defaultReasoningEffort)
       setSupportsThinkingBudget(detected?.supportsThinkingBudget)
@@ -726,6 +740,30 @@ function statusToneClass(status: string): string {
                 exactInput={{ min: 0, max: 2 }}
                 help={t('chat.settings.temperatureHelp')}
               />
+            )}
+            {/*
+              Native MTP only runs on greedy requests, and several MTP bundles
+              ship temperature 1.0, so in Auto mode the feature silently never
+              engages. Explain the 0 when it is pinned, and say so out loud when
+              MTP is present but not running.
+            */}
+            {mtpTemperatureNotice && (
+              <p
+                data-testid="mtp-temperature-notice"
+                className={
+                  mtpTemperatureNotice.kind === 'inactive'
+                    ? 'mt-1 text-xs text-amber-500'
+                    : 'mt-1 text-xs text-neutral-500'
+                }
+              >
+                {mtpTemperatureNotice.kind === 'pinned'
+                  ? t('chat.settings.mtpTempPinned')
+                  : mtpTemperatureNotice.kind === 'active'
+                    ? t('chat.settings.mtpTempActive')
+                    : t('chat.settings.mtpTempInactive', {
+                        temperature: mtpTemperatureNotice.temperature,
+                      })}
+              </p>
             )}
             {displayedTopP != null && (
               <SliderField

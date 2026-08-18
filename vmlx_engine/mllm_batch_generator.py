@@ -3290,16 +3290,26 @@ def _native_mtp_sample_one(
 def _native_mtp_sample_rows(
     logits_2d: mx.array,
     sampler: Callable[[mx.array], mx.array],
+    also_eval: Tuple[Any, ...] = (),
 ) -> Tuple[List[mx.array], List[Optional[mx.array]], List[int]]:
+    """Sample one row per verify position and read the ids back to the host.
+
+    ``also_eval`` is materialized in the SAME ``mx.eval`` as the sampled
+    tokens.  A verify cycle otherwise pays two separate blocking round-trips —
+    one here and one in ``_native_mtp_materialize_draft_ids`` — and each drains
+    the device before the host can continue.  Folding them into one sync halves
+    the per-cycle stalls; the caller's later ``mx.eval`` on the same arrays is
+    then a no-op.
+    """
     if _native_mtp_sampler_accepts_logits(sampler):
         sampled = _native_mtp_ensure_uint32(sampler(logits_2d))
-        mx.eval(sampled)
+        mx.eval(sampled, *also_eval)
         sampled_ids = [int(value) for value in sampled.tolist()]
         rows = int(sampled.shape[0])
         return [sampled[i : i + 1] for i in range(rows)], [None] * rows, sampled_ids
     logprobs = _native_mtp_logprobs(logits_2d)
     sampled = _native_mtp_ensure_uint32(sampler(logprobs))
-    mx.eval(sampled)
+    mx.eval(sampled, *also_eval)
     sampled_ids = [int(value) for value in sampled.tolist()]
     rows = int(sampled.shape[0])
     return [sampled[i : i + 1] for i in range(rows)], [
@@ -3326,6 +3336,34 @@ def _native_mtp_sample_rows(
 _NATIVE_MTP_STOCHASTIC_ACCEPT = os.environ.get(
     "VMLX_MTP_STOCHASTIC_ACCEPT", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# Fold the draft-id materialization into the verify sample's eval so a cycle
+# pays ONE blocking device round-trip instead of two.  Each blocking eval
+# drains the device and stalls the host, and at depth 1 that stall amortizes
+# over the fewest emitted tokens.
+#
+# Default OFF: semantically identical (same arrays, one eval instead of two)
+# but NOT yet proven to move the needle, and run-to-run spread on this path is
+# wide enough (14.1 vs 24.0 t/s on identical config) that nothing ships here
+# without an N>=3 settled A/B.  VMLX_MTP_FUSED_SYNC=1 enables it.
+_NATIVE_MTP_FUSED_SYNC = os.environ.get(
+    "VMLX_MTP_FUSED_SYNC", "0"
+).strip().lower() not in {"0", "false", "no", "off"}
+
+
+# Whether a verifier rejection destroys the MTP head's own KV cache.
+#
+# The MLLM path has always recreated it from scratch, so after every rejected
+# draft the head predicts the next token with ZERO history.  The text path does
+# the opposite by design.  On predictable text rejections are rare and this
+# never shows; on real prose ~37% of cycles reject, so the head is blinded over
+# and over and acceptance spirals down -- which is exactly the gap between
+# 96.6% acceptance on a counting prompt and 62.5% on prose for the same bundle.
+#
+# VMLX_MTP_RECREATE_HEAD_CACHE_ON_REJECT=0 retains the cache instead.
+_NATIVE_MTP_RECREATE_HEAD_CACHE_ON_REJECT = os.environ.get(
+    "VMLX_MTP_RECREATE_HEAD_CACHE_ON_REJECT", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 from .native_mtp_acceptance import accepted_count as _shared_accepted_count
 
@@ -4179,6 +4217,12 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
     ):
         drafted_d1 = int(state.stats.drafted_by_depth[0]) if state.stats.drafted_by_depth else 0
         rate_d1 = _native_mtp_depth_rate(state.stats, 1)
+        # Left at 0.65.  A single run at 53% acceptance with the fallback
+        # disabled measured 24.0 t/s vs 22.3 AR, which looked like the floor was
+        # demoting a real gain -- but a repeat of the SAME configuration and
+        # prompt measured 14.1 t/s.  With that spread the break-even is not
+        # established, so the floor stays where it is until an N>=3 settled A/B
+        # says otherwise.
         min_d1 = _native_mtp_env_float(
             0.65,
             "VMLINUX_NATIVE_MTP_D1_MIN_ACCEPT",
@@ -10371,9 +10415,17 @@ class MLLMBatchGenerator:
 
         depth = len(state.drafts)
         trace_t0 = _native_mtp_trace_start()
+        # Fold the draft-id materialization into the sample sync: one blocking
+        # device round-trip per cycle instead of two.  VMLX_MTP_FUSED_SYNC=0
+        # restores the two-sync behaviour for A/B.
         target_tokens, target_lps, target_ids = _native_mtp_sample_rows(
             logits[:, -(depth + 1) :, :].reshape(depth + 1, -1),
             sampler,
+            also_eval=(
+                tuple(state.drafts)
+                if (_NATIVE_MTP_FUSED_SYNC and state.drafts)
+                else ()
+            ),
         )
         _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
         trace_t0 = _native_mtp_trace_start()
@@ -10485,8 +10537,20 @@ class MLLMBatchGenerator:
             state.draft_lps = []
             state.draft_ids = []
             return
-        state.mtp_cache = self.language_model.make_mtp_cache()
-        state.stats.mtp_cache_recreated_on_rejects += 1
+        if _NATIVE_MTP_RECREATE_HEAD_CACHE_ON_REJECT:
+            state.mtp_cache = self.language_model.make_mtp_cache()
+            state.stats.mtp_cache_recreated_on_rejects += 1
+        else:
+            # Retain the head cache across a rejection, matching the text path
+            # (patches/mlx_lm_mtp/batch_generator.py): "The head cache is never
+            # rolled back (loose history by design -- verify guarantees
+            # correctness; the cache only shapes draft quality)."
+            #
+            # Recreating it means the head drafts the next token with ZERO
+            # history. On predictable text rejections are rare so it never
+            # shows, but on real prose ~37% of cycles reject, so the head is
+            # repeatedly blinded and acceptance spirals down.
+            state.stats.mtp_cache_retained_on_rejects += 1
         state.drafts, state.draft_lps, state.draft_ids = self._draft_native_mtp_tokens(
             request,
             replay_hidden,

@@ -2449,38 +2449,49 @@ export class SessionManager extends EventEmitter {
         modelFileBytes,
         totalBytes,
       )
-      const hardRefusal = unsafeModelLaunchReason(admissionBytes, freemem(), process.env, {
+      // 2026-08-17: this used to REFUSE the launch. It is now advisory only.
+      //
+      // The refusal turned users away from the exact models this app exists to
+      // run. Two independent reasons it could not be trusted as a gate:
+      //
+      //  1. It keys off a per-family residency ratio resolved from the
+      //     top-level config.json `model_type`. Any bundle that ratio does not
+      //     recognise silently falls back to 1.0x, so a ~101 GB bundle
+      //     estimated ~103.6 GB resident and was refused on a 128 GB box that
+      //     runs it. A guard whose default is "assume the worst and block" is a
+      //     guess with veto power.
+      //  2. `freemem()` is not the capacity that matters on unified memory.
+      //     macOS reclaims inactive, purgeable and file-cache pages on demand,
+      //     so "currently free RAM" understates what a launch can actually use.
+      //     The reclaimable credit below is capped at 15% of total, which does
+      //     not cover a large page cache.
+      //
+      // The OS and the Metal allocator already fail loudly and recoverably when
+      // a model genuinely does not fit. Predicting that failure badly, and
+      // blocking on the prediction, is strictly worse than attempting the load.
+      const admissionAdvisory = unsafeModelLaunchReason(admissionBytes, freemem(), process.env, {
         reclaimableBytes: estimateMacReclaimableMemoryBytes(),
         totalBytes,
       })
-      if (hardRefusal) {
+      if (admissionAdvisory) {
         const message = appendMetalWiredLimitGuidance(
-          `Refusing to start this model: ${hardRefusal}. Close other apps, stop ` +
-          `any running vMLX sessions, or reboot before loading again. To launch ` +
-          `anyway, set ${unsafeModelLaunchOverrideHint()}.`
+          `Memory estimate: ${admissionAdvisory}. Starting anyway — this is an ` +
+          `estimate, not a limit. If it does fail to load, closing other apps or ` +
+          `stopping running vMLX sessions frees memory.`
         )
         console.warn(`[SESSION] ${message}`)
-        this.emit('session:log', { sessionId, data: `⛔ ${message}\n` })
-        db.updateSession(sessionId, { status: 'error', lastStoppedAt: Date.now() })
-        this.emit('session:error', { sessionId, error: message })
-        throw new Error(message)
+        this.emit('session:log', { sessionId, data: `⚠️  ${message}\n` })
       }
       const reserveWarning = modelLaunchReserveWarning(modelSizeBytes, availableBytes)
       if (reserveWarning) {
         console.warn(`[SESSION] ${reserveWarning}`)
         this.emit('session:log', { sessionId, data: `⚠️  ${reserveWarning}\n` })
       }
+      // No `block` arm: classifyLargeModelMemoryPreflight can no longer return
+      // one (the variant was deleted from its type on 2026-08-17). Preflight
+      // advises; it never refuses.
       const memoryPreflight = classifyLargeModelMemoryPreflight({ modelSizeBytes, availableBytes, totalBytes })
-      if (memoryPreflight.action === 'block') {
-        console.warn(`[SESSION] ${memoryPreflight.message}`)
-        this.emit('session:log', { sessionId, data: `⛔ ${memoryPreflight.message}\n` })
-        db.updateSession(sessionId, {
-          status: 'error',
-          lastStoppedAt: Date.now()
-        })
-        this.emit('session:error', { sessionId, error: memoryPreflight.message })
-        throw new Error(memoryPreflight.message)
-      } else if (memoryPreflight.action === 'warn') {
+      if (memoryPreflight.action === 'warn') {
         if (modelSizeBytes > availableBytes * 0.9) {
           console.warn(`[SESSION] WARNING: Model (~${modelGB} GB) may exceed available memory (${availGB} GB free). Risk of system instability.`)
           this.emit('session:log', { sessionId, data: `⚠️  ${memoryPreflight.message}\n` })

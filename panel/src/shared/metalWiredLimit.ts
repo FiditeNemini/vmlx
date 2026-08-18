@@ -3,8 +3,17 @@ export const metalWiredLimitCommand = 'sudo sysctl iogpu.wired_limit_mb=120000'
 export const metalWiredLimitHelpText =
   `If a large model hits Metal OOM, SIGKILL, or kernel-panic risk, macOS may need a tuned Metal wired-memory limit. Example for large-memory Macs: ${metalWiredLimitCommand}. Do not set it equal to physical RAM; leave OS/WindowServer/app headroom. On 128GB Macs, 115000-120000 MB is usually safer than 128000 MB. The command requires an admin password and resets after reboot.`
 
+/**
+ * 2026-08-17: `block` was REMOVED from this union deliberately.
+ *
+ * This preflight must never be able to refuse a load. Loading big models on
+ * unified memory is what this app is for, and a size-vs-freemem heuristic does
+ * not get veto power over a model the user explicitly chose. Deleting the
+ * variant (rather than leaving it unused at the call site) means no future
+ * edit can reintroduce a refusal without changing this type on purpose.
+ */
 export type LargeModelMemoryPreflight = {
-  action: 'ok' | 'warn' | 'block'
+  action: 'ok' | 'warn'
   message: string
 }
 
@@ -30,9 +39,9 @@ export function classifyLargeModelMemoryPreflight(input: {
 
   if (hugeModel && effectivelyNoFreeRam) {
     return {
-      action: 'block',
+      action: 'warn',
       message: appendMetalWiredLimitGuidance(
-        `Refusing to start this large model because the machine has only ${availGB} GB free for a ~${modelGB} GB model (${usagePercent.toFixed(0)}% used), which is an out of memory risk. Close other apps, stop any running vMLX sessions, or reboot before loading again.`
+        `Memory warning: only ${availGB} GB free for a ~${modelGB} GB model (${usagePercent.toFixed(0)}% used). Loading anyway; if it fails with an out of memory error, closing other apps or stopping running vMLX sessions frees memory.`
       ),
     }
   }

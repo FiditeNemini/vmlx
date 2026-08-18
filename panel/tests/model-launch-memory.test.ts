@@ -14,6 +14,7 @@ import {
   unsafeModelLaunchOverrideEnabled,
   unsafeModelLaunchReason,
 } from '../src/main/modelLaunchMemory'
+import { classifyLargeModelMemoryPreflight } from '../src/shared/metalWiredLimit'
 
 function makeModelDir(name: string): string {
   const dir = join(tmpdir(), `vmlx-model-launch-${name}-${Date.now()}-${Math.random().toString(16).slice(2)}`)
@@ -148,51 +149,88 @@ describe('launch admission is actually wired into the launch path', () => {
     'utf8',
   )
 
-  it('consults unsafeModelLaunchReason before spawning the engine', () => {
-    // These three were written, unit-tested, and never called from src/ — the
-    // launch path relied solely on classifyLargeModelMemoryPreflight, whose
-    // block arm requires modelSizeBytes >= 50GB AND availableBytes < 2GB AND
-    // >= 98% used. MEASURED on a 137GB box at 42.2GB free: a 91.9GB model and a
-    // 73.4GB model both classified as merely "warn", so the app would start a
-    // 92GB model into 42GB of free RAM.
+  it('still COMPUTES the memory estimate and surfaces it', () => {
     expect(sessions).toContain('unsafeModelLaunchReason(')
     expect(sessions).toContain('modelLaunchReserveWarning(')
-    expect(sessions).toContain('unsafeModelLaunchOverrideHint()')
     expect(sessions).toMatch(
       /import \{[^}]*unsafeModelLaunchReason[^}]*\} from '\.\/modelLaunchMemory'/s,
     )
   })
 
-  it('refuses BEFORE the graded warnings, and names the override', () => {
-    const refusalAt = sessions.indexOf('unsafeModelLaunchReason(')
-    const classifyAt = sessions.indexOf('classifyLargeModelMemoryPreflight({')
-    expect(refusalAt).toBeGreaterThan(-1)
-    expect(classifyAt).toBeGreaterThan(-1)
-    expect(refusalAt).toBeLessThan(classifyAt)
+  /**
+   * 2026-08-17 — THE REGRESSION THIS FILE NOW EXISTS TO PREVENT.
+   *
+   * Shipped in 1.6.33: a ~101 GB bundle was REFUSED on a 128 GB box with
+   * "estimated launch resident ~103.6 GB exceeds currently free RAM 78.2 GB".
+   * The 103.6 figure is fileBytes x 1.0 — i.e. the per-family residency ratio
+   * did not recognise the bundle and fell back to the worst case, so a FAILED
+   * DETECTION became a user-facing wall on the exact models this app exists to
+   * run. Eric never asked for a RAM limit.
+   *
+   * The estimate may inform. It may not refuse. These assertions are
+   * deliberately phrased as absence-of-refusal so that reintroducing a block
+   * fails the suite.
+   */
+  it('NEVER refuses a launch on a memory estimate', () => {
+    const estimateAt = sessions.indexOf('unsafeModelLaunchReason(')
+    const spawnAt = sessions.indexOf('await this.ensureOwnedSessionPortAvailable(session)')
+    expect(estimateAt).toBeGreaterThan(-1)
+    expect(spawnAt).toBeGreaterThan(estimateAt)
 
-    const block = sessions.slice(refusalAt, classifyAt)
-    expect(block).toContain('Refusing to start this model')
-    expect(block).toContain('unsafeModelLaunchOverrideHint()')
-    expect(block).toContain("status: 'error'")
-    expect(block).toContain('throw new Error')
+    // Everything between computing the estimate and actually launching.
+    const preflight = sessions.slice(estimateAt, spawnAt)
+
+    // No refusal, by any spelling.
+    expect(preflight).not.toContain('Refusing to start this model')
+    expect(preflight).not.toContain('Refusing to start this large model')
+    // No throwing, and no marking the session failed before it ever ran.
+    expect(preflight).not.toContain('throw new Error')
+    expect(preflight).not.toContain("status: 'error'")
+    // An override env is not consent — it is a wall with a secret door.
+    expect(preflight).not.toContain('unsafeModelLaunchOverrideHint()')
+    // It must still SAY something: advice is the whole remaining job.
+    expect(preflight).toMatch(/session:log/)
   })
 
-  it('the refusal threshold is the one that actually fits, not near-death', () => {
+  it('the preflight classifier cannot even express a refusal', () => {
+    const shared = readFileSync(
+      resolve(__dirname, '../src/shared/metalWiredLimit.ts'),
+      'utf8',
+    )
+    // `block` was deleted from the union so no call site can reintroduce it.
+    expect(shared).toMatch(/action:\s*'ok'\s*\|\s*'warn'\s*$/m)
+    expect(shared).not.toContain("action: 'block'")
+    expect(sessions).not.toContain("memoryPreflight.action === 'block'")
+
+    // And the classifier's worst case is a warning that still starts.
     const gib = 1024 ** 3
-    // 92GB model, 42GB free, 20GB reclaimable on a 137GB box -> must refuse.
-    expect(
-      unsafeModelLaunchReason(92 * gib, 42 * gib, {}, {
-        reclaimableBytes: 20 * gib,
-        totalBytes: 137 * gib,
-      }),
-    ).toContain('exceeds currently free RAM')
-    // A 21GB model in the same conditions must still be admitted.
-    expect(
-      unsafeModelLaunchReason(21 * gib, 42 * gib, {}, {
-        reclaimableBytes: 20 * gib,
-        totalBytes: 137 * gib,
-      }),
-    ).toBeNull()
+    const verdict = classifyLargeModelMemoryPreflight({
+      modelSizeBytes: 101 * gib,
+      availableBytes: 1 * gib,
+      totalBytes: 128 * gib,
+    })
+    expect(verdict.action).toBe('warn')
+    expect(verdict.message).not.toContain('Refusing')
+  })
+
+  it('a 101 GB bundle on a 128 GB box is admitted even undetected', () => {
+    // The exact shape of the 1.6.33 failure: unknown model_type -> 1.0x ratio.
+    const dir = makeModelDir('unknown-family-101gb')
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ model_type: 'some_new_family' }))
+
+    const gib = 1024 ** 3
+    const admission = estimateModelLaunchAdmissionBytes(dir, 101 * gib, 128 * gib)
+    // The estimate is still pessimistic — that is fine, it is only advice now.
+    expect(admission).toBeGreaterThan(100 * gib)
+
+    // What must NOT happen: that estimate stopping the launch. The launch path
+    // has no refusal at all, which the preceding test pins at the source level.
+    const verdict = classifyLargeModelMemoryPreflight({
+      modelSizeBytes: 101 * gib,
+      availableBytes: 78.2 * gib,
+      totalBytes: 128 * gib,
+    })
+    expect(verdict.action).not.toBe('block')
   })
 })
 

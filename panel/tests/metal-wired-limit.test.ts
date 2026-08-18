@@ -43,15 +43,24 @@ describe('Metal wired-memory limit guidance', () => {
     expect(annotated).toContain('115000-120000 MB')
   })
 
-  it('hard-blocks huge model startup when the machine has essentially no free RAM', () => {
+  // 2026-08-17: this used to assert action === 'block'. It now asserts the
+  // opposite, and that inversion is the point.
+  //
+  // The refusal it pinned shipped in v1.6.28-v1.6.33 and made dots3-note
+  // (101.6 GB, estimated 103.6 GB) unloadable for EVERY 128 GB user, along with
+  // any other bundle over ~76 GB whose model_type the ratio table did not
+  // recognise. Eric never asked for a RAM limit. Even at 0.1 GB free the
+  // preflight only warns — the OS and the Metal allocator report a real OOM
+  // recoverably, and that is a better failure than refusing to try.
+  it('NEVER blocks, even with essentially no free RAM — it only warns', () => {
     const result = classifyLargeModelMemoryPreflight({
       modelSizeBytes: 132.3e9,
       availableBytes: 0.1e9,
       totalBytes: 137e9,
     })
 
-    expect(result.action).toBe('block')
-    expect(result.message).toContain('Refusing to start')
+    expect(result.action).toBe('warn')
+    expect(result.message).not.toContain('Refusing to start')
     expect(result.message).toContain('0.1 GB free')
     expect(result.message).toContain(metalWiredLimitCommand)
   })

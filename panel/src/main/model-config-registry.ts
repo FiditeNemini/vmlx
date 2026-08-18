@@ -992,20 +992,19 @@ function coerceNativeMtpDepth(raw: unknown): number | undefined {
  * for 1-2 tokens to draft 3 ahead tanks acceptance (measured 58.6%, under the
  * ~0.68 breakeven), so MTP burns draft+verify work and then falls back to AR.
  *
- * Order is deliberate: what the bundle RECOMMENDS beats what upstream merely
- * supports, and both beat the layer count, which is a structural fact rather
- * than a decode recommendation.
+ * ⚠️ ONLY `recommended_num_drafts` may be read here. NEVER
+ * `upstream_num_speculative_tokens` — that is a terminology collision the
+ * engine already documents (vmlx_engine/native_mtp.py): vLLM's field counts
+ * DRAFTS while the kit's D-notation counts drafts+verified, so upstream's "2"
+ * means 2 drafts = the kit's forbidden D3, the exact config the Nemotron sweep
+ * measured at 0.48x. The stamp keeps that value for provenance only, flagged
+ * do-not-copy. This mirrors the engine's resolution order so panel and engine
+ * cannot disagree about depth.
  */
 function declaredNativeMtpDrafts(jangCfg: any): { depth: number; source: string } | undefined {
-  const candidates = [
-    [jangCfg?.mtp?.recommended_num_drafts, 'jang_config.mtp.recommended_num_drafts'],
-    [jangCfg?.mtp?.upstream_num_speculative_tokens, 'jang_config.mtp.upstream_num_speculative_tokens'],
-  ] as const
-  for (const [value, source] of candidates) {
-    const depth = coerceNativeMtpDepth(value)
-    if (depth !== undefined) return { depth, source }
-  }
-  return undefined
+  const depth = coerceNativeMtpDepth(jangCfg?.mtp?.recommended_num_drafts)
+  if (depth === undefined) return undefined
+  return { depth, source: 'jang_config.mtp.recommended_num_drafts' }
 }
 
 function readNativeMtpTuningDepth(modelPath: string): { depth: number; source: string } | undefined {

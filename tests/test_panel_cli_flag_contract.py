@@ -758,15 +758,19 @@ def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> Non
         encoding="utf-8"
     )
 
-    # the bundle's own declarations are actually read
+    # the bundle's own recommendation is actually read
     assert "jang_config.mtp.recommended_num_drafts" in registry
-    assert "jang_config.mtp.upstream_num_speculative_tokens" in registry
     assert "declaredNativeMtpDrafts" in registry
 
-    # recommendation outranks upstream-supported, which outranks layer count
-    rec = registry.index("jang_config.mtp.recommended_num_drafts")
-    ups = registry.index("jang_config.mtp.upstream_num_speculative_tokens")
-    assert rec < ups
+    # upstream_num_speculative_tokens must NEVER be used as a depth source.
+    # vLLM's field counts DRAFTS while the kit's D-notation counts
+    # drafts+verified, so upstream's "2" is the kit's forbidden D3 -- the exact
+    # config the Nemotron sweep measured at 0.48x. The engine documents this
+    # trap in vmlx_engine/native_mtp.py and the panel must not diverge.
+    # forbid the ACCESS, not the word -- the warning comment names the field
+    assert "mtp?.upstream_num_speculative_tokens" not in registry
+    assert "mtp.upstream_num_speculative_tokens]" not in registry
+    assert "NEVER" in registry  # the trap stays documented at the call site
 
     # and neither call site may fall back to 3
     assert "?? 3," not in registry

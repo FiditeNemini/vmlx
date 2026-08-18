@@ -104,6 +104,7 @@ import hashlib
 import importlib
 import logging
 import inspect
+import math
 import os
 import threading
 import time
@@ -3304,6 +3305,74 @@ def _native_mtp_sample_rows(
     return [sampled[i : i + 1] for i in range(rows)], [
         logprobs[i] for i in range(rows)
     ], sampled_ids
+
+
+# Speculative rejection sampling for MTP drafts.
+#
+# Exact-match acceptance is only the correct test under greedy decode.  At
+# temperature > 0 the target and the draft head each draw independently, so a
+# draft that is a perfectly good sample from the target distribution is thrown
+# away merely for disagreeing with the target's own draw.  That collapse is the
+# reason MTP bundles have to pin temperature to 0 today.
+#
+# Standard speculative sampling instead accepts a draft x with probability
+# min(1, p_target(x) / p_draft(x)).  Upstream (ml-explore/mlx-lm PR #990)
+# reports this recovers greedy-level acceptance at temperature: 84.8% at
+# temp 0.6 vs 88.3% at temp 0 on Qwen3.5-27B 4-bit, which is why upstream never
+# needs to pin temperature.
+#
+# Default OFF.  This changes the sampled distribution, so it stays gated until
+# an A/B proves output quality parity against the greedy arm.
+_NATIVE_MTP_STOCHASTIC_ACCEPT = os.environ.get(
+    "VMLX_MTP_STOCHASTIC_ACCEPT", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_mtp_accepted_count(
+    draft_ids: List[int],
+    target_ids: List[int],
+    draft_lps: List[Optional[mx.array]],
+    target_lps: List[Optional[mx.array]],
+) -> int:
+    """Count leading accepted drafts for one MTP verify cycle.
+
+    Matching tokens are always accepted.  When stochastic acceptance is enabled
+    and both sides exposed a distribution, a mismatched draft still gets its
+    min(1, p_target/p_draft) chance instead of ending the cycle outright.
+    """
+    accepted = 0
+    for idx, draft_id in enumerate(draft_ids):
+        draft_id = int(draft_id)
+        if int(target_ids[idx]) == draft_id:
+            accepted += 1
+            continue
+        if not _NATIVE_MTP_STOCHASTIC_ACCEPT:
+            break
+        target_lp = target_lps[idx] if idx < len(target_lps) else None
+        draft_lp = draft_lps[idx] if idx < len(draft_lps) else None
+        if target_lp is None or draft_lp is None:
+            # Greedy and compact-top-k samplers expose no distribution; for
+            # them exact match already is the correct acceptance test.
+            break
+        # MLX does not raise on an out-of-range index, so a short or ragged row
+        # would silently read as log_ratio 0.0 and ACCEPT the draft.  Check the
+        # width explicitly rather than relying on an exception.
+        if (
+            draft_id < 0
+            or int(target_lp.shape[-1]) <= draft_id
+            or int(draft_lp.shape[-1]) <= draft_id
+        ):
+            break
+        try:
+            log_ratio = float(target_lp[draft_id]) - float(draft_lp[draft_id])
+        except Exception:
+            break
+        if log_ratio < 0.0:
+            draw = float(mx.random.uniform(shape=(1,)).item())
+            if draw <= 0.0 or math.log(draw) > log_ratio:
+                break
+        accepted += 1
+    return accepted
 
 
 def _sample_mllm_prefill_logits(
@@ -10308,11 +10377,12 @@ class MLLMBatchGenerator:
             except Exception:
                 pass
 
-        accepted = 0
-        for idx, draft_id in enumerate(state.draft_ids):
-            if int(target_ids[idx]) != int(draft_id):
-                break
-            accepted += 1
+        accepted = _native_mtp_accepted_count(
+            state.draft_ids,
+            target_ids,
+            state.draft_lps,
+            target_lps,
+        )
 
         state.stats.cycles += 1
         state.stats.drafted_tokens += depth

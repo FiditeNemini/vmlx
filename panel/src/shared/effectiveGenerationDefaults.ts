@@ -24,12 +24,23 @@ function sessionConfigObject(config: string | Record<string, unknown> | undefine
 }
 
 /**
- * Apply an explicit saved server policy to bundle-derived chat defaults.
+ * Apply the effective sampling a session will really use, given native MTP.
  *
- * Fresh sessions default to nativeMtpMode=auto and therefore preserve the
- * bundle's generation_config/jang_config sampling. Only a session explicitly
- * saved as deterministic replaces omitted request values with greedy sampling;
- * its Chat Settings controls must display that real effective inheritance.
+ * 2026-08-17 — BEHAVIOUR CHANGE. This previously required an explicitly saved
+ * `deterministic` session, so the DEFAULT (`auto`) preserved the bundle's own
+ * sampling. Native MTP only decodes multiple tokens per step on GREEDY
+ * requests, and MTP bundles ship `temperature: 1.0` (dots3-note, the Qwen MTP
+ * builds) — so out of the box MTP never engaged, users got ordinary decode
+ * speed, and nothing said why. Measured live: dots3-note at 21.9 t/s with the
+ * mode selector reading "Auto".
+ *
+ * Eric: "if it has mtp it sets temp to 0 and lets user know in the chat
+ * settings bar temp area and shows also in the mtp server settings".
+ *
+ * So a bundle that actually carries MTP heads now decodes greedily unless the
+ * user turns MTP OFF. `off` is the only mode that preserves bundle sampling —
+ * an explicit choice, not a silent default. Chat Settings must show the pinned
+ * 0 and say MTP is the reason (see mtpTemperatureNotice).
  */
 export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefaultsLike>(
   defaults: T,
@@ -40,7 +51,10 @@ export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefa
   const mode = typeof config.nativeMtpMode === 'string'
     ? config.nativeMtpMode
     : 'auto'
-  if (nativeMtp?.supported !== true || mode !== 'deterministic') return defaults
+  // No MTP heads -> MTP has no say over sampling.
+  if (nativeMtp?.supported !== true) return defaults
+  // The user explicitly disabled MTP: honour the bundle's sampling.
+  if (mode === 'off') return defaults
   return {
     ...defaults,
     temperature: 0,

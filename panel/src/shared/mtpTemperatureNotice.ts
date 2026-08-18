@@ -69,11 +69,12 @@ export function resolveMtpTemperatureNotice(
   // Explicitly disabled by the user: their choice, not a surprise.
   if (mode === 'off') return null
 
-  if (mode === 'deterministic') return { kind: 'pinned' }
-
-  // auto: the bundle's own sampling decides whether MTP can engage.
+  // With MTP on (auto or deterministic) the session pins greedy sampling, so a
+  // 0 in the box is a CONSEQUENCE of MTP and must say so. A non-zero value can
+  // now only come from the user overriding it by hand — in which case MTP will
+  // not run, and that is the case worth warning about.
   const temperature = input.temperature
   if (temperature == null) return null
   if (temperature > 0) return { kind: 'inactive', temperature }
-  return { kind: 'active' }
+  return { kind: 'pinned' }
 }

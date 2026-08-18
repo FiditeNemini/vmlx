@@ -33,8 +33,9 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'pinned' })
   })
 
-  it('THE REGRESSION: auto + MTP bundle + temp > 0 must warn MTP is not running', () => {
-    // dots3-note's real shape: bundle default temperature 1.0, mode auto.
+  it('THE REGRESSION: a hand-raised temperature must warn MTP is not running', () => {
+    // Auto now pins greedy for MTP bundles, so a non-zero value can only come
+    // from a manual override -- which silently disables MTP.
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 1 }),
     ).toEqual({ kind: 'inactive', temperature: 1 })
@@ -44,10 +45,10 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'inactive', temperature: 0.01 })
   })
 
-  it('confirms MTP is live on auto at temperature 0', () => {
+  it('explains the pinned 0 on auto too, not just deterministic', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0 }),
-    ).toEqual({ kind: 'active' })
+    ).toEqual({ kind: 'pinned' })
   })
 
   it('stays silent when the user explicitly turned MTP off', () => {
@@ -73,8 +74,7 @@ describe('MTP temperature disclosure', () => {
     expect(source).toContain('data-testid="mtp-temperature-notice"')
     // all three states have copy wired
     expect(source).toContain('chat.settings.mtpTempPinned')
-    expect(source).toContain('chat.settings.mtpTempActive')
-    expect(source).toContain('chat.settings.mtpTempInactive')
+        expect(source).toContain('chat.settings.mtpTempInactive')
     // it must sit with the temperature control, not in some unrelated section
     const tempAt = source.indexOf("t('chat.settings.temperature')")
     const noticeAt = source.indexOf('data-testid="mtp-temperature-notice"')
@@ -91,7 +91,6 @@ describe('MTP temperature disclosure', () => {
     const settings = en.chat.settings
     expect(settings.mtpTempPinned).toMatch(/MTP/)
     expect(settings.mtpTempPinned).toMatch(/greedy/i)
-    expect(settings.mtpTempActive).toMatch(/MTP/)
     // the warning must tell the user what to DO about it
     expect(settings.mtpTempInactive).toMatch(/MTP/)
     expect(settings.mtpTempInactive).toMatch(/temperature to 0|Deterministic/i)

@@ -149,6 +149,15 @@ def _app_runtime_flavor_matches(
     )
 
 
+MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY = (
+    "current-real-ui-live-model-minimax-m27-small-responses-stricttools"
+    "-cachecontrols-20260815"
+)
+MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF = Path(
+    f"build/private-evidence/{MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY}-proof.json"
+)
+
+
 def _surfaces(path: Path) -> set[str]:
     payload = _load_json(path)
     surfaces = payload.get("provenSurfaces")
@@ -384,8 +393,7 @@ def _issue117_checks(root: Path) -> dict[str, bool]:
     release_manifest = _read(root / "tests/cross_matrix/release_regression_manifest.py")
     parser_contract = _read(root / "tests/cross_matrix/run_parser_registry_contract.py")
     minimax_real_ui = (
-        root
-        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260815-proof.json"
+        root / MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF
     )
     surfaces = _surfaces(minimax_real_ui)
     return {
@@ -427,8 +435,7 @@ def _issue117_checks(root: Path) -> dict[str, bool]:
 def _issue180_checks(root: Path) -> dict[str, bool]:
     release_manifest = _read(root / "tests/cross_matrix/release_regression_manifest.py")
     minimax_real_ui = (
-        root
-        / "build/private-evidence/current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260815-proof.json"
+        root / MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF
     )
     payload = _load_json(minimax_real_ui)
     surfaces = _surfaces(minimax_real_ui)
@@ -446,8 +453,14 @@ def _issue180_checks(root: Path) -> dict[str, bool]:
             and "server_cache_controls" in surfaces
             and "parser_leak_check" in surfaces
             and "language_leak_check" in surfaces
-            and "current-real-ui-live-model-minimax-m27-small-responses-stricttools-cachecontrols-20260530"
-            in release_manifest
+            # 2026-08-17 (ledger row 263): this pinned the -20260530 artifact
+            # KEY, which the manifest has not indexed for some time — it
+            # indexes -20260815, the artifact that actually exists in
+            # build/private-evidence. The check therefore asserted that the
+            # manifest indexes a file present on no machine, and stayed False
+            # no matter how good the real-UI evidence was. Artifact names are
+            # pinned KEYS, not dates: point it at the indexed one.
+            and MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY in release_manifest
         ),
         "minimax_small_numeric_garbage_guarded": (
             "reasoning_language_or_numeric_leak" in release_manifest

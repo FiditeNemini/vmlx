@@ -308,3 +308,30 @@ def test_public_app_issue_audit_cli_accepts_cleared_issue179_boundary(
         marker in out.read_text(encoding="utf-8")
         for marker in ('"status": "pass"', '"status": "open"')
     )
+
+
+def test_minimax_small_stricttools_key_matches_the_manifest_index():
+    """2026-08-17 (ledger row 263): the #180 check pinned the -20260530
+    artifact KEY, which the release manifest has not indexed for some time — it
+    indexes -20260815, the artifact that actually exists in
+    build/private-evidence. The check therefore asserted the manifest indexes a
+    file present on no machine and stayed False regardless of the evidence.
+    Artifact names are pinned KEYS, not dates. Pin the agreement so the audit
+    and the manifest cannot drift apart again."""
+    from pathlib import Path
+
+    from tests.cross_matrix.run_public_app_issue_audit import (
+        MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY,
+        MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF,
+    )
+
+    manifest = Path("tests/cross_matrix/release_regression_manifest.py").read_text(
+        encoding="utf-8"
+    )
+    assert MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY in manifest, (
+        "the audit must pin the artifact key the release manifest actually indexes"
+    )
+    assert str(MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF).endswith("-proof.json")
+    assert MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY in str(
+        MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF
+    )

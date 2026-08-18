@@ -3180,6 +3180,10 @@ class MLLMNativeMTPState:
     stats: MLLMNativeMTPStats = field(default_factory=MLLMNativeMTPStats)
     ar_fallback_pending: bool = False
     ar_fallback_reason: Optional[str] = None
+    # Highest depth this request may climb back to.  Every demotion lowers it,
+    # so a depth that already failed its acceptance gate is never retried and
+    # the controller cannot oscillate between two depths for a whole request.
+    depth_ceiling: int = 3
 
 
 @dataclass
@@ -4292,7 +4296,78 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
                 else "n/a"
             ),
         )
+        # A depth that failed its gate is never retried this request.
+        state.depth_ceiling = min(int(getattr(state, "depth_ceiling", 3) or 3), target)
         state.depth = target
+        return
+
+    _native_mtp_maybe_raise_depth(request_id, state, current)
+
+
+def _native_mtp_maybe_raise_depth(
+    request_id: str,
+    state: MLLMNativeMTPState,
+    current: int,
+) -> None:
+    """Climb to a deeper draft chain when the shallow one is nearly perfect.
+
+    The controller could only ever LOWER depth, so a bundle whose tuning
+    sidecar says depth 1 stays at depth 1 no matter how well its head performs
+    — capping it at (1 + acceptance) tokens per cycle.  A head accepting ~0.95
+    is worth roughly 3.46 tokens per cycle at depth 3 (1 + .95 + .95*.88 +
+    .95*.88*.80), which is the entire gap between a 1.5x and a 2.5x speedup.
+
+    Raising is deliberately timid: it needs a near-perfect shallow rate over a
+    real sample, climbs one step at a time, and can never exceed a ceiling that
+    every demotion lowers — so a depth that already failed cannot be retried
+    and the controller cannot oscillate.  The existing d2/d3 acceptance gates
+    remain the safety net: an unprofitable deeper chain is demoted right back.
+    """
+    if not _native_mtp_env_flag(
+        True,
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_RAISE",
+        "VMLX_NATIVE_MTP_ADAPTIVE_RAISE",
+    ):
+        return
+
+    ceiling = max(1, min(3, int(getattr(state, "depth_ceiling", 3) or 3)))
+    if current >= ceiling:
+        return
+
+    min_raise = _native_mtp_env_float(
+        0.90,
+        "VMLINUX_NATIVE_MTP_RAISE_MIN_ACCEPT",
+        "VMLX_NATIVE_MTP_RAISE_MIN_ACCEPT",
+    )
+    raise_sample = _native_mtp_env_int(
+        64,
+        "VMLINUX_NATIVE_MTP_RAISE_MIN_SAMPLE",
+        "VMLX_NATIVE_MTP_RAISE_MIN_SAMPLE",
+        minimum=1,
+    )
+
+    drafted = (
+        int(state.stats.drafted_by_depth[current - 1])
+        if len(state.stats.drafted_by_depth) >= current
+        else 0
+    )
+    rate = _native_mtp_depth_rate(state.stats, current)
+    if drafted < raise_sample or rate is None or rate < min_raise:
+        return
+
+    state.depth = current + 1
+    logger.info(
+        "MLLM MTP[%s] adaptive depth D%d -> D%d after cycles=%d "
+        "d%d_acceptance=%.3f>=raise_min=%.3f ceiling=D%d",
+        request_id,
+        current,
+        state.depth,
+        state.stats.cycles,
+        current,
+        rate,
+        min_raise,
+        ceiling,
+    )
 
 
 def _native_mtp_materialize_draft_ids(state: MLLMNativeMTPState) -> None:

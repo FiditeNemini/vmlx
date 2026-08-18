@@ -976,7 +976,7 @@
       "maxVideoFramesTooltip": "Maximum number of frames extracted from a single video, regardless of fps or duration. Caps prefill cost on long clips. Qwen 3.6 supports up to 32+ frames but most prompts work well with 8.",
       "nativeMtp": "Native MTP",
       "nativeMtpBlockedFallback": "Native MTP weights were detected, but this bundle has not passed the runtime compatibility gate. Autoregressive decode remains active.",
-      "nativeMtpHint": "Uses the model's own preserved MTP heads and measured model-local depth when present, with D3 as the generic fallback.",
+      "nativeMtpHint": "Uses the model's own preserved MTP heads and measured model-local depth when present, falling back to depth 1 when the bundle declares none.",
       "nativeMtpAutoNote": "This bundle has native MTP, so Auto pins sampling to greedy — temperature 0, top-p 1, top-k 0 — and Chat Settings shows why. MTP decodes multiple tokens per step and only runs on greedy requests, so preserving the bundle's temperature (often 1.0) would silently disable it. Choose Off to keep the bundle's own sampling instead.",
       "nativeMtpDeterministicNote": "Explicit deterministic mode applies D{depth} and greedy startup sampling so omitted API/chat sampling values enter the native MTP path. Explicit per-request sampling parameters still win.",
       "nativeMtpMode": "Native MTP Mode",

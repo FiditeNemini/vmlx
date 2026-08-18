@@ -976,7 +976,7 @@
       "maxVideoFramesTooltip": "无论 fps 或时长，从单个视频提取的最大帧数。限制长剪辑的预填充成本。Qwen 3.6 支持 32+ 帧，但大多数提示词用 8 帧效果就很好。",
       "nativeMtp": "原生 MTP",
       "nativeMtpBlockedFallback": "检测到原生 MTP 权重，但此 bundle 未通过运行时兼容性门槛。自回归解码保持激活。",
-      "nativeMtpHint": "使用模型自身保留的 MTP 头和实测的模型本地深度（如存在），D3 作为通用回退。",
+      "nativeMtpHint": "使用模型自身保留的 MTP 头和实测的模型本地深度（如存在），当捆绑包未声明时回退到深度 1。",
       "nativeMtpAutoNote": "该 bundle 具备原生 MTP，因此 Auto 会将采样固定为 greedy（温度 0、top-p 1、top-k 0），并在聊天设置中说明原因。MTP 每步解码多个 token 且仅在 greedy 请求下运行，若保留 bundle 的温度（通常为 1.0）会静默地将其关闭。如需保留 bundle 自身的采样，请选择 Off。",
       "nativeMtpDeterministicNote": "显式确定性模式应用 D{depth} 和贪心启动采样，使省略的 API/聊天采样值进入原生 MTP 路径。每请求的显式采样参数仍然优先。",
       "nativeMtpMode": "原生 MTP 模式",

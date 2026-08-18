@@ -976,7 +976,7 @@
       "maxVideoFramesTooltip": "Número máximo de fotogramas extraídos de un solo video, independientemente de los fps o la duración. Limita el costo de prefill en clips largos. Qwen 3.6 admite 32+ fotogramas pero la mayoría de los prompts funcionan bien con 8.",
       "nativeMtp": "MTP nativo",
       "nativeMtpBlockedFallback": "Se detectaron pesos MTP nativos, pero este bundle no ha pasado la puerta de compatibilidad del runtime. La decodificación autorregresiva permanece activa.",
-      "nativeMtpHint": "Usa las cabezas MTP preservadas del propio modelo y la profundidad local del modelo medida cuando existe, con D3 como respaldo genérico.",
+      "nativeMtpHint": "Usa las cabezas MTP preservadas del propio modelo y la profundidad local del modelo medida cuando existe, con profundidad 1 como respaldo si el paquete no declara ninguna.",
       "nativeMtpAutoNote": "Este bundle tiene MTP nativo, así que Auto fija el muestreo a greedy — temperatura 0, top-p 1, top-k 0 — y Ajustes de chat explica por qué. MTP decodifica varios tokens por paso y solo funciona con peticiones greedy, así que conservar la temperatura del bundle (a menudo 1.0) lo desactivaría en silencio. Elige Off para mantener el muestreo propio del bundle.",
       "nativeMtpDeterministicNote": "El modo determinista explícito aplica D{depth} y muestreo greedy inicial para que los valores de muestreo omitidos de API/chat entren en la ruta MTP nativa. Los parámetros de muestreo explícitos por solicitud siguen ganando.",
       "nativeMtpMode": "Modo MTP nativo",

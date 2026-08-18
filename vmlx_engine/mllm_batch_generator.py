@@ -4167,7 +4167,26 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
             "VMLINUX_NATIVE_MTP_D1_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D1_MIN_ACCEPT",
         )
-        if drafted_d1 >= warmup and rate_d1 is not None and rate_d1 < min_d1:
+        # Demoting to AR is irreversible for the rest of the request, so it
+        # needs a real sample — not the 12-cycle warmup used for the reversible
+        # depth steps.  Measured 2026-08-18 on Qwen3.8-27B-JANG_4D-CRACK, same
+        # bundle and same prompt: the FIRST request after load read 7/12 =
+        # 58.3% while the MTP cache was still cold and demoted the whole
+        # request to AR; the next request scored 2033/2104 = 96.6% and held MTP
+        # for 34.1 t/s.  Twelve cycles was 0.57% of that request.  The genuine
+        # sub-breakeven case this gate exists for ran 483 cycles at 58.6%, so
+        # it still trips well inside its own request at this sample size.
+        ar_min_sample = _native_mtp_env_int(
+            64,
+            "VMLINUX_NATIVE_MTP_AR_FALLBACK_MIN_SAMPLE",
+            "VMLX_NATIVE_MTP_AR_FALLBACK_MIN_SAMPLE",
+            minimum=1,
+        )
+        if (
+            drafted_d1 >= max(warmup, ar_min_sample)
+            and rate_d1 is not None
+            and rate_d1 < min_d1
+        ):
             state.depth = 1
             state.ar_fallback_pending = True
             state.ar_fallback_reason = (

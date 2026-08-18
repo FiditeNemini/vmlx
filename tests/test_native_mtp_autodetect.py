@@ -2909,9 +2909,12 @@ class TestNativeMtpAutodetect:
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES", "8")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_D1_MIN_ACCEPT", "0.70")
         state = MLLMNativeMTPState(depth=1)
-        state.stats.cycles = 12
-        state.stats.drafted_by_depth = [12, 0, 0]
-        state.stats.accepted_by_depth = [7, 0, 0]
+        # 58.3% over a sample that clears the AR-demotion floor.  The original
+        # 7/12 figures were the cold-start window, which demoted a request that
+        # measured 96.6% once the MTP cache warmed.
+        state.stats.cycles = 72
+        state.stats.drafted_by_depth = [72, 0, 0]
+        state.stats.accepted_by_depth = [42, 0, 0]
 
         with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_batch_generator"):
             _native_mtp_maybe_adapt_depth("adaptive-row", state)
@@ -2937,9 +2940,12 @@ class TestNativeMtpAutodetect:
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES", "8")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_D1_MIN_ACCEPT", "0.70")
         state = MLLMNativeMTPState(depth=1)
-        state.stats.cycles = 12
-        state.stats.drafted_by_depth = [12, 0, 0]
-        state.stats.accepted_by_depth = [7, 0, 0]
+        # 58.3% over a sample that clears the AR-demotion floor.  The original
+        # 7/12 figures were the cold-start window, which demoted a request that
+        # measured 96.6% once the MTP cache warmed.
+        state.stats.cycles = 72
+        state.stats.drafted_by_depth = [72, 0, 0]
+        state.stats.accepted_by_depth = [42, 0, 0]
 
         _native_mtp_maybe_adapt_depth("adaptive-row", state)
 
@@ -2947,9 +2953,9 @@ class TestNativeMtpAutodetect:
 
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_AR_FALLBACK", "0")
         state_off = MLLMNativeMTPState(depth=1)
-        state_off.stats.cycles = 12
-        state_off.stats.drafted_by_depth = [12, 0, 0]
-        state_off.stats.accepted_by_depth = [7, 0, 0]
+        state_off.stats.cycles = 72
+        state_off.stats.drafted_by_depth = [72, 0, 0]
+        state_off.stats.accepted_by_depth = [42, 0, 0]
 
         _native_mtp_maybe_adapt_depth("adaptive-row-off", state_off)
 

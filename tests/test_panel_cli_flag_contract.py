@@ -420,7 +420,19 @@ def test_metal_oom_startup_errors_surface_wired_limit_guidance() -> None:
     assert "115000-120000 MB" in catalog
 
 
-def test_large_model_low_memory_preflight_blocks_before_engine_spawn() -> None:
+def test_large_model_low_memory_preflight_never_blocks_engine_spawn() -> None:
+    """2026-08-17: this test used to REQUIRE the block. It now forbids it.
+
+    The refusal it pinned shipped in v1.6.28-v1.6.33 and made dots3-note
+    (101.6 GB, estimated 103.6 GB because an unrecognised model_type falls back
+    to a 1.0x residency ratio) unloadable for EVERY 128 GB user, along with any
+    other bundle over ~76 GB the ratio table did not recognise. Eric never
+    asked for a RAM limit: "U CANNOT MAKE UP SOME FUCKING RAM SAFETY RULE".
+
+    The preflight may advise. It may not refuse. Loading big models on unified
+    memory is the product.
+    """
+
     shared = (ROOT / "panel" / "src" / "shared" / "metalWiredLimit.ts").read_text(
         encoding="utf-8"
     )
@@ -429,13 +441,19 @@ def test_large_model_low_memory_preflight_blocks_before_engine_spawn() -> None:
     )
 
     assert "classifyLargeModelMemoryPreflight" in shared
-    assert "action: 'block'" in shared
     assert "effectivelyNoFreeRam" in shared
-    assert "ordinary large-model overcommit" not in shared
+    # `block` was deleted from the union so no call site can reintroduce it.
+    assert "action: 'block'" not in shared
+    assert "Refusing to start" not in shared
     assert "classifyLargeModelMemoryPreflight" in sessions
-    assert "memoryPreflight.action === 'block'" in sessions
-    assert "this.emit('session:error', { sessionId, error: memoryPreflight.message })" in sessions
-    assert "throw new Error(memoryPreflight.message)" in sessions
+    assert "memoryPreflight.action === 'block'" not in sessions
+    assert "Refusing to start this model" not in sessions
+    assert "this.emit('session:error', { sessionId, error: memoryPreflight.message })" not in sessions
+    assert "throw new Error(memoryPreflight.message)" not in sessions
+    # An override env is not consent -- it is a wall with a secret door.
+    assert "unsafeModelLaunchOverrideHint()" not in sessions
+    # It must still SAY something: advice is the whole remaining job.
+    assert "unsafeModelLaunchReason(" in sessions
 
     preflight_index = sessions.index("const memoryPreflight = classifyLargeModelMemoryPreflight")
     owned_port_index = sessions.index("await this.ensureOwnedSessionPortAvailable(session)")

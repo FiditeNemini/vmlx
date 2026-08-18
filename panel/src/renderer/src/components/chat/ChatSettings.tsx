@@ -761,7 +761,9 @@ function statusToneClass(status: string): string {
                   : mtpTemperatureNotice.kind === 'active'
                     ? t('chat.settings.mtpTempActive')
                     : t('chat.settings.mtpTempInactive', {
-                        temperature: mtpTemperatureNotice.temperature,
+                        // only the `inactive` branch carries a temperature, but
+                        // the field is optional on the union, so narrow it here
+                        temperature: mtpTemperatureNotice.temperature ?? 0,
                       })}
               </p>
             )}

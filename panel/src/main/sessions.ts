@@ -54,7 +54,6 @@ import {
   estimateMacReclaimableMemoryBytes,
   effectiveLaunchAvailableBytes,
   unsafeModelLaunchReason,
-  unsafeModelLaunchOverrideHint,
   modelLaunchReserveWarning,
 } from './modelLaunchMemory'
 import {

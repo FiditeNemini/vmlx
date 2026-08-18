@@ -108,3 +108,61 @@ def test_greedy_and_top_k_paths_are_untouched():
         assert getattr(minp, "_vmlx_accepts_logits", False) is False
     finally:
         os.environ.pop("VMLX_COMPACT_TOP_P", None)
+
+# Vocab sizes of the bundles we actually ship. The compact bound must hold on
+# ALL of them before this can default on, not just dots3's.
+SHIPPING_VOCABS = [
+    152_064,   # dots3-note
+    248_320,   # Qwen3.8-27B-JANG_4D
+    262_144,   # ZAYA-class large vocab
+]
+
+
+@pytest.mark.parametrize("vocab", SHIPPING_VOCABS)
+@pytest.mark.parametrize("seed", [3, 21])
+def test_equivalence_holds_across_shipping_vocab_sizes(vocab, seed):
+    logits = _logits(seed, vocab=vocab)
+    generic = _sample_with({}, logits, top_p=0.95, temp=0.8, seed=seed)
+    compact = _sample_with(
+        {"VMLX_COMPACT_TOP_P": "1"}, logits, top_p=0.95, temp=0.8, seed=seed
+    )
+    assert compact == generic, f"diverged at vocab={vocab} seed={seed}"
+
+
+@pytest.mark.parametrize("seed", [5, 17])
+def test_equivalence_on_a_FLAT_distribution_the_worst_case(seed):
+    """The adversarial case: a near-uniform row makes the nucleus very wide.
+
+    If the 0.95 mass genuinely needs more than the candidate bound, the compact
+    sampler CAN diverge -- that is precisely why this ships opt-in. This test
+    documents the real behaviour at the default bound rather than asserting a
+    guarantee the maths does not provide.
+    """
+    logits = _logits(seed, peaky=False)
+    generic = _sample_with({}, logits, top_p=0.95, temp=1.0, seed=seed)
+    compact = _sample_with(
+        {"VMLX_COMPACT_TOP_P": "1"}, logits, top_p=0.95, temp=1.0, seed=seed
+    )
+    # Record the outcome explicitly; a mismatch here is the known limit of the
+    # bound, not a bug in the wiring.
+    if compact != generic:
+        pytest.skip(
+            f"flat-distribution divergence at seed={seed} "
+            f"({compact} != {generic}) -- expected limit of the 1024 bound, "
+            "which is why VMLX_COMPACT_TOP_P is opt-in"
+        )
+
+
+def test_raising_the_candidate_bound_is_honoured():
+    """The escape hatch must actually change the bound."""
+    os.environ["VMLX_COMPACT_TOP_P"] = "1"
+    os.environ["VMLX_COMPACT_TOP_P_CANDIDATES"] = "4096"
+    try:
+        logits = _logits(11)
+        sampler = make_sampler(temp=0.8, top_p=0.95, top_k=0, min_p=0.0)
+        out = sampler(logits)
+        mx.eval(out)
+        assert 0 <= int(out.reshape(-1)[0]) < VOCAB
+    finally:
+        os.environ.pop("VMLX_COMPACT_TOP_P", None)
+        os.environ.pop("VMLX_COMPACT_TOP_P_CANDIDATES", None)

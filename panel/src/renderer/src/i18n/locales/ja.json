@@ -429,7 +429,7 @@
       "effortHelpGeneric": "対応モデルの思考の深さを制御します。デフォルトはモデル自身の設定を使用します。",
       "temperature": "温度",
       "temperatureHelp": "ランダム性を制御します。低いほど集中的、高いほど創造的です。",
-      "mtpTempPinned": "Native MTP が有効なため温度は 0 です。MTP は 1 ステップで複数トークンをデコードし、greedy なリクエストでのみ動作するため、このセッションではサンプリングを greedy デコードに置き換えます。再びサンプリングするには、サーバー設定で Native MTP を Auto または Off にしてください。",
+      "mtpTempPinned": "Native MTP が有効なため温度は 0 です。MTP は 1 ステップで複数トークンをデコードし、greedy なリクエストでのみ動作するため、このセッションではサンプリングを greedy デコードに置き換えます。再びサンプリングするには、サーバー設定で Native MTP を Off にしてください。",
       "mtpTempActive": "温度 0 で Native MTP が有効です。このモデルは 1 ステップで複数トークンをデコードします。温度を 0 より上げると MTP は無効になり、1 ステップ 1 トークンのデコードに戻ります。",
       "mtpTempInactive": "このモデルは Native MTP に対応していますが、動作していません。MTP は greedy なリクエストでのみ動作し、現在の温度は {{temperature}} です。温度を 0 にするか、サーバー設定で Native MTP を「Deterministic override」にすると MTP による高速化が得られます。",
       "topP": "Top P",

@@ -429,7 +429,7 @@
       "effortHelpGeneric": "Controla la profundidad de razonamiento en los modelos compatibles. Predeterminado usa el ajuste del propio modelo.",
       "temperature": "Temperatura",
       "temperatureHelp": "Controla la aleatoriedad. Menor = más enfocado, mayor = más creativo.",
-      "mtpTempPinned": "La temperatura es 0 porque Native MTP está activado. MTP decodifica varios tokens por paso y solo funciona con peticiones greedy, así que esta sesión sustituye el muestreo por decodificación greedy. Cambia Native MTP a Auto u Off en Ajustes del servidor para volver a muestrear.",
+      "mtpTempPinned": "La temperatura es 0 porque Native MTP está activado. MTP decodifica varios tokens por paso y solo funciona con peticiones greedy, así que esta sesión sustituye el muestreo por decodificación greedy. Pon Native MTP en Off en Ajustes del servidor para volver a muestrear.",
       "mtpTempActive": "Native MTP está activo con temperatura 0: este modelo decodifica varios tokens por paso. Subir la temperatura por encima de 0 desactiva MTP y la decodificación vuelve a un token por paso.",
       "mtpTempInactive": "Este modelo tiene Native MTP, pero NO se está usando: MTP solo funciona con peticiones greedy y la temperatura es {{temperature}}. Pon la temperatura a 0, o selecciona \"Deterministic override\" en Native MTP en Ajustes del servidor, para obtener la aceleración de MTP.",
       "topP": "Top P",

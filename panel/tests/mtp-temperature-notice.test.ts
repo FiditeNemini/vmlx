@@ -91,6 +91,9 @@ describe('MTP temperature disclosure', () => {
     const settings = en.chat.settings
     expect(settings.mtpTempPinned).toMatch(/MTP/)
     expect(settings.mtpTempPinned).toMatch(/greedy/i)
+    // Auto also pins greedy now, so Off is the ONLY mode that restores sampling
+    expect(settings.mtpTempPinned).toMatch(/to Off/)
+    expect(settings.mtpTempPinned).not.toMatch(/Auto or Off/)
     // the warning must tell the user what to DO about it
     expect(settings.mtpTempInactive).toMatch(/MTP/)
     expect(settings.mtpTempInactive).toMatch(/temperature to 0|Deterministic/i)

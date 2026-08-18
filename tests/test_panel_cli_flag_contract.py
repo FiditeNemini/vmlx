@@ -734,3 +734,41 @@ def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
     assert "args.push('--native-mtp-sampling-policy', 'deterministic-defaults')" in sessions
     # off must still disable the runtime outright
     assert "args.push('--disable-native-mtp')" in sessions
+
+def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> None:
+    """2026-08-17: depth fell through to a hardcoded 3 and tanked acceptance.
+
+    Qwen3.8-27B-JANG_4D-CRACK declares `recommended_num_drafts: 1` and
+    `upstream_num_speculative_tokens: 2` in jang_config, and its
+    vmlx_mtp_tuning.json says `best_depth: 1` -- yet the running engine used
+    depth 3 (a stale session nativeMtpDepthOverride). Asking a head trained for
+    1-2 tokens to draft 3 ahead measured 58.6% acceptance, under the ~0.68
+    breakeven, so MTP paid draft+verify and then fell back to AR.
+
+    Derivation order must be: measured tuning > what the bundle declares for
+    itself > layer count > 1. The final fallback must be 1, never 3: an
+    uncharacterised head has to draft conservatively because an over-deep
+    draft is pure loss.
+    """
+
+    registry = (ROOT / "panel" / "src" / "main" / "model-config-registry.ts").read_text(
+        encoding="utf-8"
+    )
+    sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
+        encoding="utf-8"
+    )
+
+    # the bundle's own declarations are actually read
+    assert "jang_config.mtp.recommended_num_drafts" in registry
+    assert "jang_config.mtp.upstream_num_speculative_tokens" in registry
+    assert "declaredNativeMtpDrafts" in registry
+
+    # recommendation outranks upstream-supported, which outranks layer count
+    rec = registry.index("jang_config.mtp.recommended_num_drafts")
+    ups = registry.index("jang_config.mtp.upstream_num_speculative_tokens")
+    assert rec < ups
+
+    # and neither call site may fall back to 3
+    assert "?? 3," not in registry
+    assert "finitePositiveInteger(nativeMtp.depth) || 3" not in sessions
+    assert "finitePositiveInteger(nativeMtp.depth) || 1" in sessions

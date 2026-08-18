@@ -4696,7 +4696,11 @@ export class SessionManager extends EventEmitter {
         const configuredDepth = (config as any).nativeMtpDepthOverride === true
           ? (config as any).nativeMtpDepth
           : nativeMtp.depth
-        const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 3))
+        // Fallback is 1, not 3. Detection already resolves the bundle's own
+        // depth (measured tuning > declared recommendation > layer count), so
+        // reaching this literal means we know nothing about the head — and an
+        // over-deep draft costs verify + replay for tokens that get rejected.
+        const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 1))
         args.push('--native-mtp-depth', depth.toString())
         // 2026-08-17 — `auto` used to map to `compatible-only`, which runs MTP
         // ONLY on requests that are already greedy. Bundles carrying MTP heads

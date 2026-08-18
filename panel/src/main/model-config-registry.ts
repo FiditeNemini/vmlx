@@ -983,6 +983,31 @@ function coerceNativeMtpDepth(raw: unknown): number | undefined {
   return Math.max(1, Math.min(3, Math.round(value)))
 }
 
+/**
+ * Draft depth the BUNDLE itself declares, before any measured tuning.
+ *
+ * 2026-08-17. Qwen3.8-27B-JANG_4D-CRACK states `recommended_num_drafts: 1` and
+ * `upstream_num_speculative_tokens: 2` in its jang_config, yet nothing read
+ * either field — depth fell through to a hardcoded 3. Asking a head trained
+ * for 1-2 tokens to draft 3 ahead tanks acceptance (measured 58.6%, under the
+ * ~0.68 breakeven), so MTP burns draft+verify work and then falls back to AR.
+ *
+ * Order is deliberate: what the bundle RECOMMENDS beats what upstream merely
+ * supports, and both beat the layer count, which is a structural fact rather
+ * than a decode recommendation.
+ */
+function declaredNativeMtpDrafts(jangCfg: any): { depth: number; source: string } | undefined {
+  const candidates = [
+    [jangCfg?.mtp?.recommended_num_drafts, 'jang_config.mtp.recommended_num_drafts'],
+    [jangCfg?.mtp?.upstream_num_speculative_tokens, 'jang_config.mtp.upstream_num_speculative_tokens'],
+  ] as const
+  for (const [value, source] of candidates) {
+    const depth = coerceNativeMtpDepth(value)
+    if (depth !== undefined) return { depth, source }
+  }
+  return undefined
+}
+
 function readNativeMtpTuningDepth(modelPath: string): { depth: number; source: string } | undefined {
   try {
     const tuningPath = join(modelPath, 'vmlx_mtp_tuning.json')
@@ -1102,6 +1127,7 @@ function detectNativeMtpCapability(
     (!hy3 && nativeMtpBlockedByProfile(jangCfg) && !tuningDepth)
   ) return undefined
 
+  const declaredDrafts = declaredNativeMtpDrafts(jangCfg)
   const configuredMtp = configuredNativeMtpLayers(parsedConfig, jangCfg)
   if (configuredMtp.layers <= 0) return undefined
 
@@ -1130,8 +1156,19 @@ function detectNativeMtpCapability(
     }
     return {
       supported: true,
-      depth: tuningDepth?.depth ?? coerceNativeMtpDepth(configuredMtp.layers) ?? 3,
-      depthSource: tuningDepth?.source ?? configuredMtp.source,
+      // Measured tuning wins; then what the bundle declares for itself; then
+      // the layer count. The final fallback is 1, NOT 3: an uncharacterised
+      // head must draft conservatively, because an over-deep draft is pure
+      // loss (verify + replay) once acceptance falls under breakeven.
+      depth:
+        tuningDepth?.depth
+        ?? declaredDrafts?.depth
+        ?? coerceNativeMtpDepth(configuredMtp.layers)
+        ?? 1,
+      depthSource:
+        tuningDepth?.source
+        ?? declaredDrafts?.source
+        ?? configuredMtp.source,
       runtimeScope: configDeclaresMedia(parsedConfig) && hasVisionWeights ? 'text+vl' : 'text',
       // Match the runtime schema string reported by /v1/capabilities
       // (cache.native.schema): hy3 is plain attention (plain_kv_v1); the

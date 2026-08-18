@@ -966,15 +966,15 @@ def build_audit(root: Path) -> dict[str, Any]:
             {"minimax_reasoning_parser_guarded"},
             (ISSUE179_ROOT_CAUSE_AUDIT, ISSUE179_RESPONSES_CANCEL_PREFLIGHT),
         ),
+        # 2026-08-17 (ledger row 267): this carried the SECOND copy of the
+        # stale -20260530 path. Fixing only the check in _issue180_checks was
+        # inert: the proof listed here does not exist, so
+        # missing_generated_proof stayed True and the slice reported "open"
+        # even with every check passing — an artifact claiming a slice is open
+        # while nothing in it fails. Both sites now share one constant.
         "180": (
             set(),
-            (
-                Path(
-                    "build/private-evidence/"
-                    "current-real-ui-live-model-minimax-m27-small-responses-"
-                    "stricttools-cachecontrols-20260530-proof.json"
-                ),
-            ),
+            (MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF,),
         ),
         "116": (
             {"panel_thinking_off_control_present"},

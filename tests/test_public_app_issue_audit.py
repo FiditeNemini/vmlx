@@ -335,3 +335,24 @@ def test_minimax_small_stricttools_key_matches_the_manifest_index():
     assert MINIMAX_SMALL_STRICTTOOLS_REAL_UI_KEY in str(
         MINIMAX_SMALL_STRICTTOOLS_REAL_UI_PROOF
     )
+
+
+def test_no_stale_minimax_stricttools_proof_path_outside_comments():
+    """2026-08-17 (ledger row 267): the stale -20260530 key lived in TWO places
+    — the #180 check AND generated_proof_boundaries. Fixing only the first was
+    inert: the boundary's proof path still did not exist, so
+    missing_generated_proof stayed True and the slice reported "open" while
+    every check passed. Both sites must use the shared constant."""
+    from pathlib import Path
+
+    source = Path("tests/cross_matrix/run_public_app_issue_audit.py").read_text(
+        encoding="utf-8"
+    )
+    offenders = [
+        line.strip()
+        for line in source.splitlines()
+        if "20260530" in line and not line.strip().startswith("#")
+    ]
+    assert offenders == [], (
+        f"stale -20260530 proof path still referenced in code: {offenders}"
+    )

@@ -4698,19 +4698,27 @@ export class SessionManager extends EventEmitter {
           : nativeMtp.depth
         const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 3))
         args.push('--native-mtp-depth', depth.toString())
-        // 2026-08-17 — `auto` used to map to `compatible-only`, which runs MTP
-        // ONLY on requests that are already greedy. Bundles carrying MTP heads
-        // ship temperature 1.0, so on default settings the engine logged
+        // 2026-08-17. `auto` maps to `compatible-only`, which runs MTP only on
+        // requests that are already greedy. Because MTP bundles ship
+        // temperature 1.0, that means MTP does NOT auto-run — the engine logs
         //   "native MTP skipped for request=...: temperature=1.0 is not deterministic"
-        // on EVERY turn and nobody ever got MTP. Measured in the app: Qwen3.8
-        // 4D decoding at 19.5 t/s with `Native MTP: READY D3` in the same log.
+        // and decode falls back to autoregressive.
         //
-        // A bundle with MTP heads now gets greedy defaults from the engine, so
-        // the feature actually runs, and the temperature 0 that Chat Settings
-        // shows is the temperature the engine really uses. Previously the panel
-        // displayed 0 while the request went out at 1.0 — a UI/API parity lie.
-        // `off` is handled above and remains the way to keep bundle sampling.
-        args.push('--native-mtp-sampling-policy', 'deterministic-defaults')
+        // Forcing `deterministic-defaults` here (so MTP always runs) was tried
+        // and REVERTED, because greedy decoding is not free:
+        //   - Qwen3.8-27B-JANG_4D-CRACK at temperature 0 degenerated into a
+        //     word-counting loop ("for38 every39 layer40 and41 …"), 6972 tokens
+        //     and 363s of it, while measuring 19.5 t/s — EXACTLY the same rate
+        //     as with MTP skipped. All cost, zero benefit on that bundle.
+        //   - dots3-note did benefit (18.9 -> 27.0 t/s) and showed no loop.
+        // Since the win is family-specific and the damage is user-visible
+        // output quality, the engine no longer has greedy forced on its behalf.
+        //
+        // What makes this non-silent — the missing half before — is that Chat
+        // Settings now states plainly when a bundle HAS MTP but is not running
+        // it, and names both remedies (temperature 0, or Deterministic
+        // override). The user chooses the tradeoff instead of inheriting it.
+        args.push('--native-mtp-sampling-policy', mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only')
       }
     }
 

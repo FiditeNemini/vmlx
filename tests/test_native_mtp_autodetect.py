@@ -2155,7 +2155,12 @@ class TestNativeMtpAutodetect:
         tokens = [generator._next()[0].token for _ in range(4)]
 
         assert tokens == [2, 3, 4, 5]
-        assert language_model.calls == [([2], 0), ([3, 4], 0)]
+        # Verify passes n_confirmed=1 (replay-skip default): the confirmed
+        # token's SSM state is snapshotted for rollback instead of replayed.
+        # The third call is the PREFETCHED verify for the following cycle,
+        # launched while the queued tokens were being emitted; the request hit
+        # max_tokens before it was consumed.
+        assert language_model.calls == [([2], 0), ([3, 4], 1), ([5, 6], 1)]
         assert language_model.mtp_calls == [3, 5]
         assert req.output_tokens == [2, 3, 4, 5]
 

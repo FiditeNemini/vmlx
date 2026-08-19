@@ -51,9 +51,17 @@ def test_cold_twelve_cycle_window_no_longer_demotes():
     assert state.ar_fallback_pending is False
 
 
-def test_sustained_sub_breakeven_head_still_demotes():
-    """The case the gate exists for: 58.6% over a real sample must demote."""
+def test_midrange_head_is_kept_under_skip_replay_economics():
+    """58.6% stays on MTP: with the replay skipped (default), a rejected
+    cycle costs the same as an accepted one, so the floor is ~0.35."""
     state = _State(drafted=483, accepted=283)
+    gen._native_mtp_maybe_adapt_depth("req-mid", state)
+    assert state.ar_fallback_pending is False
+
+
+def test_sustained_sub_breakeven_head_still_demotes():
+    """A head below even the skip-replay floor must still fall back."""
+    state = _State(drafted=483, accepted=140)  # 29.0%
     gen._native_mtp_maybe_adapt_depth("req-weak", state)
     assert state.ar_fallback_pending is True
     assert "d1_acceptance" in (state.ar_fallback_reason or "")

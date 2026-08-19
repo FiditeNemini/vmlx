@@ -29,8 +29,11 @@ def unset_env(monkeypatch):
 
 
 class TestDepthDefault:
-    def test_depth_one_is_unfenced_by_default(self, unset_env):
-        assert unset_env._native_mtp_cycle_fence_enabled(1) is False
+    def test_depth_one_is_fenced_by_default(self, unset_env):
+        """Default ON at depth 1 too: the exemption re-exposed the 2026-08-15
+        lazy-accumulation stall on dots3 (43.5 -> 11.6 t/s at identical 89%
+        acceptance, avg_cycle 40 -> 162ms)."""
+        assert unset_env._native_mtp_cycle_fence_enabled(1) is True
 
     def test_depth_two_is_fenced_by_default(self, unset_env):
         assert unset_env._native_mtp_cycle_fence_enabled(2) is True
@@ -39,8 +42,8 @@ class TestDepthDefault:
         assert unset_env._native_mtp_cycle_fence_enabled(3) is True
 
     def test_zero_and_none_depth_are_treated_as_one(self, unset_env):
-        assert unset_env._native_mtp_cycle_fence_enabled(0) is False
-        assert unset_env._native_mtp_cycle_fence_enabled(None) is False
+        assert unset_env._native_mtp_cycle_fence_enabled(0) is True
+        assert unset_env._native_mtp_cycle_fence_enabled(None) is True
 
 
 class TestExplicitOverrideWins:
@@ -66,11 +69,11 @@ class TestExplicitOverrideWins:
     def test_unrecognised_value_falls_back_to_the_depth_default(self, monkeypatch):
         """A typo must not silently pin the fence one way."""
         gen = _reload_with(monkeypatch, "maybe")
-        assert gen._native_mtp_cycle_fence_enabled(1) is False
+        assert gen._native_mtp_cycle_fence_enabled(1) is True
         assert gen._native_mtp_cycle_fence_enabled(2) is True
 
 
 def test_module_reloads_clean(monkeypatch):
     """Leave the module in its unset-env state for the rest of the suite."""
     gen = _reload_with(monkeypatch, None)
-    assert gen._native_mtp_cycle_fence_enabled(1) is False
+    assert gen._native_mtp_cycle_fence_enabled(1) is True

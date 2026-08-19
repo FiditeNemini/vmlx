@@ -3188,6 +3188,8 @@ class MLLMNativeMTPState:
     # head cache during the last draft phase.  Trimmed after every verify so an
     # unverified draft can never persist in the head's context.
     head_chain_pairs: int = 0
+    # In-flight prefetched verify: {snapshot, logits, hidden, n_inputs} or None.
+    pending_verify: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -3440,9 +3442,13 @@ _NATIVE_MTP_FUSED_SYNC = os.environ.get(
 # restores the rollback point.  Deeper drafts fall back to the replay path.
 #
 # VMLX_MTP_SKIP_REPLAY=1 enables.
+# Default ON since 2026-08-18: proven live across many runs (replay_main
+# 391 -> 0, output byte-correct), and it changes MTP's economics - a rejected
+# cycle costs the same as an accepted one, so the profitability floor drops
+# from ~0.68 to roughly the draft cost (~6%).
 _NATIVE_MTP_SKIP_REPLAY = os.environ.get(
-    "VMLX_MTP_SKIP_REPLAY", "0"
-).strip().lower() in {"1", "true", "yes", "on"}
+    "VMLX_MTP_SKIP_REPLAY", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _native_mtp_rollback_to_confirmed(cache: List[Any], reject_tokens: int) -> bool:
@@ -3505,6 +3511,15 @@ _NATIVE_MTP_RETAIN_HEAD_CACHE = os.environ.get(
 # VMLX_MTP_ALIGNED_HEAD_CACHE=0 reverts to the fresh-per-cycle behaviour.
 _NATIVE_MTP_ALIGNED_HEAD_CACHE = os.environ.get(
     "VMLX_MTP_ALIGNED_HEAD_CACHE", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+
+# Verify prefetch: submit the NEXT verify forward (async) the moment a cycle's
+# decision refills the emit queue, so the GPU crunches it while Python spends
+# ~5ms per token on detokenize/stream/stats for the 2-3 queued tokens.  Same
+# forwards, zero extra compute — pure overlap of the measured 10-18ms/cycle
+# host gap.  VMLX_MTP_VERIFY_PREFETCH=0 disables.
+_NATIVE_MTP_VERIFY_PREFETCH = os.environ.get(
+    "VMLX_MTP_VERIFY_PREFETCH", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
 
 
@@ -3612,7 +3627,13 @@ def _native_mtp_cycle_fence_enabled(depth: int) -> bool:
         return False
     if _NATIVE_MTP_CYCLE_FENCE_ENV in {"1", "true", "yes", "on"}:
         return True
-    return int(depth or 1) >= 2
+    # Default ON at every depth.  The depth-1 exemption re-exposed the
+    # 2026-08-15 lazy-accumulation stall on dots3-note (102GB MoE, block-disk
+    # populated): same request shape went 43.5 t/s early in the process to
+    # avg_cycle=162ms (11.6 t/s) later, at IDENTICAL 89% acceptance.  The
+    # fence bounds the outstanding lazy queue and is measured free when the
+    # stall is absent (cache-off 1.932x fenced vs 1.943x unfenced).
+    return True
 
 
 def _native_mtp_trace_enabled() -> bool:
@@ -4431,14 +4452,16 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
     ):
         drafted_d1 = int(state.stats.drafted_by_depth[0]) if state.stats.drafted_by_depth else 0
         rate_d1 = _native_mtp_depth_rate(state.stats, 1)
-        # Left at 0.65.  A single run at 53% acceptance with the fallback
-        # disabled measured 24.0 t/s vs 22.3 AR, which looked like the floor was
-        # demoting a real gain -- but a repeat of the SAME configuration and
-        # prompt measured 14.1 t/s.  With that spread the break-even is not
-        # established, so the floor stays where it is until an N>=3 settled A/B
-        # says otherwise.
+        # With the replay skipped (default), a rejected depth-1 cycle costs
+        # the same backbone forward an accepted one does, so MTP is profitable
+        # down to roughly the draft-head cost (~6% acceptance).  0.35 keeps a
+        # wide margin over that.  With the replay active a reject pays a full
+        # extra forward and the old ~0.68 break-even applies, so 0.65 stays.
+        # Live case this decides: the reasoning workload measured d1=0.649 and
+        # was demoted by the old floor at 25.2 t/s vs 22.1 AR - a real win
+        # discarded by one thousandth.
         min_d1 = _native_mtp_env_float(
-            0.65,
+            0.35 if (_NATIVE_MTP_SKIP_REPLAY and current == 1) else 0.65,
             "VMLINUX_NATIVE_MTP_D1_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D1_MIN_ACCEPT",
         )
@@ -5800,6 +5823,9 @@ class MLLMBatchGenerator:
                 if mtp_state is None:
                     continue
                 try:
+                    self._abandon_pending_native_mtp_verify(
+                        mtp_state, getattr(self.active_batch, "cache", None)
+                    )
                     _native_mtp_log_stats(
                         request.request_id,
                         mtp_state.stats,
@@ -10664,16 +10690,19 @@ class MLLMBatchGenerator:
             raise RuntimeError("native MTP replay did not return hidden states")
         return hidden[:, -1:, :]
 
-    def _run_native_mtp_verify_cycle(
+    def _submit_native_mtp_verify(
         self,
         request: MLLMBatchRequest,
         cache: List[Any],
         state: MLLMNativeMTPState,
-    ) -> None:
-        if state.next_main is None or not state.drafts:
-            raise RuntimeError("native MTP verify entered without pending drafts")
+    ) -> Dict[str, Any]:
+        """Build and launch the verify forward for the current drafts.
 
-        sampler = self._make_request_sampler(request)
+        The graph is submitted with ``mx.async_eval`` so the GPU can run it
+        while the host emits the previous cycle's queued tokens.  The returned
+        record carries the pre-verify snapshot needed to roll the appended
+        positions back on rejection or abandonment.
+        """
         verify_inputs = [state.next_main] + list(state.drafts)
         trace_t0 = _native_mtp_trace_start()
         replay_snapshot = _native_mtp_snapshot_replay_cache(
@@ -10683,7 +10712,6 @@ class MLLMBatchGenerator:
         inputs = mx.concatenate(
             [_native_mtp_ensure_uint32(tok) for tok in verify_inputs]
         )
-        trace_t0 = _native_mtp_trace_start()
         state.stats.verify_main_forwards += 1
         # n_confirmed=1 marks state.next_main as already-confirmed, so the
         # hybrid layers stash the post-confirmed (conv, ssm) pair in
@@ -10704,6 +10732,63 @@ class MLLMBatchGenerator:
             logits, hidden = output.logits, output.hidden_states
         else:
             raise RuntimeError("native MTP verify did not return hidden states")
+        _native_mtp_async_eval(logits, hidden)
+        return {
+            "snapshot": replay_snapshot,
+            "logits": logits,
+            "hidden": hidden,
+            "n_inputs": len(verify_inputs),
+        }
+
+    def _abandon_pending_native_mtp_verify(
+        self,
+        state: Optional["MLLMNativeMTPState"],
+        cache: List[Any],
+    ) -> None:
+        """Undo an in-flight prefetched verify's cache appends.
+
+        Must run before the cache is reused (AR fallback step) or persisted
+        (prefix-cache store on finish), or the unverified draft positions leak
+        into it.
+        """
+        if state is None:
+            return
+        pending = getattr(state, "pending_verify", None)
+        if not isinstance(pending, dict):
+            return
+        state.pending_verify = None
+        if cache is None:
+            return
+        try:
+            _native_mtp_restore_replay_cache(
+                cache,
+                pending["snapshot"],
+                pending["n_inputs"],
+            )
+        except Exception:
+            logger.warning(
+                "native MTP pending-verify rollback failed; cache may hold "
+                "unverified draft positions"
+            )
+
+    def _run_native_mtp_verify_cycle(
+        self,
+        request: MLLMBatchRequest,
+        cache: List[Any],
+        state: MLLMNativeMTPState,
+    ) -> None:
+        if state.next_main is None or not state.drafts:
+            raise RuntimeError("native MTP verify entered without pending drafts")
+
+        sampler = self._make_request_sampler(request)
+        pending = getattr(state, "pending_verify", None)
+        state.pending_verify = None
+        if pending is None:
+            pending = self._submit_native_mtp_verify(request, cache, state)
+        replay_snapshot = pending["snapshot"]
+        logits = pending["logits"]
+        hidden = pending["hidden"]
+        trace_t0 = _native_mtp_trace_start()
         _native_mtp_trace_eval(logits, hidden)
         _native_mtp_trace_stop(state.stats, "verify_ms", trace_t0)
 
@@ -10963,6 +11048,17 @@ class MLLMBatchGenerator:
     ) -> Tuple[int, Any]:
         if not state.queue:
             self._run_native_mtp_verify_cycle(request, cache, state)
+            if (
+                _NATIVE_MTP_VERIFY_PREFETCH
+                and state.drafts
+                and not state.ar_fallback_pending
+                and state.pending_verify is None
+            ):
+                # Launch the next verify now: the GPU runs it while the host
+                # emits the tokens this cycle just queued.
+                state.pending_verify = self._submit_native_mtp_verify(
+                    request, cache, state
+                )
         if not state.queue:
             raise RuntimeError("native MTP verify produced no emit token")
         token, logprobs, source = state.queue.popleft()
@@ -11224,6 +11320,7 @@ class MLLMBatchGenerator:
                     getattr(mtp_state, "ar_fallback_pending", False)
                     and not mtp_state.queue
                 ):
+                    self._abandon_pending_native_mtp_verify(mtp_state, batch.cache)
                     ready, fallback_reason = _native_mtp_ar_fallback_ready(
                         batch.cache,
                         mtp_state,
@@ -11370,6 +11467,9 @@ class MLLMBatchGenerator:
             if finish_reason is not None:
                 mtp_state_for_finish = getattr(req, "_native_mtp_state", None)
                 if mtp_state_for_finish is not None:
+                    self._abandon_pending_native_mtp_verify(
+                        mtp_state_for_finish, batch.cache
+                    )
                     _native_mtp_log_stats(
                         request_id,
                         mtp_state_for_finish.stats,

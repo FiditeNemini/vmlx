@@ -68,6 +68,26 @@ _TRANSIENT_SIGNATURES = (
 )
 
 
+def wired_limit_advisory(max_ws_bytes: int) -> str:
+    """User-facing guidance appended to every admission rejection.
+
+    The rejections fire at the macOS Metal wired-memory ceiling (default
+    ~84% of RAM, ``iogpu.wired_limit_mb=0``), which an administrator can
+    raise — that is often the difference between "cannot serve this
+    context" and serving it comfortably on the same machine. The advisory
+    must carry the caution too: setting it too high can stall or panic
+    macOS, and the sysctl resets on reboot.
+    """
+    return (
+        f" Advanced: this rejection is against the macOS GPU wired-memory "
+        f"limit ({max_ws_bytes / _GIB:.2f}GB; macOS defaults to ~84% of "
+        f"RAM). An administrator can raise it with 'sudo sysctl "
+        f"iogpu.wired_limit_mb=<MB>' — leave at least 8GB of RAM for macOS "
+        f"or the system may become unstable, and note the setting resets "
+        f"on reboot."
+    )
+
+
 class PrefillAdmissionError(RuntimeError):
     """The request cannot be served on this device — rejected before GPU work.
 
@@ -158,7 +178,7 @@ def prefill_valve_check(
         f"{(projected - active_bytes) / _GIB:.2f}GB exceeds the device "
         f"working-set limit {max_ws_bytes / _GIB:.2f}GB. A context of this "
         f"length cannot be served on this hardware; reduce the prompt or "
-        f"context size."
+        f"context size." + wired_limit_advisory(max_ws_bytes)
     )
 
 
@@ -329,7 +349,7 @@ def hybrid_chunk_valve_check(
         f"{projected / _GIB:.2f}GB for this chunk exceeds the device "
         f"working-set limit {max_ws_bytes / _GIB:.2f}GB. A context of this "
         f"length cannot be served on this hardware; shorten the conversation "
-        f"or reduce the prompt."
+        f"or reduce the prompt." + wired_limit_advisory(max_ws_bytes)
     )
 
 
@@ -563,4 +583,5 @@ def span_admission_check(
         f"{intercept / _GIB:.2f}GB + {slope * 1000 / _GIB:.4f}GB per 1k tokens). "
         f"A context of this length cannot be served on this hardware; "
         f"shorten the conversation or reduce the prompt."
+        + wired_limit_advisory(max_ws_bytes)
     )

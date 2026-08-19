@@ -807,3 +807,76 @@ class TestChunkScaledValve:
             next_chunk_tokens=chunk,
             **kw,
         )
+
+
+class TestWiredLimitAdvisory:
+    """Every admission rejection is user-visible in the app error chip, so it
+    must teach the wired-limit lever AND its risks: raising
+    iogpu.wired_limit_mb too high can destabilize macOS, and it resets on
+    reboot. Measured live: dots3-note at 20k context rejected against the
+    107.52GB default on a 128GB Mac that serves it fine at 120GB."""
+
+    GIB = 1024**3
+
+    def _advisory_asserts(self, message):
+        assert "iogpu.wired_limit_mb" in message
+        assert "sudo sysctl" in message
+        assert "resets" in message and "reboot" in message
+        assert "8GB" in message  # the leave-room-for-macOS caution
+        assert "84%" in message and "84%%" not in message
+
+    def test_chunk_valve_rejection_carries_the_advisory(self):
+        from vmlx_engine.utils.prefill_admission import (
+            PrefillAdmissionError,
+            prefill_valve_check,
+        )
+        import pytest
+
+        with pytest.raises(PrefillAdmissionError) as e:
+            prefill_valve_check(
+                int(106 * self.GIB),
+                int(107.52 * self.GIB),
+                int(8 * self.GIB),
+                int(2 * self.GIB),
+                chunk_start=0,
+                chunk_end=64,
+            )
+        self._advisory_asserts(str(e.value))
+        assert "107.52GB" in str(e.value)
+
+    def test_hybrid_valve_rejection_carries_the_advisory(self):
+        from vmlx_engine.utils.prefill_admission import (
+            PrefillAdmissionError,
+            hybrid_chunk_valve_check,
+        )
+        import pytest
+
+        with pytest.raises(PrefillAdmissionError) as e:
+            hybrid_chunk_valve_check(
+                int(106 * self.GIB),
+                int(107.52 * self.GIB),
+                int(8 * self.GIB),
+                17152,
+                17152,
+                int(2 * self.GIB),
+                chunk_start=0,
+                chunk_end=64,
+            )
+        self._advisory_asserts(str(e.value))
+
+    def test_span_check_rejection_carries_the_advisory(self):
+        from vmlx_engine.utils import prefill_admission as pa
+        import pytest
+
+        # Force the whole-span path to reject: steep fitted peak model far
+        # over the limit with no degradable chunks.
+        with pytest.raises(pa.PrefillAdmissionError) as e:
+            pa.span_admission_check(
+                int(107.52 * self.GIB),
+                (float(20 * self.GIB), float(2 * self.GIB) / 1000),
+                100_000,
+                fresh_tokens=90_000,
+                fitted_max_context=100_000,
+                degradable_chunks=False,
+            )
+        self._advisory_asserts(str(e.value))

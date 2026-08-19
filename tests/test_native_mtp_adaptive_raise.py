@@ -170,3 +170,43 @@ class TestHysteresis:
         state.stats = _Stats([400, 200, 0], [395, 40, 0])
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 1
+
+
+class TestRestoredPrefixGates:
+    """Restored-prefix requests start with a COLD head cache (backbone
+    hiddens are not stored), so early gate windows measure a context-starved
+    head, not the bundle. Live A/B: run 3 of a warm conversation demoted
+    D3->D1 at cycle 129 on d2=0.574 that recovers to ~0.85 warm, and the
+    lowered ceiling made 17.4 t/s permanent (cold run 1 = 40.2 t/s)."""
+
+    def _state(self, depth, drafted, accepted, restored=True, ceiling=3):
+        state = _State(depth, drafted, accepted, ceiling=ceiling)
+        state.restored_prefix = restored
+        return state
+
+    def test_cold_window_sample_does_not_demote_restored_request(self):
+        # 129 drafted at joint d2=0.574 — the exact live demotion window.
+        # Fresh requests demote here; restored ones must wait for 4x sample.
+        state = self._state(3, [129, 129, 129], [110, 74, 50])
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 3
+
+    def test_fresh_request_still_demotes_on_the_same_window(self):
+        state = self._state(3, [129, 129, 129], [110, 74, 50], restored=False)
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth < 3
+
+    def test_restored_demote_at_full_sample_keeps_ceiling(self):
+        # Even when a restored request eventually demotes (sustained bad d2
+        # over the stretched sample), the ceiling stays put so the raise
+        # path can climb back once the head cache is warm.
+        state = self._state(2, [800, 800, 0], [780, 160, 0])  # d2 20%
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 1
+        assert state.depth_ceiling == 3
+
+    def test_fresh_demote_still_lowers_ceiling(self):
+        state = self._state(2, [800, 800, 0], [780, 160, 0], restored=False)
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 1
+        assert state.depth_ceiling == 1

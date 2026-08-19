@@ -3195,6 +3195,12 @@ class MLLMNativeMTPState:
     # emitted tokens is the real MTP cost per token.
     ar_step_ms: float = 0.0
     cycle_span_start: float = 0.0
+    # The request began from a restored prefix. The MTP head cache starts
+    # COLD on such requests (backbone hiddens are not stored), so the first
+    # gate windows measure a context-starved head: run 3 of a live A/B
+    # demoted D3->D1 at cycle 129 on d2=0.574 that recovers to ~0.85 once
+    # the head warms, and the lowered ceiling made 17.4 t/s permanent.
+    restored_prefix: bool = False
 
 
 @dataclass
@@ -4378,6 +4384,12 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
         "VMLX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
         minimum=1,
     )
+    # Restored-prefix requests start with a COLD head cache, so the early
+    # gate windows measure a context-starved head, not the bundle. Stretch
+    # every demotion sample window so warm cycles dilute the cold ones
+    # before any gate may fire.
+    _restore_scale = 4 if getattr(state, "restored_prefix", False) else 1
+    warmup = warmup * _restore_scale
     if int(state.stats.cycles) < warmup:
         return
 
@@ -4397,7 +4409,7 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
             "VMLINUX_NATIVE_MTP_D3_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D3_MIN_ACCEPT",
         )
-        d3_min_sample = _native_mtp_env_int(
+        d3_min_sample = _restore_scale * _native_mtp_env_int(
             128 if accelerated_d3 else 48,
             "VMLINUX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
             "VMLX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
@@ -4442,7 +4454,7 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
             "VMLINUX_NATIVE_MTP_D2_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D2_MIN_ACCEPT",
         )
-        depth_min_sample = _native_mtp_env_int(
+        depth_min_sample = _restore_scale * _native_mtp_env_int(
             128 if (accelerated_d3 and current >= 3) else 48,
             "VMLINUX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
             "VMLX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
@@ -4481,7 +4493,9 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
         ar_ms = float(getattr(state, "ar_step_ms", 0.0) or 0.0)
         span_start = float(getattr(state, "cycle_span_start", 0.0) or 0.0)
         cycles_done = int(state.stats.cycles)
-        cost_sample = _native_mtp_env_int(
+        cost_sample = (
+            4 if getattr(state, "restored_prefix", False) else 1
+        ) * _native_mtp_env_int(
             48,
             "VMLINUX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES",
             "VMLX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES",
@@ -4552,7 +4566,7 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
         # for 34.1 t/s.  Twelve cycles was 0.57% of that request.  The genuine
         # sub-breakeven case this gate exists for ran 483 cycles at 58.6%, so
         # it still trips well inside its own request at this sample size.
-        ar_min_sample = _native_mtp_env_int(
+        ar_min_sample = _restore_scale * _native_mtp_env_int(
             64,
             "VMLINUX_NATIVE_MTP_AR_FALLBACK_MIN_SAMPLE",
             "VMLX_NATIVE_MTP_AR_FALLBACK_MIN_SAMPLE",
@@ -4607,8 +4621,14 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
                 else "n/a"
             ),
         )
-        # A depth that failed its gate is never retried this request.
-        state.depth_ceiling = min(int(getattr(state, "depth_ceiling", 3) or 3), target)
+        # A depth that failed its gate is never retried this request —
+        # EXCEPT on restored-prefix requests, whose early windows judge a
+        # cold head: keep the ceiling so the raise path can climb back once
+        # the head cache is warm and d1 sustains the raise floor.
+        if not getattr(state, "restored_prefix", False):
+            state.depth_ceiling = min(
+                int(getattr(state, "depth_ceiling", 3) or 3), target
+            )
         state.depth = target
         return
 
@@ -10767,6 +10787,9 @@ class MLLMBatchGenerator:
             head_chain_pairs=max(0, len(drafts) - 1),
             ar_step_ms=_seed_ar_ms,
             cycle_span_start=time.perf_counter(),
+            restored_prefix=bool(
+                int(getattr(request, "_cached_tokens", 0) or 0) > 0
+            ),
         )
         state.stats.seed_main_forwards += seed_main_forwards
         state.stats.mtp_forwards += len(drafts)

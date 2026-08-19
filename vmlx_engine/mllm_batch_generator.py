@@ -3415,6 +3415,71 @@ _NATIVE_MTP_FUSED_SYNC = os.environ.get(
 ).strip().lower() not in {"0", "false", "no", "off"}
 
 
+# Skip the replay forward on rejection by rolling the hybrid SSM state back to
+# the post-confirmed snapshot the model can capture for us.
+#
+# Every rejected cycle currently pays a FULL extra backbone forward: the verify
+# is rolled back to BEFORE it ran, then the confirmed tokens are re-run to
+# rebuild their state.  Measured on Qwen3.8-27B-JANG_4D-CRACK: verify 42.3ms,
+# draft 2.47ms, replay ~40ms -- so a reject costs 84.8ms against an accept's
+# 44.8ms, and the logs show `replay_main=28` for 64 cycles.
+#
+# The replay is unnecessary.  Passing ``n_confirmed`` to the verify forward makes
+# GatedDeltaNet process the confirmed prefix separately and stash the resulting
+# (conv, ssm) pair as ``cache.rollback_state`` (patches/mlx_vlm_mtp/qwen35_vl.py).
+# Restoring THAT instead of the pre-verify snapshot lands exactly where the
+# replay would have, and the corrected token's hidden state is already sitting in
+# the verify output.  A raw harness doing precisely this runs 26.8 t/s where the
+# engine runs 22.1.
+#
+# At depth 1 ``n_confirmed=1`` is exact: accept keeps the cache untouched, reject
+# restores the rollback point.  Deeper drafts fall back to the replay path.
+#
+# VMLX_MTP_SKIP_REPLAY=1 enables.
+_NATIVE_MTP_SKIP_REPLAY = os.environ.get(
+    "VMLX_MTP_SKIP_REPLAY", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_mtp_rollback_to_confirmed(cache: List[Any], reject_tokens: int) -> bool:
+    """Roll back one rejected verify without re-running the confirmed tokens.
+
+    SSM layers restore the ``rollback_state`` captured after the confirmed
+    prefix; plain KV layers simply trim the rejected positions.  Returns False
+    if any layer cannot be rolled back this way, so the caller can fall back to
+    the snapshot+replay path rather than continue on a corrupt cache.
+    """
+    if reject_tokens <= 0:
+        return False
+    for layer in cache:
+        if layer is None:
+            continue
+        rollback = getattr(layer, "rollback_state", None)
+        if rollback is not None:
+            try:
+                conv_state, ssm_state = rollback
+            except (TypeError, ValueError):
+                return False
+            # Write through __setitem__, exactly as the model does
+            # (`cache[0] = conv_f; cache[1] = ssm_f`).  Assigning `.state`
+            # replaces the backing list with a TUPLE, and the next forward's
+            # indexed write then dies with "'tuple' object does not support
+            # item assignment".  ArraysCache carries no offset -- the SSM state
+            # IS the position -- so nothing else needs rewinding here.
+            try:
+                layer[0] = conv_state
+                layer[1] = ssm_state
+            except (TypeError, IndexError, AttributeError):
+                return False
+            layer.rollback_state = None
+            continue
+        if hasattr(layer, "is_trimmable") and layer.is_trimmable():
+            layer.trim(reject_tokens)
+            continue
+        return False
+    return True
+
+
 # Whether a verifier rejection destroys the MTP head's own KV cache.
 #
 # The MLLM path has always recreated it from scratch, so after every rejected
@@ -10534,10 +10599,18 @@ class MLLMBatchGenerator:
         )
         trace_t0 = _native_mtp_trace_start()
         state.stats.verify_main_forwards += 1
+        # n_confirmed=1 marks state.next_main as already-confirmed, so the
+        # hybrid layers stash the post-confirmed (conv, ssm) pair in
+        # cache.rollback_state and a rejection can roll back to it instead of
+        # replaying.  Exact at depth 1, where accepted is 0 or 1.
+        verify_kwargs = {}
+        if _NATIVE_MTP_SKIP_REPLAY and len(state.drafts) == 1:
+            verify_kwargs["n_confirmed"] = 1
         output = self.language_model(
             inputs[None, :],
             cache=cache,
             return_hidden=True,
+            **verify_kwargs,
         )
         if isinstance(output, tuple):
             logits, hidden = output
@@ -10662,29 +10735,42 @@ class MLLMBatchGenerator:
             return
 
         state.stats.rejects += 1
-        trace_t0 = _native_mtp_trace_start()
-        if not _native_mtp_restore_replay_cache(
-            cache,
-            replay_snapshot,
-            depth + 1,
-        ):
-            raise RuntimeError("native MTP cache rejected rollback")
-        _native_mtp_trace_stop(state.stats, "restore_ms", trace_t0)
         accepted_drafts = state.drafts[:accepted]
+        skipped_replay = False
+        if _NATIVE_MTP_SKIP_REPLAY and depth == 1 and accepted == 0:
+            # Roll the hybrid state back to the post-confirmed snapshot the
+            # verify forward captured, trim the rejected KV position, and take
+            # the corrected token's hidden straight out of the verify output.
+            # That is the same state the replay would have rebuilt, for free.
+            trace_t0 = _native_mtp_trace_start()
+            skipped_replay = _native_mtp_rollback_to_confirmed(cache, depth)
+            _native_mtp_trace_stop(state.stats, "restore_ms", trace_t0)
+            if skipped_replay:
+                replay_hidden = hidden[:, 0:1, :]
+        if not skipped_replay:
+            trace_t0 = _native_mtp_trace_start()
+            if not _native_mtp_restore_replay_cache(
+                cache,
+                replay_snapshot,
+                depth + 1,
+            ):
+                raise RuntimeError("native MTP cache rejected rollback")
+            _native_mtp_trace_stop(state.stats, "restore_ms", trace_t0)
         for draft_id, draft_lp in zip(state.draft_ids[:accepted], state.draft_lps[:accepted]):
             state.queue.append((draft_id, draft_lp, "draft"))
         correction = target_tokens[accepted]
         correction_id = int(target_ids[accepted])
         state.queue.append((correction_id, target_lps[accepted], "verify"))
-        confirmed_tokens = [state.next_main] + accepted_drafts
-        trace_t0 = _native_mtp_trace_start()
-        state.stats.replay_main_forwards += 1
-        replay_hidden = self._replay_native_mtp_confirmed_tokens(
-            request,
-            cache,
-            confirmed_tokens,
-        )
-        _native_mtp_trace_stop(state.stats, "replay_ms", trace_t0)
+        if not skipped_replay:
+            confirmed_tokens = [state.next_main] + accepted_drafts
+            trace_t0 = _native_mtp_trace_start()
+            state.stats.replay_main_forwards += 1
+            replay_hidden = self._replay_native_mtp_confirmed_tokens(
+                request,
+                cache,
+                confirmed_tokens,
+            )
+            _native_mtp_trace_stop(state.stats, "replay_ms", trace_t0)
         state.next_main = correction
         if state.ar_fallback_pending:
             _native_mtp_capture_head_cache_before_discard(

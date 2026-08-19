@@ -88,6 +88,19 @@ def register_qwen3_5_family_runtime() -> bool:
     if _REGISTERED:
         return True
 
+    # DFlash2 relies on mlx-vlm's current Qwen hybrid rollback contract. The
+    # older vendored family predates its batched GDN rollback and is markedly
+    # slower under speculative rejection. Keep upstream active for this
+    # explicitly loaded runtime; ordinary Qwen sessions retain the vendor.
+    try:
+        from ...speculative import is_dflash2_enabled
+
+        if is_dflash2_enabled():
+            logger.info("DFlash2 active: retaining upstream Qwen 3.5 VLM runtime")
+            return True
+    except Exception:
+        pass
+
     # Order matters: qwen3_5 first, because qwen3_5_moe's language.py imports
     # from ..qwen3_5 (which will be looked up as mlx_vlm.models.qwen3_5).
     ok_base = _install_vendored_submodule("mlx_vlm.models.qwen3_5", "qwen3_5")

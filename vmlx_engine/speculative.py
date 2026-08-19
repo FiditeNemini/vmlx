@@ -18,9 +18,11 @@ Usage:
     draft_model, draft_tokenizer = load_draft_model(config)
 """
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ class SpeculativeConfig:
 _spec_config: Optional[SpeculativeConfig] = None
 _draft_model: Any = None
 _draft_tokenizer: Any = None
+_spec_kind = "standard"
 
 
 def get_spec_config() -> Optional[SpeculativeConfig]:
@@ -75,6 +78,21 @@ def get_draft_model() -> Optional[Any]:
 def is_speculative_enabled() -> bool:
     """Check if speculative decoding is enabled and draft model is loaded."""
     return _spec_config is not None and _spec_config.enabled and _draft_model is not None
+
+
+def is_dflash2_enabled() -> bool:
+    return is_speculative_enabled() and _spec_kind == "dflash2"
+
+
+def _is_dflash2_model(model: str) -> bool:
+    path = Path(model).expanduser()
+    if path.is_dir():
+        try:
+            config = json.loads((path / "config.json").read_text())
+            return "DFlash2DraftModel" in (config.get("architectures") or [])
+        except Exception:
+            return False
+    return "dflash2" in model.lower()
 
 
 def external_speculative_incompatibility_reason(
@@ -129,7 +147,7 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
         ImportError: If mlx-lm is not installed
         ValueError: If model cannot be loaded
     """
-    global _spec_config, _draft_model, _draft_tokenizer
+    global _spec_config, _draft_model, _draft_tokenizer, _spec_kind
 
     _spec_config = config
 
@@ -137,22 +155,42 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
         logger.info("Speculative decoding not configured (no --speculative-model)")
         return None, None
 
-    try:
-        from mlx_lm import load as mlx_lm_load
-    except ImportError:
-        raise ImportError(
-            "mlx-lm is required for speculative decoding. "
-            "Install with: pip install mlx-lm"
-        )
-
     logger.info(f"Loading draft model for speculative decoding: {config.model}")
     start_time = time.time()
 
     try:
-        draft_model, draft_tokenizer = mlx_lm_load(
-            config.model,
-            tokenizer_config={"trust_remote_code": True},
-        )
+        if _is_dflash2_model(config.model):
+            import dflash.model_mlx as dflash_runtime
+            import mlx.core as mx
+            import mlx.nn as nn
+            from .patches.mlx_lm_mtp import set_mtp_active
+            from .patches.mlx_vlm_mtp import apply_mlx_vlm_mtp_patch
+
+            # DFlash2 reuses the Qwen text-RoPE and hybrid rollback hooks from
+            # the native-MTP adapter even though its own external draft wins.
+            set_mtp_active(True)
+            apply_mlx_vlm_mtp_patch()
+
+            original_download = dflash_runtime.snapshot_download
+            if Path(config.model).expanduser().is_dir():
+                dflash_runtime.snapshot_download = lambda model_id, **_kwargs: model_id
+            try:
+                draft_model = dflash_runtime.load_draft(config.model)
+            finally:
+                dflash_runtime.snapshot_download = original_download
+            nn.quantize(draft_model, group_size=64, bits=4)
+            mx.eval(draft_model.parameters())
+            draft_tokenizer = None
+            _spec_kind = "dflash2"
+            config.num_tokens = min(5, int(draft_model.config.block_size))
+        else:
+            from mlx_lm import load as mlx_lm_load
+
+            draft_model, draft_tokenizer = mlx_lm_load(
+                config.model,
+                tokenizer_config={"trust_remote_code": True},
+            )
+            _spec_kind = "standard"
     except Exception as e:
         logger.error(f"Failed to load draft model '{config.model}': {e}")
         config.enabled = False
@@ -182,12 +220,13 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
 
 def unload_draft_model() -> None:
     """Unload the draft model and free memory."""
-    global _draft_model, _draft_tokenizer, _spec_config
+    global _draft_model, _draft_tokenizer, _spec_config, _spec_kind
 
     if _draft_model is not None:
         logger.info("Unloading draft model")
         _draft_model = None
         _draft_tokenizer = None
+        _spec_kind = "standard"
         if _spec_config:
             _spec_config.enabled = False
 

@@ -4483,6 +4483,32 @@ class MLXMultimodalLM:
         except Exception as _mtp_e:
             logger.debug(f"Native MTP pre-load apply skipped: {_mtp_e}")
 
+        # DFlash2's measured Qwen3.8 path is the current upstream mlx-vlm
+        # runtime.  Do not send it through the JANG VLM loader below: that
+        # path is required for ordinary mixed-precision sessions, but its
+        # model construction adds substantial verifier overhead here even
+        # when it ultimately resolves the same upstream Qwen classes.
+        try:
+            from ..speculative import is_dflash2_enabled
+
+            if is_dflash2_enabled():
+                from mlx_vlm import load
+                from mlx_vlm.utils import load_config
+
+                logger.info(
+                    "Loading DFlash2 target through direct mlx-vlm path: %s",
+                    self.model_name,
+                )
+                self._patch_video_processor()
+                self.model, self.processor = load(resolved_name)
+                self.config = load_config(resolved_name)
+                _set_vlm_inference_mode(self.model)
+                self._loaded = True
+                logger.info("DFlash2 target loaded: %s", self.model_name)
+                return
+        except ImportError:
+            raise
+
         # JANG VL models: use JANG loader (handles mixed-precision + mlx-vlm sanitization)
         from ..utils.jang_loader import is_jang_model
         if is_jang_model(resolved_name):
@@ -5736,6 +5762,33 @@ class MLXMultimodalLM:
                 formatted_prompt = prompt
         else:
             formatted_prompt = prompt
+
+        if not all_images:
+            try:
+                from ..dflash2_runtime import stream_dflash2_generate
+                from ..speculative import get_draft_model, is_dflash2_enabled
+
+                if is_dflash2_enabled():
+                    tokenizer = (
+                        self.processor.tokenizer
+                        if hasattr(self.processor, "tokenizer")
+                        else self.processor
+                    )
+                    logger.info("DFlash2 text generation active for %s", self.model_name)
+                    yield from stream_dflash2_generate(
+                        self.model,
+                        tokenizer,
+                        get_draft_model(),
+                        formatted_prompt,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=float(kwargs.get("top_p", 1.0)),
+                        top_k=int(kwargs.get("top_k", 0)),
+                    )
+                    return
+            except ImportError:
+                logger.exception("DFlash2 runtime is unavailable")
+                raise
 
         prompt_cache = None
         prompt_cache_state = None

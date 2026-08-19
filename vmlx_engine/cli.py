@@ -261,10 +261,13 @@ def _speculative_incompatibility_reason(args) -> str | None:
     )
     if reason:
         return reason
+    from .speculative import _is_dflash2_model
+
+    dflash2 = _is_dflash2_model(getattr(args, "speculative_model", ""))
     try:
         from .api.utils import is_mllm_model
 
-        if is_mllm_model(args.model, force_mllm=getattr(args, "is_mllm", False), force_text_only=getattr(args, "force_text_only", False)):
+        if not dflash2 and is_mllm_model(args.model, force_mllm=getattr(args, "is_mllm", False), force_text_only=getattr(args, "force_text_only", False)):
             return "multimodal (VLM)"
     except Exception:
         return None
@@ -2391,7 +2394,8 @@ def serve_command(args):
         # Check if target model is MLLM
         from .api.utils import is_mllm_model
         is_mllm = is_mllm_model(args.model, force_mllm=getattr(args, 'is_mllm', False), force_text_only=getattr(args, 'force_text_only', False))
-        if is_mllm:
+        from .speculative import _is_dflash2_model
+        if is_mllm and not _is_dflash2_model(spec_model):
             print(
                 "  ⚠️  WARNING: Speculative decoding is incompatible with multimodal (VLM) models.")
             print(

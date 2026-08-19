@@ -421,7 +421,12 @@ function buildCommandPreview(
     else if (!dsv4Active && !effectiveSmelt && !m3Active && !omniBackendActive && detected?.isMultimodal && (userForceTextOnly || detected?.forceTextOnly)) {
         parts.push('--text-only')
     }
-    const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false
+    const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
+    const cacheStackActive = dsv4Active
+        ? true
+        : dflash2Speculative
+            ? false
+            : config.continuousBatching !== false
     if (cacheStackActive) parts.push('--continuous-batching')
     else parts.push('--no-continuous-batching')
 
@@ -560,9 +565,14 @@ function buildCommandPreview(
     if (config.servedModelName) parts.push('--served-model-name', config.servedModelName)
 
     // Speculative decoding mirrors sessions.ts: external draft models are only
-    // compatible with the non-VLM, non-DSV4, non-continuous-batching path.
+    // compatible with the non-VLM, non-DSV4, non-continuous-batching path,
+    // except for the explicit DFlash2 text bridge on Qwen VLM bundles.
     const loopedNanbeige = detected?.family === 'nanbeige' || detected?.architectureHints?.cacheSchema === 'looped_kv_v1'
-    const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige && !!config.speculativeModel
+    const compatibleExternalSpeculative = !!config.speculativeModel && (
+        dflash2Speculative
+            ? !dsv4Active && isVLM
+            : !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige
+    )
     if (compatibleExternalSpeculative) {
         parts.push('--speculative-model', config.speculativeModel)
         const numDraftTokens = finitePositiveInteger(config.numDraftTokens)
@@ -1759,6 +1769,25 @@ describe('Speculative Decoding', () => {
     it('sets --num-draft-tokens=20 (maximum)', () => {
         const out = preview({ continuousBatching: false, speculativeModel: 'draft-model', numDraftTokens: 20 })
         expect(getFlagValue(out, '--num-draft-tokens')).toBe('20')
+    })
+
+    it('routes a DFlash2 draft for a Qwen VLM through SimpleEngine', () => {
+        const out = preview(
+            {
+                speculativeModel: '/models/Qwen3.8-27B-DFlash2',
+                continuousBatching: true,
+            },
+            {
+                family: 'qwen3.5',
+                isMultimodal: true,
+                nativeMtp: { supported: true, depth: 3 },
+            },
+        )
+
+        expect(getFlagValue(out, '--speculative-model')).toBe('/models/Qwen3.8-27B-DFlash2')
+        expect(hasFlag(out, '--no-continuous-batching')).toBe(true)
+        expect(hasFlag(out, '--continuous-batching')).toBe(false)
+        expect(getFlagValue(out, '--native-mtp-depth')).toBe('3')
     })
 
     it('suppresses external speculative decoding for Nanbeige looped KV', () => {

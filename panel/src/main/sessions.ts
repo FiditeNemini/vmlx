@@ -4325,7 +4325,12 @@ export class SessionManager extends EventEmitter {
       args.push('--text-only')
     }
 
-    const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false
+    const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
+    const cacheStackActive = dsv4Active
+      ? true
+      : dflash2Speculative
+        ? false
+        : config.continuousBatching !== false
     if (cacheStackActive) {
       args.push('--continuous-batching')
     } else {
@@ -4660,11 +4665,15 @@ export class SessionManager extends EventEmitter {
     // Speculative decoding
     const externalSpeculativeModel = config.speculativeModel || ''
     const loopedNanbeige = detected.family === 'nanbeige' || detected.architectureHints?.cacheSchema === 'looped_kv_v1'
-    const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige && !!externalSpeculativeModel
+    const compatibleExternalSpeculative = !!externalSpeculativeModel && (
+      dflash2Speculative
+        ? !dsv4Active && isVLM
+        : !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige
+    )
     if (externalSpeculativeModel && !compatibleExternalSpeculative) {
       const reason = dsv4Active
         ? 'DSV4-Flash has a native composite-cache runtime'
-        : isVLM
+        : isVLM && !dflash2Speculative
         ? 'multimodal/VLM generation has no external draft verifier path'
         : cacheStackActive
         ? 'continuous batching is active'

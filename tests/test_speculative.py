@@ -19,8 +19,11 @@ Tests cover:
 """
 
 import argparse
+import json
+import tempfile
 import unittest
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 import sys
@@ -146,6 +149,24 @@ class TestGlobalState(unittest.TestCase):
         self.assertIsNone(model)
         self.assertIsNone(tokenizer)
         self.assertFalse(spec.is_speculative_enabled())
+
+    def test_dflash2_local_checkpoint_detection_uses_architecture(self):
+        from vmlx_engine.speculative import _is_dflash2_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "config.json").write_text(
+                json.dumps({"architectures": ["DFlash2DraftModel"]})
+            )
+            self.assertTrue(_is_dflash2_model(tmp))
+
+    def test_unrelated_local_checkpoint_is_not_dflash2(self):
+        from vmlx_engine.speculative import _is_dflash2_model
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "config.json").write_text(
+                json.dumps({"architectures": ["Qwen3ForCausalLM"]})
+            )
+            self.assertFalse(_is_dflash2_model(tmp))
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +524,19 @@ class TestCLIArgs(unittest.TestCase):
             _speculative_incompatibility_reason(args),
             "multimodal (VLM)",
         )
+
+    def test_cli_allows_dflash2_for_vlm(self):
+        """The matched DFlash2 bridge owns text-only Qwen VLM generation."""
+        from vmlx_engine.cli import _speculative_incompatibility_reason
+
+        args = SimpleNamespace(
+            speculative_model="Qwen3.8-27B-DFlash2",
+            continuous_batching=False,
+            model="vlm-target",
+            is_mllm=True,
+        )
+
+        self.assertIsNone(_speculative_incompatibility_reason(args))
 
 
 # ---------------------------------------------------------------------------

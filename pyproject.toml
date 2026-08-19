@@ -42,6 +42,9 @@ dependencies = [
     # affine q4 Metal kernel on M5/G17. All other shapes and hardware retain
     # stock MLX QuantizedLinear dispatch.
     "dflash-mlx==0.1.8",
+    # Matched Qwen3.8 DFlash2 draft runtime. Pin the audited upstream commit;
+    # PyPI's dflash-mlx package currently implements DFlash-1 checkpoints only.
+    "dflash @ git+https://github.com/z-lab/dflash.git@07ebd93db9f472af339b644bb70221ad8428328a",
     # MiniCPM-V-4.6 model class added in mlx-vlm 0.5.0; Gemma 4 remains covered.
     # Keep the floor Darwin-specific so optional Linux image-extra resolution
     # does not inherit mlx-vlm's macOS MLX wheel floor.

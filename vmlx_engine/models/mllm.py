@@ -6364,6 +6364,7 @@ class MLXMultimodalLM:
                 token_count = 0
                 emitted_per_cycle: list[int] = []
                 last_chunk = None
+                stats_logged = False
                 logger.info("DFlash2 text chat active for %s", self.model_name)
                 for chunk in stream_dflash2_generate(
                     self.model,
@@ -6380,6 +6381,27 @@ class MLXMultimodalLM:
                     if getattr(chunk, "accepted", None) is not None:
                         emitted_per_cycle.append(int(chunk.accepted))
                     last_chunk = chunk
+                    if getattr(chunk, "finish_reason", None) is not None:
+                        cycles = len(emitted_per_cycle)
+                        mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
+                        accepted_draft = sum(
+                            max(0, n - 1) for n in emitted_per_cycle
+                        )
+                        proposed_draft = cycles * 4
+                        logger.info(
+                            "DFlash2 generation stats: prompt_tokens=%d "
+                            "output_tokens=%d cycles=%d emitted_per_cycle=%.3f "
+                            "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
+                            "finish_reason=%s",
+                            int(getattr(chunk, "prompt_tokens", 0) or 0),
+                            token_count,
+                            cycles,
+                            mean_emitted,
+                            100.0 * accepted_draft / max(1, proposed_draft),
+                            float(getattr(chunk, "generation_tps", 0.0) or 0.0),
+                            chunk.finish_reason,
+                        )
+                        stats_logged = True
                     yield MLLMOutput(
                         text=getattr(chunk, "text", ""),
                         finish_reason=getattr(chunk, "finish_reason", None),
@@ -6387,22 +6409,23 @@ class MLXMultimodalLM:
                         completion_tokens=token_count,
                     )
 
-                cycles = len(emitted_per_cycle)
-                mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
-                accepted_draft = sum(max(0, n - 1) for n in emitted_per_cycle)
-                proposed_draft = cycles * 4
-                logger.info(
-                    "DFlash2 generation stats: prompt_tokens=%d output_tokens=%d "
-                    "cycles=%d emitted_per_cycle=%.3f draft_acceptance_estimate=%.1f%% "
-                    "generation_tps=%.2f finish_reason=%s",
-                    int(getattr(last_chunk, "prompt_tokens", 0) or 0),
-                    token_count,
-                    cycles,
-                    mean_emitted,
-                    100.0 * accepted_draft / max(1, proposed_draft),
-                    float(getattr(last_chunk, "generation_tps", 0.0) or 0.0),
-                    getattr(last_chunk, "finish_reason", None),
-                )
+                if not stats_logged:
+                    cycles = len(emitted_per_cycle)
+                    mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
+                    accepted_draft = sum(max(0, n - 1) for n in emitted_per_cycle)
+                    logger.info(
+                        "DFlash2 generation stats: prompt_tokens=%d output_tokens=%d "
+                        "cycles=%d emitted_per_cycle=%.3f "
+                        "draft_acceptance_estimate=%.1f%% generation_tps=%.2f "
+                        "finish_reason=%s",
+                        int(getattr(last_chunk, "prompt_tokens", 0) or 0),
+                        token_count,
+                        cycles,
+                        mean_emitted,
+                        100.0 * accepted_draft / max(1, cycles * 4),
+                        float(getattr(last_chunk, "generation_tps", 0.0) or 0.0),
+                        getattr(last_chunk, "finish_reason", None),
+                    )
                 return
 
         # Check cache for existing KV state (uses images as cache key)

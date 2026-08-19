@@ -44,6 +44,16 @@ def _count_llm_prompt_tokens(tokenizer: Any, prompt: str) -> int:
         return 0
 
 
+def _advance_mllm_completion_tokens(current: int, chunk: Any) -> int:
+    """Advance from a chunk's cumulative count, including multi-token chunks."""
+    reported = int(getattr(chunk, "completion_tokens", 0) or 0)
+    if reported > current:
+        return reported
+    if getattr(chunk, "text", ""):
+        return current + 1
+    return current
+
+
 class SimpleEngine(BaseEngine):
     """
     Simple engine for direct model calls.
@@ -1082,7 +1092,7 @@ class SimpleEngine(BaseEngine):
                         )
                         return
 
-                    token_count += 1
+                    token_count = _advance_mllm_completion_tokens(token_count, chunk)
                     new_text = chunk.text if hasattr(chunk, "text") else str(chunk)
                     accumulated_text += new_text
 

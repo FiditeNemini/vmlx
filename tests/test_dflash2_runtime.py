@@ -5,6 +5,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
+def test_simple_engine_counts_multi_token_mllm_chunks_cumulatively():
+    from vmlx_engine.engine.simple import _advance_mllm_completion_tokens
+
+    assert _advance_mllm_completion_tokens(
+        1, SimpleNamespace(text="four tokens", completion_tokens=5)
+    ) == 5
+    assert _advance_mllm_completion_tokens(
+        5, SimpleNamespace(text="", completion_tokens=5)
+    ) == 5
+    assert _advance_mllm_completion_tokens(
+        5, SimpleNamespace(text="legacy", completion_tokens=0)
+    ) == 6
+
+
 def test_qwen_mtp_model_wrapper_accepts_upstream_capture_contract():
     from vmlx_engine.patches.mlx_vlm_mtp.qwen35_vl import _patch_qwen_model
 

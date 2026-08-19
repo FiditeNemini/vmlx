@@ -8007,7 +8007,7 @@ class MLLMBatchGenerator:
                                 pass
                         mx.clear_cache()
                     if (_HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0) or (
-                        chunk_num > 0 and chunk_num % 32 == 0
+                        chunk_num > 0 and chunk_num % 8 == 0
                     ):
                         # Attribute the growth to actual cache slots instead of
                         # inferring it. The trace showed active memory reaching

@@ -180,3 +180,47 @@ class TestEnvGate:
         else:
             monkeypatch.setenv("VMLX_DFLASH2_PREFIX_REUSE", value)
         assert _prefix_reuse_enabled() is True
+
+
+class TestAssistantTagCut:
+    class _Tok:
+        def convert_tokens_to_ids(self, s):
+            assert s == "<|im_start|>"
+            return 100
+
+    def test_cuts_at_last_tag(self):
+        from vmlx_engine.dflash2_runtime import _assistant_tag_cut
+
+        # sys/user turns then the generation tag at index 6
+        prompt = [100, 1, 2, 100, 3, 4, 100, 5]
+        assert _assistant_tag_cut(self._Tok(), prompt, 0) == 6
+
+    def test_tag_inside_cached_region_is_rejected(self):
+        from vmlx_engine.dflash2_runtime import _assistant_tag_cut
+
+        prompt = [100, 1, 2, 100, 3]
+        assert _assistant_tag_cut(self._Tok(), prompt, 4) is None
+
+    def test_no_tag_returns_none(self):
+        from vmlx_engine.dflash2_runtime import _assistant_tag_cut
+
+        assert _assistant_tag_cut(self._Tok(), [1, 2, 3], 0) is None
+
+    def test_tokenizer_without_vocab_returns_none(self):
+        from vmlx_engine.dflash2_runtime import _assistant_tag_cut
+
+        assert _assistant_tag_cut(object(), [100, 1], 0) is None
+
+
+class TestDescribeMisses:
+    def test_reports_common_prefix_per_entry(self):
+        store = _DFlash2SessionStore(max_entries=4)
+        store.put(_entry("m", [1, 2, 3, 7, 8], cache_len=4))
+        store.put(_entry("m", [1, 2], cache_len=2))
+        out = store.describe_misses("m", [1, 2, 3, 9])
+        assert out == ["turn len=5 cached=4 common=3", "turn len=2 cached=2 common=2"]
+
+    def test_other_models_excluded(self):
+        store = _DFlash2SessionStore()
+        store.put(_entry("other", [1, 2, 3]))
+        assert store.describe_misses("m", [1, 2, 3]) == []

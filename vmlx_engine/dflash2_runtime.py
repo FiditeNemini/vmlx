@@ -179,6 +179,31 @@ class _DFlash2SessionStore:
             while len(self._entries) > self.max_entries:
                 self._entries.pop(0)
 
+    def describe_misses(self, model_key: Any, prompt_tokens: list[int]) -> list[str]:
+        """Diagnostics for a failed match: how far each stored entry agrees
+        with the prompt before diverging."""
+        with self._lock:
+            out = []
+            for entry in self._entries:
+                if entry["model_key"] != model_key:
+                    continue
+                stored = entry["tokens"]
+                common = 0
+                for a, b in zip(stored, prompt_tokens):
+                    if a != b:
+                        break
+                    common += 1
+                out.append(
+                    "%s len=%d cached=%d common=%d"
+                    % (
+                        entry.get("kind", "turn"),
+                        len(stored),
+                        int(entry["cache_len"]),
+                        common,
+                    )
+                )
+            return out
+
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
@@ -203,8 +228,26 @@ def _clone_cache_shells(cache: list, factory) -> Optional[list]:
                 dst.meta_state = src.meta_state
         return fresh
     except Exception:
-        logger.debug("DFlash2 prompt-boundary snapshot skipped", exc_info=True)
+        logger.info("DFlash2 cache clone failed", exc_info=True)
         return None
+
+
+def _assistant_tag_cut(tokenizer: Any, prompt_list: list[int], cache_len: int):
+    """Index of the last assistant generation tag (<|im_start|>) in the
+    prompt, or None. Snapshotting the cache BEFORE this position makes the
+    boundary entry immune to generation-tag / think-opener divergence
+    between this prompt and how the next prompt renders this turn."""
+    try:
+        tag = tokenizer.convert_tokens_to_ids("<|im_start|>")
+    except Exception:
+        return None
+    if tag is None or int(tag) < 0:
+        return None
+    tag = int(tag)
+    for i in range(len(prompt_list) - 1, -1, -1):
+        if prompt_list[i] == tag:
+            return i if cache_len < i < len(prompt_list) else None
+    return None
 
 
 def _checkpoint_correction(cycle_committed: int, cycle_kept: int):
@@ -272,6 +315,14 @@ def _stream_generate_resumable(
         if _prefix_reuse_enabled()
         else None
     )
+    if resume is None and _prefix_reuse_enabled():
+        misses = _SESSION_STORE.describe_misses(model_key, prompt_list)
+        if misses:
+            logger.info(
+                "DFlash2 prefix reuse miss for %d-token prompt: %s",
+                len(prompt_list),
+                "; ".join(misses),
+            )
 
     if resume is not None:
         target_cache = resume["target_cache"]
@@ -288,6 +339,17 @@ def _stream_generate_resumable(
     _target_can_trim = runtime.can_trim_prompt_cache(target_cache)
     _capture = None
 
+    # Snapshot the boundary BEFORE the assistant generation tag: the tag and
+    # any think-opener tokens after it are exactly what the next prompt
+    # renders differently, so a snapshot taken at the full prompt would
+    # diverge in its last few tokens and never match.
+    boundary_cut = (
+        _assistant_tag_cut(tokenizer, prompt_list, cache_len)
+        if _prefix_reuse_enabled()
+        else None
+    )
+    boundary_shells = None
+
     try:
         tic = time.perf_counter()
         with mx.stream(runtime.generation_stream):
@@ -296,9 +358,32 @@ def _stream_generate_resumable(
                 if all(t == "sliding_attention" for t in draft.config.layer_types)
                 else None
             )
-            logits, hidden, hidden_offset = runtime._prefill_target(
-                adapter, delta, target_cache, hidden_limit, prefill_step_size
-            )
+            if boundary_cut is not None:
+                _, hidden_a, _ = runtime._prefill_target(
+                    adapter,
+                    prompt_arr[cache_len:boundary_cut],
+                    target_cache,
+                    hidden_limit,
+                    prefill_step_size,
+                )
+                boundary_shells = _clone_cache_shells(
+                    target_cache, lambda: runtime.make_prompt_cache(adapter)
+                )
+                logits, hidden_b, _ = runtime._prefill_target(
+                    adapter,
+                    prompt_arr[boundary_cut:],
+                    target_cache,
+                    hidden_limit,
+                    prefill_step_size,
+                )
+                hidden = mx.concatenate([hidden_a, hidden_b], axis=1)
+                if hidden_limit is not None and hidden.shape[1] > hidden_limit:
+                    hidden = hidden[:, -hidden_limit:]
+                hidden_offset = int(delta.size) - int(hidden.shape[1])
+            else:
+                logits, hidden, hidden_offset = runtime._prefill_target(
+                    adapter, delta, target_cache, hidden_limit, prefill_step_size
+                )
             draft_spliced = False
             if stored_draft_cache is not None and hidden.shape[1] == delta.size:
                 gap_arr = resume.get("draft_hidden_gap") if resume else None
@@ -329,25 +414,30 @@ def _stream_generate_resumable(
                 prefill_elapsed,
             )
 
-        if _prefix_reuse_enabled():
-            # Prompt-boundary snapshot: freeze the cache at exactly the
-            # prompt so the NEXT turn can reuse the conversation history
-            # even when the template strips this turn's <think> block from
-            # it (which makes the end-of-turn entry unmatchable).
-            boundary = _clone_cache_shells(
-                target_cache, lambda: runtime.make_prompt_cache(adapter)
+        if boundary_shells is not None:
+            # Prompt-boundary snapshot: the conversation up to (not
+            # including) the assistant generation tag. The NEXT turn's
+            # prompt always contains this exact prefix, even when the
+            # template strips this turn's <think> block from history
+            # (which makes the end-of-turn entry unmatchable).
+            _SESSION_STORE.put(
+                {
+                    "model_key": model_key,
+                    "kind": "boundary",
+                    "tokens": prompt_list[:boundary_cut],
+                    "cache_len": int(boundary_cut),
+                    "target_cache": boundary_shells,
+                    "draft_cache": None,
+                    "draft_hidden_gap": None,
+                }
             )
-            if boundary is not None:
-                _SESSION_STORE.put(
-                    {
-                        "model_key": model_key,
-                        "tokens": list(prompt_list),
-                        "cache_len": len(prompt_list),
-                        "target_cache": boundary,
-                        "draft_cache": None,
-                        "draft_hidden_gap": None,
-                    }
-                )
+            logger.info(
+                "DFlash2 boundary snapshot stored: %d of %d prompt tokens",
+                int(boundary_cut),
+                len(prompt_list),
+            )
+        elif boundary_cut is not None:
+            logger.info("DFlash2 boundary snapshot skipped: cache clone failed")
 
         tic = time.perf_counter()
         token = sampler(logits[:, -1:])[0, 0].item()
@@ -394,6 +484,7 @@ def _stream_generate_resumable(
             _SESSION_STORE.put(
                 {
                     "model_key": model_key,
+                    "kind": "turn",
                     "tokens": confirmed,
                     "cache_len": len(confirmed) - 1,
                     "target_cache": target_cache,

@@ -3321,6 +3321,66 @@ def _native_mtp_sample_rows(
     ], sampled_ids
 
 
+def _native_mtp_sample_and_decide(
+    logits_2d: mx.array,
+    sampler: Callable[[mx.array], mx.array],
+    drafts: List[Any],
+    depth: int,
+):
+    """Sample the verify rows and decide acceptance in ONE device round-trip.
+
+    Returns ``(target_tokens, target_lps, target_ids, draft_ids, accepted)``.
+
+    Only the logits-consuming samplers (greedy / compact-top-k, i.e. exactly
+    the ones MTP runs under) take this path; stochastic samplers need the full
+    log-prob rows on the host anyway, so they keep the original two-step route.
+    """
+    sampled = _native_mtp_ensure_uint32(sampler(logits_2d))
+    bundle, _ = _native_mtp_decision_bundle(sampled, drafts, depth)
+    mx.eval(bundle)
+    flat = [int(v) for v in bundle.tolist()]
+    target_ids = flat[: depth + 1]
+    draft_ids = flat[depth + 1 : depth + 1 + depth]
+    accepted = flat[-1]
+    rows = int(sampled.shape[0])
+    target_tokens = [sampled[i : i + 1] for i in range(rows)]
+    return target_tokens, [None] * rows, target_ids, draft_ids, accepted
+
+
+def _native_mtp_decision_bundle(
+    sampled: mx.array,
+    drafts: List[Any],
+    depth: int,
+) -> Tuple[mx.array, int]:
+    """Build one small device array carrying the whole verify decision.
+
+    Recreates the shape of MTPLX's decode loop, which submits the verify and
+    then reads back a single tiny "decision bundle" holding the sampled tokens,
+    the drafts, and the accept flags -- the comparison happens ON DEVICE.
+
+    vMLX instead pulled the sampled ids to the host with ``.tolist()``, pulled
+    the draft ids back in a SECOND blocking eval, and then compared them in
+    Python.  Two device round-trips per cycle, each draining the queue and
+    stalling the host while the GPU idles.  At depth 1 that stall amortizes
+    over the fewest emitted tokens, which is exactly where it hurts most.
+
+    Layout: ``[sampled(depth+1) | drafts(depth) | accepted_count(1)]``.
+    ``accepted_count`` is the LEADING run of matches, computed with a cumulative
+    product so a mismatch zeroes everything after it.
+    """
+    draft_arr = mx.concatenate(
+        [_native_mtp_ensure_uint32(tok).reshape(1) for tok in drafts]
+    )
+    target_head = sampled[:depth].astype(mx.int32)
+    matches = (target_head == draft_arr.astype(mx.int32)).astype(mx.int32)
+    # cumprod: 1 until the first mismatch, 0 from there on -> sum == leading run
+    accepted = mx.cumprod(matches).sum().reshape(1).astype(mx.uint32)
+    bundle = mx.concatenate(
+        [sampled.astype(mx.uint32), draft_arr.astype(mx.uint32), accepted]
+    )
+    return bundle, depth
+
+
 # Speculative rejection sampling for MTP drafts.
 #
 # Exact-match acceptance is only the correct test under greedy decode.  At
@@ -10490,22 +10550,42 @@ class MLLMBatchGenerator:
 
         depth = len(state.drafts)
         trace_t0 = _native_mtp_trace_start()
-        # Fold the draft-id materialization into the sample sync: one blocking
-        # device round-trip per cycle instead of two.  VMLX_MTP_FUSED_SYNC=0
-        # restores the two-sync behaviour for A/B.
-        target_tokens, target_lps, target_ids = _native_mtp_sample_rows(
-            logits[:, -(depth + 1) :, :].reshape(depth + 1, -1),
-            sampler,
-            also_eval=(
-                tuple(state.drafts)
-                if (_NATIVE_MTP_FUSED_SYNC and state.drafts)
-                else ()
-            ),
+        # ONE device round-trip per cycle: sample the verify rows, compare them
+        # against the drafts, and count the leading accepted run -- all on
+        # device -- then read back a single small bundle.  The original path
+        # paid two blocking syncs (sampled ids here, draft ids in
+        # _native_mtp_materialize_draft_ids) and compared in Python with the
+        # GPU idle.  VMLX_MTP_FUSED_SYNC=0 restores it for A/B.
+        fused_decision = (
+            _NATIVE_MTP_FUSED_SYNC
+            and bool(state.drafts)
+            and _native_mtp_sampler_accepts_logits(sampler)
         )
-        _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
-        trace_t0 = _native_mtp_trace_start()
-        _native_mtp_materialize_draft_ids(state)
-        _native_mtp_trace_stop(state.stats, "materialize_ms", trace_t0)
+        precomputed_accepted = None
+        if fused_decision:
+            (
+                target_tokens,
+                target_lps,
+                target_ids,
+                fused_draft_ids,
+                precomputed_accepted,
+            ) = _native_mtp_sample_and_decide(
+                logits[:, -(depth + 1) :, :].reshape(depth + 1, -1),
+                sampler,
+                state.drafts,
+                depth,
+            )
+            state.draft_ids = fused_draft_ids
+            _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
+        else:
+            target_tokens, target_lps, target_ids = _native_mtp_sample_rows(
+                logits[:, -(depth + 1) :, :].reshape(depth + 1, -1),
+                sampler,
+            )
+            _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
+            trace_t0 = _native_mtp_trace_start()
+            _native_mtp_materialize_draft_ids(state)
+            _native_mtp_trace_stop(state.stats, "materialize_ms", trace_t0)
         # Measured 2026-08-15 (35B MXFP8 MTP, depth 2): with any cache tier
         # populated, per-cycle wall GROWS 19 -> ~30ms under normal async
         # execution while barrier-traced runs stay FLAT at ~21.6ms with the
@@ -10519,13 +10599,17 @@ class MLLMBatchGenerator:
             except Exception:
                 pass
 
-        accepted = _native_mtp_accepted_count(
-            state.draft_ids,
-            target_ids,
-            state.draft_lps,
-            target_lps,
-            sampler,
-        )
+        if precomputed_accepted is not None:
+            # Decided on device in the bundle above; no host-side comparison.
+            accepted = precomputed_accepted
+        else:
+            accepted = _native_mtp_accepted_count(
+                state.draft_ids,
+                target_ids,
+                state.draft_lps,
+                target_lps,
+                sampler,
+            )
 
         state.stats.cycles += 1
         state.stats.drafted_tokens += depth

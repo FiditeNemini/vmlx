@@ -8006,12 +8006,18 @@ class MLLMBatchGenerator:
                             except Exception:  # noqa: BLE001
                                 pass
                         mx.clear_cache()
-                    if _HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0:
+                    if (_HYBRID_PREFILL_MEM_TRACE and chunk_num % 8 == 0) or (
+                        chunk_num > 0 and chunk_num % 32 == 0
+                    ):
                         # Attribute the growth to actual cache slots instead of
                         # inferring it. The trace showed active memory reaching
                         # 94.86GB at 73,728 tokens while a 16-layer KV cache
                         # that size should be ~5GB, so ~90GB was unaccounted for
-                        # and every guess about WHERE was wrong.
+                        # and every guess about WHERE was wrong. Always-on at a
+                        # 32-chunk cadence: the dots3 span-retention hunt burned
+                        # a day because the by-kind census was invisible on the
+                        # spans that actually died (the trace env only reaches
+                        # the engine on a full app restart).
                         try:
                             _by_kind: dict = {}
                             for _slot in (cache or []):
@@ -8030,10 +8036,16 @@ class MLLMBatchGenerator:
                                 _agg = _by_kind.setdefault(_kind, [0, 0])
                                 _agg[0] += 1
                                 _agg[1] += _nb
+                            try:
+                                _census_active = mx.get_active_memory() / (1024**3)
+                            except Exception:  # noqa: BLE001
+                                _census_active = -1.0
                             logger.info(
-                                "hybrid-prefill-slots chunk=%d processed=%d %s",
+                                "hybrid-prefill-slots chunk=%d processed=%d "
+                                "active=%.2fGB %s",
                                 chunk_num,
                                 processed,
+                                _census_active,
                                 " ".join(
                                     f"{k}x{v[0]}={v[1] / (1024**3):.2f}GB"
                                     for k, v in sorted(_by_kind.items())

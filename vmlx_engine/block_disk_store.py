@@ -330,15 +330,23 @@ class BlockDiskStore:
         self._offthread_serialization_failures = 0
         self._pending_write_bytes = 0
         self._pending_write_byte_drops = 0
+        # 4GB, up from 1GB: a single multiturn store burst on a big model is
+        # ~1GB of detached payloads (measured live: dots3-note, 220 blocks at
+        # ~14k tokens), which saturated the old budget exactly — the burst
+        # TAIL then raced the sub-second admission wait against the writer's
+        # multi-second drain and lost, and each dropped ancestor poisoned its
+        # descendants. The budget bounds transient HOST RAM (numpy copies
+        # awaiting the writer), not Metal, and per-turn bursts are bounded by
+        # the DELTA being stored, so 4GB holds a whole burst with margin.
         _pending_env = os.environ.get("VMLX_BLOCK_DISK_PENDING_WRITE_BYTES")
         try:
             _pending_default = (
                 max(1, int(_pending_env))
                 if _pending_env
-                else 1024 * 1024 * 1024
+                else 4 * 1024 * 1024 * 1024
             )
         except (TypeError, ValueError):
-            _pending_default = 1024 * 1024 * 1024
+            _pending_default = 4 * 1024 * 1024 * 1024
         self._max_pending_write_bytes = (
             max(1, int(max_pending_write_bytes))
             if max_pending_write_bytes is not None

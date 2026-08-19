@@ -373,7 +373,12 @@ function buildCommandPreview(
     // is_mllm_model->False so the engine doesn't re-autodetect VL from config.json.
     parts.push('--text-only')
   }
-  const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false
+  const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
+  const cacheStackActive = dsv4Active
+    ? true
+    : dflash2Speculative
+      ? false
+      : config.continuousBatching !== false
   if (cacheStackActive) {
     parts.push('--continuous-batching')
   } else {
@@ -565,7 +570,12 @@ function buildCommandPreview(
   if ((config as any).chatTemplate) parts.push('--chat-template', '"..."')
 
   // Speculative decoding
-  const compatibleExternalSpeculative = !dsv4Active && !isVLM && !cacheStackActive && !!config.speculativeModel
+  const loopedNanbeige = detected?.family === 'nanbeige' || detected?.architectureHints?.cacheSchema === 'looped_kv_v1'
+  const compatibleExternalSpeculative = !!config.speculativeModel && (
+    dflash2Speculative
+      ? !dsv4Active && isVLM
+      : !dsv4Active && !isVLM && !cacheStackActive && !loopedNanbeige
+  )
   if (compatibleExternalSpeculative) {
     parts.push('--speculative-model', config.speculativeModel)
     const numDraftTokens = finitePositiveInteger(config.numDraftTokens)

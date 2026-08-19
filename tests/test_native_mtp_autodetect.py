@@ -2871,10 +2871,16 @@ class TestNativeMtpAutodetect:
             MLLMNativeMTPState,
             _native_mtp_maybe_adapt_depth,
         )
+        from vmlx_engine.metal import native_mtp_verify_qmm
 
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES", "8")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_D3_MIN_ACCEPT", "0.80")
+        monkeypatch.setattr(
+            native_mtp_verify_qmm,
+            "native_mtp_verify_qmm_active",
+            lambda: False,
+        )
         state = MLLMNativeMTPState(depth=3)
         # Depth gates need a REAL sample (48 drafts), not a cold-start window.
         # Measured live: true d2 acceptance was 74.6% while the first 12 cycles

@@ -105,6 +105,49 @@ class TestDoesNotRaise:
 
 
 class TestHysteresis:
+    def test_depth_three_gate_compares_joint_rate_to_joint_floor(self):
+        """A healthy conditional d3 rate must not be compared to 0.85 raw."""
+        # Joint d2=85%, joint d3=75%, so conditional d3=88.2% and passes.
+        state = _State(3, [200, 200, 200], [190, 170, 150])
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 3
+
+    def test_depth_three_gate_still_demotes_bad_conditional_rate(self):
+        # Joint d2=85%, joint d3=65%, so conditional d3=76.5% and fails.
+        state = _State(3, [200, 200, 200], [190, 170, 130])
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 2
+        assert state.depth_ceiling == 2
+
+    def test_accelerated_depth_three_waits_for_a_real_sample(self, monkeypatch):
+        from vmlx_engine.metal import native_mtp_verify_qmm
+
+        monkeypatch.setattr(
+            native_mtp_verify_qmm,
+            "native_mtp_verify_qmm_active",
+            lambda: True,
+        )
+        # The exact live cold window was 22/48 joint d3. The accelerated lane
+        # waits for 128 drafts because the completed run recovered to 582/767.
+        state = _State(3, [48, 48, 48], [45, 30, 22])
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 3
+
+    def test_accelerated_depth_three_uses_profitable_floor(self, monkeypatch):
+        from vmlx_engine.metal import native_mtp_verify_qmm
+
+        monkeypatch.setattr(
+            native_mtp_verify_qmm,
+            "native_mtp_verify_qmm_active",
+            lambda: True,
+        )
+        # Representative 128-cycle window: joint d2=64.8%, joint d3=47.7%,
+        # therefore conditional d3=73.5%. This remains profitable with the
+        # four-row verifier while independently satisfying the D2 gate.
+        state = _State(3, [128, 128, 128], [118, 83, 61])
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 3
+
     def test_ceiling_blocks_returning_to_a_failed_depth(self):
         """A depth demoted for poor acceptance is never retried."""
         state = _State(1, [200, 0, 0], [195, 0, 0], ceiling=1)

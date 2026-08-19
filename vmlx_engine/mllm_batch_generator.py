@@ -4377,24 +4377,46 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
         return
 
     target = current
+    accelerated_d3 = False
     if target >= 3:
         drafted_d3 = int(state.stats.drafted_by_depth[2]) if len(state.stats.drafted_by_depth) > 2 else 0
         rate_d3 = _native_mtp_depth_rate(state.stats, 3)
+        try:
+            from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_active
+
+            accelerated_d3 = native_mtp_verify_qmm_active()
+        except Exception:
+            accelerated_d3 = False
         min_d3 = _native_mtp_env_float(
-            0.85,
+            0.65 if accelerated_d3 else 0.85,
             "VMLINUX_NATIVE_MTP_D3_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D3_MIN_ACCEPT",
         )
         d3_min_sample = _native_mtp_env_int(
-            48,
+            128 if accelerated_d3 else 48,
             "VMLINUX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
             "VMLX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
             minimum=1,
         )
+        # accepted_by_depth[2] is a JOINT rate: d1, d2 and d3 all accepted.
+        # The configured floor is conditional on reaching d3, so scale it by
+        # the measured joint d2 rate exactly as the d2 gate is scaled by d1.
+        # Comparing the joint d3 rate directly with 0.85 permanently demoted
+        # healthy chains (Qwen3.8 measured 0.842 joint d2 / 0.759 joint d3,
+        # i.e. 90.1% conditional d3 acceptance). The accelerated verifier gets
+        # a longer sample and a 65% conditional floor: its 48-cycle cold window
+        # measured 45.8% joint, its 128-cycle window measured 73.6% conditional,
+        # and the same completed 767-cycle response settled at 90.1%. The lower
+        # floor is profitable only with the guarded four-row verifier; the stock
+        # verifier retains its conservative 85% floor.
+        rate_d2_for_d3_gate = _native_mtp_depth_rate(state.stats, 2)
+        joint_floor_d3 = min_d3 * (
+            rate_d2_for_d3_gate if rate_d2_for_d3_gate else 1.0
+        )
         if (
             drafted_d3 >= max(warmup, d3_min_sample)
             and rate_d3 is not None
-            and rate_d3 < min_d3
+            and rate_d3 < joint_floor_d3
         ):
             target = 2
     if target >= 2:
@@ -4416,7 +4438,7 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
             "VMLX_NATIVE_MTP_D2_MIN_ACCEPT",
         )
         depth_min_sample = _native_mtp_env_int(
-            48,
+            128 if (accelerated_d3 and current >= 3) else 48,
             "VMLINUX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
             "VMLX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
             minimum=1,
@@ -10720,12 +10742,15 @@ class MLLMBatchGenerator:
         verify_kwargs = {}
         if _NATIVE_MTP_SKIP_REPLAY and len(state.drafts) == 1:
             verify_kwargs["n_confirmed"] = 1
-        output = self.language_model(
-            inputs[None, :],
-            cache=cache,
-            return_hidden=True,
-            **verify_kwargs,
-        )
+        from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_scope
+
+        with native_mtp_verify_qmm_scope():
+            output = self.language_model(
+                inputs[None, :],
+                cache=cache,
+                return_hidden=True,
+                **verify_kwargs,
+            )
         if isinstance(output, tuple):
             logits, hidden = output
         elif hasattr(output, "logits") and hasattr(output, "hidden_states"):

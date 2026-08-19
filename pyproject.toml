@@ -27,13 +27,21 @@ classifiers = [
 ]
 
 dependencies = [
-    "mlx>=0.29.0",
+    # MLX 0.32.1 is the first release where the M5/G17 four-row verifier is
+    # both numerically correct and faster than stock QMM. Keep non-Darwin's
+    # existing floor because this Metal-only optimization cannot run there.
+    "mlx>=0.32.1; sys_platform == 'darwin'",
+    "mlx>=0.29.0; sys_platform != 'darwin'",
     "mlx-lm>=0.31.3",  # 0.31.3 is the release-bundle floor for current JANG
                        # families: ArraysCache.lengths/advance, SequenceStateMachine,
                        # LRUPromptCache, native Gemma 4 text MoE, and the baseline
                        # model registry that vMLX patches with bailing_hybrid for
                        # Ling. The release app separately pins a compatible
                        # MLX-Audio build in panel/scripts/bundle-python.sh.
+    # Native-MTP target verification uses dflash-mlx's Apache-2.0 four-row
+    # affine q4 Metal kernel on M5/G17. All other shapes and hardware retain
+    # stock MLX QuantizedLinear dispatch.
+    "dflash-mlx==0.1.8",
     # MiniCPM-V-4.6 model class added in mlx-vlm 0.5.0; Gemma 4 remains covered.
     # Keep the floor Darwin-specific so optional Linux image-extra resolution
     # does not inherit mlx-vlm's macOS MLX wheel floor.

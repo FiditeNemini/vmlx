@@ -584,9 +584,8 @@ function buildCommandPreview(
     }
   }
 
-  // Native in-model MTP mirrors sessions.ts. Auto is the default so a fresh
-  // session preserves generation_config/jang_config sampling. Deterministic is
-  // an explicit server-level override for users who prefer the native MTP path.
+  // Native in-model MTP mirrors sessions.ts. Auto pins omitted request
+  // sampling to greedy defaults so the preserved MTP head actually runs.
   const nativeMtp = detected?.nativeMtp
   if (!dsv4Active && nativeMtp?.supported) {
     const mode = (config as any).nativeMtpMode || 'auto'
@@ -598,7 +597,7 @@ function buildCommandPreview(
         : nativeMtp.depth
       const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 3))
       parts.push('--native-mtp-depth', depth.toString())
-      parts.push('--native-mtp-sampling-policy', mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only')
+      parts.push('--native-mtp-sampling-policy', 'deterministic-defaults')
     }
   }
 

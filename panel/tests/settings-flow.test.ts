@@ -591,7 +591,7 @@ function buildCommandPreview(
                 : detected.nativeMtp.depth
             const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(detected.nativeMtp.depth) || 3))
             parts.push('--native-mtp-depth', String(depth))
-            parts.push('--native-mtp-sampling-policy', mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only')
+            parts.push('--native-mtp-sampling-policy', 'deterministic-defaults')
         }
     }
 
@@ -1830,11 +1830,11 @@ describe('Native MTP', () => {
         },
     }
 
-    it('defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating', () => {
+    it('defaults native-MTP bundles to deterministic sampling so MTP actually runs', () => {
         const out = preview({}, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('2')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('deterministic-defaults')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)

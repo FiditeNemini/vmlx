@@ -3190,6 +3190,11 @@ class MLLMNativeMTPState:
     head_chain_pairs: int = 0
     # In-flight prefetched verify: {snapshot, logits, hidden, n_inputs} or None.
     pending_verify: Optional[Dict[str, Any]] = None
+    # Runtime cost telemetry (wall-clock, trace-free): the seed forward is a
+    # true AR step, and the span since the first verify cycle divided by
+    # emitted tokens is the real MTP cost per token.
+    ar_step_ms: float = 0.0
+    cycle_span_start: float = 0.0
 
 
 @dataclass
@@ -4459,6 +4464,57 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
 
     if _native_mtp_maybe_cost_fallback(request_id, state, current):
         return
+
+    # Runtime cost gate (default ON, wall-clock, no trace needed).  Acceptance
+    # gates cannot catch a request whose CYCLE COST exploded while acceptance
+    # stayed healthy — measured live on dots3: a prefix restored from
+    # block-disk (mixed-SWA lane) keeps ~60-90% acceptance but MTP decodes at
+    # 11.7-12.2 t/s while plain AR on the SAME restored cache does 35.1.  The
+    # seed forward is a true AR step; if MTP's measured ms-per-emitted-token
+    # exceeds it by the margin over a real sample, AR is simply faster and the
+    # request falls back.  Runtime measurement choosing the faster path.
+    if _native_mtp_env_flag(
+        True,
+        "VMLINUX_NATIVE_MTP_RUNTIME_COST_GATE",
+        "VMLX_NATIVE_MTP_RUNTIME_COST_GATE",
+    ):
+        ar_ms = float(getattr(state, "ar_step_ms", 0.0) or 0.0)
+        span_start = float(getattr(state, "cycle_span_start", 0.0) or 0.0)
+        cycles_done = int(state.stats.cycles)
+        cost_sample = _native_mtp_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES",
+            "VMLX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES",
+            minimum=8,
+        )
+        margin = _native_mtp_env_float(
+            1.25,
+            "VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+            "VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+        )
+        if ar_ms > 0.0 and span_start > 0.0 and cycles_done >= cost_sample:
+            emitted = cycles_done + int(state.stats.accepted_tokens)
+            span_ms = (time.perf_counter() - span_start) * 1000.0
+            if emitted > 0 and span_ms > 0.0:
+                mtp_ms_per_tok = span_ms / emitted
+                if mtp_ms_per_tok > ar_ms * margin:
+                    state.depth = 1
+                    state.ar_fallback_pending = True
+                    state.ar_fallback_reason = (
+                        f"runtime_cost mtp_ms_per_tok={mtp_ms_per_tok:.1f}"
+                        f">ar_step_ms={ar_ms:.1f}x{margin:.2f}"
+                    )
+                    logger.info(
+                        "MLLM MTP[%s] adaptive depth D%d -> AR after cycles=%d "
+                        "runtime cost %.1fms/token vs AR %.1fms (margin %.2f)",
+                        request_id,
+                        current,
+                        cycles_done,
+                        mtp_ms_per_tok,
+                        ar_ms,
+                        margin,
+                    )
+                    return
 
     # Default ON since 2026-08-15: Qwen3.8-27B-JANG_4D served at temp 0 ran
     # its 58.6% d1-acceptance head for entire requests (483 cycles, 200
@@ -10639,6 +10695,7 @@ class MLLMBatchGenerator:
 
         sampler = self._make_request_sampler(request)
         seed_main_forwards = 1
+        _seed_t0 = time.perf_counter()
         output = self.language_model(
             first_tok[:, None],
             cache=cache,
@@ -10653,6 +10710,12 @@ class MLLMBatchGenerator:
             return False
 
         next_tok, next_lp = _native_mtp_sample_one(logits[:, -1, :], sampler)
+        # Materialize the seed forward NOW so the wall below is a real AR step,
+        # not graph-build time.  First measurement shipped without this eval
+        # and read 2.3ms for a ~30ms forward — a baseline that would demote
+        # perfectly healthy MTP.
+        mx.eval(next_tok)
+        _seed_ar_ms = (time.perf_counter() - _seed_t0) * 1000.0
         mtp_cache = self.language_model.make_mtp_cache()
         depth = _native_mtp_depth_for_request(request)
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
@@ -10672,6 +10735,8 @@ class MLLMBatchGenerator:
             draft_ids=draft_ids,
             depth=depth,
             head_chain_pairs=max(0, len(drafts) - 1),
+            ar_step_ms=_seed_ar_ms,
+            cycle_span_start=time.perf_counter(),
         )
         state.stats.seed_main_forwards += seed_main_forwards
         state.stats.mtp_forwards += len(drafts)

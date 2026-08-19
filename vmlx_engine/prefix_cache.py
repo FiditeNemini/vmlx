@@ -1421,12 +1421,24 @@ def _block_has_complete_dsv4_append_safe_anchor(
 
 
 def _to_numpy_tree(obj):
-    """Convert nested MLX-array state to numpy, preserving tuple/list shape."""
+    """Convert nested MLX-array state to numpy, preserving tuple/list shape.
+
+    MLX >= 0.32 removed the PEP-3118 buffer shim for bfloat16, so
+    ``np.array(bf16)`` raises "'bfloat16' is not a valid PEP 3118 buffer
+    format string" and the ENTIRE store silently fails (observed live:
+    blocks_on_disk stayed 0 on every model after the 0.32.1 upgrade).  Cast
+    through float32 — value-exact for bf16, and the loaders already restore
+    the original dtype via astype.
+    """
     import numpy as np
 
     if obj is None:
         return None
     if hasattr(obj, "__array__"):
+        if hasattr(obj, "dtype") and "bfloat16" in str(getattr(obj, "dtype", "")):
+            import mlx.core as mx
+
+            return np.array(obj.astype(mx.float32))
         return np.array(obj)
     if isinstance(obj, tuple):
         return tuple(_to_numpy_tree(x) for x in obj)
@@ -2152,6 +2164,12 @@ def _numpy_block_slice(
                     np_state = []
                     for s in state:
                         if hasattr(s, '__array__'):
+                            if hasattr(s, "dtype") and "bfloat16" in str(
+                                getattr(s, "dtype", "")
+                            ):
+                                # MLX >= 0.32: np.array(bf16) raises; cast
+                                # through fp32 (value-exact for bf16).
+                                s = s.astype(mx.float32)
                             np_state.append(np.array(s))
                         else:
                             np_state.append(s)

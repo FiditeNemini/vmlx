@@ -19,6 +19,7 @@ class _Stats:
         self.drafted_by_depth = [drafted, 0, 0]
         self.accepted_by_depth = [accepted, 0, 0]
         self.mtp_forwards = drafted
+        self.accepted_tokens = accepted
 
 
 class _State:
@@ -97,3 +98,50 @@ def test_one_short_of_the_floor_does_not_demote():
     state = _State(drafted=63, accepted=20)
     gen._native_mtp_maybe_adapt_depth("req-just-under", state)
     assert state.ar_fallback_pending is False
+
+
+class TestRuntimeCostGate:
+    """Wall-clock cost gate: demote when MTP is measurably slower than AR.
+
+    Live case: a dots3 prefix restored from block-disk keeps healthy
+    acceptance but MTP decodes at ~12 t/s while plain AR on the same restored
+    cache does 35.1. Acceptance gates cannot see that; the cost gate can.
+    """
+
+    def _state(self, ar_ms, span_ago_s, cycles, accepted):
+        import time
+
+        state = _State(drafted=cycles, accepted=accepted)
+        state.ar_step_ms = ar_ms
+        state.cycle_span_start = time.perf_counter() - span_ago_s
+        return state
+
+    def test_expensive_cycles_fall_back(self):
+        # 60 cycles + 40 accepted = 100 tokens over 8s = 80ms/token vs AR 28ms
+        state = self._state(ar_ms=28.0, span_ago_s=8.0, cycles=60, accepted=40)
+        gen._native_mtp_maybe_adapt_depth("req-cost", state)
+        assert state.ar_fallback_pending is True
+        assert "runtime_cost" in (state.ar_fallback_reason or "")
+
+    def test_profitable_cycles_stay(self):
+        # 100 tokens over 2.5s = 25ms/token vs AR 40ms -> keep MTP
+        state = self._state(ar_ms=40.0, span_ago_s=2.5, cycles=60, accepted=40)
+        gen._native_mtp_maybe_adapt_depth("req-fast", state)
+        assert state.ar_fallback_pending is False
+
+    def test_needs_a_real_sample(self):
+        state = self._state(ar_ms=28.0, span_ago_s=8.0, cycles=20, accepted=10)
+        gen._native_mtp_maybe_adapt_depth("req-small", state)
+        assert state.ar_fallback_pending is False
+
+    def test_no_baseline_no_gate(self):
+        """Old states without the seed timing must never trip the gate."""
+        state = self._state(ar_ms=0.0, span_ago_s=8.0, cycles=60, accepted=40)
+        gen._native_mtp_maybe_adapt_depth("req-nobase", state)
+        assert state.ar_fallback_pending is False
+
+    def test_disabled_by_env(self, monkeypatch):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_RUNTIME_COST_GATE", "0")
+        state = self._state(ar_ms=28.0, span_ago_s=8.0, cycles=60, accepted=40)
+        gen._native_mtp_maybe_adapt_depth("req-off", state)
+        assert state.ar_fallback_pending is False

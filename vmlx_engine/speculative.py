@@ -95,6 +95,25 @@ def _is_dflash2_model(model: str) -> bool:
     return "dflash2" in model.lower()
 
 
+def resolve_num_draft_tokens(model: str, requested: int) -> int:
+    """Return the verifier width the selected draft runtime will actually use."""
+    if not _is_dflash2_model(model):
+        return requested
+
+    path = Path(model).expanduser()
+    if path.is_dir():
+        try:
+            config = json.loads((path / "config.json").read_text())
+            return min(5, int(config["block_size"]))
+        except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+            pass
+
+    # DFlash2's published verifier contract is a five-token block. The loaded
+    # local config is authoritative when available; this fallback lets the CLI
+    # report the effective width before a Hub checkpoint has been downloaded.
+    return 5
+
+
 def external_speculative_incompatibility_reason(
     target_model_name: str | None,
 ) -> str | None:
@@ -182,7 +201,10 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
             mx.eval(draft_model.parameters())
             draft_tokenizer = None
             _spec_kind = "dflash2"
-            config.num_tokens = min(5, int(draft_model.config.block_size))
+            config.num_tokens = resolve_num_draft_tokens(
+                config.model,
+                config.num_tokens,
+            )
         else:
             from mlx_lm import load as mlx_lm_load
 

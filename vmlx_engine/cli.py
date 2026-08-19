@@ -2076,9 +2076,15 @@ def serve_command(args):
         print("  Reasoning: Use --reasoning-parser to enable")
     spec_model = getattr(args, 'speculative_model', None)
     if spec_model:
+        from .speculative import resolve_num_draft_tokens
+
+        effective_draft_tokens = resolve_num_draft_tokens(
+            spec_model,
+            getattr(args, 'num_draft_tokens', 3),
+        )
         print(f"  External speculative decoding: ENABLED")
         print(f"    Draft model: {spec_model}")
-        print(f"    Draft tokens per step: {getattr(args, 'num_draft_tokens', 3)}")
+        print(f"    Draft tokens per step: {effective_draft_tokens}")
     else:
         print("  External speculative decoding: Use --speculative-model to enable")
     try:

@@ -1,8 +1,26 @@
 from __future__ import annotations
 
 import inspect
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
+
+
+def test_dflash2_effective_width_comes_from_checkpoint_config(tmp_path):
+    from vmlx_engine.speculative import resolve_num_draft_tokens
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "architectures": ["DFlash2DraftModel"],
+        "block_size": 5,
+    }))
+
+    assert resolve_num_draft_tokens(str(tmp_path), requested=3) == 5
+
+
+def test_standard_draft_preserves_requested_width():
+    from vmlx_engine.speculative import resolve_num_draft_tokens
+
+    assert resolve_num_draft_tokens("ordinary-draft", requested=3) == 3
 
 
 def test_simple_engine_counts_multi_token_mllm_chunks_cumulatively():

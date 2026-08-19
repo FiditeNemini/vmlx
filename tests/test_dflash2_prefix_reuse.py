@@ -18,10 +18,11 @@ from vmlx_engine.dflash2_runtime import (
 )
 
 
-def _entry(model_key, tokens, tag=None):
+def _entry(model_key, tokens, tag=None, cache_len=None):
     return {
         "model_key": model_key,
         "tokens": list(tokens),
+        "cache_len": len(tokens) - 1 if cache_len is None else cache_len,
         "target_cache": tag or object(),
         "draft_cache": None,
     }
@@ -76,6 +77,37 @@ class TestTakeMatching:
         got = store.take_matching("m", [1, 2, 3, 4, 5])
         assert got["target_cache"] == "long"
 
+
+class TestPromptBoundarySnapshots:
+    """Boundary entries have cache_len == len(tokens): the whole prompt is
+    forwarded but no output token exists yet. They rescue reuse when the
+    template strips the previous turn's <think> block from history."""
+
+    def test_boundary_hit_needs_a_nonempty_delta(self):
+        store = _DFlash2SessionStore()
+        store.put(_entry("m", [1, 2, 3], cache_len=3))
+        # Prompt identical to the cached positions: nothing left to prefill,
+        # so this must miss (the loop needs at least one token for logits).
+        assert store.take_matching("m", [1, 2, 3]) is None
+        store.put(_entry("m", [1, 2, 3], cache_len=3))
+        assert store.take_matching("m", [1, 2, 3, 4]) is not None
+
+    def test_end_of_turn_beats_boundary_when_it_covers_more(self):
+        store = _DFlash2SessionStore(max_entries=4)
+        store.put(_entry("m", [1, 2, 3], cache_len=3, tag="boundary"))
+        store.put(_entry("m", [1, 2, 3, 4, 5], cache_len=4, tag="turn"))
+        got = store.take_matching("m", [1, 2, 3, 4, 5, 6])
+        assert got["target_cache"] == "turn"
+
+    def test_boundary_wins_when_think_strip_breaks_the_turn_entry(self):
+        """The realistic reasoning-template shape: the end-of-turn entry
+        contains think tokens (7, 8) the next prompt does not."""
+        store = _DFlash2SessionStore(max_entries=4)
+        store.put(_entry("m", [1, 2, 3], cache_len=3, tag="boundary"))
+        store.put(_entry("m", [1, 2, 3, 7, 8, 9], cache_len=5, tag="turn"))
+        got = store.take_matching("m", [1, 2, 3, 9, 4, 5])
+        assert got["target_cache"] == "boundary"
+
     def test_empty_store_misses(self):
         assert _DFlash2SessionStore().take_matching("m", [1, 2]) is None
 
@@ -83,12 +115,19 @@ class TestTakeMatching:
 class TestLru:
     def test_cap_evicts_oldest(self):
         store = _DFlash2SessionStore(max_entries=2)
-        store.put(_entry("m", [1]))
-        store.put(_entry("m", [2]))
-        store.put(_entry("m", [3]))
-        assert store.take_matching("m", [1, 9]) is None
-        assert store.take_matching("m", [2, 9]) is not None
-        assert store.take_matching("m", [3, 9]) is not None
+        store.put(_entry("m", [1, 1]))
+        store.put(_entry("m", [2, 2]))
+        store.put(_entry("m", [3, 3]))
+        assert store.take_matching("m", [1, 1, 9]) is None
+        assert store.take_matching("m", [2, 2, 9]) is not None
+        assert store.take_matching("m", [3, 3, 9]) is not None
+
+    def test_zero_cached_positions_never_matches(self):
+        """A single-token conversation caches nothing; resuming it would be
+        a full prefill pretending to be a hit."""
+        store = _DFlash2SessionStore()
+        store.put(_entry("m", [7]))
+        assert store.take_matching("m", [7, 9]) is None
 
     def test_clear(self):
         store = _DFlash2SessionStore()

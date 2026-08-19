@@ -134,32 +134,41 @@ def _adapter_for(model: Any) -> _TargetAdapter:
 class _DFlash2SessionStore:
     """LRU store of finished-turn generation state, newest last.
 
-    Each entry: ``tokens`` (full confirmed token list; the target cache holds
-    exactly ``tokens[:-1]`` forwarded positions), ``target_cache``,
-    ``draft_cache`` (or None when its offset could not be aligned), and
-    ``model_key`` guarding against cross-model token-id collisions.
+    Each entry: ``tokens`` (the token list this entry represents),
+    ``cache_len`` (how many of those tokens the target cache actually holds:
+    len(tokens)-1 for end-of-turn entries because the last emitted token is
+    sampled but never forwarded, len(tokens) for prompt-boundary snapshots),
+    ``target_cache``, ``draft_cache`` (or None when its offset could not be
+    aligned), and ``model_key`` guarding cross-model token-id collisions.
+
+    Prompt-boundary snapshots exist because reasoning templates (Qwen3)
+    strip the previous turn's <think> block from history, so the end-of-turn
+    conversation is never a prefix of the next prompt. The prompt itself,
+    up to the latest user message, always is.
     """
 
-    def __init__(self, max_entries: int = 2):
+    def __init__(self, max_entries: int = 4):
         self.max_entries = int(max_entries)
         self._entries: list[dict] = []
         self._lock = threading.Lock()
 
     def take_matching(self, model_key: Any, prompt_tokens: list[int]) -> Optional[dict]:
-        """Pop and return the longest stored conversation that is a prefix of
-        ``prompt_tokens``. Ownership transfers to the caller."""
+        """Pop and return the entry covering the most cached positions whose
+        tokens are a prefix of ``prompt_tokens`` and whose cache leaves a
+        non-empty delta to prefill. Ownership transfers to the caller."""
         with self._lock:
             best_i = -1
-            best_len = 0
+            best_cached = 0
             for i, entry in enumerate(self._entries):
                 if entry["model_key"] != model_key:
                     continue
                 stored = entry["tokens"]
-                if len(stored) > len(prompt_tokens):
+                cached = int(entry["cache_len"])
+                if len(stored) > len(prompt_tokens) or cached >= len(prompt_tokens):
                     continue
-                if prompt_tokens[: len(stored)] == stored and len(stored) > best_len:
+                if prompt_tokens[: len(stored)] == stored and cached > best_cached:
                     best_i = i
-                    best_len = len(stored)
+                    best_cached = cached
             if best_i < 0:
                 return None
             return self._entries.pop(best_i)
@@ -176,6 +185,26 @@ class _DFlash2SessionStore:
 
 
 _SESSION_STORE = _DFlash2SessionStore()
+
+
+def _clone_cache_shells(cache: list, factory) -> Optional[list]:
+    """Duplicate a prompt cache as fresh cache objects sharing the same
+    (immutable) state arrays via the mlx-lm state/meta_state protocol.
+
+    Used to freeze the target cache at the prompt boundary before decode
+    mutates it. Returns None if any layer does not round-trip.
+    """
+    try:
+        fresh = factory()
+        for dst, src in zip(fresh, cache):
+            dst.state = src.state
+            src_meta = getattr(type(src), "meta_state", None)
+            if isinstance(src_meta, property) and src_meta.fset is not None:
+                dst.meta_state = src.meta_state
+        return fresh
+    except Exception:
+        logger.debug("DFlash2 prompt-boundary snapshot skipped", exc_info=True)
+        return None
 
 
 def _checkpoint_correction(cycle_committed: int, cycle_kept: int):
@@ -246,7 +275,7 @@ def _stream_generate_resumable(
 
     if resume is not None:
         target_cache = resume["target_cache"]
-        cache_len = len(resume["tokens"]) - 1
+        cache_len = int(resume["cache_len"])
         delta = prompt_arr[cache_len:]
         stored_draft_cache = resume["draft_cache"]
     else:
@@ -300,6 +329,26 @@ def _stream_generate_resumable(
                 prefill_elapsed,
             )
 
+        if _prefix_reuse_enabled():
+            # Prompt-boundary snapshot: freeze the cache at exactly the
+            # prompt so the NEXT turn can reuse the conversation history
+            # even when the template strips this turn's <think> block from
+            # it (which makes the end-of-turn entry unmatchable).
+            boundary = _clone_cache_shells(
+                target_cache, lambda: runtime.make_prompt_cache(adapter)
+            )
+            if boundary is not None:
+                _SESSION_STORE.put(
+                    {
+                        "model_key": model_key,
+                        "tokens": list(prompt_list),
+                        "cache_len": len(prompt_list),
+                        "target_cache": boundary,
+                        "draft_cache": None,
+                        "draft_hidden_gap": None,
+                    }
+                )
+
         tic = time.perf_counter()
         token = sampler(logits[:, -1:])[0, 0].item()
         tokens.append(token)
@@ -346,6 +395,7 @@ def _stream_generate_resumable(
                 {
                     "model_key": model_key,
                     "tokens": confirmed,
+                    "cache_len": len(confirmed) - 1,
                     "target_cache": target_cache,
                     "draft_cache": store_draft,
                     "draft_hidden_gap": gap_arr if store_draft is not None else None,

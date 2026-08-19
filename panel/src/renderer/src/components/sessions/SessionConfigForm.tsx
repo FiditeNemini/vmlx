@@ -357,6 +357,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const zayaCcaActive = isZayaCcaFamily(normalizedDetectedFamily)
   const turboQuantActive = !!detectedIsTurboQuant
   const multimodalActive = !dsv4Active && !detectedForceTextOnly && (!!detectedIsMultimodal || config.isMultimodal === true)
+  const dflash2Speculative = /dflash2/i.test(config.speculativeModel || '')
   const hybridCacheActive =
     detectedCacheType === 'hybrid' ||
     detectedCacheType === 'mamba' ||
@@ -1744,10 +1745,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {/* Speculative Decoding */}
       <Section title={t('sessions.config.specDecoding')} expanded={expandedSections.specDecode} onToggle={() => toggleSection('specDecode')} hidden={isImage || dsv4Active}>
         <PerformanceHint text={t('sessions.config.specDecodeHint')} />
-        {config.continuousBatching && <IncompatWarning text={t('sessions.config.specDecodeIncompatBatching')} />}
-        {multimodalActive && <IncompatWarning text={t('sessions.config.specDecodeIncompatVlm')} />}
+        {config.continuousBatching && !dflash2Speculative && !multimodalActive && <IncompatWarning text={t('sessions.config.specDecodeIncompatBatching')} />}
+        {multimodalActive && config.speculativeModel && !dflash2Speculative && <IncompatWarning text={t('sessions.config.specDecodeIncompatVlm')} />}
         <Field label={t('sessions.config.draftModel')} tooltip={t('sessions.config.draftModelTooltip')}>
-          <input type="text" value={config.speculativeModel} onChange={e => onChange('speculativeModel', e.target.value)} placeholder={t('sessions.config.specModelPlaceholder')} className="cfg-input" disabled={config.continuousBatching || multimodalActive || dsv4Active} />
+          <input type="text" value={config.speculativeModel} onChange={e => onChange('speculativeModel', e.target.value)} placeholder={t('sessions.config.specModelPlaceholder')} className="cfg-input" disabled={dsv4Active || (!multimodalActive && config.continuousBatching)} />
         </Field>
         {config.speculativeModel && (
           <SliderField
@@ -1759,7 +1760,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             max={20}
             step={1}
             defaultValue={DEFAULT_CONFIG.numDraftTokens}
-            disabled={config.continuousBatching || multimodalActive || dsv4Active}
+            disabled={dsv4Active || (!dflash2Speculative && (config.continuousBatching || multimodalActive))}
           />
         )}
       </Section>

@@ -655,7 +655,22 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
     sessions = Path("panel/src/main/sessions.ts").read_text()
 
     for source in (settings, sessions):
-        assert "const cacheStackActive = dsv4Active ? true : config.continuousBatching !== false" in source
+        # DFlash2 speculative sessions run the SimpleEngine lane, which
+        # deliberately keeps the paged cache stack off (its multiturn reuse
+        # lives in the dflash2_runtime session store instead).
+        assert (
+            "const cacheStackActive = dsv4Active\n"
+            "      ? true\n"
+            "      : dflash2Speculative\n"
+            "        ? false\n"
+            "        : config.continuousBatching !== false"
+        ) in source or (
+            "const cacheStackActive = dsv4Active\n"
+            "    ? true\n"
+            "    : dflash2Speculative\n"
+            "      ? false\n"
+            "      : config.continuousBatching !== false"
+        ) in source
         assert "resolveCacheLaunchPolicy" in source
         assert "architectureRequiresPagedCache" in source
         assert "const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff" in source

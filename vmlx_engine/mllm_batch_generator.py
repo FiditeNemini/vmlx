@@ -3480,6 +3480,15 @@ def _native_mtp_rollback_to_confirmed(cache: List[Any], reject_tokens: int) -> b
     return True
 
 
+# Whether the MTP head's KV cache survives ACCEPTED cycles.  Retention sounds
+# right but the accumulated context is gappy (bonus tokens never pass through
+# the head), and measured live it nearly halves depth-2 acceptance (74.6% fresh
+# vs 41.7% retained) while being neutral at depth 1.  Default: fresh per cycle.
+_NATIVE_MTP_RETAIN_HEAD_CACHE = os.environ.get(
+    "VMLX_MTP_RETAIN_HEAD_CACHE", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+
 # Whether a verifier rejection destroys the MTP head's own KV cache.
 #
 # The MLLM path has always recreated it from scratch, so after every rejected
@@ -4316,17 +4325,54 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
             "VMLINUX_NATIVE_MTP_D3_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D3_MIN_ACCEPT",
         )
-        if drafted_d3 >= warmup and rate_d3 is not None and rate_d3 < min_d3:
+        d3_min_sample = _native_mtp_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
+            "VMLX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
+            minimum=1,
+        )
+        if (
+            drafted_d3 >= max(warmup, d3_min_sample)
+            and rate_d3 is not None
+            and rate_d3 < min_d3
+        ):
             target = 2
     if target >= 2:
         drafted_d2 = int(state.stats.drafted_by_depth[1]) if len(state.stats.drafted_by_depth) > 1 else 0
         rate_d2 = _native_mtp_depth_rate(state.stats, 2)
+        # Floor 0.70 and a REAL sample, not the 12-cycle warmup.  Measured
+        # 2026-08-18 (controlled chain test, 150 cycles, code workload,
+        # Qwen3.8-27B-JANG_4D-CRACK): true d2 acceptance is 88/118 = 74.6% —
+        # healthy decay from d1's 78.7% — yet the engine demoted D2 after
+        # reading 3/12 = 25% on the cold dozen cycles right after climbing.
+        # With the depth ceiling recording demotions, that snap judgment
+        # permanently locked the request out of depth 2.  Same cold-window
+        # failure as the AR fallback (fixed at 64); the depth gates kept the
+        # old 12.  0.75 also sat above the bundle's real 74.6%, so even a fair
+        # sample would have flapped.
         min_d2 = _native_mtp_env_float(
-            0.75,
+            0.70,
             "VMLINUX_NATIVE_MTP_D2_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_D2_MIN_ACCEPT",
         )
-        if drafted_d2 >= warmup and rate_d2 is not None and rate_d2 < min_d2:
+        depth_min_sample = _native_mtp_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
+            "VMLX_NATIVE_MTP_DEPTH_GATE_MIN_SAMPLE",
+            minimum=1,
+        )
+        # rate_d2 is a JOINT rate (cycles where BOTH d1 and d2 accepted /
+        # cycles drafted at depth 2), but the floor is calibrated as a
+        # CONDITIONAL rate.  Comparing them raw demands conditional ~90% at
+        # d1=0.78 — depth 2 could mathematically never stick.  Scale the floor
+        # by the observed d1 rate so the comparison is joint-vs-joint.
+        rate_d1_for_gate = _native_mtp_depth_rate(state.stats, 1)
+        joint_floor_d2 = min_d2 * (rate_d1_for_gate if rate_d1_for_gate else 1.0)
+        if (
+            drafted_d2 >= max(warmup, depth_min_sample)
+            and rate_d2 is not None
+            and rate_d2 < joint_floor_d2
+        ):
             target = 1
 
     if _native_mtp_maybe_cost_fallback(request_id, state, current):
@@ -10723,7 +10769,21 @@ class MLLMBatchGenerator:
                 state.draft_lps = []
                 state.draft_ids = []
                 return
-            state.mtp_cache = state.mtp_cache or self.language_model.make_mtp_cache()
+            # The head cache accumulated across accepted cycles is GAPPY: each
+            # cycle emits draft + bonus but only the draft passes through the
+            # head, so the bonus token never enters the head's KV and its
+            # context has a hole at every other position.  Upstream PR #990
+            # fixes this with "batched MTP cache commits ... maintaining cache
+            # alignment between backbone and MTP head"; we never did.  Measured
+            # 2026-08-18 (Qwen3.8-27B-JANG_4D-CRACK, code workload, fair 48+
+            # samples): retained-gappy cache d1 78.1% / d2 41.7%; fresh cache
+            # per cycle d1 78.7% / d2 74.6%.  Fresh is neutral at depth 1 and
+            # nearly doubles depth-2 acceptance, so it is the default.
+            # VMLX_MTP_RETAIN_HEAD_CACHE=1 restores the old accumulation.
+            if _NATIVE_MTP_RETAIN_HEAD_CACHE:
+                state.mtp_cache = state.mtp_cache or self.language_model.make_mtp_cache()
+            else:
+                state.mtp_cache = self.language_model.make_mtp_cache()
             state.drafts, state.draft_lps, state.draft_ids = self._draft_native_mtp_tokens(
                 request,
                 next_hidden,

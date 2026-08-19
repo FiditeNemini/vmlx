@@ -2868,9 +2868,12 @@ class TestNativeMtpAutodetect:
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES", "8")
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_D3_MIN_ACCEPT", "0.80")
         state = MLLMNativeMTPState(depth=3)
-        state.stats.cycles = 8
-        state.stats.drafted_by_depth = [8, 8, 8]
-        state.stats.accepted_by_depth = [8, 8, 3]
+        # Depth gates need a REAL sample (48 drafts), not a cold-start window.
+        # Measured live: true d2 acceptance was 74.6% while the first 12 cycles
+        # after a depth climb read 3/12 = 25% and wrongly locked depth out.
+        state.stats.cycles = 64
+        state.stats.drafted_by_depth = [64, 64, 64]
+        state.stats.accepted_by_depth = [64, 64, 24]
 
         with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_batch_generator"):
             _native_mtp_maybe_adapt_depth("adaptive-row", state)

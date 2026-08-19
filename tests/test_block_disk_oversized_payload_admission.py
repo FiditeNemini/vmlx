@@ -140,3 +140,32 @@ def test_ssm_store_oversized_exclusive_admission():
     resize = _ssm_stub(pending=700)
     assert SSMCompanionDiskStore._resize_pending_reservation(resize, 700, 2 * MAX)
     assert resize._pending_write_bytes == 2 * MAX
+
+
+def test_oversized_resize_waits_for_drain_within_admission_timeout():
+    """Burst-tail durability: dropping at resize the instant other writers
+    are pending poisons every descendant of this block for the session, so
+    the resize honors the same admission deadline the reservation used."""
+    stub = _block_stub(pending=900)  # 300 ours + 600 someone else's
+
+    def _drain():
+        time.sleep(0.05)
+        with stub._pending_write_condition:
+            stub._pending_write_bytes = 300  # the writer finished the others
+            stub._pending_write_condition.notify_all()
+
+    t = threading.Thread(target=_drain)
+    t.start()
+    ok = BlockDiskStore._resize_pending_write_reservation(
+        stub, 300, 3 * MAX, timeout=2.0
+    )
+    t.join()
+    assert ok, "the writer drained within the deadline; the resize must admit"
+    assert stub._pending_write_bytes == 3 * MAX
+
+
+def test_oversized_resize_zero_timeout_still_drops_under_congestion():
+    stub = _block_stub(pending=900)
+    ok = BlockDiskStore._resize_pending_write_reservation(stub, 300, 3 * MAX)
+    assert not ok
+    assert stub._pending_write_bytes == 600

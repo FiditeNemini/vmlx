@@ -275,6 +275,9 @@ def hybrid_chunk_valve_check(
     chunk_end: int,
     model_label: str = "model",
     safety: float = 1.10,
+    observed_chunk_tokens: int = 0,
+    next_chunk_tokens: int = 0,
+    chunk_scaled: bool = False,
 ) -> None:
     """Per-chunk admission for the hybrid prefill, projected along the context.
 
@@ -296,6 +299,17 @@ def hybrid_chunk_valve_check(
     ``safety`` sits inside the window those two chunks define (0.81 < s < 1.18);
     1.10 keeps ~10% headroom while still separating them.
 
+    ``chunk_scaled`` is for attention paths whose transient is the scores
+    buffer itself and therefore proportional to ``chunk x context`` (dots3's
+    absorbed-latent path), unlike the GDN hybrid measured above where halving
+    the chunk did not move the abort point. Without it, a transient observed
+    at a 1024-token chunk is projected unchanged onto a 64-token retry, so
+    the halving ladder can never rescue the span: MEASURED live, dots3 at a
+    17k context was refused at every chunk size down to the floor with the
+    same ~8.5GB projection, capping the model at ~17k on hardware that
+    serves it. When enabled and both chunk sizes are known, the projection
+    scales by their ratio.
+
     Unknown readings never reject.
     """
     if max_ws_bytes <= 0 or active_bytes <= 0 or observed_transient_bytes <= 0:
@@ -303,6 +317,8 @@ def hybrid_chunk_valve_check(
     projected = project_span_peak_bytes(
         observed_transient_bytes, observed_at_context, next_context
     )
+    if chunk_scaled and observed_chunk_tokens > 0 and next_chunk_tokens > 0:
+        projected = int(projected * (next_chunk_tokens / observed_chunk_tokens))
     projected = max(int(projected * safety), int(min_margin_bytes))
     if active_bytes + projected <= max_ws_bytes:
         return

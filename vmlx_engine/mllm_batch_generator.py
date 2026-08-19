@@ -7420,6 +7420,18 @@ class MLLMBatchGenerator:
                 # from OBSERVED peaks instead of predicting them; same idea here.
                 _observed_chunk_transient = 0
                 _observed_transient_at_ctx = 0
+                _observed_transient_chunk_tokens = 0
+                # Absorbed-latent attention (dots3) materializes chunk x ctx
+                # score buffers, so its transient scales with the CHUNK as
+                # well as the context — unlike the GDN hybrid the valve was
+                # measured on, where halving the chunk did not move the abort
+                # point. Without chunk scaling the halving ladder can never
+                # rescue a declined span (measured: dots3 refused at every
+                # size down to the 64-token floor with the same projection,
+                # capping the model at ~17k context).
+                _valve_chunk_scaled = bool(cache) and (
+                    type(cache[0]).__name__ == "Dots3LatentCache"
+                )
                 # (context, absolute peak) pairs for the cross-span affine fit.
                 # The per-chunk valve only needs the LARGEST transient and where
                 # it was seen; fitting an intercept as well needs every point.
@@ -7674,6 +7686,9 @@ class MLLMBatchGenerator:
                                 chunk_start=processed,
                                 chunk_end=processed + chunk_size,
                                 model_label="hybrid prefill",
+                                observed_chunk_tokens=_observed_transient_chunk_tokens,
+                                next_chunk_tokens=chunk_size,
+                                chunk_scaled=_valve_chunk_scaled,
                             )
                         except PrefillAdmissionError:
                             # A decline used to fail the whole request with a
@@ -7814,6 +7829,9 @@ class MLLMBatchGenerator:
                                 + processed
                                 + chunk_size,
                             )
+                            # The chunk size it was observed at, for paths
+                            # whose transient scales with the chunk too.
+                            _observed_transient_chunk_tokens = int(chunk_size)
                     if _HYBRID_PREFILL_MEM_TRACE:
                         try:
                             logger.info(

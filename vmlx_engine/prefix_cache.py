@@ -2444,18 +2444,28 @@ class BlockAwarePrefixCache:
         self._chained_prefix_index_hash = os.environ.get(
             "VMLX_CHAINED_PREFIX_INDEX_HASH", ""
         ).strip().lower() in {"1", "true", "yes", "on"}
+        # 1s, up from 0.25s: measured live on dots3-note at ~17k context, a
+        # multiturn store burst filled the 1GB pending-write budget and the
+        # burst TAIL blocks (6 of 220) timed out at 0.25s — one dropped
+        # ancestor then poisons every descendant for the session ("cannot
+        # publish block whose parent ancestry is unavailable" cascade), L1
+        # drops the pinned blocks, and the conversation re-prefills every
+        # turn. The wait blocks the model-owning thread, so it must stay
+        # sub-second per block (test-pinned); it only engages when the
+        # budget is actually full, and the writer drains continuously, so
+        # 1s per tail block rides out a burst the 0.25s window could not.
         try:
             self._block_disk_admission_timeout = max(
                 0.0,
                 float(
                     os.environ.get(
                         "VMLX_BLOCK_DISK_ADMISSION_TIMEOUT_SECONDS",
-                        "0.25",
+                        "1.0",
                     )
                 ),
             )
         except (TypeError, ValueError):
-            self._block_disk_admission_timeout = 0.25
+            self._block_disk_admission_timeout = 1.0
 
         # Hash table for quick prefix lookup
         # Maps hash(tokens[:block_size*n]) -> (tokens, block_ids)

@@ -1098,9 +1098,17 @@ class BlockDiskStore:
             self._pending_write_bytes += amount
             return True
 
-    def _resize_pending_write_reservation(self, previous: int, actual: int) -> bool:
+    def _resize_pending_write_reservation(
+        self,
+        previous: int,
+        actual: int,
+        *,
+        timeout: float = 0.0,
+    ) -> bool:
         old_amount = max(0, int(previous))
         new_amount = max(1, int(actual))
+        timeout_s = max(0.0, float(timeout or 0.0))
+        deadline = time.monotonic() + timeout_s
         with self._pending_write_condition:
             delta = new_amount - old_amount
             if (
@@ -1113,8 +1121,24 @@ class BlockDiskStore:
                 # this reservation is the ONLY thing pending, the exclusive-
                 # admission rule above applies to the resize too — dropping
                 # here would reintroduce the flat ceiling one step later.
-                if self._pending_write_bytes - old_amount <= 0:
-                    self._pending_write_bytes = new_amount
+                # Otherwise wait for the writer to drain the others (within
+                # the same admission deadline the initial reservation used):
+                # an instant drop here poisons every descendant of this block
+                # for the session, so a transient burst becomes a permanent
+                # L2 lineage hole.
+                while self._pending_write_bytes - old_amount > 0:
+                    remaining = deadline - time.monotonic()
+                    if timeout_s <= 0.0 or remaining <= 0.0:
+                        self._pending_write_bytes = max(
+                            0, self._pending_write_bytes - old_amount
+                        )
+                        self._pending_write_byte_drops += 1
+                        self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
+                        self._pending_write_condition.notify_all()
+                        return False
+                    self._pending_write_condition.wait(timeout=remaining)
+                self._pending_write_bytes = new_amount
+                if new_amount > self._max_pending_write_bytes:
                     logger.info(
                         "BlockDiskStore resized an exclusive oversized "
                         "payload reservation (%d -> %d bytes, budget %d)",
@@ -1122,14 +1146,7 @@ class BlockDiskStore:
                         new_amount,
                         self._max_pending_write_bytes,
                     )
-                    return True
-                self._pending_write_bytes = max(
-                    0, self._pending_write_bytes - old_amount
-                )
-                self._pending_write_byte_drops += 1
-                self.write_drop_reasons["byte_budget"] = self.write_drop_reasons.get("byte_budget", 0) + 1
-                self._pending_write_condition.notify_all()
-                return False
+                return True
             self._pending_write_bytes = max(
                 0, self._pending_write_bytes + delta
             )
@@ -1818,7 +1835,9 @@ class BlockDiskStore:
                 + len(tensors) * 1024
             )
             if not self._resize_pending_write_reservation(
-                reserved_bytes, detached_bytes
+                reserved_bytes,
+                detached_bytes,
+                timeout=_remaining_admission_time(),
             ):
                 self._write_fence_queue_result(fence_id, dropped=True)
                 logger.warning(

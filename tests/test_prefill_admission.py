@@ -729,3 +729,81 @@ def test_span_admission_defers_to_a_degradable_chunk_path():
             fitted_max_context=8000,
             degradable_chunks=True,
         )
+
+
+class TestChunkScaledValve:
+    """Absorbed-latent (dots3) transients scale with chunk x context, so the
+    halving ladder must be able to rescue a declined span. All numbers are
+    from the live refusal: active 99.58GB, limit 107.52GB, ~7.76GB transient
+    observed at a 1024-token chunk at ~17k context."""
+
+    GIB = 1024**3
+    ACTIVE = int(99.58 * GIB)
+    LIMIT = int(107.52 * GIB)
+    TRANSIENT = int(7.76 * GIB)
+    MARGIN = 2 * GIB
+
+    def test_unscaled_refuses_the_floor_chunk(self):
+        """The live defect: without chunk scaling the 64-token retry carries
+        the full 1024-chunk projection and the ladder can never converge."""
+        from vmlx_engine.utils.prefill_admission import PrefillAdmissionError
+        import pytest
+
+        with pytest.raises(PrefillAdmissionError):
+            self._check(64, chunk_scaled=False)
+
+    def test_scaled_admits_the_floor_chunk(self):
+        self._check(64, chunk_scaled=True)  # ~0.53GB projected — fits
+
+    def test_scaled_still_refuses_the_original_chunk(self):
+        """Scaling is not a bypass: the size that measured 7.76GB is still
+        refused against 7.94GB of headroom once the 1.10 safety applies."""
+        from vmlx_engine.utils.prefill_admission import PrefillAdmissionError
+        import pytest
+
+        with pytest.raises(PrefillAdmissionError):
+            self._check(1024, chunk_scaled=True)
+
+    def test_scaled_projection_grows_with_context_too(self):
+        """At 100k the same 64-token chunk projects ~3.1GB — still admitted,
+        which is what unlocks the 100k goal."""
+        from vmlx_engine.utils.prefill_admission import hybrid_chunk_valve_check
+
+        hybrid_chunk_valve_check(
+            self.ACTIVE,
+            self.LIMIT,
+            self.TRANSIENT,
+            17152,
+            100_000,
+            self.MARGIN,
+            chunk_start=0,
+            chunk_end=64,
+            observed_chunk_tokens=1024,
+            next_chunk_tokens=64,
+            chunk_scaled=True,
+        )
+
+    def test_unknown_chunk_sizes_fall_back_to_unscaled(self):
+        from vmlx_engine.utils.prefill_admission import PrefillAdmissionError
+        import pytest
+
+        with pytest.raises(PrefillAdmissionError):
+            self._check(64, chunk_scaled=True, observed_chunk_tokens=0)
+
+    def _check(self, chunk, observed_chunk_tokens=1024, **kw):
+        from vmlx_engine.utils.prefill_admission import hybrid_chunk_valve_check
+
+        hybrid_chunk_valve_check(
+            self.ACTIVE,
+            self.LIMIT,
+            self.TRANSIENT,
+            17152,
+            17152,
+            self.MARGIN,
+            chunk_start=3328,
+            chunk_end=3328 + chunk,
+            model_label="hybrid prefill",
+            observed_chunk_tokens=observed_chunk_tokens,
+            next_chunk_tokens=chunk,
+            **kw,
+        )

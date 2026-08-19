@@ -3184,6 +3184,10 @@ class MLLMNativeMTPState:
     # so a depth that already failed its acceptance gate is never retried and
     # the controller cannot oscillate between two depths for a whole request.
     depth_ceiling: int = 3
+    # Aligned head cache: chain pairs (deeper-level drafts) appended to the
+    # head cache during the last draft phase.  Trimmed after every verify so an
+    # unverified draft can never persist in the head's context.
+    head_chain_pairs: int = 0
 
 
 @dataclass
@@ -3487,6 +3491,41 @@ def _native_mtp_rollback_to_confirmed(cache: List[Any], reject_tokens: int) -> b
 _NATIVE_MTP_RETAIN_HEAD_CACHE = os.environ.get(
     "VMLX_MTP_RETAIN_HEAD_CACHE", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
+
+# ALIGNED head cache — upstream PR #990's "batched MTP cache commits ...
+# maintaining cache alignment between backbone and MTP head", which vMLX never
+# implemented.  Every confirmed token's (backbone_hidden_i, token_{i+1}) pair
+# is committed through the head in the SAME forward that drafts the next token
+# (the level-0 draft samples from the last position, so a multi-token input is
+# free).  The head then always drafts with complete, correctly-paired context
+# instead of one fused pair (fresh mode) or a history with a hole at every
+# bonus token (retain mode).  Chain pairs from deeper draft levels are trimmed
+# after each verify so a rejected draft can never poison the cache — the exact
+# failure ledger 343 measured (retained d2 16.7% vs recreate 66.7%).
+# VMLX_MTP_ALIGNED_HEAD_CACHE=0 reverts to the fresh-per-cycle behaviour.
+_NATIVE_MTP_ALIGNED_HEAD_CACHE = os.environ.get(
+    "VMLX_MTP_ALIGNED_HEAD_CACHE", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _native_mtp_trim_head_chain(state: "MLLMNativeMTPState") -> None:
+    """Drop the head-cache entries added by deeper draft levels last cycle.
+
+    Chain pairs are drafted before verification, so one of them may carry a
+    rejected token; they are also built from the head's own post-norm hidden
+    rather than the backbone's.  The commit that follows re-adds the accepted
+    ones with proper backbone hiddens, so trimming is always safe.
+    """
+    n = int(getattr(state, "head_chain_pairs", 0) or 0)
+    if n <= 0 or not state.mtp_cache:
+        state.head_chain_pairs = 0
+        return
+    for layer in state.mtp_cache:
+        if layer is None:
+            continue
+        if hasattr(layer, "is_trimmable") and layer.is_trimmable():
+            layer.trim(n)
+    state.head_chain_pairs = 0
 
 
 # Whether a verifier rejection destroys the MTP head's own KV cache.
@@ -10475,14 +10514,14 @@ class MLLMBatchGenerator:
         try:
             mtp_output = self.language_model.mtp_forward(
                 hidden_state,
-                _native_mtp_ensure_uint32(next_token).reshape(1, 1),
+                _native_mtp_ensure_uint32(next_token).reshape(1, -1),
                 mtp_cache,
                 return_hidden=return_hidden,
             )
         except TypeError:
             mtp_output = self.language_model.mtp_forward(
                 hidden_state,
-                _native_mtp_ensure_uint32(next_token).reshape(1, 1),
+                _native_mtp_ensure_uint32(next_token).reshape(1, -1),
                 mtp_cache,
             )
         if isinstance(mtp_output, tuple):
@@ -10584,6 +10623,7 @@ class MLLMBatchGenerator:
             draft_lps=draft_lps,
             draft_ids=draft_ids,
             depth=depth,
+            head_chain_pairs=max(0, len(drafts) - 1),
         )
         state.stats.seed_main_forwards += seed_main_forwards
         state.stats.mtp_forwards += len(drafts)
@@ -10769,6 +10809,34 @@ class MLLMBatchGenerator:
                 state.draft_lps = []
                 state.draft_ids = []
                 return
+            if _NATIVE_MTP_ALIGNED_HEAD_CACHE:
+                # PR #990's batched cache commit: trim the unverified chain
+                # pairs, then run ONE head forward whose input pairs are every
+                # token confirmed this cycle — (h0, d1) .. (h_{k-1}, dk),
+                # (hk, bonus) — with backbone hiddens from the verify output.
+                # The last position of that same forward IS the next level-0
+                # draft, so alignment costs no extra head call.
+                _native_mtp_trim_head_chain(state)
+                state.mtp_cache = state.mtp_cache or self.language_model.make_mtp_cache()
+                commit_hidden = hidden[:, 0 : depth + 1, :]
+                commit_tokens = mx.concatenate(
+                    [_native_mtp_ensure_uint32(t).reshape(1) for t in state.drafts]
+                    + [_native_mtp_ensure_uint32(bonus_tok).reshape(1)]
+                ).reshape(1, depth + 1)
+                (
+                    state.drafts,
+                    state.draft_lps,
+                    state.draft_ids,
+                ) = self._draft_native_mtp_tokens(
+                    request,
+                    commit_hidden,
+                    commit_tokens,
+                    state.mtp_cache,
+                    state.depth,
+                    state.stats,
+                )
+                state.head_chain_pairs = max(0, len(state.drafts) - 1)
+                return
             # The head cache accumulated across accepted cycles is GAPPY: each
             # cycle emits draft + bonus but only the draft passes through the
             # head, so the bonus token never enters the head's KV and its
@@ -10841,6 +10909,28 @@ class MLLMBatchGenerator:
             state.drafts = []
             state.draft_lps = []
             state.draft_ids = []
+            return
+        if _NATIVE_MTP_ALIGNED_HEAD_CACHE:
+            # Trim the unverified chain pairs (one may carry a rejected token),
+            # keep the valid history, and commit the confirmed prefix plus the
+            # correction in the same forward that drafts the next token.
+            _native_mtp_trim_head_chain(state)
+            state.mtp_cache = state.mtp_cache or self.language_model.make_mtp_cache()
+            state.stats.mtp_cache_retained_on_rejects += 1
+            aligned_hidden = hidden[:, 0 : accepted + 1, :]
+            aligned_tokens = mx.concatenate(
+                [_native_mtp_ensure_uint32(t).reshape(1) for t in accepted_drafts]
+                + [_native_mtp_ensure_uint32(correction).reshape(1)]
+            ).reshape(1, accepted + 1)
+            state.drafts, state.draft_lps, state.draft_ids = self._draft_native_mtp_tokens(
+                request,
+                aligned_hidden,
+                aligned_tokens,
+                state.mtp_cache,
+                state.depth,
+                state.stats,
+            )
+            state.head_chain_pairs = max(0, len(state.drafts) - 1)
             return
         if _NATIVE_MTP_RECREATE_HEAD_CACHE_ON_REJECT:
             state.mtp_cache = self.language_model.make_mtp_cache()

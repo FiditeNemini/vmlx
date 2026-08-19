@@ -2105,7 +2105,7 @@ class TestNativeMtpAutodetect:
                 return logits
 
             def mtp_forward(self, hidden_states, next_token_ids, mtp_cache):
-                next_id = int(next_token_ids.reshape(-1).tolist()[0])
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
                 self.mtp_calls.append(next_id)
                 return logits_for([(next_id + 1) % vocab_size])
 
@@ -2234,7 +2234,7 @@ class TestNativeMtpAutodetect:
                 mtp_cache,
                 return_hidden=False,
             ):
-                next_id = int(next_token_ids.reshape(-1).tolist()[0])
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
                 self.mtp_calls.append(next_id)
                 logits = logits_for([(next_id + 1) % vocab_size])
                 hidden = mx.ones((1, 1, 4), dtype=mx.float32)
@@ -2371,7 +2371,7 @@ class TestNativeMtpAutodetect:
                 mtp_cache,
                 return_hidden=False,
             ):
-                next_id = int(next_token_ids.reshape(-1).tolist()[0])
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
                 target = {3: 9, 9: 10, 10: 11}.get(next_id, (next_id + 1) % vocab_size)
                 logits = logits_for([target])
                 hidden = mx.ones((1, 1, 4), dtype=mx.float32)
@@ -2514,7 +2514,7 @@ class TestNativeMtpAutodetect:
                 mtp_cache,
                 return_hidden=False,
             ):
-                next_id = int(next_token_ids.reshape(-1).tolist()[0])
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
                 target = {3: 4, 4: 5, 5: 9}.get(next_id, (next_id + 1) % vocab_size)
                 logits = logits_for([target])
                 hidden = mx.ones((1, 1, 4), dtype=mx.float32)
@@ -2579,8 +2579,11 @@ class TestNativeMtpAutodetect:
         assert cache.position == 4
         assert cache.conv_state == 4
         assert cache.ssm_state == 4
-        assert state.stats.mtp_cache_recreated_on_rejects == 1
-        assert state.stats.mtp_cache_retained_on_rejects == 0
+        # Aligned head cache (default): a reject RETAINS the head cache, trims
+        # the unverified chain pairs, and re-commits the confirmed prefix with
+        # backbone hiddens — it no longer recreates from scratch.
+        assert state.stats.mtp_cache_recreated_on_rejects == 0
+        assert state.stats.mtp_cache_retained_on_rejects == 1
 
     def test_native_mtp_greedy_sampler_uses_logits_fast_path(self, monkeypatch):
         import mlx.core as mx
@@ -2651,7 +2654,7 @@ class TestNativeMtpAutodetect:
                 mtp_cache,
                 return_hidden=False,
             ):
-                next_id = int(next_token_ids.reshape(-1).tolist()[0])
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
                 logits = logits_for([(next_id + 1) % vocab_size])
                 hidden = mx.ones((1, 1, 4), dtype=mx.float32)
                 if return_hidden:
@@ -3198,7 +3201,7 @@ class TestNativeMtpAutodetect:
                 mtp_cache,
                 return_hidden=False,
             ):
-                next_id = int(next_token_ids.reshape(-1).tolist()[0])
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
                 logits = logits_for([(next_id + 1) % vocab_size])
                 hidden = mx.ones((1, 1, 4), dtype=mx.float32)
                 if return_hidden:

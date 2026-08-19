@@ -6344,6 +6344,67 @@ class MLXMultimodalLM:
                 except Exception as _e:
                     logger.debug(f"Image slot count check failed: {_e}")
 
+        # The server's SimpleEngine uses stream_chat(), not stream_generate().
+        # Route text-only DFlash2 requests here before mlx-vlm constructs its
+        # ordinary prompt cache and generator. Media requests deliberately keep
+        # the native VLM path because the draft checkpoint is text-only.
+        if not all_images and not all_audio and not videos:
+            from ..speculative import get_draft_model, is_dflash2_enabled
+
+            if is_dflash2_enabled():
+                from ..dflash2_runtime import stream_dflash2_generate
+
+                tokenizer = (
+                    self.processor.tokenizer
+                    if hasattr(self.processor, "tokenizer")
+                    else self.processor
+                )
+                top_p = float(kwargs.pop("top_p", 1.0))
+                top_k = int(kwargs.pop("top_k", 0))
+                token_count = 0
+                emitted_per_cycle: list[int] = []
+                last_chunk = None
+                logger.info("DFlash2 text chat active for %s", self.model_name)
+                for chunk in stream_dflash2_generate(
+                    self.model,
+                    tokenizer,
+                    get_draft_model(),
+                    formatted_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    top_k=top_k,
+                ):
+                    emitted = len(getattr(chunk, "tokens", []) or [])
+                    token_count += emitted
+                    if getattr(chunk, "accepted", None) is not None:
+                        emitted_per_cycle.append(int(chunk.accepted))
+                    last_chunk = chunk
+                    yield MLLMOutput(
+                        text=getattr(chunk, "text", ""),
+                        finish_reason=getattr(chunk, "finish_reason", None),
+                        prompt_tokens=int(getattr(chunk, "prompt_tokens", 0) or 0),
+                        completion_tokens=token_count,
+                    )
+
+                cycles = len(emitted_per_cycle)
+                mean_emitted = sum(emitted_per_cycle) / max(1, cycles)
+                accepted_draft = sum(max(0, n - 1) for n in emitted_per_cycle)
+                proposed_draft = cycles * 4
+                logger.info(
+                    "DFlash2 generation stats: prompt_tokens=%d output_tokens=%d "
+                    "cycles=%d emitted_per_cycle=%.3f draft_acceptance_estimate=%.1f%% "
+                    "generation_tps=%.2f finish_reason=%s",
+                    int(getattr(last_chunk, "prompt_tokens", 0) or 0),
+                    token_count,
+                    cycles,
+                    mean_emitted,
+                    100.0 * accepted_draft / max(1, proposed_draft),
+                    float(getattr(last_chunk, "generation_tps", 0.0) or 0.0),
+                    getattr(last_chunk, "finish_reason", None),
+                )
+                return
+
         # Check cache for existing KV state (uses images as cache key)
         from mlx_vlm.models import cache as vlm_cache
 

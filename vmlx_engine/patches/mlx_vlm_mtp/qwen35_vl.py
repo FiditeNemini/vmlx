@@ -665,6 +665,8 @@ def _patch_qwen_model(qlang: Any) -> None:
         mask=None,
         cache=None,
         position_ids=None,
+        capture_layer_ids=None,
+        hidden_sink=None,
         gdn_sink=None,
         n_confirmed: int = 0,
         return_unnormed: bool = False,
@@ -697,7 +699,8 @@ def _patch_qwen_model(qlang: Any) -> None:
             fa_layer = self.layers[self.fa_idx]
             position_embeddings = fa_layer.self_attn.rotary_emb(h, position_ids)
 
-        for layer, layer_cache in zip(self.layers, cache):
+        capture_set = set(capture_layer_ids) if capture_layer_ids else set()
+        for layer_idx, (layer, layer_cache) in enumerate(zip(self.layers, cache)):
             layer_mask = ssm_mask if layer.is_linear else fa_mask
             h = layer(
                 h,
@@ -708,6 +711,8 @@ def _patch_qwen_model(qlang: Any) -> None:
                 gdn_sink=gdn_sink,
                 n_confirmed=n_confirmed,
             )
+            if hidden_sink is not None and layer_idx in capture_set:
+                hidden_sink.append(h)
 
         return h
 

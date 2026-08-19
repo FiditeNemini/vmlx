@@ -270,11 +270,19 @@ def _stream_generate_resumable(
             logits, hidden, hidden_offset = runtime._prefill_target(
                 adapter, delta, target_cache, hidden_limit, prefill_step_size
             )
+            draft_spliced = False
             if stored_draft_cache is not None and hidden.shape[1] == delta.size:
-                # Stored draft KV ends exactly where this hidden window
-                # starts, so the drafter keeps its history.
-                draft_cache = stored_draft_cache
-            else:
+                gap_arr = resume.get("draft_hidden_gap") if resume else None
+                gap_len = int(gap_arr.shape[1]) if gap_arr is not None else 0
+                if int(stored_draft_cache[0].offset) + gap_len == cache_len:
+                    # Stored draft KV plus the bridged gap ends exactly where
+                    # this hidden window starts, so the drafter keeps its
+                    # conversation history instead of seeing only the delta.
+                    if gap_arr is not None:
+                        hidden = mx.concatenate([gap_arr, hidden], axis=1)
+                    draft_cache = stored_draft_cache
+                    draft_spliced = True
+            if not draft_spliced:
                 draft_cache = runtime.make_prompt_cache(draft)
                 for cache in draft_cache:
                     cache.offset = cache_len + int(hidden_offset)
@@ -320,7 +328,19 @@ def _stream_generate_resumable(
             store_draft: Optional[list] = draft_cache
             if draft_trim > 0:
                 runtime._trim_recent_cache(draft_cache, int(draft_trim))
-            if draft_cache[0].offset != len(confirmed) - 1:
+            # The draft cache trails the target by the final cycle's kept
+            # tokens (its self-trim runs at cycle start, before emissions).
+            # The exit-time hidden always starts at the draft's offset, so
+            # the missing positions can be bridged at resume time by
+            # prepending this slice to the delta hidden.
+            gap_arr = None
+            gap_needed = (len(confirmed) - 1) - int(draft_cache[0].offset)
+            if gap_needed > 0:
+                if hidden is not None and hidden.shape[1] >= gap_needed:
+                    gap_arr = hidden[:, :gap_needed, :]
+                else:
+                    store_draft = None
+            elif gap_needed < 0:
                 store_draft = None
             _SESSION_STORE.put(
                 {
@@ -328,12 +348,15 @@ def _stream_generate_resumable(
                     "tokens": confirmed,
                     "target_cache": target_cache,
                     "draft_cache": store_draft,
+                    "draft_hidden_gap": gap_arr if store_draft is not None else None,
                 }
             )
             logger.info(
                 "DFlash2 session stored: %d confirmed tokens (draft cache %s)",
                 len(confirmed),
-                "kept" if store_draft is not None else "dropped",
+                "dropped"
+                if store_draft is None
+                else ("kept+gap%d" % gap_needed if gap_arr is not None else "kept"),
             )
 
         if token in tokenizer.eos_token_ids:

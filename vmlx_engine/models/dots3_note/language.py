@@ -1160,15 +1160,64 @@ class Dots3NoteModel(nn.Module):
         idx_dim = self.config.index_head_dim
         rank = self.config.kv_lora_rank
         adopted_n = 0
+        adopted_sliding = 0
         foreign: dict = {}
         for i in range(self.config.num_hidden_layers):
-            if self.config.is_sliding(i) or i >= len(cache):
+            if i >= len(cache):
                 continue
             c = cache[i]
             if c is None or isinstance(c, Dots3LatentCache):
                 continue
             keys = getattr(c, "keys", None)
             values = getattr(c, "values", None)
+            if self.config.is_sliding(i):
+                # Sliding slots left as generic KVCache run the MATERIALIZED
+                # lane from the restore point on: 64-head K/V at ~48KB per
+                # token per layer, window enforced only by the mask so the
+                # buffers never trim. Across 33 sliding layers that is the
+                # measured ~1.7MB/token span retention that climbed active
+                # memory 96.8->118.7GB over one 12.7k-token prefill. The
+                # reconstructor's sliding shells arrive EMPTY (the sliding
+                # cumulative tuple only restores on exact boundaries), so
+                # re-entering the window-bounded latent lane loses nothing:
+                # both lanes mask from PHYSICAL length, and an empty window
+                # start forgets the same <window of pre-restore context.
+                if keys is None or getattr(keys, "size", 0) == 0:
+                    adopted = Dots3LatentCache(
+                        window=self.config.sliding_window_size
+                    )
+                    adopted._rope_dim = rope_dim
+                    adopted.offset = int(getattr(c, "offset", 0) or 0)
+                    cache[i] = adopted
+                    adopted_sliding += 1
+                elif (
+                    getattr(keys, "ndim", 0) == 4
+                    and keys.shape[1] == 1
+                    and keys.shape[-1] == rank
+                    and values is not None
+                    and values.shape[-1] == rope_dim
+                ):
+                    # A reconstructor that carried the cumulative sliding
+                    # payload as (latent, k_pe): re-enter the latent lane
+                    # with the state intact.
+                    adopted = Dots3LatentCache(
+                        window=self.config.sliding_window_size
+                    )
+                    adopted._rope_dim = rope_dim
+                    adopted.latent = keys
+                    adopted.k_pe = values
+                    adopted.offset = int(getattr(c, "offset", keys.shape[2]))
+                    cache[i] = adopted
+                    adopted_sliding += 1
+                else:
+                    foreign.setdefault(type(c).__name__, []).append(
+                        (
+                            i,
+                            tuple(getattr(keys, "shape", ()) or ()),
+                            tuple(getattr(values, "shape", ()) or ()),
+                        )
+                    )
+                continue
             if (
                 keys is None
                 or values is None
@@ -1192,11 +1241,12 @@ class Dots3NoteModel(nn.Module):
             adopted.offset = int(getattr(c, "offset", keys.shape[2]))
             cache[i] = adopted
             adopted_n += 1
-        if adopted_n or foreign:
+        if adopted_n or adopted_sliding or foreign:
             _logger.info(
-                "dots3 adopted %d restored full-layer cache(s) into "
-                "Dots3LatentCache",
+                "dots3 adopted %d restored full-layer and %d sliding "
+                "cache(s) into Dots3LatentCache",
                 adopted_n,
+                adopted_sliding,
             )
         elif cache and cache[0] is not None and int(getattr(cache[0], "offset", 0)) > 0:
             # Continuation entry with pre-populated caches and nothing to

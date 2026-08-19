@@ -276,6 +276,44 @@ def test_restored_generic_kvcache_is_adopted(model):
     assert float(mx.abs(a - b).max()) < 1e-4
 
 
+def test_restored_empty_sliding_shells_are_adopted_with_window(model):
+    # The SSD-only hit lane hands SLIDING slots back as EMPTY generic
+    # KVCache shells (the sliding cumulative tuple only restores on exact
+    # boundaries). Left un-adopted they run the materialized lane from the
+    # restore point on — 64-head K/V, window enforced only by the mask so
+    # nothing ever trims: measured live as ~1.7MB of retained Metal per
+    # prefilled token across 33 sliding layers (active 96.8->118.7GB over
+    # one 12.7k-token span). Adoption must re-enter the window-bounded
+    # latent lane and keep the logical offset for RoPE.
+    from mlx_lm.models.cache import KVCache
+
+    cfg = model.text_config
+    ref = _latent_caches(model)
+    ids = mx.array([[3, 17, 42, 9, 55, 20, 31, 8]])
+    model(ids, cache=ref)
+
+    mixed = []
+    for i, c in enumerate(ref):
+        fake = KVCache()
+        if not cfg.is_sliding(i):
+            packed, latent = c.state
+            fake.keys = packed
+            fake.values = latent
+        fake.offset = c.offset
+        mixed.append(fake)
+
+    out = model(mx.array([[11]]), cache=mixed)
+    for i, c in enumerate(mixed):
+        assert isinstance(c, Dots3LatentCache), f"layer {i} not adopted"
+        if cfg.is_sliding(i):
+            assert c.window == cfg.sliding_window_size
+    # The adopted sliding cache must continue at the logical position, not
+    # restart at zero (RoPE would otherwise rotate the wrong angles).
+    sliding_idx = next(i for i in range(cfg.num_hidden_layers) if cfg.is_sliding(i))
+    assert mixed[sliding_idx].offset == ref[sliding_idx].offset + 1
+    assert bool(mx.isfinite(out).all())
+
+
 def test_padding_mask_all_ones_equals_causal(model):
     # The MLLM generator forwards the processor's [B, S] all-ones PADDING
     # mask as `mask=` on every media forward. Consumed verbatim as an
@@ -763,3 +801,4 @@ def test_dsa_gather_defaults_on_for_depth():
             os.environ.pop(key, None)
         else:
             os.environ[key] = old
+

@@ -542,7 +542,14 @@ class TestReconstructHybrid:
         kv_layers = [c for c in reconstructed if hasattr(c, 'keys') and c.keys is not None]
         assert len(kv_layers) == 2, f"Expected 2 KV layers, got {len(kv_layers)}"
         for kv in kv_layers:
-            assert kv.keys.shape == (1, 8, 64, 64), f"KV keys shape mismatch: {kv.keys.shape}"
+            # Restored buffers are padded to the KVCache step boundary
+            # (growth slack, matching the ZAYA/CacheList branches); the
+            # OFFSET stays logical. 64 restored tokens -> 256 physical.
+            assert kv.offset == 64, f"KV offset mismatch: {kv.offset}"
+            assert kv.keys.shape[0:2] == (1, 8) and kv.keys.shape[3] == 64
+            assert kv.keys.shape[2] >= 64 and kv.keys.shape[2] % 256 == 0, (
+                f"KV keys physical length not step-padded: {kv.keys.shape}"
+            )
 
     def test_external_companion_store_reconstructs_kv_only_boundary(self):
         """Generic hybrid block storage must not duplicate typed SSM companions."""

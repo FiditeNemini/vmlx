@@ -8099,6 +8099,37 @@ class MLLMBatchGenerator:
                                     for k, v in sorted(_by_kind.items())
                                 ),
                             )
+                            if os.environ.get("VMLX_CENSUS_GC", "").strip() == "1":
+                                # Name the holder: bucket EVERY live mx.array
+                                # by shape. Slow (full gc walk) — diagnosis
+                                # only. The cache-slot census already proved
+                                # the slots innocent while active carried
+                                # ~18GB above baseline between chunks.
+                                import gc as _gc
+
+                                _buckets: dict = {}
+                                for _obj in _gc.get_objects():
+                                    if isinstance(_obj, mx.array):
+                                        _kb = (
+                                            tuple(_obj.shape),
+                                            str(_obj.dtype),
+                                        )
+                                        _agg2 = _buckets.setdefault(_kb, [0, 0])
+                                        _agg2[0] += 1
+                                        _agg2[1] += int(_obj.nbytes)
+                                _top = sorted(
+                                    _buckets.items(),
+                                    key=lambda kv: -kv[1][1],
+                                )[:8]
+                                logger.info(
+                                    "census-gc chunk=%d %s",
+                                    chunk_num,
+                                    " | ".join(
+                                        f"{k[0]}x{v[0]} {k[1]} ="
+                                        f"{v[1] / (1024**3):.2f}GB"
+                                        for k, v in _top
+                                    ),
+                                )
                         except Exception:  # noqa: BLE001
                             pass
                     if _HYBRID_PREFILL_MEM_TRACE:

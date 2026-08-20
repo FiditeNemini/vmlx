@@ -6626,9 +6626,39 @@ class BlockAwarePrefixCache:
                             return None
 
                     cache = KVCache()
+                    _kv_offset = concat_keys.shape[seq_axis]
+                    # Pad to the cache's step boundary like the ZAYA and
+                    # CacheList restore branches already do: an exactly-sized
+                    # restored buffer pays one whole-buffer copy per layer on
+                    # the first post-restore append before KVCache's chunked
+                    # growth re-establishes slack.
+                    _kv_step = int(getattr(KVCache, "step", 256) or 256)
+                    if _kv_step > 0 and _kv_offset > 0 and _kv_offset % _kv_step:
+                        _kv_pad = (
+                            (_kv_offset + _kv_step - 1) // _kv_step
+                        ) * _kv_step - _kv_offset
+                        _pad_shape = list(concat_keys.shape)
+                        _pad_shape[seq_axis] = _kv_pad
+                        concat_keys = mx.concatenate(
+                            [
+                                concat_keys,
+                                mx.zeros(tuple(_pad_shape), concat_keys.dtype),
+                            ],
+                            axis=seq_axis,
+                        )
+                        _pad_shape_v = list(concat_values.shape)
+                        _pad_shape_v[seq_axis] = _kv_pad
+                        concat_values = mx.concatenate(
+                            [
+                                concat_values,
+                                mx.zeros(tuple(_pad_shape_v), concat_values.dtype),
+                            ],
+                            axis=seq_axis,
+                        )
+                        mx.eval(concat_keys, concat_values)
                     cache.keys = concat_keys
                     cache.values = concat_values
-                    cache.offset = concat_keys.shape[seq_axis]
+                    cache.offset = _kv_offset
                     reconstructed_caches.append(cache)
                     reconstructed_indices.add(layer_idx)
                     kv_count += 1

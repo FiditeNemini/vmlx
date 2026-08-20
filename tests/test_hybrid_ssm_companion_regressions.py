@@ -809,3 +809,41 @@ def test_clean_pass_companion_store_applies_positional_latent_exemption():
     assert companion.stored == [(list(range(6)), 6, 1, True)], (
         "only the genuine companion slot (layer 3) may be stored"
     )
+
+
+def test_np_slice_import_does_not_drag_base_buffer():
+    """mx.array() on a NON-CONTIGUOUS numpy view imports a buffer sized like
+    the view's BASE array (measured 30.6MB Metal for a 0.26MB 64-token block
+    slice). The per-block store extraction over an 11k-token qwen hybrid
+    turned that into ~140GB of live Metal — killing the serve process and
+    twice panicking the machine. `_mx_from_np_slice` must keep the import at
+    slice size."""
+    import numpy as np
+
+    from vmlx_engine.prefix_cache import _mx_from_np_slice
+
+    base = np.zeros((1, 4, 4096, 256), np.float32)  # 16.8MB
+    view = base[:, :, 64:128, :]                     # 0.26MB slice
+    before = mx.get_active_memory()
+    out = _mx_from_np_slice(view)
+    mx.eval(out)
+    cost = mx.get_active_memory() - before
+    assert cost < 4 * view.nbytes + (1 << 20), (
+        f"slice import cost {cost} bytes — the full base buffer is being "
+        f"dragged into Metal again (view is only {view.nbytes} bytes)"
+    )
+    assert out.shape == view.shape
+
+
+def test_block_extraction_uses_contiguous_slice_helper():
+    """Source pin: every numpy-slice-to-MLX site in the block store paths
+    must go through _mx_from_np_slice — a bare mx.array(np_k[...slice...])
+    re-introduces the full-base import."""
+    import inspect
+    import re
+
+    from vmlx_engine import prefix_cache as pc
+
+    src = inspect.getsource(pc)
+    bare = re.findall(r"mx\.array\(np_[kviq][a-z]*\[[^)]*:", src)
+    assert bare == [], f"bare numpy-view imports found: {bare}"

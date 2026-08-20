@@ -11137,8 +11137,8 @@ class Scheduler:
                             else c.values
                         )
                         _k, _v = _np.array(_ka), _np.array(_va)
-                        c.keys = mx.array(_k[..., :pre_verify_offset, :]).astype(_kd)
-                        c.values = mx.array(_v[..., :pre_verify_offset, :]).astype(_vd)
+                        c.keys = mx.array(_np.ascontiguousarray(_k[..., :pre_verify_offset, :])).astype(_kd)
+                        c.values = mx.array(_np.ascontiguousarray(_v[..., :pre_verify_offset, :])).astype(_vd)
                     c.offset = pre_verify_offset
                     if hasattr(c, "_idx"):  # RotatingKVCache: sync write pointer
                         c._idx = pre_verify_offset
@@ -11190,8 +11190,8 @@ class Scheduler:
                             else c.values
                         )
                         _k, _v = _np.array(_ka), _np.array(_va)
-                        c.keys = mx.array(_k[..., :accepted_offset, :]).astype(_kd)
-                        c.values = mx.array(_v[..., :accepted_offset, :]).astype(_vd)
+                        c.keys = mx.array(_np.ascontiguousarray(_k[..., :accepted_offset, :])).astype(_kd)
+                        c.values = mx.array(_np.ascontiguousarray(_v[..., :accepted_offset, :])).astype(_vd)
                     c.offset = accepted_offset
                     if hasattr(c, "_idx"):  # RotatingKVCache: sync write pointer
                         c._idx = accepted_offset

@@ -1935,6 +1935,22 @@ def _dsv4_cache_meta(layer_state: Dict[str, Any]) -> Dict[str, Any]:
     return meta
 
 
+def _mx_from_np_slice(view):
+    """Import a numpy slice into MLX without dragging its base buffer.
+
+    mx.array() on a NON-CONTIGUOUS numpy view imports a buffer sized like the
+    view's BASE array (measured: 30.6MB of Metal for a 0.26MB 64-token block
+    slice of a 42.7MB full-layer mirror). Per-block extraction over a long
+    prompt turns that into O(blocks x full_layer) live Metal — ~140GB on an
+    11k-token qwen hybrid store, enough to abort the serve process and twice
+    panic the machine. A host-side contiguous copy of just the slice keeps
+    the import at slice size.
+    """
+    import numpy as np
+
+    return mx.array(np.ascontiguousarray(view))
+
+
 def _positional_layer_slice_bounds(
     layer_state, class_name, start_idx, end_idx, seq_len, existing_tokens=0,
 ):
@@ -2053,15 +2069,15 @@ def _numpy_block_slice(
             if start_idx >= actual_end:
                 kv_entry = ("skip",)
             elif ndim == 4:
-                ks = mx.array(np_k[:, :, start_idx:actual_end, :])
-                vs = mx.array(np_v[:, :, start_idx:actual_end, :])
+                ks = _mx_from_np_slice(np_k[:, :, start_idx:actual_end, :])
+                vs = _mx_from_np_slice(np_v[:, :, start_idx:actual_end, :])
                 if ks.dtype != orig_dtype:
                     ks = ks.astype(orig_dtype)
                     vs = vs.astype(orig_dtype)
                 kv_entry = ("kv", ks, vs)
             else:
-                ks = mx.array(np_k[:, start_idx:actual_end, :])
-                vs = mx.array(np_v[:, start_idx:actual_end, :])
+                ks = _mx_from_np_slice(np_k[:, start_idx:actual_end, :])
+                vs = _mx_from_np_slice(np_v[:, start_idx:actual_end, :])
                 if ks.dtype != orig_dtype:
                     ks = ks.astype(orig_dtype)
                     vs = vs.astype(orig_dtype)
@@ -2096,11 +2112,11 @@ def _numpy_block_slice(
             if start_idx >= actual_end:
                 block_slices.append(("skip",))
                 continue
-            ks = mx.array(np_k[:, :, start_idx:actual_end, :])
-            vs = mx.array(np_v[:, :, start_idx:actual_end, :])
+            ks = _mx_from_np_slice(np_k[:, :, start_idx:actual_end, :])
+            vs = _mx_from_np_slice(np_v[:, :, start_idx:actual_end, :])
             idxs = None
             if np_idx is not None:
-                idxs = mx.array(np_idx[:, :, start_idx:actual_end, :])
+                idxs = _mx_from_np_slice(np_idx[:, :, start_idx:actual_end, :])
             if orig_dtype is not None and ks.dtype != orig_dtype:
                 ks = ks.astype(orig_dtype)
                 vs = vs.astype(orig_dtype)
@@ -5263,10 +5279,10 @@ class BlockAwarePrefixCache:
                         if start_idx >= actual_end:
                             block_slices.append(("skip",))
                             continue
-                        ks = mx.array(np_k[:, :, start_idx:actual_end, :])
-                        vs = mx.array(np_v[:, :, start_idx:actual_end, :])
+                        ks = _mx_from_np_slice(np_k[:, :, start_idx:actual_end, :])
+                        vs = _mx_from_np_slice(np_v[:, :, start_idx:actual_end, :])
                         idxs = (
-                            mx.array(np_idx[:, :, start_idx:actual_end, :])
+                            _mx_from_np_slice(np_idx[:, :, start_idx:actual_end, :])
                             if np_idx is not None
                             else None
                         )
@@ -5496,11 +5512,11 @@ class BlockAwarePrefixCache:
                     if np_sources is not None and layer_idx in np_sources:
                         np_k, np_v, orig_dtype = np_sources[layer_idx]
                         if ndim == 4:
-                            ks = mx.array(np_k[:, :, slice_start:actual_end, :])
-                            vs = mx.array(np_v[:, :, slice_start:actual_end, :])
+                            ks = _mx_from_np_slice(np_k[:, :, slice_start:actual_end, :])
+                            vs = _mx_from_np_slice(np_v[:, :, slice_start:actual_end, :])
                         else:
-                            ks = mx.array(np_k[:, slice_start:actual_end, :])
-                            vs = mx.array(np_v[:, slice_start:actual_end, :])
+                            ks = _mx_from_np_slice(np_k[:, slice_start:actual_end, :])
+                            vs = _mx_from_np_slice(np_v[:, slice_start:actual_end, :])
                         # Restore original dtype (e.g. bfloat16 → float16 → bfloat16)
                         if ks.dtype != orig_dtype:
                             ks = ks.astype(orig_dtype)

@@ -508,9 +508,13 @@ class SSMCompanionCache:
         cache_extra_keys partition media-conditioned VLM states in the same
         way paged KV block hashes partition image/video prompts.
         """
+        # schema-v2: positional full-latent slots (dots3) are exempt from
+        # companion snapshots, which changes the implicit layer ordering of
+        # stored entries. Version the key so pre-exemption entries can never
+        # splice misaligned state into the new mapping.
         data = (
             self._model_key.encode()
-            + b"\x00"
+            + b"\x00schema-v2\x00"
             + json.dumps(token_ids[:num_tokens], separators=(",", ":")).encode()
             + self._extra_key_bytes(cache_extra_keys)
         )

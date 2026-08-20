@@ -843,3 +843,51 @@ class TestCumulativeStateDtypePreservation:
         assert meta == "" and dts is None
         meta, dts = _unwrap_cumulative_meta({"m": ("0",), "dt": ["bfloat16"]})
         assert meta == ("0",) and dts == ["bfloat16"]
+
+
+class TestCompanionExemptPositionalLatents:
+    """dots3's full-attention latent slots are positional O(ctx) streams;
+    cloning them into every SSM companion checkpoint made the companion
+    grow quadratically with context (measured live: +13 full-length latents
+    per stored boundary, ~8.6GB retained by 36k — the real dots3 deep-
+    context wall). They are exempt: the block lane + adoption rebuilds them
+    positionally. Sliding (windowed) and true recurrent slots keep their
+    companion coverage."""
+
+    def test_predicate(self):
+        from vmlx_engine.mllm_batch_generator import _companion_exempt_cache
+
+        class _PositionalFull:
+            window = None
+
+            def trim_to_boundary(self, b):
+                return True
+
+        class _SlidingLatent:
+            window = 513
+
+            def trim_to_boundary(self, b):
+                return True
+
+        class _Gdn:  # recurrent, no trim_to_boundary
+            pass
+
+        assert _companion_exempt_cache(_PositionalFull()) is True
+        assert _companion_exempt_cache(_SlidingLatent()) is False
+        assert _companion_exempt_cache(_Gdn()) is False
+        assert _companion_exempt_cache(object()) is False
+
+    def test_companion_key_carries_schema_version(self):
+        from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
+
+        cache = SSMCompanionCache(model_key="m")
+        # The version salt must partition keys from any pre-exemption build:
+        # identical tokens under the OLD recipe (no salt) hash differently.
+        import hashlib, json
+
+        key = cache._key([1, 2, 3], 3)
+        old_recipe = hashlib.sha256(
+            b"m" + b"\x00" + json.dumps([1, 2, 3], separators=(",", ":")).encode()
+            + cache._extra_key_bytes(None)
+        ).hexdigest()
+        assert key != old_recipe

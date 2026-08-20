@@ -3971,6 +3971,27 @@ def _call_lm_prefix_without_logits(
     return lm(input_ids, **kwargs)
 
 
+def _companion_exempt_cache(cache_obj: Any) -> bool:
+    """Positional full-latent caches are EXEMPT from SSM companion snapshots.
+
+    The companion lane was designed for fixed-size recurrent state (GDN
+    conv/ssm, a few MB per layer). dots3's full-attention Dots3LatentCache
+    slots look "SSM-like" (a .cache list, not trimmable KV) but hold O(ctx)
+    positional latent streams — cloning them per checkpoint made the
+    companion cache grow QUADRATICALLY with context (measured: +13 full-
+    length latents per stored boundary, ~8.6GB retained by 36k, the real
+    dots3 deep-context wall). They do not need companion state at all: the
+    block lane reconstructs them positionally and the adoption lane
+    re-types them (`dots3 adopted N restored full-layer cache(s)` fires on
+    every block hit today). The discriminator: positionally rewindable
+    (trim_to_boundary) with no window = a positional stream, not state.
+    """
+    return (
+        hasattr(cache_obj, "trim_to_boundary")
+        and getattr(cache_obj, "window", 1) is None
+    )
+
+
 def _prefill_cache_materialization_items(cache: Optional[List[Any]]) -> List[Any]:
     """Collect KV/SSM cache arrays that should be realized after prefix prefill."""
     items: List[Any] = []
@@ -6458,6 +6479,8 @@ class MLLMBatchGenerator:
             _inline_materialize: List[Any] = []
             for layer_idx, c in enumerate(cache):
                 if layer_idx in kv_set:
+                    continue
+                if _companion_exempt_cache(c):
                     continue
                 if hasattr(c, "cache") and isinstance(c.cache, list):
                     from copy import deepcopy
@@ -9112,7 +9135,17 @@ class MLLMBatchGenerator:
                                     kv_set = set(self._hybrid_kv_positions or [])
                                     ssm_idx = 0
                                     for layer_idx in range(len(full_cache)):
-                                        if layer_idx not in kv_set and ssm_idx < len(ssm_states):
+                                        if layer_idx in kv_set:
+                                            continue
+                                        # Positional full-latent slots keep
+                                        # the block-reconstructed (adopted)
+                                        # content — companion entries no
+                                        # longer carry them.
+                                        if _companion_exempt_cache(
+                                            full_cache[layer_idx]
+                                        ):
+                                            continue
+                                        if ssm_idx < len(ssm_states):
                                             full_cache[layer_idx] = ssm_states[ssm_idx]
                                             ssm_idx += 1
                                     if not _validate_prompt_cache(
@@ -9973,6 +10006,8 @@ class MLLMBatchGenerator:
                         for layer_idx, cache_obj in enumerate(clean_media_cache):
                             if layer_idx in kv_set:
                                 continue
+                            if _companion_exempt_cache(cache_obj):
+                                continue
                             if hasattr(cache_obj, "cache") and isinstance(
                                 cache_obj.cache, list
                             ):
@@ -10059,6 +10094,8 @@ class MLLMBatchGenerator:
                         ssm_layers = []
                         for layer_idx, c in enumerate(req_cache):
                             if layer_idx not in kv_set:
+                                if _companion_exempt_cache(c):
+                                    continue
                                 if hasattr(c, 'cache') and isinstance(c.cache, list):
                                     from copy import deepcopy
                                     cloned = deepcopy(c)
@@ -11966,7 +12003,11 @@ class MLLMBatchGenerator:
         kv_positions = set(self._hybrid_kv_positions or [])
         injected = 0
         for layer_idx in range(len(fixed)):
-            if layer_idx not in kv_positions and injected < len(ssm_states):
+            if layer_idx in kv_positions:
+                continue
+            if _companion_exempt_cache(fixed[layer_idx]):
+                continue
+            if injected < len(ssm_states):
                 fixed[layer_idx] = ssm_states[injected]
                 injected += 1
         if injected != len(ssm_states):

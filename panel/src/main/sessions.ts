@@ -726,6 +726,21 @@ function markCacheStackStartupDefaultsCurrent(
   return true
 }
 
+function liftLegacyStreamInterval(config: Partial<ServerConfig>): boolean {
+  // stream-interval 1 was the shipped default and is a measured user-facing
+  // defect on long conversations: the renderer re-renders a growing markdown
+  // document per token, TCP backpressure stalls the engine's emit loop, and
+  // the MTP runtime cost gate then reads the stall as speculative-decoding
+  // cost and falls back to AR (measured live on Qwen 4D: warm turn 3 at
+  // 14.8 t/s with interval 1 vs 28.9 t/s with interval 8; the identical
+  // engine + prompts over the raw API hold 26-31 t/s). dots3 sessions have
+  // shipped interval 8 for the same reason. Only the legacy default value 1
+  // is lifted; any other explicit choice is kept.
+  if (Number(config.streamInterval) !== 1) return false
+  config.streamInterval = 8
+  return true
+}
+
 function liftStaleFlatCacheIndex(
   config: Partial<ServerConfig>,
   modelPath?: string,
@@ -1724,6 +1739,7 @@ export class SessionManager extends EventEmitter {
     applyMissingCacheStackStartupDefaults(config, modelPath)
     applyFamilyStartupDefaults(config, modelPath)
     liftStaleFlatCacheIndex(config, modelPath)
+    liftLegacyStreamInterval(config)
     normalizeCacheStackMutualExclusion(config)
     markCacheStackStartupDefaultsCurrent(config, modelPath)
 
@@ -1753,6 +1769,7 @@ export class SessionManager extends EventEmitter {
       // 1000 over a value the migration just lifted, so re-run the backstop on
       // the merged result rather than only on the incoming config.
       liftStaleFlatCacheIndex(merged, modelPath)
+      liftLegacyStreamInterval(merged)
       normalizeCacheStackMutualExclusion(merged)
       markCacheStackStartupDefaultsCurrent(merged, modelPath)
       db.updateSession(existing.id, {
@@ -3311,7 +3328,7 @@ export class SessionManager extends EventEmitter {
           kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
           modelParserDefaultsVersion: MODEL_PARSER_DEFAULTS_VERSION,
-          streamInterval: 1,
+          streamInterval: 8,
           maxTokens: 0,
           maxContextLength: 0,
           toolCallParser: 'auto',
@@ -4556,7 +4573,11 @@ export class SessionManager extends EventEmitter {
     }
 
     // Performance
-    const streamInterval = finitePositiveInteger(config.streamInterval)
+    // Launch-time backstop for sessions saved before the interval-8 lift:
+    // the legacy default 1 is the measured backpressure defect (see
+    // liftLegacyStreamInterval); emit 8 for it without rewriting the row.
+    const streamInterval0 = finitePositiveInteger(config.streamInterval)
+    const streamInterval = streamInterval0 === 1 ? 8 : streamInterval0
     if (streamInterval != null) {
       args.push('--stream-interval', streamInterval.toString())
     }

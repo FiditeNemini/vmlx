@@ -4329,6 +4329,21 @@ def save_frames_to_temp(frames: list[np.ndarray]) -> list[str]:
     return paths
 
 
+# Families whose SimpleEngine video handling routes through sampled frames
+# sent as images. Mirror of the BatchedEngine's _video_frame_fallback_messages
+# family gate (batched.py) minus native-gemma4: qwen3_5's native video tensors
+# misread even simple color sequences, so frame-fallback IS the designed path.
+# A family folded into all_images at frame extraction but absent from this set
+# renders ONE un-expanded <|video_pad|> while the tower produces per-frame
+# features — "Image features and image tokens do not match" at generation.
+_VIDEO_FRAME_FALLBACK_MODEL_TYPES = {
+    "gemma4_unified",
+    "step3p7",
+    "qwen3_5",
+    "qwen3_5_moe",
+}
+
+
 def _expand_video_placeholders_to_image_frames(
     chat_messages: list[dict],
     frame_counts: list[int],
@@ -5956,7 +5971,7 @@ class MLXMultimodalLM:
             if isinstance(self.config, dict)
             else str(getattr(self.config, "model_type", "") or "").lower()
         )
-        if model_type in {"gemma4_unified", "step3p7"} and video_frame_counts:
+        if model_type in _VIDEO_FRAME_FALLBACK_MODEL_TYPES and video_frame_counts:
             chat_messages = _expand_video_placeholders_to_image_frames(
                 chat_messages,
                 video_frame_counts,
@@ -6296,7 +6311,7 @@ class MLXMultimodalLM:
             if isinstance(self.config, dict)
             else str(getattr(self.config, "model_type", "") or "").lower()
         )
-        if model_type == "gemma4_unified" and video_frame_counts:
+        if model_type in _VIDEO_FRAME_FALLBACK_MODEL_TYPES and video_frame_counts:
             chat_messages = _expand_video_placeholders_to_image_frames(
                 chat_messages,
                 video_frame_counts,

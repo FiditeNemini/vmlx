@@ -11009,3 +11009,39 @@ class TestStreamingWhitespacePreservation:
             "strip_marker_tokens_delta must NOT call .strip() — that eats "
             "per-delta leading whitespace and concatenates the stream"
         )
+
+
+class TestVideoFrameFallbackFamilyGate:
+    """qwen3_5 video via SimpleEngine raised "Image features and image tokens
+    do not match: tokens: 1, features 480" — frames were folded into
+    all_images but the video->image-frames placeholder rewrite was gated to
+    gemma4_unified only (and stream_chat additionally missed step3p7), so the
+    template rendered ONE un-expanded video_pad against per-frame tower
+    features. The BatchedEngine has carried the correct family set since
+    v1.5.55; both SimpleEngine methods must use the shared set."""
+
+    def test_shared_set_covers_frame_fallback_families(self):
+        from vmlx_engine.models.mllm import _VIDEO_FRAME_FALLBACK_MODEL_TYPES
+
+        assert {
+            "gemma4_unified",
+            "step3p7",
+            "qwen3_5",
+            "qwen3_5_moe",
+        } <= _VIDEO_FRAME_FALLBACK_MODEL_TYPES
+
+    def test_both_methods_use_the_shared_set(self):
+        import inspect
+
+        from vmlx_engine.models import mllm
+
+        src = inspect.getsource(mllm)
+        assert src.count("_VIDEO_FRAME_FALLBACK_MODEL_TYPES") >= 2, (
+            "chat() and stream_chat() must both gate the video placeholder "
+            "rewrite on the shared family set"
+        )
+        for stale in (
+            'model_type == "gemma4_unified" and video_frame_counts',
+            'model_type in {"gemma4_unified", "step3p7"} and video_frame_counts',
+        ):
+            assert stale not in src, f"stale literal gate returned: {stale}"

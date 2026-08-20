@@ -26,6 +26,29 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.34] - 2026-08-20
+
+### Performance
+
+- **Native MTP overhaul (Qwen3.8, dots3-note):** aligned draft-head context cache plus generalized skip-replay — rejected drafts no longer replay through the main model at any depth, and restore-aware acceptance gates keep heads warm across cache restores. Warm in-app decode on Qwen3.8-27B-JANG_4D rises from ~22 to 38–44 t/s; dots3-note reaches ~41 t/s.
+- **DFlash2 session prefix reuse:** end-of-turn cache checkpoints, draft hidden-state gap splice, and prompt-boundary snapshots (safe under thinking-strip) — warm multiturn TTFT drops ~20x; 60+ t/s sustained on Qwen3.8 with DFlash2. The DFlash runtime (`dflash`, `dflash-mlx`) now ships in the bundle.
+- **Stream interval defaults to 8:** the renderer can no longer backpressure-stall the engine emit loop on long conversations; legacy interval-1 sessions are lifted automatically.
+- **dots3-note deep context:** the prefill admission valve projects per-chunk (removing a phantom ~17k refusal), SSM companion snapshots exempt positional full-latent slots (quadratic memory growth fixed), and the L2 block store gains a 4GB pending-write budget with drain (no more lineage drops under store bursts). 56k-token conversations verified in-app on a 128GB Mac with the wired limit raised.
+- mlx 0.32.1, mflux 0.19.0.
+
+### Fixed
+
+- **Removed the RAM preflight that refused large model loads.** Estimates now only advise; models the hardware can genuinely hold (e.g. a 101GB dots3-note bundle on a 128GB Mac) load again.
+- **Native MTP actually engages by default.** Bundle-temperature auto-detection had kept MTP permanently off; detection is now compatible-only with a deterministic-defaults sampling policy (non-zero-temperature sessions log a loud AR fallback instead of silently degrading).
+- Prefill admission rejections now include a wired-limit advisory naming the exact `sysctl`, the macOS ~84%-of-RAM default, and the reset-on-reboot behavior.
+- Hybrid prefix cache: bf16 cumulative-state dtype round-trip; plain-KV restores are step-padded.
+
+## [1.6.33] - 2026-08-17
+
+### Fixed
+
+- Stale Error badge and title no longer survive restarts on sessions whose models load fine (boot-time reconcile).
+
 ## [1.6.32] - 2026-08-16
 
 ### Added

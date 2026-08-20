@@ -45,6 +45,104 @@ class EmbeddingEngine:
         if not self.is_loaded:
             self.load()
 
+    # Only used when neither the tokenizer nor the model config states a
+    # usable limit. It is NOT a product decision about how much text an
+    # embedding model can read (vmlx#255: this was hardcoded, so a
+    # 32k-context embedding model silently indexed the first 512 tokens of
+    # every chunk and returned vectors that ignored the rest).
+    _FALLBACK_MAX_SEQUENCE_LENGTH = 512
+    # transformers uses a huge sentinel for "no stated limit".
+    _IMPLAUSIBLE_MAX_SEQUENCE_LENGTH = 1_000_000
+
+    def _max_sequence_length(self) -> int:
+        cached = getattr(self, "_cached_max_sequence_length", None)
+        if cached:
+            return cached
+
+        candidates: list[int] = []
+
+        def _consider(raw: object) -> None:
+            try:
+                value = int(raw)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return
+            if 0 < value < self._IMPLAUSIBLE_MAX_SEQUENCE_LENGTH:
+                candidates.append(value)
+
+        tok = getattr(self._tokenizer, "_tokenizer", self._tokenizer)
+        _consider(getattr(tok, "model_max_length", None))
+
+        config = getattr(self._model, "config", None)
+        for attr in (
+            "max_position_embeddings",
+            "max_seq_length",
+            "n_positions",
+            "seq_length",
+        ):
+            if config is not None:
+                _consider(getattr(config, attr, None))
+                if isinstance(config, dict):
+                    _consider(config.get(attr))
+
+        # The smallest stated limit is the one that actually holds: exceeding
+        # either the tokenizer's or the model's ceiling is what breaks.
+        resolved = min(candidates) if candidates else self._FALLBACK_MAX_SEQUENCE_LENGTH
+        self._cached_max_sequence_length = resolved
+        logger.info(
+            "Embedding model %s max sequence length resolved to %d tokens%s",
+            self.model_name,
+            resolved,
+            "" if candidates else " (no stated limit found; using fallback)",
+        )
+        return resolved
+
+    def _warn_on_truncation(
+        self,
+        tokenizer: object,
+        texts: list[str],
+        max_length: int,
+        attention_mask: object = None,
+    ) -> None:
+        """Truncation must never be silent — the caller's vector would
+        simply ignore the tail of their document (vmlx#255).
+
+        Rows that did not fill the window cannot have been truncated, so
+        only those are re-tokenized. The row's REAL length comes from the
+        attention mask, not from the padded input_ids width — with
+        padding=True every row shares the widest row's width, so using the
+        ids would make one oversize chunk re-tokenize the whole batch.
+        Embedding callers index thousands of chunks; the all-fits case must
+        add no tokenization work at all.
+        """
+        try:
+            suspects = list(range(len(texts)))
+            if attention_mask is not None:
+                suspects = [
+                    i
+                    for i, row in enumerate(attention_mask)
+                    if int(sum(row)) >= max_length
+                ]
+            if not suspects:
+                return
+            over = []
+            for i in suspects:
+                length = len(tokenizer(texts[i], truncation=False)["input_ids"])  # type: ignore[operator]
+                if length > max_length:
+                    over.append(length)
+        except Exception:
+            return
+        if not over:
+            return
+        logger.warning(
+            "Embedding input truncated: %d of %d input(s) exceed the model's "
+            "%d-token limit (longest %d). Content past the limit does not "
+            "affect the returned vector — split the text into chunks that fit.",
+            len(over),
+            len(texts),
+            max_length,
+            max(over),
+        )
+
     def embed(self, texts: str | list[str]) -> list[list[float]]:
         """
         Generate embeddings for one or more texts.
@@ -65,15 +163,23 @@ class EmbeddingEngine:
         # GemmaTokenizer lacks batch_encode_plus, and the model's __call__
         # expects positional `inputs` not `input_ids` as a kwarg).
         inner_tok = getattr(self._tokenizer, "_tokenizer", self._tokenizer)
+        max_length = self._max_sequence_length()
         encoded = inner_tok(
             texts,
             padding=True,
             truncation=True,
-            max_length=512,
+            max_length=max_length,
             return_tensors="np",
         )
+        input_ids_raw = encoded["input_ids"]
+        # Only pay for a second tokenization when a row actually filled the
+        # window — RAG callers embed thousands of chunks, and the common case
+        # (everything fits) must cost nothing extra.
+        self._warn_on_truncation(
+            inner_tok, texts, max_length, encoded.get("attention_mask")
+        )
 
-        input_ids = mx.array(encoded["input_ids"])
+        input_ids = mx.array(input_ids_raw)
         attention_mask = mx.array(encoded["attention_mask"])
 
         output = self._model(input_ids, attention_mask=attention_mask)

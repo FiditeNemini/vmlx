@@ -113,6 +113,19 @@ class Model(Qwen3VLModel):
             ".k_norm.weight",
         )
 
+        # ABSOLUTE import on purpose: register.py loads this file under the
+        # package name mlx_vlm.models.qwen3_5, so a relative import would
+        # resolve against mlx_vlm and raise at load time.
+        from vmlx_engine.utils.zero_centered_norms import (
+            zero_centered_norm_shift_needed,
+        )
+
+        # Bundles saved AFTER a conversion pipeline ran sanitize already carry
+        # shifted norms; shifting again doubles the scale and garbles output.
+        apply_norm_shift = zero_centered_norm_shift_needed(
+            weights, norm_keys, model_label="qwen3_5"
+        )
+
         sanitized_weights = {}
         for key, value in weights.items():
             if "model" in key:
@@ -125,7 +138,7 @@ class Model(Qwen3VLModel):
 
             if "conv1d.weight" in key and value.shape[-1] != 1:
                 value = value.moveaxis(2, 1)
-            if any(key.endswith(sfx) for sfx in norm_keys):
+            if apply_norm_shift and any(key.endswith(sfx) for sfx in norm_keys):
                 if value.ndim == 1:
                     value += 1.0
 

@@ -587,6 +587,64 @@ def estimate_kv_bytes_per_token_from_config(config) -> int:
             scalar = _dtype_scalar_bytes(dtype)
             return full_layers * (kv_lora + rope_dim + index_dim) * scalar
 
+    # Interval-hybrid families (Qwen3.5/3.6 gated-delta stacks) keep standard
+    # K+V only on every Nth layer — `full_attention_interval` — while the rest
+    # hold a FIXED-size recurrent state that does not grow with context. The
+    # generic geometry below charges every layer as full attention, so a
+    # 4-interval stack is over-charged ~4x. That is not academic: the auto
+    # prompt cap is derived from this number, and the over-charge is what put
+    # a VLM session at 20,119 tokens on a box that fits far more (vmlx#254).
+    # Same shape of fix as the dots3_note case above, keyed on config the
+    # family actually declares.
+    for cfg in candidates:
+        interval = _cfg_get(cfg, "full_attention_interval")
+        layer_types = _cfg_get(cfg, "layer_types") or []
+        n_layers_hybrid = _positive_int(
+            _cfg_get(cfg, "num_hidden_layers")
+            or _cfg_get(cfg, "n_layers")
+            or _cfg_get(cfg, "num_layers"),
+            0,
+        )
+        full_layers = 0
+        if layer_types:
+            full_layers = sum(
+                1
+                for t in layer_types
+                if "full" in str(t) or str(t) == "attention"
+            )
+        elif interval and n_layers_hybrid:
+            try:
+                step = int(interval)
+            except (TypeError, ValueError):
+                step = 0
+            if step > 1:
+                full_layers = n_layers_hybrid // step
+        if not full_layers or not n_layers_hybrid:
+            continue
+        if full_layers >= n_layers_hybrid:
+            continue  # not actually hybrid; fall through to the generic path
+        n_kv_heads = (
+            _cfg_get(cfg, "num_key_value_heads")
+            or _cfg_get(cfg, "n_kv_heads")
+            or _cfg_get(cfg, "num_attention_heads")
+            or 0
+        )
+        head_dim = _cfg_get(cfg, "head_dim") or 0
+        if not head_dim:
+            hidden = _positive_int(_cfg_get(cfg, "hidden_size"), 0)
+            heads = _positive_int(_cfg_get(cfg, "num_attention_heads"), 0)
+            head_dim = (hidden // heads) if hidden and heads else 0
+        n_kv_heads = _positive_int(n_kv_heads, 0)
+        head_dim = _positive_int(head_dim, 0)
+        if n_kv_heads <= 0 or head_dim <= 0:
+            continue
+        dtype = (
+            _cfg_get(cfg, "torch_dtype")
+            or _cfg_get(cfg, "dtype")
+            or _cfg_get(cfg, "mlx_dtype")
+        )
+        return full_layers * 2 * n_kv_heads * head_dim * _dtype_scalar_bytes(dtype)
+
     for cfg in candidates:
         n_layers = (
             _cfg_get(cfg, "num_hidden_layers")

@@ -1006,12 +1006,19 @@ class Model(nn.Module):
                 ".k_norm.weight",
                 "model.norm.weight",
             )
-            language_weights = {
-                key: value + 1.0
-                if any(key.endswith(suffix) for suffix in norm_suffixes)
-                else value
-                for key, value in language_weights.items()
-            }
+            from vmlx_engine.utils.zero_centered_norms import (
+                zero_centered_norm_shift_needed,
+            )
+
+            if zero_centered_norm_shift_needed(
+                language_weights, norm_suffixes, model_label="step3p7"
+            ):
+                language_weights = {
+                    key: value + 1.0
+                    if any(key.endswith(suffix) for suffix in norm_suffixes)
+                    else value
+                    for key, value in language_weights.items()
+                }
         for key, value in language_weights.items():
             sanitized["language_model." + key] = value
         return sanitized

@@ -584,6 +584,19 @@ def _apply_vlm_image_request_cache_limit() -> bool:
         return False
 
 
+def _max_tokens_under_attention_bytes(byte_budget: int, heads: int) -> int:
+    """Largest media-expanded prompt whose heads x tokens^2 x 2B fits.
+
+    The guard's cost model is quadratic in prompt length, so "shorten the
+    prompt" is unactionable without this inverse (vmlx#256).
+    """
+    import math
+
+    if byte_budget <= 0 or heads <= 0:
+        return 0
+    return int(math.isqrt(int(byte_budget) // (2 * int(heads))))
+
+
 def _vlm_image_prefill_budget(
     *,
     has_images: bool,
@@ -594,6 +607,7 @@ def _vlm_image_prefill_budget(
     reject_pct: float,
     single_buffer_limit_bytes: int,
     guard_enabled: bool,
+    image_token_count: Optional[int] = None,
 ) -> VLMImagePrefillBudgetDecision:
     """Budget a one-shot image prefill before it reaches Metal.
 
@@ -646,14 +660,52 @@ def _vlm_image_prefill_budget(
     reasons: List[str] = []
     if exceeds_single_buffer:
         reasons.append(
-            f"predicted attention buffer {gb(predicted):.1f}GB exceeds "
+            f"predicted attention buffer {gb(predicted):.1f}GB "
+            f"(= {heads} heads x ({tokens:,} tokens)^2 x 2B) exceeds "
             f"single-buffer guard {gb(single_limit):.1f}GB"
         )
     if exceeds_working_set:
         reasons.append(
-            f"projected Metal working set {projected_pct:.0f}% exceeds "
+            f"projected Metal working set {projected_pct:.0f}% "
+            f"({gb(active):.1f}GB already resident + {gb(predicted):.1f}GB "
+            f"predicted of {gb(max_ws):.1f}GB) exceeds "
             f"threshold {reject_pct:.0f}%"
         )
+
+    # The buffer grows with the SQUARE of the media-expanded prompt, so the
+    # actionable number is how many total tokens actually fit — without it a
+    # user can only guess-and-retry (vmlx#256).
+    fitting_budgets = []
+    if exceeds_single_buffer:
+        fitting_budgets.append(_max_tokens_under_attention_bytes(single_limit, heads))
+    if exceeds_working_set:
+        headroom = int((reject_pct / 100.0) * max_ws) - active
+        fitting_budgets.append(_max_tokens_under_attention_bytes(headroom, heads))
+    fits_tokens = min([b for b in fitting_budgets if b >= 0], default=0)
+
+    budget_line = (
+        f" This device fits about {fits_tokens:,} media-expanded tokens under "
+        f"the binding limit; this prompt is {tokens:,}"
+    )
+    if image_token_count is not None and image_token_count >= 0:
+        text_tokens = max(0, tokens - int(image_token_count))
+        budget_line += (
+            f" ({int(image_token_count):,} image + {text_tokens:,} text)"
+        )
+        if fits_tokens > int(image_token_count):
+            budget_line += (
+                f" — keeping these images, the text must fit in "
+                f"{fits_tokens - int(image_token_count):,} tokens"
+            )
+        else:
+            budget_line += (
+                " — the images alone exceed the budget, so a smaller image "
+                "or fewer images is required"
+            )
+    else:
+        budget_line += f", i.e. {max(0, tokens - fits_tokens):,} too many"
+    budget_line += "."
+
     return VLMImagePrefillBudgetDecision(
         should_reject=True,
         predicted_attention_bytes=predicted,
@@ -662,7 +714,9 @@ def _vlm_image_prefill_budget(
         detail=(
             "VLM image prefill rejected before Metal forward: "
             + "; ".join(reasons)
-            + ". Image prefill cannot be chunked safely because the VLM "
+            + "."
+            + budget_line
+            + " Image prefill cannot be chunked safely because the VLM "
             "wrapper needs the full media-expanded prompt. Reduce image "
             "resolution/prompt length, use a smaller model, or set "
             "VMLX_VLM_IMAGE_PREFILL_GUARD=0 to bypass this guard at OOM risk."
@@ -716,6 +770,7 @@ def _raise_if_image_prefill_exceeds_budget(
     has_audio_payload: bool = False,
     seq_len: int,
     language_model: Any,
+    image_token_count: Optional[int] = None,
 ) -> None:
     if os.environ.get("VMLX_VLM_IMAGE_PREFILL_GUARD", "1") == "0":
         guard_enabled = False
@@ -752,6 +807,7 @@ def _raise_if_image_prefill_exceeds_budget(
         reject_pct=reject_pct,
         single_buffer_limit_bytes=single_buffer_limit,
         guard_enabled=guard_enabled,
+        image_token_count=image_token_count,
     )
     if decision.should_reject:
         logger.warning(decision.detail)

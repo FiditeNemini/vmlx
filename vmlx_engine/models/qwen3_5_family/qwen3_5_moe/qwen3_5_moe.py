@@ -43,6 +43,16 @@ class Model(Qwen3_5Model):
             ".k_norm.weight",
         )
 
+        # ABSOLUTE import: this file is registered under the mlx_vlm package
+        # name, so relative imports resolve against mlx_vlm.
+        from vmlx_engine.utils.zero_centered_norms import (
+            zero_centered_norm_shift_needed,
+        )
+
+        apply_norm_shift = zero_centered_norm_shift_needed(
+            weights, norm_keys, model_label="qwen3_5_moe"
+        )
+
         sanitized_weights = {}
         for key, value in weights.items():
             if "model" in key:
@@ -55,7 +65,7 @@ class Model(Qwen3_5Model):
 
             if "conv1d.weight" in key and value.shape[-1] != 1:
                 value = value.moveaxis(2, 1)
-            if any(key.endswith(sfx) for sfx in norm_keys):
+            if apply_norm_shift and any(key.endswith(sfx) for sfx in norm_keys):
                 if value.ndim == 1:
                     value += 1.0
 

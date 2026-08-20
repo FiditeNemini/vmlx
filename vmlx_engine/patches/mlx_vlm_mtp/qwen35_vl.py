@@ -32,22 +32,13 @@ def _qwen_vlm_gated_delta_kernel_enabled(module: Any) -> bool:
     return not getattr(module, "training", False)
 
 
-def _qwen_norm_shard_looks_unshifted(weights, norm_keys) -> bool:
-    for key, value in weights.items():
-        if not any(key.endswith(sfx) for sfx in norm_keys):
-            continue
-        if getattr(value, "ndim", 0) != 1:
-            continue
-        try:
-            sample = value[: min(int(value.shape[0]), 1024)].astype(mx.float32)
-            mean = float(mx.mean(sample).item())
-        except Exception:
-            continue
-        if key.endswith("model.norm.weight") and mean < 1.5:
-            return True
-        if mean < 0.5:
-            return True
-    return False
+# Canonical implementation lives in vmlx_engine/utils/zero_centered_norms.py
+# so the base family loaders (qwen3_5, qwen3_5_moe) share this detector
+# instead of carrying an unconditional shift that garbles every
+# already-converted bundle (vmlx#259).
+from vmlx_engine.utils.zero_centered_norms import (  # noqa: E402
+    qwen_norm_shard_looks_unshifted as _qwen_norm_shard_looks_unshifted,
+)
 
 
 def _qwen35_patch_embed_to_mlx_layout(key: str, value: Any) -> Any:
@@ -1011,11 +1002,13 @@ def _patch_language_model(qlang: Any) -> None:
             "mtp.norm.weight",
         )
 
+        apply_norm_shift = _qwen_norm_shard_looks_unshifted(weights, norm_keys)
+
         sanitized = {}
         for key, value in weights.items():
             if "conv1d.weight" in key and value.shape[-1] != 1:
                 value = value.moveaxis(2, 1)
-            if any(key.endswith(sfx) for sfx in norm_keys):
+            if apply_norm_shift and any(key.endswith(sfx) for sfx in norm_keys):
                 if value.ndim == 1:
                     value = value + 1.0
             sanitized[key] = value

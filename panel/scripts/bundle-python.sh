@@ -278,7 +278,7 @@ echo "==> Upgrading pip..."
 MLX_VERSION="0.32.1"
 MLX_LM_VERSION="0.31.3"
 MLX_VLM_VERSION="0.5.0"
-MFLUX_VERSION="0.17.5"
+MFLUX_VERSION="0.19.0"
 OPENCV_VERSION="4.13.0.92"
 MLX_AUDIO_VERSION="0.4.6"
 # The MCP SDK was installed as an unpinned "mcp>=1.0.0", so every re-bundle took

@@ -371,19 +371,21 @@ class Dots3LatentCache:
 
 
 def _prefill_layer_eval_every() -> int:
-    """Layers per prefill eval boundary; 0 disables. Default 2: a single
-    full layer's DSA score buffers are ~2.5GB at 60k context (measured: the
-    every-8 default left the same 101->118GB sawtooth because 8 layers'
-    worth equals the unbounded case), so the bound must be a couple of
-    layers to matter. ~23 barriers per chunk at ~1ms each, engaged only for
-    seq_len > 1."""
+    """Layers per prefill eval boundary; 0 (default) disables.
+
+    Kept as an experiment lever only: MEASURED at every-8 AND every-2 on
+    the live 100k ladder, the 98->118GB active sawtooth at 60k context was
+    UNCHANGED — the deep-context transient is not pending-layer score
+    graphs, so mid-forward eval barriers buy nothing and only add
+    dispatch overhead. The remaining dots3 deep-context wall is the DSA
+    dense-mask working set itself (the known kernel-level ceiling)."""
     try:
         return max(
             0,
-            int(os.environ.get("VMLX_DOTS3_PREFILL_LAYER_EVAL_EVERY", "2")),
+            int(os.environ.get("VMLX_DOTS3_PREFILL_LAYER_EVAL_EVERY", "0")),
         )
     except (TypeError, ValueError):
-        return 2
+        return 0
 
 
 def _sliding_causal_mask(

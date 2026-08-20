@@ -224,3 +224,103 @@ class TestDescribeMisses:
         store = _DFlash2SessionStore()
         store.put(_entry("other", [1, 2, 3]))
         assert store.describe_misses("m", [1, 2, 3]) == []
+
+
+class TestRotatingCacheResumeMath:
+    """The resume path force-sets ``cache.offset`` to the absolute
+    conversation position on a fresh drafter RotatingKVCache. Upstream sizes
+    physical buffer growth from that logical offset, so a resume at 14k into
+    a 2047-slot window computed a negative ``mx.zeros`` dimension and the
+    first 1-token update after an accepted==0 verify cycle died with
+    ``[full] Negative dimensions not allowed`` (live: turn 3 of the qwen 4D
+    matrix, transient because acceptance rarely hits zero inside the
+    under-filled window). The patch keys growth and the returned view on the
+    physical fill; every assertion here runs the REAL mlx_lm cache class."""
+
+    def _patched_cache(self, max_size=31, keep=0, step=8):
+        import mlx.core as mx
+        from mlx_lm.models.cache import RotatingKVCache
+
+        from vmlx_engine.dflash2_runtime import _patch_rotating_cache_resume_math
+
+        _patch_rotating_cache_resume_math()
+        c = RotatingKVCache(max_size=max_size, keep=keep)
+        c.step = step
+        return mx, c
+
+    def _tok(self, mx, value, dims=(1, 2, 1, 4)):
+        return mx.full(dims, value, dtype=mx.float32)
+
+    def test_forced_offset_short_delta_survives_single_token_updates(self):
+        mx, c = self._patched_cache()
+        # Resume: fresh cache, forced absolute offset far past the window.
+        c.offset = 1000
+        # Short delta (< window) lands via the concat path.
+        delta = mx.zeros((1, 2, 5, 4), dtype=mx.float32)
+        c.update_and_fetch(delta, delta)
+        assert c.keys.shape[2] == 5
+        # The crash site: 1-token updates while the window is under-filled.
+        for i in range(40):
+            t = self._tok(mx, float(i + 1))
+            k, v = c.update_and_fetch(t, t)
+            mx.eval(k, v)
+        assert c.keys.shape[2] <= 31 + c.step
+
+    def test_forced_offset_growth_has_no_mid_buffer_gap(self):
+        mx, c = self._patched_cache()
+        c.offset = 500
+        seed = mx.zeros((1, 2, 3, 4), dtype=mx.float32)
+        c.update_and_fetch(seed, seed)
+        # Write distinct values; the returned view must end with exactly the
+        # written sequence (no zero gap from a premature re-grow).
+        for i in range(10):
+            t = self._tok(mx, float(i + 1))
+            k, _ = c.update_and_fetch(t, t)
+        got = [float(k[0, 0, j, 0]) for j in range(k.shape[2])]
+        assert got[:3] == [0.0, 0.0, 0.0]
+        assert got[3:] == [float(i + 1) for i in range(10)]
+
+    def test_forced_offset_returned_view_excludes_unwritten_tail(self):
+        mx, c = self._patched_cache(step=8)
+        c.offset = 999
+        seed = mx.zeros((1, 2, 2, 4), dtype=mx.float32)
+        c.update_and_fetch(seed, seed)
+        t = self._tok(mx, 7.0)
+        k, v = c.update_and_fetch(t, t)
+        # Buffer grew to 2+8=10 wide, but only 3 positions are written.
+        assert k.shape[2] == 3
+        assert float(k[0, 0, 2, 0]) == 7.0
+
+    def test_normal_flow_semantics_unchanged(self):
+        mx, c = self._patched_cache(max_size=15, step=4)
+        # Pure upstream flow: no forced offset. Grow, fill, rotate.
+        for i in range(40):
+            t = self._tok(mx, float(i + 1))
+            k, v = c.update_and_fetch(t, t)
+            if c.offset < 15:
+                # While under the window the view is exactly the history.
+                assert k.shape[2] == c.offset
+        assert c.keys.shape[2] == 15
+        assert c.offset == 40
+        # Rotation is active: the most recent token is present in the buffer.
+        vals = [float(c.keys[0, 0, j, 0]) for j in range(15)]
+        assert 40.0 in vals
+
+    def test_delta_at_least_window_remains_immune(self):
+        mx, c = self._patched_cache(max_size=15, step=4)
+        c.offset = 2000
+        big = mx.zeros((1, 2, 20, 4), dtype=mx.float32)
+        c.update_and_fetch(big, big)
+        for i in range(10):
+            t = self._tok(mx, float(i + 1))
+            k, v = c.update_and_fetch(t, t)
+            mx.eval(k, v)
+        assert c.keys.shape[2] >= 15
+
+    def test_patch_is_idempotent(self):
+        from vmlx_engine.dflash2_runtime import (
+            _patch_rotating_cache_resume_math,
+        )
+
+        _patch_rotating_cache_resume_math()
+        _patch_rotating_cache_resume_math()

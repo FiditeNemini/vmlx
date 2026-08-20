@@ -12211,6 +12211,16 @@ class MLLMBatchGenerator:
                             mx.synchronize()
                         else:
                             raise
+                # Return each chunk's transients to the allocator before the
+                # next chunk. This pass runs post-turn in the background with
+                # no admission valve; retained transients (~18GB per
+                # 2048-token chunk on a 30-head hybrid) stack across chunks
+                # into a Metal working-set wave that the wired limit turns
+                # into an uncatchable process abort — measured killing the
+                # serve process ~2 minutes after an 11k-token turn, and once
+                # hard-resetting the whole machine.
+                mx.clear_cache()
+            self._store_companion_from_clean_pass(tokens, fresh_cache)
             return fresh_cache
         except Exception as ex:
             if isinstance(ex, (NameError, AttributeError, TypeError)):
@@ -12235,6 +12245,74 @@ class MLLMBatchGenerator:
                     setattr(self.language_model, _attr, _value)
                 except Exception:
                     pass
+
+    def _store_companion_from_clean_pass(
+        self, tokens: List[int], fresh_cache: Optional[List[Any]]
+    ) -> None:
+        """Store the SSM companion produced by a clean prompt-only prefill.
+
+        The clean pass computes exactly the typed hybrid state at the stored
+        key (no gen_prompt_len suffix, no generation output — the same
+        contract that makes its result safe to store with is_complete=True).
+        That is byte-for-byte the state the idle re-derive queue would later
+        recompute with ANOTHER O(prompt) background forward; storing the
+        companion here makes ``run_idle_rederive``'s ``has_complete`` probe
+        skip that second pass, halving the post-turn background GPU work for
+        hybrid thinking models.
+
+        Keys: media prompts never route through the hybrid clean store, and
+        text captures enqueue their re-derive entries with
+        ``cache_extra_keys=None``, so the default key here matches the queued
+        entry exactly.
+        """
+        companion_cache = getattr(self, "_ssm_state_cache", None)
+        if fresh_cache is None or companion_cache is None:
+            return
+        kv_positions = getattr(self, "_hybrid_kv_positions", None)
+        if not kv_positions:
+            return
+        try:
+            prompt_len = len(tokens)
+            if prompt_len <= 0 or companion_cache.has_complete(
+                tokens, prompt_len
+            ):
+                return
+            kv_set = set(kv_positions)
+            ssm_layers: List[Any] = []
+            for layer_idx, c in enumerate(fresh_cache):
+                if layer_idx in kv_set:
+                    continue
+                if _companion_exempt_cache(c):
+                    # Positional full-latent slots (dots3) are excluded from
+                    # every companion snapshot — the restore path rebuilds
+                    # them as windowed shells. Including them here would
+                    # resurrect the O(ctx)-per-checkpoint growth through a
+                    # new door.
+                    continue
+                if hasattr(c, "cache") and isinstance(c.cache, list):
+                    from copy import deepcopy
+
+                    cloned = deepcopy(c)
+                    cloned.cache = [
+                        mx.contiguous(a) if a is not None else None
+                        for a in c.cache
+                    ]
+                    ssm_layers.append(cloned)
+                else:
+                    ssm_layers.append(c)
+            if ssm_layers:
+                companion_cache.store(
+                    tokens, prompt_len, ssm_layers, is_complete=True
+                )
+                logger.info(
+                    "MLLM clean prefill: stored complete SSM companion at the "
+                    "%d-token key (idle re-derive will skip)",
+                    prompt_len,
+                )
+        except Exception as ex:
+            logger.warning(
+                "MLLM clean prefill: companion store failed (non-fatal): %s", ex
+            )
 
     def _prefill_for_clean_ssm(
         self,

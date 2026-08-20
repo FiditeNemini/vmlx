@@ -698,3 +698,114 @@ def test_companion_ram_budget_default_holds_multiple_conversations():
         f"companion RAM default {m.group(1)}MB again holds ~one 27B "
         "conversation (3x ~157MB checkpoints per request)"
     )
+
+
+class _CleanPassLM:
+    """Callable language-model stub with a real layer list."""
+
+    def __init__(self, n_layers=4):
+        self.layers = [SimpleNamespace(is_linear=False) for _ in range(n_layers)]
+        self.calls = []
+
+    def __call__(self, arr, cache=None):
+        self.calls.append(int(arr.shape[1]))
+        return None
+
+
+class _RecordingCompanionCache:
+    def __init__(self, complete=False):
+        self.complete = complete
+        self.stored = []
+
+    def has_complete(self, tokens, num_tokens, cache_extra_keys=None):
+        return self.complete
+
+    def store(self, tokens, num_tokens, layers, is_complete=True, cache_extra_keys=None):
+        self.stored.append((list(tokens), num_tokens, len(layers), is_complete))
+
+
+def _clean_pass_generator(companion):
+    gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    gen.language_model = _CleanPassLM()
+    gen._cache_model = None
+    gen.prefill_step_size = 2
+    gen._ssm_state_cache = companion
+    gen._hybrid_kv_positions = [0, 2]
+    return gen
+
+
+def test_clean_pass_clears_allocator_per_chunk_and_stores_companion(monkeypatch):
+    """The post-turn clean prefill runs in the background with no admission
+    valve; without a per-chunk ``mx.clear_cache()`` its retained transients
+    (~18GB per 2048-token chunk on a 30-head hybrid) stack into a Metal
+    working-set wave that killed the serve process ~2 minutes after an
+    11k-token turn — and once hard-reset the whole machine. The same pass
+    must also store the SSM companion it just computed, so the idle
+    re-derive queue (``run_idle_rederive``) skips its second O(prompt)
+    background forward via ``has_complete``."""
+    from vmlx_engine import mllm_batch_generator as mbg
+
+    companion = _RecordingCompanionCache(complete=False)
+    gen = _clean_pass_generator(companion)
+
+    clears = []
+    monkeypatch.setattr(mbg.mx, "clear_cache", lambda: clears.append(1))
+
+    tokens = list(range(1, 8))  # 7 tokens, chunk 2 -> 4 chunks
+    result = gen._prefill_for_clean_path_dependent_cache(tokens)
+
+    assert result is not None
+    assert gen.language_model.calls == [2, 2, 2, 1]
+    assert len(clears) >= 4, "allocator must be cleared after every chunk"
+    assert companion.stored == [(tokens, 7, 2, True)], (
+        "the clean pass must store the non-KV layers as a complete companion "
+        "at exactly the derived key"
+    )
+
+
+def test_clean_pass_companion_store_skips_when_already_complete():
+    companion = _RecordingCompanionCache(complete=True)
+    gen = _clean_pass_generator(companion)
+    result = gen._prefill_for_clean_path_dependent_cache(list(range(5)))
+    assert result is not None
+    assert companion.stored == []
+
+
+def test_clean_pass_companion_store_noop_without_hybrid_positions():
+    """Non-hybrid models (no kv-position map) must not grow a companion."""
+    companion = _RecordingCompanionCache(complete=False)
+    gen = _clean_pass_generator(companion)
+    gen._hybrid_kv_positions = []
+    result = gen._prefill_for_clean_path_dependent_cache(list(range(5)))
+    assert result is not None
+    assert companion.stored == []
+
+
+def test_clean_pass_companion_store_applies_positional_latent_exemption():
+    """Positional full-latent slots (dots3: trim_to_boundary + window None)
+    are excluded from every companion snapshot; the clean-pass store must
+    apply the same exemption or it resurrects the O(ctx)-per-checkpoint
+    companion growth through a new door."""
+
+    class _ExemptLatent:
+        window = None
+
+        def trim_to_boundary(self):
+            pass
+
+    companion = _RecordingCompanionCache(complete=False)
+    gen = _clean_pass_generator(companion)
+
+    from mlx_lm.models.cache import KVCache
+
+    fresh = [KVCache(), _ExemptLatent(), KVCache(), _ExemptLatent()]
+    gen._store_companion_from_clean_pass(list(range(6)), fresh)
+    assert companion.stored == [], (
+        "exempt latent slots were the only non-KV layers; nothing may be stored"
+    )
+
+    fresh2 = [KVCache(), _ExemptLatent(), KVCache(), KVCache()]
+    gen._store_companion_from_clean_pass(list(range(6)), fresh2)
+    assert companion.stored == [(list(range(6)), 6, 1, True)], (
+        "only the genuine companion slot (layer 3) may be stored"
+    )

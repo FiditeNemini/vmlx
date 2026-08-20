@@ -370,6 +370,20 @@ class Dots3LatentCache:
         return obj
 
 
+def _prefill_layer_eval_every() -> int:
+    """Layers per prefill eval boundary; 0 disables. Default 8: bounds the
+    in-flight lazy graph to ~8 layers of DSA score buffers (~8GB at 64k
+    context) instead of all 46 (~19GB sawtooth measured by the slot census),
+    for ~6 extra barriers per chunk."""
+    try:
+        return max(
+            0,
+            int(os.environ.get("VMLX_DOTS3_PREFILL_LAYER_EVAL_EVERY", "8")),
+        )
+    except (TypeError, ValueError):
+        return 8
+
+
 def _sliding_causal_mask(
     seq_len: int,
     past: int,
@@ -1360,11 +1374,24 @@ class Dots3NoteModel(nn.Module):
             else:
                 full_mask = mask
                 swa_mask = mask
+        # Prefill graph bounding. At deep contexts the lazy graph across all
+        # 46 layers holds every layer's DSA score buffers at once (~1GB per
+        # full layer at 64k context): the slot census measured cache objects
+        # FLAT at 1.1GB while active sawtoothed 99->118GB chunk to chunk,
+        # and the admission valve then declines against those transient
+        # peaks. Materializing the residual stream every few layers frees
+        # each segment's score buffers before the next builds, bounding the
+        # in-flight transient to ~eval_every layers' worth. Decode (seq 1)
+        # is untouched. mx.eval is semantically neutral — numerics identical.
+        eval_every = _prefill_layer_eval_every()
+        bound_prefill = eval_every > 0 and seq_len > 1
         for i in range(n_backbone):
             layer_mask = (
                 swa_mask if self.config.is_sliding(i) else full_mask
             )
             h = self.layers[i](h, mask=layer_mask, cache=cache[i])
+            if bound_prefill and (i + 1) % eval_every == 0:
+                mx.eval(h)
         return self.norm(h)
 
 

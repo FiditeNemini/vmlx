@@ -1477,6 +1477,47 @@ def _copy_dsv4_delta_record(record):
     return copied
 
 
+def _wrap_cumulative_meta(meta, arrays):
+    """Carry the original per-array dtypes beside a cumulative meta_state.
+
+    The numpy store bridge casts bf16 state through fp32 (np.array(bf16)
+    raises under MLX >= 0.32) and, unlike the KV branches, recorded no
+    orig_dtype — so restart/L2-path hybrid restores handed the model FLOAT32
+    conv/SSM states, which promote the whole residual stream to f32 and
+    silently drop the bf16 QMM fast path for the rest of the request. The
+    wrapper is JSON-safe for the block-disk meta and unwraps to a no-op on
+    records stored before it existed.
+    """
+    dts = []
+    for a in arrays:
+        dt = str(getattr(a, "dtype", "") or "")
+        dts.append(dt.replace("mlx.core.", ""))
+    return {"m": meta, "dt": dts}
+
+
+def _unwrap_cumulative_meta(meta):
+    if isinstance(meta, dict) and "m" in meta:
+        return meta.get("m", ""), meta.get("dt") or None
+    return meta, None
+
+
+def _cast_cumulative_state_dtypes(state, dtypes):
+    if not dtypes or not isinstance(state, (list, tuple)):
+        return state
+    out = []
+    for idx, a in enumerate(state):
+        dt = dtypes[idx] if idx < len(dtypes) else None
+        if a is not None and dt and hasattr(a, "astype"):
+            target = getattr(mx, dt, None)
+            if target is not None and str(getattr(a, "dtype", "")) != str(target):
+                try:
+                    a = a.astype(target)
+                except Exception:
+                    pass
+        out.append(a)
+    return out
+
+
 def _copy_mlx_tree(obj):
     """Materialize independent MLX-array copies in a nested cache state tree."""
     if obj is None or not HAS_MLX:
@@ -2168,12 +2209,21 @@ def _numpy_block_slice(
                                 getattr(s, "dtype", "")
                             ):
                                 # MLX >= 0.32: np.array(bf16) raises; cast
-                                # through fp32 (value-exact for bf16).
+                                # through fp32 (value-exact for bf16). The
+                                # original dtype travels in the wrapped meta
+                                # so the restore casts back.
                                 s = s.astype(mx.float32)
                             np_state.append(np.array(s))
                         else:
                             np_state.append(s)
-                    block_slices.append(("cumulative", np_state, meta, cls))
+                    block_slices.append(
+                        (
+                            "cumulative",
+                            np_state,
+                            _wrap_cumulative_meta(meta, state),
+                            cls,
+                        )
+                    )
                 else:
                     block_slices.append(("skip",))
             else:
@@ -7100,7 +7150,10 @@ class BlockAwarePrefixCache:
 
                     # Cumulative cache (MambaCache/ArraysCache): restore full state
                     _, state, meta, class_name = best_cumulative
-                    state = _copy_mlx_tree(state)
+                    meta, _state_dtypes = _unwrap_cumulative_meta(meta)
+                    state = _cast_cumulative_state_dtypes(
+                        _copy_mlx_tree(state), _state_dtypes
+                    )
 
                     # Try class-specific restoration.
                     # ArraysCache.from_state() rejects meta_state (it has no offset),
@@ -7314,7 +7367,10 @@ class BlockAwarePrefixCache:
                             sub_caches_rebuilt.append(sc)
                         elif sub_cumulative is not None:
                             _, sstate, smeta, scls = sub_cumulative
-                            sstate = _copy_mlx_tree(sstate)
+                            smeta, _sub_dtypes = _unwrap_cumulative_meta(smeta)
+                            sstate = _cast_cumulative_state_dtypes(
+                                _copy_mlx_tree(sstate), _sub_dtypes
+                            )
                             try:
                                 import mlx_lm.models.cache as cache_mod
                                 scls_obj = getattr(cache_mod, scls, None)

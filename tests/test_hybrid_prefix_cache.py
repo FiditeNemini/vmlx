@@ -773,3 +773,73 @@ class TestHeadCountAgreement:
         assert mllm_n_kv == pcache_n_kv, (
             "MLLMScheduler and prefix cache disagree on wrapped-MLA head count"
         )
+
+
+class TestCumulativeStateDtypePreservation:
+    """bf16 SSM/cumulative state must come back bf16.
+
+    The numpy store bridge casts bf16 through fp32 (np.array(bf16) raises
+    under MLX >= 0.32) and recorded no orig_dtype, so restored hybrid
+    conv/SSM states arrived FLOAT32 — the GDN forward then promotes the
+    residual stream to f32 for the rest of the request and every QMM
+    silently loses the bf16 fast path. The wrapped cumulative meta carries
+    per-array dtypes; pre-wrap records unwrap to a no-op."""
+
+    def test_bf16_ssm_state_round_trips_as_bf16(self, tmp_path):
+        # Reuse the suite's builder for a real store/fetch/reconstruct pass.
+        cache = TestReconstructHybrid()._make_cache(block_size=64)
+
+        kv = mx.random.normal((1, 8, 64, 64)).astype(mx.bfloat16)
+        conv = mx.random.normal((1, 4, 16)).astype(mx.bfloat16)
+        ssm = mx.random.normal((1, 2, 16, 16))  # fp32 stays fp32
+        mx.synchronize()
+
+        cache_data = [
+            {
+                "state": (conv, ssm),
+                "meta_state": ("0",),
+                "class_name": "ArraysCache",
+            },
+            {
+                "state": (kv, kv),
+                "meta_state": ("64",),
+                "class_name": "KVCache",
+            },
+            {
+                "state": (conv, ssm),
+                "meta_state": ("0",),
+                "class_name": "ArraysCache",
+            },
+            {
+                "state": (kv, kv),
+                "meta_state": ("64",),
+                "class_name": "KVCache",
+            },
+        ]
+        tokens = list(range(64))
+        cache.store_cache("req1", tokens, cache_data)
+        block_table, remaining = cache.fetch_cache("req2", tokens)
+        assert block_table is not None
+        reconstructed = cache.reconstruct_cache(block_table)
+        assert reconstructed is not None
+        arrs = getattr(reconstructed[0], "cache", None) or getattr(
+            reconstructed[0], "state", None
+        )
+        assert arrs is not None
+        restored_conv, restored_ssm = arrs[0], arrs[1]
+        assert "bfloat16" in str(restored_conv.dtype), (
+            f"conv state lost bf16: {restored_conv.dtype}"
+        )
+        assert "float32" in str(restored_ssm.dtype), (
+            f"fp32 state must stay fp32: {restored_ssm.dtype}"
+        )
+
+    def test_unwrap_is_a_noop_for_legacy_records(self):
+        from vmlx_engine.prefix_cache import _unwrap_cumulative_meta
+
+        meta, dts = _unwrap_cumulative_meta(("64",))
+        assert meta == ("64",) and dts is None
+        meta, dts = _unwrap_cumulative_meta("")
+        assert meta == "" and dts is None
+        meta, dts = _unwrap_cumulative_meta({"m": ("0",), "dt": ["bfloat16"]})
+        assert meta == ("0",) and dts == ["bfloat16"]

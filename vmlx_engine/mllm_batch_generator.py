@@ -8123,17 +8123,30 @@ class MLLMBatchGenerator:
                                 )[:8]
                                 _tot_n = sum(v[0] for v in _buckets.values())
                                 _tot_b = sum(v[1] for v in _buckets.values())
+                                _prev = getattr(
+                                    MLLMBatchGenerator, "_census_gc_prev", {}
+                                )
+                                _grown = sorted(
+                                    (
+                                        (k, v[1] - _prev.get(k, (0, 0))[1],
+                                         v[0] - _prev.get(k, (0, 0))[0])
+                                        for k, v in _buckets.items()
+                                    ),
+                                    key=lambda kv: -kv[1],
+                                )[:6]
+                                MLLMBatchGenerator._census_gc_prev = dict(_buckets)
                                 logger.info(
                                     "census-gc chunk=%d TOTAL=%d arrays "
-                                    "%.2fGB | %s",
+                                    "%.2fGB | GROWN: %s",
                                     chunk_num,
                                     _tot_n,
                                     _tot_b / (1024**3),
                                     " | ".join(
-                                        f"{k[0]}x{v[0]} {k[1]} ="
-                                        f"{v[1] / (1024**3):.2f}GB"
-                                        for k, v in _top
-                                    ),
+                                        f"{k[0]} {k[1]} +{db / (1024**3):.3f}GB"
+                                        f" (+{dn})"
+                                        for k, db, dn in _grown
+                                        if db > 0
+                                    ) or "none",
                                 )
                         except Exception:  # noqa: BLE001
                             pass

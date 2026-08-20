@@ -81,3 +81,56 @@ def test_patch_is_idempotent():
     first = lfm2_vl.Model.get_input_embeddings
     mlx_vlm_compat._patch_lfm2_vl_input_embeddings()
     assert lfm2_vl.Model.get_input_embeddings is first
+
+
+def test_language_model_unwraps_input_embeddings_features():
+    """Second upstream defect: Model.__call__ passes the whole
+    InputEmbeddingsFeatures dataclass as `inputs_embeds`, but
+    LanguageModel.__call__ is typed Optional[mx.array] and indexes it —
+    "'InputEmbeddingsFeatures' object has no attribute 'shape'"."""
+    pytest.importorskip("mlx_vlm")
+    language = pytest.importorskip("mlx_vlm.models.lfm2_vl.language")
+
+    from vmlx_engine.utils import mlx_vlm_compat
+
+    mlx_vlm_compat.apply()
+    assert getattr(language.LanguageModel.__call__, "_vmlx_lfm2_vl_unwrap", False)
+
+    class _Features:
+        inputs_embeds = "ARRAY"
+
+    seen = {}
+
+    def fake_original(self, inputs, mask=None, cache=None, inputs_embeds=None, **kw):
+        seen["inputs_embeds"] = inputs_embeds
+        return "logits"
+
+    out = language.LanguageModel.__call__(
+        object(), "IDS", None, None, _Features(), _original=fake_original
+    )
+    assert out == "logits"
+    assert seen["inputs_embeds"] == "ARRAY", "features object was not unwrapped"
+
+
+def test_language_model_passes_plain_arrays_through_untouched():
+    pytest.importorskip("mlx_vlm")
+    language = pytest.importorskip("mlx_vlm.models.lfm2_vl.language")
+
+    from vmlx_engine.utils import mlx_vlm_compat
+
+    mlx_vlm_compat.apply()
+    seen = {}
+
+    class _Arr:
+        shape = (1, 2, 3)
+
+    arr = _Arr()
+
+    def fake_original(self, inputs, mask=None, cache=None, inputs_embeds=None, **kw):
+        seen["inputs_embeds"] = inputs_embeds
+        return "logits"
+
+    language.LanguageModel.__call__(
+        object(), "IDS", None, None, arr, _original=fake_original
+    )
+    assert seen["inputs_embeds"] is arr

@@ -648,7 +648,46 @@ def _patch_lfm2_vl_input_embeddings() -> None:
 
     get_input_embeddings._vmlx_lfm2_vl_positional = True  # type: ignore[attr-defined]
     Model.get_input_embeddings = get_input_embeddings  # type: ignore[assignment]
-    _logger.info("mlx_vlm_compat: LFM2-VL get_input_embeddings arity patched")
+
+    # Second defect in the same module: Model.__call__ forwards the whole
+    # InputEmbeddingsFeatures dataclass as `inputs_embeds`, but
+    # LanguageModel.__call__ is typed Optional[mx.array] and indexes it —
+    # "'InputEmbeddingsFeatures' object has no attribute 'shape'". Unwrap at
+    # the language-model boundary so it is fixed no matter which caller
+    # produced the features object.
+    try:
+        from mlx_vlm.models.lfm2_vl import language as _lfm2_lang
+    except ImportError:
+        _lfm2_lang = None
+    LanguageModel = getattr(_lfm2_lang, "LanguageModel", None) if _lfm2_lang else None
+    if LanguageModel is not None:
+        lm_original = getattr(LanguageModel, "__call__", None)
+        if lm_original is not None and not getattr(
+            lm_original, "_vmlx_lfm2_vl_unwrap", False
+        ):
+
+            def lm_call(
+                self,
+                inputs,
+                mask=None,
+                cache=None,
+                inputs_embeds=None,
+                _original=lm_original,
+                **kwargs,
+            ):
+                if inputs_embeds is not None and not hasattr(inputs_embeds, "shape"):
+                    inputs_embeds = getattr(
+                        inputs_embeds, "inputs_embeds", inputs_embeds
+                    )
+                return _original(self, inputs, mask, cache, inputs_embeds, **kwargs)
+
+            lm_call._vmlx_lfm2_vl_unwrap = True  # type: ignore[attr-defined]
+            LanguageModel.__call__ = lm_call  # type: ignore[assignment]
+
+    _logger.info(
+        "mlx_vlm_compat: LFM2-VL image path patched "
+        "(get_input_embeddings arity + inputs_embeds unwrap)"
+    )
 
 
 def _patch_qwen35_patch_embed_layout() -> None:

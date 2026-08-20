@@ -8135,6 +8135,80 @@ class MLLMBatchGenerator:
                                     key=lambda kv: -kv[1],
                                 )[:6]
                                 MLLMBatchGenerator._census_gc_prev = dict(_buckets)
+                                # Walk referrers of one array from the largest
+                                # GROWN bucket to NAME the holder chain.
+                                try:
+                                    _tk = next(
+                                        (k for k, db, dn in _grown
+                                         if db > 0 and dn > 0),
+                                        None,
+                                    )
+                                    if _tk is not None:
+                                        _sample = None
+                                        for _o in _gc.get_objects():
+                                            if (
+                                                isinstance(_o, mx.array)
+                                                and tuple(_o.shape) == _tk[0]
+                                                and str(_o.dtype) == _tk[1]
+                                            ):
+                                                _sample = _o
+                                                break
+                                        _chain = []
+                                        _node = _sample
+                                        for _depth in range(4):
+                                            if _node is None:
+                                                break
+                                            _refs = [
+                                                r for r in _gc.get_referrers(_node)
+                                                if not isinstance(r, dict)
+                                                or r is not locals()
+                                            ]
+                                            _named = None
+                                            for _r in _refs:
+                                                if isinstance(_r, (list, tuple, dict)):
+                                                    _named = _r
+                                                    break
+                                            if _named is None:
+                                                _chain.append(
+                                                    ";".join(
+                                                        type(_r).__name__
+                                                        for _r in _refs[:4]
+                                                    )
+                                                )
+                                                break
+                                            _owners = [
+                                                r2 for r2 in _gc.get_referrers(_named)
+                                                if hasattr(r2, "__dict__")
+                                                or isinstance(r2, (list, tuple, dict))
+                                            ]
+                                            _attr = ""
+                                            for _r2 in _owners:
+                                                if hasattr(_r2, "__dict__"):
+                                                    for _an, _av in vars(_r2).items():
+                                                        if _av is _named:
+                                                            _attr = (
+                                                                type(_r2).__name__
+                                                                + "." + _an
+                                                            )
+                                                            break
+                                                if _attr:
+                                                    break
+                                            _chain.append(
+                                                f"{type(_named).__name__}"
+                                                f"(len={len(_named)})"
+                                                + (f"<-{_attr}" if _attr else "")
+                                            )
+                                            if _attr:
+                                                break
+                                            _node = _named
+                                        logger.info(
+                                            "census-gc-referrer %s %s -> %s",
+                                            _tk[0],
+                                            _tk[1],
+                                            " -> ".join(_chain) or "unknown",
+                                        )
+                                except Exception as _re:
+                                    logger.info("census-gc-referrer failed: %s", _re)
                                 logger.info(
                                     "census-gc chunk=%d TOTAL=%d arrays "
                                     "%.2fGB | GROWN: %s",

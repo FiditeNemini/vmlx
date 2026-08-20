@@ -499,6 +499,31 @@ def _patch_gated_delta_net(qlang: Any) -> None:
             )
             if cache is not None:
                 cache.rollback_state = (conv_c, ssm_c)
+                # Partial-accept rollback: state after ANY accepted count is
+                # recomputable through the SAME chunk kernel from the
+                # post-confirmed initial states. Everything the closure
+                # captures is a lazy ref; it only computes on a rejection
+                # that keeps >=1 draft, which previously paid a full
+                # main-model replay forward instead.
+                _qkv_d = qkv[:, n_confirmed:]
+                _a_d = a[:, n_confirmed:]
+                _b_d = b[:, n_confirmed:]
+                _mask_d = mask_d
+
+                def _rollback_to(count, _q=_qkv_d, _a=_a_d, _b=_b_d,
+                                 _c=conv_c, _s=ssm_c, _m=_mask_d,
+                                 _self=self):
+                    _, conv_k, ssm_k = _self._process_chunk(
+                        _q[:, :count],
+                        _a[:, :count],
+                        _b[:, :count],
+                        _c,
+                        _s,
+                        _m[:, :count] if _m is not None else None,
+                    )
+                    return conv_k, ssm_k
+
+                cache.rollback_to = _rollback_to
             capture_gdn_sink(
                 qkv[:, n_confirmed:],
                 a[:, n_confirmed:],

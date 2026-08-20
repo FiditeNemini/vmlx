@@ -2295,7 +2295,10 @@ class TestNativeMtpAutodetect:
         tokens = [generator._next()[0].token for _ in range(6)]
 
         assert tokens == [2, 3, 4, 5, 6, 7]
-        assert language_model.calls[:2] == [([2], 0), ([3, 4, 5, 6], 0)]
+        # Verifies carry n_confirmed=1 at every depth: the hybrid layers stash
+        # the post-confirmed rollback point (and the rollback_to closure) so a
+        # rejection at any depth skips the replay forward.
+        assert language_model.calls[:2] == [([2], 0), ([3, 4, 5, 6], 1)]
         assert language_model.mtp_calls[:3] == [3, 4, 5]
         assert req.output_tokens == [2, 3, 4, 5, 6, 7]
         assert state.stats.mtp_forwards > 3
@@ -2432,11 +2435,14 @@ class TestNativeMtpAutodetect:
 
         assert tokens[:3] == [2, 3, 4]
         assert ([4], 0) not in language_model.calls
-        assert language_model.calls[:4] == [
+        # The trimmable mock cache lets the generalized skip-replay engage:
+        # the rejected drafts are trimmed and NO replay forward of the
+        # confirmed token runs — previously the third call was ([3], 0).
+        assert ([3], 0) not in language_model.calls
+        assert language_model.calls[:3] == [
             ([2], 0),
-            ([3, 9, 10, 11], 0),
-            ([3], 0),
-            ([4, 5, 6, 7], 0),
+            ([3, 9, 10, 11], 1),
+            ([4, 5, 6, 7], 1),
         ]
         assert cache.tokens[:6] == [2, 3, 4, 5, 6, 7]
 
@@ -3703,3 +3709,187 @@ class TestNativeMtpKillSwitchEnvSpellings:
 
         assert status["status"] == "runtime_disabled"
         assert status["runtime_available"] is False
+
+
+class TestGeneralizedSkipReplay:
+    """Depth>1 rejections skip the replay forward when the verify captured
+    rollback machinery — the depth-1-only gate made 32% of cold cycles and
+    61% of warm cycles pay a full extra main-model forward (measured live,
+    Qwen 4D). The rollback_to closure recomputes the post-accepted hybrid
+    state through the same chunk kernel the forward used."""
+
+    def test_depth3_partial_reject_skips_replay_via_rollback_to(
+        self, monkeypatch
+    ):
+        import mlx.core as mx
+
+        from vmlx_engine.mllm_batch_generator import (
+            MLLMBatch,
+            MLLMBatchGenerator,
+            MLLMBatchRequest,
+            MLLMBatchStats,
+        )
+
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+        vocab_size = 32
+
+        def logits_for(targets):
+            rows = []
+            for target in targets:
+                row = [-100.0] * vocab_size
+                row[int(target)] = 100.0
+                rows.append(row)
+            return mx.array([rows], dtype=mx.float32)
+
+        class _RollbackHybridCache:
+            """Mimics the patched GDN layer: rollback_state after the
+            confirmed prefix plus a rollback_to(count) recompute."""
+
+            def __init__(self):
+                self.tokens = []
+                self.position = 0
+                self.state_list = [0, 0]
+                self.rollback_state = None
+                self.rollback_to = None
+                self.rollback_to_calls = []
+
+            def __setitem__(self, idx, value):
+                self.state_list[idx] = value
+
+            def __getitem__(self, idx):
+                return self.state_list[idx]
+
+            def append(self, tokens, n_confirmed=0):
+                base = self.position
+                for index, token in enumerate(tokens, start=1):
+                    self.tokens.append(int(token))
+                    self.position += 1
+                    self.state_list = [self.position, self.position]
+                if n_confirmed:
+                    confirmed_pos = base + n_confirmed
+                    self.rollback_state = (confirmed_pos, confirmed_pos)
+
+                    def _rollback_to(count, _pos=confirmed_pos, _self=self):
+                        _self.rollback_to_calls.append(count)
+                        return (_pos + count, _pos + count)
+
+                    self.rollback_to = _rollback_to
+
+        class _LanguageModel:
+            def __init__(self):
+                self.mtp = object()
+                self.calls = []
+
+            def make_mtp_cache(self):
+                return [_RollbackHybridCache()]
+
+            def __call__(
+                self,
+                input_ids,
+                cache=None,
+                return_hidden=False,
+                n_confirmed=0,
+                **_kwargs,
+            ):
+                tokens = [int(t) for t in input_ids.reshape(-1).tolist()]
+                self.calls.append((tokens, int(n_confirmed)))
+                if cache:
+                    cache[0].append(tokens, int(n_confirmed))
+                if tokens == [2]:
+                    targets = [3]
+                elif tokens == [3, 4, 5, 9]:
+                    targets = [4, 5, 6, 7]
+                else:
+                    targets = [(tokens[-1] + 1) % vocab_size for _ in tokens]
+                logits = logits_for(targets)
+                if return_hidden:
+                    hidden = mx.ones((1, len(targets), 4), dtype=mx.float32)
+                    return logits, hidden
+                return logits
+
+            def mtp_forward(
+                self,
+                hidden_states,
+                next_token_ids,
+                mtp_cache,
+                return_hidden=False,
+            ):
+                next_id = int(next_token_ids.reshape(-1).tolist()[-1])
+                target = {3: 4, 4: 5, 5: 9}.get(
+                    next_id, (next_id + 1) % vocab_size
+                )
+                logits = logits_for([target])
+                hidden = mx.ones((1, 1, 4), dtype=mx.float32)
+                if return_hidden:
+                    return logits, hidden
+                return logits
+
+        req = MLLMBatchRequest(
+            uid=0,
+            request_id="vl-mtp-skip-replay",
+            prompt="",
+            max_tokens=8,
+            temperature=0.0,
+        )
+        req.input_ids = mx.array([101, 102])
+        req._original_token_ids = [101, 102]
+
+        language_model = _LanguageModel()
+        generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        generator.language_model = language_model
+        generator.model = type("_VLM", (), {"language_model": language_model})()
+        generator.unprocessed_requests = []
+        generator.completion_batch_size = 1
+        generator.stop_tokens = set()
+        generator._prefill_errors = []
+        generator._stats = MLLMBatchStats()
+        generator._make_request_sampler = lambda _req: (
+            lambda logits: mx.argmax(logits, axis=-1).astype(mx.uint32)
+        )
+
+        first_token = mx.array([2], dtype=mx.uint32)
+        first_logprobs = [logits_for([2]).squeeze(0).squeeze(0)]
+        cache = _RollbackHybridCache()
+        generator.active_batch = MLLMBatch(
+            uids=[0],
+            request_ids=["vl-mtp-skip-replay"],
+            y=first_token,
+            logprobs=first_logprobs,
+            max_tokens=[8],
+            num_tokens=[0],
+            cache=[cache],
+            requests=[req],
+        )
+
+        generator._seed_native_mtp_from_prefill(
+            req,
+            generator.active_batch.cache,
+            first_token,
+            first_logprobs,
+        )
+        state = req._native_mtp_state
+        state.queue.clear()
+
+        generator._run_native_mtp_verify_cycle(
+            req, generator.active_batch.cache, state
+        )
+
+        # Drafts [4, 5, 9] vs targets [4, 5, 6]: accepted=2, correction=6.
+        assert [t for t, _lp, source in state.queue if source != "init"] == [
+            4,
+            5,
+            6,
+        ]
+        # NO replay forward: the only main-model calls are seed + verify.
+        assert language_model.calls == [([2], 0), ([3, 4, 5, 9], 1)]
+        assert state.stats.replay_main_forwards == 0
+        # rollback_to was invoked with the accepted-draft count and its
+        # state landed in the cache slots.
+        assert cache.rollback_to_calls == [2]
+        # State after seed(1) + next_main(1) + the 2 accepted drafts = 4;
+        # rollback_to(2) recomputed exactly that from the post-confirmed
+        # point without any replay forward.
+        assert cache.state_list == [4, 4]
+        # Consumed rollback machinery is cleared.
+        assert cache.rollback_state is None
+        assert cache.rollback_to is None

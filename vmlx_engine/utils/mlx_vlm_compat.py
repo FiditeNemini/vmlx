@@ -58,6 +58,7 @@ def apply() -> None:
         )
     _patch_qwen3_vl_grid_thw()
     _patch_qwen35_patch_embed_layout()
+    _patch_lfm2_vl_input_embeddings()
     _patch_qwen3_vl_vision_model_type_allowlist()
     _patch_prompt_cache_rank3_trim()
     _patch_qwen35_mixed_image_video_embeddings()
@@ -601,6 +602,53 @@ def _qwen35_patch_embed_to_mlx_layout(key, value):
     ):
         return value.transpose(0, 2, 3, 4, 1)
     return value
+
+
+def _patch_lfm2_vl_input_embeddings() -> None:
+    """LFM2-VL (mlx-vlm 0.5.0) cannot serve a single image request.
+
+    Its own ``Model.__call__`` invokes
+    ``self.get_input_embeddings(input_ids, pixel_values, spatial_shapes,
+    pixel_attention_mask)`` — four positional arguments — while the method
+    is declared ``(self, input_ids=None, pixel_values=None, **kwargs)`` and
+    reads the extras out of ``kwargs``. Every image prompt therefore dies
+    with "get_input_embeddings() takes from 1 to 3 positional arguments but
+    5 were given" before any Metal work happens; text-only prompts are
+    unaffected because that path never passes the extras.
+
+    Accept the extra positionals and forward them as the keywords the body
+    already looks for. Callers that pass keywords are unaffected.
+    """
+    try:
+        from mlx_vlm.models.lfm2_vl import lfm2_vl as _lfm2_vl
+    except ImportError:
+        return
+
+    Model = getattr(_lfm2_vl, "Model", None)
+    if Model is None:
+        return
+    original = getattr(Model, "get_input_embeddings", None)
+    if original is None or getattr(original, "_vmlx_lfm2_vl_positional", False):
+        return
+
+    def get_input_embeddings(
+        self,
+        input_ids=None,
+        pixel_values=None,
+        spatial_shapes=None,
+        pixel_attention_mask=None,
+        _original=original,
+        **kwargs,
+    ):
+        if spatial_shapes is not None:
+            kwargs.setdefault("spatial_shapes", spatial_shapes)
+        if pixel_attention_mask is not None:
+            kwargs.setdefault("pixel_attention_mask", pixel_attention_mask)
+        return _original(self, input_ids, pixel_values, **kwargs)
+
+    get_input_embeddings._vmlx_lfm2_vl_positional = True  # type: ignore[attr-defined]
+    Model.get_input_embeddings = get_input_embeddings  # type: ignore[assignment]
+    _logger.info("mlx_vlm_compat: LFM2-VL get_input_embeddings arity patched")
 
 
 def _patch_qwen35_patch_embed_layout() -> None:

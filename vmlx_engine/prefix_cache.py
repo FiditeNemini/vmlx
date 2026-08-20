@@ -2092,7 +2092,7 @@ def _numpy_block_slice(
                         return tuple(_to_mx_tree(v) for v in x)
                     if isinstance(x, list):
                         return [_to_mx_tree(v) for v in x]
-                    return mx.array(x)
+                    return _mx_from_np_slice(x)
 
                 cca_state = _to_mx_tree(cca_state)
             block_slices.append((
@@ -2175,8 +2175,8 @@ def _numpy_block_slice(
                         block_slices.append(("rotating_kv_pending", cls))
                     continue
                 tk, tv, max_size, keep, offset, idx_state = terminal
-                tk = mx.array(tk)
-                tv = mx.array(tv)
+                tk = _mx_from_np_slice(tk)
+                tv = _mx_from_np_slice(tv)
                 if orig_dtype is not None and tk.dtype != orig_dtype:
                     tk = tk.astype(orig_dtype)
                     tv = tv.astype(orig_dtype)
@@ -2204,9 +2204,15 @@ def _numpy_block_slice(
                 vs = np_v[:, slice_start:actual_end, :]
             # NumPy has no native bfloat16 dtype. Preserve the model-owned
             # attention dtype rather than persisting the fp32 bridge arrays.
+            # The import MUST go through _mx_from_np_slice: ks/vs are
+            # non-contiguous views of the full-prompt mirror, and a bare
+            # mx.array() import allocates a base-buffer-sized Metal buffer
+            # per block — retained in pending_disk_writes for the whole
+            # store loop, this reached ~159GB live Metal on an 11k-token
+            # hybrid store (the disk-lane half of the machine-killer).
             if orig_dtype is not None:
-                ks = mx.array(ks)
-                vs = mx.array(vs)
+                ks = _mx_from_np_slice(ks)
+                vs = _mx_from_np_slice(vs)
                 if ks.dtype != orig_dtype:
                     ks = ks.astype(orig_dtype)
                     vs = vs.astype(orig_dtype)
@@ -5444,8 +5450,8 @@ class BlockAwarePrefixCache:
                                         concatenate=np.concatenate,
                                     )
                                 tk, tv, max_size, keep, offset, idx_state = terminal
-                                tk = mx.array(tk)
-                                tv = mx.array(tv)
+                                tk = _mx_from_np_slice(tk)
+                                tv = _mx_from_np_slice(tv)
                                 if tk.dtype != orig_dtype:
                                     tk = tk.astype(orig_dtype)
                                     tv = tv.astype(orig_dtype)

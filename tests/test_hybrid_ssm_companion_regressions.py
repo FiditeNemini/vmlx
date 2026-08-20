@@ -836,14 +836,43 @@ def test_np_slice_import_does_not_drag_base_buffer():
 
 
 def test_block_extraction_uses_contiguous_slice_helper():
-    """Source pin: every numpy-slice-to-MLX site in the block store paths
-    must go through _mx_from_np_slice — a bare mx.array(np_k[...slice...])
-    re-introduces the full-base import."""
+    """Source pin: NO bare mx.array() call may exist anywhere inside the two
+    block-slice functions — every numpy-to-MLX import there must go through
+    _mx_from_np_slice. The first pin only matched inline mx.array(np_k[...])
+    patterns and MISSED the disk-lane site where the view was aliased
+    through a local (ks = np_k[...]; ks = mx.array(ks)) — that miss kept the
+    machine-killer alive through one whole fix cycle."""
+    import ast
     import inspect
     import re
 
     from vmlx_engine import prefix_cache as pc
 
-    src = inspect.getsource(pc)
-    bare = re.findall(r"mx\.array\(np_[kviq][a-z]*\[[^)]*:", src)
-    assert bare == [], f"bare numpy-view imports found: {bare}"
+    module_src = inspect.getsource(pc)
+    tree = ast.parse(module_src)
+    lines = module_src.split("\n")
+    checked = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+            "_numpy_block_slice",
+            "_extract_block_tensor_slice",
+        ):
+            checked += 1
+            body = "\n".join(lines[node.lineno - 1 : node.end_lineno])
+            import io
+            import textwrap
+            import tokenize
+
+            code_only = []
+            toks = tokenize.generate_tokens(
+                io.StringIO(textwrap.dedent(body)).readline
+            )
+            for tok in toks:
+                if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+                    code_only.append(tok.string)
+            bare = re.findall(r"mx\s*\.\s*array\s*\(", " ".join(code_only))
+            assert bare == [], (
+                f"{node.name} contains {len(bare)} bare mx.array() call(s) — "
+                "route numpy imports through _mx_from_np_slice"
+            )
+    assert checked == 2, f"expected both block-slice functions, found {checked}"

@@ -876,3 +876,60 @@ def test_block_extraction_uses_contiguous_slice_helper():
                 "route numpy imports through _mx_from_np_slice"
             )
     assert checked == 2, f"expected both block-slice functions, found {checked}"
+
+
+def test_batched_scheduler_prompt_only_prefill_clears_per_chunk():
+    """The e8b2b6087 memory-wave fix (per-chunk mx.clear_cache in the
+    background clean-prefill loop) originally landed only in the MLLM
+    generator; the batched Scheduler's identical loop serves ZAYA/mixed-SWA/
+    M3 deferred clean stores and the hybrid-text idle rederive, and without
+    the same discipline retains ~18GB of Metal transients per 2048-token
+    chunk across the pass."""
+    import inspect
+
+    from vmlx_engine.scheduler import Scheduler
+
+    src = inspect.getsource(Scheduler._prefill_for_prompt_only_cache)
+    assert "mx.clear_cache()" in src, (
+        "batched clean-prefill loop lost its per-chunk allocator clear"
+    )
+
+
+def test_idle_rederive_applies_exemption_and_skips_when_clean_pass_stored():
+    """run_idle_rederive stored companions WITHOUT the positional-latent
+    exemption, overwriting the exemption-correct entry the clean pass just
+    stored at the same key (shifting the fetch splice's sequential slot
+    fill on dots3 and resurrecting the O(ctx) growth 1c282ae23 closed) —
+    and double-storing a 50-200MB clone. It must (a) skip entirely when the
+    clean pass already stored, (b) filter exempt slots when it does store."""
+
+    class _ExemptLatent:
+        window = None
+
+        def trim_to_boundary(self):
+            pass
+
+    from mlx_lm.models.cache import KVCache
+
+    # (a) dedupe: has_complete True after the clean pass -> no second store
+    companion = _RecordingCompanionCache(complete=True)
+    gen = _clean_pass_generator(companion)
+    gen._ssm_rederive_queue = [([1, 2, 3], 3, "rid-a", None)]
+    gen._prefill_for_clean_ssm = lambda tokens: [KVCache(), KVCache()]
+    assert gen.run_idle_rederive() is True
+    assert companion.stored == [], "idle rederive must not double-store"
+
+    # (b) exemption: stored layers exclude exempt latents
+    companion2 = _RecordingCompanionCache(complete=False)
+    gen2 = _clean_pass_generator(companion2)
+    gen2._ssm_rederive_queue = [([1, 2, 3, 4], 4, "rid-b", None)]
+    gen2._prefill_for_clean_ssm = lambda tokens: [
+        KVCache(),        # layer 0 (kv position)
+        _ExemptLatent(),  # layer 1 — must be excluded
+        KVCache(),        # layer 2 (kv position)
+        KVCache(),        # layer 3 — genuine companion
+    ]
+    assert gen2.run_idle_rederive() is True
+    assert companion2.stored == [([1, 2, 3, 4], 4, 1, True)], (
+        "exactly the one genuine companion layer may be stored"
+    )

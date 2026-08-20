@@ -12456,10 +12456,36 @@ class MLLMBatchGenerator:
             clean_cache = self._prefill_for_clean_ssm(list(tokens))
             if clean_cache is None:
                 return True
+            if self._ssm_state_cache.has_complete(
+                tokens, prompt_len, cache_extra_keys=cache_extra_keys
+            ):
+                # The clean pass itself already stored the (filtered)
+                # companion via _store_companion_from_clean_pass — a second
+                # store here would both duplicate a 50-200MB deep clone +
+                # disk write AND, before this guard, re-store the layers
+                # UNFILTERED, overwriting the exemption-correct entry.
+                logger.info(
+                    "MLLM SSM re-derive: companion already stored by the "
+                    "clean pass for %s (%d-token key)",
+                    orig_rid,
+                    prompt_len,
+                )
+                del clean_cache
+                try:
+                    mx.clear_cache()
+                except Exception:
+                    pass
+                return True
             kv_set = set(self._hybrid_kv_positions or [])
             ssm_layers: List[Any] = []
             for layer_idx, c in enumerate(clean_cache):
                 if layer_idx in kv_set:
+                    continue
+                if _companion_exempt_cache(c):
+                    # Positional full-latent slots (dots3) are excluded from
+                    # every companion snapshot; storing them here would both
+                    # shift the fetch splice's sequential slot fill and
+                    # resurrect the O(ctx)-per-checkpoint growth (1c282ae23).
                     continue
                 if hasattr(c, "cache") and isinstance(c.cache, list):
                     from copy import deepcopy

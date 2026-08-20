@@ -2872,6 +2872,14 @@ class Scheduler:
                     _collect_cache_arrays(c)
                 if eval_args:
                     mx.eval(*eval_args)
+                # Return each chunk's transients to the allocator before the
+                # next chunk — the MLLM twin of this loop got this in
+                # e8b2b6087 after retained transients (~18GB per 2048-token
+                # chunk) stacked into a background memory wave that killed
+                # the serve process; this lane (ZAYA / mixed-SWA / M3
+                # deferred clean stores, hybrid-text idle rederive) runs the
+                # same post-turn work and needs the same discipline.
+                mx.clear_cache()
 
             return fresh_cache
         except Exception as e:

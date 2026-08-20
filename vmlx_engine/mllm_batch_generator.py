@@ -8121,9 +8121,14 @@ class MLLMBatchGenerator:
                                     _buckets.items(),
                                     key=lambda kv: -kv[1][1],
                                 )[:8]
+                                _tot_n = sum(v[0] for v in _buckets.values())
+                                _tot_b = sum(v[1] for v in _buckets.values())
                                 logger.info(
-                                    "census-gc chunk=%d %s",
+                                    "census-gc chunk=%d TOTAL=%d arrays "
+                                    "%.2fGB | %s",
                                     chunk_num,
+                                    _tot_n,
+                                    _tot_b / (1024**3),
                                     " | ".join(
                                         f"{k[0]}x{v[0]} {k[1]} ="
                                         f"{v[1] / (1024**3):.2f}GB"

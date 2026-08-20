@@ -350,7 +350,10 @@ echo "==> Installing dependencies..."
   "soundfile>=0.12" \
   "mflux==$MFLUX_VERSION" \
   "timm>=1.0.20" \
+  "dflash==0.1.0" "dflash-mlx==0.1.8" \
   "einops>=0.8.0"  # Kimi K2.6 tokenizer + Nemotron-Omni RADIO/ViT deps
+  # dflash: the z-lab DFlash2 draft runtime (Qwen3.8 matched drafter path);
+  # dflash-mlx: the Apache-2.0 four-row affine-q4 Metal verify kernel.
 
 restore_python_runtime_files
 PYTHON_BIN="$BUNDLE_DIR/python/bin/python3.12"

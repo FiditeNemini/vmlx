@@ -19,6 +19,7 @@
 export const ADDITIONAL_ARG_VALUE_FLAGS = new Set([
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
+  '--block-disk-cache-max-percent',
   '--allowed-origins',
   '--api-key',
   '--cache-memory-mb',

@@ -141,6 +141,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
+  '--block-disk-cache-max-percent',
   '--smelt',
   '--smelt-experts',
   '--flash-moe',
@@ -220,6 +221,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
+  '--block-disk-cache-max-percent',
   '--image-mode',
   '--image-quantize',
   '--mflux-class',
@@ -502,6 +504,8 @@ function buildCommandPreview(
     if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
     const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
     if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
+    const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
+    if (blockDiskCacheMaxPercent != null) parts.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())
   } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
     // The engine defaults paged-compatible L2 on. Emit the explicit negative
     // flag so a user-disabled UI toggle remains a real opt-out.

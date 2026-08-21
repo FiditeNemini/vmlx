@@ -138,7 +138,12 @@ def test_omitted_kv_quantization_keeps_loader_turboquant_auto_enabled(tmp_path, 
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
-    assert args.kv_cache_quantization == "q4"
+    # v1.6.35: the STORED prefix codec is full precision for every family.
+    # Measured q4-on vs off: 2.33 vs 2.35s full hit, 2.95 vs 2.97s partial,
+    # byte-identical disk -- under 1%, so exactness wins and quantising a
+    # stored prefix is pure downside. The LIVE TQ-KV patch is a separate
+    # layer and stays on, which the env assertions below pin.
+    assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
@@ -155,7 +160,12 @@ def test_plain_qwen3_moe_auto_mode_keeps_loader_turboquant_enabled(tmp_path, mon
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
-    assert args.kv_cache_quantization == "q4"
+    # v1.6.35: the STORED prefix codec is full precision for every family.
+    # Measured q4-on vs off: 2.33 vs 2.35s full hit, 2.95 vs 2.97s partial,
+    # byte-identical disk -- under 1%, so exactness wins and quantising a
+    # stored prefix is pure downside. The LIVE TQ-KV patch is a separate
+    # layer and stays on, which the env assertions below pin.
+    assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
@@ -262,7 +272,7 @@ def test_explicit_kv_quantization_disables_loader_turboquant(tmp_path, monkeypat
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None
 
 
-def test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4(tmp_path, monkeypatch):
+def test_hybrid_ssm_auto_mode_disables_live_tq_and_stores_full_precision(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "bailing_hybrid"}))
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
     monkeypatch.delenv("VMLX_FORCE_TQ_AUTO", raising=False)
@@ -272,7 +282,12 @@ def test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4(tmp_path, 
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
-    assert args.kv_cache_quantization == "q4"
+    # v1.6.35: the STORED prefix codec is full precision for every family.
+    # Measured q4-on vs off: 2.33 vs 2.35s full hit, 2.95 vs 2.97s partial,
+    # byte-identical disk -- under 1%, so exactness wins and quantising a
+    # stored prefix is pure downside. The LIVE TQ-KV patch is a separate
+    # layer and stays on, which the env assertions below pin.
+    assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
     assert os.environ.get("VMLX_DISABLE_TQ_KV") == "1"
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None

@@ -2434,6 +2434,28 @@ class BlockDiskStore:
                                 f"{global_result.max_size_bytes})"
                             )
                         )
+                        # Distinguish "the budget is full" from "this ONE chain
+                        # is bigger than the entire budget". They read the same
+                        # in the fence warning, but only the second is
+                        # permanent: every long prompt will be refused until the
+                        # budget is raised, and the cache silently stores
+                        # nothing at all. Observed with a 0.5GB budget and a
+                        # 6050-token / 44-layer chain needing ~640MB.
+                        _chain_bytes = net_payload_bytes + metadata_delta
+                        _budget_bytes = global_result.max_size_bytes or 0
+                        if _budget_bytes and _chain_bytes > _budget_bytes:
+                            logger.warning(
+                                "Block cache budget is smaller than a single "
+                                "prompt's block chain (%.1fMB needed vs %.1fMB "
+                                "budget); nothing from this request can be "
+                                "cached. Raise the SSD cache size (Session "
+                                "Settings -> SSD Cache Size, or "
+                                "--block-disk-cache-max-percent / "
+                                "--block-disk-cache-max-gb) to reuse prompts "
+                                "this long.",
+                                _chain_bytes / (1024 ** 2),
+                                _budget_bytes / (1024 ** 2),
+                            )
                         released_fences = self._release_write_fence_pins_locked(
                             write_conn,
                         )

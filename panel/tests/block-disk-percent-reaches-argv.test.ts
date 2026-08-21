@@ -94,3 +94,24 @@ describe('the v17 SSD-first default runs as a post-pass', () => {
     expect(fn).toContain("'openpangu_v2'")
   })
 })
+
+describe('an unrecognised family still gets the SSD-first default', () => {
+  const sessions = readFileSync('src/main/sessions.ts', 'utf-8')
+
+  it('gates the version stamp on bundle REACHABILITY, not on family detection', () => {
+    // The stamp declines so an unmounted drive can retry later. It used to
+    // decide that by asking whether the family resolved, which conflates "the
+    // drive is not mounted" with "this bundle reads fine but is not in the
+    // registry" -- and the second case then never migrates at all.
+    //
+    // Live: 21 real sessions, 20 migrated to the SSD-first default. The one
+    // that did not was an LFM2.5-VL HF snapshot (model_type lfm2_vl) that
+    // detects as family 'unknown'; it kept the in-RAM paged cache on.
+    const fn = sessions.slice(
+      sessions.indexOf('function markCacheStackStartupDefaultsCurrent('),
+      sessions.indexOf('function applySsdFirstCacheDefaults('),
+    )
+    expect(fn).toContain("existsSync(join(targetPath, 'config.json'))")
+    expect(fn).not.toContain("effectiveFamily === 'unknown'")
+  })
+})

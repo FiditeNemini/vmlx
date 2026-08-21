@@ -1019,7 +1019,7 @@
       "pagedCacheCapacity": "Capacidad efectiva de caché en memoria: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "El TTL de caché no se aplica mientras la caché paginada en memoria está activa. El límite de memoria de caché / % de memoria de caché limita su uso de L1 de la memoria unificada de Apple; el máximo de bloques de caché y el tamaño de bloque limitan la capacidad en tokens.",
       "blockDiskCapacity": "Capacidad efectiva del índice de bloques en SSD: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
-      "ramCacheTradeoffNotice": "Consejo de memoria: los prompts se guardan en tu SSD de forma predeterminada, así que la RAM se mantiene cerca del tamaño del propio modelo. Puedes activar «Caché Paginada en Memoria (RAM)» en la sección Caché de Prefijos para respuestas un 2% más rápidas, pero mantiene una copia de la caché en memoria y usa bastante más RAM. La mayoría debería dejarla desactivada.",
+      "ramCacheTradeoffNotice": "Cambio en la caché: la caché en memoria ahora está DESACTIVADA de forma predeterminada. Los prompts se guardan en tu SSD, así que el uso de memoria se mantiene cerca del tamaño del propio modelo. Puedes volver a activar «Caché Paginada en Memoria (RAM)» más abajo: las respuestas son un 2% más rápidas, pero mantiene una segunda copia de la caché en memoria y usa bastante más RAM.",
       "blockCacheMaxPercent": "Tamaño de caché SSD (% del disco)",
       "blockCacheMaxPercentTooltip": "Espacio máximo en disco para la raíz gestionada de la caché de bloques, como porcentaje de este volumen. Medirlo en porcentaje mantiene la caché proporcional al equipo en lugar de un número fijo de gigabytes. El límite se comparte entre espacios de nombres de modelo/configuración y el estado de acompañantes tipados: se aplica a todos los subdirectorios gestionados y acompañantes tipados de esta raíz, y cuando varias sesiones activas aportan un porcentaje se aplica el límite finito más pequeño. Usa 0 para ilimitado solo cuando ninguna sesión activa aporte un límite finito.",
       "blockCacheSharedBudgetNote": "Este límite se comparte entre todas las sesiones: la app usa una sola carpeta de caché y elimina los prompts más antiguos de todos los modelos cuando se llena, incluidos modelos que no estés usando.",
@@ -1029,7 +1029,8 @@
       "clearSsdCacheDone": "Se borraron {{count}} nivel(es) de caché.",
       "clearSsdCacheFailed": "No se pudo borrar: {{error}}. La sesión debe estar en ejecución.",
       "clearSsdCacheEmpty": "Nada que borrar: esta sesión no tenía prompts en caché.",
-      "clearSsdCachePartial": "Se borraron {{count}} nivel(es); {{skipped}} se dejó intacto (aún lo usa una solicitud en curso). Inténtalo cuando la sesión esté inactiva."
+      "clearSsdCachePartial": "Se borraron {{count}} nivel(es); {{skipped}} se dejó intacto (aún lo usa una solicitud en curso). Inténtalo cuando la sesión esté inactiva.",
+      "blockCacheArchitecturePoolNote": "Un único grupo para todo: este límite cubre todos los tipos de caché que escribe vMLX — bloques KV simples, estado de acompañantes tipados (SSM/GatedDelta), registros compuestos nativos (DeepSeek-V4 DSA/CSA/HCA), estado de ventana deslizante y bloques multimodales — para cada modelo y cada sesión. Cuando se llena, se eliminan primero los prompts más antiguos de todos ellos, incluidos modelos que no estés usando."
     },
     "create": {
       "title": "Crear sesión",

@@ -1019,7 +1019,7 @@
       "pagedCacheCapacity": "有效内存缓存容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
       "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。",
       "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
-      "ramCacheTradeoffNotice": "内存提示：提示默认缓存在 SSD 上，因此内存占用会接近模型本身的大小。你可以在下方“前缀缓存”中开启“内存分页缓存 (RAM)”，回复大约快 2%，但它会在内存中保留一份缓存副本，占用明显更多内存。多数情况下建议保持关闭。",
+      "ramCacheTradeoffNotice": "缓存变更：内存缓存现在默认已关闭。提示改为缓存在 SSD 上，因此内存占用会接近模型本身的大小。你仍可以在下方重新开启“内存分页缓存 (RAM)”——回复大约快 2%，但它会在内存中再保留一份缓存副本，占用明显更多内存。",
       "blockCacheMaxPercent": "SSD 缓存大小（磁盘百分比）",
       "blockCacheMaxPercentTooltip": "受管理的块缓存根目录可使用的最大磁盘空间，以该卷的百分比表示。用百分比而不是固定的 GB 数，可以让缓存大小与机器相称。该容量由模型/配置命名空间和类型化伴随状态共享：大小上限适用于此根目录下所有受管理的子目录和类型化伴随数据；当多个运行中的会话各自提供百分比时，将采用最小的有限上限。仅当没有任何运行中的会话提供有限上限时，设为 0（无限制）才会生效。",
       "blockCacheSharedBudgetNote": "该容量由所有会话共享：应用只使用一个缓存文件夹，占满时会跨所有模型删除最旧的提示，包括你当前没有在用的模型。",
@@ -1029,7 +1029,8 @@
       "clearSsdCacheDone": "已清除 {{count}} 个缓存层。",
       "clearSsdCacheFailed": "无法清除：{{error}}。会话必须正在运行。",
       "clearSsdCacheEmpty": "没有可清除的内容 — 此会话没有缓存的提示。",
-      "clearSsdCachePartial": "已清除 {{count}} 个层；{{skipped}} 保持不变（仍被运行中的请求占用）。请在会话空闲后重试。"
+      "clearSsdCachePartial": "已清除 {{count}} 个层；{{skipped}} 保持不变（仍被运行中的请求占用）。请在会话空闲后重试。",
+      "blockCacheArchitecturePoolNote": "所有内容共用一个池：该容量涵盖 vMLX 写入的所有缓存类型——普通 KV 块、类型化伴随状态 (SSM/GatedDelta)、原生复合记录 (DeepSeek-V4 DSA/CSA/HCA)、滑动窗口状态和多模态块——适用于每个模型和每个会话。占满时会跨所有这些内容优先删除最旧的提示，包括你当前没有在用的模型。"
     },
     "create": {
       "title": "创建会话",

@@ -716,14 +716,19 @@ function markCacheStackStartupDefaultsCurrent(
   if (pendingVersion >= 12 && pendingVersion < CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
     const targetPath = modelPath || config.modelPath
     if (!targetPath) return false
+    // The question here is ONLY "is the bundle reachable", so ask that directly.
+    // Treating family==='unknown' as the answer conflates an unmounted drive
+    // with a bundle that reads fine but is not in the registry — and the second
+    // case then never migrates at all, silently keeping whatever defaults it
+    // already had. Live example: an LFM2.5-VL HF snapshot (model_type lfm2_vl)
+    // detects as 'unknown' and was the ONE session out of 21 that kept the
+    // in-RAM paged cache on through the v17 flip.
+    //
+    // An unrecognised family is a real answer, not a failed detection. The
+    // migrations that genuinely need a family are all gated on matching a
+    // specific one, so they simply do not fire for it.
     try {
-      const detectedFamily = normalizeDetectedFamilyName(
-        detectModelConfigFromDir(targetPath).family,
-      )
-      const effectiveFamily = normalizeDetectedFamilyName(
-        resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
-      )
-      if (!effectiveFamily || effectiveFamily === 'unknown') return false
+      if (!existsSync(join(targetPath, 'config.json'))) return false
     } catch {
       return false
     }

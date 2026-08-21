@@ -1221,6 +1221,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                 percentages would otherwise look independent while contending
                 over the same pool. */}
             <InfoNote text={t('sessions.config.blockCacheSharedBudgetNote')} />
+            {/* The pool spans cache ARCHITECTURES, not just sessions: typed SSM
+                companions, DSV4 composite records, rotating-SWA state and
+                multimodal blocks are all trimmed out of the same root. Someone
+                reading only the per-session note would reasonably assume their
+                DSV4 session had its own budget. */}
+            <InfoNote text={t('sessions.config.blockCacheArchitecturePoolNote')} />
             <div className="flex items-center gap-2 mt-1">
               <button
                 type="button"

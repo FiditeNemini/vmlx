@@ -1019,7 +1019,7 @@
       "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
       "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
-      "ramCacheTradeoffNotice": "Memory tip: prompts are cached on your SSD by default, so RAM stays close to the model's own size. You can turn on \"In-Memory Paged Cache (RAM)\" in the Prefix Cache section below for about 2% faster replies, but it keeps a copy of the cache in memory and uses noticeably more RAM. Most people should leave it off.",
+      "ramCacheTradeoffNotice": "Cache update: the in-memory cache is now OFF by default. Prompts are cached on your SSD instead, so memory use stays close to the model's own size. You can still turn \"In-Memory Paged Cache (RAM)\" back on below — it makes replies about 2% faster, but it keeps a second copy of the cache in memory and uses noticeably more RAM.",
       "blockCacheMaxPercent": "SSD Cache Size (% of disk)",
       "blockCacheMaxPercentTooltip": "Maximum physical disk space for the managed block-cache root, as a percent of this volume. Sizing by percent keeps the cache proportionate to the machine instead of a fixed number of gigabytes. The budget is shared across model/config namespaces and typed companion state: the size limit applies across all managed subdirectories and typed companions in this root, and when several live sessions each supply a percentage the smallest finite limit is enforced. Set to 0 for unlimited only when no live session supplies a finite limit.",
       "blockCacheSharedBudgetNote": "This budget is shared by all sessions — the app keeps one cache folder and removes the oldest prompts across every model when it fills up, including models you are not using right now.",
@@ -1029,7 +1029,8 @@
       "clearSsdCacheDone": "Cleared {{count}} cache tier(s).",
       "clearSsdCacheFailed": "Could not clear: {{error}}. The session must be running.",
       "clearSsdCacheEmpty": "Nothing to clear — this session had no cached prompts.",
-      "clearSsdCachePartial": "Cleared {{count}} tier(s); {{skipped}} was left alone (still in use by a running request). Try again once the session is idle."
+      "clearSsdCachePartial": "Cleared {{count}} tier(s); {{skipped}} was left alone (still in use by a running request). Try again once the session is idle.",
+      "blockCacheArchitecturePoolNote": "One pool for everything: this budget covers every cache type vMLX writes — plain KV blocks, typed companion state (SSM/GatedDelta), native composite records (DeepSeek-V4 DSA/CSA/HCA), rotating sliding-window state, and multimodal blocks — for every model and every session. When it fills, the oldest prompts are removed first, across all of them, including models you are not using right now."
     },
     "create": {
       "title": "Create Session",

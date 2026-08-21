@@ -827,8 +827,6 @@
       "maxCacheBlocksTooltip": "Número total máximo de bloques de caché KV asignados. El bloque 0 está reservado permanentemente como bloque nulo/marcador, por lo que la capacidad utilizable de tokens = block_size x (max_blocks - 1). Auméntelo para contextos más largos, redúzcalo para ahorrar memoria.",
       "blockDiskPureSsdNote": "La Caché de bloques en disco puede funcionar como un nivel de prefijos puramente SSD mientras la Caché paginada en memoria permanece desactivada. Mantiene solo el índice de bloques direccionado por contenido en memoria, restaura las cargas KV transitoriamente desde SSD y sigue requiriendo la Caché de prefijos.",
       "blockDiskCacheTooltip": "Persiste los bloques de prefijos direccionados por contenido en SSD. Con la Caché paginada en memoria (RAM) activada, el SSD es L2 detrás del nivel RAM. Con el nivel RAM desactivado, el SSD es el nivel de bloques autoritativo y las cargas KV se restauran solo transitoriamente para su reconstrucción. Los runtimes compatibles preservan los registros de caché nativos TurboQuant o tipados.",
-      "blockCacheMaxGb": "Máx. de caché de bloques (GB)",
-      "blockCacheMaxTooltip": "Espacio máximo físico en disco para la raíz gestionada de caché de bloques, compartido entre espacios de nombres de modelo/configuración y estado acompañante tipado. Las entradas menos usadas recientemente se expulsan cuando la raíz agregada supera el límite. Si varias sesiones activas comparten la raíz, se aplica el límite finito más pequeño. Establezca 0 para ilimitado solo cuando ninguna sesión activa proporcione un límite finito.",
       "blockCacheDirectoryTooltip": "Raíz gestionada para los archivos de caché en disco a nivel de bloque. Se crea automáticamente un subdirectorio específico de modelo/configuración, y el límite de tamaño se aplica a todos los subdirectorios gestionados y acompañantes tipados en esta raíz. Déjelo vacío para ~/.cache/vmlx-engine/block-cache/.",
       "kvQuantRequiresBatching": "La cuantización de la caché KV requiere procesamiento por lotes continuo. Active 'Procesamiento por lotes continuo' en la sección Procesamiento concurrente de arriba.",
       "kvQuantRequiresPrefix": "La cuantización de la caché KV requiere la caché de prefijos. Habilite 'Caché de prefijos' arriba para usar la cuantización de la caché KV.",
@@ -1465,7 +1463,8 @@
       "clearRam": "Vaciar RAM",
       "clearPrefixL2": "Vaciar prefijos + L2",
       "clearAll": "Vaciar todo",
-      "reuseExplainer": "La reutilización coincide con el prefijo causal continuo más largo desde el token 0. Solo se preprocesa la cola no coincidente; nunca se reutilizan sufijos arbitrarios ni secuencias intermedias. En familias dependientes de la ruta (DeepSeek V4, ZAYA CCA y modelos de KV rotatorio como Gemma 4 y Muse), un prompt MÁS CORTO que la cadena almacenada puede no reutilizar nada y preprocesarse por completo."
+      "reuseExplainer": "La reutilización coincide con el prefijo causal continuo más largo desde el token 0. Solo se preprocesa la cola no coincidente; nunca se reutilizan sufijos arbitrarios ni secuencias intermedias. En familias dependientes de la ruta (DeepSeek V4, ZAYA CCA y modelos de KV rotatorio como Gemma 4 y Muse), un prompt MÁS CORTO que la cadena almacenada puede no reutilizar nada y preprocesarse por completo.",
+      "clearSkipped": "Algunos niveles de caché no se borraron: {{skipped}}. Siguen en uso por una solicitud en curso; inténtalo cuando la sesión esté inactiva."
     },
     "embeddings": {
       "sessionMustBeRunning": "La sesión debe estar en ejecución para generar incrustaciones.",

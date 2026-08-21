@@ -65,14 +65,55 @@ def test_store_casts_bfloat16_to_float32_not_float16():
 
 
 def test_block_disk_store_still_agrees():
-    """The two tiers must not disagree about how a bf16 cache is persisted."""
+    """The two tiers must not disagree about how a bf16 cache is persisted.
+
+    The invariant is LOSSLESSNESS, not a particular cast. This used to assert
+    the literal string "astype(mx.float32)", which pinned an implementation
+    rather than the property: the block store now carries bf16 as its raw
+    uint16 bits (1x bytes instead of 2x) and reinterprets on restore, which is
+    equally lossless and half the IO on what is now the default prefix tier.
+
+    So test the round trip instead of the source text.
+    """
     block = (ROOT / "vmlx_engine" / "block_disk_store.py").read_text(
         encoding="utf-8"
     )
-    assert "astype(mx.float32)" in block
     assert "astype(mx.float16)" not in block, (
-        "block_disk_store started narrowing to float16; the two disk tiers "
-        "would then round-trip the same cache differently"
+        "block_disk_store started narrowing to float16; values above 65504 "
+        "become inf and the two disk tiers would round-trip differently"
+    )
+
+    mx = pytest.importorskip("mlx.core")
+    from vmlx_engine.block_disk_store import (
+        BlockDiskStore,
+        _restore_serialized_dtype,
+    )
+
+    original = mx.array(
+        [[1.0, -2.5, 65504.0 * 4, 1e30, 6e-8]], dtype=mx.bfloat16
+    )
+    detached = BlockDiskStore._detach_safetensors_tensors({"x": original})
+
+    # 1x: the payload must be the same byte count as the bf16 source, not
+    # double it. This is the whole point of the change.
+    assert detached["x"].nbytes == original.size * 2, (
+        f"expected 1x bf16 bytes, got {detached['x'].nbytes} for "
+        f"{original.size} elements"
+    )
+
+    restored = _restore_serialized_dtype(mx.array(detached["x"]), mx.bfloat16)
+    assert restored.dtype == mx.bfloat16
+    assert bool(mx.all(restored == original).item()), (
+        "bf16 did not survive the block-store round trip bit-exactly"
+    )
+
+    # Backward compatibility: caches written by older builds hold f32 payloads
+    # and must still restore by casting.
+    legacy = original.astype(mx.float32)
+    legacy_restored = _restore_serialized_dtype(legacy, mx.bfloat16)
+    assert legacy_restored.dtype == mx.bfloat16
+    assert bool(mx.all(legacy_restored == original).item()), (
+        "an f32 block written by an older build no longer restores"
     )
 
 

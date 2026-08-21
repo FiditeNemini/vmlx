@@ -226,8 +226,17 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
     if (!actionToken) return
     setClearing(true)
     try {
-      await window.api.cache.clear(type, endpoint, sessionId)
+      const res: any = await window.api.cache.clear(type, endpoint, sessionId)
       if (!requestGuard.isCurrent(actionToken)) return
+      // The engine answers with what it cleared AND what it refused to touch:
+      // `paged_prefix:blocks_in_use` means a live request still holds those
+      // blocks and nothing was freed there, and a `busy` status means nothing
+      // was cleared at all. Discarding the response rendered both as success —
+      // a spinner, a refresh, and a cache the user believes is gone.
+      const skipped: string[] = Array.isArray(res?.skipped) ? res.skipped : []
+      if (res?.status === 'busy' || skipped.length > 0) {
+        setError(t('sessions.cachePanel.clearSkipped', { skipped: skipped.join(', ') || res?.detail || '' }))
+      }
       await fetchStatsForToken(actionToken)
       if (!requestGuard.isCurrent(actionToken)) return
       setEntries(null)

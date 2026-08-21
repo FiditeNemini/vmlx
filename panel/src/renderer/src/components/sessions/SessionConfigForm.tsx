@@ -55,7 +55,7 @@ export interface SessionConfig {
   diskCacheMaxGb: number
   diskCacheDir: string
   enableBlockDiskCache: boolean
-  blockDiskCacheMaxGb: number
+  blockDiskCacheMaxGb?: number
   blockDiskCacheMaxPercent: number
   blockDiskCacheDir: string
   streamInterval: number
@@ -154,7 +154,10 @@ export const DEFAULT_CONFIG: SessionConfig = {
   diskCacheMaxGb: 10,
   diskCacheDir: '',
   enableBlockDiskCache: true,
-  blockDiskCacheMaxGb: 0,
+  // Intentionally absent, not 0: the engine reads 0 as UNLIMITED, so a seeded
+  // 0 is emitted at launch and hands the whole disk to the cache while this
+  // form shows a 10% budget.
+
   blockDiskCacheMaxPercent: DEFAULT_BLOCK_DISK_CACHE_PERCENT,
   blockDiskCacheDir: '',
   streamInterval: 1,

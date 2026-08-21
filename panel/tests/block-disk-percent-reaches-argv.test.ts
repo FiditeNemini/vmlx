@@ -34,12 +34,20 @@ describe('block-disk budget percent reaches the engine argv', () => {
     expect(sessions.slice(gbIdx, pctIdx)).not.toMatch(/\belse\b/)
   })
 
-  it('fresh configs seed 0 GB so the percent owns the budget', () => {
-    expect(sessions).toContain("setConfigValue(mutable, 'blockDiskCacheMaxGb', 0)")
+  it('fresh configs seed NO GB value at all, so the percent owns the budget', () => {
+    // This assertion previously demanded a seeded 0 and passed while the
+    // shipped launcher ran an UNBOUNDED cache: the engine reads
+    // `explicit_gb is not None`, and BlockDiskStore documents
+    // `max_size_gb: 0 = unlimited`. 0 is not "unset" — absent is.
+    //
+    // Behaviour, rather than these string greps, is asserted in
+    // block-disk-budget-behaviour.test.ts. Every literal this file checked was
+    // individually correct while the composed result was wrong, which is the
+    // whole reason a grep-based test could not catch it.
     expect(sessions).toContain(
       "setConfigValue(mutable, 'blockDiskCacheMaxPercent', DEFAULT_BLOCK_DISK_CACHE_PERCENT)",
     )
-    // The old flat seed is what made the percent dead on arrival.
+    expect(sessions).not.toContain("setConfigValue(mutable, 'blockDiskCacheMaxGb', 0)")
     expect(sessions).not.toContain("setConfigValue(mutable, 'blockDiskCacheMaxGb', 10)")
   })
 

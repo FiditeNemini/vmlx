@@ -827,8 +827,6 @@
       "maxCacheBlocksTooltip": "分配的 KV 缓存块最大总数。块 0 永久保留为空/占位块，因此可用 token 容量 = block_size x (max_blocks - 1)。上下文更长时调大，节省内存时调小。",
       "blockDiskPureSsdNote": "内存分页缓存保持关闭时，块磁盘缓存可作为纯 SSD 前缀层运行。它仅在内存中保留内容寻址块索引，从 SSD 瞬时恢复 KV 负载，且仍需要前缀缓存。",
       "blockDiskCacheTooltip": "将内容寻址的前缀块持久化到 SSD。内存分页缓存 (RAM) 开启时，SSD 是 RAM 层后面的 L2。RAM 层关闭时，SSD 是权威块层，KV 负载仅在重建时瞬时恢复。兼容的运行时会保留原生 TurboQuant 或类型化缓存记录。",
-      "blockCacheMaxGb": "块缓存上限 (GB)",
-      "blockCacheMaxTooltip": "受管块缓存根目录的最大物理磁盘空间，在模型/配置命名空间和类型化伴随状态之间共享。聚合根超过上限时逐出最久未使用的条目。多个活动会话共享根目录时，采用最小的有限上限。仅当没有活动会话提供有限上限时才设为 0（无限制）。",
       "blockCacheDirectoryTooltip": "块级磁盘缓存文件的受管根目录。会自动创建模型/配置专用子目录，大小上限适用于此根目录下所有受管子目录和类型化伴随数据。留空则为 ~/.cache/vmlx-engine/block-cache/。",
       "kvQuantRequiresBatching": "KV 缓存量化需要连续批处理。请在上方并发处理部分开启“连续批处理”。",
       "kvQuantRequiresPrefix": "KV 缓存量化需要前缀缓存。请在上方启用“前缀缓存”以使用 KV 缓存量化。",
@@ -1465,7 +1463,8 @@
       "clearRam": "清除内存",
       "clearPrefixL2": "清除前缀 + L2",
       "clearAll": "全部清除",
-      "reuseExplainer": "复用匹配从第 0 个 token 起最长的连续因果前缀。只有未匹配的尾部会被预填充；任意后缀或中间片段永远不会被复用。对于路径依赖的模型系列（DeepSeek V4、ZAYA CCA，以及 Gemma 4、Muse 等旋转 KV 模型），比缓存链更短的提示可能完全无法复用，需要全量预填充。"
+      "reuseExplainer": "复用匹配从第 0 个 token 起最长的连续因果前缀。只有未匹配的尾部会被预填充；任意后缀或中间片段永远不会被复用。对于路径依赖的模型系列（DeepSeek V4、ZAYA CCA，以及 Gemma 4、Muse 等旋转 KV 模型），比缓存链更短的提示可能完全无法复用，需要全量预填充。",
+      "clearSkipped": "部分缓存层未被清除：{{skipped}}。它们仍被运行中的请求占用，请在会话空闲后重试。"
     },
     "embeddings": {
       "sessionMustBeRunning": "会话必须正在运行才能生成嵌入。",

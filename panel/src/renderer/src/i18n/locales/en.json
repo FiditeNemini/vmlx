@@ -827,8 +827,6 @@
       "maxCacheBlocksTooltip": "Maximum total number of KV cache blocks allocated. Block 0 is permanently reserved as the null/placeholder block, so usable token capacity = block_size x (max_blocks - 1). Increase for longer contexts, decrease to save memory.",
       "blockDiskPureSsdNote": "Block Disk Cache can run as a pure SSD prefix tier while In-Memory Paged Cache remains Off. It keeps only the content-addressed block index in memory, restores KV payloads transiently from SSD, and still requires Prefix Cache.",
       "blockDiskCacheTooltip": "Persist content-addressed prefix blocks to SSD. With In-Memory Paged Cache (RAM) On, SSD is L2 behind the RAM tier. With the RAM tier Off, SSD is the authoritative block tier and KV payloads are restored only transiently for reconstruction. Compatible runtimes preserve native TurboQuant or typed cache records.",
-      "blockCacheMaxGb": "Block Cache Max (GB)",
-      "blockCacheMaxTooltip": "Maximum physical disk space for the managed block-cache root, shared across model/config namespaces and typed companion state. Least-recently-used entries are evicted when the aggregate root exceeds the limit. If multiple live sessions share the root, the smallest finite limit is enforced. Set to 0 for unlimited only when no live session supplies a finite limit.",
       "blockCacheDirectoryTooltip": "Managed root for block-level disk cache files. A model/config-specific subdirectory is created automatically, and the size limit applies across all managed subdirectories and typed companions in this root. Leave empty for ~/.cache/vmlx-engine/block-cache/.",
       "kvQuantRequiresBatching": "KV cache quantization requires continuous batching. Turn on 'Continuous Batching' in the Concurrent Processing section above.",
       "kvQuantRequiresPrefix": "KV cache quantization requires prefix cache. Enable 'Prefix Cache' above to use KV cache quantization.",
@@ -1465,7 +1463,8 @@
       "clearRam": "Clear RAM",
       "clearPrefixL2": "Clear Prefix + L2",
       "clearAll": "Clear All",
-      "reuseExplainer": "Reuse matches the longest continuous causal token prefix from token 0. Only the unmatched tail is prefilled; arbitrary suffix or interior sequences are never reused. On path-dependent families (DeepSeek V4, ZAYA CCA, and rotating-KV models such as Gemma 4 and Muse) a prompt SHORTER than the cached chain may reuse nothing and prefill in full."
+      "reuseExplainer": "Reuse matches the longest continuous causal token prefix from token 0. Only the unmatched tail is prefilled; arbitrary suffix or interior sequences are never reused. On path-dependent families (DeepSeek V4, ZAYA CCA, and rotating-KV models such as Gemma 4 and Muse) a prompt SHORTER than the cached chain may reuse nothing and prefill in full.",
+      "clearSkipped": "Some cache tiers were not cleared: {{skipped}}. They are still in use by a running request — try again once the session is idle."
     },
     "embeddings": {
       "sessionMustBeRunning": "Session must be running to generate embeddings.",

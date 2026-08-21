@@ -867,10 +867,9 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     ) || changed
   }
   if (mutable.enableBlockDiskCache === undefined) changed = setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache) || changed
-  // 0 = "no explicit GB cap"; the engine then resolves the budget from
-  // blockDiskCacheMaxPercent. Seeding the old flat 10 here made the percent
-  // dead on arrival, because an explicit --block-disk-cache-max-gb always wins.
-  if (mutable.blockDiskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxGb', 0) || changed
+  // Deliberately NOT seeded. Any number here is emitted and beats the percent;
+  // 0 in particular means UNLIMITED to the engine, not "unset". Leaving the
+  // field absent is what lets blockDiskCacheMaxPercent actually govern.
   if (mutable.blockDiskCacheMaxPercent === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxPercent', DEFAULT_BLOCK_DISK_CACHE_PERCENT) || changed
   if (mutable.kvCacheQuantization === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto') || changed
 
@@ -965,7 +964,10 @@ function applySsdFirstCacheDefaults(
     // The old flat default; let the percent take over. An explicitly chosen size
     // that happens to be 10 is indistinguishable from the default here, which is
     // why only the exact legacy value is migrated.
-    config.blockDiskCacheMaxGb = 0
+    //
+    // DELETE it rather than writing 0 — 0 means UNLIMITED to the engine, so
+    // "handing over to the percent" by writing 0 handed over the whole disk.
+    delete config.blockDiskCacheMaxGb
     changed = true
   }
   return changed
@@ -3151,7 +3153,7 @@ export class SessionManager extends EventEmitter {
     'noMemoryAwareCache', 'cacheMemoryMb', 'cacheMemoryPercent',
     'kvCacheQuantization', 'kvCacheGroupSize',
     'enableDiskCache', 'diskCacheMaxGb', 'diskCacheDir',
-    'enableBlockDiskCache', 'blockDiskCacheMaxGb', 'blockDiskCacheDir',
+    'enableBlockDiskCache', 'blockDiskCacheMaxGb', 'blockDiskCacheMaxPercent', 'blockDiskCacheDir',
     'prefixCacheSize', 'prefixCacheMaxBytes', 'cacheTtlMinutes', 'isMultimodal',
     'toolCallParser', 'reasoningParser',
     'dsv4PrefixCache', 'dsv4PoolQuant', 'dsv4ActivationQat',
@@ -3442,7 +3444,10 @@ export class SessionManager extends EventEmitter {
             ? DSV4_MAX_CACHE_BLOCKS
             : indexBlocksForCapacity(64),
           enableBlockDiskCache: detectedFamily !== 'openpangu_v2',
-          blockDiskCacheMaxGb: 10,
+          // No GB cap: adopted sessions get the percent budget like everyone
+          // else. This used to hardcode 10 AND stamp the defaults version
+          // current, so the GB->percent migration could never reach it.
+          blockDiskCacheMaxPercent: DEFAULT_BLOCK_DISK_CACHE_PERCENT,
           kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
           modelParserDefaultsVersion: MODEL_PARSER_DEFAULTS_VERSION,
@@ -4680,14 +4685,22 @@ export class SessionManager extends EventEmitter {
       if (config.blockDiskCacheDir) {
         args.push('--block-disk-cache-dir', config.blockDiskCacheDir)
       }
+      // ONLY a positive GB value is a real cap. 0 is NOT "unset": the engine
+      // reads `explicit_gb is not None` and BlockDiskStore documents
+      // `max_size_gb: 0 = unlimited`, so emitting 0 hands the whole disk to the
+      // cache while the UI reads "10%". Seeding 0 into fresh configs and then
+      // emitting it did exactly that on every install.
+      //
+      // There is no GB control in the UI any more. Unlimited is expressed by
+      // the PERCENT slider's 0, which the engine maps to the same 0.0 budget.
+      // So a 0 here only ever means "nobody chose a GB cap" — do not pass it.
       const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
-      if (blockDiskCacheMaxGb != null) {
+      if (blockDiskCacheMaxGb != null && blockDiskCacheMaxGb > 0) {
         args.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
       }
-      // The percent is what the slider actually edits. It must be passed even
-      // when a GB value is also present: the engine resolves explicit-GB-wins,
-      // so passing only the GB silently pins the budget and the slider becomes
-      // decorative. 0 GB means "no explicit cap" and hands over to the percent.
+      // The percent is what the slider edits. The engine resolves
+      // explicit-GB-wins, so a stale positive GB still overrides it — which is
+      // why the seed above must not be a number nobody chose.
       const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
       if (blockDiskCacheMaxPercent != null) {
         args.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())

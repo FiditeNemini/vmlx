@@ -10139,6 +10139,30 @@ class MLLMBatchGenerator:
                                 "vmlx#109 inline store failed for %s: %s",
                                 req.request_id, e,
                             )
+                        # Hand the boundary snapshot to the prefix-cache store
+                        # before dropping it. Without this the scheduler's
+                        # path-dependent store finds nothing and falls back to
+                        # a SECOND full prefill (profiled at 40.8% of engine
+                        # time, ~28s at 15.4k, blocking the next request).
+                        # ArraysCache state is fixed-size per layer (~0.15GB
+                        # for 48 layers here), so holding it until the store
+                        # completes is cheap; the scheduler clears it after use.
+                        try:
+                            req._clean_boundary_recurrent = list(_inline_checkpoints)
+                            # The scheduler works with its own request wrapper,
+                            # so hand off by request_id rather than by object.
+                            snaps = getattr(self, "_clean_boundary_snapshots", None)
+                            if snaps is None:
+                                snaps = {}
+                                self._clean_boundary_snapshots = snaps
+                            snaps[str(req.request_id)] = list(_inline_checkpoints)
+                            # Bound the map: these are per-request and consumed
+                            # by the store, but a dropped request must not leak.
+                            if len(snaps) > 8:
+                                for _stale in list(snaps)[:-8]:
+                                    snaps.pop(_stale, None)
+                        except Exception:
+                            req._clean_boundary_recurrent = None
                         # Drop refs so per-request memory isn't held longer
                         # than necessary.
                         req._inline_ssm_layers = None

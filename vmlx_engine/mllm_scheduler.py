@@ -180,7 +180,7 @@ from .utils.memory_limits import (
     get_metal_ws_guard_threshold,
 )
 from .prefix_cache import runtime_cache_fingerprint
-from .utils.cache_extent import logical_truncate_target
+from .utils.cache_extent import cache_offset, logical_truncate_target
 
 logger = logging.getLogger(__name__)
 
@@ -3759,6 +3759,37 @@ class MLLMScheduler:
                                     # a contaminated hit that later hurts coherence
                                     # or speed.
                                     cache_blocks = None
+                                    # Pure-hybrid layouts already hold both
+                                    # halves of the boundary state: append-only
+                                    # attention KV (sliceable) plus the
+                                    # vmlx#109 inline recurrent snapshot taken
+                                    # before generation advanced it. Assembling
+                                    # those is exact and skips a SECOND full
+                                    # prefill — profiled at 40.8% of engine time
+                                    # (~28s at 15.4k), running after the
+                                    # response and blocking the next request.
+                                    if (
+                                        _uses_hybrid_clean_store
+                                        and not _uses_zaya_cache
+                                        and not _uses_mixed_attention_cache
+                                    ):
+                                        _assembled = _assemble_clean_hybrid_boundary_cache(
+                                            self.batch_generator,
+                                            request,
+                                            raw,
+                                            len(truncated_tokens),
+                                        )
+                                        if _assembled is not None:
+                                            cache_blocks = _assembled
+                                            logger.info(
+                                                "Clean hybrid boundary cache assembled "
+                                                "for %s from live KV + inline recurrent "
+                                                "snapshot (%d layers, %d tokens) — "
+                                                "skipped the second prefill",
+                                                request_id,
+                                                len(_assembled),
+                                                len(truncated_tokens),
+                                            )
                                     prefill_fn = getattr(
                                         self.batch_generator,
                                         "_prefill_for_clean_path_dependent_cache",
@@ -3881,7 +3912,13 @@ class MLLMScheduler:
                                             request_id,
                                             prompt_len,
                                         )
-                                    elif truncated_tokens and callable(prefill_fn):
+                                    elif (
+                                        cache_blocks is None
+                                        and truncated_tokens
+                                        and callable(prefill_fn)
+                                    ):
+                                        # Only re-prefill when the boundary cache
+                                        # could NOT be assembled above.
                                         _base_cache, _base_covered = (
                                             self._clean_store_base_from_stored_chain(
                                                 request_id,
@@ -3978,6 +4015,7 @@ class MLLMScheduler:
                                             self.disk_cache.store(token_list, cache_blocks)
                                         except Exception as de:
                                             logger.debug(f"VLM disk cache store failed for {request_id}: {de}")
+
                                     if getattr(self, '_kv_cache_bits', 0):
                                         cache_blocks = self._quantize_cache_for_storage(cache_blocks)
                                         if not self._validate_cache(
@@ -5509,3 +5547,124 @@ class MLLMScheduler:
                     layer.self_attn.cache = None
 
         clear_mlx_memory_cache(log=logger)
+
+
+def _assemble_clean_hybrid_boundary_cache(
+    batch_generator: Any,
+    request: Any,
+    live_cache: Any,
+    boundary: int,
+) -> Optional[List[Any]]:
+    """Build the clean prompt-boundary cache WITHOUT a second prefill.
+
+    A path-dependent store needs the cache as it stood at the prompt boundary.
+    Recurrent state and rotating windows cannot be recovered from
+    post-generation state, so the store re-prefills the whole prompt — a
+    second full forward pass. Profiled on Qwen3.8-27B at 15.4k tokens,
+    ``_prefill_for_clean_path_dependent_cache`` was 40.8% of the engine
+    profile (~28s), running AFTER the response was dispatched and blocking the
+    next request: message 2 of a fresh conversation cost ~36s even though it
+    was a full cache hit, while message 3 cost 1.8s.
+
+    For the pure-hybrid layout that second pass is unnecessary, because both
+    halves of the boundary state are already in hand:
+
+    * attention layers are plain append-only ``KVCache`` — generation only
+      appends, so slicing to the boundary recovers exactly the prompt-boundary
+      KV (the same operation the truncation path already performs);
+    * recurrent layers were deep-copied at the boundary during the live
+      prefill by the vmlx#109 inline capture, before generation advanced them.
+
+    Assembling those two is exact, not an approximation. It deliberately does
+    NOT apply to ZAYA CCA or mixed-SWA rotating layouts, whose attention state
+    genuinely is destroyed by generation — those keep re-prefilling.
+
+    Returns None whenever anything fails to line up, so the caller falls back
+    to the existing clean prefill. This never fabricates state: it either has
+    the exact boundary cache or it declines.
+    """
+    if boundary <= 0 or not isinstance(live_cache, (list, tuple)):
+        return None
+    kv_positions = getattr(batch_generator, "_hybrid_kv_positions", None)
+    if not kv_positions:
+        logger.info(
+            "clean-boundary assembly declined: no _hybrid_kv_positions "
+            "(boundary=%d, live_layers=%d)",
+            boundary,
+            len(live_cache),
+        )
+        return None
+    kv_set = set(kv_positions)
+
+    # The companion store consumes and clears the inline checkpoints, so it
+    # hands the boundary snapshot over under this attribute first.
+    # The companion store consumes and clears the inline checkpoints, and the
+    # scheduler holds a different request wrapper than the generator, so the
+    # snapshot is handed over by request_id.
+    checkpoints = getattr(request, "_clean_boundary_recurrent", None) or []
+    if not checkpoints:
+        snaps = getattr(batch_generator, "_clean_boundary_snapshots", None) or {}
+        checkpoints = snaps.pop(str(getattr(request, "request_id", "")), None) or []
+    if not checkpoints:
+        checkpoints = getattr(request, "_inline_ssm_checkpoints", None) or []
+    if not checkpoints:
+        layers = getattr(request, "_inline_ssm_layers", None)
+        bound = int(getattr(request, "_inline_ssm_boundary", 0) or 0)
+        toks = getattr(request, "_inline_ssm_tokens", None)
+        if layers and bound > 0 and toks:
+            checkpoints = [(bound, toks, layers)]
+    match = None
+    for cp_boundary, _cp_tokens, cp_layers in checkpoints:
+        if int(cp_boundary) == int(boundary) and cp_layers:
+            match = list(cp_layers)
+            break
+    if match is None:
+        logger.info(
+            "clean-boundary assembly declined: no inline checkpoint at %d "
+            "(have %s, kv_positions=%d, live_layers=%s)",
+            boundary,
+            [int(c[0]) for c in checkpoints] or "none",
+            len(kv_set),
+            len(live_cache),
+        )
+        return None
+
+    try:
+        from mlx_lm.models.cache import KVCache, QuantizedKVCache, RotatingKVCache
+    except ImportError:
+        return None
+
+    assembled: List[Any] = []
+    recurrent_iter = iter(match)
+    for idx, layer in enumerate(live_cache):
+        if idx in kv_set:
+            # Rotating/quantized attention is NOT recoverable by slicing.
+            if isinstance(layer, (RotatingKVCache, QuantizedKVCache)):
+                return None
+            if not isinstance(layer, KVCache):
+                return None
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            if keys is None or values is None:
+                return None
+            # `offset` is the only authority on how many tokens the buffer
+            # holds; a live KVCache allocates in `step` chunks so the trailing
+            # rows are slack, not tokens.
+            live_offset = cache_offset(layer)
+            if live_offset < boundary or int(keys.shape[2]) < boundary:
+                return None
+            clone = KVCache()
+            clone.keys = keys[..., :boundary, :]
+            clone.values = values[..., :boundary, :]
+            clone.offset = boundary
+            assembled.append(clone)
+        else:
+            try:
+                assembled.append(next(recurrent_iter))
+            except StopIteration:
+                return None
+    if next(recurrent_iter, None) is not None:
+        return None
+    if len(assembled) != len(live_cache):
+        return None
+    return assembled

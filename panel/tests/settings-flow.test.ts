@@ -181,6 +181,13 @@ const DEFAULT_CONFIG: SessionConfig = {
 
 // ─── buildCommandPreview (extracted from SessionSettings.tsx) ─────────────────
 // This MUST mirror sessions.ts buildArgs() exactly.
+//
+// A mirror agrees with itself no matter what the shipped launcher does. When
+// buildArgs stopped emitting a flag the user's slider controlled, every test in
+// this file stayed green because they all run against the mirror.
+// `block-disk-percent-reaches-argv.test.ts` asserts against the REAL sessions.ts
+// source for exactly that reason — any new "the user's setting reaches the
+// process" claim belongs there, not here.
 
 type DetectedConfig = {
     toolParser?: string
@@ -518,6 +525,8 @@ function buildCommandPreview(
         if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
         const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
         if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
+        const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
+        if (blockDiskCacheMaxPercent != null) parts.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())
     } else if (!prefixCacheOff) {
         parts.push('--disable-block-disk-cache')
     }

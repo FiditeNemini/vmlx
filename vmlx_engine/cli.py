@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import sys
 
 DSV4_PAGED_CACHE_BLOCK_SIZE = 256
@@ -44,6 +45,12 @@ _SLOW_FAMILY_TIMEOUTS = {
     "qwen3_next": 900,
     "nemotron_h": 900,
 }
+#: Default block-disk (SSD / L2) cache budget, as a percent of the cache
+#: volume's capacity. A flat gigabyte default is wrong at both ends: too small
+#: to be useful on a 4TB machine, and able to fill a 512GB one. Percent keeps
+#: the cache proportionate to the machine it runs on.
+DEFAULT_BLOCK_DISK_CACHE_PERCENT = 10.0
+
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
 
@@ -630,11 +637,24 @@ def _apply_paged_block_disk_default(args, logger):
         and prefix_active
     )
     args.enable_block_disk_cache = enabled
+    normalize_block_disk_cache_budget(args)
+    resolved_gb = args.block_disk_cache_max_gb
+    percent = getattr(args, "block_disk_cache_max_percent", None)
+    sized_by_percent = getattr(args, "block_disk_cache_sized_by_percent", False)
     if enabled:
         logger.info(
             "Prefix cache active — enabling block disk cache (SSD L2) by default. "
             "Pass --disable-block-disk-cache for an explicit opt-out."
         )
+        if sized_by_percent:
+            logger.info(
+                "Block disk cache budget: %.1fGB (%.3g%% of the cache volume). "
+                "Sizing by percent keeps the cache proportionate to the machine; "
+                "pass --block-disk-cache-max-gb to set an absolute size, or "
+                "--block-disk-cache-max-percent to change the share.",
+                resolved_gb,
+                percent if percent is not None else DEFAULT_BLOCK_DISK_CACHE_PERCENT,
+            )
     return enabled
 
 
@@ -849,6 +869,84 @@ def _cache_stack_summary_lines(
 #: 16/18/24/32/36GB below this line and 48GB+ above it. Tunable for support
 #: cases via VMLX_LOW_RAM_ADVISORY_GB; it only moves ADVICE.
 _LOW_RAM_ADVISORY_GB = 36
+
+
+def normalize_block_disk_cache_budget(args) -> float:
+    """Collapse the GB/percent budget flags to ONE concrete number on `args`.
+
+    Call this once, immediately after parse_args, before anything reads
+    `block_disk_cache_max_gb`. The GB flag defaults to None so that a percent of
+    the volume can be used instead, but every downstream consumer — the startup
+    summary, both scheduler config builders, the DSV4 native lane — expects a
+    float. A `None` reaching them is not a soft failure: BlockDiskStore raises
+    on `None > float`, the generic path swallows it and continues without a disk
+    cache, and the disk-ONLY path (the new default) then refuses to start at all
+    with "could not be initialized; refusing to substitute a RAM backend".
+
+    Resolving inside the paged-default helper was not enough, which is the usual
+    shape of this bug in this codebase: a fix applied to one of several paths is
+    inert in the others. Normalising at the single parse point is what makes the
+    value impossible to observe as None.
+
+    Idempotent: `sized_by_percent` is recorded so a second call does not mistake
+    the already-resolved GB number for an explicit user choice.
+    """
+    if getattr(args, "block_disk_cache_sized_by_percent", None) is not None:
+        return float(getattr(args, "block_disk_cache_max_gb", 0.0) or 0.0)
+    args.block_disk_cache_sized_by_percent = (
+        getattr(args, "block_disk_cache_max_gb", None) is None
+    )
+    args.block_disk_cache_max_gb = resolve_block_disk_cache_max_gb(args)
+    return args.block_disk_cache_max_gb
+
+
+def resolve_block_disk_cache_max_gb(args) -> float:
+    """Resolve the block-disk (SSD / L2) budget in GB.
+
+    An explicit --block-disk-cache-max-gb always wins, including an explicit 0
+    for unlimited. Otherwise the budget is a percent of the cache volume's
+    capacity, so the default is proportionate to the machine rather than a flat
+    number that is simultaneously too small for a 4TB disk and too large for a
+    512GB one.
+
+    If the volume cannot be measured we fall back to the historical 10GB rather
+    than guessing, and never to unlimited: a failed measurement must not hand
+    the cache the whole disk.
+    """
+    explicit_gb = getattr(args, "block_disk_cache_max_gb", None)
+    if explicit_gb is not None:
+        return float(explicit_gb)
+
+    percent = getattr(args, "block_disk_cache_max_percent", None)
+    if percent is None:
+        percent = DEFAULT_BLOCK_DISK_CACHE_PERCENT
+    try:
+        percent = float(percent)
+    except (TypeError, ValueError):
+        percent = DEFAULT_BLOCK_DISK_CACHE_PERCENT
+    if percent <= 0:
+        # 0 means UNLIMITED, matching --block-disk-cache-max-gb 0 and the
+        # Session Settings slider's "Unlimited" position. Returning the old flat
+        # 10GB here would silently cap a user who deliberately asked for no cap.
+        return 0.0
+
+    cache_dir = getattr(args, "block_disk_cache_dir", None) or os.path.expanduser(
+        "~/.cache/vmlx-engine"
+    )
+    probe = cache_dir
+    while probe and not os.path.exists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    try:
+        usage = shutil.disk_usage(probe or os.path.expanduser("~"))
+        total_gb = usage.total / (1024 ** 3)
+    except Exception:  # noqa: BLE001 - measurement is best-effort
+        return 10.0
+    if total_gb <= 0:
+        return 10.0
+    return round(total_gb * percent / 100.0, 2)
 
 
 def _low_ram_cache_advice_lines(args) -> list[str]:
@@ -1230,9 +1328,29 @@ def serve_command(args):
                 _fallback_kvq,
             )
             _default_kvq = _fallback_kvq
-        args.kv_cache_quantization = _default_kvq
+        # 2026-08-21: stored cache is FULL PRECISION for every family. The
+        # per-bundle fallback above used to pick none/q4/q8 by bundle shape, so
+        # "TQ is off for the model I tested" never generalised. Measured on
+        # Qwen3.8-27B, stored q4 vs none: 2.33 vs 2.35s full hit, 2.95 vs 2.97s
+        # partial, identical 3531MB on disk — under 1%, so exactness is free.
+        # VMLX_DEFAULT_KV_CACHE_QUANTIZATION still overrides for diagnostics.
+        _full_precision_default = os.environ.get(
+            "VMLX_DEFAULT_KV_CACHE_QUANTIZATION", "none"
+        )
+        if _full_precision_default not in ("none", "q4", "q8"):
+            _full_precision_default = "none"
+        args.kv_cache_quantization = _full_precision_default
+        _default_kvq = _full_precision_default
         args.kv_cache_quantization_explicit = False
-        os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
+        # The LIVE TurboQuant KV cache is a separate lever from the stored
+        # format: it compresses KV in unified memory. Leaving it on is what
+        # keeps resident memory near model size; turning it off would make the
+        # live cache full precision too, at a real RAM cost. Gated so it can be
+        # measured and switched without touching this decision again.
+        if os.environ.get("VMLX_FULL_PRECISION_LIVE_KV") in ("1", "true", "yes", "on"):
+            os.environ["VMLX_DISABLE_TQ_KV"] = "1"
+        else:
+            os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
         logger.info(
             "KV cache auto mode: TurboQuant enabled for compatible models; "
             "stored prefix cache quantization=%s%s",
@@ -1686,10 +1804,23 @@ def serve_command(args):
             and not _is_dsv4_model
             and _mc.family_name not in _PAGED_INCOMPATIBLE_FAMILIES
         ):
-            args.use_paged_cache = True
+            # 2026-08-21: the generic text default is OFF again, reversing the
+            # 2026-07-12 default-ON. Measured on Qwen3.8-27B at equal capacity,
+            # paged RAM buys 2.68s vs 2.70s on a full hit and 3.48s vs 3.57s on
+            # a partial — under 2% — while the RAM mirror costs 15% of unified
+            # memory (15.4GB on a 128GB Mac) that the model could use instead.
+            # SSD-only is only cheap when the disk budget is adequate, which is
+            # why the block-disk budget moved to a percent of the volume in the
+            # same change; the two belong together.
+            #
+            # This is the GENERIC default only. Families whose native cache
+            # REQUIRES paged still enable it through their own policy or the
+            # scheduler, and --use-paged-cache turns it back on explicitly.
             logger.info(
-                "Paged cache defaulted ON for autodetected text family=%s "
-                "(bounded-block prefix reuse; pass --no-paged-cache to opt out).",
+                "Paged cache left OFF for autodetected text family=%s — the "
+                "SSD block cache (L2) serves prefixes and keeps unified memory "
+                "for the model. Pass --use-paged-cache for the in-RAM mirror "
+                "(~2%% faster time-to-first-token, materially more RAM).",
                 _mc.family_name,
             )
 
@@ -2396,7 +2527,7 @@ def serve_command(args):
             # Block-level disk cache (L2 for paged cache)
             enable_block_disk_cache=args.enable_block_disk_cache,
             block_disk_cache_dir=args.block_disk_cache_dir,
-            block_disk_cache_max_gb=args.block_disk_cache_max_gb,
+            block_disk_cache_max_gb=normalize_block_disk_cache_budget(args),
             # Prompt Lookup Decoding
             pld_enabled=args.enable_pld,
             pld_summary_interval=args.pld_summary_interval,
@@ -2785,7 +2916,7 @@ def bench_command(args):
             # Block disk cache (L2 for paged cache)
             enable_block_disk_cache=getattr(args, 'enable_block_disk_cache', False),
             block_disk_cache_dir=getattr(args, 'block_disk_cache_dir', None),
-            block_disk_cache_max_gb=getattr(args, 'block_disk_cache_max_gb', 10.0),
+            block_disk_cache_max_gb=normalize_block_disk_cache_budget(args),
             # Loader fingerprint inputs (F6 + A4 Concern #1)
             smelt_enabled=getattr(args, 'smelt', False),
             smelt_pct=(
@@ -3595,8 +3726,17 @@ Examples:
     serve_parser.add_argument(
         "--block-disk-cache-max-gb",
         type=float,
-        default=10.0,
-        help="Maximum total size of block disk cache in GB. 0 = unlimited. (default: 10)",
+        default=None,
+        help="Maximum total size of block disk cache in GB. 0 = unlimited. "
+             "Overrides --block-disk-cache-max-percent when given.",
+    )
+    serve_parser.add_argument(
+        "--block-disk-cache-max-percent",
+        type=float,
+        default=DEFAULT_BLOCK_DISK_CACHE_PERCENT,
+        help="Maximum total size of the block disk cache as a percent of the "
+             "cache volume's capacity. 0 disables the percent sizing. "
+             f"(default: {DEFAULT_BLOCK_DISK_CACHE_PERCENT:g})",
     )
     # Smelt mode (partial expert loading for MoE models)
     serve_parser.add_argument(
@@ -4177,7 +4317,7 @@ Examples:
     bench_parser.add_argument(
         "--block-disk-cache-max-gb",
         type=float,
-        default=10.0,
+        default=None,
         help="Maximum block disk cache size in GB (default: 10)",
     )
     bench_parser.add_argument(
@@ -4363,6 +4503,11 @@ Examples:
                 f"See mlxstudio#76.\n"
             )
         raise
+
+    # ONE place where the GB/percent budget becomes a number. Every consumer
+    # downstream — both scheduler config builders, the startup summary, the DSV4
+    # native lane — reads args.block_disk_cache_max_gb and expects a float.
+    normalize_block_disk_cache_budget(args)
 
     if args.command in ("serve", "bench"):
         args.max_cache_blocks_explicit = _argv_has_option(

@@ -3944,7 +3944,12 @@ describe('JIT Toggle', () => {
             'utf-8',
         )
 
-        expect(form).toContain("t('sessions.config.blockCacheMaxTooltip')")
+        // The control is now a PERCENT of the volume, but the semantics it has
+        // to disclose are unchanged: one aggregate root, shared by every
+        // namespace, with the smallest finite limit winning. Those sentences
+        // are the contract; the unit is not.
+        expect(form).toContain("t('sessions.config.blockCacheMaxPercentTooltip')")
+        expect(form).toContain("t('sessions.config.blockCacheSharedBudgetNote')")
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(enLocale).toContain('Maximum physical disk space for the managed block-cache root')
         expect(enLocale).toContain('shared across model/config namespaces and typed companion state')

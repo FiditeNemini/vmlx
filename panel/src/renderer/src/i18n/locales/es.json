@@ -1019,7 +1019,17 @@
       "pagedCacheCapacity": "Capacidad efectiva de caché en memoria: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "El TTL de caché no se aplica mientras la caché paginada en memoria está activa. El límite de memoria de caché / % de memoria de caché limita su uso de L1 de la memoria unificada de Apple; el máximo de bloques de caché y el tamaño de bloque limitan la capacidad en tokens.",
       "blockDiskCapacity": "Capacidad efectiva del índice de bloques en SSD: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
-      "ramCacheTradeoffNotice": "Consejo de memoria: la caché en memoria guarda los prompts recientes en RAM para responder más rápido a los mensajes siguientes. Para ello usa memoria adicional, y desactivarla solo es un poco más lento — alrededor del 2% en nuestras pruebas — liberando esa memoria para el propio modelo. Si tu Mac va justo de memoria, desactiva «Caché Paginada en Memoria (RAM)» en la sección Caché de Prefijos y deja activada «Caché de Bloques en Disco (SSD / L2)», para que los prompts se sigan recordando en disco."
+      "ramCacheTradeoffNotice": "Consejo de memoria: los prompts se guardan en tu SSD de forma predeterminada, así que la RAM se mantiene cerca del tamaño del propio modelo. Puedes activar «Caché Paginada en Memoria (RAM)» en la sección Caché de Prefijos para respuestas un 2% más rápidas, pero mantiene una copia de la caché en memoria y usa bastante más RAM. La mayoría debería dejarla desactivada.",
+      "blockCacheMaxPercent": "Tamaño de caché SSD (% del disco)",
+      "blockCacheMaxPercentTooltip": "Espacio máximo en disco para la raíz gestionada de la caché de bloques, como porcentaje de este volumen. Medirlo en porcentaje mantiene la caché proporcional al equipo en lugar de un número fijo de gigabytes. El límite se comparte entre espacios de nombres de modelo/configuración y el estado de acompañantes tipados: se aplica a todos los subdirectorios gestionados y acompañantes tipados de esta raíz, y cuando varias sesiones activas aportan un porcentaje se aplica el límite finito más pequeño. Usa 0 para ilimitado solo cuando ninguna sesión activa aporte un límite finito.",
+      "blockCacheSharedBudgetNote": "Este límite se comparte entre todas las sesiones: la app usa una sola carpeta de caché y elimina los prompts más antiguos de todos los modelos cuando se llena, incluidos modelos que no estés usando.",
+      "clearSsdCache": "Borrar caché SSD de esta sesión",
+      "clearSsdCacheBusy": "Borrando…",
+      "clearSsdCacheTooltip": "Elimina del SSD los prompts en caché de esta sesión. El siguiente mensaje será un prompt nuevo sin caché que reutilizar. La sesión debe estar en ejecución.",
+      "clearSsdCacheDone": "Se borraron {{count}} nivel(es) de caché.",
+      "clearSsdCacheFailed": "No se pudo borrar: {{error}}. La sesión debe estar en ejecución.",
+      "clearSsdCacheEmpty": "Nada que borrar: esta sesión no tenía prompts en caché.",
+      "clearSsdCachePartial": "Se borraron {{count}} nivel(es); {{skipped}} se dejó intacto (aún lo usa una solicitud en curso). Inténtalo cuando la sesión esté inactiva."
     },
     "create": {
       "title": "Crear sesión",

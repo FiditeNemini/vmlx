@@ -1,3 +1,4 @@
+import { DEFAULT_BLOCK_DISK_CACHE_PERCENT } from '../../../../shared/cacheDefaults'
 import { useEffect, useState, useRef } from 'react'
 import { Modal } from '../ui/Modal'
 import { DistributedNodeList } from './DistributedNodeList'
@@ -55,6 +56,7 @@ export interface SessionConfig {
   diskCacheDir: string
   enableBlockDiskCache: boolean
   blockDiskCacheMaxGb: number
+  blockDiskCacheMaxPercent: number
   blockDiskCacheDir: string
   streamInterval: number
   maxTokens: number
@@ -152,7 +154,8 @@ export const DEFAULT_CONFIG: SessionConfig = {
   diskCacheMaxGb: 10,
   diskCacheDir: '',
   enableBlockDiskCache: true,
-  blockDiskCacheMaxGb: 10,
+  blockDiskCacheMaxGb: 0,
+  blockDiskCacheMaxPercent: DEFAULT_BLOCK_DISK_CACHE_PERCENT,
   blockDiskCacheDir: '',
   streamInterval: 1,
   maxTokens: 0,
@@ -334,6 +337,42 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   })
 
   const [showCachingHelp, setShowCachingHelp] = useState(false)
+  // Clearing the SSD cache for THIS session. The engine owns the block store
+  // while it is running, so this goes through the engine rather than deleting
+  // files underneath it; the button says so when the session is stopped.
+  const [clearingSsdCache, setClearingSsdCache] = useState(false)
+  const [ssdClearResult, setSsdClearResult] = useState<string | null>(null)
+  const handleClearSsdCache = async () => {
+    setClearingSsdCache(true)
+    setSsdClearResult(null)
+    try {
+      const endpoint = { host: String(config.host || '127.0.0.1'), port: Number(config.port) }
+      const res: any = await (window as any).api?.cache?.clear('prefix', endpoint, sessionId)
+      // The engine reports WHICH tiers it cleared and, separately, which it
+      // refused to touch — `paged_prefix:blocks_in_use` means a live request
+      // still holds those blocks, so nothing was freed there. Reporting a flat
+      // "Cleared." over a skipped tier would tell the user the cache is gone
+      // when it is not.
+      const cleared: string[] = Array.isArray(res?.caches) ? res.caches : []
+      const skipped: string[] = Array.isArray(res?.skipped) ? res.skipped : []
+      if (skipped.length > 0) {
+        setSsdClearResult(
+          t('sessions.config.clearSsdCachePartial', {
+            cleared: cleared.length,
+            skipped: skipped.join(', '),
+          }),
+        )
+      } else if (cleared.length > 0) {
+        setSsdClearResult(t('sessions.config.clearSsdCacheDone', { count: cleared.length }))
+      } else {
+        setSsdClearResult(t('sessions.config.clearSsdCacheEmpty'))
+      }
+    } catch (e: any) {
+      setSsdClearResult(t('sessions.config.clearSsdCacheFailed', { error: String(e?.message || e) }))
+    } finally {
+      setClearingSsdCache(false)
+    }
+  }
   const [mcpStatus, setMcpStatus] = useState<{ servers: LiveMcpServer[]; tools: LiveMcpTool[]; error?: string } | null>(null)
   const [mcpStatusLoading, setMcpStatusLoading] = useState(false)
   const [mcpValidation, setMcpValidation] = useState<{ servers: any[]; serverCount?: number; error?: string } | null>(null)
@@ -1164,18 +1203,40 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {cachePolicy.blockDiskCacheChecked && (
           <>
             <SliderField
-              label={t('sessions.config.blockCacheMaxGb')}
-              tooltip={t('sessions.config.blockCacheMaxTooltip')}
-              value={config.blockDiskCacheMaxGb}
-              onChange={v => onChange('blockDiskCacheMaxGb', v)}
+              label={t('sessions.config.blockCacheMaxPercent')}
+              tooltip={t('sessions.config.blockCacheMaxPercentTooltip')}
+              value={config.blockDiskCacheMaxPercent}
+              onChange={v => onChange('blockDiskCacheMaxPercent', v)}
               min={0}
-              max={100}
+              max={90}
               step={1}
               defaultValue={10}
               allowUnlimited
               unlimitedValue={0}
               unlimitedLabel={t('sessions.cache.unlimited')}
             />
+            {/* The engine trims ONE cache root shared by every session, so this
+                budget is a total rather than a per-session allowance. Saying so
+                here keeps the control honest: two sessions set to different
+                percentages would otherwise look independent while contending
+                over the same pool. */}
+            <InfoNote text={t('sessions.config.blockCacheSharedBudgetNote')} />
+            <div className="flex items-center gap-2 mt-1">
+              <button
+                type="button"
+                onClick={handleClearSsdCache}
+                disabled={clearingSsdCache}
+                title={t('sessions.config.clearSsdCacheTooltip')}
+                className="px-3 py-1.5 text-xs border border-destructive/50 text-destructive rounded hover:bg-destructive/10 disabled:opacity-50"
+              >
+                {clearingSsdCache
+                  ? t('sessions.config.clearSsdCacheBusy')
+                  : t('sessions.config.clearSsdCache')}
+              </button>
+              {ssdClearResult && (
+                <span className="text-[11px] text-muted-foreground">{ssdClearResult}</span>
+              )}
+            </div>
             <div className="block">
               <span className="text-xs font-medium text-muted-foreground">
                 {t('sessions.config.blockCacheDirectory')}

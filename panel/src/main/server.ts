@@ -56,6 +56,9 @@ export interface ServerConfig {
   enableBlockDiskCache?: boolean
   blockDiskCacheDir?: string
   blockDiskCacheMaxGb?: number
+  /** Block-disk budget as a percent of the cache volume. The engine trims ONE
+   *  shared cache root, so this is a total across sessions, not per-session. */
+  blockDiskCacheMaxPercent?: number
 
   // MoE runtime modes
   smelt?: boolean

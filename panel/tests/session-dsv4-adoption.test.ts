@@ -152,6 +152,12 @@ describe('DSV4 existing-engine adoption policy', () => {
     }
   })
 
+  // v17 (2026-08-21) makes SSD-only the default for every family that has an
+  // SSD-only lane, DSV4 included -- proven live on DeepSeek-V4-Flash-0731, where
+  // the block disk-only backend served 3325/3328 cached tokens with correct
+  // answers across changed prefixes, effort changes, tool toggles and malformed
+  // tool calls. The legacy tuple rewrites below still run and still own the
+  // native block geometry; the paged-RAM tier is what changed.
   it('migrates only the exact v11 DSV4 fail-closed cache tuple to native hot/warm/cold defaults', () => {
     const modelPath = modelBundle('deepseek_v4')
     state.sessions = [localSession('dsv4-v11', modelPath, untouchedV11Dsv4CacheConfig())]
@@ -162,7 +168,8 @@ describe('DSV4 existing-engine adoption policy', () => {
     expect(migrated.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(migrated.dsv4PrefixCache).toBe(true)
     expect(migrated.enablePrefixCache).toBe(true)
-    expect(migrated.usePagedCache).toBe(true)
+    // v17: SSD-first. The native composite index still owns block geometry.
+    expect(migrated.usePagedCache).toBe(false)
     expect(migrated.enableDiskCache).toBe(false)
     expect(migrated.enableBlockDiskCache).toBe(true)
     expect(migrated.pagedCacheBlockSize).toBe(256)
@@ -178,7 +185,6 @@ describe('DSV4 existing-engine adoption policy', () => {
     { label: 'RAM percentage customized', patch: { cacheMemoryPercent: 37 } },
     { label: 'block-L2 directory customized', patch: { blockDiskCacheDir: '/tmp/custom-block-cache' } },
     { label: 'prefill batch customized', patch: { prefillBatchSize: 256 } },
-    { label: 'already current', patch: { cacheStackStartupDefaultsVersion: CURRENT_CACHE_DEFAULTS_VERSION } },
   ])('preserves a near-miss DSV4 v11 cache tuple: $label', ({ patch }) => {
     const modelPath = modelBundle('deepseek_v4')
     const original = {
@@ -190,14 +196,43 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const preserved = JSON.parse(state.sessions[0].config)
+    // What "preserved" protects is that the legacy v11 REWRITE did not fire:
+    // a near-miss keeps its own prefix policy and block capacity rather than
+    // being rebuilt into the native hot/warm/cold tuple.
     expect(preserved.enablePrefixCache).toBe(original.enablePrefixCache)
-    expect(preserved.usePagedCache).toBe(original.usePagedCache)
-    expect(preserved.enableBlockDiskCache).toBe(original.enableBlockDiskCache)
     expect(preserved.maxCacheBlocks).toBe(original.maxCacheBlocks)
+    expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
+    // v17 is a separate, universal default change: the in-RAM mirror ships off
+    // for updated users too, otherwise "it ships off" is true only of fresh
+    // installs. It runs as a POST-pass precisely so it cannot rewrite a
+    // near-miss tuple into an exact match and re-fire the migration above.
+    expect(preserved.usePagedCache).toBe(false)
+    expect(preserved.enableBlockDiskCache).toBe(true)
+  })
+
+  it('leaves a session already stamped at the current version completely alone', () => {
+    // The version stamp is what makes every migration run exactly once. A
+    // session already at the current version must not be touched by ANY pass,
+    // including the v17 SSD-first post-pass -- otherwise a user who turned the
+    // RAM cache back on after upgrading would silently lose that choice on the
+    // next launch.
+    const modelPath = modelBundle('deepseek_v4')
+    const original = {
+      ...untouchedV11Dsv4CacheConfig(),
+      cacheStackStartupDefaultsVersion: CURRENT_CACHE_DEFAULTS_VERSION,
+      usePagedCache: true,
+    }
+    state.sessions = [localSession('dsv4-already-current', modelPath, original)]
+
+    new SessionManager()
+
+    const preserved = JSON.parse(state.sessions[0].config)
+    expect(preserved.usePagedCache).toBe(true)
+    expect(preserved.enableBlockDiskCache).toBe(original.enableBlockDiskCache)
     expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
   })
 
-  it('migrates the exact v12 DSV4 SSD-only default to paged RAM backed by block L2', () => {
+  it('keeps the exact v12 DSV4 SSD-only default on SSD, with the native block index', () => {
     const modelPath = modelBundle('deepseek_v4')
     state.sessions = [localSession('dsv4-v12', modelPath, untouchedV12Dsv4CacheConfig())]
 
@@ -207,7 +242,8 @@ describe('DSV4 existing-engine adoption policy', () => {
     expect(migrated.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
     expect(migrated.dsv4PrefixCache).toBe(true)
     expect(migrated.enablePrefixCache).toBe(true)
-    expect(migrated.usePagedCache).toBe(true)
+    // v17: SSD-first. The native composite index still owns block geometry.
+    expect(migrated.usePagedCache).toBe(false)
     expect(migrated.enableDiskCache).toBe(false)
     expect(migrated.enableBlockDiskCache).toBe(true)
     expect(migrated.pagedCacheBlockSize).toBe(256)
@@ -267,8 +303,11 @@ describe('DSV4 existing-engine adoption policy', () => {
 
     const preserved = JSON.parse(state.sessions[0].config)
     expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
+    // The customised value survives: no older generic predicate re-fired and
+    // rebuilt this session from a stale default tuple.
     expect(preserved.cacheMemoryPercent).toBe(37)
-    expect(preserved.usePagedCache).toBe(true)
+    // v17 still applies -- an updated user gets the SSD-first default too.
+    expect(preserved.usePagedCache).toBe(false)
     expect(preserved.enableBlockDiskCache).toBe(true)
   })
 
@@ -293,7 +332,10 @@ describe('DSV4 existing-engine adoption policy', () => {
 
     const retried = JSON.parse(state.sessions[0].config)
     expect(retried.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
-    expect(retried.usePagedCache).toBe(true)
+    // The point of the retry is that the migration RUNS once the bundle is back
+    // (version advances past 12); under v17 it lands on the SSD-first default.
+    expect(retried.usePagedCache).toBe(false)
+    expect(retried.enableBlockDiskCache).toBe(true)
   })
 
   it.each([

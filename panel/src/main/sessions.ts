@@ -12,6 +12,10 @@ import { v4 as uuidv4 } from 'uuid'
 import { db, Session } from './database'
 import { resolveImageModelFromDirectoryName } from '../shared/imageModels'
 import { dsv4EnvFromConfig, resolveEffectiveModelFamily } from '../shared/dsv4Env'
+import {
+  DEFAULT_BLOCK_DISK_CACHE_PERCENT,
+  LEGACY_BLOCK_DISK_CACHE_MAX_GB,
+} from '../shared/cacheDefaults'
 import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
 import {
   applyLagunaJitDefaultEnvironment,
@@ -506,6 +510,7 @@ const TEXT_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
+  '--block-disk-cache-max-percent',
   '--smelt',
   '--smelt-experts',
   '--flash-moe',
@@ -585,6 +590,7 @@ const DSV4_ADDITIONAL_ARG_BLOCKLIST = new Set([
   '--disable-block-disk-cache',
   '--block-disk-cache-dir',
   '--block-disk-cache-max-gb',
+  '--block-disk-cache-max-percent',
   '--image-mode',
   '--image-quantize',
   '--mflux-class',
@@ -692,7 +698,7 @@ function applyBundleStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
   return changed
 }
 
-const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 16
+const CACHE_STACK_STARTUP_DEFAULTS_VERSION = 17
 
 function markCacheStackStartupDefaultsCurrent(
   config: Partial<ServerConfig>,
@@ -856,7 +862,11 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     ) || changed
   }
   if (mutable.enableBlockDiskCache === undefined) changed = setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache) || changed
-  if (mutable.blockDiskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxGb', 10) || changed
+  // 0 = "no explicit GB cap"; the engine then resolves the budget from
+  // blockDiskCacheMaxPercent. Seeding the old flat 10 here made the percent
+  // dead on arrival, because an explicit --block-disk-cache-max-gb always wins.
+  if (mutable.blockDiskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxGb', 0) || changed
+  if (mutable.blockDiskCacheMaxPercent === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxPercent', DEFAULT_BLOCK_DISK_CACHE_PERCENT) || changed
   if (mutable.kvCacheQuantization === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto') || changed
 
   return changed
@@ -888,7 +898,110 @@ function isZayaCacheStackMigrationTarget(modelPath?: string): boolean {
   return lower.includes('zaya1') || lower.includes('zaya')
 }
 
+/**
+ * v17 (2026-08-21): the in-RAM paged cache default flips back OFF, and the
+ * block-disk budget moves from a flat GB number to a percent of the volume.
+ * Existing installs must move too, otherwise an updated user silently keeps the
+ * RAM mirror the new default exists to avoid — the parity gap that would make
+ * "it ships off" true only for fresh installs.
+ *
+ * Measured basis: paged buys 2.68s vs 2.70s on a full hit and 3.48s vs 3.57s on
+ * a partial (under 2%), while the mirror costs 15% of unified memory.
+ *
+ * This runs as a POST-pass, after every legacy migration has matched. Each of
+ * those migrations is an exact-tuple fingerprint that includes `usePagedCache`,
+ * so flipping it first silently rewrites near-miss tuples into exact matches and
+ * re-fires migrations a user had deliberately escaped. Ordering is the whole
+ * correctness argument here, not a style preference.
+ */
+function applySsdFirstCacheDefaults(
+  config: Partial<ServerConfig>,
+  modelPath?: string,
+  detectedCacheType?: string,
+  detectedCacheSubtype?: string,
+  detectedFamily?: string,
+): boolean {
+  // Two families carry runtime policies that contradict an SSD-only default, and
+  // a persisted value the launcher overrules is worse than no change at all: the
+  // Session Settings checkbox would read Off while the engine ran the RAM tier.
+  //
+  //  - ZAYA CCA: recurrent conv_state is not position-sliceable, so the SSD-only
+  //    lane is not wired (Phase-2). spawn re-enables paged for it regardless.
+  //  - openPangu v2: exact full-precision typed prefix + legacy prompt-L2, with
+  //    the block-disk tier deliberately off. Enabling block disk here would be
+  //    reverted at spawn.
+  if (isZayaCacheStackMigrationTarget(modelPath || config.modelPath)) return false
+  if (normalizeDetectedFamilyName(detectedFamily) === 'openpangu_v2') return false
+
+  let changed = false
+  // A shape that REQUIRES the paged tier and cannot serve block-disk-only has no
+  // SSD-only lane to fall back to. Today those two predicates coincide, so this
+  // never fires — but they are independent by design, and when they diverge the
+  // flip must not strand such a family with no cache at all.
+  const pagedRequired =
+    cacheTypeRequiresPaged(detectedCacheType) || cacheSubtypeRequiresPaged(detectedCacheSubtype)
+  const ssdOnlyCapable =
+    cacheTypeSupportsBlockDiskOnly(detectedCacheType) ||
+    cacheSubtypeSupportsBlockDiskOnly(detectedCacheSubtype)
+  if (config.usePagedCache === true && !(pagedRequired && !ssdOnlyCapable)) {
+    config.usePagedCache = false
+    changed = true
+  }
+  if (config.enableBlockDiskCache !== true) {
+    // SSD-only is only cheap when the disk tier is actually on.
+    config.enableBlockDiskCache = true
+    changed = true
+  }
+  if (config.blockDiskCacheMaxPercent == null) {
+    config.blockDiskCacheMaxPercent = DEFAULT_BLOCK_DISK_CACHE_PERCENT
+    changed = true
+  }
+  if (Number(config.blockDiskCacheMaxGb) === LEGACY_BLOCK_DISK_CACHE_MAX_GB) {
+    // The old flat default; let the percent take over. An explicitly chosen size
+    // that happens to be 10 is indistinguishable from the default here, which is
+    // why only the exact legacy value is migrated.
+    config.blockDiskCacheMaxGb = 0
+    changed = true
+  }
+  return changed
+}
+
 function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, modelPath?: string): boolean {
+  const cacheDefaultsVersion = Number(config.cacheStackStartupDefaultsVersion || 0)
+  if (cacheDefaultsVersion >= CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
+    return false
+  }
+  const legacyChanged = applyLegacyCacheStackMigrations(config, modelPath)
+  markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath)
+  if (
+    Number(config.cacheStackStartupDefaultsVersion || 0) !==
+    CACHE_STACK_STARTUP_DEFAULTS_VERSION
+  ) {
+    // The stamp declines while the bundle is unreachable, so the migration can
+    // retry once the drive is mounted. The SSD-first pass has to honour that
+    // too: writing usePagedCache / blockDiskCacheMaxGb on a pass that
+    // deliberately did NOT complete rewrites the exact-tuple fingerprint the
+    // retry matches on, and the retry then never fires. Models live on an
+    // external drive here, so this path is routine.
+    return legacyChanged
+  }
+  let detected: ReturnType<typeof detectModelConfigFromDir> | undefined
+  try {
+    detected = detectModelConfigFromDir(String(modelPath || config.modelPath || ''))
+  } catch {
+    /* detection best-effort; an unresolvable bundle just gets the generic flip */
+  }
+  const ssdFirstChanged = applySsdFirstCacheDefaults(
+    config,
+    modelPath,
+    detected?.cacheType,
+    detected?.cacheSubtype,
+    detected?.family,
+  )
+  return legacyChanged || ssdFirstChanged
+}
+
+function applyLegacyCacheStackMigrations(config: Partial<ServerConfig>, modelPath?: string): boolean {
   const cacheDefaultsVersion = Number(config.cacheStackStartupDefaultsVersion || 0)
   if (cacheDefaultsVersion >= CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
     return false
@@ -4565,6 +4678,14 @@ export class SessionManager extends EventEmitter {
       const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
       if (blockDiskCacheMaxGb != null) {
         args.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
+      }
+      // The percent is what the slider actually edits. It must be passed even
+      // when a GB value is also present: the engine resolves explicit-GB-wins,
+      // so passing only the GB silently pins the budget and the slider becomes
+      // decorative. 0 GB means "no explicit cap" and hands over to the percent.
+      const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
+      if (blockDiskCacheMaxPercent != null) {
+        args.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())
       }
     } else if (!prefixCacheOff) {
       // Prefix cache defaults its SSD L2 on in the engine. Preserve an explicit

@@ -1019,7 +1019,17 @@
       "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
       "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
-      "ramCacheTradeoffNotice": "Memory tip: the in-memory cache keeps recent prompts in RAM to answer follow-ups faster. It uses extra memory to do that, and turning it off is only slightly slower — about 2% in our tests — while freeing that memory for the model itself. If your Mac is tight on memory, turn off \"In-Memory Paged Cache (RAM)\" in the Prefix Cache section below and leave \"Block Disk Cache (SSD / L2)\" on, so prompts are still remembered on disk."
+      "ramCacheTradeoffNotice": "Memory tip: prompts are cached on your SSD by default, so RAM stays close to the model's own size. You can turn on \"In-Memory Paged Cache (RAM)\" in the Prefix Cache section below for about 2% faster replies, but it keeps a copy of the cache in memory and uses noticeably more RAM. Most people should leave it off.",
+      "blockCacheMaxPercent": "SSD Cache Size (% of disk)",
+      "blockCacheMaxPercentTooltip": "Maximum physical disk space for the managed block-cache root, as a percent of this volume. Sizing by percent keeps the cache proportionate to the machine instead of a fixed number of gigabytes. The budget is shared across model/config namespaces and typed companion state: the size limit applies across all managed subdirectories and typed companions in this root, and when several live sessions each supply a percentage the smallest finite limit is enforced. Set to 0 for unlimited only when no live session supplies a finite limit.",
+      "blockCacheSharedBudgetNote": "This budget is shared by all sessions — the app keeps one cache folder and removes the oldest prompts across every model when it fills up, including models you are not using right now.",
+      "clearSsdCache": "Clear SSD cache for this session",
+      "clearSsdCacheBusy": "Clearing…",
+      "clearSsdCacheTooltip": "Deletes this session's cached prompts from the SSD. The next message will be a fresh prompt with no cache to reuse. The session must be running.",
+      "clearSsdCacheDone": "Cleared {{count}} cache tier(s).",
+      "clearSsdCacheFailed": "Could not clear: {{error}}. The session must be running.",
+      "clearSsdCacheEmpty": "Nothing to clear — this session had no cached prompts.",
+      "clearSsdCachePartial": "Cleared {{count}} tier(s); {{skipped}} was left alone (still in use by a running request). Try again once the session is idle."
     },
     "create": {
       "title": "Create Session",

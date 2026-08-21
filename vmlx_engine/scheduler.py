@@ -1346,6 +1346,7 @@ class Scheduler:
                 )
                 # Create optional block-level disk store (L2)
                 block_disk_store = None
+                block_disk_store_error: Exception | None = None
                 if self.config.enable_block_disk_cache:
                     _default_block_cache_root = (
                         self.config.block_disk_cache_dir is None
@@ -1486,9 +1487,16 @@ class Scheduler:
                     except Exception as e:
                         logger.error(
                             f"Failed to initialize block disk cache at {cache_dir}: {e}. "
-                            "Continuing without disk cache."
+                            "Continuing without disk cache.",
+                            exc_info=True,
                         )
                         block_disk_store = None
+                        # Keep the cause. Without it the disk-ONLY path below
+                        # raises a fatal "could not be initialized" with no
+                        # explanation, and the actual reason is a logger.error
+                        # forty lines earlier that a reader has no reason to
+                        # connect to the crash.
+                        block_disk_store_error = e
 
                 # Use paged cache for memory efficiency.
                 # Give the block pool the SAME RAM-byte ceiling the memory-aware
@@ -1504,8 +1512,9 @@ class Scheduler:
                 if _block_disk_only and block_disk_store is None:
                     raise RuntimeError(
                         "Block disk-only cache was requested but its SSD store "
-                        "could not be initialized; refusing to substitute a RAM backend"
-                    )
+                        "could not be initialized; refusing to substitute a RAM "
+                        f"backend. Cause: {block_disk_store_error!r}"
+                    ) from block_disk_store_error
 
                 _paged_resident_budget, _explicit_zero_cache = (
                     resolve_paged_resident_policy(self.config, _block_disk_only)

@@ -1074,6 +1074,9 @@ class BatchedEngine(BaseEngine):
             cache_ttl_minutes=getattr(self._scheduler_config, "cache_ttl_minutes", 0),
             # Legacy prefix cache
             prefix_cache_size=getattr(self._scheduler_config, "prefix_cache_size", 100),
+            prefix_cache_max_bytes=getattr(
+                self._scheduler_config, "prefix_cache_max_bytes", None
+            ),
             # Disk cache L2
             enable_disk_cache=getattr(self._scheduler_config, "enable_disk_cache", False),
             disk_cache_dir=getattr(self._scheduler_config, "disk_cache_dir", None),

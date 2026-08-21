@@ -581,6 +581,90 @@ describe("Ollama gateway request translation behavior", () => {
     }]);
   });
 
+  it("forwards the top-level images array on /api/generate as media parts", async () => {
+    // Ollama puts media at the TOP LEVEL of an /api/generate body, not inside
+    // a message. The gateway built a plain string here, so a vision request
+    // became text-only and the model answered about nothing, with no error —
+    // the exact regression the Python route already fixed. /api/chat was
+    // never affected.
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    await postJson(`http://127.0.0.1:${started.port}/api/generate`, {
+      model: "vl-model",
+      stream: false,
+      prompt: "What colour is the left half?",
+      images: ["iVBORw0KGgo="],
+    });
+
+    expect(backend.paths).toEqual(["/v1/chat/completions"]);
+    expect(backend.bodies[0].messages).toEqual([{
+      role: "user",
+      content: [
+        { type: "text", text: "What colour is the left half?" },
+        { type: "image_url", image_url: {
+          url: "data:image/png;base64,iVBORw0KGgo=",
+        } },
+      ],
+    }]);
+  });
+
+  it("keeps /api/generate text-only prompts as plain strings", async () => {
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    await postJson(`http://127.0.0.1:${started.port}/api/generate`, {
+      model: "text-model",
+      stream: false,
+      prompt: "Say OK.",
+    });
+
+    expect(backend.bodies[0].messages).toEqual([
+      { role: "user", content: "Say OK." },
+    ]);
+  });
+
+  it("forwards the Ollama seed on both chat and generate", async () => {
+    // The Python route honours options.seed and top-level seed; the gateway
+    // dropped both, so the identical request was reproducible against the
+    // engine port and silently non-deterministic through the gateway.
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    await postJson(`http://127.0.0.1:${started.port}/api/chat`, {
+      model: "text-model",
+      stream: false,
+      messages: [{ role: "user", content: "Say OK." }],
+      options: { seed: 4242 },
+    });
+    await postJson(`http://127.0.0.1:${started.port}/api/generate`, {
+      model: "text-model",
+      stream: false,
+      prompt: "Say OK.",
+      seed: 99,
+    });
+
+    expect(backend.bodies[0].seed).toBe(4242);
+    expect(backend.bodies[1].seed).toBe(99);
+  });
+
+  it("omits the seed entirely when the client did not send one", async () => {
+    backend = await startCaptureBackend();
+    const started = await startGateway(backend.port);
+    gateway = started.gateway;
+
+    await postJson(`http://127.0.0.1:${started.port}/api/chat`, {
+      model: "text-model",
+      stream: false,
+      messages: [{ role: "user", content: "Say OK." }],
+    });
+
+    expect("seed" in backend.bodies[0]).toBe(false);
+  });
+
   it("normalizes prior Ollama assistant thinking before text and media history forwarding", async () => {
     backend = await startCaptureBackend();
     const started = await startGateway(backend.port);

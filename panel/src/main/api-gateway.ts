@@ -1825,6 +1825,12 @@ export class ApiGateway extends EventEmitter {
     if (opts.stop) openaiBody.stop = opts.stop;
     if (opts.repeat_penalty != null)
       openaiBody.repetition_penalty = opts.repeat_penalty;
+    // Ollama accepts the seed in options or at the top level; the Python route
+    // honours both. Dropping it here made the identical request reproducible
+    // against the engine port and silently non-deterministic through the
+    // gateway.
+    const seedValue = opts.seed ?? parsed.seed;
+    if (seedValue != null) openaiBody.seed = seedValue;
     this.applyOllamaPromptContextLimit(parsed, opts, openaiBody);
     if (parsed.tools) openaiBody.tools = parsed.tools;
     if (parsed.cache_salt != null) openaiBody.cache_salt = parsed.cache_salt;
@@ -2154,7 +2160,23 @@ export class ApiGateway extends EventEmitter {
             ...(typeof parsed.system === "string" && parsed.system
               ? [{ role: "system", content: parsed.system }]
               : []),
-            { role: "user", content: parsed.prompt || "" },
+            // Ollama's /api/generate carries media at the TOP LEVEL of the
+            // body, not inside a message. Building a plain string here dropped
+            // it silently: a vision request became text-only and the model
+            // answered about nothing, with no error — the same regression the
+            // Python route already fixed. Route the synthetic user message
+            // through the shared translator so the two paths cannot drift
+            // apart again. Raw mode is text-only by definition and is
+            // unaffected (it targets /v1/completions above).
+            ...this.translateOllamaMessages([
+              {
+                role: "user",
+                content: parsed.prompt || "",
+                images: parsed.images,
+                videos: parsed.videos,
+                audio: parsed.audio ?? parsed.audios,
+              },
+            ]),
           ],
           stream: isStreaming,
           stream_options: { include_usage: true },
@@ -2167,6 +2189,12 @@ export class ApiGateway extends EventEmitter {
     if (opts.stop) openaiBody.stop = opts.stop;
     if (opts.repeat_penalty != null)
       openaiBody.repetition_penalty = opts.repeat_penalty;
+    // Ollama accepts the seed in options or at the top level; the Python route
+    // honours both. Dropping it here made the identical request reproducible
+    // against the engine port and silently non-deterministic through the
+    // gateway.
+    const seedValue = opts.seed ?? parsed.seed;
+    if (seedValue != null) openaiBody.seed = seedValue;
     this.applyOllamaPromptContextLimit(parsed, opts, openaiBody);
     if (parsed.cache_salt != null) openaiBody.cache_salt = parsed.cache_salt;
     if (parsed.skip_prefix_cache != null)

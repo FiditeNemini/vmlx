@@ -97,6 +97,16 @@ class AnthropicRequest(BaseModel):
     # all divergent on exactly this field).
     reasoning_effort: str | None = None
     seed: int | None = None
+    # Non-Anthropic passthrough, same class of drift as reasoning_effort above.
+    # server.py already resolves all four off the converted ChatCompletionRequest
+    # (_set_resolved_min_p, _resolve_repetition_penalty,
+    # _compute_bypass_prefix_cache) — they were simply never ACCEPTED here, so
+    # pydantic dropped them and /v1/messages silently ignored sampling and
+    # cache controls that the chat, responses and ollama dialects all honour.
+    min_p: float | None = None
+    repetition_penalty: float | None = None
+    cache_salt: str | None = None
+    skip_prefix_cache: bool | None = None
 
     @field_validator("max_tokens")
     @classmethod
@@ -268,6 +278,10 @@ def to_chat_completion(req: AnthropicRequest) -> ChatCompletionRequest:
         enable_thinking=enable_thinking,
         max_thinking_tokens=max_thinking_tokens,
         seed=req.seed,
+        min_p=req.min_p,
+        repetition_penalty=req.repetition_penalty,
+        cache_salt=req.cache_salt,
+        skip_prefix_cache=req.skip_prefix_cache,
         chat_template_kwargs=chat_template_kwargs,
         # Forward reasoning_effort: explicit top-level field first (parity
         # with the chat/responses/ollama dialects), then the ct_kwargs copy

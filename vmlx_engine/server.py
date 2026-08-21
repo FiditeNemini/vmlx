@@ -2826,8 +2826,25 @@ def _normalize_hy3_reasoning_effort(
             return "no_think"
         if raw in {"low", "high"}:
             return raw
+        # "minimal" is a first-class tier on _EFFORT_LADDER and in Ollama's
+        # think levels, but hy3's template only opens the rail for low/high.
+        # Without this branch it fell through, the policy early-returned, and
+        # the template silently rendered no_think — asking for the LOWEST
+        # reasoning effort turned reasoning OFF, while every stamped family
+        # clamps the same value to "low".
+        if raw == "minimal":
+            return "low"
         if raw in {"medium", "xhigh", "max", "reasoning", "thinking", "on", "true"}:
             return "high"
+        # Anything else is unrecognized. Keep the historical behaviour (fall
+        # through) but stop it being invisible: the template's fallback is
+        # no_think, so an unknown effort silently disables reasoning.
+        logger.warning(
+            "hy3: unrecognized reasoning_effort %r — the template will fall "
+            "back to no_think, so reasoning will be OFF for this request. "
+            "Known values: none/minimal/low/medium/high/xhigh/max.",
+            effort,
+        )
 
     if enable_thinking is True:
         return "high"

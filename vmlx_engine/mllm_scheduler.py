@@ -373,6 +373,12 @@ class MLLMSchedulerConfig:
 
     # Legacy entry-count prefix cache (fallback when paged+memory-aware both off)
     prefix_cache_size: int = 100
+    # An entry COUNT does not bound memory — entries here are whole-KV
+    # snapshots that grow with context. _resolve_prefix_cache_byte_budget()
+    # already reads this field, but MLLMSchedulerConfig never declared it, so
+    # --prefix-cache-max-bytes was silently ignored on every VL/multimodal
+    # session and the budget fell back to the RAM-percent default.
+    prefix_cache_max_bytes: Optional[int] = None
 
     # Disk cache L2 (persistent across restarts, non-paged path)
     enable_disk_cache: bool = False

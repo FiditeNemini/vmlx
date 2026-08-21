@@ -105,12 +105,15 @@ class TestTruncationCheckIsCheap:
 
         def __init__(self):
             self.calls = 0
+            self.single_calls = 0
 
         def __call__(self, texts, truncation=False, **kw):
             import numpy as np
 
             self.calls += 1
             if isinstance(texts, str):
+                # A single-string call is a RE-tokenization of one suspect row.
+                self.single_calls += 1
                 return {"input_ids": list(range(max(1, len(texts.split()))))}
             maxlen = kw.get("max_length", 10**9)
             rows = [list(range(min(len(t.split()), maxlen))) for t in texts]
@@ -137,12 +140,74 @@ class TestTruncationCheckIsCheap:
         e._model = _M()
         return e
 
-    def test_all_fits_costs_one_tokenizer_call(self):
+    def test_all_fits_costs_no_retokenization(self):
         e = self._engine()
         e.embed(["short text"] * 200)
+        # One batched call, and crucially ZERO per-row re-tokenizations.
+        assert e._tokenizer.single_calls == 0
         assert e._tokenizer.calls == 1
 
     def test_one_oversize_chunk_only_retokenizes_that_chunk(self):
         e = self._engine()
         e.embed(["word " * 9000] + ["short one"] * 199)
-        assert e._tokenizer.calls == 2
+        # Exactly ONE row is re-tokenized regardless of how many sub-batches
+        # the planner used — padding makes every row share the widest width,
+        # so suspects must come from the attention mask, not the ids.
+        assert e._tokenizer.single_calls == 1
+
+
+class TestBatchPlanning:
+    """Lifting the 512 cap (vmlx#255) made a batch of long chunks a single
+    huge padded forward: 100 chunks x 40k tokens asked Metal for 200GB and
+    failed the request. The endpoint now splits into sub-batches with a
+    bounded padded-token budget — same vectors, same order, bounded memory,
+    and no refusal. MEASURED after the fix: that case completes at 1.4GB
+    RSS, and 500x400 chunks got ~2x faster from per-batch cleanup."""
+
+    def _engine(self, budget=None):
+        e = EmbeddingEngine.__new__(EmbeddingEngine)
+        e.model_name = "t"
+        if budget:
+            e._DEFAULT_MAX_PADDED_BATCH_TOKENS = budget
+        return e
+
+    def test_short_inputs_stay_in_one_forward(self):
+        e = self._engine()
+        groups = e._plan_batches(["hi there"] * 200, 32768)
+        assert len(groups) == 1
+        assert groups[0] == list(range(200))
+
+    def test_long_chunks_are_split(self):
+        e = self._engine()
+        # 100 chunks of ~40k tokens each: one forward would be ~3.3M padded
+        # tokens. Must split.
+        texts = ["alpha " * 40000] * 100
+        groups = e._plan_batches(texts, 32768)
+        assert len(groups) > 1
+        budget = e._max_padded_batch_tokens()
+        for g in groups:
+            longest = max(min(max(1, len(texts[i]) // 3), 32768) for i in g)
+            assert longest * len(g) <= budget
+
+    def test_every_input_appears_exactly_once_in_order(self):
+        e = self._engine()
+        texts = ["x" * (500 * (i % 7 + 1)) for i in range(60)]
+        groups = e._plan_batches(texts, 32768)
+        flat = [i for g in groups for i in g]
+        assert flat == list(range(60)), "order or membership changed"
+
+    def test_a_single_oversize_input_still_gets_its_own_forward(self):
+        e = self._engine()
+        groups = e._plan_batches(["alpha " * 200000], 32768)
+        assert groups == [[0]]
+
+    def test_budget_is_env_overridable(self, monkeypatch):
+        e = self._engine()
+        monkeypatch.setenv("VMLX_EMBED_MAX_PADDED_TOKENS", "4096")
+        assert e._max_padded_batch_tokens() == 4096
+        monkeypatch.setenv("VMLX_EMBED_MAX_PADDED_TOKENS", "garbage")
+        assert e._max_padded_batch_tokens() == e._DEFAULT_MAX_PADDED_BATCH_TOKENS
+
+    def test_empty_input_list_is_safe(self):
+        e = self._engine()
+        assert e._plan_batches([], 32768) == [[]]

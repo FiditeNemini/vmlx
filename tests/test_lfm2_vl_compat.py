@@ -134,3 +134,63 @@ def test_language_model_passes_plain_arrays_through_untouched():
         object(), "IDS", None, None, arr, _original=fake_original
     )
     assert seen["inputs_embeds"] is arr
+
+
+def test_llama_style_mlp_names_are_aliased_back_to_lfm2_names():
+    """jjang-ai/mlxstudio#132: a conversion renamed LFM2's feed_forward
+    w1/w2/w3 to the llama gate_proj/up_proj/down_proj spelling, and the bundle
+    failed to load with 270 unhandled parameters (reproduced on the Python
+    engine by renaming the official bundle's keys, weights untouched)."""
+    lfm2_vl = pytest.importorskip("mlx_vlm.models.lfm2_vl.lfm2_vl")
+
+    from vmlx_engine.utils import mlx_vlm_compat
+
+    mlx_vlm_compat.apply()
+
+    weights = {
+        "language_model.model.layers.0.feed_forward.gate_proj.weight": 1,
+        "language_model.model.layers.0.feed_forward.up_proj.weight": 2,
+        "language_model.model.layers.0.feed_forward.down_proj.weight": 3,
+        "language_model.model.layers.0.self_attn.q_proj.weight": 4,
+    }
+    out = lfm2_vl.Model.sanitize(object(), dict(weights))
+
+    assert out["language_model.model.layers.0.feed_forward.w1.weight"] == 1
+    assert out["language_model.model.layers.0.feed_forward.w3.weight"] == 2
+    assert out["language_model.model.layers.0.feed_forward.w2.weight"] == 3
+    assert not any("gate_proj" in k or "up_proj" in k or "down_proj" in k for k in out)
+    # non-MLP tensors are untouched
+    assert out["language_model.model.layers.0.self_attn.q_proj.weight"] == 4
+
+
+def test_correctly_named_lfm2_bundle_is_passed_through_untouched():
+    """A bundle that already uses w1/w2/w3 must not be rewritten."""
+    lfm2_vl = pytest.importorskip("mlx_vlm.models.lfm2_vl.lfm2_vl")
+
+    from vmlx_engine.utils import mlx_vlm_compat
+
+    mlx_vlm_compat.apply()
+
+    weights = {
+        "language_model.model.layers.0.feed_forward.w1.weight": 1,
+        "language_model.model.layers.0.feed_forward.w2.weight": 2,
+        "language_model.model.layers.0.feed_forward.w3.weight": 3,
+    }
+    assert lfm2_vl.Model.sanitize(object(), dict(weights)) == weights
+
+
+def test_alias_never_clobbers_an_existing_canonical_tensor():
+    """If both spellings are present, the canonical one wins and the llama
+    duplicate is left alone rather than overwriting real weights."""
+    lfm2_vl = pytest.importorskip("mlx_vlm.models.lfm2_vl.lfm2_vl")
+
+    from vmlx_engine.utils import mlx_vlm_compat
+
+    mlx_vlm_compat.apply()
+
+    weights = {
+        "language_model.model.layers.0.feed_forward.w1.weight": "canonical",
+        "language_model.model.layers.0.feed_forward.gate_proj.weight": "duplicate",
+    }
+    out = lfm2_vl.Model.sanitize(object(), dict(weights))
+    assert out["language_model.model.layers.0.feed_forward.w1.weight"] == "canonical"

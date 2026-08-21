@@ -61,6 +61,7 @@ def apply() -> None:
     _patch_qwen3_vl_grid_thw()
     _patch_qwen35_patch_embed_layout()
     _patch_lfm2_vl_input_embeddings()
+    _patch_lfm2_vl_llama_style_mlp_names()
     _patch_qwen3_vl_vision_model_type_allowlist()
     _patch_prompt_cache_rank3_trim()
     _patch_qwen35_mixed_image_video_embeddings()
@@ -609,6 +610,75 @@ def _qwen35_patch_embed_to_mlx_layout(key, value):
     ):
         return value.transpose(0, 2, 3, 4, 1)
     return value
+
+
+#: LFM2 names its MLP projections w1/w2/w3; conversion pipelines that borrow
+#: the llama vocabulary rename them. Verified against the official
+#: LiquidAI/LFM2.5-VL-3B-MLX-4bit bundle, whose 4-bit shapes make w2
+#: unambiguous: w1 and w3 are (10752, 256) i.e. hidden -> intermediate, while
+#: w2 is (2048, 1344) i.e. intermediate -> hidden. w1 vs w3 cannot be told
+#: apart by shape; both this map and LFM2's own forward
+#: (``w2(silu(w1(x)) * w3(x))``) follow the standard convention.
+_LFM2_LLAMA_STYLE_MLP_ALIASES = {
+    "gate_proj": "w1",
+    "down_proj": "w2",
+    "up_proj": "w3",
+}
+
+
+def _patch_lfm2_vl_llama_style_mlp_names() -> None:
+    """Load LFM2-VL bundles whose MLP tensors were renamed to llama names.
+
+    A conversion that emits ``feed_forward.gate_proj/up_proj/down_proj``
+    instead of ``feed_forward.w1/w3/w2`` fails to load with 270 unhandled
+    parameters on a 3B bundle -- the model has no module by those names, so
+    nothing binds. Reported as jjang-ai/mlxstudio#132 against vmlx-swift;
+    reproduced here against the Python engine by renaming the keys of the
+    official bundle, weights untouched.
+
+    Alias the llama spelling back to LFM2's own on the way in. Only
+    ``feed_forward`` keys are touched, and only when the canonical name is
+    absent, so a correctly-named bundle is passed through byte-for-byte.
+    """
+    try:
+        from mlx_vlm.models.lfm2_vl import lfm2_vl as _lfm2_vl
+    except ImportError:
+        return
+
+    Model = getattr(_lfm2_vl, "Model", None)
+    if Model is None:
+        return
+    original = getattr(Model, "sanitize", None)
+    if original is None or getattr(original, "_vmlx_lfm2_mlp_aliases", False):
+        return
+
+    def sanitize(self, weights):
+        weights = original(self, weights)
+        renames = {}
+        for key in weights:
+            if ".feed_forward." not in key:
+                continue
+            for llama_name, lfm2_name in _LFM2_LLAMA_STYLE_MLP_ALIASES.items():
+                token = f".feed_forward.{llama_name}."
+                if token not in key:
+                    continue
+                target = key.replace(token, f".feed_forward.{lfm2_name}.")
+                if target not in weights:
+                    renames[key] = target
+                break
+        if not renames:
+            return weights
+        _logger.info(
+            "LFM2-VL: bundle uses llama-style MLP names; aliasing %d tensors "
+            "(gate_proj->w1, up_proj->w3, down_proj->w2)",
+            len(renames),
+        )
+        for old_key, new_key in renames.items():
+            weights[new_key] = weights.pop(old_key)
+        return weights
+
+    sanitize._vmlx_lfm2_mlp_aliases = True  # type: ignore[attr-defined]
+    Model.sanitize = sanitize
 
 
 def _patch_lfm2_vl_input_embeddings() -> None:

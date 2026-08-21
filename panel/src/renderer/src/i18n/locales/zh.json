@@ -1019,7 +1019,7 @@
       "pagedCacheCapacity": "有效内存缓存容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
       "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。",
       "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
-      "lowRamPagedCacheWarning": "检测到内存较小（{{totalGB}} GB）。内存分页 KV 缓存与模型权重共用 Apple 统一内存，在这一容量的机器上往往得不偿失——实测与仅用 SSD 的差距约为 2%。建议：关闭下方的“内存分页缓存 (RAM)”，并保持“块磁盘缓存 (SSD / L2)”开启。系统不会自动禁用任何功能，这仅是建议。"
+      "ramCacheTradeoffNotice": "内存提示：内存缓存会把最近的提示保存在 RAM 中，让后续回复更快。这会占用额外内存；关闭它只会稍慢一点（我们测试中约 2%），却能把这部分内存留给模型本身。如果你的 Mac 内存吃紧，请在下方“前缀缓存”中关闭“内存分页缓存 (RAM)”，并保持“块磁盘缓存 (SSD / L2)”开启，这样提示仍会保存在磁盘上。"
     },
     "create": {
       "title": "创建会话",

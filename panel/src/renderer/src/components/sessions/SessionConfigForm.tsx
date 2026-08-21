@@ -334,17 +334,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   })
 
   const [showCachingHelp, setShowCachingHelp] = useState(false)
-  // Total unified memory, for the low-RAM cache recommendation. Advisory only.
-  const [totalMemoryGB, setTotalMemoryGB] = useState<number | null>(null)
-  useEffect(() => {
-    let cancelled = false
-    const getter = (window as any)?.api?.app?.getTotalMemoryGB
-    if (typeof getter !== 'function') return
-    getter()
-      .then((gb: number) => { if (!cancelled && Number.isFinite(gb) && gb > 0) setTotalMemoryGB(gb) })
-      .catch(() => { /* detection failure must never become a user-facing warning */ })
-    return () => { cancelled = true }
-  }, [])
   const [mcpStatus, setMcpStatus] = useState<{ servers: LiveMcpServer[]; tools: LiveMcpTool[]; error?: string } | null>(null)
   const [mcpStatusLoading, setMcpStatusLoading] = useState(false)
   const [mcpValidation, setMcpValidation] = useState<{ servers: any[]; serverCount?: number; error?: string } | null>(null)
@@ -731,6 +720,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {lagunaXsTopKMetadataWarning && (
         <IncompatWarning text={t('sessions.config.lagunaXsTopKWarning')} />
       )}
+      {/* Shown to every user, not gated on RAM: the in-RAM cache buys only a
+          few percent over SSD-only, so most people are better off keeping that
+          memory for the model. Points at the exact control rather than leaving
+          them to hunt for it. */}
+      <InfoNote text={t('sessions.config.ramCacheTradeoffNotice')} />
+
       {/* Server Settings */}
       <Section title={t('sessions.config.serverSettings')} expanded={expandedSections.server} onToggle={() => toggleSection('server')}>
         <Field label={t('sessions.config.host')} tooltip={t('sessions.config.hostTooltip')}>
@@ -960,9 +955,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* Prefix Cache */}
       <Section title={t('sessions.config.prefixCache')} expanded={expandedSections.prefixCache} onToggle={() => toggleSection('prefixCache')} hidden={isImage}>
-        {totalMemoryGB !== null && totalMemoryGB <= LOW_RAM_ADVISORY_GB && effectiveUsePagedCache && (
-          <IncompatWarning text={t('sessions.config.lowRamPagedCacheWarning', { totalGB: totalMemoryGB })} />
-        )}
         {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.prefixCacheHint')} />}
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguTypedCacheNote')} />}
@@ -2256,12 +2248,6 @@ function ParserField({ label, tooltip, value, onChange, options, detectedValue, 
     </div>
   )
 }
-
-// Macs at or below this get the SSD-only cache recommendation. Mirrors the
-// engine-side advisory (vmlx_engine/cli.py::_low_ram_cache_advice_lines) so the
-// app and the startup log agree. Apple ships 16/18/24/32/36 GB below this line
-// and 48 GB+ above it.
-const LOW_RAM_ADVISORY_GB = 36
 
 function IncompatWarning({ text }: { text: string }) {
   return (

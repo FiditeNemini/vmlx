@@ -1019,7 +1019,7 @@
       "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
       "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
-      "lowRamPagedCacheWarning": "Low memory detected ({{totalGB}} GB). The in-RAM paged KV cache shares Apple unified memory with the model's weights, so on machines this size it often costs more than it saves — measured within ~2% of SSD-only. Recommended: turn In-Memory Paged Cache (RAM) OFF below and keep Block Disk Cache (SSD / L2) on. Nothing is disabled automatically; this is a recommendation only."
+      "ramCacheTradeoffNotice": "Memory tip: the in-memory cache keeps recent prompts in RAM to answer follow-ups faster. It uses extra memory to do that, and turning it off is only slightly slower — about 2% in our tests — while freeing that memory for the model itself. If your Mac is tight on memory, turn off \"In-Memory Paged Cache (RAM)\" in the Prefix Cache section below and leave \"Block Disk Cache (SSD / L2)\" on, so prompts are still remembered on disk."
     },
     "create": {
       "title": "Create Session",

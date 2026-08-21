@@ -15704,6 +15704,7 @@ async def ollama_chat(fastapi_request: Request):
         _now_iso,
         merge_ollama_stream_terminal,
         ollama_chat_to_openai,
+        ollama_duration_fields,
         openai_chat_response_to_ollama,
         openai_chat_chunk_to_ollama_ndjson,
     )
@@ -15728,6 +15729,7 @@ async def ollama_chat(fastapi_request: Request):
     _ollama_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
 
     if not is_streaming:
+        _ollama_started_ns = time.perf_counter_ns()
         result = await create_chat_completion(chat_req, fastapi_request)
         # Convert Pydantic response to dict
         if hasattr(result, "model_dump"):
@@ -15740,7 +15742,9 @@ async def ollama_chat(fastapi_request: Request):
                 result_dict = {"choices": []}
         else:
             result_dict = dict(result)
-        return openai_chat_response_to_ollama(result_dict, model_name)
+        return openai_chat_response_to_ollama(
+            result_dict, model_name, started_ns=_ollama_started_ns
+        )
 
     # Streaming: wrap SSE generator → NDJSON
     from starlette.responses import StreamingResponse as _SR
@@ -16011,6 +16015,19 @@ async def ollama_chat(fastapi_request: Request):
         buffered_tcs: list[dict] = []  # ollama-shape {function:{name,arguments}}
         pending_done: dict | None = None
         stream_errored = False
+        # Ollama clients compute tok/s as eval_count / eval_duration; without
+        # these fields they display nothing. Measured, never estimated:
+        # prompt_eval_duration is the real time to the first content token.
+        _t0 = time.perf_counter_ns()
+        _t_first: int | None = None
+
+        def _with_timings(row: dict) -> dict:
+            row = dict(row)
+            row.update(
+                ollama_duration_fields(_t0, _t_first, time.perf_counter_ns())
+            )
+            return row
+
         async for sse_line in _terminal_finish_guard(
             stream_chat_completion(
                 engine,
@@ -16036,7 +16053,7 @@ async def ollama_chat(fastapi_request: Request):
                         "done": True,
                         "done_reason": "stop",
                     }
-                yield json.dumps(pending_done) + "\n"
+                yield json.dumps(_with_timings(pending_done)) + "\n"
                 pending_done = None
                 continue
             # Peek at the SSE line to harvest tool_calls and rewrite the
@@ -16131,6 +16148,8 @@ async def ollama_chat(fastapi_request: Request):
                         _payload_obj.pop("done_reason", None)
                         _payload_obj.pop("eval_count", None)
                         _payload_obj.pop("prompt_eval_count", None)
+                        if _t_first is None:
+                            _t_first = time.perf_counter_ns()
                         yield json.dumps(_payload_obj) + "\n"
                         _terminal_message["content"] = ""
                         _terminal_message.pop("thinking", None)
@@ -16142,9 +16161,13 @@ async def ollama_chat(fastapi_request: Request):
                     continue
             except (json.JSONDecodeError, TypeError):
                 pass
+            # Terminal rows are intercepted above, so anything reaching here is
+            # a content delta — the first one marks the end of prefill.
+            if _t_first is None:
+                _t_first = time.perf_counter_ns()
             yield ndjson
         if pending_done is not None and not stream_errored:
-            yield json.dumps(pending_done) + "\n"
+            yield json.dumps(_with_timings(pending_done)) + "\n"
 
     return _SR(ndjson_stream(), media_type="application/x-ndjson")
 
@@ -16172,6 +16195,7 @@ async def ollama_generate(fastapi_request: Request):
     from .api.ollama_adapter import (
         ollama_generate_to_openai,
         ollama_generate_to_openai_chat,
+        ollama_duration_fields,
         merge_ollama_generate_stream_terminal,
         openai_chat_response_to_ollama_generate,
         openai_chat_chunk_to_ollama_generate_ndjson,
@@ -16184,6 +16208,7 @@ async def ollama_generate(fastapi_request: Request):
         chat_req = ChatCompletionRequest(**openai_chat_req)
         _ollama_gen_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
         if not is_streaming:
+            _ollama_started_ns = time.perf_counter_ns()
             result = await create_chat_completion(chat_req, fastapi_request)
             if hasattr(result, "model_dump"):
                 result_dict = result.model_dump(exclude_none=True)
@@ -16194,7 +16219,9 @@ async def ollama_generate(fastapi_request: Request):
                     result_dict = {"choices": []}
             else:
                 result_dict = dict(result)
-            return openai_chat_response_to_ollama_generate(result_dict, model_name)
+            return openai_chat_response_to_ollama_generate(
+                result_dict, model_name, started_ns=_ollama_started_ns
+            )
 
         from starlette.responses import StreamingResponse as _SR
 
@@ -16203,6 +16230,16 @@ async def ollama_generate(fastapi_request: Request):
         async def templated_ndjson_stream():
             pending_done: dict[str, Any] | None = None
             stream_errored = False
+            _t0 = time.perf_counter_ns()
+            _t_first: int | None = None
+
+            def _with_timings(row: dict) -> dict:
+                row = dict(row)
+                row.update(
+                    ollama_duration_fields(_t0, _t_first, time.perf_counter_ns())
+                )
+                return row
+
             async for sse_line in streaming_response.body_iterator:
                 if isinstance(sse_line, bytes):
                     sse_line = sse_line.decode("utf-8", "replace")
@@ -16220,7 +16257,7 @@ async def ollama_generate(fastapi_request: Request):
                             "done": True,
                             "done_reason": "stop",
                         }
-                    yield json.dumps(pending_done) + "\n"
+                    yield json.dumps(_with_timings(pending_done)) + "\n"
                     pending_done = None
                     continue
                 ndjson = openai_chat_chunk_to_ollama_generate_ndjson(
@@ -16242,9 +16279,11 @@ async def ollama_generate(fastapi_request: Request):
                             continue
                     except (json.JSONDecodeError, TypeError):
                         pass
+                    if _t_first is None:
+                        _t_first = time.perf_counter_ns()
                     yield ndjson
             if pending_done is not None and not stream_errored:
-                yield json.dumps(pending_done) + "\n"
+                yield json.dumps(_with_timings(pending_done)) + "\n"
 
         return _SR(templated_ndjson_stream(), media_type="application/x-ndjson")
 

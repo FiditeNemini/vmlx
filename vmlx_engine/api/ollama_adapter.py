@@ -405,11 +405,46 @@ def ollama_generate_to_openai_chat(body: dict) -> dict:
     return req
 
 
+def ollama_duration_fields(
+    started_ns: int | None,
+    first_content_ns: int | None,
+    ended_ns: int | None,
+) -> dict[str, int]:
+    """Ollama's nanosecond timing fields, from measurements only.
+
+    Ollama clients render throughput as ``eval_count / eval_duration * 1e9``
+    (Open WebUI, Continue.dev, ``ollama run --verbose``). vMLX used to send
+    ``total_duration: 0`` on the non-streaming path and no duration fields at
+    all on the streaming one, so every such client showed nothing — while a
+    comment in the chat handler claimed the streaming path carried tok/s.
+
+    ``prompt_eval_duration`` is the measured time to the first content token,
+    which is what prefill actually cost; ``eval_duration`` is the remainder.
+    When no first-token timestamp is available (the non-streaming path can't
+    see one) the split is OMITTED rather than guessed — reporting total time
+    as decode time would understate tok/s with a number that looks precise.
+
+    ``load_duration`` is 0 because the model is already resident by the time a
+    request is served; that is a fact, not a placeholder.
+    """
+    if started_ns is None or ended_ns is None:
+        return {}
+    total = max(0, int(ended_ns) - int(started_ns))
+    fields: dict[str, int] = {"total_duration": total, "load_duration": 0}
+    if first_content_ns is not None:
+        prompt_eval = max(0, int(first_content_ns) - int(started_ns))
+        fields["prompt_eval_duration"] = min(prompt_eval, total)
+        fields["eval_duration"] = max(0, total - fields["prompt_eval_duration"])
+    return fields
+
+
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 
 
-def openai_chat_response_to_ollama(openai_resp: dict, model: str) -> dict:
+def openai_chat_response_to_ollama(
+    openai_resp: dict, model: str, started_ns: int | None = None
+) -> dict:
     """Convert non-streaming OpenAI chat response to Ollama format."""
     choices = openai_resp.get("choices", [])
     # A thinking model may omit `content` entirely if every token was reasoning
@@ -456,7 +491,7 @@ def openai_chat_response_to_ollama(openai_resp: dict, model: str) -> dict:
             if _out_tcs:
                 msg["tool_calls"] = _out_tcs
     finish_reason = choices[0].get("finish_reason", "stop") if choices else "stop"
-    return {
+    result: dict[str, Any] = {
         "model": model,
         "created_at": _now_iso(),
         "message": msg,
@@ -466,9 +501,18 @@ def openai_chat_response_to_ollama(openai_resp: dict, model: str) -> dict:
         "eval_count": usage.get("completion_tokens", 0),
         "prompt_eval_count": usage.get("prompt_tokens", 0),
     }
+    # No first-token timestamp exists on the non-streaming path, so only the
+    # total is reported; the prefill/decode split is omitted rather than
+    # guessed.
+    result.update(
+        ollama_duration_fields(started_ns, None, time.perf_counter_ns())
+    )
+    return result
 
 
-def openai_chat_response_to_ollama_generate(openai_resp: dict, model: str) -> dict:
+def openai_chat_response_to_ollama_generate(
+    openai_resp: dict, model: str, started_ns: int | None = None
+) -> dict:
     """Convert non-streaming chat-completions response to /api/generate shape."""
     choices = openai_resp.get("choices", [])
     usage = openai_resp.get("usage", {})
@@ -486,6 +530,9 @@ def openai_chat_response_to_ollama_generate(openai_resp: dict, model: str) -> di
         "eval_count": usage.get("completion_tokens", 0),
         "prompt_eval_count": usage.get("prompt_tokens", 0),
     }
+    result.update(
+        ollama_duration_fields(started_ns, None, time.perf_counter_ns())
+    )
     if reasoning:
         result["thinking"] = reasoning
     return result

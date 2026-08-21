@@ -26,6 +26,27 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.35] - 2026-08-21
+
+### Fixed
+
+- **dots3-note returned an EMPTY answer on most cached turns (regression in 1.6.34).** Restored plain-KV layers are zero-padded to the 256-token cache step while `offset` stays logical, and dots3 adopted the padded buffers — so its sparse-attention indexer counted pad rows as real keys, put the causal frontier behind by the pad size, and generation ran to `max_tokens` with nothing visible. The trigger was any restore whose cached length was not a multiple of 256, which is the overwhelming majority: every restore observed in testing (2176, 2232, 2245, 3438, 7043, 10634) was misaligned. Fixed by adopting the logical extent, refusing to let a padded physical length become an offset, and declining the adoption loudly rather than attending over zeros.
+- **`--prefix-cache-max-bytes` was silently ignored on every VL/multimodal session** — the MLLM scheduler read a field its config never declared, so the flag did nothing and the budget fell back to the RAM-percent default.
+- **`reasoning_effort: "minimal"` turned reasoning OFF on hy3 bundles.** The lowest effort tier matched no branch and fell through to the template's `no_think` fallback, while every other family clamps it to `low`. Unrecognized efforts now warn instead of silently disabling reasoning.
+- **`/v1/messages` silently dropped `min_p`, `repetition_penalty`, `cache_salt` and `skip_prefix_cache`.** The server already resolved all four; the Anthropic request model simply never accepted them.
+- **API gateway dropped the top-level `images` array on `/api/generate`,** so a vision request became text-only and the model answered about nothing, with no error. The gateway also dropped `options.seed`, making identical requests reproducible against the engine port and silently non-deterministic through the gateway.
+- **Ollama responses carried no usable timings.** `total_duration` was hardcoded to 0 and the streaming path sent no duration fields at all, so every client that renders throughput as `eval_count / eval_duration` showed nothing. Durations are now measured, with the prefill/decode split taken from real time-to-first-token and omitted where it cannot be measured.
+- **LFM2-VL bundles whose MLP tensors were renamed to the llama `gate_proj/up_proj/down_proj` spelling failed to load** with 270 unhandled parameters. The llama names are now aliased back to LFM2's own `w1/w3/w2`.
+
+### Performance
+
+- **The second message of a long conversation no longer stalls.** To store a reusable prefix the engine needs the cache as it stood at the prompt boundary, and because recurrent state cannot be recovered after generation it re-prefilled the entire prompt — a second full forward pass that ran after the response was dispatched and blocked the next request. Profiled at 40.8% of engine time (~28s at 15.4k tokens). That boundary cache is now assembled from state already in hand: append-only attention KV sliced back to the boundary, plus the recurrent snapshot captured before generation advanced it. Second-message time-to-first-token drops from ~37s to ~2.4s on Qwen3.8-27B at 15k context. Layouts where slicing would be wrong (ZAYA CCA, mixed-SWA rotating windows, quantized attention) are excluded and keep re-prefilling.
+- Embeddings requests batch internally, so a long-chunk batch can no longer ask Metal for an impossible single allocation.
+
+### Added
+
+- **Low-memory Macs are advised to use SSD-only caching at session startup.** On 36GB and below, the in-RAM paged KV mirror competes with model weights for the same unified memory while measuring within ~2% of SSD-only on a 15k-token workload. The notice is advice only — nothing is disabled, no argument is changed, and the configuration runs exactly as requested.
+
 ## [1.6.34] - 2026-08-20
 
 ### Performance

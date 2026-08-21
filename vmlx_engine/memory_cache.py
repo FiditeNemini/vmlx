@@ -32,6 +32,8 @@ import gc
 from dataclasses import dataclass, field
 from typing import Any
 
+from .utils.cache_extent import logical_truncate_target
+
 logger = logging.getLogger(__name__)
 
 # Constants
@@ -938,7 +940,7 @@ class MemoryAwarePrefixCache:
                             from mlx_lm.models.cache import KVCache
                         except ImportError:
                             return None
-                        safe_target = min(target_len, sc.keys.shape[-2])
+                        safe_target = logical_truncate_target(sc, target_len, sc.keys.shape[-2])
                         new_sc = KVCache()
                         new_sc.keys = _copy_positional_slice(
                             sc.keys[..., :safe_target, :]
@@ -959,7 +961,7 @@ class MemoryAwarePrefixCache:
                     try:
                         from mlx_lm.models.cache import QuantizedKVCache
                         v = layer_cache.values
-                        safe_target = min(target_len, k[0].shape[-2])
+                        safe_target = logical_truncate_target(layer_cache, target_len, k[0].shape[-2])
                         new_cache = QuantizedKVCache(
                             group_size=layer_cache.group_size,
                             bits=layer_cache.bits,
@@ -988,7 +990,7 @@ class MemoryAwarePrefixCache:
                         from mlx_lm.models.cache import KVCache
                     except ImportError:
                         return None
-                    safe_target = min(target_len, k.shape[-2])
+                    safe_target = logical_truncate_target(layer_cache, target_len, k.shape[-2])
                     new_cache = KVCache()
                     new_cache.keys = _copy_positional_slice(
                         k[..., :safe_target, :]

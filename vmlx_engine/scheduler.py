@@ -70,6 +70,7 @@ from .utils.cache_types import (
     expand_cache_class_names,
 )
 from .utils.ssm_companion_disk_store import SSMCompanionDiskStore
+from .utils.cache_extent import logical_truncate_target
 from .utils.memory_limits import (
     get_effective_metal_working_set_bytes,
     get_metal_ws_guard_threshold,
@@ -5022,7 +5023,7 @@ class Scheduler:
                     if not hasattr(k, "ndim") or not hasattr(v, "ndim"):
                         return None
                     if k.ndim == 4:
-                        safe_target = min(target_len, int(k.shape[2]))
+                        safe_target = logical_truncate_target(layer_cache, target_len, int(k.shape[2]))
                         np_k, np_v = _to_numpy(k), _to_numpy(v)
                         tk = _from_numpy(
                             np_k[:, :, :safe_target, :], getattr(k, "dtype", None)
@@ -5031,7 +5032,7 @@ class Scheduler:
                             np_v[:, :, :safe_target, :], getattr(v, "dtype", None)
                         )
                     elif k.ndim == 3:
-                        safe_target = min(target_len, int(k.shape[1]))
+                        safe_target = logical_truncate_target(layer_cache, target_len, int(k.shape[1]))
                         np_k, np_v = _to_numpy(k), _to_numpy(v)
                         tk = _from_numpy(
                             np_k[:, :safe_target, :], getattr(k, "dtype", None)
@@ -5177,7 +5178,7 @@ class Scheduler:
                             from mlx_lm.models.cache import QuantizedKVCache
                         except ImportError:
                             return None
-                        safe_target = min(target_len, k[0].shape[-2])
+                        safe_target = logical_truncate_target(layer_cache, target_len, k[0].shape[-2])
                         if safe_target <= 0:
                             return None
                         new_cache = QuantizedKVCache(
@@ -5226,7 +5227,7 @@ class Scheduler:
                         # Slicing in numpy avoids the Metal command buffer
                         # bug entirely — no lazy MLX ops, no GPU involvement.
                         if ndim == 4:
-                            safe_target = min(target_len, k.shape[2])
+                            safe_target = logical_truncate_target(layer_cache, target_len, k.shape[2])
                             np_k, np_v = _to_numpy(k), _to_numpy(v)
                             new_cache.keys = _from_numpy(
                                 np_k[:, :, :safe_target, :], k.dtype
@@ -5235,7 +5236,7 @@ class Scheduler:
                                 np_v[:, :, :safe_target, :], v.dtype
                             )
                         elif ndim == 3:
-                            safe_target = min(target_len, k.shape[1])
+                            safe_target = logical_truncate_target(layer_cache, target_len, k.shape[1])
                             np_k, np_v = _to_numpy(k), _to_numpy(v)
                             new_cache.keys = _from_numpy(
                                 np_k[:, :safe_target, :], k.dtype

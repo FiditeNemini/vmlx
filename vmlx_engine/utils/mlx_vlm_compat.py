@@ -33,6 +33,8 @@ from __future__ import annotations
 import logging
 import textwrap
 
+from vmlx_engine.utils.cache_extent import logical_truncate_target
+
 _logger = logging.getLogger(__name__)
 _applied = False
 
@@ -332,20 +334,25 @@ def _vmlx_trim_prompt_cache(cache, prefix_len: int):
         if keys is None or values is None:
             continue
         ndim = getattr(keys, "ndim", len(getattr(keys, "shape", ())))
+        # A live KVCache allocates in `step` chunks, so keys.shape[seq] is the
+        # BUFFER size and is routinely larger than the token count. Comparing
+        # prefix_len against it (and then assigning offset = prefix_len) would
+        # raise the offset into allocation slack and turn zero rows into
+        # tokens. Clamp through the logical extent instead.
         if ndim >= 4:
-            cached_len = keys.shape[2]
-            if cached_len > prefix_len:
-                layer_cache.keys = keys[:, :, :prefix_len, :]
-                layer_cache.values = values[:, :, :prefix_len, :]
-                if hasattr(layer_cache, "offset"):
-                    layer_cache.offset = prefix_len
+            target = logical_truncate_target(layer_cache, prefix_len, keys.shape[2])
+            if target < keys.shape[2]:
+                layer_cache.keys = keys[:, :, :target, :]
+                layer_cache.values = values[:, :, :target, :]
+            if hasattr(layer_cache, "offset"):
+                layer_cache.offset = target
         elif ndim == 3:
-            cached_len = keys.shape[1]
-            if cached_len > prefix_len:
-                layer_cache.keys = keys[:, :prefix_len, :]
-                layer_cache.values = values[:, :prefix_len, :]
-                if hasattr(layer_cache, "offset"):
-                    layer_cache.offset = prefix_len
+            target = logical_truncate_target(layer_cache, prefix_len, keys.shape[1])
+            if target < keys.shape[1]:
+                layer_cache.keys = keys[:, :target, :]
+                layer_cache.values = values[:, :target, :]
+            if hasattr(layer_cache, "offset"):
+                layer_cache.offset = target
     return cache
 
 

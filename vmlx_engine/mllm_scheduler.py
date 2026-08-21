@@ -180,6 +180,7 @@ from .utils.memory_limits import (
     get_metal_ws_guard_threshold,
 )
 from .prefix_cache import runtime_cache_fingerprint
+from .utils.cache_extent import logical_truncate_target
 
 logger = logging.getLogger(__name__)
 
@@ -1872,7 +1873,7 @@ class MLLMScheduler:
                     full_k, full_v = layer_cache._get_full_cache()
                     if full_k is None or full_v is None:
                         return None
-                    safe_target = min(target_len, int(full_k.shape[-2]))
+                    safe_target = logical_truncate_target(layer_cache, target_len, int(full_k.shape[-2]))
                     if safe_target <= 0:
                         return None
                     new_cache = TurboQuantKVCache(
@@ -1918,7 +1919,7 @@ class MLLMScheduler:
                             from mlx_lm.models.cache import QuantizedKVCache
                         except ImportError:
                             return None
-                        safe_target = min(target_len, k[0].shape[-2])
+                        safe_target = logical_truncate_target(layer_cache, target_len, k[0].shape[-2])
                         if safe_target <= 0:
                             return None
                         new_cache = QuantizedKVCache(
@@ -1960,11 +1961,11 @@ class MLLMScheduler:
                             new_cache = KVCache()
                         ndim = k.ndim
                         if ndim == 4:
-                            safe_target = min(target_len, k.shape[2])
+                            safe_target = logical_truncate_target(layer_cache, target_len, k.shape[2])
                             new_cache.keys = k[:, :, :safe_target, :]
                             new_cache.values = v[:, :, :safe_target, :]
                         elif ndim == 3:
-                            safe_target = min(target_len, k.shape[1])
+                            safe_target = logical_truncate_target(layer_cache, target_len, k.shape[1])
                             new_cache.keys = k[:, :safe_target, :]
                             new_cache.values = v[:, :safe_target, :]
                         else:

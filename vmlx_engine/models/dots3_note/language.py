@@ -151,6 +151,39 @@ def _prefill_materialize_max_keys() -> int:
         return 0
 
 
+def _logical_kv_extent(cache_obj):
+    """(keys, values) trimmed to the cache's LOGICAL length.
+
+    Restored plain-KV layers can be zero-padded to KVCache.step while
+    ``offset`` stays logical. ``KVCache.state`` already slices to ``:offset``;
+    the raw ``.keys``/``.values`` attributes do not. Prefer ``state`` and fall
+    back to an explicit slice so a padded stream can never reach a consumer
+    that treats ``shape[2]`` as the real key count.
+    """
+    keys = getattr(cache_obj, "keys", None)
+    values = getattr(cache_obj, "values", None)
+    if keys is None or values is None:
+        return keys, values
+    try:
+        offset = int(getattr(cache_obj, "offset", 0) or 0)
+    except (TypeError, ValueError):
+        return keys, values
+    if 0 < offset < int(keys.shape[2]):
+        return keys[..., :offset, :], values[..., :offset, :]
+    return keys, values
+
+
+def _logical_offset(cache_obj, keys) -> int:
+    """Logical offset, never a padded physical length."""
+    try:
+        offset = int(getattr(cache_obj, "offset", 0) or 0)
+    except (TypeError, ValueError):
+        offset = 0
+    if offset > 0:
+        return offset
+    return int(keys.shape[2]) if keys is not None else 0
+
+
 class Dots3LatentCache:
     """Ordered latent cache for one MLA layer.
 
@@ -1186,8 +1219,17 @@ class Dots3NoteModel(nn.Module):
             c = cache[i]
             if c is None or isinstance(c, Dots3LatentCache):
                 continue
-            keys = getattr(c, "keys", None)
-            values = getattr(c, "values", None)
+            # Take the LOGICAL extent, never the raw buffers. Restored
+            # plain-KV layers are zero-padded up to KVCache.step (256) while
+            # `offset` stays logical (prefix_cache.py, 44c20c278). KVCache.state
+            # slices to `:offset`; `.keys`/`.values` do not. Adopting the padded
+            # buffers made this family attend over zero rows: DSA counts
+            # `latent.shape[2]` as real keys while `past` is the logical offset,
+            # so the causal frontier lands (physical - logical) tokens behind and
+            # the pad rows become legal top-k candidates. Generation then never
+            # converges — it runs to max_tokens with no visible answer. Any
+            # restore whose cached length is not a multiple of 256 hits this.
+            keys, values = _logical_kv_extent(c)
             if self.config.is_sliding(i):
                 # Sliding slots left as generic KVCache run the MATERIALIZED
                 # lane from the restore point on: 64-head K/V at ~48KB per
@@ -1224,7 +1266,7 @@ class Dots3NoteModel(nn.Module):
                     adopted._rope_dim = rope_dim
                     adopted.latent = keys
                     adopted.k_pe = values
-                    adopted.offset = int(getattr(c, "offset", keys.shape[2]))
+                    adopted.offset = _logical_offset(c, keys)
                     cache[i] = adopted
                     adopted_sliding += 1
                 else:
@@ -1256,9 +1298,34 @@ class Dots3NoteModel(nn.Module):
             adopted._rope_dim = rope_dim
             adopted._idx_dim = idx_dim
             adopted.state = (keys, values)
-            adopted.offset = int(getattr(c, "offset", keys.shape[2]))
+            adopted.offset = _logical_offset(c, keys)
             cache[i] = adopted
             adopted_n += 1
+        # A window=None latent stream must be exactly as long as its offset.
+        # If a restore lane ever hands over padded state again, fail LOUD here
+        # rather than silently attending to zero rows (vmlx dots3 2026-08-20).
+        for i in range(min(len(cache), self.config.num_hidden_layers)):
+            slot = cache[i]
+            if not isinstance(slot, Dots3LatentCache):
+                continue
+            if getattr(slot, "window", None) is not None:
+                continue
+            latent = getattr(slot, "latent", None)
+            if latent is None or not getattr(latent, "size", 0):
+                continue
+            physical = int(latent.shape[2])
+            logical = int(getattr(slot, "offset", 0) or 0)
+            if logical and physical != logical:
+                _logger.error(
+                    "dots3 restore invariant violated on layer %d: latent has "
+                    "%d rows but offset is %d. The extra rows are padding and "
+                    "would be attended as real keys; declining the adoption.",
+                    i, physical, logical,
+                )
+                cache[i] = Dots3LatentCache()
+                cache[i]._rope_dim = rope_dim
+                cache[i]._idx_dim = idx_dim
+
         if adopted_n or adopted_sliding or foreign:
             _logger.info(
                 "dots3 adopted %d restored full-layer and %d sliding "

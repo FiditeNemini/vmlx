@@ -1018,7 +1018,8 @@
       "metalWiredLimitHelp": "如果大模型出现 Metal 内存不足、SIGKILL 或内核崩溃风险，macOS 可能需要调整 Metal 常驻内存上限。大内存 Mac 示例：{{command}}。不要将其设为与物理内存相同；请为系统、WindowServer 和应用留出余量。在 128GB 的 Mac 上，115000-120000 MB 通常比 128000 MB 更安全。该命令需要管理员密码，重启后会重置。",
       "pagedCacheCapacity": "有效内存缓存容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
       "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。",
-      "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token"
+      "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
+      "lowRamPagedCacheWarning": "检测到内存较小（{{totalGB}} GB）。内存分页 KV 缓存与模型权重共用 Apple 统一内存，在这一容量的机器上往往得不偿失——实测与仅用 SSD 的差距约为 2%。建议：关闭下方的“内存分页缓存 (RAM)”，并保持“块磁盘缓存 (SSD / L2)”开启。系统不会自动禁用任何功能，这仅是建议。"
     },
     "create": {
       "title": "创建会话",

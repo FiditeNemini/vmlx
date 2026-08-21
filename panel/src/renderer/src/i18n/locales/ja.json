@@ -1018,7 +1018,8 @@
       "metalWiredLimitHelp": "大きなモデルで Metal のメモリ不足、SIGKILL、カーネルパニックの恐れがある場合、macOS の Metal ワイヤードメモリ上限の調整が必要になることがあります。大容量メモリの Mac の例: {{command}}。物理 RAM と同じ値にはせず、OS・WindowServer・アプリ用の余裕を残してください。128GB の Mac では通常 128000 MB より 115000〜120000 MB のほうが安全です。このコマンドには管理者パスワードが必要で、再起動すると元に戻ります。",
       "pagedCacheCapacity": "実効インメモリキャッシュ容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン",
       "pagedCacheMemoryIgnored": "インメモリページドキャッシュが有効な間、キャッシュ TTL は適用されません。キャッシュメモリ上限／キャッシュメモリ % は Apple ユニファイドメモリの L1 使用量を制限し、最大キャッシュブロック数とブロックサイズがトークン容量を制限します。",
-      "blockDiskCapacity": "実効 SSD ブロックインデックス容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン"
+      "blockDiskCapacity": "実効 SSD ブロックインデックス容量: {{blockSize}} トークン/ブロック x {{usableBlocks}} 使用可能ブロック（{{maxBlocks}} 構成、1 予約）= {{tokens}} トークン",
+      "lowRamPagedCacheWarning": "メモリが少ない構成です（{{totalGB}} GB）。RAM 上のページド KV キャッシュは Apple の統合メモリをモデルの重みと共有するため、この容量のマシンでは得られる効果より負担が上回ることが多く、SSD のみの場合との差は約 2% でした。推奨: 下の「メモリ内ページドキャッシュ (RAM)」をオフにし、「ブロックディスクキャッシュ (SSD / L2)」はオンのままにしてください。自動的に無効化されるものはありません。これはあくまで推奨です。"
     },
     "create": {
       "title": "セッションを作成",

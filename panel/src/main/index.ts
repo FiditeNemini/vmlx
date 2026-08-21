@@ -264,6 +264,11 @@ function createWindow(): void {
 
     // App version
     ipcMain.handle('app:getVersion', () => app.getVersion())
+    // Total unified memory, so the renderer can warn low-RAM Macs that the
+    // in-RAM KV cache competes with model weights. Advisory only — nothing
+    // is disabled on the basis of this number.
+    ipcMain.handle('app:totalMemoryGB', () =>
+      Math.round(require('os').totalmem() / (1024 ** 3)))
 
     // App-level settings (API keys, preferences)
     ipcMain.handle('settings:get', (_e, key: string) => {

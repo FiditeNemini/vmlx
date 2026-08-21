@@ -289,6 +289,7 @@ const api = {
   // App-level events
   app: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
+    getTotalMemoryGB: (): Promise<number> => ipcRenderer.invoke('app:totalMemoryGB'),
     onUpdateAvailable: (callback: (data: any) => void) => {
       const handler = (_: any, data: any) => callback(data)
       ipcRenderer.on('app:updateAvailable', handler)

@@ -1018,7 +1018,8 @@
       "metalWiredLimitHelp": "Si un modelo grande provoca un error de memoria de Metal, SIGKILL o riesgo de kernel panic, macOS puede necesitar un límite de memoria fija de Metal ajustado. Ejemplo para Macs con mucha memoria: {{command}}. No lo iguales a la RAM física; deja margen para el sistema, WindowServer y las apps. En Macs de 128 GB, 115000-120000 MB suele ser más seguro que 128000 MB. El comando requiere contraseña de administrador y se restablece al reiniciar.",
       "pagedCacheCapacity": "Capacidad efectiva de caché en memoria: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "El TTL de caché no se aplica mientras la caché paginada en memoria está activa. El límite de memoria de caché / % de memoria de caché limita su uso de L1 de la memoria unificada de Apple; el máximo de bloques de caché y el tamaño de bloque limitan la capacidad en tokens.",
-      "blockDiskCapacity": "Capacidad efectiva del índice de bloques en SSD: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens"
+      "blockDiskCapacity": "Capacidad efectiva del índice de bloques en SSD: {{blockSize}} tokens/bloque x {{usableBlocks}} bloques utilizables ({{maxBlocks}} configurados; 1 reservado) = {{tokens}} tokens",
+      "lowRamPagedCacheWarning": "Memoria baja detectada ({{totalGB}} GB). La caché KV paginada en RAM comparte la memoria unificada de Apple con los pesos del modelo, así que en equipos de este tamaño suele costar más de lo que ahorra — medido dentro de ~2% del modo solo SSD. Recomendado: desactiva abajo la Caché Paginada en Memoria (RAM) y mantén activa la Caché de Bloques en Disco (SSD / L2). No se desactiva nada automáticamente; esto es solo una recomendación."
     },
     "create": {
       "title": "Crear sesión",

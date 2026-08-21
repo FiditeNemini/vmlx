@@ -1018,7 +1018,8 @@
       "metalWiredLimitHelp": "대용량 모델에서 Metal 메모리 부족, SIGKILL 또는 커널 패닉 위험이 발생하면 macOS의 Metal 고정 메모리 한도를 조정해야 할 수 있습니다. 메모리가 큰 Mac 예시: {{command}}. 물리 RAM과 같은 값으로 설정하지 말고 OS/WindowServer/앱 여유를 남기세요. 128GB Mac에서는 보통 128000 MB보다 115000~120000 MB가 더 안전합니다. 이 명령은 관리자 암호가 필요하며 재부팅하면 초기화됩니다.",
       "pagedCacheCapacity": "실효 메모리 내 캐시 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
       "pagedCacheMemoryIgnored": "메모리 내 페이지 캐시가 켜져 있는 동안에는 캐시 TTL이 적용되지 않습니다. 캐시 메모리 제한 / 캐시 메모리 %는 Apple 통합 메모리의 L1 사용량을 제한하고, 최대 캐시 블록 수와 블록 크기가 토큰 용량을 제한합니다.",
-      "blockDiskCapacity": "실효 SSD 블록 인덱스 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰"
+      "blockDiskCapacity": "실효 SSD 블록 인덱스 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
+      "lowRamPagedCacheWarning": "메모리가 적은 환경입니다({{totalGB}} GB). RAM 페이지드 KV 캐시는 Apple 통합 메모리를 모델 가중치와 공유하므로, 이 정도 용량에서는 얻는 것보다 잃는 것이 많은 경우가 많습니다 — SSD 전용 대비 약 2% 차이로 측정되었습니다. 권장: 아래의 '메모리 내 페이지드 캐시(RAM)'를 끄고 '블록 디스크 캐시(SSD / L2)'는 켠 상태로 두세요. 자동으로 비활성화되는 것은 없으며, 이는 권장 사항일 뿐입니다."
     },
     "create": {
       "title": "세션 생성",

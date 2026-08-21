@@ -1018,7 +1018,8 @@
       "metalWiredLimitHelp": "If a large model hits Metal OOM, SIGKILL, or kernel-panic risk, macOS may need a tuned Metal wired-memory limit. Example for large-memory Macs: {{command}}. Do not set it equal to physical RAM; leave OS/WindowServer/app headroom. On 128GB Macs, 115000-120000 MB is usually safer than 128000 MB. The command requires an admin password and resets after reboot.",
       "pagedCacheCapacity": "Effective in-memory cache capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
       "pagedCacheMemoryIgnored": "Cache TTL does not apply while In-Memory Paged Cache is on. Cache Memory Limit / Cache Memory % caps its L1 use of Apple unified memory; Max Cache Blocks and Block Size cap token capacity.",
-      "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens"
+      "blockDiskCapacity": "Effective SSD block-index capacity: {{blockSize}} tokens/block x {{usableBlocks}} usable blocks ({{maxBlocks}} configured; 1 reserved) = {{tokens}} tokens",
+      "lowRamPagedCacheWarning": "Low memory detected ({{totalGB}} GB). The in-RAM paged KV cache shares Apple unified memory with the model's weights, so on machines this size it often costs more than it saves — measured within ~2% of SSD-only. Recommended: turn In-Memory Paged Cache (RAM) OFF below and keep Block Disk Cache (SSD / L2) on. Nothing is disabled automatically; this is a recommendation only."
     },
     "create": {
       "title": "Create Session",

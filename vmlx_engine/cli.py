@@ -841,7 +841,66 @@ def _cache_stack_summary_lines(
         lines.append(
             f"Block Disk Cache (SSD / L2): max={args.block_disk_cache_max_gb}GB"
         )
+    lines.extend(_low_ram_cache_advice_lines(args))
     return lines
+
+
+#: Machines at or below this get the SSD-only cache suggestion. Macs ship
+#: 16/18/24/32/36GB below this line and 48GB+ above it. Tunable for support
+#: cases via VMLX_LOW_RAM_ADVISORY_GB; it only moves ADVICE.
+_LOW_RAM_ADVISORY_GB = 36
+
+
+def _low_ram_cache_advice_lines(args) -> list[str]:
+    """Suggest SSD-only caching on small-memory Macs. ADVICE, never a limit.
+
+    The in-RAM paged KV mirror (L1) competes with model weights for the same
+    unified memory. On a 16-32GB Mac that trade is usually a loss: the SSD
+    block cache (L2) gives most of the reuse benefit without taking memory the
+    model needs.
+
+    This function only ever returns text. It does not disable the paged cache,
+    does not change any argument, and does not refuse to start — a guess about
+    memory must never acquire veto power over the user's configuration. If RAM
+    cannot be detected we say nothing at all, because a failed detection must
+    not turn into a user-facing warning either.
+    """
+    if not getattr(args, "use_paged_cache", False):
+        return []  # already SSD-only; nothing to suggest
+    try:
+        threshold_gb = int(
+            os.environ.get("VMLX_LOW_RAM_ADVISORY_GB", _LOW_RAM_ADVISORY_GB)
+        )
+    except ValueError:
+        threshold_gb = _LOW_RAM_ADVISORY_GB
+    if threshold_gb <= 0:
+        return []
+    try:
+        import psutil
+
+        total_gb = psutil.virtual_memory().total / (1024**3)
+    except Exception:  # noqa: BLE001 - detection is best-effort by design
+        return []
+    if total_gb <= 0 or total_gb > threshold_gb:
+        return []
+    suggestion = [
+        f"NOTE: {total_gb:.0f}GB of system memory detected. The in-RAM paged "
+        "KV cache (L1) shares unified memory with the model's weights, so on "
+        "machines this size it often costs more than it saves.",
+        "      Consider SSD-only caching: pass --no-paged-cache (or turn the "
+        "in-RAM GPU cache off in Session Settings) and leave the Block Disk "
+        "Cache (SSD / L2) enabled.",
+    ]
+    if not getattr(args, "enable_block_disk_cache", False):
+        suggestion.append(
+            "      The Block Disk Cache (L2) is currently OFF — enable it with "
+            "--enable-block-disk-cache so prefixes still survive."
+        )
+    suggestion.append(
+        "      This is a suggestion only. Nothing has been disabled or "
+        "changed, and the current configuration will run as requested."
+    )
+    return suggestion
 
 
 def _env_int(name: str, default: int, legacy_name: str | None = None) -> int:

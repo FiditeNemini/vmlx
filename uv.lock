@@ -8354,7 +8354,7 @@ wheels = [
 
 [[package]]
 name = "vmlx"
-version = "1.6.34"
+version = "1.6.35"
 source = { editable = "." }
 dependencies = [
     { name = "dflash" },

@@ -8730,6 +8730,26 @@ class MLLMBatchGenerator:
                             token_list,
                             cache_extra_keys=_cache_extra_keys,
                         )
+                        if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
+                            # Dump the ACTUAL engine token stream, because an
+                            # offline re-render of the same conversation
+                            # produces a different media-placeholder count and
+                            # will point at the wrong divergence boundary.
+                            _tl = list(token_list)
+                            logger.info(
+                                "mm-restore-debug TOKENS req=%s n=%d "
+                                "head=%s tail=%s",
+                                req.request_id, len(_tl), _tl[:8], _tl[-8:],
+                            )
+                            logger.info(
+                                "mm-restore-debug FETCHED req=%s block_table=%s "
+                                "num_tokens=%s prompt_tokens=%d media_allowed=%s",
+                                req.request_id,
+                                "None" if block_table is None else "present",
+                                getattr(block_table, "num_tokens", None),
+                                len(token_list),
+                                _media_cache_allowed,
+                            )
                         _paged_disk_hit = False
                         try:
                             _paged_disk_hits_after = int(
@@ -8805,6 +8825,14 @@ class MLLMBatchGenerator:
                                             else False
                                         ),
                                     )
+                                    if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
+                                        logger.info(
+                                            "mm-restore-debug SSM-EXACT req=%s asked_N=%s "
+                                            "hit=%s (store writes at prompt_len, this asks "
+                                            "block-aligned)",
+                                            req.request_id, _fetch_num,
+                                            _entry is not None,
+                                        )
                                     if _entry is None:
                                         ssm_states = None
                                     else:
@@ -8856,6 +8884,15 @@ class MLLMBatchGenerator:
                                                 ]
                                             )
 
+                                        if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
+                                            logger.info(
+                                                "mm-restore-debug SSM-RESUME req=%s max_len=%s "
+                                                "checkpoint=%s",
+                                                req.request_id, int(_fetch_num or 0),
+                                                "None" if _missed_ck is None
+                                                else "len=%s complete=%s" % (
+                                                    _missed_ck[0], _missed_ck[2]),
+                                            )
                                         if _enable_resume and _missed_ck is not None:
                                             _ck_len, _ck_states, _ck_complete = _missed_ck
                                             if not _ck_complete:

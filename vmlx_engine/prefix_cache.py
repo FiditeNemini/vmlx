@@ -3043,24 +3043,57 @@ class BlockAwarePrefixCache:
                 disk_store=_disk_store,
                 validation_payload_cache=_validation_payload_cache,
             ):
-                _reject_table = BlockTable(
-                    request_id=request_id,
-                    block_ids=[cb.block_id for cb in cached_blocks],
-                    num_tokens=sum(
-                        getattr(cb, "token_count", 0) for cb in cached_blocks
-                    ),
+                _rot_anchor = self._normalize_rotating_candidate(
+                    cached_blocks,
+                    target_tokens=num_cached,
+                    disk_store=_disk_store,
+                    validation_payload_cache=_validation_payload_cache,
                 )
-                self.paged_cache.release_request_refs(_reject_table)
-                logger.info(
-                    "Ignoring mixed-SWA paged prefix candidate for %s at %d "
-                    "tokens: the matched boundary has rotating_kv_pending "
-                    "markers instead of an exact RotatingKV checkpoint. "
-                    "Prefilling cleanly before recording any hit credit.",
-                    request_id,
-                    num_cached,
-                )
-                self._misses += 1
-                return None, tokens
+                if _rot_anchor is not None:
+                    _kept_rot, _rot_tokens = _rot_anchor
+                    _dropped_rot = cached_blocks[len(_kept_rot):]
+                    if _dropped_rot:
+                        self.paged_cache.release_request_refs(
+                            BlockTable(
+                                request_id=request_id,
+                                block_ids=[b.block_id for b in _dropped_rot],
+                                num_tokens=sum(
+                                    int(getattr(b, "token_count", 0) or 0)
+                                    for b in _dropped_rot
+                                ),
+                            )
+                        )
+                    logger.info(
+                        "Trimming mixed-SWA paged prefix for %s from %d to %d "
+                        "tokens: the matched boundary carried rotating_kv_pending "
+                        "markers, so the candidate is normalized to its newest "
+                        "exact RotatingKV anchor instead of going cold.",
+                        request_id,
+                        num_cached,
+                        _rot_tokens,
+                    )
+                    cached_blocks = _kept_rot
+                    num_cached = int(_rot_tokens)
+                else:
+                    _reject_table = BlockTable(
+                        request_id=request_id,
+                        block_ids=[cb.block_id for cb in cached_blocks],
+                        num_tokens=sum(
+                            getattr(cb, "token_count", 0) for cb in cached_blocks
+                        ),
+                    )
+                    self.paged_cache.release_request_refs(_reject_table)
+                    logger.info(
+                        "Ignoring mixed-SWA paged prefix candidate for %s at %d "
+                        "tokens: the matched boundary has rotating_kv_pending "
+                        "markers instead of an exact RotatingKV checkpoint, and "
+                        "no earlier block in the chain carries one either. "
+                        "Prefilling cleanly before recording any hit credit.",
+                        request_id,
+                        num_cached,
+                    )
+                    self._misses += 1
+                    return None, tokens
 
             if self._dsv4_l2_chain_missing_terminal_state(
                 cached_blocks,
@@ -3216,16 +3249,53 @@ class BlockAwarePrefixCache:
                 disk_store=_disk_store,
                 validation_payload_cache=_validation_payload_cache,
             ):
-                self.paged_cache.release_request_refs(pinned_table)
-                logger.info(
-                    "Ignoring mixed-SWA prefix-index candidate for %s at %d "
-                    "tokens: the matched boundary has no exact RotatingKV "
-                    "checkpoint.",
-                    request_id,
-                    pinned_table.num_tokens,
+                # SAME normalization as the paged lane above. A fix applied to
+                # only one of these two lanes is inert in the other -- that has
+                # been the failure mode here repeatedly, so both walk back to
+                # the newest exact anchor before giving up.
+                _rot_anchor = self._normalize_rotating_candidate(
+                    matched_blocks,
+                    target_tokens=pinned_table.num_tokens,
+                    disk_store=_disk_store,
+                    validation_payload_cache=_validation_payload_cache,
                 )
-                self._misses += 1
-                return None, tokens
+                if _rot_anchor is not None:
+                    _kept_rot, _rot_tokens = _rot_anchor
+                    _dropped_rot = matched_blocks[len(_kept_rot):]
+                    if _dropped_rot:
+                        self.paged_cache.release_request_refs(
+                            BlockTable(
+                                request_id=request_id,
+                                block_ids=[b.block_id for b in _dropped_rot],
+                                num_tokens=sum(
+                                    int(getattr(b, "token_count", 0) or 0)
+                                    for b in _dropped_rot
+                                ),
+                            )
+                        )
+                    logger.info(
+                        "Trimming mixed-SWA prefix-index candidate for %s from "
+                        "%d to %d tokens: normalized to its newest exact "
+                        "RotatingKV anchor instead of going cold.",
+                        request_id,
+                        pinned_table.num_tokens,
+                        _rot_tokens,
+                    )
+                    matched_blocks = _kept_rot
+                    pinned_table.block_ids = [b.block_id for b in _kept_rot]
+                    pinned_table.num_tokens = int(_rot_tokens)
+                    pinned_table.checkpoint_tokens = int(_rot_tokens)
+                else:
+                    self.paged_cache.release_request_refs(pinned_table)
+                    logger.info(
+                        "Ignoring mixed-SWA prefix-index candidate for %s at %d "
+                        "tokens: the matched boundary has no exact RotatingKV "
+                        "checkpoint, and no earlier block in the chain has one.",
+                        request_id,
+                        pinned_table.num_tokens,
+                    )
+                    self._misses += 1
+                    return None, tokens
             if self._dsv4_l2_chain_missing_terminal_state(
                 matched_blocks,
                 _disk_store,
@@ -3553,6 +3623,57 @@ class BlockAwarePrefixCache:
                 if len(entry) > 2 and entry[2] is not None:
                     saw_terminal = True
         return saw_zaya and not saw_terminal
+
+    @staticmethod
+    def _normalize_rotating_candidate(
+        cached_blocks: List[Any],
+        *,
+        target_tokens: int,
+        disk_store: Optional[Any] = None,
+        validation_payload_cache: Optional[Dict[int, Any]] = None,
+    ) -> Optional[Tuple[List[Any], int]]:
+        """Trim a mixed-SWA candidate back to its newest exact RotatingKV anchor.
+
+        The store keeps exact ``rotating_kv`` records only for a stored prompt's
+        terminal cluster (its last two full-block boundaries plus the terminal
+        record) -- older boundaries are deliberately ``rotating_kv_pending``,
+        because materialising a full SWA window per page would cost a max-size
+        ring for every block. Extending that fan-out is not an option either:
+        ``_rotating_previous_block_window`` can only rebuild boundaries that are
+        still inside the live ring's concat overhang, so far ones fail the
+        retained-history checks no matter how large a budget is allowed.
+
+        A multi-turn follow-up therefore matches FAR from any terminal and lands
+        on a pending marker, and the whole candidate is discarded -- going cold
+        even though earlier turns left exact anchors in the very same chain.
+
+        Walking back to the newest anchor recovers the shared history at zero
+        storage cost. Mirrors ``_normalize_dsv4_delta_candidate``, which solves
+        the identical problem for DSV4 delta chains.
+
+        Returns ``(kept_blocks, anchor_tokens)`` or ``None`` when no prefix of
+        the candidate ends on a reconstructable boundary.
+        """
+        if not cached_blocks or int(target_tokens or 0) <= 0:
+            return None
+        counts = [
+            int(getattr(block, "token_count", 0) or 0) for block in cached_blocks
+        ]
+        # Longest first, and never the full candidate: the caller only reaches
+        # here because the full candidate already failed the terminal check.
+        for end in range(len(cached_blocks) - 1, 0, -1):
+            anchor_tokens = sum(counts[:end])
+            if anchor_tokens <= 0:
+                break
+            prefix = cached_blocks[:end]
+            if not BlockAwarePrefixCache._rotating_l2_chain_missing_terminal_state(
+                prefix,
+                target_tokens=anchor_tokens,
+                disk_store=disk_store,
+                validation_payload_cache=validation_payload_cache,
+            ):
+                return prefix, anchor_tokens
+        return None
 
     @staticmethod
     def _rotating_l2_chain_missing_terminal_state(

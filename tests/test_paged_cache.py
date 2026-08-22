@@ -1748,6 +1748,213 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    @pytest.mark.parametrize("read_len", [320, 300, 301, 255, 193])
+    def test_rotating_pending_boundary_walks_back_to_an_earlier_anchor(
+        self,
+        tmp_path,
+        read_len,
+    ):
+        """A pending boundary must trim to the newest exact anchor, not go cold.
+
+        The store keeps exact ``rotating_kv`` records only for a stored
+        prompt's terminal cluster; older boundaries are deliberately
+        ``rotating_kv_pending``.  A multi-turn follow-up therefore matches FAR
+        from any terminal, lands on a pending marker, and used to discard the
+        WHOLE candidate -- going cold even though an earlier turn left an exact
+        anchor in the very same chain.
+
+        Real shape reproduced here: turn 1 stores 192 tokens (exact anchor at
+        192), turn 2 stores 384 (192 is now interior), then a follow-up matches
+        past 192.  Read lengths deliberately include values that are NOT
+        multiples of the 64-token block size -- an aligned-only matrix hides
+        this whole class of defect by construction.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def mixed_snapshot(offset):
+            full = mx.arange(offset, dtype=mx.float32).reshape(1, 1, offset, 1)
+            rotating = mx.arange(
+                max(0, offset - 128),
+                offset,
+                dtype=mx.float32,
+            ).reshape(1, 1, min(offset, 128), 1)
+            return [
+                {
+                    "class_name": "KVCache",
+                    "state": (full, full + 1000),
+                    "meta_state": (),
+                }
+                for _ in range(12)
+            ] + [
+                {
+                    "class_name": "RotatingKVCache",
+                    "state": (rotating, rotating + 1000),
+                    "meta_state": (0, 128, offset, min(offset, 128)),
+                }
+                for _ in range(36)
+            ]
+
+        cache_dir = tmp_path / "rotating-anchor-walk"
+        tokens = list(range(384))
+        store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.05,
+            expected_num_layers=48,
+        )
+        manager = PagedCacheManager(
+            block_size=64,
+            max_blocks=32,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        writer = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        assert writer.store_cache("turn1", tokens[:192], mixed_snapshot(192))
+        assert writer.store_cache("turn2", tokens, mixed_snapshot(384))
+        store.shutdown()
+
+        restarted_store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.05,
+            expected_num_layers=48,
+        )
+        restarted_manager = PagedCacheManager(
+            block_size=64,
+            max_blocks=32,
+            disk_store=restarted_store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_manager,
+        )
+        try:
+            hit, remaining = restarted.fetch_cache("reader", tokens[:read_len])
+            assert hit is not None, (
+                "pending boundary went cold instead of trimming back to the "
+                "exact 192-token anchor left by turn 1"
+            )
+            assert hit.num_tokens == 192
+            assert len(remaining) == read_len - 192
+            assert remaining == tokens[192:read_len]
+            assert restarted.get_stats()["tokens_saved"] == 192
+        finally:
+            restarted_store.shutdown()
+
+    def test_rotating_pending_boundary_with_no_anchor_still_goes_cold(
+        self,
+        tmp_path,
+    ):
+        """The walk must not invent an anchor where the chain has none.
+
+        Same construction WITHOUT the earlier short store, so every boundary
+        below the terminal is pending.  Trimming to a boundary that cannot be
+        reconstructed would restore a wrong SWA window and yield
+        plausible-but-wrong output, which is far worse than a clean re-prefill.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        def mixed_snapshot(offset):
+            full = mx.arange(offset, dtype=mx.float32).reshape(1, 1, offset, 1)
+            rotating = mx.arange(
+                max(0, offset - 128),
+                offset,
+                dtype=mx.float32,
+            ).reshape(1, 1, min(offset, 128), 1)
+            return [
+                {
+                    "class_name": "KVCache",
+                    "state": (full, full + 1000),
+                    "meta_state": (),
+                }
+                for _ in range(12)
+            ] + [
+                {
+                    "class_name": "RotatingKVCache",
+                    "state": (rotating, rotating + 1000),
+                    "meta_state": (0, 128, offset, min(offset, 128)),
+                }
+                for _ in range(36)
+            ]
+
+        cache_dir = tmp_path / "rotating-anchor-walk-none"
+        tokens = list(range(384))
+        store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.05,
+            expected_num_layers=48,
+        )
+        manager = PagedCacheManager(
+            block_size=64,
+            max_blocks=32,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        writer = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        assert writer.store_cache("only", tokens, mixed_snapshot(384))
+        store.shutdown()
+
+        restarted_store = BlockDiskStore(
+            cache_dir=str(cache_dir),
+            max_size_gb=0.05,
+            expected_num_layers=48,
+        )
+        restarted_manager = PagedCacheManager(
+            block_size=64,
+            max_blocks=32,
+            disk_store=restarted_store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        restarted = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=restarted_manager,
+        )
+        try:
+            hit, remaining = restarted.fetch_cache("reader", tokens[:192])
+            assert hit is None
+            assert remaining == tokens[:192]
+            assert restarted.get_stats()["misses"] == 1
+            assert restarted.get_stats()["tokens_saved"] == 0
+        finally:
+            restarted_store.shutdown()
+
+    def test_both_fetch_lanes_normalize_rotating_candidates(self):
+        """Both fetch lanes must call the anchor walk.
+
+        A fix applied to one of the two lanes and not the other is the single
+        most repeated failure in this cache: the paged chain-hash lane and the
+        prefix-index lane are separate code paths that both reach the mixed-SWA
+        terminal guard.  Pin structurally, because the prefix-index lane needs
+        a terminal-PARTIAL match to be selected and is not reachable from the
+        same fixture as the paged lane.
+        """
+        import inspect
+
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        source = inspect.getsource(BlockAwarePrefixCache.fetch_cache)
+        guard_sites = source.count("_rotating_l2_chain_missing_terminal_state(")
+        walk_sites = source.count("_normalize_rotating_candidate(")
+        assert guard_sites == 2, (
+            "expected exactly two mixed-SWA terminal guards (paged lane + "
+            f"prefix-index lane), found {guard_sites}"
+        )
+        assert walk_sites == guard_sites, (
+            f"{guard_sites} terminal guards but only {walk_sites} anchor "
+            "walks -- one lane still goes cold instead of trimming"
+        )
+
     def test_extending_partial_prefix_realigns_durable_block_chain(self):
         """An extended partial tail must be replaced at block boundaries."""
         from vmlx_engine.paged_cache import PagedCacheManager

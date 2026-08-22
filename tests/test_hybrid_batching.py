@@ -647,6 +647,64 @@ class TestHybridPagedSSMReuse:
         assert "base_token_count=" in source
 
 
+class TestNativeMtpVersusExternalDrafter:
+    """An external drafter and native MTP must never run together."""
+
+    def _args(self, **over):
+        from types import SimpleNamespace
+
+        base = dict(
+            speculative_model=None,
+            disable_native_mtp=False,
+            native_mtp_depth=3,
+            native_mtp_sampling_policy=None,
+        )
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def test_external_drafter_disables_native_mtp(self):
+        """Selecting a draft model must switch the bundle's MTP heads off.
+
+        Running both is two speculative decoders bidding for the same decode
+        step. Observed live before this guard: the same code prompt measured
+        31.6, 44.5 and 45.3 t/s back to back with a DFlash2 drafter and native
+        MTP depth 3 both on the command line.
+        """
+        import inspect
+
+        from vmlx_engine import cli
+
+        source = inspect.getsource(cli)
+        guard = source.index("Native MTP disabled: an external speculative model")
+        assert guard > 0
+        window = source[max(0, guard - 1200) : guard + 400]
+        assert "args.disable_native_mtp = True" in window
+        assert "args.native_mtp_depth = None" in window
+
+    def test_disabling_mtp_clears_a_leftover_depth_env(self):
+        """A disabled runtime must not be revivable by stale env state."""
+        import inspect
+
+        from vmlx_engine import cli
+
+        source = inspect.getsource(cli)
+        idx = source.index('os.environ["VMLINUX_NATIVE_MTP"] = "0"')
+        window = source[idx : idx + 500]
+        assert 'os.environ.pop("VMLINUX_NATIVE_MTP_DEPTH", None)' in window
+        assert 'os.environ.pop("VMLX_NATIVE_MTP_DEPTH", None)' in window
+
+    def test_explicit_disable_is_not_overridden_by_the_guard(self):
+        """--disable-native-mtp already off must not re-enter the guard."""
+        import inspect
+
+        from vmlx_engine import cli
+
+        source = inspect.getsource(cli)
+        idx = source.index('if getattr(args, "speculative_model", None) and not getattr(')
+        window = source[idx : idx + 200]
+        assert '"disable_native_mtp", False' in window
+
+
 class TestMLLMCacheStatsCompleteness:
     """Tests for MLLM cache stats including hits/misses/hit_rate."""
 

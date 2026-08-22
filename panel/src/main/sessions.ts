@@ -4874,6 +4874,21 @@ export class SessionManager extends EventEmitter {
       const mode = (config as any).nativeMtpMode || 'auto'
       if (mode === 'off') {
         args.push('--disable-native-mtp')
+      } else if (compatibleExternalSpeculative) {
+        // An external drafter and the bundle's own MTP heads are two
+        // speculative decoders bidding for the same decode step. Shipping both
+        // is what made decode rates jump around on identical requests -- the
+        // same code prompt measured 31.6, 44.5 and 45.3 t/s back to back with
+        // a DFlash2 drafter and native MTP depth 3 both on the command line.
+        // The drafter is the explicit per-session choice, so it wins, and MTP
+        // is turned off LOUDLY rather than left to resolve its own depth from
+        // the bundle underneath it.
+        args.push('--disable-native-mtp')
+        console.warn(
+          `[SESSION] Native MTP disabled because an external speculative ` +
+            `model is selected (${externalSpeculativeModel}). The two cannot ` +
+            `share a decode step.`,
+        )
       } else {
         const configuredDepth = (config as any).nativeMtpDepthOverride === true
           ? (config as any).nativeMtpDepth

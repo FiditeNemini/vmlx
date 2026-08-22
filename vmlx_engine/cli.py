@@ -1528,8 +1528,33 @@ def serve_command(args):
             sys.exit(1)
         server._default_repetition_penalty = args.default_repetition_penalty
 
+    # An external draft model and the bundle's own MTP heads are two
+    # speculative decoders competing for the same decode step. Running both
+    # gives neither a clean measurement and produces wildly variable decode
+    # rates on identical requests -- observed live: the same code prompt at
+    # 31.6, 44.5 and 45.3 t/s back to back with a DFlash2 drafter and native
+    # MTP depth 3 both active. The external drafter wins because it is the
+    # explicit, per-session choice; native MTP is a bundle property that would
+    # otherwise switch itself on silently underneath it.
+    if getattr(args, "speculative_model", None) and not getattr(
+        args, "disable_native_mtp", False
+    ):
+        args.disable_native_mtp = True
+        args.native_mtp_depth = None
+        logger.info(
+            "Native MTP disabled: an external speculative model is in use "
+            "(%s). The two cannot share a decode step, so the explicitly "
+            "selected drafter wins. Drop --speculative-model to use the "
+            "bundle's own MTP heads instead.",
+            args.speculative_model,
+        )
+
     if getattr(args, "disable_native_mtp", False):
         os.environ["VMLINUX_NATIVE_MTP"] = "0"
+        # Clear any depth an earlier arg or a stale env left behind, so a
+        # disabled runtime cannot be revived by leftover state.
+        os.environ.pop("VMLINUX_NATIVE_MTP_DEPTH", None)
+        os.environ.pop("VMLX_NATIVE_MTP_DEPTH", None)
     if getattr(args, "native_mtp_depth", None) is not None:
         if args.native_mtp_depth < 1 or args.native_mtp_depth > 3:
             print(f"Error: --native-mtp-depth must be between 1 and 3, got {args.native_mtp_depth}")

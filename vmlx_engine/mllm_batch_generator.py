@@ -8946,8 +8946,45 @@ class MLLMBatchGenerator:
                                             # aligned_len contract (a 1-token version of this
                                             # caused the v1.3.77 think-loop). Accept the resume
                                             # ONLY on exact alignment; otherwise full prefill.
+                                            _delta_states = None
                                             if (
                                                 trimmed is not None
+                                                and trimmed.num_tokens > 0
+                                                and int(trimmed.num_tokens) != int(_ck_len or 0)
+                                            ):
+                                                # Try advancing the companion UP
+                                                # to the hit boundary before
+                                                # discarding a hit over an
+                                                # alignment that only the trim
+                                                # actually requires.
+                                                _delta_states = (
+                                                    self._derive_hybrid_companion_delta(
+                                                        req,
+                                                        token_list,
+                                                        int(_fetch_num or 0),
+                                                        int(_ck_len or 0),
+                                                        block_table,
+                                                    )
+                                                )
+                                                if _delta_states:
+                                                    ssm_states = _delta_states
+                                                    remaining = token_list[
+                                                        int(_fetch_num or 0):
+                                                    ]
+                                                    self._adjust_paged_hit_credit(
+                                                        req.request_id,
+                                                        int(_fetch_num or 0),
+                                                    )
+                                                    logger.info(
+                                                        f"vmlx#91 DELTA accepted for "
+                                                        f"{req.request_id}: kept the full "
+                                                        f"{_fetch_num}-token KV hit, companion "
+                                                        f"advanced from {_ck_len}. Prefill "
+                                                        f"tail: {len(remaining)} tokens"
+                                                    )
+                                            if (
+                                                not _delta_states
+                                                and trimmed is not None
                                                 and trimmed.num_tokens > 0
                                                 and int(trimmed.num_tokens) != int(_ck_len or 0)
                                             ):
@@ -12073,6 +12110,108 @@ class MLLMBatchGenerator:
     def has_pending(self) -> bool:
         """Check if there are pending or active requests."""
         return bool(self.unprocessed_requests or self.active_batch)
+
+    def _derive_hybrid_companion_delta(
+        self,
+        req: Any,
+        token_list: List[int],
+        fetch_num: int,
+        ck_len: int,
+        block_table: Any,
+    ) -> Optional[List[Any]]:
+        """Advance companion state from a checkpoint to the KV hit boundary.
+
+        The RESUME path needs a BLOCK-ALIGNED checkpoint because it trims the
+        KV back to it, and SSM at an arbitrary length paired with KV floored to
+        a block boundary re-feeds the gap through layers that already absorbed
+        it. Companion stores land on gpl-stripped prompt boundaries, so they are
+        almost never multiples of the block size, and the whole hit was being
+        thrown away over the difference.
+
+        Measured on Qwen3.8 at 51k context: a 51,328-token KV hit was discarded
+        because the only companion sat at 51,297 -- 31 tokens away -- costing a
+        138.9s full re-prefill where the neighbouring turns took 4-6s.
+
+        Alignment is irrelevant here because this does the opposite of RESUME:
+        the KV hit is kept whole and only the recurrent state is advanced up to
+        it, so both describe ``fetch_num`` once the derive finishes. Returns the
+        companion states, or None to fall back to the existing full prefill.
+        """
+        if not getattr(self, "_is_hybrid", False):
+            return None
+        fetch_num = int(fetch_num or 0)
+        ck_len = int(ck_len or 0)
+        if not (0 < ck_len < fetch_num) or block_table is None:
+            return None
+        if not self._hybrid_kv_positions:
+            return None
+        try:
+            from .utils.cache_extent import cache_offset
+        except Exception:
+            return None
+        try:
+            reconstructed = self.block_aware_cache.reconstruct_cache(block_table)
+        except Exception as exc:
+            logger.debug("Companion delta: reconstruct failed: %s", exc)
+            return None
+        if not reconstructed:
+            return None
+
+        sliced: List[Any] = []
+        for layer in reconstructed:
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            if keys is None or values is None:
+                return None
+            # OFFSET is the token-count authority. Restored buffers are
+            # zero-padded up to the cache step, so keys.shape routinely exceeds
+            # the logical length; slicing off the shape is the mistake that
+            # silently emptied dots3 answers.
+            if int(cache_offset(layer) or 0) < ck_len:
+                return None
+            seq_axis = 1 if keys.ndim == 3 else 2
+            if int(keys.shape[seq_axis]) < ck_len:
+                return None
+            try:
+                clone = type(layer)()
+            except Exception:
+                # Needs constructor arguments, so it is a typed or windowed
+                # cache and is not position-sliceable.
+                return None
+            if seq_axis == 1:
+                clone.keys = keys[:, :ck_len, :]
+                clone.values = values[:, :ck_len, :]
+            else:
+                clone.keys = keys[..., :ck_len, :]
+                clone.values = values[..., :ck_len, :]
+            clone.offset = ck_len
+            sliced.append(clone)
+
+        logger.info(
+            "vmlx#91 DELTA for %s: keeping the %d-token KV hit and advancing "
+            "the companion %d tokens from its checkpoint at %d, instead of "
+            "discarding the hit for a full prefill.",
+            getattr(req, "request_id", "?"),
+            fetch_num,
+            fetch_num - ck_len,
+            ck_len,
+        )
+        try:
+            derived = self._prefill_for_clean_ssm(
+                list(token_list[:fetch_num]), sliced, ck_len
+            )
+        except Exception as exc:
+            logger.info(
+                "vmlx#91 DELTA failed for %s (%s); falling back to full prefill",
+                getattr(req, "request_id", "?"),
+                exc,
+            )
+            return None
+        if not derived:
+            return None
+        kv_set = set(self._hybrid_kv_positions or [])
+        states = [c for i, c in enumerate(derived) if i not in kv_set]
+        return states or None
 
     def _complete_hybrid_base_from_companion(
         self, base_cache: Any, token_ids: Any, base_token_count: int

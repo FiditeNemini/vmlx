@@ -9235,10 +9235,36 @@ class MLLMBatchGenerator:
                             # produces a different media-placeholder count and
                             # will point at the wrong divergence boundary.
                             _tl = list(token_list)
+                            # Count the media placeholders too. If the SAME
+                            # image expands to a different number of tokens
+                            # between two turns of one conversation, every
+                            # position after the first placeholder shifts and
+                            # no block hash can ever match again -- which
+                            # looks exactly like "the cache is broken" while
+                            # the cache is working perfectly on a prompt that
+                            # genuinely is not the same prompt.
+                            try:
+                                _media_ids = self._media_placeholder_token_ids()
+                            except Exception:
+                                _media_ids = set()
+                            _media_count = (
+                                sum(1 for _t in _tl if _t in _media_ids)
+                                if _media_ids else 0
+                            )
+                            _first_media = next(
+                                (
+                                    _i
+                                    for _i, _t in enumerate(_tl)
+                                    if _t in _media_ids
+                                ),
+                                -1,
+                            ) if _media_ids else -1
                             logger.info(
                                 "mm-restore-debug TOKENS req=%s n=%d "
+                                "media_tokens=%d first_media_at=%d "
                                 "head=%s tail=%s",
-                                req.request_id, len(_tl), _tl[:8], _tl[-8:],
+                                req.request_id, len(_tl), _media_count,
+                                _first_media, _tl[:8], _tl[-8:],
                             )
                             # Segment fingerprints. head/tail cannot show WHERE
                             # two prompts stop agreeing, and that is the only

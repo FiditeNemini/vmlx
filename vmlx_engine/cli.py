@@ -1351,9 +1351,18 @@ def serve_command(args):
             os.environ["VMLX_DISABLE_TQ_KV"] = "1"
         else:
             os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
+        # Word this so it cannot be misread as "the cache is quantized". The
+        # CACHE -- everything written to the SSD block store -- is full
+        # precision for every family. TurboQuant applies only to the live
+        # working KV held in unified memory for the request being generated,
+        # which is not cache and is never persisted. Reading an earlier
+        # "KV cache auto mode: TurboQuant enabled" line cost a whole
+        # investigation before the on-disk dtypes settled it (F16 keys/values,
+        # zero scale/bias tensors).
         logger.info(
-            "KV cache auto mode: TurboQuant enabled for compatible models; "
-            "stored prefix cache quantization=%s%s",
+            "SSD prefix cache: FULL PRECISION (stored quantization=%s) for "
+            "every family. TurboQuant applies only to the live in-memory "
+            "working KV, which is never written to the cache.%s",
             args.kv_cache_quantization,
             # Gate on the RESOLVED value, not just the bundle shape:
             # VMLX_DEFAULT_KV_CACHE_QUANTIZATION can override the fallback, and
@@ -2799,22 +2808,19 @@ def bench_command(args):
     # also disables JANG-calibrated TurboQuant when the user passes
     # --kv-cache-quantization explicitly.
     if args.kv_cache_quantization is None:
+        # 2026-08-21: match serve_command exactly. serve stores FULL PRECISION
+        # for every family, so a bench that defaulted to q4 measured a codec
+        # production no longer uses -- and the whole point of benching is to
+        # predict what users will see. Same env override for diagnostics.
         args.kv_cache_quantization = os.environ.get(
-            "VMLX_DEFAULT_KV_CACHE_QUANTIZATION", "q4"
+            "VMLX_DEFAULT_KV_CACHE_QUANTIZATION", "none"
         )
         if args.kv_cache_quantization not in ("none", "q4", "q8"):
             print(
                 "Invalid VMLX_DEFAULT_KV_CACHE_QUANTIZATION="
-                f"{args.kv_cache_quantization!r}; using q4"
+                f"{args.kv_cache_quantization!r}; using none"
             )
-            # Same precedence as serve: a mixed-SWA bundle benchmarked with a
-            # lossy stored codec measures a configuration production will not
-            # use, and exercises the answer-corrupting path serve now avoids.
-            args.kv_cache_quantization = _stored_kvq_fallback(
-                _bundle_has_mixed_swa_layout(getattr(args, "model", None)),
-                _bundle_declares_mxtq_jangtq(getattr(args, "model", None))
-                or _bundle_is_jang_affine(getattr(args, "model", None)),
-            )
+            args.kv_cache_quantization = "none"
         args.kv_cache_quantization_explicit = False
         os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
     else:

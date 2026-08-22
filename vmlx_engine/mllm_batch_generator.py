@@ -3126,6 +3126,10 @@ class MLLMNativeMTPStats:
     verify_emits: int = 0
     drafted_tokens: int = 0
     accepted_tokens: int = 0
+    # Cycles where the confidence gate stopped the draft chain early. Reported
+    # so a threshold that never fires -- or fires on every cycle -- is visible
+    # rather than something to infer from the throughput.
+    margin_truncated_cycles: int = 0
     verify_ms: float = 0.0
     sample_ms: float = 0.0
     draft_ms: float = 0.0
@@ -3352,6 +3356,51 @@ def _native_mtp_sampler_accepts_logits(sampler: Callable[[mx.array], mx.array]) 
     return bool(getattr(sampler, "_vmlx_accepts_logits", False))
 
 
+def _native_mtp_draft_margin_threshold() -> float:
+    """Logit gap below which the draft chain stops extending. 0 disables.
+
+    Speculative decoding pays for a draft whether or not it is accepted. On
+    high-entropy positions -- reasoning and prose, where measured acceptance
+    falls to 44-58% against 85-98% on code and counting -- deep chains spend
+    head forwards on tokens that are about to be rejected. Measured on
+    Qwen3.8-27B at depth 3: code with thinking off runs 51.5 t/s, the same
+    prompt with thinking on runs 28.1. The difference is entropy, not the
+    engine.
+
+    The head's own top-1-minus-top-2 logit gap is a cheap confidence proxy for
+    that, available from logits already computed. It costs one reduction over
+    the vocabulary next to a head forward that is a full transformer layer plus
+    a 5120x248320 projection.
+    """
+    raw = os.environ.get("VMLINUX_NATIVE_MTP_DRAFT_MARGIN") or os.environ.get(
+        "VMLX_NATIVE_MTP_DRAFT_MARGIN"
+    )
+    if raw is None:
+        return _NATIVE_MTP_DRAFT_MARGIN_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring invalid native-MTP draft margin %r; using %.2f",
+            raw,
+            _NATIVE_MTP_DRAFT_MARGIN_DEFAULT,
+        )
+        return _NATIVE_MTP_DRAFT_MARGIN_DEFAULT
+    return max(0.0, value)
+
+
+def _native_mtp_top2_margin(logits_2d: mx.array) -> mx.array:
+    """Top-1 minus top-2 logit for the final position, as a 0-d array.
+
+    Deliberately NOT a full sort. The sampler's full-vocabulary sort was
+    measured at roughly 30% of decode on wide-vocabulary bundles, so this takes
+    a k=2 partial reduction instead.
+    """
+    row = logits_2d[-1] if logits_2d.ndim > 1 else logits_2d
+    top2 = mx.topk(row, 2)
+    return mx.abs(top2[..., 0] - top2[..., 1])
+
+
 def _native_mtp_sample_one(
     logits_2d: mx.array,
     sampler: Callable[[mx.array], mx.array],
@@ -3513,6 +3562,11 @@ _NATIVE_MTP_FUSED_SYNC = os.environ.get(
 # 391 -> 0, output byte-correct), and it changes MTP's economics - a rejected
 # cycle costs the same as an accepted one, so the profitability floor drops
 # from ~0.68 to roughly the draft cost (~6%).
+# Default OFF until measured per family. A gate that trims the chain on a
+# model whose head is confident everywhere would cost a sync per cycle and buy
+# nothing, so this ships inert and is switched on by measurement.
+_NATIVE_MTP_DRAFT_MARGIN_DEFAULT = 0.0
+
 _NATIVE_MTP_SKIP_REPLAY = os.environ.get(
     "VMLX_MTP_SKIP_REPLAY", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
@@ -4246,7 +4300,7 @@ def _native_mtp_log_stats(
     rate = (stats.accepted_tokens / stats.drafted_tokens * 100.0) if stats.drafted_tokens else 0.0
     logger.info(
         "MLLM MTP[%s] finish=%s cycles=%d accepted=%d/%d (%.1f%%) "
-        "emits[init=%d,draft=%d,bonus=%d,verify=%d]",
+        "emits[init=%d,draft=%d,bonus=%d,verify=%d] margin_truncated=%d",
         request_id,
         reason,
         stats.cycles,
@@ -4257,6 +4311,7 @@ def _native_mtp_log_stats(
         stats.draft_emits,
         stats.bonus_emits,
         stats.verify_emits,
+        stats.margin_truncated_cycles,
     )
     if any(stats.drafted_by_depth) or any(stats.accepted_by_depth):
         logger.info(
@@ -11004,8 +11059,14 @@ class MLLMBatchGenerator:
         mtp_cache: List[Any],
         *,
         return_hidden: bool = False,
+        return_margin: bool = False,
     ) -> Tuple[mx.array, mx.array, Optional[mx.array]]:
-        """Run one MTP-head prediction and return sampled token/logprobs/hidden."""
+        """Run one MTP-head prediction and return sampled token/logprobs/hidden.
+
+        With ``return_margin`` the tuple gains the head's top-1-minus-top-2
+        logit gap for this position, so the caller can decide whether
+        extending the draft chain is worth another forward.
+        """
         sampler = self._make_request_sampler(request)
         try:
             mtp_output = self.language_model.mtp_forward(
@@ -11026,7 +11087,10 @@ class MLLMBatchGenerator:
             mtp_logits, mtp_hidden = mtp_output.logits, mtp_output.hidden_states
         else:
             mtp_logits, mtp_hidden = mtp_output, None
-        draft_tok, draft_lp = _native_mtp_sample_one(mtp_logits[:, -1, :], sampler)
+        final_logits = mtp_logits[:, -1, :]
+        draft_tok, draft_lp = _native_mtp_sample_one(final_logits, sampler)
+        if return_margin:
+            return draft_tok, draft_lp, mtp_hidden, _native_mtp_top2_margin(final_logits)
         return draft_tok, draft_lp, mtp_hidden
 
     def _draft_native_mtp_tokens(
@@ -11043,16 +11107,32 @@ class MLLMBatchGenerator:
         draft_lps: List[mx.array] = []
         current_hidden = hidden_state
         current_token = start_token
-        for level in range(max(1, int(depth))):
+        total_depth = max(1, int(depth))
+        # Confidence gate. Read the head's top-2 gap ONCE, after the first
+        # draft, and stop there when it is small. Deciding per level would cost
+        # a device sync per level; deciding once costs a single sync to avoid
+        # up to two further head forwards plus a wider verify, which is the
+        # trade that actually pays on a low-acceptance position.
+        margin_threshold = (
+            _native_mtp_draft_margin_threshold() if total_depth > 1 else 0.0
+        )
+        for level in range(total_depth):
             if stats is not None:
                 stats.mtp_forwards += 1
-            draft_tok, draft_lp, mtp_hidden = self._step_native_mtp_head(
+            want_margin = margin_threshold > 0.0 and level == 0
+            step = self._step_native_mtp_head(
                 request,
                 current_hidden,
                 current_token,
                 mtp_cache,
                 return_hidden=level + 1 < depth,
+                return_margin=want_margin,
             )
+            if want_margin:
+                draft_tok, draft_lp, mtp_hidden, margin = step
+            else:
+                draft_tok, draft_lp, mtp_hidden = step
+                margin = None
             drafts.append(draft_tok)
             draft_lps.append(draft_lp)
             current_token = draft_tok
@@ -11060,6 +11140,18 @@ class MLLMBatchGenerator:
                 current_hidden = current_hidden
             else:
                 current_hidden = mtp_hidden[:, -1:, :]
+            if margin is not None:
+                try:
+                    gap = float(margin.item())
+                except Exception:
+                    gap = None
+                if gap is not None and gap < margin_threshold:
+                    # Never drop below one draft: the caller's verify path
+                    # expects a chain, and a single draft still wins whenever
+                    # the head is right.
+                    if stats is not None:
+                        stats.margin_truncated_cycles += 1
+                    break
         _native_mtp_async_eval(*drafts)
         if stats is not None:
             _native_mtp_trace_stop(stats, "draft_ms", trace_t0)

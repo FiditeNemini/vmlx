@@ -526,11 +526,12 @@ class SSMCompanionCache:
         # investigation -- the two key lines side by side settle it in one read.
         if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
             logger.info(
-                "SSM key: N=%d hash=%s extra=%s tokens[:4]=%s tokens[-4:]=%s",
+                "SSM key: N=%d of len=%d hash=%s extra=%s "
+                "tokens[N-4:N]=%s",
                 num_tokens,
+                len(token_ids),
                 h[:12],
                 bool(cache_extra_keys),
-                token_ids[:4],
                 token_ids[max(0, num_tokens - 4):num_tokens],
             )
         elif logger.isEnabledFor(logging.DEBUG):

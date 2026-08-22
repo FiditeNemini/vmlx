@@ -8984,34 +8984,23 @@ class MLLMBatchGenerator:
                                                 self._adjust_paged_hit_credit(req.request_id, 0)
                                                 self.block_aware_cache.release_cache(req.request_id)
                                                 continue
-                                            # Trim the block_table down to block-aligned
-                                            # <= _ck_len so KV + SSM stay aligned.
                                             _requested_kv_tokens = int(
                                                 getattr(block_table, "num_tokens", 0) or 0
                                             )
-                                            trimmed = self.block_aware_cache.trim_block_table(
-                                                req.request_id, _ck_len
-                                            )
-                                            # KV block tables trim to WHOLE blocks while SSM
-                                            # state is cumulative at exactly _ck_len. Pairing
-                                            # KV@aligned<_ck_len with SSM@_ck_len re-feeds the
-                                            # gap tokens through layers whose state already
-                                            # absorbed them -- the double-application class the
-                                            # LLM scheduler refuses via its checkpoint_len ==
-                                            # aligned_len contract (a 1-token version of this
-                                            # caused the v1.3.77 think-loop). Accept the resume
-                                            # ONLY on exact alignment; otherwise full prefill.
+                                            # Advancing the companion UP to the hit
+                                            # boundary has to happen BEFORE the trim.
+                                            # The seed needs attention KV covering
+                                            # [0, checkpoint), and the checkpoint sits
+                                            # ABOVE the block-aligned floor the trim
+                                            # drops to -- reconstructing afterwards
+                                            # yields KV that stops short of the very
+                                            # state it has to pair with, and the
+                                            # offset guard then correctly refuses it.
+                                            # Measured live: checkpoint 38467, trim to
+                                            # 38464, full hit 38528. Only the untrimmed
+                                            # hit can be sliced to 38467.
                                             _delta_states = None
-                                            if (
-                                                trimmed is not None
-                                                and trimmed.num_tokens > 0
-                                                and int(trimmed.num_tokens) != int(_ck_len or 0)
-                                            ):
-                                                # Try advancing the companion UP
-                                                # to the hit boundary before
-                                                # discarding a hit over an
-                                                # alignment that only the trim
-                                                # actually requires.
+                                            if int(_ck_len or 0) < _requested_kv_tokens:
                                                 _delta_states = (
                                                     self._derive_hybrid_companion_delta(
                                                         req,
@@ -9021,22 +9010,35 @@ class MLLMBatchGenerator:
                                                         block_table,
                                                     )
                                                 )
-                                                if _delta_states:
-                                                    ssm_states = _delta_states
-                                                    remaining = token_list[
-                                                        int(_fetch_num or 0):
-                                                    ]
-                                                    self._adjust_paged_hit_credit(
-                                                        req.request_id,
-                                                        int(_fetch_num or 0),
-                                                    )
-                                                    logger.info(
-                                                        f"vmlx#91 DELTA accepted for "
-                                                        f"{req.request_id}: kept the full "
-                                                        f"{_fetch_num}-token KV hit, companion "
-                                                        f"advanced from {_ck_len}. Prefill "
-                                                        f"tail: {len(remaining)} tokens"
-                                                    )
+                                            if _delta_states:
+                                                ssm_states = _delta_states
+                                                remaining = token_list[int(_fetch_num or 0):]
+                                                self._adjust_paged_hit_credit(
+                                                    req.request_id, int(_fetch_num or 0)
+                                                )
+                                                logger.info(
+                                                    f"vmlx#91 DELTA accepted for "
+                                                    f"{req.request_id}: kept the full "
+                                                    f"{_fetch_num}-token KV hit, companion "
+                                                    f"advanced from {_ck_len}. Prefill "
+                                                    f"tail: {len(remaining)} tokens"
+                                                )
+                                                trimmed = None
+                                            else:
+                                                # Trim the block_table down to block-aligned
+                                                # <= _ck_len so KV + SSM stay aligned.
+                                                trimmed = self.block_aware_cache.trim_block_table(
+                                                    req.request_id, _ck_len
+                                                )
+                                            # KV block tables trim to WHOLE blocks while SSM
+                                            # state is cumulative at exactly _ck_len. Pairing
+                                            # KV@aligned<_ck_len with SSM@_ck_len re-feeds the
+                                            # gap tokens through layers whose state already
+                                            # absorbed them -- the double-application class the
+                                            # LLM scheduler refuses via its checkpoint_len ==
+                                            # aligned_len contract (a 1-token version of this
+                                            # caused the v1.3.77 think-loop). Accept the resume
+                                            # ONLY on exact alignment; otherwise full prefill.
                                             if (
                                                 not _delta_states
                                                 and trimmed is not None

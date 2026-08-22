@@ -632,12 +632,19 @@ class TestHybridPagedSSMReuse:
         import inspect
 
         source = inspect.getsource(Scheduler._finalize_hybrid_paged_cache_on_worker)
-        derive_idx = source.index("_prefill_for_prompt_only_cache(boundary_tokens)")
+        derive_idx = source.index("_prefill_for_prompt_only_cache(")
         miss_idx = source.index("hybrid paged MISS")
 
         assert derive_idx < miss_idx
         assert "synchronously derived SSM companion" in source
         assert "self._ssm_state_cache.store(" in source
+        # The derive must be SEEDED from the newest companion checkpoint, not
+        # re-run from token zero. An unseeded derive costs as much forward
+        # compute as a cold prefill, which makes the paged hit it is attached
+        # to worth nothing while usage still reports the full cached_tokens.
+        seed_idx = source.index("_seed_cache_from_ssm_checkpoint(")
+        assert seed_idx < derive_idx
+        assert "base_token_count=" in source
 
 
 class TestMLLMCacheStatsCompleteness:

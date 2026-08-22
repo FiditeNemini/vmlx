@@ -2721,6 +2721,8 @@ class Scheduler:
         prompt_tokens: List[int],
         should_stop: Optional[Callable[[], bool]] = None,
         capture_dsv4_deltas: bool = False,
+        base_cache: Optional[List[Any]] = None,
+        base_token_count: int = 0,
     ) -> Optional[List[Any]]:
         """
         Run a prefill-only forward pass to get cache state for the given tokens.
@@ -2747,7 +2749,31 @@ class Scheduler:
         try:
             import mlx.core as mx
 
-            fresh_cache = self.model.make_cache()
+            # Resuming from an existing checkpoint turns a whole-prefix derive
+            # into a delta. The recurrent state advances the same way it does
+            # across an ordinary chunk boundary, so there is no
+            # contiguous-from-zero requirement -- the RESUME path already
+            # generates from checkpoint states, and chunked SSM re-derive is
+            # default ON off the back of a byte-exactness A/B.
+            _resume_at = 0
+            if base_cache is not None and int(base_token_count or 0) > 0:
+                if int(base_token_count) >= len(prompt_tokens):
+                    # Nothing to advance; the caller already has this boundary.
+                    return list(base_cache)
+                if capture_dsv4_deltas:
+                    # The DSV4 capture loop stamps anchors from a cache it owns
+                    # from token zero. Resuming would leave the delta chain
+                    # without its parent records, so decline rather than store
+                    # something that cannot be composed later.
+                    logger.debug(
+                        "Ignoring base cache for a DSV4 delta-capture derive; "
+                        "anchors must be stamped from a full pass."
+                    )
+                else:
+                    fresh_cache = base_cache
+                    _resume_at = int(base_token_count)
+            if _resume_at == 0:
+                fresh_cache = self.model.make_cache()
 
             if capture_dsv4_deltas:
                 # Shadow re-key chains are later extended from native
@@ -2822,7 +2848,7 @@ class Scheduler:
                         or 2048
                     ),
                 )
-            for start in range(0, len(prompt_tokens), chunk_size):
+            for start in range(_resume_at, len(prompt_tokens), chunk_size):
                 if should_stop is not None and should_stop():
                     del fresh_cache
                     clear_mlx_memory_cache(log=logger)
@@ -7174,6 +7200,134 @@ class Scheduler:
                 disk_store.shutdown()
                 logger.info("Block disk cache shutdown complete")
 
+    def _seed_cache_from_ssm_checkpoint(
+        self,
+        request: Request,
+        *,
+        reconstructed: List[Any],
+        ssm_tokens: List[int],
+        fetch_num: int,
+    ) -> Tuple[Optional[List[Any]], int]:
+        """Build a cache positioned at the newest complete SSM checkpoint.
+
+        Returns ``(seed_cache, checkpoint_len)``, or ``(None, 0)`` when no
+        usable checkpoint exists and the caller must derive from scratch.
+
+        Unlike the vmlx#91 RESUME ladder this deliberately accepts a checkpoint
+        at ANY length, aligned or not. RESUME has to trim the KV back to the
+        checkpoint, so a non-block-aligned one would leave SSM and KV
+        disagreeing about position; here the KV hit is left alone and only the
+        recurrent state is advanced, so alignment is irrelevant. That
+        distinction is the whole point -- companion stores land on gpl-stripped
+        prompt boundaries, which are essentially never multiples of 64, so the
+        aligned-only ladder misses them and falls through to a full re-derive.
+        """
+        if not reconstructed or int(fetch_num or 0) <= 0:
+            return None, 0
+        cache = self._ssm_state_cache
+        fetch_longest = getattr(cache, "fetch_longest_prefix", None)
+        if cache is None or not callable(fetch_longest):
+            return None, 0
+        try:
+            hit = fetch_longest(ssm_tokens, fetch_num)
+        except Exception:
+            return None, 0
+        if not hit:
+            return None, 0
+        try:
+            ck_len, ck_states, ck_complete = int(hit[0]), hit[1], bool(hit[2])
+        except Exception:
+            return None, 0
+        # An incomplete entry was stored after the generation-prompt suffix was
+        # processed; resuming from it would bake that contamination into every
+        # future exact hit at fetch_num.
+        if not ck_complete or not ck_states or not (0 < ck_len < fetch_num):
+            return None, 0
+
+        kv_positions = list(self._hybrid_kv_positions or [])
+        if not kv_positions or len(kv_positions) != len(reconstructed):
+            return None, 0
+
+        try:
+            import mlx.core as mx
+            from .utils.cache_extent import cache_offset
+        except Exception:
+            return None, 0
+
+        sliced: List[Any] = []
+        for layer in reconstructed:
+            keys = getattr(layer, "keys", None)
+            values = getattr(layer, "values", None)
+            if keys is None or values is None:
+                return None, 0
+            # OFFSET is the only token-count authority. Restored KV buffers are
+            # zero-padded up to the cache step, so keys.shape is routinely
+            # LARGER than the logical length -- reading the shape here is the
+            # exact mistake that silently emptied dots3 answers.
+            live = int(cache_offset(layer) or 0)
+            if live < ck_len:
+                return None, 0
+            seq_axis = 1 if keys.ndim == 3 else 2
+            if int(keys.shape[seq_axis]) < ck_len:
+                return None, 0
+            try:
+                clone = type(layer)()
+            except Exception:
+                # Only plain append-only KV can be sliced to an arbitrary
+                # position. Anything needing constructor arguments is a typed
+                # or windowed cache whose state is not position-sliceable.
+                return None, 0
+            if seq_axis == 1:
+                clone.keys = keys[:, :ck_len, :]
+                clone.values = values[:, :ck_len, :]
+            else:
+                clone.keys = keys[..., :ck_len, :]
+                clone.values = values[..., :ck_len, :]
+            clone.offset = ck_len
+            sliced.append(clone)
+
+        seed = self._compose_hybrid_cache_from_parts(sliced, ck_states)
+        if seed is None:
+            return None, 0
+        mx.eval([c.keys for c in sliced] + [c.values for c in sliced])
+        logger.info(
+            "Request %s: deriving SSM companion for %d tokens as a %d-token "
+            "DELTA from a checkpoint at %d, instead of re-running the whole "
+            "prefix.",
+            request.request_id,
+            fetch_num,
+            fetch_num - ck_len,
+            ck_len,
+        )
+        return seed, ck_len
+
+    def _compose_hybrid_cache_from_parts(
+        self,
+        attention_caches: List[Any],
+        ssm_states: List[Any],
+    ) -> Optional[List[Any]]:
+        """Interleave attention caches and SSM states into a full layer list."""
+        kv_positions = list(self._hybrid_kv_positions or [])
+        total = int(getattr(self, "_hybrid_num_layers", 0) or 0)
+        if not kv_positions or total <= 0:
+            return None
+        if len(attention_caches) != len(kv_positions):
+            return None
+        kv_set = set(kv_positions)
+        ssm_slots = [i for i in range(total) if i not in kv_set]
+        if len(ssm_slots) != len(ssm_states):
+            return None
+        composed: List[Any] = [None] * total
+        for pos, layer in zip(kv_positions, attention_caches):
+            if not (0 <= int(pos) < total):
+                return None
+            composed[int(pos)] = layer
+        for pos, state in zip(ssm_slots, ssm_states):
+            composed[pos] = state
+        if any(c is None for c in composed):
+            return None
+        return composed
+
     def _finalize_hybrid_paged_cache_on_worker(
         self,
         request: Request,
@@ -7296,8 +7450,31 @@ class Scheduler:
 
         if not ssm_states and fetch_num > 0 and len(ssm_tokens) >= fetch_num:
             boundary_tokens = list(ssm_tokens[:fetch_num])
+            # Deriving the companion over the WHOLE prefix makes a cache HIT
+            # cost as much forward compute as a cold prefill: a 12k paged hit
+            # would re-run all ~12k tokens here and then still prefill the
+            # visible tail, while usage reports cached_tokens=12k. The hit
+            # saves nothing it claims to save.
+            #
+            # The RESUME ladder above already declined, but only because it
+            # needs a checkpoint that is BLOCK-ALIGNED -- it has to trim the KV
+            # back to the checkpoint, and SSM@ck with KV@floor64(ck)
+            # double-applies the gap. That alignment requirement does not apply
+            # here: this path advances the SSM state up to fetch_num and leaves
+            # the KV hit untouched, so ANY complete checkpoint below fetch_num
+            # is a valid starting point.
+            _seed_cache, _seed_len = self._seed_cache_from_ssm_checkpoint(
+                request,
+                reconstructed=reconstructed,
+                ssm_tokens=ssm_tokens,
+                fetch_num=fetch_num,
+            )
             try:
-                clean_cache = self._prefill_for_prompt_only_cache(boundary_tokens)
+                clean_cache = self._prefill_for_prompt_only_cache(
+                    boundary_tokens,
+                    base_cache=_seed_cache,
+                    base_token_count=_seed_len,
+                )
                 if clean_cache is not None:
                     kv_set = set(self._hybrid_kv_positions or [])
                     derived_states = []

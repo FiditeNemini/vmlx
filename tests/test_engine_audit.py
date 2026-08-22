@@ -13118,6 +13118,192 @@ class TestTurboQuantKVTelemetry:
         assert request.cached_tokens == 0
         assert request.remaining_tokens == request.prompt_token_ids
 
+    def test_llm_hybrid_partial_hit_derives_companion_as_a_delta(self):
+        """A partial KV hit must not re-run the whole prefix to get a companion.
+
+        When the exact companion misses and the block-ALIGNED resume ladder
+        also declines, the fallback used to derive over ``tokens[:fetch_num]``
+        from scratch. That makes a cache hit cost as much forward compute as a
+        cold prefill while ``cached_tokens`` still reports the full hit -- the
+        telemetry claims a saving that does not exist.
+
+        Any complete checkpoint below ``fetch_num`` is a valid seed here,
+        aligned or not: unlike the resume ladder this path leaves the KV hit
+        untouched and only advances the recurrent state, so there is no
+        SSM-vs-KV position disagreement to avoid.
+
+        Numbers are deliberately awkward: prompt 703 (multiple of neither 64
+        nor 256), fetch_num 448 (a multiple of 64 but NOT of 256), checkpoint
+        at 300 (a multiple of neither -- the realistic case, since companion
+        stores land on gpl-stripped prompt boundaries).
+        """
+        mx = pytest.importorskip("mlx.core")
+        import vmlx_engine.scheduler as scheduler_mod
+
+        scheduler = scheduler_mod.Scheduler.__new__(scheduler_mod.Scheduler)
+        scheduler._is_hybrid = True
+        scheduler._uses_dsv4_cache = False
+        scheduler._uses_zaya_cache = False
+        scheduler._hybrid_kv_positions = [0, 2]
+        scheduler._hybrid_num_layers = 4
+        scheduler._kv_cache_bits = 0
+        scheduler._ssm_rederive_queue = []
+        scheduler._ssm_state_cache = SimpleNamespace(
+            fetch=lambda tokens, fetch_num: None,
+            fetch_longest_prefix=lambda tokens, max_len: (
+                (300, ["ssm-a", "ssm-b"], True) if max_len >= 300 else None
+            ),
+            store=lambda *a, **kw: None,
+            _store={},
+            max_entries=8,
+        )
+        scheduler.block_aware_cache = SimpleNamespace(
+            block_size=64,
+            trim_block_table=lambda request_id, n: None,
+            reconstruct_cache=lambda table: None,
+            detach_request=lambda request_id: None,
+        )
+        scheduler._fetch_block_aligned_ssm_checkpoint = (
+            lambda *a, **kw: None
+        )
+
+        seen = {}
+
+        def _derive(
+            tokens,
+            should_stop=None,
+            capture_dsv4_deltas=False,
+            base_cache=None,
+            base_token_count=0,
+        ):
+            seen["total"] = len(tokens)
+            seen["base"] = int(base_token_count or 0)
+            seen["seeded"] = base_cache is not None
+            return [
+                SimpleNamespace(),
+                SimpleNamespace(cache=[mx.zeros((1, 4))]),
+                SimpleNamespace(),
+                SimpleNamespace(cache=[mx.zeros((1, 4))]),
+            ]
+
+        scheduler._prefill_for_prompt_only_cache = _derive
+
+        class _KV:
+            def __init__(self):
+                self.keys = None
+                self.values = None
+                self.offset = 0
+
+        # Restored KV is zero-padded to the cache step: offset says 448 while
+        # the physical buffer is 512. Slicing off the SHAPE instead of the
+        # OFFSET is the mistake that silently emptied dots3 answers, so this
+        # fixture makes the two disagree on purpose.
+        reconstructed = []
+        for _ in range(2):
+            layer = _KV()
+            layer.keys = mx.zeros((1, 8, 512, 64))
+            layer.values = mx.zeros((1, 8, 512, 64))
+            layer.offset = 448
+            reconstructed.append(layer)
+
+        request = SimpleNamespace(
+            request_id="req-delta",
+            block_table=SimpleNamespace(num_tokens=448, block_ids=list(range(7))),
+            prompt_token_ids=list(range(703)),
+            _hybrid_ssm_fetch_tokens=list(range(703)),
+            remaining_tokens=list(range(448, 703)),
+            cached_tokens=448,
+            shared_prefix_blocks=7,
+        )
+
+        try:
+            scheduler._finalize_hybrid_paged_cache_on_worker(
+                request, reconstructed
+            )
+        except AttributeError:
+            # Downstream cache expansion needs a real model; the contract
+            # under test is what the derive was asked to compute.
+            pass
+
+        assert seen.get("seeded") is True, "derive ran without a seed cache"
+        assert seen["base"] == 300, (
+            "derive started from zero instead of the 300-token checkpoint"
+        )
+        assert seen["total"] == 448
+        assert seen["total"] - seen["base"] == 148, (
+            "expected a 148-token delta, not a whole-prefix re-run"
+        )
+
+    def test_hybrid_delta_seed_reads_offset_not_buffer_shape(self):
+        """The seed length must come from offset, never from keys.shape."""
+        mx = pytest.importorskip("mlx.core")
+        import vmlx_engine.scheduler as scheduler_mod
+
+        scheduler = scheduler_mod.Scheduler.__new__(scheduler_mod.Scheduler)
+        scheduler._hybrid_kv_positions = [0, 2]
+        scheduler._hybrid_num_layers = 4
+        scheduler._ssm_state_cache = SimpleNamespace(
+            fetch_longest_prefix=lambda tokens, max_len: (
+                (300, ["ssm-a", "ssm-b"], True)
+            ),
+        )
+
+        class _KV:
+            def __init__(self):
+                self.keys = None
+                self.values = None
+                self.offset = 0
+
+        reconstructed = []
+        for _ in range(2):
+            layer = _KV()
+            layer.keys = mx.zeros((1, 8, 512, 64))
+            layer.values = mx.zeros((1, 8, 512, 64))
+            layer.offset = 448
+            reconstructed.append(layer)
+
+        seed, ck_len = scheduler._seed_cache_from_ssm_checkpoint(
+            SimpleNamespace(request_id="r"),
+            reconstructed=reconstructed,
+            ssm_tokens=list(range(703)),
+            fetch_num=448,
+        )
+        assert ck_len == 300
+        assert seed is not None and len(seed) == 4
+        for pos in (0, 2):
+            assert int(seed[pos].offset) == 300
+            assert int(seed[pos].keys.shape[2]) == 300, (
+                "sliced from the padded buffer extent instead of the offset"
+            )
+
+    def test_hybrid_delta_seed_declines_an_incomplete_checkpoint(self):
+        """gpl-contaminated state must never seed a companion derive."""
+        mx = pytest.importorskip("mlx.core")
+        import vmlx_engine.scheduler as scheduler_mod
+
+        scheduler = scheduler_mod.Scheduler.__new__(scheduler_mod.Scheduler)
+        scheduler._hybrid_kv_positions = [0, 2]
+        scheduler._hybrid_num_layers = 4
+        scheduler._ssm_state_cache = SimpleNamespace(
+            fetch_longest_prefix=lambda tokens, max_len: (
+                (300, ["ssm-a", "ssm-b"], False)
+            ),
+        )
+
+        class _KV:
+            def __init__(self):
+                self.keys = mx.zeros((1, 8, 512, 64))
+                self.values = mx.zeros((1, 8, 512, 64))
+                self.offset = 448
+
+        seed, ck_len = scheduler._seed_cache_from_ssm_checkpoint(
+            SimpleNamespace(request_id="r"),
+            reconstructed=[_KV(), _KV()],
+            ssm_tokens=list(range(703)),
+            fetch_num=448,
+        )
+        assert seed is None and ck_len == 0
+
     @pytest.mark.asyncio
     async def test_cache_stats_endpoint_projects_cache_reuse_skip_telemetry(
         self, monkeypatch

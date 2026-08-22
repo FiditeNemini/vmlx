@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The media clean boundary must be BLOCK-ALIGNED, or nothing ever pairs.
+
+Measured live on Qwen3.8-27B VL (M5 Max, SSD-only tier, block_size 64), before
+this fix:
+
+    turn 2 stores: KV 7607 tokens, SSM companion at 7607
+    turn 3 fetches: paged cache hit 117 blocks = 7488 tokens
+    turn 3 asks for a companion at 7488 -> nothing (it is at 7607)
+    "VLM prefix cache MISS: 7488 KV blocks found but no SSM companion
+     state - full prefill required"
+
+The paged chain can only ever be MATCHED on block boundaries, so a companion
+stored at an unaligned N-1 is invisible to every future turn: a found
+7,488-token hit was discarded on turn 3, again on turn 4, and TTFT climbed
+35s -> 60s -> 85s until the prompt tripped a hard prefill guard and the
+conversation was dead.
+
+Giving up at most block_size-1 tokens of stored prefix buys all of that back.
+"""
+
+import inspect
+
+from vmlx_engine.mllm_batch_generator import (
+    MLLMBatchGenerator,
+    MLLMBatchResponse,
+)
+
+
+class _Gen:
+    """Bare generator exposing only the alignment helper under test."""
+
+    def __init__(self, block_size=64):
+        self.gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        from types import SimpleNamespace
+
+        self.gen.block_aware_cache = SimpleNamespace(block_size=block_size)
+
+    def aligned(self, boundary):
+        return self.gen._ssm_block_aligned_boundary(boundary)
+
+
+def test_the_helper_floors_to_a_block_and_steps_back_when_exact():
+    g = _Gen(64)
+    # 7607 is the real N-1 from the live failure. 7607 // 64 = 118 -> 7552.
+    assert g.aligned(7607) == 7552
+    # An EXACTLY aligned boundary steps back one block, so a future request
+    # that diverges inside the final block still finds a checkpoint.
+    assert g.aligned(7552) == 7488
+    # Nothing usable below one block.
+    assert g.aligned(64) == 0
+    assert g.aligned(10) == 0
+
+
+def test_capture_uses_the_aligned_length_not_n_minus_1():
+    src = inspect.getsource(MLLMBatchGenerator._process_prompts)
+    assert "_clean_media_len = self._ssm_block_aligned_boundary(" in src, (
+        "the clean media capture is back on the unaligned N-1 boundary"
+    )
+    assert "_media_tokens[:_clean_media_len]" in src, (
+        "the prefill still runs over N-1 rather than the aligned prefix"
+    )
+    assert "req._media_clean_prefix_len = _clean_media_len" in src
+
+
+def test_the_companion_store_uses_the_same_length_as_the_capture():
+    src = inspect.getsource(MLLMBatchGenerator._process_prompts)
+    idx = src.index("stored clean media SSM")
+    window = src[max(0, idx - 1400) : idx]
+    assert '_media_clean_prefix_len' in window, (
+        "the companion is stored at a different length than the cache "
+        "actually covers — it would claim state it does not have"
+    )
+
+
+def test_the_response_carries_a_separate_clean_store_key():
+    """usage.prompt_tokens is derived from prompt_token_ids.
+
+    The scheduler sets request.num_prompt_tokens = len(prompt_token_ids), and
+    that becomes the user-visible usage.prompt_tokens. Shortening it to the
+    aligned length would misreport every media request, so the aligned key
+    travels on its own field.
+    """
+    assert "clean_store_token_ids" in MLLMBatchResponse.__dataclass_fields__
+    assert (
+        MLLMBatchResponse.__dataclass_fields__["clean_store_token_ids"].default
+        is None
+    )
+
+    src = inspect.getsource(MLLMBatchGenerator._next)
+    assert "clean_store_token_ids=_clean_store_tokens" in src
+    assert "_orig[: _clean_len + 1]" in src, (
+        "the store key must be aligned+1 so the N-1 payload contract holds"
+    )
+
+
+def test_the_scheduler_prefers_the_clean_store_key():
+    import vmlx_engine.mllm_scheduler as sched
+
+    src = inspect.getsource(sched)
+    occurrences = src.count('"clean_store_token_ids", None)')
+    assert occurrences >= 2, (
+        "both _extracted_tokens assignment sites must prefer the aligned key; "
+        "fixing one of two is the default failure mode here (found %d)"
+        % occurrences
+    )

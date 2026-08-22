@@ -4989,6 +4989,13 @@ class MLLMBatchResponse:
     # scheduler uses this list to suppress the echoed prefix from the output
     # stream. Empty when no gen-prefix was stripped.
     gen_prefix_tokens: Optional[List[int]] = None
+    # Token list the CLEAN-STORE lane must be keyed by, when it differs
+    # from prompt_token_ids. The media clean boundary is deliberately
+    # block-aligned so the KV chain and the SSM companion land on the
+    # SAME token count; prompt_token_ids cannot carry that, because the
+    # scheduler also derives usage.prompt_tokens from its length and
+    # shortening it would misreport the request to the user.
+    clean_store_token_ids: Optional[List[int]] = None
     # Optional human-readable error message attached when finish_reason="error".
     # Scheduler and server.py lift this into an HTTP error response so users
     # can see the actual mlx / mlx_vlm traceback instead of an empty 200.
@@ -10042,17 +10049,37 @@ class MLLMBatchGenerator:
                         and len(_media_tokens) > 1
                         and self._media_prefix_cache_allowed(req, _media_tokens)
                     ):
+                        # BLOCK-ALIGN the clean media boundary. Capturing at
+                        # N-1 is what made every media turn re-prefill from
+                        # scratch: the paged chain can only ever be MATCHED on
+                        # block boundaries, so a companion stored at 7607 is
+                        # invisible to the next turn's 7488-token block hit,
+                        # and the whole found hit gets discarded with "KV
+                        # blocks found but no SSM companion state". Measured
+                        # live on Qwen3.8 VL: 7,488 tokens found and thrown
+                        # away on turn 3, 7,488 again on turn 4, TTFT climbing
+                        # 35s -> 60s -> 85s until the prompt hit a hard guard
+                        # and the conversation died. Giving up <= block_size-1
+                        # tokens of stored prefix buys back all of it.
+                        _clean_media_len = self._ssm_block_aligned_boundary(
+                            len(_media_tokens) - 1
+                        )
+                        if _clean_media_len <= 0:
+                            _clean_media_len = len(_media_tokens) - 1
                         clean_media_cache = (
                             self._prefill_for_clean_media_prefix_cache(
-                                req, _media_tokens[:-1]
+                                req, _media_tokens[:_clean_media_len]
                             )
                         )
                         if clean_media_cache is not None:
                             req._media_clean_prefix_cache = clean_media_cache  # type: ignore[attr-defined]
+                            req._media_clean_prefix_len = _clean_media_len  # type: ignore[attr-defined]
                             logger.info(
                                 "MLLM media prefix cache: captured clean media "
-                                "N-1 boundary for %s (%d tokens) before tensor release",
+                                "boundary for %s (%d tokens, block-aligned from "
+                                "N-1=%d) before tensor release",
                                 req.request_id,
+                                _clean_media_len,
                                 len(_media_tokens) - 1,
                             )
                 except ValueError as ve:
@@ -10354,11 +10381,18 @@ class MLLMBatchGenerator:
                             getattr(req, "_original_token_ids", None)
                             or input_ids_list[i]
                         )
-                        prompt_len = (
-                            len(all_tokens) - 1
-                            if len(all_tokens) > 1
-                            else len(all_tokens)
+                        # Must be the SAME length the clean cache actually
+                        # covers, or the companion claims state it does not
+                        # have and the KV/SSM pair is off by up to a block.
+                        prompt_len = int(
+                            getattr(req, "_media_clean_prefix_len", 0) or 0
                         )
+                        if prompt_len <= 0:
+                            prompt_len = (
+                                len(all_tokens) - 1
+                                if len(all_tokens) > 1
+                                else len(all_tokens)
+                            )
                         if clean_ssm_layers and prompt_len > 0:
                             self._ssm_state_cache.store(
                                 all_tokens[:prompt_len],
@@ -12225,6 +12259,18 @@ class MLLMBatchGenerator:
                 # Do NOT TQ-compress here — the scheduler needs original float16
                 # for block extraction. TQ recompress happens on the fetch path.
                 captured_cache = getattr(req, "_media_clean_prefix_cache", None)
+                _clean_store_tokens = None
+                if captured_cache is not None:
+                    # The clean media cache covers a BLOCK-ALIGNED prefix, not
+                    # N-1, so the store must be keyed by that prefix + 1 (the
+                    # N-1 payload contract). prompt_token_ids stays full length
+                    # because usage.prompt_tokens is derived from it.
+                    _clean_len = int(
+                        getattr(req, "_media_clean_prefix_len", 0) or 0
+                    )
+                    _orig = getattr(req, "_original_token_ids", None) or []
+                    if 0 < _clean_len < len(_orig):
+                        _clean_store_tokens = list(_orig[: _clean_len + 1])
                 if captured_cache is None:
                     captured_cache = batch.extract_cache(i)
                 cache_fn = lambda c=captured_cache: c
@@ -12250,6 +12296,7 @@ class MLLMBatchGenerator:
                     ),
                     cache_extra_keys=getattr(req, '_cache_extra_keys', None),
                     gen_prefix_tokens=getattr(req, '_gen_prefix_tokens', None),
+                    clean_store_token_ids=_clean_store_tokens,
                 )
             )
 

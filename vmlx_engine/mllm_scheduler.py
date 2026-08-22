@@ -3081,8 +3081,13 @@ class MLLMScheduler:
             if finish_response is not None:
                 if getattr(finish_response, "prompt_cache", None) is not None:
                     request._extracted_cache = finish_response.prompt_cache
-                    request._extracted_tokens = getattr(
-                        finish_response, "prompt_token_ids", []
+                    # The media clean-store lane keys by a BLOCK-ALIGNED
+                    # prefix, which is shorter than prompt_token_ids; using the
+                    # full list here would store a payload under a key it does
+                    # not cover.
+                    request._extracted_tokens = (
+                        getattr(finish_response, "clean_store_token_ids", None)
+                        or getattr(finish_response, "prompt_token_ids", [])
                     )
                 else:
                     logger.info(
@@ -3278,7 +3283,10 @@ class MLLMScheduler:
             if finish_reason is not None:
                 if getattr(response, "prompt_cache", None) is not None:
                     request._extracted_cache = response.prompt_cache
-                    request._extracted_tokens = getattr(response, "prompt_token_ids", [])
+                    request._extracted_tokens = (
+                        getattr(response, "clean_store_token_ids", None)
+                        or getattr(response, "prompt_token_ids", [])
+                    )
                 else:
                     logger.info(
                         "VLM finish response for %s had no prompt_cache "

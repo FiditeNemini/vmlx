@@ -1078,11 +1078,19 @@ class TestIssueGuards:
             guard_enabled=True,
         )
 
-        assert decision.should_reject is True
+        assert decision.over_budget is True
         assert decision.predicted_attention_bytes > 8 * 1024**3
         assert "image prefill" in decision.detail
-        assert "cannot be chunked safely" in decision.detail
-        assert "VMLX_VLM_IMAGE_PREFILL_GUARD=0" in decision.detail
+        # The estimate REPORTS; it does not refuse. It used to raise, and the
+        # arithmetic behind it is a guess with veto power: heads x seq^2 x 2B
+        # assumes a fully materialised score matrix, and the "single-buffer
+        # limit" is 16% of the Metal working set, not a device limit. Measured
+        # on an M5 Max it refused a 33,913-token media prompt with 89.4GB
+        # free — and since a chat client re-sends the image every turn, that
+        # killed the conversation permanently.
+        assert "ESTIMATE" in decision.detail
+        assert "not enforced" in decision.detail
+        assert "rejected" not in decision.detail.lower()
 
     def test_vmlx156_image_prefill_guard_does_not_touch_text_only_path(self):
         from vmlx_engine.mllm_batch_generator import _vlm_image_prefill_budget
@@ -1098,7 +1106,7 @@ class TestIssueGuards:
             guard_enabled=True,
         )
 
-        assert decision.should_reject is False
+        assert decision.over_budget is False
 
     def test_vlm_image_prefill_default_single_buffer_guard_scales_on_high_memory(self, monkeypatch):
         monkeypatch.delenv("VMLX_VLM_IMAGE_PREFILL_BUFFER_GB", raising=False)
@@ -1127,7 +1135,7 @@ class TestIssueGuards:
             guard_enabled=True,
         )
 
-        assert decision.should_reject is False
+        assert decision.over_budget is False
 
     def test_vlm_image_prefill_explicit_single_buffer_guard_preserves_old_limit(self, monkeypatch):
         monkeypatch.setenv("VMLX_VLM_IMAGE_PREFILL_BUFFER_GB", "8")
@@ -1406,9 +1414,12 @@ class TestIssueGuards:
         monkeypatch.setenv("VMLX_VLM_IMAGE_PREFILL_GUARD", "1")
         monkeypatch.setenv("VMLX_VLM_IMAGE_PREFILL_BUFFER_GB", "8")
 
-        with pytest.raises(RuntimeError, match="VLM image prefill rejected"):
-            model._guard_simple_image_prefill("oversized image prompt", True)
-
+        # The SimpleEngine path delegates to the same budget helper as the
+        # batch path, so it inherits advise-not-refuse. What must be pinned is
+        # that a big image prompt goes THROUGH, not that it is blocked: this
+        # guard once made any VL chat unusable past ~17k media-expanded tokens
+        # while the machine had 89GB free.
+        model._guard_simple_image_prefill("oversized image prompt", True)
         model._guard_simple_image_prefill("oversized text-only prompt", False)
 
     def test_vmlx156_simple_mllm_guard_uses_media_expanded_input_ids(self, monkeypatch):
@@ -1449,12 +1460,15 @@ class TestIssueGuards:
         monkeypatch.setenv("VMLX_VLM_IMAGE_PREFILL_GUARD", "1")
         monkeypatch.setenv("VMLX_VLM_IMAGE_PREFILL_BUFFER_GB", "8")
 
-        with pytest.raises(RuntimeError, match="VLM image prefill rejected"):
-            model._guard_simple_image_prefill(
-                "prompt with one image placeholder",
-                True,
-                images=["/tmp/fake.png"],
-            )
+        # Must NOT raise: the budget only advises. What this pins is that the
+        # guard still budgets the PROCESSOR-EXPANDED prompt (24,000 tokens from
+        # one placeholder), because the number it reports has to be the real
+        # media-expanded length even though it no longer blocks anything.
+        model._guard_simple_image_prefill(
+            "prompt with one image placeholder",
+            True,
+            images=["/tmp/fake.png"],
+        )
 
     def test_mllm_temp_cleanup_ignores_closed_logging_stream(self, tmp_path, monkeypatch):
         """Atexit cleanup must not print logging errors after pytest closes streams."""

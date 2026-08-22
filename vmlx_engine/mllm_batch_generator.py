@@ -330,7 +330,7 @@ def _uses_ssm_companion_cache(
 
 @dataclass(frozen=True)
 class VLMImagePrefillBudgetDecision:
-    should_reject: bool
+    over_budget: bool
     predicted_attention_bytes: int
     active_memory_bytes: int
     max_working_set_bytes: int
@@ -339,6 +339,11 @@ class VLMImagePrefillBudgetDecision:
 
 @dataclass(frozen=True)
 class MiMoTightMemoryTextPrefillDecision:
+    # Named for what it does: this one genuinely refuses (PromptTooLongError).
+    # It is narrowly scoped to mimo_v2 under an active tight-memory drain and
+    # documents a Metal abort that kills the process before Python can catch
+    # it. The VLM image budget next door is the opposite: an estimate that
+    # only advises.
     should_reject: bool
     prompt_tokens: int
     generation_tokens: int
@@ -634,7 +639,7 @@ def _vlm_image_prefill_budget(
 
     if not guard_enabled or not has_images:
         return VLMImagePrefillBudgetDecision(
-            should_reject=False,
+            over_budget=False,
             predicted_attention_bytes=predicted,
             active_memory_bytes=active,
             max_working_set_bytes=max_ws,
@@ -650,7 +655,7 @@ def _vlm_image_prefill_budget(
 
     if not (exceeds_single_buffer or exceeds_working_set):
         return VLMImagePrefillBudgetDecision(
-            should_reject=False,
+            over_budget=False,
             predicted_attention_bytes=predicted,
             active_memory_bytes=active,
             max_working_set_bytes=max_ws,
@@ -711,19 +716,19 @@ def _vlm_image_prefill_budget(
     budget_line += "."
 
     return VLMImagePrefillBudgetDecision(
-        should_reject=True,
+        over_budget=True,
         predicted_attention_bytes=predicted,
         active_memory_bytes=active,
         max_working_set_bytes=max_ws,
         detail=(
-            "VLM image prefill rejected before Metal forward: "
+            "VLM image prefill is above the estimated attention budget: "
             + "; ".join(reasons)
             + "."
             + budget_line
-            + " Image prefill cannot be chunked safely because the VLM "
-            "wrapper needs the full media-expanded prompt. Reduce image "
-            "resolution/prompt length, use a smaller model, or set "
-            "VMLX_VLM_IMAGE_PREFILL_GUARD=0 to bypass this guard at OOM risk."
+            + " This is an ESTIMATE (heads x seq^2 x 2B assumes a fully "
+            "materialised score matrix, which a fused attention kernel does "
+            "not produce), so it is reported and not enforced. If the "
+            "allocation genuinely does not fit, Metal will say so."
         ),
     )
 
@@ -813,9 +818,25 @@ def _raise_if_image_prefill_exceeds_budget(
         guard_enabled=guard_enabled,
         image_token_count=image_token_count,
     )
-    if decision.should_reject:
-        logger.warning(decision.detail)
-        raise VLMImagePrefillBudgetError(decision.detail)
+    if decision.over_budget:
+        # ADVISE, NEVER REFUSE. This used to raise, and the arithmetic behind
+        # it is a guess with veto power: `heads * seq^2 * 2B` assumes a full
+        # head x seq x seq score matrix is materialised, which a fused
+        # attention kernel never does, and the "single-buffer limit" it is
+        # compared against is not a device limit at all -- it is 16% of the
+        # Metal working set. Measured on an M5 Max: a 33,913-token media
+        # prompt was refused against a "17.2GB" ceiling with 89.4GB free, and
+        # because a chat client re-sends the image every turn, that killed
+        # the conversation permanently from the first turn that crossed it.
+        #
+        # If a request genuinely does not fit, Metal and the allocator fail
+        # loudly on their own. Predicting that badly and blocking on the
+        # prediction is strictly worse than attempting the operation.
+        logger.warning(
+            "%s (PROCEEDING ANYWAY: this is an estimate, not a measurement, "
+            "and it may not refuse the request)",
+            decision.detail,
+        )
 
 
 def _infer_attention_heads_for_hybrid_oom_guard(

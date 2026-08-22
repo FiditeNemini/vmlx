@@ -44,7 +44,7 @@ class TestInverseBudget:
 class TestMessageIsActionable:
     def test_names_the_cost_model(self):
         d = _reject()
-        assert d.should_reject
+        assert d.over_budget
         assert "32 heads" in d.detail and "19,729 tokens" in d.detail
 
     def test_states_a_fitting_budget(self):
@@ -68,12 +68,20 @@ class TestMessageIsActionable:
 
     def test_working_set_reason_names_resident_and_limit(self):
         d = _reject(single_buffer_limit_bytes=0, active_memory_bytes=int(100 * GB))
-        assert d.should_reject
+        assert d.over_budget
         assert "already resident" in d.detail and "107.5GB" in d.detail
 
-    def test_still_explains_why_chunking_is_impossible(self):
-        assert "cannot be chunked safely" in _reject().detail
+    def test_reports_that_it_is_an_estimate_and_does_not_enforce(self):
+        detail = _reject().detail
+        assert "ESTIMATE" in detail
+        assert "not enforced" in detail
+
+    def test_never_uses_refusal_language(self):
+        """An advisory that reads like a refusal will be treated as one."""
+        detail = _reject().detail.lower()
+        for word in ("rejected", "cannot be chunked", "bypass this guard"):
+            assert word not in detail, "still reads as a refusal: %r" % word
 
     def test_passing_prompt_is_not_rejected(self):
         d = _reject(seq_len=2000)
-        assert not d.should_reject
+        assert not d.over_budget

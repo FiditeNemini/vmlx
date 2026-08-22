@@ -7687,7 +7687,20 @@ def _suppressed_tool_display_delta(
     streamed_display_text: str,
     request: ChatCompletionRequest | ResponsesRequest | None = None,
 ) -> str | None:
-    """Return the next visible delta while hiding suppressed native tool markup."""
+    """Return the next visible delta while hiding suppressed native tool markup.
+
+    Visual-grounding control tokens are stripped HERE as well as in
+    ``_visual_grounding_display_delta``. The two are alternatives in an
+    ``if _suppress_markup_display ... elif ...`` at every streaming call site,
+    so a family that suppresses tool markup (zaya_xml does) took this branch
+    and never reached the grounding stripper -- ZAYA-VL's
+    ``<|point_start|>tool<|point_end|>`` went out as visible assistant text.
+    Applying it first also keeps the tool-marker scan below from seeing
+    grounding spans it has no business interpreting.
+    """
+    accumulated_text = _strip_visual_grounding_markup_for_display(
+        accumulated_text
+    )
     cleaned = _clean_suppressed_tool_markup_for_display(accumulated_text, request)
     markup_identified = cleaned != accumulated_text
     if not markup_identified:

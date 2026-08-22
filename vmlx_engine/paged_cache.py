@@ -168,7 +168,21 @@ def compute_block_hash(
                 _update_sized(
                     b"A", bytes(f"{obj.dtype}|{tuple(obj.shape)}", "utf-8")
                 )
-                _update_sized(b"a", np.array(obj).tobytes())
+                # np.array() RAISES on bfloat16 under mlx >= 0.32 (the PEP-3118
+                # shim was removed): "'bfloat16' is not a valid PEP 3118 buffer
+                # format string". uv.lock pins 0.32.1, so a bf16 vision
+                # embedding reaching here would throw inside cache-key hashing
+                # rather than merely miss. Reinterpret the bits instead --
+                # numpy needs no bfloat16 support to hash bytes, and the dtype
+                # is already folded into the key on the line above, so this
+                # cannot collide with a genuine uint16 input.
+                hashable = obj
+                try:
+                    if "bfloat16" in str(obj.dtype):
+                        hashable = obj.view(mx.uint16)
+                except Exception:  # noqa: BLE001 - hashing must never crash
+                    hashable = obj
+                _update_sized(b"a", np.array(hashable).tobytes())
             elif isinstance(obj, dict):
                 hasher.update(b"D")
                 hasher.update(struct.pack("<Q", len(obj)))

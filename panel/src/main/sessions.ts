@@ -956,6 +956,19 @@ function applySsdFirstCacheDefaults(
     config.enableBlockDiskCache = true
     changed = true
   }
+  // A DELIBERATE unlimited must survive the move to percent. Shipped builds
+  // offered a GB slider whose "Unlimited" position stored 0, so an upgrading
+  // user may hold 0 on purpose. Dropping it and letting the 10% default apply
+  // would cap someone who explicitly asked for no cap — an invented limit.
+  // Percent 0 means unlimited too, so the intent translates exactly.
+  //
+  // Ordering matters: this must run BEFORE the percent default below, or the
+  // default overwrites the preserved intent.
+  if (config.blockDiskCacheMaxGb != null && Number(config.blockDiskCacheMaxGb) === 0) {
+    config.blockDiskCacheMaxPercent = 0
+    delete config.blockDiskCacheMaxGb
+    changed = true
+  }
   if (config.blockDiskCacheMaxPercent == null) {
     config.blockDiskCacheMaxPercent = DEFAULT_BLOCK_DISK_CACHE_PERCENT
     changed = true

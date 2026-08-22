@@ -110,6 +110,18 @@ describe('the launcher and the stored config agree', () => {
     expect(sessions).toContain('delete config.blockDiskCacheMaxGb')
   })
 
+  it('a deliberate GB=0 (Unlimited) is preserved as percent=0, not capped', () => {
+    // Shipped builds offered a GB slider whose Unlimited position stored 0.
+    // Silently turning that into the 10% default would cap a user who
+    // explicitly asked for no cap.
+    const idx = sessions.indexOf('function applySsdFirstCacheDefaults(')
+    const fn = sessions.slice(idx, sessions.indexOf('function applyCacheStackStartupDefaultMigration('))
+    expect(fn).toContain('config.blockDiskCacheMaxPercent = 0')
+    // ...and it must happen BEFORE the percent default, or the default wins.
+    expect(fn.indexOf('config.blockDiskCacheMaxPercent = 0'))
+      .toBeLessThan(fn.indexOf('config.blockDiskCacheMaxPercent = DEFAULT_BLOCK_DISK_CACHE_PERCENT'))
+  })
+
   it('changing the percent requires a restart, like every other launch flag', () => {
     const idx = sessions.indexOf('RESTART_REQUIRED_KEYS')
     const block = sessions.slice(idx, idx + 1200)

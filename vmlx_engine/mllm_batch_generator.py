@@ -123,6 +123,10 @@ from .errors import (
     VLMImagePrefillBudgetError,
 )
 from .vision_embedding_cache import VisionEmbeddingCache
+from .utils.prefix_hit import (
+    disk_prefix_hit_tail_and_cached_tokens as _shared_disk_prefix_hit,
+    prefix_hit_tail_and_cached_tokens as _shared_prefix_hit,
+)
 from .utils.memory_limits import (
     get_effective_metal_working_set_bytes,
     get_metal_ws_guard_threshold,
@@ -904,17 +908,12 @@ def _prefix_hit_tail_and_cached_tokens(
     remaining: List[int],
     gen_prompt_suffix: List[int],
 ) -> Tuple[List[int], int]:
-    """Return prefill tail + cached-token count for an N-1 VLM prefix hit."""
-    key_tokens = list(token_list or [])
-    cache_remaining = list(remaining or [])
-    suffix = list(gen_prompt_suffix or [])
-    if suffix and not cache_remaining and key_tokens:
-        cache_remaining = [key_tokens[-1]]
-    if not cache_remaining and key_tokens:
-        cached_tokens = max(len(key_tokens) - 1, 0)
-    else:
-        cached_tokens = max(len(key_tokens) - len(cache_remaining), 0)
-    return cache_remaining + suffix, cached_tokens
+    """Thin adapter over the shared N-1 prefix-hit arithmetic."""
+    return _shared_prefix_hit(
+        key_tokens=token_list,
+        remaining=remaining,
+        gen_prompt_suffix=gen_prompt_suffix,
+    )
 
 
 def _disk_prefix_hit_tail_and_cached_tokens(
@@ -923,25 +922,25 @@ def _disk_prefix_hit_tail_and_cached_tokens(
     matched_tokens: List[int],
     gen_prompt_suffix: List[int],
 ) -> Tuple[List[int], int]:
-    """Return prefill tail + cached count for disk L2 prefix hits.
+    """Thin adapter over the shared disk L2 partial-hit arithmetic.
 
-    Disk prompt L2 stores the clean prompt-boundary cache under the same token
-    key length it reports from ``fetch_longest_prefix``. The restored cache
-    offset is therefore ``len(matched_tokens)``. Re-feeding the last matched
-    token duplicates one position and corrupts path-sensitive mixed-SWA caches
-    such as Gemma4 12B. Only replay the unmatched tail plus generation prompt.
+    This used to be a private copy that reported ``cached=len(matched)`` and
+    dropped ``matched[-1]`` from the tail, on the stated premise that the MLLM
+    disk store "stores the clean prompt-boundary cache under the same token key
+    length it reports". That premise is false on BOTH MLLM store branches: the
+    plain VLM path truncates through ``_truncate_hybrid_cache`` (prompt_len-1)
+    and the mixed-SWA / ZAYA clean path re-prefills ``token_list[:prompt_len-1]``
+    -- and both then write under the FULL N-token key. So the last matched token
+    was never in the payload, was never re-fed, and never got KV: a warm
+    disk-prefix turn answered differently from the same turn cold. It also ate
+    the boundary-swap sentinel, silently serving the previous turn's thinking
+    mode. The text lane fixed this in 12ee1c8ee; this copy did not get the fix,
+    which is why there is no longer a copy.
     """
-    fetch_tokens = list(token_list or [])
-    matched = list(matched_tokens or [])
-    suffix = list(gen_prompt_suffix or [])
-    if matched:
-        tail = list(fetch_tokens[len(matched):]) + suffix
-        if tail:
-            return tail, len(matched)
-    return _prefix_hit_tail_and_cached_tokens(
-        token_list=matched or fetch_tokens,
-        remaining=[],
-        gen_prompt_suffix=suffix,
+    return _shared_disk_prefix_hit(
+        fetch_tokens=token_list,
+        matched_tokens=matched_tokens,
+        gen_prompt_suffix=gen_prompt_suffix,
     )
 
 
@@ -6759,14 +6758,18 @@ class MLLMBatchGenerator:
         """Return clean SSM checkpoint boundaries to capture during prefill."""
         if not self._is_hybrid:
             return []
-        # Media turns used to return NOTHING here, which is half of why a
-        # multimodal chat never reuses cache: the discard path records the
-        # exact boundary it needed (_ssm_required_checkpoint_tokens) and this
-        # is the only consumer that would honour it, so the requirement was
-        # re-recorded and re-ignored every turn and the conversation could
-        # never heal. Media turns now capture too -- but only within the
-        # prefix that precedes the first media placeholder, which is pure text
-        # and therefore safe to snapshot and to resume from.
+        # DEFENSE IN DEPTH, NOT THE MULTIMODAL REUSE FIX. Be precise about
+        # this, because the first version of this comment claimed otherwise:
+        # every one of this function's three call sites sits inside an
+        # `if not has_media_payload:` branch, and has_media_payload is
+        # `has_images or has_audio_payload`, so has_images is ALWAYS False
+        # here today. A turn carrying pixels takes the one-shot VLM forward
+        # and captures nothing, by design -- the vision encoder needs the
+        # whole sequence in a single pass. The media arm below therefore does
+        # not currently execute; it exists so that if a future call site ever
+        # does pass has_images=True, the capture is bounded to the pure-text
+        # prefix instead of silently snapshotting recurrent state that
+        # absorbed vision embeddings.
         media_limit = None
         if has_images:
             media_limit = self._media_safe_capture_limit(
@@ -8787,11 +8790,46 @@ class MLLMBatchGenerator:
             _media_cache_allowed = (
                 _media_context and self._media_prefix_cache_allowed(req)
             )
+            # Once an image enters a conversation, EVERY later text-only turn
+            # used to re-prefill the entire history, forever. The two halves of
+            # the gate disagree by construction: _media_context is TOKEN-based
+            # (placeholders anywhere in the prompt, so True for the rest of the
+            # chat), while _media_cache_allowed needs req._cache_extra_keys,
+            # which is PAYLOAD-derived and therefore None the moment the user
+            # stops re-attaching the picture. A text-only turn can never
+            # reproduce a hash of image bytes it does not have, so it fell off
+            # the allow-list and the gate skipped the fetch outright -- not
+            # even the pure-text prefix sitting unsalted in the store from
+            # turn 1. Measured cost in a VL document chat: full re-prefill of
+            # the whole history on every single turn.
+            #
+            # Everything strictly BEFORE the first media placeholder is pure
+            # text, is token-deterministic, and was stored unsalted. Reusing
+            # exactly that region is safe by construction -- recurrent state
+            # cannot pair with any image because the boundary precedes every
+            # placeholder -- so this turn gets a positional cap instead of a
+            # blanket skip.
+            _media_payload_present = bool(
+                getattr(req, "pixel_values", None) is not None
+                or getattr(req, "video_pixel_values", None) is not None
+                or getattr(req, "audio_codes", None) is not None
+                or getattr(req, "audio_embeds", None) is not None
+                or getattr(req, "audio_features", None) is not None
+            )
+            _media_text_prefix_only = bool(
+                _media_context
+                and not _media_cache_allowed
+                and not _media_payload_present
+            )
             if (
                 self._prefix_cache_enabled
                 and self.block_aware_cache is not None
                 and req.prompt_cache is None
-                and (not _media_context or _media_cache_allowed)
+                and (
+                    not _media_context
+                    or _media_cache_allowed
+                    or _media_text_prefix_only
+                )
                 and not _mllm_bypass
             ):
                 if req.input_ids is not None:
@@ -8829,11 +8867,65 @@ class MLLMBatchGenerator:
                         except Exception:
                             _paged_disk_hits_before = 0
                         _cache_extra_keys = getattr(req, "_cache_extra_keys", None)
-                        block_table, remaining = self.block_aware_cache.fetch_cache(
-                            req.request_id,
-                            token_list,
-                            cache_extra_keys=_cache_extra_keys,
+                        # Positional cap for a text-only turn whose HISTORY
+                        # holds media: match only the pure-text region that
+                        # precedes the first placeholder. Nothing in that
+                        # region depends on pixels, so the unsalted key that
+                        # stored it is the correct key to read it back with.
+                        _fetch_token_list = token_list
+                        _media_prefix_cap = None
+                        if _media_text_prefix_only:
+                            _media_prefix_cap = self._media_safe_capture_limit(
+                                list(token_list)
+                            )
+                            _min_worth = int(
+                                getattr(self.block_aware_cache, "block_size", 64)
+                                or 64
+                            )
+                            if _media_prefix_cap < _min_worth:
+                                logger.info(
+                                    "media-history turn %s: only %d pure-text "
+                                    "tokens precede the first placeholder "
+                                    "(< one %d-token block) -- not worth a "
+                                    "fetch, full prefill",
+                                    req.request_id,
+                                    _media_prefix_cap,
+                                    _min_worth,
+                                )
+                                _media_prefix_cap = None
+                                _fetch_token_list = []
+                            else:
+                                _fetch_token_list = token_list[:_media_prefix_cap]
+                                _cache_extra_keys = None
+                                logger.info(
+                                    "media-history turn %s: capping the prefix "
+                                    "fetch at %d/%d tokens (the pure-text "
+                                    "region before the first media "
+                                    "placeholder) instead of skipping the "
+                                    "cache entirely",
+                                    req.request_id,
+                                    _media_prefix_cap,
+                                    len(token_list),
+                                )
+                        block_table, remaining = (
+                            self.block_aware_cache.fetch_cache(
+                                req.request_id,
+                                _fetch_token_list,
+                                cache_extra_keys=_cache_extra_keys,
+                            )
+                            if _fetch_token_list
+                            else (None, list(token_list))
                         )
+                        if _media_prefix_cap is not None and block_table is not None:
+                            # fetch_cache computed `remaining` against the
+                            # CAPPED list, so it stops at the cap. The real
+                            # uncached tail is everything after the hit in the
+                            # FULL prompt -- including the media region, which
+                            # this turn must forward itself.
+                            _hit_len = int(
+                                getattr(block_table, "num_tokens", 0) or 0
+                            )
+                            remaining = list(token_list[_hit_len:])
                         if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
                             # Dump the ACTUAL engine token stream, because an
                             # offline re-render of the same conversation
@@ -12381,7 +12473,11 @@ class MLLMBatchGenerator:
         return states or None
 
     def _complete_hybrid_base_from_companion(
-        self, base_cache: Any, token_ids: Any, base_token_count: int
+        self,
+        base_cache: Any,
+        token_ids: Any,
+        base_token_count: int,
+        cache_extra_keys: Optional[Any] = None,
     ) -> Optional[List[Any]]:
         """Fill a paged-reconstructed base's recurrent slots from the companion.
 
@@ -12397,7 +12493,20 @@ class MLLMBatchGenerator:
         if not getattr(self, "_is_hybrid", False):
             return None
         try:
-            entry = cache.fetch(list(token_ids), int(base_token_count))
+            # The salt MUST travel here. Asking with the bare token key while
+            # every media writer salts means the splice can never find the
+            # companion for a media conversation, so it silently declines and
+            # the caller falls back to a TEXT-ONLY re-derive of the whole
+            # prompt -- across the image placeholder positions, with no pixels.
+            # That produces wrong recurrent state which is then stored under
+            # the CORRECT salted key with is_complete=True and used for the
+            # live answer: coherent prose about the wrong picture, persisted,
+            # self-reinforcing on every later turn.
+            entry = cache.fetch(
+                list(token_ids),
+                int(base_token_count),
+                cache_extra_keys=cache_extra_keys,
+            )
         except Exception as exc:
             logger.debug("Companion fetch for clean-store base failed: %s", exc)
             return None
@@ -12528,7 +12637,10 @@ class MLLMBatchGenerator:
             elif base_cache is not None and not _base_matches_layers:
                 _spliced = (
                     self._complete_hybrid_base_from_companion(
-                        base_cache, tokens, int(base_token_count)
+                        base_cache,
+                        tokens,
+                        int(base_token_count),
+                        cache_extra_keys=cache_extra_keys,
                     )
                     if _HYBRID_BASE_SPLICE
                     else None

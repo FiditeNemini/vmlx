@@ -51,7 +51,7 @@ def test_touch_enqueues_store_matching_chain_hashes():
     )
 
 
-def test_touch_is_a_noop_without_disk_store_or_full_blocks():
+def test_touch_is_a_noop_without_a_disk_store_or_without_tokens():
     cache = _make_cache(None)
     cache._touch_disk_chain_access(list(range(8)), 8)  # no store: no raise
 
@@ -60,8 +60,12 @@ def test_touch_is_a_noop_without_disk_store_or_full_blocks():
         _queue_access_update=lambda hash_hex: touched.append(hash_hex)
     )
     cache = _make_cache(disk_store)
-    cache._touch_disk_chain_access(list(range(3)), 3)  # sub-block hit
+    cache._touch_disk_chain_access([], 0)
     assert touched == []
+    # NOTE: a sub-block hit is NOT a no-op any more. Partial blocks are
+    # durable rows (paged_cache._partial_block_sizes probes them on restart),
+    # so leaving them untouched is exactly the eviction hazard this file is
+    # about. See test_touch_still_covers_a_sub_block_only_chain.
 
 
 def test_fetch_cache_hit_paths_call_the_touch():
@@ -82,3 +86,56 @@ def test_real_store_access_queue_accepts_touches(tmp_path):
         cache._touch_disk_chain_access(list(range(8)), 8)
     finally:
         store.shutdown()
+
+
+def test_touch_includes_the_terminal_partial_block():
+    """The partial tail is a LEAF, and the L2 trim evicts leaves oldest-first.
+
+    Skipping it meant that on an L1-hot chain every full block had its
+    timestamp refreshed each warm turn while the partial kept its store-time
+    stamp — so the block that COMPLETES the chain was the first casualty of any
+    budget pressure. The two pre-existing tests here used 8 (exact multiple of
+    the block size) and 3 (sub-block), the two shapes where this is invisible
+    by construction. This one uses 11 with block_size 4: full blocks present
+    AND a tail.
+    """
+    touched = []
+    disk_store = SimpleNamespace(
+        _queue_access_update=lambda hash_hex: touched.append(hash_hex)
+    )
+    cache = _make_cache(disk_store)
+    tokens = list(range(11))
+    cache._touch_disk_chain_access(tokens, 11, cache_extra_keys=None)
+
+    parent = None
+    expected = []
+    for idx in range(2):
+        parent = compute_block_hash(
+            parent, tokens[idx * 4 : idx * 4 + 4], extra_keys=None
+        )
+        expected.append(parent.hex())
+    # The partial hashes against the running parent exactly as paged_cache's
+    # own partial-hit probe does (paged_cache.py compute_block_hash on
+    # token_ids[start : start + partial_size]).
+    expected.append(
+        compute_block_hash(parent, tokens[8:11], extra_keys=None).hex()
+    )
+
+    assert touched == expected, (
+        "the terminal partial was not touched — it is the first row the LRU "
+        "trim will take, and losing it dead-ends the whole chain"
+    )
+
+
+def test_touch_still_covers_a_sub_block_only_chain():
+    """A chain shorter than one block is ALL partial — it must still touch."""
+    touched = []
+    disk_store = SimpleNamespace(
+        _queue_access_update=lambda hash_hex: touched.append(hash_hex)
+    )
+    cache = _make_cache(disk_store)
+    tokens = [7, 8, 9]
+    cache._touch_disk_chain_access(tokens, 3, cache_extra_keys=None)
+    assert touched == [
+        compute_block_hash(None, tokens[:3], extra_keys=None).hex()
+    ]

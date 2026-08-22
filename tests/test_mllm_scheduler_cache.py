@@ -826,8 +826,18 @@ def test_mllm_exact_prefix_hit_without_suffix_counts_n_minus_one_cached_tokens()
     assert cached_tokens == 3
 
 
-def test_mllm_disk_prefix_hit_does_not_refeed_last_matched_token():
-    """Disk L2 payload offset equals matched length; duplicating boundary corrupts Gemma 12B."""
+def test_mllm_disk_prefix_hit_refeeds_the_last_matched_token():
+    """The MLLM disk L2 payload covers matched[:-1], so matched[-1] must lead.
+
+    This test previously asserted the OPPOSITE (cached == len(matched), tail
+    starting after matched) on the premise that the MLLM disk store writes a
+    payload as long as its key. Both MLLM store branches disprove that: the
+    plain VLM path truncates through _truncate_hybrid_cache(prompt_len - 1),
+    and the mixed-SWA / ZAYA clean path re-prefills token_list[:prompt_len-1] --
+    and both write under the FULL N-token key. Dropping matched[-1] meant its
+    KV was never computed, so a warm disk-prefix turn answered differently from
+    the same turn cold.
+    """
 
     remaining, cached_tokens = _mllm_disk_prefix_hit_tail_and_cached_tokens(
         token_list=[10, 11, 12, 13, 14, 15],
@@ -835,19 +845,65 @@ def test_mllm_disk_prefix_hit_does_not_refeed_last_matched_token():
         gen_prompt_suffix=[90, 91],
     )
 
-    assert remaining == [14, 15, 90, 91]
-    assert cached_tokens == 4
+    assert remaining == [13, 14, 15, 90, 91]
+    assert cached_tokens == 3
 
 
-def test_mllm_disk_exact_hit_with_generation_suffix_uses_suffix_only():
+def test_mllm_disk_exact_hit_with_generation_suffix_refeeds_boundary():
     remaining, cached_tokens = _mllm_disk_prefix_hit_tail_and_cached_tokens(
         token_list=[10, 11, 12, 13],
         matched_tokens=[10, 11, 12, 13],
         gen_prompt_suffix=[90, 91],
     )
 
-    assert remaining == [90, 91]
-    assert cached_tokens == 4
+    assert remaining == [13, 90, 91]
+    assert cached_tokens == 3
+
+
+def test_mllm_and_text_disk_helpers_agree_at_a_non_block_aligned_length():
+    """The two lanes must not be able to disagree again.
+
+    The original defect survived because each scheduler carried its own copy
+    and only one got 12ee1c8ee. Lengths here are deliberately indivisible by
+    64 or 256 -- the aligned lengths every prior test used are exactly where
+    an off-by-one is invisible.
+    """
+    from vmlx_engine.scheduler import Scheduler
+
+    fetch = list(range(1361))
+    matched = list(range(1003))
+    suffix = [90, 91]
+
+    text_tail, text_cached = Scheduler._disk_prefix_hit_tail_and_cached_tokens(
+        fetch_tokens=fetch, matched_tokens=matched, gen_prompt_suffix=suffix
+    )
+    mllm_tail, mllm_cached = _mllm_disk_prefix_hit_tail_and_cached_tokens(
+        token_list=fetch, matched_tokens=matched, gen_prompt_suffix=suffix
+    )
+
+    assert (mllm_tail, mllm_cached) == (text_tail, text_cached)
+    assert mllm_cached == 1002
+    assert mllm_tail[0] == matched[-1] == 1002
+    assert mllm_tail[-2:] == suffix
+
+
+def test_mllm_disk_boundary_swap_refeeds_the_swapped_token():
+    """A boundary-swap match hands back the CURRENT prompt's final token.
+
+    disk_cache.fetch_longest_prefix can match a stored key whose last token
+    differs from the query's (a thinking sentinel toggling between turns) and
+    returns the query's token in matched[-1]. Dropping it silently served the
+    previous turn's thinking mode.
+    """
+    remaining, cached_tokens = _mllm_disk_prefix_hit_tail_and_cached_tokens(
+        token_list=[10, 11, 12, 777, 14],
+        matched_tokens=[10, 11, 12, 777],
+        gen_prompt_suffix=[],
+    )
+
+    assert remaining[0] == 777, "the swapped boundary token was dropped"
+    assert remaining == [777, 14]
+    assert cached_tokens == 3
 
 
 # ============================================================

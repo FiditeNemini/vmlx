@@ -2844,8 +2844,9 @@ class BlockAwarePrefixCache:
         touch = getattr(disk_store, "_queue_access_update", None)
         if not callable(touch):
             return
-        num_full = max(0, int(num_tokens)) // self.block_size
-        if num_full <= 0:
+        total = max(0, int(num_tokens))
+        num_full = total // self.block_size
+        if num_full <= 0 and total <= 0:
             return
         try:
             from .paged_cache import compute_block_hash as _compute_chain_hash
@@ -2859,6 +2860,24 @@ class BlockAwarePrefixCache:
                     extra_keys=cache_extra_keys,
                 )
                 touch(parent_hash.hex())
+            # The TERMINAL PARTIAL was the one row this walk used to skip, and
+            # it is the row that matters most: it is by definition a leaf, and
+            # the global L2 trim evicts leaves oldest-first. So on an L1-hot
+            # chain every full block got its timestamp refreshed each warm
+            # turn while the partial kept its store-time stamp -- making the
+            # block that completes the chain the FIRST casualty of any budget
+            # pressure. Costs up to block_size-1 tokens of reuse for plain KV,
+            # and a whole-prompt re-prefill for DSV4 composite chains whose
+            # CSA/HCA state lives only in that terminal block.
+            tail_len = total - num_full * self.block_size
+            if tail_len > 0:
+                start = num_full * self.block_size
+                tail_hash = _compute_chain_hash(
+                    parent_hash,
+                    tokens[start:total],
+                    extra_keys=cache_extra_keys,
+                )
+                touch(tail_hash.hex())
         except Exception:
             logger.debug(
                 "L2 access touch for a RAM-served chain failed (best-effort)",
@@ -4125,6 +4144,28 @@ class BlockAwarePrefixCache:
         rotating_kv_layer_count = (
             _rotating_kv_layer_count(cache_data) if has_rotating_kv_cache_data else 0
         )
+        if has_dsv4_delta_cache_data:
+            # Fail LOUD and NAMED on a block-size mismatch. Native DSV4 delta
+            # records are cut at a fixed 256; a cutter at any other size asks
+            # for interval (0, N), never finds it, and every store of every
+            # request dies with a generic "no interval" ValueError that names
+            # no cause. The scheduler reconciles this at construction, so
+            # reaching here means something bypassed that — say so.
+            try:
+                from .utils.dsv4_batch_generator import DSV4_NATIVE_BLOCK_SIZE
+            except Exception:
+                DSV4_NATIVE_BLOCK_SIZE = 256
+            if int(self.block_size) != int(DSV4_NATIVE_BLOCK_SIZE):
+                raise ValueError(
+                    "DSV4 native delta records require a "
+                    f"{DSV4_NATIVE_BLOCK_SIZE}-token paged block, but this "
+                    f"cache is configured with block_size={self.block_size}. "
+                    "Every store would abort on a missing interval. The "
+                    "scheduler normally reconciles this at construction; a "
+                    "launcher that builds the cache directly must pass "
+                    f"paged_cache_block_size={DSV4_NATIVE_BLOCK_SIZE}."
+                )
+
         disk_store = self.paged_cache._disk_store  # May be None
 
         # Get or create block table

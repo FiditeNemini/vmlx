@@ -59,6 +59,10 @@ from .utils.mamba_cache import (
     unregister_generation_logprobs,
 )
 from .utils.single_batch_generator import SingleBatchGenerator
+from .utils.prefix_hit import (
+    disk_prefix_hit_tail_and_cached_tokens as _shared_disk_prefix_hit,
+    prefix_hit_tail_and_cached_tokens as _shared_prefix_hit,
+)
 from .utils.head_dim_detection import (
     choose_supported_kv_group_size,
     detect_cache_head_dims,
@@ -1328,6 +1332,39 @@ class Scheduler:
                 )
 
         if self._uses_dsv4_cache and self.config.use_paged_cache:
+            # DSV4's native delta records are cut at a HARD-CODED 256 tokens
+            # (DSV4_NATIVE_BLOCK_SIZE); the store cutter walks the CONFIGURED
+            # block size and demands an exact interval match per block. Any
+            # other block size makes the very first lookup raise
+            # "DSV4 block transport has no interval (0, N)" and EVERY store of
+            # EVERY request aborts — 100% store-dead, surfaced only as a
+            # per-request warning that names no cause.
+            #
+            # The 256 force used to live only in cli.serve_command, inside a
+            # try whose except logs at DEBUG. Generator selection is a
+            # SEPARATE, class-based detection, so a registry lookup that threw
+            # left a 64-block manager driving native-256 records. This is the
+            # opt-out-equals-failed-detection shape, and the cure is to
+            # reconcile where every launcher converges rather than in one
+            # command function. Advise and correct; never refuse.
+            try:
+                from .utils.dsv4_batch_generator import DSV4_NATIVE_BLOCK_SIZE
+            except Exception:
+                DSV4_NATIVE_BLOCK_SIZE = 256
+            _configured_block = int(
+                getattr(self.config, "paged_cache_block_size", 0) or 0
+            )
+            if _configured_block != DSV4_NATIVE_BLOCK_SIZE:
+                logger.info(
+                    "DSV4 paged block size reconciled %s -> %s: the native "
+                    "delta records are cut at %s tokens and a block cutter at "
+                    "any other size cannot match a single interval, which "
+                    "would drop 100%% of cache stores.",
+                    _configured_block,
+                    DSV4_NATIVE_BLOCK_SIZE,
+                    DSV4_NATIVE_BLOCK_SIZE,
+                )
+                self.config.paged_cache_block_size = DSV4_NATIVE_BLOCK_SIZE
             logger.info(
                 "DSV4 DeepseekV4Cache-aware paged prefix cache enabled — "
                 "terminal blocks store full SWA+CSA/HCA composite state and "
@@ -3846,25 +3883,12 @@ class Scheduler:
         remaining: List[int],
         gen_prompt_suffix: List[int],
     ) -> Tuple[List[int], int]:
-        """Return prefill tail + cached-token count for an N-1 prefix hit.
-
-        Prefix-cache payloads store KV state through ``len(fetch_tokens) - 1``.
-        On an exact key hit the cache layer may report ``remaining=[]`` because
-        its key matched the full stripped prompt, but the scheduler must still
-        re-feed the last stripped prompt token before any generation-prompt
-        suffix. Otherwise thinking/chat-template suffixes get processed without
-        the final user token in cache context.
-        """
-        key_tokens = list(fetch_tokens or [])
-        cache_remaining = list(remaining or [])
-        suffix = list(gen_prompt_suffix or [])
-        if suffix and not cache_remaining and key_tokens:
-            cache_remaining = [key_tokens[-1]]
-        if not cache_remaining and key_tokens:
-            cached_tokens = max(len(key_tokens) - 1, 0)
-        else:
-            cached_tokens = max(len(key_tokens) - len(cache_remaining), 0)
-        return cache_remaining + suffix, cached_tokens
+        """Thin adapter over the shared N-1 prefix-hit arithmetic."""
+        return _shared_prefix_hit(
+            key_tokens=fetch_tokens,
+            remaining=remaining,
+            gen_prompt_suffix=gen_prompt_suffix,
+        )
 
     def _dsv4_snapshot_store_below_threshold(self, request) -> bool:
         """True when a DSV4 prompt snapshot is too short to store on its own.
@@ -3950,33 +3974,11 @@ class Scheduler:
         matched_tokens: List[int],
         gen_prompt_suffix: List[int],
     ) -> Tuple[List[int], int]:
-        """Return prefill tail + cached count for disk L2 prefix hits.
-
-        Disk prompt L2 payloads store KV state for ``len(matched_tokens) - 1``
-        tokens, NOT ``len(matched_tokens)``: every disk write truncates via
-        ``_truncate_cache_to_prompt_length`` (target ``prompt_len - 1``) so the
-        last matched token can be re-fed on a hit. Its docstring states the
-        contract for exactly this path — "forward prefix match: remaining has
-        extra tokens INCLUDING THE Nth token". So the restored cache offset is
-        ``len(matched) - 1`` and ``matched[-1]`` must lead the uncached tail,
-        identically to the exact-hit helper. (Returning ``len(matched)`` and
-        dropping ``matched[-1]`` silently skips one token — a warm disk-prefix
-        vs cold positional skew on non-hybrid models.)
-        """
-        key_tokens = list(fetch_tokens or [])
-        matched = list(matched_tokens or [])
-        suffix = list(gen_prompt_suffix or [])
-        if matched:
-            offset = max(len(matched) - 1, 0)
-            # key_tokens[offset:] == [matched[-1], *uncached_tail]; re-feed
-            # matched[-1] so its KV is (re)computed against the N-1 payload.
-            tail = list(key_tokens[offset:]) + suffix
-            if tail:
-                return tail, offset
-        return Scheduler._prefix_hit_tail_and_cached_tokens(
-            fetch_tokens=matched or key_tokens,
-            remaining=[],
-            gen_prompt_suffix=suffix,
+        """Thin adapter over the shared disk L2 partial-hit arithmetic."""
+        return _shared_disk_prefix_hit(
+            fetch_tokens=fetch_tokens,
+            matched_tokens=matched_tokens,
+            gen_prompt_suffix=gen_prompt_suffix,
         )
 
     def _cache_selection_hot_advantage_threshold(self) -> int:

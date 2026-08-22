@@ -660,14 +660,17 @@ class TestMediaCompanionCaptureBoundaries:
         gen._media_placeholder_token_ids = lambda: set(placeholders)
         return gen
 
-    def test_media_turn_no_longer_returns_no_boundaries(self):
-        """The blanket has_images exclusion made multimodal chats un-healable.
+    def test_media_capture_is_bounded_to_the_pure_text_prefix(self):
+        """Unreachable today; asserts the bound for when it is not.
 
-        The discard path records the boundary it needed via
-        _ssm_required_checkpoint_tokens, and this function is its only
-        consumer. Returning [] for every media turn meant the requirement was
-        re-recorded and re-ignored forever, so a media conversation could
-        never recover -- an identical repeat turn still reported cached=0.
+        All three call sites sit under `if not has_media_payload:`, so
+        has_images is always False in production and this arm does not run --
+        it is NOT the multimodal reuse fix. What it pins is the invariant: if
+        a media turn ever does reach here, the capture must stop before the
+        first media placeholder, because a snapshot taken past one describes
+        recurrent state that absorbed vision embeddings, and anything
+        resuming from it with a text-only forward re-feeds those positions
+        without pixels.
         """
         from types import SimpleNamespace
 

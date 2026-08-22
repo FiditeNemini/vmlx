@@ -10688,71 +10688,97 @@ class MLLMBatchGenerator:
                         )
                         if clean_media_cache is None:
                             if int(getattr(req, "_cached_tokens", 0) or 0) > 0:
+                                # A WARM media turn has no clean-boundary
+                                # capture (that only runs on a cold request),
+                                # but it MUST still leave a companion behind.
+                                # Calling this store "redundant" and skipping
+                                # it was the last link in the multimodal
+                                # reuse chain: the KV chain advances to the
+                                # new turn's boundary while the companion
+                                # stays at the OLD one, so the NEXT turn finds
+                                # its blocks and no companion and re-prefills
+                                # everything. Measured live on Qwen3.8 VL: the
+                                # warm turn restored 2432 tokens and stored KV
+                                # out to 2477, and the turn after it asked for
+                                # a companion at 2477, missed, and fell back
+                                # to a full prefill.
+                                #
+                                # The inline capture already ran during this
+                                # turn's prefill (vmlx#109 logs it at the new
+                                # boundary), so the state exists. Fall through
+                                # to the inline-checkpoint store below instead
+                                # of discarding it.
                                 logger.info(
-                                    "MLLM media prefix cache: restored media-keyed "
-                                    "KV+SSM boundary for %s; skipping redundant "
-                                    "clean-boundary store",
+                                    "MLLM media prefix cache: warm media turn "
+                                    "for %s -- storing the companion at the "
+                                    "NEW boundary so the next turn can pair "
+                                    "with it",
                                     req.request_id,
                                 )
+                                # Fall through to the inline-checkpoint store
+                                # below. `continue` here is what stranded the
+                                # companion at the previous boundary.
+                                clean_media_cache = None
                             else:
                                 logger.info(
                                     "MLLM media prefix cache: no clean media boundary "
                                     "for %s; full prefill will remain required",
                                     req.request_id,
                                 )
-                            continue
-                        clean_ssm_layers: List[Any] = []
-                        kv_set = set(self._hybrid_kv_positions or [])
-                        for layer_idx, cache_obj in enumerate(clean_media_cache):
-                            if layer_idx in kv_set:
                                 continue
-                            if _companion_exempt_cache(cache_obj):
-                                continue
-                            if hasattr(cache_obj, "cache") and isinstance(
-                                cache_obj.cache, list
-                            ):
-                                from copy import deepcopy
+                        if clean_media_cache is not None:
+                            clean_ssm_layers: List[Any] = []
+                            kv_set = set(self._hybrid_kv_positions or [])
+                            for layer_idx, cache_obj in enumerate(clean_media_cache):
+                                if layer_idx in kv_set:
+                                    continue
+                                if _companion_exempt_cache(cache_obj):
+                                    continue
+                                if hasattr(cache_obj, "cache") and isinstance(
+                                    cache_obj.cache, list
+                                ):
+                                    from copy import deepcopy
 
-                                cloned = deepcopy(cache_obj)
-                                cloned.cache = [
-                                    mx.contiguous(arr) if arr is not None else None
-                                    for arr in cache_obj.cache
-                                ]
-                                clean_ssm_layers.append(cloned)
-                            else:
-                                clean_ssm_layers.append(cache_obj)
-                        all_tokens = list(
-                            getattr(req, "_original_token_ids", None)
-                            or input_ids_list[i]
-                        )
-                        # Must be the SAME length the clean cache actually
-                        # covers, or the companion claims state it does not
-                        # have and the KV/SSM pair is off by up to a block.
-                        prompt_len = int(
-                            getattr(req, "_media_clean_prefix_len", 0) or 0
-                        )
-                        if prompt_len <= 0:
-                            prompt_len = (
-                                len(all_tokens) - 1
-                                if len(all_tokens) > 1
-                                else len(all_tokens)
+                                    cloned = deepcopy(cache_obj)
+                                    cloned.cache = [
+                                        mx.contiguous(arr) if arr is not None else None
+                                        for arr in cache_obj.cache
+                                    ]
+                                    clean_ssm_layers.append(cloned)
+                                else:
+                                    clean_ssm_layers.append(cache_obj)
+                            all_tokens = list(
+                                getattr(req, "_original_token_ids", None)
+                                or input_ids_list[i]
                             )
-                        if clean_ssm_layers and prompt_len > 0:
-                            self._ssm_state_cache.store(
-                                all_tokens[:prompt_len],
-                                prompt_len,
-                                clean_ssm_layers,
-                                is_complete=True,
-                                cache_extra_keys=_ssm_extra_keys,
+                            # Must be the SAME length the clean cache actually
+                            # covers, or the companion claims state it does not
+                            # have and the KV/SSM pair is off by up to a block.
+                            prompt_len = int(
+                                getattr(req, "_media_clean_prefix_len", 0) or 0
                             )
-                            logger.info(
-                                "MLLM media prefix cache: stored clean media SSM "
-                                "companion for %s (%d layers, %d-token key)",
-                                req.request_id,
-                                len(clean_ssm_layers),
-                                prompt_len,
-                            )
-                        continue
+                            if prompt_len <= 0:
+                                prompt_len = (
+                                    len(all_tokens) - 1
+                                    if len(all_tokens) > 1
+                                    else len(all_tokens)
+                                )
+                            if clean_ssm_layers and prompt_len > 0:
+                                self._ssm_state_cache.store(
+                                    all_tokens[:prompt_len],
+                                    prompt_len,
+                                    clean_ssm_layers,
+                                    is_complete=True,
+                                    cache_extra_keys=_ssm_extra_keys,
+                                )
+                                logger.info(
+                                    "MLLM media prefix cache: stored clean media SSM "
+                                    "companion for %s (%d layers, %d-token key)",
+                                    req.request_id,
+                                    len(clean_ssm_layers),
+                                    prompt_len,
+                                )
+                            continue
                     # vmlx#109: if capture-during-prefill already snapshotted
                     # a clean SSM state at the gpl boundary, store it now
                     # with is_complete=True and skip the deferred re-derive

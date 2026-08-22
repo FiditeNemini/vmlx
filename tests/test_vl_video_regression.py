@@ -1273,26 +1273,34 @@ class TestIssueGuards:
         import vmlx_engine.mllm_batch_generator as _m
 
         src = inspect.getsource(_m.MLLMBatchGenerator._run_vision_encoding_inner)
-        image_forward = src[src.index("output = self.model(input_ids, **kwargs)") - 900 :]
+        image_forward = src[src.index("output = self._media_forward(") - 900 :]
 
         assert "_raise_if_image_prefill_exceeds_budget" in image_forward
         assert "_apply_vlm_image_request_cache_limit" in image_forward
         assert "mx.clear_cache()" in image_forward
-        assert "output = self.model(input_ids, **kwargs)" in image_forward
+        # The wrapper call moved into _media_forward, which chunks it when the
+        # family supports embeddings and falls back to exactly this one-shot
+        # call otherwise. The ordering being pinned here -- clear the
+        # allocator, then budget, then forward -- is unchanged.
+        assert "output = self._media_forward(" in image_forward
+        media_src = inspect.getsource(_m.MLLMBatchGenerator._media_forward)
+        assert "self.model(input_ids, **kwargs)" in media_src
 
     def test_mimo_audio_media_prefill_uses_guard_before_wrapper_forward(self):
         import inspect
         import vmlx_engine.mllm_batch_generator as _m
 
         src = inspect.getsource(_m.MLLMBatchGenerator._run_vision_encoding_inner)
-        wrapper_forward = src[src.index("output = self.model(input_ids, **kwargs)") - 900 :]
+        wrapper_forward = src[src.index("output = self._media_forward(") - 900 :]
 
         assert "if has_images or has_audio_payload:" in wrapper_forward
         assert "has_audio_payload=has_audio_payload" in wrapper_forward
         assert "_apply_vlm_image_request_cache_limit" in wrapper_forward
         assert "mx.clear_cache()" in wrapper_forward
         assert "_raise_if_image_prefill_exceeds_budget" in wrapper_forward
-        assert "output = self.model(input_ids, **kwargs)" in wrapper_forward
+        assert "output = self._media_forward(" in wrapper_forward
+        media_src = inspect.getsource(_m.MLLMBatchGenerator._media_forward)
+        assert "self.model(input_ids, **kwargs)" in media_src
 
     def test_vmlx156_media_preprocess_tightens_allocator_cache_before_processor(self):
         """Retained image history must not enter mlx-vlm preprocessing with the

@@ -773,6 +773,117 @@ def _resolve_vlm_image_prefill_single_buffer_limit(
     return min(cap, max(floor, int(max_ws * fraction)))
 
 
+# Media prefill chunking. The floor is high on purpose -- see
+# _media_prefill_chunk_tokens: chunking trades peak memory for repeated weight
+# streaming, so the aim is the largest chunk that stays off the cliff.
+_MEDIA_PREFILL_CHUNK_FLOOR = 4096
+# Below this the one-shot forward wins outright: it was never the shape that
+# ran out of memory, and it reads the weights once.
+_MEDIA_PREFILL_CHUNK_MIN_SEQ = 8192
+
+
+def _named_params(fn) -> set:
+    """Named parameters of a callable, EXCLUDING anything absorbed by **kwargs.
+
+    `**kwargs` makes every introspection question answer "yes". Several
+    wrappers in this tree accept `position_ids` only in the sense that it
+    disappears into `**kwargs` and is never read, so a capability probe that
+    counts `**kwargs` as support will happily build a chunked prefill on a
+    model that silently ignores the positions and returns confident garbage.
+    Only NAMED parameters count as support.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return set()
+    return {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+    }
+
+
+def _media_embed_kwarg_name(language_model) -> Optional[str]:
+    """Return the embeddings kwarg this language model actually names.
+
+    Two spellings exist in this tree: `inputs_embeds` almost everywhere,
+    `input_embeddings` on minimax (zaya accepts both). Returns None when the
+    model names neither, which is the signal to keep the one-shot path.
+    """
+    if language_model is None:
+        return None
+    call = getattr(language_model, "__call__", None)
+    if call is None:
+        return None
+    names = _named_params(call)
+    for candidate in ("inputs_embeds", "input_embeddings"):
+        if candidate in names:
+            return candidate
+    return None
+
+
+def _media_chunk_boundaries(
+    seq_len: int,
+    chunk: int,
+    media_runs: Optional[List[Tuple[int, int]]] = None,
+) -> List[int]:
+    """Chunk end positions, snapped away from the middle of a media run.
+
+    Once vision embeddings are merged into the embedding sequence, splitting
+    inside a run of media placeholders is harmless for every family whose
+    masks are built from the cache offset -- which is all of them here today.
+    It stops being harmless the moment a family builds a mask from
+    whole-sequence image geometry (gemma4's config already declares
+    `use_bidirectional_attention: "vision"` even though the MLX language
+    model does not implement it yet, and qwen3_vl's deepstack injection is
+    keyed to visual rows in the current window).
+
+    Snapping costs nothing -- boundaries are approximate already -- and means
+    this does not silently break the day one of those masks lands.
+    """
+    if chunk <= 0 or seq_len <= 0:
+        return [seq_len]
+    runs = list(media_runs or [])
+    bounds: List[int] = []
+    pos = 0
+    while pos < seq_len:
+        end = min(pos + chunk, seq_len)
+        if end < seq_len:
+            for run_start, run_end in runs:
+                if run_start < end < run_end:
+                    # Prefer the run's start; fall back to its end if that
+                    # would make no forward progress.
+                    end = run_start if run_start > pos else run_end
+                    end = min(max(end, pos + 1), seq_len)
+                    break
+        bounds.append(end)
+        pos = end
+    return bounds
+
+
+def _media_placeholder_runs(
+    token_ids: Optional[List[int]], media_ids: set
+) -> List[Tuple[int, int]]:
+    """Half-open [start, end) spans of consecutive media placeholder tokens."""
+    if not token_ids or not media_ids:
+        return []
+    runs: List[Tuple[int, int]] = []
+    start = None
+    for index, token in enumerate(token_ids):
+        if token in media_ids:
+            if start is None:
+                start = index
+        elif start is not None:
+            runs.append((start, index))
+            start = None
+    if start is not None:
+        runs.append((start, len(token_ids)))
+    return runs
+
+
 def _raise_if_image_prefill_exceeds_budget(
     *,
     has_images: bool,
@@ -8653,12 +8764,176 @@ class MLLMBatchGenerator:
             seq_len=seq_len,
             language_model=self.language_model,
         )
-        output = self.model(input_ids, **kwargs)
+        output = self._media_forward(
+            request, input_ids, seq_len, cache, kwargs
+        )
         request.vision_encoded = True
 
         if hasattr(output, "logits"):
             return output.logits
         return output
+
+    def _media_forward(
+        self,
+        request: "MLLMBatchRequest",
+        input_ids: Any,
+        seq_len: int,
+        cache: Optional[List[Any]],
+        kwargs: Dict[str, Any],
+    ) -> Any:
+        """Run the media-expanded prefill, CHUNKED when the family allows it.
+
+        The one-shot forward is what made long VL chats impossible: the whole
+        media-expanded prompt goes through the language model in a single
+        command buffer, so peak memory grows with the full sequence and a
+        conversation dies once it crosses the machine's limit. Measured on an
+        M5 Max: a 28,483-token prompt returned
+        kIOGPUCommandBufferCallbackErrorOutOfMemory with 89GB free, because
+        the problem is one enormous allocation, not total memory.
+
+        The vision tower genuinely needs the whole image, but the LANGUAGE
+        model does not need the whole sequence in one call. Every VL wrapper
+        here already exposes the seam: `get_input_embeddings` merges pixels
+        into an embedding sequence, and the language model accepts those
+        embeddings plus a cache. qwen3_5 even pre-computes its mRoPE
+        `position_ids` under the comment "Pre-calculate position_ids for
+        chunked prefill" -- the plumbing was built for this and simply was
+        not used.
+
+        Capability detection, not a family list: the LM must NAME an
+        embeddings parameter. `**kwargs` does not count -- several wrappers
+        swallow `position_ids` into `**kwargs` and never read it, so counting
+        that as support would build a chunked prefill on a model that ignores
+        the positions. Anything undetected, unsupported, or raising falls
+        straight back to the one-shot call.
+        """
+        one_shot = lambda: self.model(input_ids, **kwargs)
+
+        if os.environ.get("VMLX_DISABLE_MEDIA_CHUNKED_PREFILL") in (
+            "1", "true", "True", "yes", "on"
+        ):
+            return one_shot()
+        # Wrappers may declare themselves unchunkable (gemma4 stamps
+        # no_chunked_prefill when its config asks for bidirectional vision
+        # attention). Honour it as a kill switch even though the MLX language
+        # model does not implement that mask today.
+        if getattr(self.model, "no_chunked_prefill", False):
+            return one_shot()
+        if cache is None or seq_len <= 0:
+            return one_shot()
+
+        lm = self.language_model
+        embed_kwarg = _media_embed_kwarg_name(lm)
+        get_embeds = getattr(self.model, "get_input_embeddings", None)
+        if lm is None or embed_kwarg is None or not callable(get_embeds):
+            return one_shot()
+
+        chunk = 0
+        try:
+            chunk = int(self._media_prefill_chunk_tokens(seq_len))
+        except Exception:
+            chunk = 0
+        # Only chunk when the prompt is actually big. A short media prompt is
+        # the common case and one-shot is strictly better for it: one pass
+        # over the weights instead of several, and the peak was never the
+        # problem at that size.
+        if chunk <= 0 or seq_len <= max(chunk, _MEDIA_PREFILL_CHUNK_MIN_SEQ):
+            return one_shot()
+
+        try:
+            features = get_embeds(input_ids, **kwargs)
+        except Exception as exc:
+            logger.info(
+                "media chunked prefill unavailable for %s (embedding merge "
+                "failed: %s); using the one-shot forward",
+                getattr(request, "request_id", "?"),
+                exc,
+            )
+            return one_shot()
+
+        embeds = getattr(features, "inputs_embeds", None)
+        if embeds is None:
+            embeds = features if hasattr(features, "shape") else None
+        if embeds is None or getattr(embeds, "ndim", 0) < 2:
+            return one_shot()
+
+        # Per-chunk extras that are NOT derivable from the cache offset.
+        per_layer_inputs = getattr(features, "per_layer_inputs", None)
+        image_mask = getattr(features, "image_mask", None)
+        position_ids = getattr(lm, "_position_ids", None)
+        lm_names = _named_params(getattr(lm, "__call__", None))
+
+        media_ids: set = set()
+        try:
+            media_ids = self._media_placeholder_token_ids()
+        except Exception:
+            media_ids = set()
+        token_list = None
+        try:
+            token_list = input_ids[0].tolist()
+        except Exception:
+            token_list = None
+        runs = _media_placeholder_runs(token_list, media_ids)
+        bounds = _media_chunk_boundaries(seq_len, chunk, runs)
+
+        logger.info(
+            "media chunked prefill for %s: %d tokens in %d chunks (step %d), "
+            "peak now scales with the chunk instead of the whole prompt",
+            getattr(request, "request_id", "?"),
+            seq_len,
+            len(bounds),
+            chunk,
+        )
+
+        output = None
+        start = 0
+        for end in bounds:
+            call_kwargs: Dict[str, Any] = {"cache": cache}
+            call_kwargs[embed_kwarg] = embeds[:, start:end]
+            # Every family in this tree builds its masks from the cache
+            # offset, and muse actively overrides a caller-supplied bare mask
+            # for its sliding layers. A (B, seq) padding mask must never
+            # reach a chunked call.
+            if "mask" in lm_names:
+                call_kwargs["mask"] = None
+            if position_ids is not None and "position_ids" in lm_names:
+                call_kwargs["position_ids"] = position_ids[..., start:end]
+            if per_layer_inputs is not None and "per_layer_inputs" in lm_names:
+                # gemma4's language model slices this itself by cache offset.
+                call_kwargs["per_layer_inputs"] = per_layer_inputs
+            if image_mask is not None and "image_mask" in lm_names:
+                call_kwargs["image_mask"] = image_mask[:, start:end]
+            output = lm(input_ids[:, start:end], **call_kwargs)
+            try:
+                mx.clear_cache()
+            except Exception:
+                pass
+            start = end
+        return output
+
+    def _media_prefill_chunk_tokens(self, seq_len: int) -> int:
+        """Chunk size for a media-expanded prefill. BIGGER IS BETTER HERE.
+
+        A SMALLER CHUNK DOES NOT REDUCE WEIGHT STREAMING -- IT MULTIPLIES IT.
+        The chunk bounds only the terms that scale with it (activations,
+        attention scores, masks); the model weights are re-read IN FULL on
+        every chunk. On a MoE that is the dominant cost: dots3 restreams
+        ~85GB of expert weights per chunk, so a 64-token chunk paid that 32x
+        more often than a 2048-token one.
+
+        So this deliberately floors well above the text step. The goal is the
+        LARGEST chunk that still keeps peak allocation off the cliff, not the
+        smallest chunk that fits.
+        """
+        step = int(getattr(self, "prefill_step_size", 0) or 0)
+        step = max(step, _MEDIA_PREFILL_CHUNK_FLOOR)
+        override = os.environ.get("VMLX_MEDIA_PREFILL_CHUNK_TOKENS")
+        if override:
+            try:
+                step = max(1, int(override))
+            except (TypeError, ValueError):
+                pass
+        return step
 
     def _process_prompts(
         self, requests: List[MLLMBatchRequest], force_batch_cache: bool = False

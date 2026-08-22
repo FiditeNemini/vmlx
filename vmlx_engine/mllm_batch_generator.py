@@ -10593,7 +10593,25 @@ class MLLMBatchGenerator:
                                     f"(gen_prompt_len={_gpl_for_flag})"
                                 )
                     except Exception as e:
-                        logger.debug(f"SSM state capture failed for {req.request_id}: {e}")
+                        # WARNING, not DEBUG. This except wraps the entire
+                        # companion capture AND store. When it fires, the turn
+                        # still answers, so nothing looks wrong -- but no
+                        # companion is written, and every later turn then
+                        # reports "KV blocks found but no SSM companion state
+                        # - full prefill required" with no hint as to why.
+                        # Observed live on Qwen3.8 VL: the capture logged
+                        # success at 14,272 tokens and the store line never
+                        # appeared, because the failure in between was
+                        # invisible at DEBUG.
+                        logger.warning(
+                            "SSM companion capture/store FAILED for %s: %s "
+                            "(the turn still answers, but this prefix will "
+                            "have no companion and every later turn will "
+                            "re-prefill in full)",
+                            req.request_id,
+                            e,
+                            exc_info=True,
+                        )
                 if trace is not None:
                     trace.stop("ssm_capture")
           except Exception as prefill_err:

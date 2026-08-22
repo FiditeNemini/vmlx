@@ -1360,9 +1360,18 @@ def serve_command(args):
         # investigation before the on-disk dtypes settled it (F16 keys/values,
         # zero scale/bias tensors).
         logger.info(
-            "SSD prefix cache: FULL PRECISION (stored quantization=%s) for "
-            "every family. TurboQuant applies only to the live in-memory "
-            "working KV, which is never written to the cache.%s",
+            # "FULL PRECISION for every family" was not true. DSV4 pool
+            # state is natively q8-segmented and is stored that way ON
+            # PURPOSE; a bundle-calibrated TurboQuant config does write TQ
+            # payloads to disk; Zaya keys are fp32 while its values are bf16;
+            # dots3 latents are bf16. The honest contract is not "f16
+            # everywhere" -- it is "whatever the live cache holds, with no
+            # extra codec imposed on top".
+            "SSD prefix cache: stored in the model's NATIVE cache "
+            "representation -- exactly what the live cache holds, with no "
+            "additional codec imposed (requested stored quantization=%s). "
+            "A natively quantized cache stays quantized; a natively "
+            "full-precision one is never quantized on the way to disk.%s",
             args.kv_cache_quantization,
             # Gate on the RESOLVED value, not just the bundle shape:
             # VMLX_DEFAULT_KV_CACHE_QUANTIZATION can override the fallback, and

@@ -392,7 +392,19 @@ def test_omni_dispatcher_uses_one_persistent_native_runtime_owner_thread():
     assert first != threading.get_ident()
 
 
-def test_omni_session_l2_roundtrips_q4_attention_and_native_ssm(tmp_path):
+def test_omni_session_l2_roundtrips_the_NATIVE_representation(tmp_path):
+    """The session snapshot must store what the live cache holds, nothing more.
+
+    This test used to assert the opposite -- that the attention slots came
+    back as QuantizedKVCache at 4 bits. That was an IMPOSED codec: the Omni
+    backbone's own make_cache returns a plain float KVCache for '*' blocks, so
+    nothing about the model asked for q4. Worse, the restore assigns the
+    loaded objects straight back into the live session and mlx_lm has no
+    dequant API, so a restored session decoded through q4 attention and
+    appended q4 keys from then on -- permanently, and only on warm turns.
+    A natively quantized cache (DSV4 pool state) is already quantized when it
+    arrives here and still round-trips unchanged.
+    """
     import mlx.core as mx
     from mlx_lm.models.cache import (
         ArraysCache,
@@ -438,8 +450,11 @@ def test_omni_session_l2_roundtrips_q4_attention_and_native_ssm(tmp_path):
     stored, metadata = load_prompt_cache(
         str(dispatcher._session_l2_path), return_metadata=True
     )
-    assert isinstance(stored[0], QuantizedKVCache)
-    assert stored[0].bits == 4
+    assert isinstance(stored[0], KVCache), (
+        "attention slot came back as %s -- a codec was imposed on a natively "
+        "full-precision cache" % type(stored[0]).__name__
+    )
+    assert not isinstance(stored[0], QuantizedKVCache)
     assert isinstance(stored[1], ArraysCache)
     assert metadata["signature"] == "media-prefix-a"
 
@@ -464,8 +479,11 @@ def test_omni_session_l2_roundtrips_q4_attention_and_native_ssm(tmp_path):
     )
 
     assert restored._try_restore_session_snapshot("media-prefix-a") is True
-    assert isinstance(restored._session._cache[0], QuantizedKVCache)
-    assert restored._session._cache[0].bits == 4
+    assert isinstance(restored._session._cache[0], KVCache)
+    assert not isinstance(restored._session._cache[0], QuantizedKVCache), (
+        "a restored session must not continue decoding through a codec the "
+        "model never used"
+    )
     assert isinstance(restored._session._cache[1], ArraysCache)
     assert restored._session._history_text == [
         {"role": "user", "content": "remember blue"}

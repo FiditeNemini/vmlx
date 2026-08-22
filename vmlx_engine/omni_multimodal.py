@@ -770,7 +770,7 @@ class OmniMultimodalDispatcher:
             "schema": _OMNI_SESSION_L2_SCHEMA,
             "enabled": self._disk_cache_enabled,
             "path": str(self._session_l2_path),
-            "attention_codec": "mlx-quantized-kv-q4",
+            "attention_codec": "native",
             "ssm_codec": "native-arrays",
             "stores": 0,
             "hits": 0,
@@ -839,7 +839,7 @@ class OmniMultimodalDispatcher:
             "path": str(path),
             "exists": path.is_file(),
             "bytes": path.stat().st_size if path.is_file() else 0,
-            "attention_codec": "mlx-quantized-kv-q4",
+            "attention_codec": "native",
             "ssm_codec": "native-arrays",
             "stores": 0,
             "hits": 0,
@@ -874,12 +874,24 @@ class OmniMultimodalDispatcher:
                 "Omni cache layer count does not match the model cache topology: "
                 f"cache={len(cache)} topology={len(block_types)}"
             )
-        persisted: List[Any] = []
-        for block_type, entry in zip(block_types, cache):
-            if block_type == "*" and hasattr(entry, "to_quantized"):
-                entry = entry.to_quantized(group_size=64, bits=4)
-            persisted.append(entry)
-        return persisted
+        # Persist the session in the representation the model ACTUALLY uses.
+        #
+        # This used to call entry.to_quantized(group_size=64, bits=4) on every
+        # attention slot. The Omni backbone's own make_cache returns a plain
+        # float KVCache for '*' blocks, so that was not "storing the native
+        # form" -- it was imposing a lossy codec the model never asked for.
+        # And the restore path assigns the loaded objects straight back into
+        # the live session (self._session._cache = cache) with no dequant,
+        # because mlx_lm has no dequant API: only to_quantized. So after any
+        # restore the session decoded through q4 attention AND appended
+        # q4-quantized keys from then on -- permanent, compounding, and warm
+        # answers diverging from cold ones. It was reachable on defaults,
+        # since the whole path is gated on the block-disk cache being enabled.
+        #
+        # If a model's cache is natively quantized (DSV4 pool state is), it is
+        # already quantized here and gets persisted exactly as-is. That is the
+        # rule: store what the live cache holds, add nothing.
+        return list(cache)
 
     def _persist_session_snapshot(self) -> bool:
         if (
@@ -981,7 +993,7 @@ class OmniMultimodalDispatcher:
             self._session_l2_stats["last_restore_seconds"] = round(elapsed, 6)
             self._session_l2_stats["last_error"] = None
             logger.info(
-                "OmniMultimodalDispatcher: restored q4-KV/native-SSM session "
+                "OmniMultimodalDispatcher: restored native-representation session "
                 "signature=%s bytes=%d in %.3fs",
                 prefix_signature,
                 self._session_l2_path.stat().st_size,

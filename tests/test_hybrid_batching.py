@@ -647,6 +647,245 @@ class TestHybridPagedSSMReuse:
         assert "base_token_count=" in source
 
 
+class TestMediaCompanionCaptureBoundaries:
+    """Media turns must capture companion checkpoints, safely."""
+
+    def _gen(self, placeholders=frozenset({99})):
+        from types import SimpleNamespace
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen._is_hybrid = True
+        gen.block_aware_cache = SimpleNamespace(block_size=64)
+        gen._media_placeholder_token_ids = lambda: set(placeholders)
+        return gen
+
+    def test_media_turn_no_longer_returns_no_boundaries(self):
+        """The blanket has_images exclusion made multimodal chats un-healable.
+
+        The discard path records the boundary it needed via
+        _ssm_required_checkpoint_tokens, and this function is its only
+        consumer. Returning [] for every media turn meant the requirement was
+        re-recorded and re-ignored forever, so a media conversation could
+        never recover -- an identical repeat turn still reported cached=0.
+        """
+        from types import SimpleNamespace
+
+        gen = self._gen()
+        # 372 tokens (not a multiple of 64 or 256), media run starts at 300.
+        tokens = list(range(300)) + [99] * 30 + list(range(42))
+        request = SimpleNamespace(
+            _original_token_ids=tokens,
+            _cached_tokens=0,
+            _ssm_required_checkpoint_tokens=0,
+        )
+        bounds = gen._ssm_capture_boundaries_for(
+            request, seq_len=372, has_images=True, clean_boundary=371
+        )
+        assert bounds, "media turn still captures nothing"
+        assert all(b <= 300 for b in bounds), (
+            "captured past the first media placeholder at 300: %s" % bounds
+        )
+        assert all(b % 64 == 0 for b in bounds), (
+            "boundaries must be block-aligned so the KV chain can pair: %s"
+            % bounds
+        )
+
+    def test_media_at_the_very_start_captures_nothing(self):
+        """No pure-text prefix means nothing is safe to snapshot."""
+        from types import SimpleNamespace
+
+        gen = self._gen()
+        tokens = [99] * 40 + list(range(300))
+        request = SimpleNamespace(
+            _original_token_ids=tokens,
+            _cached_tokens=0,
+            _ssm_required_checkpoint_tokens=0,
+        )
+        assert gen._ssm_capture_boundaries_for(
+            request, seq_len=340, has_images=True, clean_boundary=339
+        ) == []
+
+    def test_text_only_turns_are_unchanged(self):
+        """The text lane must keep its existing boundaries."""
+        from types import SimpleNamespace
+
+        gen = self._gen()
+        request = SimpleNamespace(
+            _original_token_ids=list(range(372)),
+            _cached_tokens=0,
+            _ssm_required_checkpoint_tokens=0,
+        )
+        bounds = gen._ssm_capture_boundaries_for(
+            request, seq_len=372, has_images=False, clean_boundary=371
+        )
+        assert 371 in bounds, "clean boundary dropped from the text lane"
+
+    def test_safe_limit_reports_first_placeholder(self):
+        gen = self._gen()
+        assert gen._media_safe_capture_limit(list(range(50))) == 50
+        assert gen._media_safe_capture_limit([1, 2, 99, 4]) == 2
+        assert gen._media_safe_capture_limit([99, 1]) == 0
+        assert gen._media_safe_capture_limit([]) == 0
+
+
+class TestCompanionDeltaMediaGuard:
+    """A text-only derive must never cross a media span."""
+
+    def test_delta_declines_when_the_gap_contains_media(self):
+        from types import SimpleNamespace
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen._is_hybrid = True
+        gen._hybrid_kv_positions = [0]
+        gen._media_placeholder_token_ids = lambda: {99}
+        gen._tokens_contain_media_placeholders = (
+            lambda ids: any(i == 99 for i in ids)
+        )
+
+        def _must_not_run(_table):
+            raise AssertionError("reconstructed despite a media gap")
+
+        gen.block_aware_cache = SimpleNamespace(reconstruct_cache=_must_not_run)
+        # gap [297, 384) crosses a placeholder run at [300, 337)
+        tokens = list(range(300)) + [99] * 37 + list(range(83))
+        assert gen._derive_hybrid_companion_delta(
+            SimpleNamespace(request_id="r"), tokens,
+            fetch_num=384, ck_len=297, block_table=object(),
+        ) is None
+
+
+class TestCompanionStoreKeySymmetry:
+    """Whatever key the reader asks with, the writer must write with."""
+
+    class _RecordingCompanion:
+        def __init__(self):
+            self.stored = []
+            self.probes = []
+
+        def has_complete(self, tokens, num_tokens, cache_extra_keys=None):
+            self.probes.append((num_tokens, cache_extra_keys))
+            return any(
+                s[0] == num_tokens and s[1] == cache_extra_keys
+                for s in self.stored
+            )
+
+        def store(
+            self, tokens, num_tokens, states, is_complete=True,
+            cache_extra_keys=None,
+        ):
+            self.stored.append((num_tokens, cache_extra_keys))
+
+    def _gen(self, companion, placeholders=frozenset()):
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        gen._is_hybrid = True
+        gen._ssm_state_cache = companion
+        gen._hybrid_kv_positions = [0]
+        gen._media_placeholder_token_ids = lambda: set(placeholders)
+        gen._tokens_contain_media_placeholders = (
+            lambda ids: any(i in set(placeholders) for i in ids)
+        )
+        return gen
+
+    def test_clean_pass_stores_under_the_key_the_reader_asks_with(self):
+        """The media lane fetches with a salt; the store must carry it.
+
+        Without this, the clean pass wrote the companion under the bare token
+        key while every media reader asked with the media salt -- so the
+        entry was unfindable, and the "skip the second background pass"
+        optimisation could never fire.
+        """
+        companion = self._RecordingCompanion()
+        gen = self._gen(companion)
+        fresh = [object(), object()]
+        salt = {"mllm_media": "sha-of-the-image"}
+
+        gen._store_companion_from_clean_pass(
+            list(range(6)), fresh, cache_extra_keys=salt
+        )
+        assert companion.stored == [(6, salt)]
+
+    def test_media_prompt_without_a_salt_is_declined_not_guessed(self):
+        """Fail closed: an unsalted media companion collides across images.
+
+        Two turns can carry byte-identical placeholder token ids and totally
+        different pictures. Storing that state under the bare token key means
+        the second turn restores recurrent state that absorbed the FIRST
+        image -- coherent prose about the wrong photo, and nothing raises.
+        """
+        companion = self._RecordingCompanion()
+        gen = self._gen(companion, placeholders={99})
+        fresh = [object(), object()]
+
+        gen._store_companion_from_clean_pass(
+            [1, 2, 99, 99, 3, 4], fresh, cache_extra_keys=None
+        )
+        assert companion.stored == [], "stored an unsalted media companion"
+
+    def test_text_prompt_without_a_salt_still_stores(self):
+        companion = self._RecordingCompanion()
+        gen = self._gen(companion, placeholders={99})
+        fresh = [object(), object()]
+
+        gen._store_companion_from_clean_pass([1, 2, 3, 4], fresh)
+        assert companion.stored == [(4, None)]
+
+    def test_a_failed_media_probe_does_not_block_the_store(self):
+        """A probe that cannot answer must not become a restriction.
+
+        The media decline is allowed to fire only on a POSITIVE reading. If
+        the placeholder lookup raises (no model attached, odd config shape),
+        declining would silently kill companion storage for an entire family
+        and every hybrid turn would re-prefill from cold forever.
+        """
+        companion = self._RecordingCompanion()
+        gen = self._gen(companion)
+
+        def _boom(_ids):
+            raise RuntimeError("config unavailable")
+
+        gen._tokens_contain_media_placeholders = _boom
+        gen._store_companion_from_clean_pass([1, 2, 3, 4], [object(), object()])
+        assert companion.stored == [(4, None)], (
+            "a failed media probe blocked a legitimate store"
+        )
+
+    def test_idle_rederive_threads_the_salt_into_the_clean_prefill(self):
+        """A salted queue entry paid for the clean pass TWICE.
+
+        run_idle_rederive popped the salt, probed has_complete WITH it, then
+        ran the clean prefill WITHOUT it. The clean pass stored under the bare
+        key, the probe below still missed, and the function did the whole
+        50-200MB clone + disk write a second time.
+        """
+        companion = self._RecordingCompanion()
+        gen = self._gen(companion)
+        salt = {"mllm_media": "sha-of-the-image"}
+        gen._ssm_rederive_queue = [(list(range(6)), 6, "req-1", salt)]
+
+        seen = {}
+
+        def _fake_clean(tokens, cache_extra_keys=None):
+            seen["salt"] = cache_extra_keys
+            companion.store(
+                tokens, len(tokens), ["s"], cache_extra_keys=cache_extra_keys
+            )
+            return None
+
+        gen._prefill_for_clean_ssm = _fake_clean
+        assert gen.run_idle_rederive() is True
+        assert seen["salt"] == salt, (
+            "clean prefill ran without the salt the reader uses"
+        )
+        assert companion.stored == [(6, salt)], (
+            "companion written twice or under the wrong key: %s"
+            % companion.stored
+        )
+
+
 class TestNativeMtpVersusExternalDrafter:
     """An external drafter and native MTP must never run together."""
 

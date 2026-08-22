@@ -915,7 +915,9 @@ def test_idle_rederive_applies_exemption_and_skips_when_clean_pass_stored():
     companion = _RecordingCompanionCache(complete=True)
     gen = _clean_pass_generator(companion)
     gen._ssm_rederive_queue = [([1, 2, 3], 3, "rid-a", None)]
-    gen._prefill_for_clean_ssm = lambda tokens: [KVCache(), KVCache()]
+    gen._prefill_for_clean_ssm = (
+        lambda tokens, cache_extra_keys=None: [KVCache(), KVCache()]
+    )
     assert gen.run_idle_rederive() is True
     assert companion.stored == [], "idle rederive must not double-store"
 
@@ -923,7 +925,7 @@ def test_idle_rederive_applies_exemption_and_skips_when_clean_pass_stored():
     companion2 = _RecordingCompanionCache(complete=False)
     gen2 = _clean_pass_generator(companion2)
     gen2._ssm_rederive_queue = [([1, 2, 3, 4], 4, "rid-b", None)]
-    gen2._prefill_for_clean_ssm = lambda tokens: [
+    gen2._prefill_for_clean_ssm = lambda tokens, cache_extra_keys=None: [
         KVCache(),        # layer 0 (kv position)
         _ExemptLatent(),  # layer 1 — must be excluded
         KVCache(),        # layer 2 (kv position)

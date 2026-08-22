@@ -6757,8 +6757,23 @@ class MLLMBatchGenerator:
         clean_boundary: int,
     ) -> List[int]:
         """Return clean SSM checkpoint boundaries to capture during prefill."""
-        if has_images or not self._is_hybrid:
+        if not self._is_hybrid:
             return []
+        # Media turns used to return NOTHING here, which is half of why a
+        # multimodal chat never reuses cache: the discard path records the
+        # exact boundary it needed (_ssm_required_checkpoint_tokens) and this
+        # is the only consumer that would honour it, so the requirement was
+        # re-recorded and re-ignored every turn and the conversation could
+        # never heal. Media turns now capture too -- but only within the
+        # prefix that precedes the first media placeholder, which is pure text
+        # and therefore safe to snapshot and to resume from.
+        media_limit = None
+        if has_images:
+            media_limit = self._media_safe_capture_limit(
+                list(getattr(request, "_original_token_ids", None) or [])
+            )
+            if media_limit <= 0:
+                return []
         if os.environ.get("VMLX_DISABLE_SSM_INLINE_CAPTURE") in (
             "1", "true", "True", "yes", "on"
         ):
@@ -6786,7 +6801,41 @@ class MLLMBatchGenerator:
             if clean_boundary < seq_len:
                 boundaries.append(clean_boundary)
 
+        if media_limit is not None:
+            # Keep only boundaries inside the pre-media text, and re-align each
+            # to a block boundary so the KV chain can actually pair with it.
+            capped: List[int] = []
+            for boundary in boundaries:
+                usable = min(int(boundary), int(media_limit))
+                aligned = self._ssm_block_aligned_boundary(usable)
+                if 0 < aligned <= media_limit:
+                    capped.append(aligned)
+            boundaries = capped
+
         return sorted(set(boundaries))
+
+    def _media_safe_capture_limit(self, token_ids: Optional[List[int]]) -> int:
+        """Highest token index whose prefix contains no media placeholder.
+
+        A companion snapshot taken PAST a media placeholder describes recurrent
+        state that absorbed vision embeddings. Anything later restoring from it
+        and continuing with a text-only forward would re-feed those positions
+        without pixel values -- coherent-looking wrong output, not a failure.
+        Everything strictly before the first placeholder is pure text and is
+        safe to snapshot and to resume from.
+
+        Returns len(token_ids) when there is no media at all, and 0 when the
+        prompt opens with media (nothing is safe).
+        """
+        if not token_ids:
+            return 0
+        media_ids = self._media_placeholder_token_ids()
+        if not media_ids:
+            return len(token_ids)
+        for index, token in enumerate(token_ids):
+            if token in media_ids:
+                return index
+        return len(token_ids)
 
     def _ssm_block_aligned_boundary(self, boundary: int) -> int:
         """Return the largest positive paged-cache block boundary below boundary.
@@ -9008,6 +9057,7 @@ class MLLMBatchGenerator:
                                                         int(_fetch_num or 0),
                                                         int(_ck_len or 0),
                                                         block_table,
+                                                        cache_extra_keys=_ssm_extra_keys,
                                                     )
                                                 )
                                             if _delta_states:
@@ -12212,6 +12262,7 @@ class MLLMBatchGenerator:
         fetch_num: int,
         ck_len: int,
         block_table: Any,
+        cache_extra_keys: Optional[Any] = None,
     ) -> Optional[List[Any]]:
         """Advance companion state from a checkpoint to the KV hit boundary.
 
@@ -12238,6 +12289,25 @@ class MLLMBatchGenerator:
         if not (0 < ck_len < fetch_num) or block_table is None:
             return None
         if not self._hybrid_kv_positions:
+            return None
+        # The derive advances recurrent state with a TEXT-ONLY forward. If the
+        # gap it has to cross contains media placeholders, those positions
+        # would be re-fed without their pixel values and the resulting state
+        # would be quietly wrong -- coherent output, wrong content, no error.
+        # The store side already refuses this pairing; so must the fetch side.
+        try:
+            if self._tokens_contain_media_placeholders(
+                list(token_list[ck_len:fetch_num])
+            ):
+                logger.info(
+                    "vmlx#91 DELTA declined for %s: the %d-token gap from the "
+                    "checkpoint crosses media placeholders, which a text-only "
+                    "derive cannot reproduce.",
+                    getattr(req, "request_id", "?"),
+                    fetch_num - ck_len,
+                )
+                return None
+        except Exception:
             return None
         try:
             from .utils.cache_extent import cache_offset
@@ -12292,7 +12362,10 @@ class MLLMBatchGenerator:
         )
         try:
             derived = self._prefill_for_clean_ssm(
-                list(token_list[:fetch_num]), sliced, ck_len
+                list(token_list[:fetch_num]),
+                sliced,
+                ck_len,
+                cache_extra_keys=cache_extra_keys,
             )
         except Exception as exc:
             logger.info(
@@ -12371,6 +12444,7 @@ class MLLMBatchGenerator:
         tokens: List[int],
         base_cache: Optional[List[Any]] = None,
         base_token_count: int = 0,
+        cache_extra_keys: Optional[Any] = None,
     ) -> Optional[List[Any]]:
         """Run a clean prompt-only prefill matching a path-dependent cache key.
 
@@ -12570,7 +12644,9 @@ class MLLMBatchGenerator:
                 # serve process ~2 minutes after an 11k-token turn, and once
                 # hard-resetting the whole machine.
                 mx.clear_cache()
-            self._store_companion_from_clean_pass(tokens, fresh_cache)
+            self._store_companion_from_clean_pass(
+                tokens, fresh_cache, cache_extra_keys=cache_extra_keys
+            )
             return fresh_cache
         except Exception as ex:
             if isinstance(ex, (NameError, AttributeError, TypeError)):
@@ -12597,7 +12673,10 @@ class MLLMBatchGenerator:
                     pass
 
     def _store_companion_from_clean_pass(
-        self, tokens: List[int], fresh_cache: Optional[List[Any]]
+        self,
+        tokens: List[int],
+        fresh_cache: Optional[List[Any]],
+        cache_extra_keys: Optional[Any] = None,
     ) -> None:
         """Store the SSM companion produced by a clean prompt-only prefill.
 
@@ -12610,10 +12689,16 @@ class MLLMBatchGenerator:
         skip that second pass, halving the post-turn background GPU work for
         hybrid thinking models.
 
-        Keys: media prompts never route through the hybrid clean store, and
-        text captures enqueue their re-derive entries with
-        ``cache_extra_keys=None``, so the default key here matches the queued
-        entry exactly.
+        Keys: ``cache_extra_keys`` MUST be whatever the reader will ask with.
+        Text captures enqueue their re-derive entries with ``None``, so the
+        default matches them. Media prompts DO reach here (the vmlx#91 delta
+        derive routes through ``_prefill_for_clean_ssm``), and their reader
+        asks with the media salt — storing those under the bare token key
+        would be worse than useless: two turns whose placeholder token ids are
+        identical but whose IMAGES differ hash the same, so the second turn
+        would restore recurrent state that absorbed the FIRST image. Coherent
+        output, wrong picture, no error anywhere. Callers on a media path pass
+        their fetch-side ``_ssm_extra_keys`` here so store and fetch agree.
         """
         companion_cache = getattr(self, "_ssm_state_cache", None)
         if fresh_cache is None or companion_cache is None:
@@ -12624,7 +12709,7 @@ class MLLMBatchGenerator:
         try:
             prompt_len = len(tokens)
             if prompt_len <= 0 or companion_cache.has_complete(
-                tokens, prompt_len
+                tokens, prompt_len, cache_extra_keys=cache_extra_keys
             ):
                 return
             kv_set = set(kv_positions)
@@ -12651,13 +12736,46 @@ class MLLMBatchGenerator:
                 else:
                     ssm_layers.append(c)
             if ssm_layers:
+                _unsalted_media = False
+                if cache_extra_keys is None:
+                    try:
+                        _unsalted_media = (
+                            self._tokens_contain_media_placeholders(
+                                list(tokens)
+                            )
+                        )
+                    except Exception:
+                        # Detection failed, so we do not KNOW there is media.
+                        # A failed probe must not become a restriction --
+                        # decline only on a POSITIVE media reading.
+                        _unsalted_media = False
+                if _unsalted_media:
+                    # Fail closed. A media prompt under the bare token key is
+                    # a cross-image collision waiting to happen: the reader
+                    # that asks with the media salt can never find it, and the
+                    # reader that asks WITHOUT the salt would find it for a
+                    # different image. Neither outcome is acceptable, so this
+                    # store is declined rather than guessed at.
+                    logger.info(
+                        "MLLM clean prefill: declining the companion store at "
+                        "%d tokens -- the prompt carries media placeholders "
+                        "but no media cache key was supplied, and an unsalted "
+                        "media companion collides across images.",
+                        prompt_len,
+                    )
+                    return
                 companion_cache.store(
-                    tokens, prompt_len, ssm_layers, is_complete=True
+                    tokens,
+                    prompt_len,
+                    ssm_layers,
+                    is_complete=True,
+                    cache_extra_keys=cache_extra_keys,
                 )
                 logger.info(
                     "MLLM clean prefill: stored complete SSM companion at the "
-                    "%d-token key (idle re-derive will skip)",
+                    "%d-token key (media_salted=%s; idle re-derive will skip)",
                     prompt_len,
+                    cache_extra_keys is not None,
                 )
         except Exception as ex:
             logger.warning(
@@ -12669,10 +12787,14 @@ class MLLMBatchGenerator:
         tokens: List[int],
         base_cache: Optional[List[Any]] = None,
         base_token_count: int = 0,
+        cache_extra_keys: Optional[Any] = None,
     ) -> Optional[List[Any]]:
         """Compatibility alias for hybrid SSM callers."""
         return self._prefill_for_clean_path_dependent_cache(
-            tokens, base_cache, base_token_count
+            tokens,
+            base_cache,
+            base_token_count,
+            cache_extra_keys=cache_extra_keys,
         )
 
     def _prefill_for_clean_media_prefix_cache(
@@ -12803,7 +12925,16 @@ class MLLMBatchGenerator:
             f"({prompt_len} prompt tokens, {len(self._ssm_rederive_queue)} remaining)"
         )
         try:
-            clean_cache = self._prefill_for_clean_ssm(list(tokens))
+            # The salt has to travel WITH the prefill. Without it the clean
+            # pass stored its companion under the bare token key while this
+            # function's has_complete() probe asks with the salt -- so the
+            # probe below always missed, every media re-derive paid the
+            # 50-200MB deep clone plus disk write TWICE, and the first copy
+            # was an unsalted media companion that a different image with the
+            # same placeholder tokens would happily restore.
+            clean_cache = self._prefill_for_clean_ssm(
+                list(tokens), cache_extra_keys=cache_extra_keys
+            )
             if clean_cache is None:
                 return True
             if self._ssm_state_cache.has_complete(

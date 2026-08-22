@@ -9854,6 +9854,46 @@ class MLLMBatchGenerator:
                                     # suffix (<|im_start|>assistant\n<think>\n) to enter
                                     # thinking mode on turn 2.
                                     _full_remaining = (remaining or []) + list(_gpl_suffix)
+                                    # Dropping pixel_values below is what makes
+                                    # a warm media turn cheap -- the vision
+                                    # tower is skipped entirely because the
+                                    # image's KV is already in the restored
+                                    # prefix. That is only true when the hit
+                                    # COVERS the media span. If the tail still
+                                    # contains placeholders, forwarding it with
+                                    # no pixels embeds them as ordinary text
+                                    # tokens: the model answers fluently about
+                                    # an image it never saw, and nothing
+                                    # raises. Refuse the hit instead -- a full
+                                    # prefill is slow, a confidently wrong
+                                    # answer is worse.
+                                    try:
+                                        _tail_has_media = (
+                                            self._tokens_contain_media_placeholders(
+                                                list(_full_remaining)
+                                            )
+                                        )
+                                    except Exception:
+                                        _tail_has_media = False
+                                    if _tail_has_media:
+                                        logger.info(
+                                            "VLM cache hit DECLINED for %s: the "
+                                            "%d-token tail still contains media "
+                                            "placeholders, so the %d-token hit "
+                                            "does not cover the image. Full "
+                                            "prefill (an image-blind answer "
+                                            "would be worse).",
+                                            req.request_id,
+                                            len(_full_remaining),
+                                            int(block_table.num_tokens),
+                                        )
+                                        self._adjust_paged_hit_credit(req.request_id, 0)
+                                        self.block_aware_cache.release_cache(
+                                            req.request_id
+                                        )
+                                        req._cached_tokens = 0
+                                        req.prompt_cache = None
+                                        continue
                                     if _full_remaining:
                                         req.input_ids = mx.array([_full_remaining])
                                         req.pixel_values = None

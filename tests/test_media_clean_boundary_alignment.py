@@ -104,3 +104,34 @@ def test_the_scheduler_prefers_the_clean_store_key():
         "fixing one of two is the default failure mode here (found %d)"
         % occurrences
     )
+
+
+def test_a_hit_that_does_not_cover_the_media_span_is_declined():
+    """Dropping pixel_values is only safe when the hit COVERS the image.
+
+    A warm media turn is cheap precisely because the hybrid hit path sets
+    req.pixel_values = None -- the vision tower is skipped since the image's
+    KV is already in the restored prefix. That reasoning holds only if the
+    cached prefix actually contains the image. If the tail still carries
+    placeholders, forwarding it with no pixels embeds them as ordinary text
+    tokens and the model answers fluently about an image it never saw. Nothing
+    raises, nothing logs, and the answer looks fine.
+
+    So the hit is refused in that case. A full prefill is slow; a confidently
+    wrong answer is worse.
+    """
+    import inspect
+
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    src = inspect.getsource(MLLMBatchGenerator._process_prompts)
+    drop = src.index("req.pixel_values = None")
+    window = src[max(0, drop - 2200):drop]
+    assert "_tail_has_media" in window, (
+        "pixel_values is dropped with no check that the hit covers the media"
+    )
+    assert "_tokens_contain_media_placeholders" in window
+    # The decline must actually release the blocks and zero the credit, or the
+    # refs leak and the next turn hits the same unusable entry forever.
+    assert "release_cache" in window
+    assert "req._cached_tokens = 0" in window

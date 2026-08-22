@@ -9240,6 +9240,28 @@ class MLLMBatchGenerator:
                                 "head=%s tail=%s",
                                 req.request_id, len(_tl), _tl[:8], _tl[-8:],
                             )
+                            # Segment fingerprints. head/tail cannot show WHERE
+                            # two prompts stop agreeing, and that is the only
+                            # question worth asking when a chain matches fewer
+                            # blocks than were stored: comparing two of these
+                            # lines shows the first 512-token window that
+                            # differs, without dumping thousands of ids.
+                            _segs = []
+                            for _off in range(0, len(_tl), 512):
+                                _chunk = _tl[_off:_off + 512]
+                                _segs.append(
+                                    "%d:%s"
+                                    % (
+                                        _off,
+                                        hashlib.sha256(
+                                            repr(_chunk).encode()
+                                        ).hexdigest()[:8],
+                                    )
+                                )
+                            logger.info(
+                                "mm-restore-debug SEGMENTS req=%s n=%d %s",
+                                req.request_id, len(_tl), " ".join(_segs),
+                            )
                             logger.info(
                                 "mm-restore-debug FETCHED req=%s block_table=%s "
                                 "num_tokens=%s prompt_tokens=%d media_allowed=%s",

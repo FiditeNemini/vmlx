@@ -3572,10 +3572,12 @@ Examples:
     serve_parser.add_argument(
         "--stream-interval",
         type=int,
-        default=1,
+        default=8,
         help="How many tokens to generate before sending a streaming update to the client. "
-             "1 = send every token (smoothest typing effect). Higher values batch tokens "
-             "for slightly better throughput. Requires --continuous-batching. (default: 1)",
+             "Higher values batch tokens; 1 sends every token but is NOT recommended -- a "
+             "per-token stream lets client backpressure stall the emit loop, and the "
+             "speculative-decoding cost gate reads that stall as MTP cost and falls back "
+             "to plain autoregressive decode. Requires --continuous-batching. (default: 8)",
     )
     serve_parser.add_argument(
         "--prefill-keep-alloc",
@@ -4095,8 +4097,12 @@ Examples:
         "--native-mtp-depth",
         type=int,
         default=None,
-        help="Depth for native in-model MTP heads on preserved-MTP bundles. "
-             "D3 is the current Qwen3.6 default; overridden by VMLX_NATIVE_MTP_DEPTH.",
+        help="Starting depth for native in-model MTP heads on preserved-MTP "
+             "bundles. This flag WINS over VMLX_NATIVE_MTP_DEPTH (it is applied "
+             "as VMLINUX_NATIVE_MTP_DEPTH, which is checked first); omit it to "
+             "use the bundle's own tuned best_depth. Note this is only the "
+             "STARTING depth -- the runtime adapts it per request from measured "
+             "acceptance, and caps it to 1 when the request carries tools.",
     )
     serve_parser.add_argument(
         "--native-mtp-sampling-policy",

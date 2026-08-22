@@ -708,6 +708,15 @@ def test_mimo_v2_media_prefill_does_not_forward_processor_attention_mask(
         # its deep-context gate, so a no-op stands in for the real method.
         _turn_peak_walk_admit=lambda final_ctx, request=None: None,
     )
+    # The media forward now goes through _media_forward, which chunks when the
+    # family exposes an embeddings seam and otherwise makes exactly the same
+    # one-shot wrapper call. Bind the real method so this test exercises the
+    # production path rather than a stub of it; with language_model=None and a
+    # 3-token prompt it takes the one-shot branch, which is what is asserted
+    # below.
+    fake_self._media_forward = (
+        MLLMBatchGenerator._media_forward.__get__(fake_self, SimpleNamespace)
+    )
     request = MLLMBatchRequest(uid=1, request_id="mimo-media", prompt="p")
     request.input_ids = mx.array([[1, 151655, 2]], dtype=mx.int32)
     request.pixel_values = mx.zeros((4, 8))

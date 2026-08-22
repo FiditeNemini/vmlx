@@ -1849,6 +1849,87 @@ class BatchedEngine(BaseEngine):
                 if tools:
                     tpl_kwargs["tools"] = tools
 
+                def _build_messages_preserving_image_owner(
+                    config_arg, messages_arg, total_images
+                ):
+                    """Attach image placeholders to the message that OWNS them.
+
+                    Same output as mlx_vlm's whole-list builder for every
+                    family -- it reuses mlx_vlm's own per-family
+                    ``get_message_json``, so literal in-text syntaxes
+                    (``<start_of_image>``, ``<image>``, ``<|image_N|>`` ...)
+                    are produced by the same code as before. The ONLY
+                    difference is which message the placeholders land on.
+
+                    Images handed in through the separate ``images=`` kwarg
+                    with no owning message keep the old last-user-message
+                    convention, because for those there is nothing better to
+                    key on.
+                    """
+                    from mlx_vlm.prompt_utils import (
+                        extract_text_from_content,
+                        get_message_json,
+                    )
+
+                    model_type_arg = (
+                        config_arg.get("model_type")
+                        if isinstance(config_arg, dict)
+                        else getattr(config_arg, "model_type", None)
+                    )
+
+                    def _own_image_count(content):
+                        if not isinstance(content, list):
+                            return 0
+                        count = 0
+                        for item in content:
+                            if hasattr(item, "model_dump"):
+                                item = item.model_dump(exclude_none=True)
+                            elif hasattr(item, "dict"):
+                                item = item.dict()
+                            if isinstance(item, dict) and item.get("type") in (
+                                "image", "image_url", "input_image",
+                            ):
+                                count += 1
+                        return count
+
+                    owned = [
+                        _own_image_count(m.get("content"))
+                        for m in messages_arg
+                    ]
+                    # Surplus = images with no owning message part.
+                    surplus = max(0, int(total_images) - sum(owned))
+                    last_user_idx = -1
+                    for index, message in enumerate(messages_arg):
+                        if message.get("role") not in (
+                            "system", "assistant", "tool",
+                        ):
+                            last_user_idx = index
+
+                    built = []
+                    for index, message in enumerate(messages_arg):
+                        role = message.get("role", "user")
+                        # Tool-metadata messages pass through untouched, the
+                        # same way mlx_vlm's builder treats them.
+                        if role == "tool" or message.get("tool_calls"):
+                            built.append(message)
+                            continue
+                        text = extract_text_from_content(
+                            message.get("content", "")
+                        )
+                        count = owned[index]
+                        if index == last_user_idx and surplus:
+                            count += surplus
+                        built.append(
+                            get_message_json(
+                                model_type_arg,
+                                text,
+                                role,
+                                skip_image_token=(count == 0),
+                                num_images=count,
+                            )
+                        )
+                    return built
+
                 def _normalize_processor_messages(messages_arg):
                     try:
                         from ..models.mllm import MLXMultimodalLM
@@ -1932,13 +2013,36 @@ class BatchedEngine(BaseEngine):
                     # {"type": "video"} items and renders the template's own
                     # <|video_pad|> framing; with this condition, mixed
                     # conversations take it too.
+                    #
+                    # 🖼️ IMAGES MUST STAY IN THEIR OWN MESSAGE.
+                    # mlx_vlm's whole-list builder finds the LAST user message
+                    # and re-attaches EVERY image to it, stripping them out of
+                    # the messages that actually carried them
+                    # (prompt_utils.py: extract_text_from_content drops the
+                    # image part, then skip_image_token=not is_target puts them
+                    # all on last_user_idx). For a single-turn request that is
+                    # a no-op, which is why it looked fine. Extend the
+                    # conversation by one turn and the image MOVES: measured on
+                    # Qwen3.8-27B VL, the same image sat at token 84 in a
+                    # 4-message request and at token 2396 in the same
+                    # conversation plus an assistant reply and one more user
+                    # turn. Every token after it shifts, so no cache block hash
+                    # can ever match again -- multimodal prefix reuse was
+                    # permanently 0% from the first image turn onward, and it
+                    # looked like a cache defect while the cache was doing
+                    # exactly the right thing on a prompt that genuinely was
+                    # not the same prompt. It also bunches images from
+                    # different messages onto one message even on a first
+                    # request, which silently misattributes them.
+                    #
+                    # Build per message instead, reusing mlx_vlm's own
+                    # per-family formatter so every family's literal in-text
+                    # image syntax is preserved byte for byte -- the only
+                    # thing that changes is WHICH message carries the
+                    # placeholders.
                     try:
-                        built_messages = apply_chat_template(
-                            self._processor,
-                            config,
-                            messages,
-                            num_images=num_images,
-                            return_messages=True,
+                        built_messages = _build_messages_preserving_image_owner(
+                            config, messages, num_images
                         )
                     except Exception as build_err:
                         # Local adapters may have a real processor/template

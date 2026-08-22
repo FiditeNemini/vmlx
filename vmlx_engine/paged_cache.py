@@ -1801,9 +1801,26 @@ class PagedCacheManager:
                     # free LRU queue before they can be reallocated.
                     self.touch([cached_block])
 
+            if _CACHE_HASH_DEBUG and cached_block is None:
+                # Which of the two tiers actually answered? A FETCH line alone
+                # does not say whether L2 was consulted at all, and "the key
+                # matched but the lookup missed" is unresolvable without it.
+                logger.info(
+                    "cache-hash-debug L1MISS pos=%d hash=%s disk_store=%s",
+                    i,
+                    block_hash.hex()[:16],
+                    "present" if self._disk_store is not None else "NONE",
+                )
             if cached_block is None and self._disk_store is not None:
                 # L1 miss — check L2 disk cache (outside lock to avoid blocking)
                 disk_data = self._disk_store.read_block(block_hash)
+                if _CACHE_HASH_DEBUG:
+                    logger.info(
+                        "cache-hash-debug L2READ pos=%d hash=%s -> %s",
+                        i,
+                        block_hash.hex()[:16],
+                        "HIT" if disk_data is not None else "miss",
+                    )
                 if disk_data is not None:
                     with self._lock:
                         # Re-check L1 after releasing lock (another thread may have promoted)

@@ -12206,6 +12206,12 @@ class MLLMBatchGenerator:
                 batch.requests,
             )
         ):
+            # Must be bound for EVERY request, not inside the finish branch.
+            # The response is built on every path, so a branch-local binding
+            # made an unfinished request raise UnboundLocalError -- which the
+            # scheduler surfaced as "1 requests failed permanently", i.e. the
+            # whole turn died and every ctx/cached reading came back 0.
+            _clean_store_tokens: Optional[List[int]] = None
             num_tok += 1
             batch.num_tokens[i] = num_tok
             req.num_tokens = num_tok
@@ -12259,7 +12265,6 @@ class MLLMBatchGenerator:
                 # Do NOT TQ-compress here — the scheduler needs original float16
                 # for block extraction. TQ recompress happens on the fetch path.
                 captured_cache = getattr(req, "_media_clean_prefix_cache", None)
-                _clean_store_tokens = None
                 if captured_cache is not None:
                     # The clean media cache covers a BLOCK-ALIGNED prefix, not
                     # N-1, so the store must be keyed by that prefix + 1 (the

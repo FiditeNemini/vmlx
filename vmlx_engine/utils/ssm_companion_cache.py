@@ -88,6 +88,7 @@ DEFAULT_SSM_COMPANION_ENTRIES = 8
 import hashlib
 import json
 import logging
+import os
 import re
 from collections import OrderedDict
 from copy import deepcopy
@@ -519,7 +520,20 @@ class SSMCompanionCache:
             + self._extra_key_bytes(cache_extra_keys)
         )
         h = hashlib.sha256(data).hexdigest()
-        if logger.isEnabledFor(logging.DEBUG):
+        # VMLX_CACHE_HASH_DEBUG promotes this to INFO. A store and a fetch that
+        # disagree are indistinguishable from "nothing was stored" in the
+        # ordinary logs, and chasing that difference by inference cost a whole
+        # investigation -- the two key lines side by side settle it in one read.
+        if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
+            logger.info(
+                "SSM key: N=%d hash=%s extra=%s tokens[:4]=%s tokens[-4:]=%s",
+                num_tokens,
+                h[:12],
+                bool(cache_extra_keys),
+                token_ids[:4],
+                token_ids[max(0, num_tokens - 4):num_tokens],
+            )
+        elif logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "SSM key: N=%d hash=%s extra=%s tokens[-8:]=%s",
                 num_tokens,

@@ -10391,15 +10391,48 @@ class MLLMBatchGenerator:
                 try:
                     if trace is not None:
                         trace.start("forward")
+                    _cache_in_offset = (
+                        getattr(req_cache[0], "offset", None) if req_cache else None
+                    )
                     logger.info(
                         "MLLM prefill cache-in for %s: layer0=%s offset=%s "
                         "layers=%d cached_tokens=%s",
                         req.request_id,
                         type(req_cache[0]).__name__ if req_cache else None,
-                        getattr(req_cache[0], "offset", None) if req_cache else None,
+                        _cache_in_offset,
                         len(req_cache or []),
                         getattr(req, "_cached_tokens", None),
                     )
+                    # A hit that reconstructs to NOTHING must never be quiet.
+                    # Measured on Gemma-4-26B: the paged lane reported a
+                    # 2,638-token hit across 42 blocks, the rotating restore
+                    # produced an EMPTY cache (offset 0), and the turn fell
+                    # back to a full prefill with no log line anywhere saying
+                    # so. From the outside it is indistinguishable from "the
+                    # cache never had it" -- which is what made the multimodal
+                    # investigation take as long as it did.
+                    try:
+                        _bt = self.block_aware_cache.paged_cache.get_block_table(
+                            req.request_id
+                        )
+                        _hit_tokens = int(getattr(_bt, "num_tokens", 0) or 0)
+                    except Exception:
+                        _hit_tokens = 0
+                    if (
+                        _hit_tokens > 0
+                        and not int(getattr(req, "_cached_tokens", 0) or 0)
+                        and not _cache_in_offset
+                    ):
+                        logger.warning(
+                            "Cache hit EVAPORATED for %s: the paged lane "
+                            "matched %d tokens but the restored %s came back "
+                            "at offset %s, so this turn re-prefills in full. "
+                            "This is a restore failure, not a cache miss.",
+                            req.request_id,
+                            _hit_tokens,
+                            type(req_cache[0]).__name__ if req_cache else None,
+                            _cache_in_offset,
+                        )
                     logits = self._run_vision_encoding(req, cache=req_cache)
                     from .utils.turboquant_config import turboquant_cache_telemetry
 

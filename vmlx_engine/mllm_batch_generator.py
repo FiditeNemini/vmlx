@@ -8817,8 +8817,31 @@ class MLLMBatchGenerator:
         # no_chunked_prefill when its config asks for bidirectional vision
         # attention). Honour it as a kill switch even though the MLX language
         # model does not implement that mask today.
-        if getattr(self.model, "no_chunked_prefill", False):
-            return one_shot()
+        # `no_chunked_prefill` is an INTENT marker, not a capability answer.
+        # gemma4 sets it from `use_bidirectional_attention == "vision"`, and
+        # that config DEFAULTS to "vision", so honouring it as an absolute
+        # kill switch made every gemma4 media prompt one-shot -- which is how
+        # an 80,611-token media conversation reached
+        #   [metal::malloc] Attempting to allocate 207,940,266,272 bytes
+        #   which is greater than the maximum allowed buffer size of
+        #   86,586,540,032 bytes
+        # and every later turn failed.
+        #
+        # What the flag actually protects is vision spans: a bidirectional
+        # mask over an image would break if the span were split across
+        # forwards. (The MLX language model implements no such mask today --
+        # `_make_masks` is causal-only -- so a split is currently output
+        # identical, but that is a fact about today, not a licence.)
+        #
+        # `_media_chunk_boundaries` already guarantees no boundary lands
+        # INSIDE a media run: a run that starts after the cut moves whole to
+        # the next chunk, and a run already open at the cut extends the chunk
+        # to cover it. So the intent is satisfiable without refusing to chunk
+        # -- and it is VERIFIED below rather than assumed, falling back to
+        # one-shot if any run would be split.
+        _protect_media_spans = bool(
+            getattr(self.model, "no_chunked_prefill", False)
+        )
         if cache is None or seq_len <= 0:
             return one_shot()
 
@@ -8876,13 +8899,36 @@ class MLLMBatchGenerator:
         runs = _media_placeholder_runs(token_list, media_ids)
         bounds = _media_chunk_boundaries(seq_len, chunk, runs)
 
+        # Verify the invariant the wrapper asked for instead of trusting it.
+        _split_run = None
+        _prev = 0
+        for _end in bounds[:-1]:
+            for _rs, _re in runs:
+                if _rs < _end < _re:
+                    _split_run = (_rs, _re, _end)
+                    break
+            if _split_run:
+                break
+            _prev = _end
+        if _split_run is not None:
+            logger.info(
+                "media chunked prefill declined for %s: a chunk boundary at "
+                "%d would split the media run [%d, %d). Falling back to the "
+                "one-shot forward.",
+                getattr(request, "request_id", "?"),
+                _split_run[2], _split_run[0], _split_run[1],
+            )
+            return one_shot()
+
         logger.info(
-            "media chunked prefill for %s: %d tokens in %d chunks (step %d), "
-            "peak now scales with the chunk instead of the whole prompt",
+            "media chunked prefill for %s: %d tokens in %d chunks (step %d, "
+            "media spans kept whole%s), peak now scales with the chunk "
+            "instead of the whole prompt",
             getattr(request, "request_id", "?"),
             seq_len,
             len(bounds),
             chunk,
+            "; wrapper requested span protection" if _protect_media_spans else "",
         )
 
         output = None

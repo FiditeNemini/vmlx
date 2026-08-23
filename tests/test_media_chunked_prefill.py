@@ -194,13 +194,31 @@ class TestMediaForwardFallbacks:
         self._run(gen)
         assert calls == ["one-shot"]
 
-    def test_wrapper_can_declare_itself_unchunkable(self):
+    def test_no_chunked_prefill_protects_spans_it_does_not_forbid_chunking(self):
+        """gemma4 sets this from a config that DEFAULTS to "vision".
+
+        Treating it as an absolute kill switch made every gemma4 media prompt
+        one-shot, and an 80,611-token conversation then died on
+        `[metal::malloc] Attempting to allocate 207,940,266,272 bytes` against
+        an 86.6GB cap -- every turn after it failed. What the flag protects is
+        vision spans, and the chunker already keeps runs whole, so the intent
+        is satisfiable without refusing to chunk.
+        """
+        from types import SimpleNamespace
+
         calls = []
         gen = self._gen(
             _OneShotModel(calls, no_chunked_prefill=True), _EmbedsLM()
         )
+        gen.model.get_input_embeddings = lambda ids, **kw: SimpleNamespace(
+            inputs_embeds=_FakeIds(30000)
+        )
+        gen._media_placeholder_token_ids = lambda: set()
         self._run(gen)
-        assert calls == ["one-shot"]
+        assert calls == [], (
+            "no_chunked_prefill still forces one-shot; gemma4 media prompts "
+            "will keep dying on an oversized single allocation"
+        )
 
     def test_short_prompts_stay_one_shot_even_when_chunkable(self):
         """One-shot reads the weights once; it was never the failing shape."""
@@ -242,3 +260,25 @@ class _FakeIds:
 
     def tolist(self):
         return list(range(self._n))
+
+
+class TestMediaSpansAreNeverSplit:
+    """The invariant the wrapper flag actually cares about."""
+
+    def test_no_boundary_lands_inside_a_run(self):
+        runs = [(100, 900), (1500, 4200), (9000, 9100)]
+        bounds = _media_chunk_boundaries(12000, 4096, runs)
+        for end in bounds[:-1]:
+            for rs, re_ in runs:
+                assert not (rs < end < re_), (
+                    "boundary %d splits media run [%d, %d)" % (end, rs, re_)
+                )
+
+    def test_a_run_longer_than_the_chunk_is_kept_whole(self):
+        """A 6000-token image with a 4096 chunk must not be cut in half."""
+        runs = [(200, 6200)]
+        bounds = _media_chunk_boundaries(9000, 4096, runs)
+        for end in bounds[:-1]:
+            assert not (200 < end < 6200), "oversized run was split at %d" % end
+        assert bounds[-1] == 9000
+        assert all(b2 > b1 for b1, b2 in zip(bounds, bounds[1:]))

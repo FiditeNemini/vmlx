@@ -463,6 +463,37 @@ def test_mllm_discarded_hit_restores_full_prefill_and_reconciles_paged_credit():
     )
 
 
+def test_mllm_prefill_declines_hit_when_reconstruction_returns_none():
+    """A credited paged hit that reconstructs to None must be discarded.
+
+    The text scheduler rolls this back (_release_unusable_paged_hit); the
+    MLLM lane used to fall through silently — block refs and hit credit
+    stayed live while the request full-prefilled with cached_tokens=0 (the
+    live gemma4 2638-token empty restore).  Pin structurally that the
+    prompt-processing path declines via _discard_request_cache_hit with the
+    named reason between the reconstruct call and the dequantize step.
+    """
+    import inspect
+
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    source = inspect.getsource(MLLMBatchGenerator._process_prompts)
+    reconstruct_at = source.find("reconstruct_cache(block_table)")
+    assert reconstruct_at != -1
+    decline_at = source.find('reason="paged_reconstruction_failed"')
+    assert decline_at != -1, (
+        "MLLM prefill no longer declines a reconstruct-None paged hit; a "
+        "credited hit would silently full-prefill while its block refs and "
+        "credit stay live"
+    )
+    assert decline_at > reconstruct_at
+    dequant_at = source.find("_dequantize_cache(reconstructed)")
+    assert dequant_at != -1
+    assert decline_at < dequant_at, (
+        "the decline must run before the dequantize/adoption branch"
+    )
+
+
 class TestMLLMBatch:
     """Tests for MLLMBatch class."""
 

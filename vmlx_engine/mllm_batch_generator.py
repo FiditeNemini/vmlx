@@ -9752,6 +9752,42 @@ class MLLMBatchGenerator:
                                     _cache_execution["tq_native_blocks"] = (
                                         _tq_native_blocks
                                     )
+                                if reconstructed is None:
+                                    # Never fall through with a credited hit
+                                    # and no cache: the request would silently
+                                    # full-prefill while the fetch's block refs
+                                    # and hit credit stay live (the text
+                                    # scheduler already rolls this back —
+                                    # scheduler._release_unusable_paged_hit).
+                                    logger.info(
+                                        "VLM paged cache hit for %s "
+                                        "reconstructed to nothing (%d tokens, "
+                                        "%d blocks) — declining the hit: "
+                                        "releasing blocks and zeroing hit "
+                                        "credit before the full prefill",
+                                        req.request_id,
+                                        int(
+                                            getattr(
+                                                block_table, "num_tokens", 0
+                                            )
+                                            or 0
+                                        ),
+                                        _block_table_block_count(block_table),
+                                    )
+                                    req._cache_execution = dict(
+                                        _cache_execution
+                                    )
+                                    self._discard_request_cache_hit(
+                                        req,
+                                        reason="paged_reconstruction_failed",
+                                        attempted_cached_tokens=int(
+                                            getattr(
+                                                block_table, "num_tokens", 0
+                                            )
+                                            or 0
+                                        ),
+                                    )
+                                    continue
                                 if reconstructed is not None:
                                     _dequant_started = time.perf_counter()
                                     reconstructed = _dequantize_cache(reconstructed)

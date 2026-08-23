@@ -2169,10 +2169,24 @@ def _numpy_block_slice(
                         )
                 except ValueError as exc:
                     if is_last_block:
-                        logger.warning("Layer %s (%s): %s", idx, cls, exc)
-                        block_slices.append(("skip",))
-                    else:
-                        block_slices.append(("rotating_kv_pending", cls))
+                        # A terminal boundary the snapshot cannot cut (e.g. a
+                        # warm-media store whose extracted ring already rolled
+                        # past the store key) must stay VISIBLE.  A bare
+                        # ("skip",) here published chains whose matched
+                        # boundary passed the fetch-side terminal guard —
+                        # skip entries carry no family information — and then
+                        # reconstructed to an empty cache.  A pending marker
+                        # makes the fetch lanes normalize the candidate back
+                        # to the newest exact rotating anchor instead.
+                        logger.warning(
+                            "Layer %s (%s): %s — storing terminal boundary as "
+                            "rotating_kv_pending so fetches walk back to an "
+                            "earlier exact anchor",
+                            idx,
+                            cls,
+                            exc,
+                        )
+                    block_slices.append(("rotating_kv_pending", cls))
                     continue
                 tk, tv, max_size, keep, offset, idx_state = terminal
                 tk = _mx_from_np_slice(tk)
@@ -3740,6 +3754,37 @@ class BlockAwarePrefixCache:
         if saw_pending:
             return True
         if not rotating_entries:
+            # Blind-spot repair for chains written by older builds: a warm
+            # mixed-SWA media store used to cut every terminal rotating layer
+            # to a bare ("skip",) when the extracted post-generation ring had
+            # rolled past the store key (the cutters now emit
+            # rotating_kv_pending).  Such a terminal block carries NO rotating
+            # marker at all, so this guard mistook the chain for a
+            # non-rotating family, the full boundary was credited, and
+            # reconstruction later found no exact window and returned an
+            # empty-handed None — the live gemma4 2638-token silent
+            # re-prefill.  Rotating families stamp every non-terminal block
+            # with rotating_kv or rotating_kv_pending, so when the terminal
+            # block contains skip entries one probe of the previous block
+            # decides the family.  Dense-family terminals carry no skip
+            # entries, so they never pay the probe read.
+            if len(cached_blocks) >= 2 and any(
+                isinstance(entry, (tuple, list))
+                and entry
+                and entry[0] == "skip"
+                for entry in terminal_entries
+            ):
+                for entry in BlockAwarePrefixCache._iter_terminal_check_entries(
+                    cached_blocks[-2],
+                    disk_store,
+                    validation_payload_cache=validation_payload_cache,
+                ):
+                    if (
+                        isinstance(entry, (tuple, list))
+                        and entry
+                        and entry[0] in ("rotating_kv", "rotating_kv_pending")
+                    ):
+                        return True
             return False
         return not _block_has_complete_rotating_terminal(
             terminal_entries,
@@ -5649,15 +5694,25 @@ class BlockAwarePrefixCache:
                             ))
                         except ValueError as exc:
                             if is_last_block:
+                                # Same contract as the numpy cutter above: a
+                                # terminal boundary the snapshot cannot cut is
+                                # stored as a PENDING marker, never a silent
+                                # ("skip",), so the fetch-side terminal guard
+                                # can see the family and walk the candidate
+                                # back to the newest exact anchor instead of
+                                # crediting a hit that reconstructs to nothing.
                                 logger.warning(
-                                    "Layer %s (%s): %s", layer_idx, class_name, exc
-                                )
-                                block_slices.append(("skip",))
-                            else:
-                                block_slices.append((
-                                    "rotating_kv_pending",
+                                    "Layer %s (%s): %s — storing terminal "
+                                    "boundary as rotating_kv_pending so fetches "
+                                    "walk back to an earlier exact anchor",
+                                    layer_idx,
                                     class_name,
-                                ))
+                                    exc,
+                                )
+                            block_slices.append((
+                                "rotating_kv_pending",
+                                class_name,
+                            ))
                         continue
 
                     seq_len = keys.shape[seq_dim]

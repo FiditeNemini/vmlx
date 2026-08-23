@@ -1929,6 +1929,226 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    @staticmethod
+    def _mixed_swa_snapshot(mx, offset, *, seq_len=None):
+        """One KVCache + one RotatingKVCache layer (max_size=128, keep=0).
+
+        ``offset`` is the ring's logical offset; ``seq_len`` (default
+        ``offset``) is the positional mirror length for the full-attention
+        layer, so a post-generation snapshot can be modeled by passing a ring
+        offset larger than the stored token count.
+        """
+        if seq_len is None:
+            seq_len = offset
+        full = mx.arange(seq_len, dtype=mx.float32).reshape(1, 1, seq_len, 1)
+        rotating = mx.arange(
+            max(0, offset - 128),
+            offset,
+            dtype=mx.float32,
+        ).reshape(1, 1, min(offset, 128), 1)
+        return [
+            {
+                "class_name": "KVCache",
+                "state": (full, full + 1000),
+                "meta_state": (),
+            },
+            {
+                "class_name": "RotatingKVCache",
+                "state": (rotating, rotating + 1000),
+                "meta_state": (0, 128, offset, min(offset, 128)),
+            },
+        ]
+
+    def test_rotating_partial_terminal_block_stores_and_restores_exact_anchor(
+        self,
+    ):
+        """A terminal PARTIAL block is a valid mixed-SWA store boundary.
+
+        206 = 3*64 + 14 — the live defect shape (2638 = 41*64 + 14) scaled
+        down.  Every earlier rotating test used lengths divisible by the
+        block size, where a terminal partial cannot occur BY CONSTRUCTION.
+        A clean snapshot whose ring offset equals the store key must produce
+        an exact terminal anchor inside the partial block, and the follow-up
+        turn must restore all 206 tokens from it.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(206))
+        manager = PagedCacheManager(block_size=64, max_blocks=16)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        table = cache.store_cache(
+            "writer", tokens, self._mixed_swa_snapshot(mx, 206)
+        )
+        assert table is not None
+        assert table.num_tokens == 206
+        terminal = manager.allocated_blocks[table.block_ids[-1]]
+        assert terminal.token_count == 14
+        assert terminal.cache_data[1][0] == "rotating_kv"
+        assert int(terminal.cache_data[1][5]) == 206
+
+        hit, remaining = cache.fetch_cache("reader", tokens + [901, 902, 903])
+        assert hit is not None
+        assert hit.num_tokens == 206
+        assert remaining == [901, 902, 903]
+        rebuilt = cache.reconstruct_cache(hit)
+        assert rebuilt is not None
+        assert rebuilt[0].offset == 206
+        assert rebuilt[1].offset == 206
+        assert rebuilt[1]._idx == 128
+        assert mx.array_equal(
+            rebuilt[1].keys.reshape(-1),
+            mx.arange(78, 206, dtype=mx.float32),
+        ).item()
+
+    def test_warm_extension_with_rolled_ring_walks_back_to_exact_anchor(self):
+        """A warm-store extension past the ring must trim, not restore nothing.
+
+        Live gemma4 turn 3: a WARM media turn has no clean boundary capture,
+        so the scheduler stores the POST-GENERATION extracted cache under the
+        pre-generation N-1 key (2638 = 41*64 + 14).  The ring has rolled past
+        every appended boundary, so each new interior block goes pending and
+        the terminal cut fails outright.  The old cutters wrote a bare
+        ("skip",) terminal — invisible to the fetch-side guard — so the next
+        turn credited the full 2638-token hit and reconstructed an EMPTY
+        cache.  The terminal must be stored as rotating_kv_pending and the
+        fetch must walk back to the last exact anchor left by the cold turn.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(398))  # 6*64 + 14 — terminal partial of 14
+        manager = PagedCacheManager(block_size=64, max_blocks=32)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        # Cold turn: clean snapshot at the store boundary — exact anchor @192.
+        assert cache.store_cache(
+            "turn1", tokens[:192], self._mixed_swa_snapshot(mx, 192)
+        ) is not None
+        # Warm turn: ring already rolled to 430 (as if 32 tokens were
+        # generated past the 398-token store key).
+        table2 = cache.store_cache(
+            "turn2",
+            tokens,
+            self._mixed_swa_snapshot(mx, 430, seq_len=430),
+        )
+        assert table2 is not None
+        assert table2.num_tokens == 398
+        terminal = manager.allocated_blocks[table2.block_ids[-1]]
+        assert terminal.token_count == 14
+        # Pins the cutter contract: a terminal the snapshot cannot cut is a
+        # VISIBLE pending marker, never a silent ("skip",).
+        assert terminal.cache_data[1][0] == "rotating_kv_pending"
+
+        query = tokens + [901, 902, 903]
+        hit, remaining = cache.fetch_cache("turn3", query)
+        assert hit is not None, (
+            "the warm extension's unrestorable boundary went cold instead of "
+            "walking back to the exact 192-token anchor"
+        )
+        assert hit.num_tokens == 192
+        assert remaining == query[192:]
+        assert cache.get_stats()["tokens_saved"] == 192
+
+        rebuilt = cache.reconstruct_cache(hit)
+        assert rebuilt is not None
+        assert rebuilt[0].offset == 192
+        assert rebuilt[1].offset == 192
+        assert rebuilt[1]._idx == 128
+        assert mx.array_equal(
+            rebuilt[1].keys.reshape(-1),
+            mx.arange(64, 192, dtype=mx.float32),
+        ).item()
+
+    def test_warm_extension_with_no_anchor_declines_the_hit(self):
+        """No anchor anywhere: decline explicitly, never credit the hit.
+
+        The same rolled-ring warm store WITHOUT a preceding cold turn leaves
+        every rotating boundary pending.  The fetch must release the blocks
+        and report a miss — a credited hit that reconstructs to nothing is
+        the silent-empty-cache failure this campaign closes.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(398))
+        manager = PagedCacheManager(block_size=64, max_blocks=32)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        assert cache.store_cache(
+            "only",
+            tokens,
+            self._mixed_swa_snapshot(mx, 430, seq_len=430),
+        ) is not None
+
+        hit, remaining = cache.fetch_cache("reader", tokens)
+        assert hit is None
+        assert remaining == tokens
+        stats = cache.get_stats()
+        assert stats["misses"] == 1
+        assert stats["tokens_saved"] == 0
+        assert "reader" not in cache._request_tables
+
+    def test_legacy_skip_terminal_chain_walks_back_via_previous_block_probe(
+        self,
+    ):
+        """Chains persisted by older builds carry ("skip",) terminals.
+
+        Shipped cutters wrote a bare skip when the terminal rotating cut
+        failed, so durable chains with that shape exist on user disks.  A
+        skip entry names no family, which is exactly how the terminal guard
+        was blinded; the repair probes the PREVIOUS block (rotating families
+        stamp every non-terminal block with rotating_kv or
+        rotating_kv_pending) and then walks back like any pending boundary.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(398))
+        manager = PagedCacheManager(block_size=64, max_blocks=32)
+        cache = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+        assert cache.store_cache(
+            "turn1", tokens[:192], self._mixed_swa_snapshot(mx, 192)
+        ) is not None
+        table2 = cache.store_cache(
+            "turn2",
+            tokens,
+            self._mixed_swa_snapshot(mx, 430, seq_len=430),
+        )
+        assert table2 is not None
+        # Rewrite the terminal block payload into the legacy shape.
+        terminal = manager.allocated_blocks[table2.block_ids[-1]]
+        terminal.cache_data = [
+            ("skip",)
+            if (
+                isinstance(entry, (tuple, list))
+                and entry
+                and entry[0] == "rotating_kv_pending"
+            )
+            else entry
+            for entry in terminal.cache_data
+        ]
+        assert terminal.cache_data[1] == ("skip",)
+
+        query = tokens + [901]
+        hit, remaining = cache.fetch_cache("turn3", query)
+        assert hit is not None, (
+            "legacy skip-terminal chain went cold (or was fully credited) "
+            "instead of walking back to the 192-token anchor"
+        )
+        assert hit.num_tokens == 192
+        assert remaining == query[192:]
+        rebuilt = cache.reconstruct_cache(hit)
+        assert rebuilt is not None
+        assert rebuilt[1].offset == 192
+        assert rebuilt[1]._idx == 128
+
     def test_both_fetch_lanes_normalize_rotating_candidates(self):
         """Both fetch lanes must call the anchor walk.
 

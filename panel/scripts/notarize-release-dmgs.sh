@@ -159,7 +159,6 @@ capture_apple_records() {
     --expected-archive-name "$(basename "$snapshot_dmg")" \
     --expected-team-id "$EXPECTED_APPLE_TEAM_ID" \
     "${notarytool_args[@]}" >/dev/null
-  printf '%s\n' "$submission_id"
 }
 
 staple_and_verify_original() {
@@ -294,14 +293,12 @@ notarize_release_chain() {
 
   # Both Apple submissions are completed and their IDs proven distinct before
   # either public DMG is mutated by stapling.
-  sequoia_id="$(
-    capture_apple_records \
-      sequoia "$sequoia_snapshot" "$sequoia_snapshot_sha" "$result_dir"
-  )"
-  tahoe_id="$(
-    capture_apple_records \
-      tahoe "$tahoe_snapshot" "$tahoe_snapshot_sha" "$result_dir"
-  )"
+  capture_apple_records \
+    sequoia "$sequoia_snapshot" "$sequoia_snapshot_sha" "$result_dir"
+  sequoia_id="$(json_file_path "$result_dir/sequoia.submit.json" id)"
+  capture_apple_records \
+    tahoe "$tahoe_snapshot" "$tahoe_snapshot_sha" "$result_dir"
+  tahoe_id="$(json_file_path "$result_dir/tahoe.submit.json" id)"
   if [[ "$sequoia_id" == "$tahoe_id" ]]; then
     echo "ERROR: Sequoia and Tahoe reused one Apple submission ID" >&2
     exit 1

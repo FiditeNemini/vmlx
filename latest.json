@@ -1,19 +1,19 @@
 {
-  "version": "1.6.31",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.31/vMLX-1.6.31-tahoe-arm64.dmg",
-  "sha256": "4cbb9a42d951e47f6a3dea9034b320f8c19f01ac34a69e84d85e4b33276a5613",
-  "sha512": "dBwng/242VBJA6MS3EU+N0SDw7m5WFqpoJrVrTe/p67IIpQk65JHTw8n5YZNTeybiIE0ICHmM8TajGFprsTrfg==",
+  "version": "1.6.36",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.36/vMLX-1.6.36-tahoe-arm64.dmg",
+  "sha256": "b7cc2d47a12d60798006c4b0015bbb3fd8c276a63db553da197977dad3fdc05f",
+  "sha512": "OCryEQlWB1uTy/IgkzDrZCOMTT19WkdwIapuYP04gHT/vsYgxv2JNJnOcKuZYFoMsAcYjskOzQ9HqmXamEdQEw==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.31/vMLX-1.6.31-sequoia-arm64.dmg",
-      "sha256": "6cc4d9a2d62fcd8909b100a9259b7dfc9fb4fba59d893b146069d7269cb43df2",
-      "sha512": "L+80TjAJuF+GaRhpElGpNbQkguPAd8s8aWGSPqUbajwbelJ/vSGVxZjIeBVnJVPHPU/JcvIHdA29+GWHTklT6g=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.36/vMLX-1.6.36-sequoia-arm64.dmg",
+      "sha256": "90fed0a5ab0f5e57eeff419256f542e8f6444589ea2eec33438f08def4756693",
+      "sha512": "ixWLOLJlZ1R6pDSF1nJNyGaQ9qd5qVR5VdZreIe3eo4qzeslDV88Om0fDRqSIkrmOB/QLc2wR/ZIXPZU3EthKg=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.31/vMLX-1.6.31-tahoe-arm64.dmg",
-      "sha256": "4cbb9a42d951e47f6a3dea9034b320f8c19f01ac34a69e84d85e4b33276a5613",
-      "sha512": "dBwng/242VBJA6MS3EU+N0SDw7m5WFqpoJrVrTe/p67IIpQk65JHTw8n5YZNTeybiIE0ICHmM8TajGFprsTrfg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.36/vMLX-1.6.36-tahoe-arm64.dmg",
+      "sha256": "b7cc2d47a12d60798006c4b0015bbb3fd8c276a63db553da197977dad3fdc05f",
+      "sha512": "OCryEQlWB1uTy/IgkzDrZCOMTT19WkdwIapuYP04gHT/vsYgxv2JNJnOcKuZYFoMsAcYjskOzQ9HqmXamEdQEw=="
     }
   },
-  "notes": "vMLX 1.6.31: tool-calling reliability follow-up \u2014 malformed native tool calls are repaired on the parser routes shipping bundles actually use, families without a thinking-off mode no longer reject requests under a global thinking default, Responses chains and parallel tool-call replays are consistent across continuation modes, and Ollama tool results keep their identity."
+  "notes": "vMLX 1.6.36 \u2014 DeepSeek V4 Flash visible-response and native SSD-cache reliability. Fixes foreground replies waiting behind cache re-key work, zero-sized native DSV4 cache anchors failing durable writes, tool-result schema loss, and multimodal/mixed-attention prefix selection. SSD blocks now stream without full-cache copies or retained writer buffers, use physical-block dedupe, and keep each model's architecture-native full-precision cache format; SSD-only app defaults keep in-RAM paged, vision, and SSM payload caches disabled. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs are Developer ID signed, notarized, stapled, and Gatekeeper verified."
 }

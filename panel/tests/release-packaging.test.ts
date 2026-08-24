@@ -1639,6 +1639,20 @@ describe("release packaging", () => {
     expect(notarySource).not.toContain('chmod 0700 "$parent"');
     expect(notarySource).not.toContain('exec 9>"$temporary"');
     expect(notarySource).not.toContain("artifact_chain seal-capture");
+    expect(notarySource).toContain(
+      'sequoia_id="$(json_file_path "$result_dir/sequoia.submit.json" id)"',
+    );
+    expect(notarySource).toContain(
+      'tahoe_id="$(json_file_path "$result_dir/tahoe.submit.json" id)"',
+    );
+    expect(notarySource).not.toContain('sequoia_id="$(\n    capture_apple_records');
+    expect(notarySource).not.toContain('tahoe_id="$(\n    capture_apple_records');
+    expect(verifySource).toContain('background_entries[0].name != "1.tiff"');
+    expect(verifySource).toContain('".fseventsd",');
+    expect(verifySource).toContain(
+      're.fullmatch(r"[0-9a-f]{16}", name)',
+    );
+    expect(verifySource).toContain("str(uuid.UUID(fsevent_uuid))");
   });
 
   it("binds release Python independently and rejects mutation, alias swap, and action swap", () => {

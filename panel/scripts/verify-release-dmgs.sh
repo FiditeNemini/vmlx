@@ -312,7 +312,9 @@ verify_mounted_release_dmg() {
     "$PYTHON_BIN" -I - "$mount_dir" <<'PY'
 import os
 import pathlib
+import re
 import sys
+import uuid
 
 root = pathlib.Path(sys.argv[1])
 entries = {entry.name: entry for entry in root.iterdir()}
@@ -324,7 +326,12 @@ if visible != expected_visible:
         f"missing={sorted(expected_visible - visible)}, "
         f"extra={sorted(visible - expected_visible)}"
     )
-allowed_presentation_metadata = {".background", ".DS_Store", ".VolumeIcon.icns"}
+allowed_presentation_metadata = {
+    ".background",
+    ".DS_Store",
+    ".VolumeIcon.icns",
+    ".fseventsd",
+}
 unexpected_hidden = {
     name for name in entries
     if name.startswith(".") and name not in allowed_presentation_metadata
@@ -342,13 +349,33 @@ if background is not None:
         len(background_entries) != 1
         or background_entries[0].is_symlink()
         or not background_entries[0].is_file()
-        or not background_entries[0].name.startswith("background.")
+        or background_entries[0].name != "1.tiff"
     ):
         raise SystemExit("mounted DMG .background metadata has unexpected contents")
 for metadata_name in (".DS_Store", ".VolumeIcon.icns"):
     metadata = entries.get(metadata_name)
     if metadata is not None and (metadata.is_symlink() or not metadata.is_file()):
         raise SystemExit(f"mounted DMG {metadata_name} metadata is not a regular file")
+fseventsd = entries.get(".fseventsd")
+if fseventsd is not None:
+    if fseventsd.is_symlink() or not fseventsd.is_dir():
+        raise SystemExit("mounted DMG .fseventsd metadata is not a real directory")
+    fsevent_entries = list(fseventsd.iterdir())
+    if any(entry.is_symlink() or not entry.is_file() for entry in fsevent_entries):
+        raise SystemExit("mounted DMG .fseventsd metadata contains a non-file entry")
+    fsevent_names = {entry.name for entry in fsevent_entries}
+    if "fseventsd-uuid" not in fsevent_names or any(
+        name != "fseventsd-uuid" and re.fullmatch(r"[0-9a-f]{16}", name) is None
+        for name in fsevent_names
+    ):
+        raise SystemExit("mounted DMG .fseventsd metadata has unexpected contents")
+    fsevent_uuid = (fseventsd / "fseventsd-uuid").read_text(encoding="ascii").strip()
+    try:
+        canonical_fsevent_uuid = str(uuid.UUID(fsevent_uuid))
+    except ValueError as exc:
+        raise SystemExit("mounted DMG .fseventsd UUID is invalid") from exc
+    if canonical_fsevent_uuid != fsevent_uuid.lower():
+        raise SystemExit("mounted DMG .fseventsd UUID is not canonical")
 app = entries["vMLX.app"]
 applications = entries["Applications"]
 if app.is_symlink() or not app.is_dir():

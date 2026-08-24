@@ -17,11 +17,34 @@ import {
   scopeToolDefinitionsByName,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
+  shouldPlanCompletedToolAnswerPass,
   toolChoiceForCurrentTurn,
   unavailableRequestedToolNames,
 } from '../src/shared/toolAutoContinue'
 
 describe('tool auto-continue policy', () => {
+  it('keeps every completed exactly-once continuation on the cache-stable render', () => {
+    expect(
+      shouldPlanCompletedToolAnswerPass({
+        directAnswerAfterSingleTool: false,
+        exactFinalToolCount: 0,
+        exactFinalToolsComplete: false,
+        exactlyOnceToolCount: 1,
+        exactlyOnceToolsComplete: true,
+      }),
+    ).toBe(true)
+
+    expect(
+      shouldPlanCompletedToolAnswerPass({
+        directAnswerAfterSingleTool: false,
+        exactFinalToolCount: 0,
+        exactFinalToolsComplete: false,
+        exactlyOnceToolCount: 1,
+        exactlyOnceToolsComplete: false,
+      }),
+    ).toBe(false)
+  })
+
   it('keeps the local fulfilled-tool render stable and reserves schema removal for recovery', () => {
     const tool = {
       type: 'function',

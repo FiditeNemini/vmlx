@@ -24,6 +24,33 @@ export interface ToolRequestFields {
   toolChoice?: unknown
 }
 
+export interface CompletedToolAnswerPassInput {
+  directAnswerAfterSingleTool: boolean
+  exactFinalToolCount: number
+  exactFinalToolsComplete: boolean
+  exactlyOnceToolCount: number
+  exactlyOnceToolsComplete: boolean
+}
+
+/**
+ * Decide when a fulfilled local tool request must keep its original render.
+ *
+ * An authorized `exactly once` contract is complete after its last requested
+ * tool runs regardless of how the user phrases the following answer. Making
+ * schema preservation depend on a second "after the result" wording heuristic
+ * removes the schema at the front of native templates such as DSV4 and turns
+ * the whole tool-result continuation into a cold prefix.
+ */
+export function shouldPlanCompletedToolAnswerPass(
+  input: CompletedToolAnswerPassInput,
+): boolean {
+  return (
+    ((input.directAnswerAfterSingleTool || input.exactFinalToolCount > 1) &&
+      input.exactFinalToolsComplete) ||
+    (input.exactlyOnceToolCount > 0 && input.exactlyOnceToolsComplete)
+  )
+}
+
 export function captureToolRequestFields(
   request: Record<string, unknown>,
 ): ToolRequestFields {

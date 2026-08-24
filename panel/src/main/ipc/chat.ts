@@ -48,13 +48,13 @@ import {
   requestedOnceToolNames,
   requestedScopedToolNames,
   replaySafeToolCallKey,
-  requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
   requestsPrivateReasoningWithoutToolUse,
   scopeToolDefinitionsByName,
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
+  shouldPlanCompletedToolAnswerPass,
   toolChoiceForCurrentTurn,
   type ToolRequestFields,
   unavailableRequestedToolNames,
@@ -1531,12 +1531,6 @@ export function registerChatHandlers(
               zayaAppleScriptToolBundle: chatUsesZayaAppleScriptToolBundle,
             })
           : [];
-      const boundedFinalAfterExactlyOnceTools =
-        exactlyOnceToolNames.length > 0 &&
-        requestsBoundedFinalAnswerAfterToolResult(
-          latestUserText,
-          toolCapabilityNames(unscopedCurrentTurnToolDefinitions),
-        );
       const exactFinalToolNames =
         overrides?.builtinToolsEnabled === true
           ? requestedExactFinalToolNames(
@@ -4213,12 +4207,13 @@ export function registerChatHandlers(
               exactlyOnceToolNames.every((name) =>
                 completedExactlyOnceTools.has(name),
               );
-            plannedDirectAnswerPass =
-              ((directAnswerAfterSingleTool ||
-                exactFinalToolNames.length > 1) &&
-                exactFinalToolsComplete) ||
-              (boundedFinalAfterExactlyOnceTools &&
-                exactlyOnceToolsComplete);
+            plannedDirectAnswerPass = shouldPlanCompletedToolAnswerPass({
+              directAnswerAfterSingleTool,
+              exactFinalToolCount: exactFinalToolNames.length,
+              exactFinalToolsComplete,
+              exactlyOnceToolCount: exactlyOnceToolNames.length,
+              exactlyOnceToolsComplete,
+            });
             // Reset idle timer before follow-up — tools may have consumed minutes
             if (chatSession) sessionManager.touchSession(chatSession.id);
             if (!(await sendFollowUp())) break;

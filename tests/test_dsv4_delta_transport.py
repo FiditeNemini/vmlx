@@ -259,11 +259,18 @@ def _generic_dsv4_snapshot_43(tokens: int):
     ]
 
 
-def _write_native_block(store, *, request_id: str, block_hash: bytes, block_index: int):
+def _write_native_block(
+    store,
+    *,
+    request_id: str,
+    block_hash: bytes,
+    block_index: int,
+    payload=None,
+):
     fence_id = store.begin_write_fence(request_id)
     assert store.write_block_async(
         block_hash,
-        _topology_block(block_index, terminal=True),
+        payload or _topology_block(block_index, terminal=True),
         256,
         request_id=request_id,
         fence_id=fence_id,
@@ -871,6 +878,63 @@ def test_dsv4_native_delta_disk_store_roundtrip_is_readable_and_bounded(tmp_path
         source="test-dsv4-native-disk-roundtrip",
     )
     assert valid, reason
+
+
+def test_dsv4_periodic_anchor_empty_native_buffers_roundtrip_disk(tmp_path):
+    """Exact compression boundaries carry valid zero-row HCA buffers."""
+    from vmlx_engine.block_disk_store import BlockDiskStore
+
+    payload = _topology_block(7, terminal=True, pool_quant=True)
+    hca_entry = next(
+        entry
+        for entry in payload
+        if entry[0] == "deepseek_v4_delta_v1"
+        and entry[1]["compress_ratio"] == 128
+    )
+    anchor = hca_entry[1]["anchor"]
+    anchor["compressor_buffer_kv"] = mx.zeros(
+        (1, 0, 512), dtype=mx.float16
+    )
+    anchor["compressor_buffer_gate"] = mx.zeros(
+        (1, 0, 512), dtype=mx.float16
+    )
+    mx.eval(
+        anchor["compressor_buffer_kv"],
+        anchor["compressor_buffer_gate"],
+    )
+
+    store = BlockDiskStore(
+        str(tmp_path),
+        max_size_gb=1,
+        expected_num_layers=43,
+        allow_tq_native=False,
+    )
+    block_hash = b"z" * 32
+    try:
+        stats, fence = _write_native_block(
+            store,
+            request_id="dsv4-empty-anchor-buffers",
+            block_hash=block_hash,
+            block_index=7,
+            payload=payload,
+        )
+        restored = store.read_block(block_hash)
+    finally:
+        store.shutdown()
+
+    assert fence["expected"] == fence["completed"] == fence["retained"] == 1
+    assert fence["failed"] == fence["dropped"] == 0
+    assert stats["write_pipeline"]["offthread_serialization_failures"] == 0
+    assert restored is not None
+    restored_hca = next(
+        entry
+        for entry in restored
+        if entry[0] == "deepseek_v4_delta_v1"
+        and entry[1]["compress_ratio"] == 128
+    )
+    restored_anchor = restored_hca[1]["anchor"]
+    assert tuple(restored_anchor["compressor_buffer_kv"].shape) == (1, 0, 512)
+    assert tuple(restored_anchor["compressor_buffer_gate"].shape) == (1, 0, 512)
 
 
 def test_dsv4_native_delta_disk_store_evicts_oldest_block_at_global_cap(tmp_path):

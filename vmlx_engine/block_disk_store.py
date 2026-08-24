@@ -1423,6 +1423,13 @@ class BlockDiskStore:
         """Write one contiguous buffer completely without materializing bytes."""
 
         view = memoryview(payload)
+        # Safetensors permits zero-element tensors and represents them with an
+        # empty data-offset span.  DSV4 periodic anchors legitimately carry
+        # zero-row residual pool buffers at exact compression boundaries.
+        # Python refuses to byte-cast a view with a zero dimension even though
+        # there are no payload bytes to write, so finish before that cast.
+        if view.nbytes == 0:
+            return
         if view.ndim != 1 or view.format != "B":
             view = view.cast("B")
         written = 0

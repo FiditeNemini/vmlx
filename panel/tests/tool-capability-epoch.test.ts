@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   historicalUnavailableToolNames,
+  latestUserMessageText,
   toolCapabilityEpochInstruction,
   toolCapabilityFingerprint,
   toolCapabilityNames,
@@ -33,6 +34,44 @@ const readFile = {
 };
 
 describe("tool capability epochs", () => {
+  it("uses the newest multimodal user text for current-turn policy", () => {
+    expect(
+      latestUserMessageText([
+        { role: "user", content: "Call file_info exactly once." },
+        { role: "assistant", content: "Earlier answer." },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: "Do not call any tools. Inspect only the attached video.",
+            },
+            {
+              type: "video_url",
+              video_url: { url: "data:video/mp4;base64,AA==" },
+            },
+          ],
+        },
+      ]),
+    ).toBe("Do not call any tools. Inspect only the attached video.");
+
+    // A media-only current turn must not inherit an older authorization string.
+    expect(
+      latestUserMessageText([
+        { role: "user", content: "Call file_info exactly once." },
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: "data:image/png;base64,AA==" },
+            },
+          ],
+        },
+      ]),
+    ).toBe("");
+  });
+
   it("fingerprints schema content canonically instead of object key order", () => {
     const reordered = {
       type: "function",

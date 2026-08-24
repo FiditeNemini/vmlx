@@ -566,6 +566,10 @@ describe('tool auto-continue policy', () => {
   it('omits unusable tool schemas and suppresses the generic tool prompt when requested', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
 
+    expect(source).toContain('const latestUserText = latestUserMessageText(messages)')
+    expect(source).not.toContain(
+      '.find((m: any) => m?.role === "user" && typeof m.content === "string")',
+    )
     expect(source).toContain('requestsNoToolCalls(latestUserText)')
     expect(source).toContain('requestsExactTextOnlyWithoutToolUse(latestUserText)')
     expect(source).toContain('requestsPrivateReasoningWithoutToolUse(latestUserText)')

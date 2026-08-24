@@ -107,6 +107,7 @@ import {
 } from "../../shared/reasoningParserAliases";
 import {
   historicalUnavailableToolNames,
+  latestUserMessageText,
   toolCapabilityFingerprint,
   toolCapabilityEpochInstruction,
   toolCapabilityNames,
@@ -1473,10 +1474,11 @@ export function registerChatHandlers(
 
       // Add system prompt from overrides if available, or agentic prompt when built-in tools enabled
       const hasSystemPrompt = !!overrides?.systemPrompt;
-      const latestUserText = [...messages]
-        .reverse()
-        .find((m: any) => m?.role === "user" && typeof m.content === "string")
-        ?.content || "";
+      // The persisted content of a media turn is an array containing its text
+      // and attachment parts. Always bind authorization to the newest user
+      // message; falling back to an older string turn can silently re-enable a
+      // tool that the current image/video/audio prompt explicitly prohibited.
+      const latestUserText = latestUserMessageText(messages);
       const suppressAgenticToolPromptForExactOutput =
         overrides?.builtinToolsEnabled === true &&
         // Exact-output probes usually say "reply exactly MARKER" without a

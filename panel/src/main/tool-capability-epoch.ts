@@ -74,6 +74,15 @@ function messageText(content: unknown): string {
     .join("\n");
 }
 
+export function latestUserMessageText(
+  messages: ToolCapabilityHistoryEntry[],
+): string {
+  const latestUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  return messageText(latestUserMessage?.content);
+}
+
 function requestsTool(text: string, toolName: string): boolean {
   const escaped = toolName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const noToolDirective = new RegExp(

@@ -824,6 +824,7 @@ case "$RELEASE_SCOPE" in
         exit 1
       fi
       run_release_python "tests/cross_matrix/run_release_regression_manifest.py" \
+        --scope "$RELEASE_SCOPE" \
         --require-prepackage-ready \
         --require-production-provenance \
         --expected-version "$VERSION" \

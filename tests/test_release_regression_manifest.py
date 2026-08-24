@@ -14973,6 +14973,7 @@ def test_release_regression_manifest_production_provenance_gates_manifest(
 
     artifact = runner.build_manifest_artifact(
         tmp_path,
+        scope="r20_production",
         require_prepackage_ready=True,
         require_production_provenance=True,
         expected_version="1.6.36",
@@ -14980,12 +14981,48 @@ def test_release_regression_manifest_production_provenance_gates_manifest(
     )
 
     assert artifact["status"] == "pass"
+    assert artifact["scope"] == "r20_production"
     assert artifact["production_provenance"] == {
         "status": "pass",
         "failures": [],
     }
     assert artifact["source"] == provenance["source"]
     assert artifact["jang"] == provenance["jang"]
+
+
+def test_release_regression_manifest_production_provenance_rejects_missing_scope(
+    monkeypatch,
+    tmp_path,
+):
+    from tests.cross_matrix import run_release_regression_manifest as runner
+
+    monkeypatch.setattr(
+        runner,
+        "validate_current_proof_sweep_artifacts",
+        lambda _root: {
+            "status": "pass",
+            "regression_suite": {"status": "pass", "open_requirements": []},
+            "release_blocker_ledger": {"status": "pass", "blockers": []},
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "collect_production_provenance",
+        lambda *_args, **_kwargs: ({"version": "1.6.36"}, []),
+    )
+
+    artifact = runner.build_manifest_artifact(
+        tmp_path,
+        require_prepackage_ready=True,
+        require_production_provenance=True,
+        expected_version="1.6.36",
+        jang_source=tmp_path / "jang-tools",
+    )
+
+    assert artifact["status"] == "fail"
+    assert artifact["production_provenance"]["failures"] == [
+        "production provenance requires scope r20_production"
+    ]
 
 
 def test_release_regression_manifest_runner_fails_when_current_proof_sweep_fails_by_default(

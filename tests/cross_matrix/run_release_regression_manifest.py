@@ -60,6 +60,7 @@ PREPACKAGE_ALLOWED_BLOCKERS = {
     "issue176_live_memory_pressure_open",
     "issue177_live_ttft_paged_turboquant_open",
 }
+R20_PRODUCTION_SCOPE = "r20_production"
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -416,6 +417,7 @@ def prepackage_clearance_from_release_clearance(release_clearance: dict) -> dict
 def build_manifest_artifact(
     root: Path,
     *,
+    scope: str | None = None,
     require_current_proof_sweep: bool = False,
     require_release_ready: bool = False,
     require_prepackage_ready: bool = False,
@@ -424,6 +426,8 @@ def build_manifest_artifact(
     jang_source: Path | None = None,
 ) -> dict:
     manifest = build_manifest()
+    if scope is not None:
+        manifest["scope"] = scope
     manifest["current_proof_sweep"] = validate_current_proof_sweep_artifacts(root)
     manifest["release_clearance"] = release_clearance_from_proof_sweep(
         manifest["current_proof_sweep"]
@@ -453,16 +457,21 @@ def build_manifest_artifact(
     )
     provenance_failures: list[str] = []
     if require_production_provenance:
+        if scope != R20_PRODUCTION_SCOPE:
+            provenance_failures.append(
+                f"production provenance requires scope {R20_PRODUCTION_SCOPE}"
+            )
         if expected_version is None or jang_source is None:
             provenance_failures.append(
                 "production provenance requires expected_version and jang_source"
             )
         else:
-            provenance, provenance_failures = collect_production_provenance(
+            provenance, collected_provenance_failures = collect_production_provenance(
                 root,
                 expected_version=expected_version,
                 jang_source=jang_source,
             )
+            provenance_failures.extend(collected_provenance_failures)
             manifest.update(provenance)
         manifest["production_provenance"] = {
             "status": "pass" if not provenance_failures else "fail",
@@ -505,12 +514,14 @@ def main() -> int:
         action="store_true",
         help="Require clean pushed canonical vMLX/JANG origin/main provenance.",
     )
+    parser.add_argument("--scope")
     parser.add_argument("--expected-version")
     parser.add_argument("--jang-source", type=Path)
     args = parser.parse_args()
 
     manifest = build_manifest_artifact(
         Path("."),
+        scope=args.scope,
         require_current_proof_sweep=args.require_current_proof_sweep,
         require_release_ready=args.require_release_ready,
         require_prepackage_ready=args.require_prepackage_ready,

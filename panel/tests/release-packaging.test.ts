@@ -1921,6 +1921,7 @@ describe("release packaging", () => {
     );
     expect(driver).toContain("--require-prepackage-ready");
     expect(driver).toContain("--require-production-provenance");
+    expect(driver).toContain('--scope "$RELEASE_SCOPE"');
     expect(driver).toContain('--jang-source "$VMLX_JANG_TOOLS_SOURCE"');
     expect(driver).toContain("obsolete VMLX_R20_RELEASE_ATTESTATION is forbidden");
     expect(driver).not.toContain("--consume-v5-manifest");

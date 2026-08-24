@@ -54,6 +54,43 @@ DEFAULT_BLOCK_DISK_CACHE_PERCENT = 10.0
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 DEFAULT_MAX_OUTPUT_TOKENS_REASONING = DEFAULT_MAX_OUTPUT_TOKENS * 4
 
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _configure_generic_tq_diagnostic_policy(log) -> bool:
+    """Keep production cache objects native; permit TQ only as an env diagnostic.
+
+    The Electron app intentionally omits ``--kv-cache-quantization``.  That
+    omission must not replace a model's ``make_cache()`` implementation with a
+    generic ``TurboQuantKVCache``: native full-KV, rotating, recurrent, sparse,
+    and composite caches carry different state.  An operator can still request
+    the old experimental wrapper explicitly with ``VMLX_FORCE_TQ_AUTO=1``.
+
+    Returns whether that diagnostic override is active.
+    """
+    force_tq = os.environ.get("VMLX_FORCE_TQ_AUTO", "").lower() in _TRUE_ENV_VALUES
+    force_native = (
+        os.environ.get("VMLX_FULL_PRECISION_LIVE_KV", "").lower()
+        in _TRUE_ENV_VALUES
+        or os.environ.get("VMLX_DISABLE_TQ_KV", "").lower()
+        in _TRUE_ENV_VALUES
+    )
+    if force_tq and not force_native:
+        os.environ.pop("VMLX_DISABLE_TQ_KV", None)
+        log.warning(
+            "Generic TurboQuant KV diagnostic override enabled by "
+            "VMLX_FORCE_TQ_AUTO=1; this is not the Electron production default."
+        )
+        return True
+
+    os.environ["VMLX_DISABLE_TQ_KV"] = "1"
+    os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
+    log.info(
+        "Native live-cache policy active: preserving the model's make_cache() "
+        "objects; generic TurboQuant KV replacement is disabled."
+    )
+    return False
+
 
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
@@ -1266,10 +1303,10 @@ def serve_command(args):
 
     # mlxstudio#138/#156: --kv-cache-quantization explicit-pass detection.
     # default=None lets us tell "user didn't pass it" from "user said none".
-    # Omitted flag means production auto mode: TurboQuant KV for compatible
-    # JANG/JANGTQ bundles and q4 stored-prefix compression as the fallback.
-    # Explicit values remain exact: q4/q8/none disable loader-level TQ so the
-    # user's requested stored-cache codec is the only active cache codec.
+    # Omitted flag means production-native mode: preserve the exact cache
+    # objects returned by the architecture and impose no additional stored
+    # codec. Explicit q4/q8 remain diagnostic CLI choices and explicit none is
+    # equivalent to the production default.
     _m3_forced_no_kvq = bool(getattr(args, "_m3_force_no_kv_cache_quantization", False))
     _openpangu_forced_no_kvq = bool(
         getattr(args, "_openpangu_force_no_kv_cache_quantization", False)
@@ -1282,6 +1319,7 @@ def serve_command(args):
     if _openpangu_forced_no_kvq:
         args.kv_cache_quantization = "none"
         args.kv_cache_quantization_explicit = False
+        args.generic_tq_diagnostic_opt_in = False
         os.environ["VMLX_DISABLE_TQ_KV"] = "1"
         os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
         logger.info(
@@ -1291,6 +1329,7 @@ def serve_command(args):
     elif _m3_forced_no_kvq:
         args.kv_cache_quantization = "none"
         args.kv_cache_quantization_explicit = False
+        args.generic_tq_diagnostic_opt_in = False
         # MiniMax-M3's native sparse cache carries idx_keys and absolute block
         # offsets in addition to dense KV.  The loader already rejects the
         # generic TurboQuant make_cache patch, but the disk stores use this
@@ -1348,23 +1387,14 @@ def serve_command(args):
         args.kv_cache_quantization = _full_precision_default
         _default_kvq = _full_precision_default
         args.kv_cache_quantization_explicit = False
-        # The LIVE TurboQuant KV cache is a separate lever from the stored
-        # format: it compresses KV in unified memory. Leaving it on is what
-        # keeps resident memory near model size; turning it off would make the
-        # live cache full precision too, at a real RAM cost. Gated so it can be
-        # measured and switched without touching this decision again.
-        if os.environ.get("VMLX_FULL_PRECISION_LIVE_KV") in ("1", "true", "yes", "on"):
-            os.environ["VMLX_DISABLE_TQ_KV"] = "1"
-        else:
-            os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
-        # Word this so it cannot be misread as "the cache is quantized". The
-        # CACHE -- everything written to the SSD block store -- is full
-        # precision for every family. TurboQuant applies only to the live
-        # working KV held in unified memory for the request being generated,
-        # which is not cache and is never persisted. Reading an earlier
-        # "KV cache auto mode: TurboQuant enabled" line cost a whole
-        # investigation before the on-disk dtypes settled it (F16 keys/values,
-        # zero scale/bias tensors).
+        # Generic TurboQuant used to be forced ON here for every compatible
+        # model. That silently replaced architecture-native cache classes and
+        # made the app's omitted/Auto setting architecture-dependent. Native is
+        # now the production default; the environment-only override is retained
+        # solely for controlled diagnostics.
+        args.generic_tq_diagnostic_opt_in = (
+            _configure_generic_tq_diagnostic_policy(logger)
+        )
         logger.info(
             # "FULL PRECISION for every family" was not true. DSV4 pool
             # state is natively q8-segmented and is stored that way ON
@@ -1396,13 +1426,14 @@ def serve_command(args):
         )
     elif _kv_quant_explicit:
         args.kv_cache_quantization_explicit = True
+        args.generic_tq_diagnostic_opt_in = False
         os.environ["VMLX_DISABLE_TQ_KV"] = "1"
         os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
         logger.info(
             f"--kv-cache-quantization={args.kv_cache_quantization} explicit; "
             f"VMLX_DISABLE_TQ_KV=1 set so JANG-calibrated TurboQuant KV is "
-            f"skipped at load time. Omit the flag (or set VMLX_FORCE_TQ_AUTO=1) "
-            f"to keep the bundle's calibrated TQ."
+            f"skipped at load time. VMLX_FORCE_TQ_AUTO=1 remains available only "
+            f"when the flag is omitted, for controlled diagnostics."
         )
 
     # Unified server configuration — explicit args ONLY
@@ -1764,7 +1795,10 @@ def serve_command(args):
             from .utils.hybrid_tq_cache import SELECTIVE_HYBRID_TQ_FAMILIES
 
             _old_kvq = args.kv_cache_quantization
-            if _mc.family_name in SELECTIVE_HYBRID_TQ_FAMILIES:
+            if (
+                _mc.family_name in SELECTIVE_HYBRID_TQ_FAMILIES
+                and getattr(args, "generic_tq_diagnostic_opt_in", False)
+            ):
                 if _mc.family_name in {"qwen3_5", "qwen3_5_moe", "lfm2"}:
                     # The architecture-selected hybrid TurboQuant cache already
                     # owns the attention-only storage codec and its per-model bit
@@ -1797,18 +1831,18 @@ def serve_command(args):
                         _old_kvq,
                     )
             else:
-                # Hybrid/path-dependent models carry cumulative non-KV state in
-                # addition to attention KV. Qwen3.6, Nemotron-H, and LFM2 have a
-                # selective live TQ path; other hybrid families keep the generic
-                # loader patch disabled until their typed partial codec is proven.
+                # Production Auto preserves the native path for every hybrid,
+                # including families that retain an env-only selective-TQ
+                # diagnostic. Cumulative non-KV state must never be inferred or
+                # flattened into a generic KV wrapper.
+                args.kv_cache_quantization = "none"
                 os.environ["VMLX_DISABLE_TQ_KV"] = "1"
                 os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
                 logger.info(
-                    "Hybrid/path-dependent cache model detected — disabling live "
-                    "TurboQuant KV patch while preserving stored attention-KV "
-                    "quantization=%s for prefix/paged/L2; SSM companions stay "
-                    "full precision with async clean-prefill rederive.",
-                    _old_kvq,
+                    "Hybrid/path-dependent cache model detected — preserving "
+                    "architecture-native attention and companion cache objects; "
+                    "generic live/stored TurboQuant and QuantizedKVCache wrappers "
+                    "remain disabled."
                 )
 
         # Eric 2026-07-12 (reverses prior paged-default-OFF): paged cache
@@ -2862,9 +2896,12 @@ def bench_command(args):
             )
             args.kv_cache_quantization = "none"
         args.kv_cache_quantization_explicit = False
-        os.environ.setdefault("VMLX_FORCE_TQ_AUTO", "1")
+        args.generic_tq_diagnostic_opt_in = (
+            _configure_generic_tq_diagnostic_policy(logger)
+        )
     else:
         args.kv_cache_quantization_explicit = True
+        args.generic_tq_diagnostic_opt_in = False
         os.environ["VMLX_DISABLE_TQ_KV"] = "1"
         os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
 
@@ -3703,15 +3740,16 @@ Examples:
         type=str,
         default=None,
         choices=["none", "q4", "q8"],
-        help="Compress stored KV cache to reduce unified memory usage by 2-4x. "
+        help="Optionally encode generic stored KV for diagnostics. "
              "q8 = 8-bit (minimal quality loss, ~2x savings). "
              "q4 = 4-bit (slight quality loss, ~4x savings). "
              "Cache is stored compressed but decompressed for generation (no inference slowdown). "
              "Requires --continuous-batching. Omitting this flag uses production auto "
-             "mode: TurboQuant KV for compatible models plus an exact stored prefix for mixed sliding/full attention bundles, q8 for JANGTQ/JANG-affine, q4 otherwise. "
-             "Passing the flag explicitly disables JANG-calibrated TurboQuant KV so your "
-             "choice is honored. Set VMLX_DEFAULT_KV_CACHE_QUANTIZATION=none to turn "
-             "the stored-prefix fallback off. (default: auto, codec chosen per bundle)",
+             "mode: the architecture's native live cache objects and native SSD "
+             "representation, with no generic TurboQuant replacement or added "
+             "stored codec. Passing the flag explicitly disables loader-level "
+             "TurboQuant so the requested diagnostic stored codec is the only "
+             "added codec. (default: native)",
     )
     serve_parser.add_argument(
         "--kv-cache-group-size",
@@ -4314,9 +4352,9 @@ Examples:
         type=str,
         default=None,
         choices=["none", "q4", "q8"],
-        help="Quantize KV cache to reduce Apple unified-memory use (~2-4x). q8=8-bit, q4=4-bit. "
-             "Passing this flag explicitly disables JANG-calibrated TurboQuant KV. "
-             "Omitting it uses auto an exact stored prefix for mixed sliding/full attention bundles, q8 for JANGTQ/JANG-affine, q4 otherwise.",
+        help="Optionally encode generic stored KV for diagnostics. q8=8-bit, q4=4-bit. "
+             "Passing this flag explicitly disables loader-level TurboQuant KV. "
+             "Omitting it preserves architecture-native live and stored cache state.",
     )
     bench_parser.add_argument(
         "--kv-cache-group-size",

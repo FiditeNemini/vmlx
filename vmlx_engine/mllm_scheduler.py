@@ -780,6 +780,10 @@ class MLLMScheduler:
                         block_disk_store = BlockDiskStore(
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
+                            # Admission follows the cache objects actually
+                            # instantiated by the loaded model, never a stale
+                            # process environment or family-name guess.
+                            allow_tq_native=bool(self._tq_active),
                             expected_num_layers=expected_cache_layer_count(
                                 _lang, getattr(self, "_hybrid_num_layers", None)
                             ),
@@ -1054,6 +1058,7 @@ class MLLMScheduler:
                 self.disk_cache = DiskCacheManager(
                     cache_dir=cache_dir,
                     max_size_gb=self.config.disk_cache_max_gb,
+                    allow_tq_native=bool(self._tq_active),
                 )
                 logger.info(f"VLM disk cache (L2) enabled: dir={cache_dir}")
             except Exception as e:

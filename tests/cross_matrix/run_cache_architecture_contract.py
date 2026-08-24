@@ -113,7 +113,7 @@ REQUIRED_CACHE_TEST_MARKERS = (
     # L2/block-disk must backfill paged cache for later partial reuse.
     "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill",
     # Qwen hybrid rows keep selective live TQ only where the runtime supports it.
-    "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore",
+    "test_qwen3_5_moe_linear_attention_preserves_native_cache_and_ssm_restore",
     # TQ-native disk serialization must preserve mixed hybrid caches and round
     # trip real safetensors metadata instead of dequantizing everything.
     "test_serialize_tq_cache_mixed_hybrid",
@@ -309,7 +309,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
     "qwen36_hybrid_tq": {
         "checks": ("turboquant_kv_runtime_contract",),
         "markers": (
-            "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore",
+            "test_qwen3_5_moe_linear_attention_preserves_native_cache_and_ssm_restore",
         ),
         "api_checks": ("turboquant_kv_runtime_contract",),
         "api_command_markers": (),
@@ -643,7 +643,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         "turboquant_kv_runtime_contract": (
             not failed
             and "turboquant_kv_runtime_contract" not in missing_api_checks
-            and "test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore" not in missing_markers
+            and "test_qwen3_5_moe_linear_attention_preserves_native_cache_and_ssm_restore" not in missing_markers
         ),
         "turboquant_disk_roundtrip": (
             not failed

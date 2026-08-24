@@ -23,6 +23,7 @@ def _restore_cli_policy_environment():
     names = (
         "VMLX_DISABLE_TQ_KV",
         "VMLX_FORCE_TQ_AUTO",
+        "VMLX_FULL_PRECISION_LIVE_KV",
         "VMLX_ALLOW_HYBRID_KV_QUANT",
         "VMLX_DISABLE_SSM_DISK_RESTORE",
         "VMLX_ALLOW_UNSAFE_QWEN_SSM_DISK_RESTORE",
@@ -129,7 +130,7 @@ def _run_serve_until_uvicorn(monkeypatch, args):
         server.app.middleware_stack = None
 
 
-def test_omitted_kv_quantization_keeps_loader_turboquant_auto_enabled(tmp_path, monkeypatch):
+def test_omitted_kv_quantization_preserves_native_cache_by_default(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5"}))
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
     monkeypatch.delenv("VMLX_FORCE_TQ_AUTO", raising=False)
@@ -138,19 +139,17 @@ def test_omitted_kv_quantization_keeps_loader_turboquant_auto_enabled(tmp_path, 
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
-    # v1.6.35: the STORED prefix codec is full precision for every family.
-    # Measured q4-on vs off: 2.33 vs 2.35s full hit, 2.95 vs 2.97s partial,
-    # byte-identical disk -- under 1%, so exactness wins and quantising a
-    # stored prefix is pure downside. The LIVE TQ-KV patch is a separate
-    # layer and stays on, which the env assertions below pin.
+    # App/default Auto means native live objects and native SSD state. It must
+    # not silently patch a compatible model's make_cache() to generic TQ.
     assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
-    assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
-    assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
+    assert args.generic_tq_diagnostic_opt_in is False
+    assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None
+    assert os.environ.get("VMLX_DISABLE_TQ_KV") == "1"
 
 
-def test_plain_qwen3_moe_auto_mode_keeps_loader_turboquant_enabled(tmp_path, monkeypatch):
-    """Plain KV MoE families must keep auto TQ-KV enabled."""
+def test_plain_qwen3_moe_auto_mode_preserves_native_kv(tmp_path, monkeypatch):
+    """Plain KV MoE families keep their architecture-native cache by default."""
 
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_moe"}))
     monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
@@ -160,19 +159,17 @@ def test_plain_qwen3_moe_auto_mode_keeps_loader_turboquant_enabled(tmp_path, mon
 
     _run_serve_until_uvicorn(monkeypatch, args)
 
-    # v1.6.35: the STORED prefix codec is full precision for every family.
-    # Measured q4-on vs off: 2.33 vs 2.35s full hit, 2.95 vs 2.97s partial,
-    # byte-identical disk -- under 1%, so exactness wins and quantising a
-    # stored prefix is pure downside. The LIVE TQ-KV patch is a separate
-    # layer and stays on, which the env assertions below pin.
     assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
-    assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
-    assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
+    assert args.generic_tq_diagnostic_opt_in is False
+    assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None
+    assert os.environ.get("VMLX_DISABLE_TQ_KV") == "1"
 
 
-def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore(tmp_path, monkeypatch):
-    """Qwen hybrid Auto keeps selective TQ and does not disable SSM L2."""
+def test_qwen3_5_moe_linear_attention_preserves_native_cache_and_ssm_restore(
+    tmp_path, monkeypatch
+):
+    """Qwen hybrid Auto keeps native state and does not disable SSM L2."""
 
     (tmp_path / "config.json").write_text(json.dumps({
         "model_type": "qwen3_5_moe",
@@ -193,8 +190,9 @@ def test_qwen3_5_moe_linear_attention_keeps_selective_live_tq_and_ssm_restore(tm
 
     assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
-    assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
-    assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
+    assert args.generic_tq_diagnostic_opt_in is False
+    assert os.environ.get("VMLX_DISABLE_TQ_KV") == "1"
+    assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None
     assert os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE") is None
 
 
@@ -253,6 +251,28 @@ def test_mimo_v2_auto_mode_keeps_prefix_cache_lossless_by_default(tmp_path, monk
 
     assert args.kv_cache_quantization == "none"
     assert args.kv_cache_quantization_explicit is False
+    assert args.generic_tq_diagnostic_opt_in is False
+    assert os.environ.get("VMLX_FORCE_TQ_AUTO") is None
+    assert os.environ.get("VMLX_DISABLE_TQ_KV") == "1"
+
+
+def test_env_only_turboquant_diagnostic_override_remains_available(
+    tmp_path, monkeypatch
+):
+    """The old generic TQ lane is explicit diagnostics, never app/default Auto."""
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_moe"}))
+    monkeypatch.delenv("VMLX_DISABLE_TQ_KV", raising=False)
+    monkeypatch.delenv("VMLX_FULL_PRECISION_LIVE_KV", raising=False)
+    monkeypatch.setenv("VMLX_FORCE_TQ_AUTO", "1")
+
+    args = _serve_args(str(tmp_path), kv_cache_quantization=None)
+
+    _run_serve_until_uvicorn(monkeypatch, args)
+
+    assert args.kv_cache_quantization == "none"
+    assert args.kv_cache_quantization_explicit is False
+    assert args.generic_tq_diagnostic_opt_in is True
     assert os.environ.get("VMLX_FORCE_TQ_AUTO") == "1"
     assert os.environ.get("VMLX_DISABLE_TQ_KV") is None
 

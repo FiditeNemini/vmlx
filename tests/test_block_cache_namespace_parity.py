@@ -78,6 +78,19 @@ def test_mllm_store_arms_the_wrong_model_validator():
     )
 
 
+def test_both_schedulers_bind_disk_tq_admission_to_observed_runtime():
+    """No disk tier may infer TQ compatibility from a process environment."""
+    for path in (SCHEDULER, MLLM_SCHEDULER):
+        source = path.read_text()
+        block = source[source.index("BlockDiskStore(") :]
+        block = block[: block.index(")\n")]
+        assert "allow_tq_native=bool(self._tq_active)" in block, path.name
+
+        prompt = source[source.index("DiskCacheManager(") :]
+        prompt = prompt[: prompt.index(")\n")]
+        assert "allow_tq_native=bool(self._tq_active)" in prompt, path.name
+
+
 def test_layer_count_helper_is_shared_not_duplicated():
     assert "def expected_cache_layer_count(" in PREFIX_CACHE.read_text()
     # the text scheduler's method must delegate, not re-implement

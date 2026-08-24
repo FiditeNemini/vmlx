@@ -1504,6 +1504,10 @@ class Scheduler:
                         block_disk_store = BlockDiskStore(
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
+                            # Admission follows the cache objects actually
+                            # instantiated by the loaded model, never a stale
+                            # process environment or family-name guess.
+                            allow_tq_native=bool(self._tq_active),
                             expected_num_layers=_expected_n_layers,
                             global_cache_root=cache_root,
                             allow_legacy_hashed_namespaces=(
@@ -1757,6 +1761,7 @@ class Scheduler:
             self.disk_cache = DiskCacheManager(
                 cache_dir=cache_dir,
                 max_size_gb=self.config.disk_cache_max_gb,
+                allow_tq_native=bool(self._tq_active),
                 # Pass expected layer count
                 # so the safetensors header validator can hard-reject
                 # wrong-model L2 entries before mx.load triggers

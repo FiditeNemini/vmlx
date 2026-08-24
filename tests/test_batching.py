@@ -2000,9 +2000,9 @@ class TestSchedulerBasic:
         )
 
         scheduler._record_clean_prefill_admission_sample(request, 0.3)
-        scheduler._record_disk_reconstruction_admission_sample(
+        scheduler._record_disk_admission_sample(
             cached_tokens=256,
-            reconstruction_seconds=2.56,
+            retrieval_seconds=2.56,
         )
 
         assert scheduler._cache_admission_prefill_sample_count == 1
@@ -2029,6 +2029,108 @@ class TestSchedulerBasic:
         assert scheduler._cache_admission_prefill_reference_tokens == 3000
         assert scheduler._cache_admission_prefill_seconds_per_token == 0.002
         assert scheduler._cache_admission_prefill_sample_count == 1
+
+    def test_ssd_only_restart_lookup_time_is_part_of_disk_admission_cost(
+        self, mock_model, mock_tokenizer, monkeypatch
+    ):
+        """A fresh-process SSD read happens before worker reconstruction.
+
+        Laguna's restart receipt spent 2.726 s inside fetch_cache() and only
+        0.079 s reconstructing on the worker.  The lookup interval must remain
+        attached to the candidate so admission never learns a false-fast disk
+        rate from reconstruction alone.
+        """
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler.paged_cache_manager = SimpleNamespace(disk_only=True)
+
+        class _PagedCache:
+            stats = SimpleNamespace(disk_hits=0)
+            allocated_blocks = {}
+
+            def release_request_refs(self, _block_table):
+                pass
+
+            def detach_request(self, _request_id):
+                pass
+
+        class _BlockAwareCache:
+            paged_cache = _PagedCache()
+
+            def fetch_cache(self, request_id, tokens, cache_extra_keys=None):
+                self.paged_cache.stats.disk_hits += 7
+                return (
+                    BlockTable(request_id, list(range(1, 8)), 410),
+                    list(tokens[410:]),
+                )
+
+            def get_stats(self):
+                return {}
+
+        scheduler.block_aware_cache = _BlockAwareCache()
+        scheduler.prefix_cache = None
+        scheduler.memory_aware_cache = None
+        ticks = iter((10.0, 12.726))
+        monkeypatch.setattr(
+            "vmlx_engine.scheduler.time.perf_counter",
+            lambda: next(ticks),
+        )
+
+        request = Request("req-restart-lookup", "x", SamplingParams())
+        request.prompt_token_ids = list(range(477))
+        scheduler.add_request(request)
+
+        assert request.cached_tokens == 410
+        assert request._cache_candidate_lookup_seconds == pytest.approx(2.726)
+
+    def test_ssd_only_restart_hit_seeds_total_restore_and_tail_prefill_costs(
+        self, mock_model, mock_tokenizer
+    ):
+        """One restart refault must calibrate both sides of the next choice."""
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler.paged_cache_manager = SimpleNamespace(disk_only=True)
+        request = SimpleNamespace(
+            _paged_disk_hit=True,
+            _cache_execution={
+                "request_id": "req-restart-calibration",
+                "prompt_tokens": 477,
+                "cached_tokens": 410,
+                "uncached_prompt_tokens": 67,
+                "prefill_tokens": 67,
+                "cache_reuse_applied": True,
+                "candidate_lookup_seconds": 2.726,
+                "reconstruction_seconds": 0.079,
+                "total_worker_cache_seconds": 0.079,
+                "selection": {"selected": "paged"},
+            },
+        )
+
+        scheduler._record_cache_admission_first_token_sample(
+            request,
+            scheduled_ttft_seconds=0.274,
+            admission_first_token_seconds=3.0,
+        )
+
+        execution = request._cache_execution
+        assert execution["candidate_lookup_seconds"] == pytest.approx(2.726)
+        assert execution["ssd_retrieval_seconds"] == pytest.approx(2.805)
+        assert execution["admission_first_token_seconds"] == pytest.approx(3.0)
+        assert scheduler._cache_admission_disk_seconds_per_token == pytest.approx(
+            2.805 / 410
+        )
+        assert scheduler._cache_admission_prefill_seconds_per_token == pytest.approx(
+            0.195 / 67
+        )
+        assert scheduler._cache_admission_disk_reference_tokens == 410
+        assert scheduler._cache_admission_prefill_reference_tokens == 477
+        assert scheduler._last_cache_execution == execution
+
+        reject, detail = scheduler._should_clean_prefill_over_disk_only(
+            paged_cached_tokens=410,
+            paged_cold_tokens=410,
+        )
+        assert reject is True
+        assert detail["cost_history_comparable"] is True
+        assert detail["cost_reason"] == "estimated_clean_prefill_faster"
 
     def test_paged_quantized_kv_hit_defers_worker_dequant_for_batch_generator(
         self, mock_model, mock_tokenizer

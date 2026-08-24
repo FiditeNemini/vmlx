@@ -44,6 +44,9 @@ describe('CachePanel last-request truthfulness', () => {
       'generation_prompt_suffix_tokens',
       'blocks',
       'disk_blocks',
+      'candidate_lookup_seconds',
+      'ssd_retrieval_seconds',
+      'admission_first_token_seconds',
       'reconstruction_seconds',
       'dequantization_seconds',
       'total_worker_cache_seconds',
@@ -73,6 +76,9 @@ describe('CachePanel last-request truthfulness', () => {
       'estimatedSsd',
       'estimatedPrefill',
       'costComparable',
+      'candidateLookup',
+      'ssdRetrievalTotal',
+      'admissionFirstToken',
     ]
     for (const key of keys) {
       expect(source).toContain(`t('sessions.cache.${key}')`)

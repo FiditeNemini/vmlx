@@ -800,6 +800,24 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             {lastCacheExecution.disk_blocks != null && (
               <StatCard label={t('sessions.cache.ssdBlocksRead')} value={Number(lastCacheExecution.disk_blocks || 0).toLocaleString()} />
             )}
+            {lastCacheExecution.candidate_lookup_seconds != null && (
+              <StatCard
+                label={t('sessions.cache.candidateLookup')}
+                value={`${(Number(lastCacheExecution.candidate_lookup_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+            {lastCacheExecution.ssd_retrieval_seconds != null && (
+              <StatCard
+                label={t('sessions.cache.ssdRetrievalTotal')}
+                value={`${(Number(lastCacheExecution.ssd_retrieval_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+            {lastCacheExecution.admission_first_token_seconds != null && (
+              <StatCard
+                label={t('sessions.cache.admissionFirstToken')}
+                value={`${(Number(lastCacheExecution.admission_first_token_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
             {lastCacheExecution.reconstruction_seconds != null && (
               <StatCard
                 label={t('sessions.cache.reconstruction')}

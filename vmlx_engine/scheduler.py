@@ -4111,14 +4111,14 @@ class Scheduler:
         # seconds/token happened to be lower.
         setattr(self, reference_attr, int(reference_tokens))
 
-    def _record_disk_reconstruction_admission_sample(
+    def _record_disk_admission_sample(
         self,
         *,
         cached_tokens: int,
-        reconstruction_seconds: float,
+        retrieval_seconds: float,
     ) -> None:
         tokens = max(0, int(cached_tokens or 0))
-        seconds = max(0.0, float(reconstruction_seconds or 0.0))
+        seconds = max(0.0, float(retrieval_seconds or 0.0))
         if tokens > 0 and seconds > 0.0:
             self._update_cache_admission_rate("disk", seconds / tokens, tokens)
 
@@ -4133,13 +4133,108 @@ class Scheduler:
         if int(execution.get("cached_tokens", 0) or 0) > 0:
             return
         prefill_tokens = max(0, int(execution.get("prefill_tokens", 0) or 0))
+        reference_tokens = max(
+            prefill_tokens,
+            int(execution.get("prompt_tokens", 0) or 0),
+        )
         seconds = max(0.0, float(ttft_seconds or 0.0))
         if prefill_tokens > 0 and seconds > 0.0:
             self._update_cache_admission_rate(
                 "prefill",
                 seconds / prefill_tokens,
-                prefill_tokens,
+                reference_tokens,
             )
+
+    def _record_cache_admission_first_token_sample(
+        self,
+        request: Request,
+        *,
+        scheduled_ttft_seconds: float,
+        admission_first_token_seconds: Optional[float] = None,
+    ) -> None:
+        """Finish request-local admission timing when the first token arrives.
+
+        A persisted block hit can read its tensor payloads in either of two
+        places.  On a fresh process, ``fetch_cache()`` hydrates them while
+        resolving the candidate on the API thread; once its metadata is warm,
+        worker reconstruction performs the reads instead.  Admission must use
+        both intervals or identical SSD work appears artificially cheap after
+        restart.
+
+        The accepted hit also measures its uncached tail on this exact loaded
+        model.  Removing cache preparation from scheduled TTFT yields a
+        conservative tail-prefill/first-token sample, so one restart refault
+        seeds both sides of the *next* SSD-versus-clean decision.
+        """
+        execution = getattr(request, "_cache_execution", None)
+        if not isinstance(execution, dict):
+            return
+
+        scheduled_ttft = max(0.0, float(scheduled_ttft_seconds or 0.0))
+        candidate_lookup = max(
+            0.0,
+            float(execution.get("candidate_lookup_seconds", 0.0) or 0.0),
+        )
+        worker_cache = max(
+            0.0,
+            float(execution.get("total_worker_cache_seconds", 0.0) or 0.0),
+        )
+        admission_first_token = max(
+            0.0,
+            float(admission_first_token_seconds)
+            if admission_first_token_seconds is not None
+            else candidate_lookup + scheduled_ttft,
+        )
+        execution["candidate_lookup_seconds"] = round(candidate_lookup, 6)
+        execution["admission_first_token_seconds"] = round(
+            admission_first_token,
+            6,
+        )
+
+        cached_tokens = max(0, int(execution.get("cached_tokens", 0) or 0))
+        selection = execution.get("selection")
+        selected_paged = bool(
+            isinstance(selection, dict) and selection.get("selected") == "paged"
+        )
+        disk_only_hit = bool(
+            cached_tokens > 0
+            and execution.get("cache_reuse_applied") is True
+            and selected_paged
+            and bool(getattr(self.paged_cache_manager, "disk_only", False))
+        )
+        if disk_only_hit:
+            ssd_retrieval = candidate_lookup + worker_cache
+            execution["ssd_retrieval_seconds"] = round(ssd_retrieval, 6)
+            self._record_disk_admission_sample(
+                cached_tokens=cached_tokens,
+                retrieval_seconds=ssd_retrieval,
+            )
+
+            tail_tokens = max(
+                0,
+                int(execution.get("uncached_prompt_tokens", 0) or 0),
+            )
+            prompt_tokens = max(
+                tail_tokens,
+                int(execution.get("prompt_tokens", 0) or 0),
+            )
+            tail_prefill = max(0.0, scheduled_ttft - worker_cache)
+            if tail_tokens > 0 and tail_prefill > 0.0:
+                self._update_cache_admission_rate(
+                    "prefill",
+                    tail_prefill / tail_tokens,
+                    prompt_tokens,
+                )
+        else:
+            self._record_clean_prefill_admission_sample(
+                request,
+                scheduled_ttft,
+            )
+
+        request._cache_execution = {
+            key: value for key, value in execution.items() if value is not None
+        }
+        self._last_cache_execution = dict(request._cache_execution)
 
     def _should_clean_prefill_over_disk_only(
         self,
@@ -6141,10 +6236,16 @@ class Scheduler:
                 )
             except Exception:
                 _paged_disk_hits_before = 0
+            _paged_candidate_lookup_start = time.perf_counter()
+            request._cache_admission_start_time = _paged_candidate_lookup_start
             block_table, remaining = self.block_aware_cache.fetch_cache(
                 request.request_id,
                 _fetch_tokens,
                 cache_extra_keys=_cache_extra_keys,
+            )
+            request._cache_candidate_lookup_seconds = round(
+                max(0.0, time.perf_counter() - _paged_candidate_lookup_start),
+                6,
             )
             try:
                 _paged_disk_hits_after = int(
@@ -8123,6 +8224,20 @@ class Scheduler:
                 "prefill_tokens": len(tokens_to_process),
                 "blocks": _initial_cache_blocks,
                 "selection": getattr(request, "_cache_selection", None),
+                "candidate_lookup_seconds": round(
+                    max(
+                        0.0,
+                        float(
+                            getattr(
+                                request,
+                                "_cache_candidate_lookup_seconds",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                    ),
+                    6,
+                ),
                 "cache_outcome": (
                     "hit"
                     if _accepted_cached_tokens > 0
@@ -8195,14 +8310,6 @@ class Scheduler:
                     or 0
                 )
                 if cache_to_use is not None and _reconstruct_disk_blocks > 0:
-                    self._record_disk_reconstruction_admission_sample(
-                        cached_tokens=_accepted_cached_tokens,
-                        reconstruction_seconds=float(
-                            cache_execution.get("reconstruction_seconds", 0.0)
-                            if cache_execution is not None
-                            else 0.0
-                        ),
-                    )
                     request._paged_disk_hit = True
                     _worker_detail = str(
                         getattr(request, "_cache_detail", "")
@@ -8901,9 +9008,23 @@ class Scheduler:
                 is_first_token = request.num_computed_tokens == 0
                 request.append_output_token(response.token)
                 if is_first_token and hasattr(request, "_schedule_time"):
-                    ttft = time.perf_counter() - request._schedule_time
+                    _first_token_time = time.perf_counter()
+                    ttft = _first_token_time - request._schedule_time
                     self._record_ttft_sample(ttft)
-                    self._record_clean_prefill_admission_sample(request, ttft)
+                    _admission_start = getattr(
+                        request,
+                        "_cache_admission_start_time",
+                        None,
+                    )
+                    self._record_cache_admission_first_token_sample(
+                        request,
+                        scheduled_ttft_seconds=ttft,
+                        admission_first_token_seconds=(
+                            _first_token_time - _admission_start
+                            if isinstance(_admission_start, (int, float))
+                            else None
+                        ),
+                    )
             else:
                 continue
 

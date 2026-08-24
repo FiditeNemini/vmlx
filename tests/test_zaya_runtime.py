@@ -2042,7 +2042,7 @@ def test_non_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeyp
     assert scheduler.block_aware_cache.stores == []
 
 
-def test_qwen_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_off(
+def test_qwen_muse_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_off(
     monkeypatch,
 ):
     """Cleared media families use their clean media boundary unless disabled."""
@@ -2070,6 +2070,13 @@ def test_qwen_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_
     scheduler._mllm_request_has_media_cache_context = lambda _request, _tokens: True
     assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 248056, 11])
 
+    generator._model_type = "muse_glimmer"
+    generator._media_placeholder_token_ids_cache = {200091, 200092}
+    assert generator._media_prefix_cache_allowed(request, [10, 200092, 11])
+
+    scheduler.batch_generator._model_type = "muse_glimmer"
+    assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 200092, 11])
+
     generator._model_type = "gemma4"
     generator._media_placeholder_token_ids_cache = {258880, 258884}
     assert generator._media_prefix_cache_allowed(request, [10, 258880, 11])
@@ -2087,6 +2094,7 @@ def test_qwen_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_
     monkeypatch.setenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "off")
     for model_type, media_tokens in (
         ("qwen3_5", {248056, 248057}),
+        ("muse_glimmer", {200091, 200092}),
         ("gemma4", {258880, 258884}),
         ("step3p7", {128001}),
     ):
@@ -2104,12 +2112,16 @@ def test_qwen_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_
 
 @pytest.mark.parametrize(
     ("model_type", "media_token"),
-    (("gemma4", 258880), ("step3p7", 128001)),
+    (
+        ("muse_glimmer", 200092),
+        ("gemma4", 258880),
+        ("step3p7", 128001),
+    ),
 )
 def test_mixed_swa_media_store_uses_captured_vision_boundary(
     monkeypatch, model_type, media_token
 ):
-    """Gemma/Step must store media N-1, never text-only re-prefill it."""
+    """Muse/Gemma/Step must store media N-1, never text-only re-prefill it."""
 
     from unittest.mock import MagicMock
 

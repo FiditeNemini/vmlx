@@ -324,6 +324,7 @@ function summarizeRequestForLog(bodyJson: string, useResponsesApi: boolean): Rec
       enable_thinking: body.enable_thinking,
       thinking_mode: body.thinking_mode,
       reasoning_effort: body.reasoning_effort,
+      reasoning_strength: body.chat_template_kwargs?.reasoning_strength,
       max_thinking_tokens: body.max_thinking_tokens,
       image_token_budget: body.image_token_budget,
       thinking_budget: body.chat_template_kwargs?.thinking_budget,
@@ -2099,21 +2100,6 @@ export function registerChatHandlers(
               };
             }
           };
-          // Muse Glimmer's reasoning depth is a system-prompt literal driven by
-          // the `reasoning_strength` template kwarg — its template reads
-          // neither reasoning_effort nor enable_thinking. Translate the effort
-          // the user picked into the kwarg the model actually reads, so the
-          // control in the drawer is not decorative.
-          const applyMuseReasoningStrength = (obj: Record<string, any>) => {
-            if (isRemote || chatDetectedFamily !== "muse-glimmer") return;
-            const strength = obj.reasoning_effort ?? overrides?.reasoningEffort;
-            delete obj.reasoning_effort;
-            if (!strength || strength === "auto") return;
-            obj.chat_template_kwargs = {
-              ...(obj.chat_template_kwargs || {}),
-              reasoning_strength: String(strength).toLowerCase(),
-            };
-          };
           const applyPostToolAnswerPolicy = (obj: Record<string, any>) => {
             applyPostToolRequestFields(obj, {
               finalAnswerRecovery,
@@ -2220,7 +2206,6 @@ export function registerChatHandlers(
               supportedReasoningEfforts,
             });
             applyThinkingBudget(obj);
-            applyMuseReasoningStrength(obj);
             // VLM video sampling — forward to engine only when session
             // config has non-default values. Remote OpenAI-compatible
             // providers don't support these fields, so skip there.
@@ -2291,7 +2276,6 @@ export function registerChatHandlers(
               allowRequestControls: !isStrictApi,
             });
             applyThinkingBudget(obj);
-            applyMuseReasoningStrength(obj);
             // VLM video sampling — local engine only (strict 3rd-party APIs
             // reject unknown fields, remote OpenAI-compat doesn't support it).
             if (!isRemote && sessionImageTokenBudget !== undefined)

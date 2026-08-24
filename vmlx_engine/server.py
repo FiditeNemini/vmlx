@@ -1207,10 +1207,11 @@ def _reasoning_strength_family() -> bool:
     """Does the loaded bundle steer reasoning by the ``reasoning_strength`` kwarg?
 
     Muse Glimmer's template reads ONLY ``reasoning_strength``; it never reads
-    ``enable_thinking`` or ``reasoning_effort`` (see model_configs.py). The panel
-    already translates the UI level into that kwarg in its request builder, so a
-    UI user can steer depth while a plain API caller sending the standard
-    ``reasoning_effort`` silently could not — the two paths disagreed.
+    ``enable_thinking`` or ``reasoning_effort`` (see model_configs.py). The
+    engine owns this translation for every local API surface. Keeping a second
+    panel-only translator removed the top-level effort before request
+    validation, where ``thinking_mode=reasoning`` then silently invented
+    ``medium`` even when the visible control said Low.
     """
     try:
         identity = " ".join(str(v or "").lower() for v in (_model_path, _model_name))
@@ -3536,7 +3537,12 @@ def _log_resolved_sampling_kwargs(
     if isinstance(ct_kwargs, dict) and ct_kwargs:
         sample["chat_template_kwargs"] = {
             key: ct_kwargs[key]
-            for key in ("reasoning_effort", "thinking_budget", "enable_thinking")
+            for key in (
+                "reasoning_effort",
+                "reasoning_strength",
+                "thinking_budget",
+                "enable_thinking",
+            )
             if key in ct_kwargs
         }
     identity_values = {

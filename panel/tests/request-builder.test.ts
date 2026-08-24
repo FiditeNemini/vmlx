@@ -487,6 +487,32 @@ describe('buildRequestBody — Chat Completions API', () => {
         expect(body.reasoning_effort).toBe('high')
     })
 
+    it.each(['completions', 'responses'] as const)(
+        'keeps Muse Low as the standard %s reasoning_effort for the engine-owned native translation',
+        (wireApi) => {
+            const body = buildRequestBody(
+                wireApi,
+                'muse',
+                messages,
+                { enableThinking: true, reasoningEffort: 'low' },
+                false,
+                true,
+                undefined,
+                'muse-glimmer',
+                undefined,
+                undefined,
+                ['low', 'medium', 'high', 'xhigh'],
+            )
+
+            expect(body.reasoning_effort).toBe('low')
+            expect(body.thinking_mode).toBe('reasoning')
+            // The engine is the single owner of effort -> native
+            // reasoning_strength translation. Removing the top-level effort
+            // here made the API alias silently inject medium.
+            expect(body.chat_template_kwargs).toEqual({ enable_thinking: true })
+        },
+    )
+
     it('suppresses stale reasoning_effort when the model has no reasoning parser', () => {
         const body = buildRequestBody('completions', 'plain-model', messages, { reasoningEffort: 'max' }, false, false)
         expect(body.reasoning_effort).toBeUndefined()
@@ -955,7 +981,10 @@ describe('buildRequestBody source parity', () => {
         const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
         const branchStart = source.indexOf('if (useResponsesApi) {')
         expect(branchStart).toBeGreaterThanOrEqual(0)
-        const branchReturn = source.indexOf('return obj;', branchStart)
+        const branchReturn = source.indexOf(
+            'return finalizeRequestBody(obj);',
+            branchStart,
+        )
         expect(branchReturn).toBeGreaterThan(branchStart)
         const responsesBranch = source.slice(branchStart, branchReturn)
 
@@ -965,6 +994,7 @@ describe('buildRequestBody source parity', () => {
         expect(responsesBranch).toContain('applyThinkingBudget(obj);')
         expect(responsesBranch.match(/applyReasoningRequestFields\(obj, \{/g)?.length).toBe(1)
         expect(responsesBranch.match(/applyThinkingBudget\(obj\);/g)?.length).toBe(1)
+        expect(source).not.toContain('applyMuseReasoningStrength')
         expect(responsesBranch).toContain('splitResponsesSystemMessages(')
         expect(responsesBranch).toContain('chatDetectedFamily === "deepseek-v4"')
     })

@@ -27,6 +27,18 @@ def test_packaged_integrity_default_out_tracks_current_release_proof_artifact():
     ) == runner.DEFAULT_OUT
 
 
+def test_packaged_integrity_release_version_is_explicit_and_valid(monkeypatch):
+    monkeypatch.delenv("VMLX_R20_EXPECTED_VERSION", raising=False)
+    assert runner._configured_r20_artifact_chain_version() == "1.6.20"
+
+    monkeypatch.setenv("VMLX_R20_EXPECTED_VERSION", "1.6.36")
+    assert runner._configured_r20_artifact_chain_version() == "1.6.36"
+
+    monkeypatch.setenv("VMLX_R20_EXPECTED_VERSION", "not-a-release")
+    with pytest.raises(RuntimeError, match="invalid vMLX production version"):
+        runner._configured_r20_artifact_chain_version()
+
+
 def test_packaged_integrity_hashes_cache_ipc_guard_source():
     assert "panel/src/main/ipc/cache.ts" in runner.SOURCE_HASH_FILES
     assert "tests/test_packaged_integrity_contract.py" in runner.SOURCE_HASH_FILES

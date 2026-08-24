@@ -326,6 +326,24 @@ describe("release packaging", () => {
     }
   });
 
+  it("binds the hardened release contract to the explicit production version", () => {
+    const beforePack = requireCjs(
+      join(repo, "scripts/electron-builder-before-pack.cjs"),
+    );
+
+    expect(beforePack.configuredR20Version({})).toBe("1.6.20");
+    expect(
+      beforePack.configuredR20Version({
+        VMLX_R20_EXPECTED_VERSION: "1.6.36",
+      }),
+    ).toBe("1.6.36");
+    expect(() =>
+      beforePack.configuredR20Version({
+        VMLX_R20_EXPECTED_VERSION: "not-a-release",
+      }),
+    ).toThrow("invalid vMLX production version");
+  });
+
   it("blocks direct electron-builder packaging of 1.6.20 before expensive hooks", async () => {
     const beforePack = requireCjs(
       join(repo, "scripts/electron-builder-before-pack.cjs"),
@@ -1362,6 +1380,7 @@ describe("release packaging", () => {
     const selector = "ShieldStack LLC (55KGF2S5AY)";
     const envNames = [
       "VMLX_RELEASE_SCOPE",
+      "VMLX_R20_EXPECTED_VERSION",
       "VMLX_R20_OFFICIAL_PACKAGING",
       "VMLX_R20_EXPECTED_TEAM_ID",
       "VMLX_R20_EXPECTED_CODESIGN_IDENTITY",
@@ -1392,6 +1411,7 @@ describe("release packaging", () => {
         }),
       );
       process.env.VMLX_RELEASE_SCOPE = "r20_production";
+      process.env.VMLX_R20_EXPECTED_VERSION = "1.6.20";
       process.env.VMLX_R20_OFFICIAL_PACKAGING = "1";
       process.env.VMLX_R20_EXPECTED_TEAM_ID = "55KGF2S5AY";
       process.env.VMLX_R20_EXPECTED_CODESIGN_IDENTITY = fullIdentity;
@@ -1470,6 +1490,7 @@ describe("release packaging", () => {
     expect(source).not.toContain("check-public-repo-hygiene.sh");
     expect(source).toContain('assert_r20_source_identity "before npm ci"');
     expect(source).toContain("canonical release repositories");
+    expect(source).toContain('export VMLX_R20_EXPECTED_VERSION="$VERSION"');
     expect(source).toContain("parsed.scheme.lower()");
     expect(source).toContain('scheme == "https"');
     expect(source).toContain('scheme == "ssh"');

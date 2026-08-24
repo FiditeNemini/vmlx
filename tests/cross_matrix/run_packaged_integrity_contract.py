@@ -202,7 +202,16 @@ SOURCE_HASH_FILES = (
 
 R20_ARTIFACT_CHAIN_SCHEMA_VERSION = 4
 R20_ARTIFACT_CHAIN_SCOPE = "r20_production"
-R20_ARTIFACT_CHAIN_VERSION = "1.6.20"
+
+
+def _configured_r20_artifact_chain_version() -> str:
+    version = os.environ.get("VMLX_R20_EXPECTED_VERSION", "1.6.20")
+    if re.fullmatch(r"\d+\.\d+\.\d+", version) is None:
+        raise RuntimeError(f"invalid vMLX production version: {version}")
+    return version
+
+
+R20_ARTIFACT_CHAIN_VERSION = _configured_r20_artifact_chain_version()
 R20_ARTIFACT_CHAIN_FLAVORS = ("sequoia", "tahoe")
 INSTALLED_RELEASE_MANIFEST_SCHEMA = "vmlx-installed-release-manifest-v1"
 INSTALLED_RELEASE_MANIFEST_FIELDS = {

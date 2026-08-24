@@ -22,6 +22,12 @@ import sys
 print(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["version"])
 PY
 )"
+if [[ -n "${VMLX_R20_EXPECTED_VERSION:-}" ]] \
+  && [[ "$VMLX_R20_EXPECTED_VERSION" != "$VERSION" ]]; then
+  echo "ERROR: VMLX_R20_EXPECTED_VERSION does not match package version $VERSION" >&2
+  exit 1
+fi
+export VMLX_R20_EXPECTED_VERSION="$VERSION"
 DIST_DIR_ABS="$PANEL_DIR/release"
 ARTIFACT_CHAIN_HELPER="$ROOT_DIR/tests/cross_matrix/run_packaged_integrity_contract.py"
 EXPECTED_APPLE_TEAM_ID="55KGF2S5AY"

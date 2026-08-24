@@ -182,6 +182,12 @@ fi
 export VMLX_RELEASE_SCOPE="$RELEASE_SCOPE"
 
 if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
+  if [[ -n "${VMLX_R20_EXPECTED_VERSION:-}" ]] \
+    && [[ "$VMLX_R20_EXPECTED_VERSION" != "$VERSION" ]]; then
+    echo "ERROR: VMLX_R20_EXPECTED_VERSION does not match package version $VERSION" >&2
+    exit 1
+  fi
+  export VMLX_R20_EXPECTED_VERSION="$VERSION"
   if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "ERROR: VMLX_RELEASE_SCOPE=r20_production requires a release version like 1.2.3, found $VERSION" >&2
     exit 1

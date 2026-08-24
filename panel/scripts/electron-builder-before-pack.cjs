@@ -28,7 +28,17 @@ const {
   runPinnedReleasePythonAction,
 } = require("./release-python-action.cjs");
 
-const R20_VERSION = "1.6.20";
+const R20_DEFAULT_VERSION = "1.6.20";
+
+function configuredR20Version(env = process.env) {
+  const version = env.VMLX_R20_EXPECTED_VERSION || R20_DEFAULT_VERSION;
+  if (!/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error(`invalid vMLX production version: ${version}`);
+  }
+  return version;
+}
+
+const R20_VERSION = configuredR20Version();
 const R20_SCOPE = "r20_production";
 const R20_TEAM_ID = "55KGF2S5AY";
 const R20_CODESIGN_IDENTITY =
@@ -1054,6 +1064,7 @@ function verifyR20PackagingContext(panelDir, context) {
 
   const rootDir = resolve(panelDir, "..");
   requireExactEnv("VMLX_RELEASE_SCOPE", R20_SCOPE);
+  requireExactEnv("VMLX_R20_EXPECTED_VERSION", R20_VERSION);
   requireExactEnv("VMLX_R20_OFFICIAL_PACKAGING", "1");
   requireExactEnv("VMLX_R20_EXPECTED_TEAM_ID", R20_TEAM_ID);
   requireExactEnv("VMLX_R20_EXPECTED_CODESIGN_IDENTITY", R20_CODESIGN_IDENTITY);
@@ -1342,6 +1353,8 @@ module.exports.treePayload = treePayload;
 module.exports.R20_CODESIGN_IDENTITY = R20_CODESIGN_IDENTITY;
 module.exports.R20_CSC_NAME = R20_CSC_NAME;
 module.exports.R20_TEAM_ID = R20_TEAM_ID;
+module.exports.R20_VERSION = R20_VERSION;
+module.exports.configuredR20Version = configuredR20Version;
 
 if (require.main === module) {
   beforePack().catch((error) => {

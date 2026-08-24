@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import stat
 import subprocess
 import sys
 import tomllib
@@ -111,11 +112,58 @@ def _canonical_github_identity(remote_url: str) -> str | None:
     return path.lower()
 
 
+def _trusted_pinned_script_action(
+    root: Path,
+    *,
+    script_path: Path | None = None,
+) -> str | None:
+    """Return the release wrapper's live source-adjacent hardlink, if any."""
+    root = root.resolve()
+    original = (root / "tests/cross_matrix/run_release_regression_manifest.py").resolve()
+    candidate = (script_path or Path(__file__)).resolve()
+    if candidate == original:
+        return None
+    if candidate.parent != original.parent or re.fullmatch(
+        rf"\.{re.escape(original.name)}\.vmlx-r20-[0-9a-f]{{32}}",
+        candidate.name,
+    ) is None:
+        return None
+    try:
+        candidate_stat = candidate.lstat()
+        original_stat = original.lstat()
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(candidate_stat.st_mode)
+        or not stat.S_ISREG(original_stat.st_mode)
+        or candidate_stat.st_dev != original_stat.st_dev
+        or candidate_stat.st_ino != original_stat.st_ino
+    ):
+        return None
+    try:
+        return candidate.relative_to(root).as_posix()
+    except ValueError:
+        return None
+
+
+def _untrusted_status_records(
+    status: str,
+    *,
+    trusted_untracked_path: str | None,
+) -> list[str]:
+    records = [record for record in status.split("\0") if record]
+    if trusted_untracked_path is not None:
+        trusted_record = f"?? {trusted_untracked_path}"
+        records = [record for record in records if record != trusted_record]
+    return records
+
+
 def _repository_release_provenance(
     repo: Path,
     *,
     expected_identity: str,
     failures: list[str],
+    trusted_untracked_path: str | None = None,
 ) -> dict[str, str]:
     try:
         root = Path(_git_output(repo, "rev-parse", "--show-toplevel")).resolve()
@@ -125,7 +173,8 @@ def _repository_release_provenance(
         status = _git_output(
             root,
             "status",
-            "--porcelain",
+            "--porcelain=v1",
+            "-z",
             "--untracked-files=all",
         )
         remote_url = _git_output(root, "remote", "get-url", "origin")
@@ -141,7 +190,10 @@ def _repository_release_provenance(
     except (OSError, RuntimeError, IndexError) as exc:
         failures.append(f"{expected_identity} provenance could not be read: {exc}")
         return {}
-    if status:
+    if _untrusted_status_records(
+        status,
+        trusted_untracked_path=trusted_untracked_path,
+    ):
         failures.append(f"{expected_identity} release source is dirty")
     if remote_identity != expected_identity:
         failures.append(
@@ -179,6 +231,7 @@ def collect_production_provenance(
         root,
         expected_identity="jjang-ai/vmlx",
         failures=failures,
+        trusted_untracked_path=_trusted_pinned_script_action(root),
     )
     jang = _repository_release_provenance(
         jang_source,

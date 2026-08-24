@@ -14848,6 +14848,43 @@ def test_release_regression_manifest_canonical_github_identity_is_fail_closed():
     )
 
 
+def test_release_regression_manifest_trusts_only_live_pinned_script_hardlink(
+    tmp_path,
+):
+    from tests.cross_matrix import run_release_regression_manifest as runner
+
+    script_dir = tmp_path / "tests/cross_matrix"
+    script_dir.mkdir(parents=True)
+    original = script_dir / "run_release_regression_manifest.py"
+    original.write_text("# release manifest\n", encoding="utf-8")
+    action = script_dir / (
+        ".run_release_regression_manifest.py.vmlx-r20-" + "a" * 32
+    )
+    os.link(original, action)
+
+    trusted = runner._trusted_pinned_script_action(
+        tmp_path,
+        script_path=action,
+    )
+    assert trusted == action.relative_to(tmp_path).as_posix()
+    assert runner._untrusted_status_records(
+        f"?? {trusted}\0",
+        trusted_untracked_path=trusted,
+    ) == []
+    assert runner._untrusted_status_records(
+        f"?? {trusted}\0 M panel/package.json\0",
+        trusted_untracked_path=trusted,
+    ) == [" M panel/package.json"]
+
+    copy = script_dir / (
+        ".run_release_regression_manifest.py.vmlx-r20-" + "b" * 32
+    )
+    copy.write_bytes(original.read_bytes())
+    assert (
+        runner._trusted_pinned_script_action(tmp_path, script_path=copy) is None
+    )
+
+
 def test_release_regression_manifest_production_repo_provenance_requires_main(
     monkeypatch,
 ):
@@ -14863,7 +14900,12 @@ def test_release_regression_manifest_production_repo_provenance_requires_main(
             ("rev-parse", "HEAD"): commit,
             ("rev-parse", "HEAD^{tree}"): tree,
             ("rev-parse", "@{upstream}"): commit,
-            ("status", "--porcelain", "--untracked-files=all"): "",
+            (
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ): "",
             ("remote", "get-url", "origin"): (
                 "https://github.com/jjang-ai/vmlx.git"
             ),

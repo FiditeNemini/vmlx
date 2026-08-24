@@ -26,6 +26,25 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.36] - 2026-08-24
+
+### Fixed
+
+- **DeepSeek V4 Flash foreground replies no longer wait behind idle predicted-transcript cache work.** An incoming request is now marked before terminal cleanup begins, so the SSD shadow re-key lane cannot mistake it for an idle engine and start a full prompt prefill first. On `dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK`, the directly affected follow-up fell from 9.789 s to 4.204 s TTFT while preserving 97.88% prefix reuse and 32.0 tok/s decode.
+- **DeepSeek V4 native SSD cache writes accept zero-sized anchor tensors.** Empty topology-owned tensors are serialized as valid cache state instead of failing the durability fence and leaving most of a conversation chain unavailable after the turn.
+- **Exactly-once tool follow-ups retain their tool schema.** A model can now continue from the tool result without losing the schema that owns the call or invalidating the reusable prompt branch.
+- **Multimodal and mixed-attention cache branches keep the correct history and native state.** Step media/tool continuations, Muse image/video transitions, Gemma media tails, and mixed-SWA restores now select usable causal prefixes instead of replaying stale or incompatible snapshots.
+
+### Performance
+
+- **SSD-only prefix caching no longer builds full-cache NumPy copies or retains writer buffers after durability.** Blocks stream directly to safetensors files, duplicate physical blocks are deduplicated, and restore admission accounts for measured SSD lookup cost before choosing a hit.
+- **Architecture-native cache state is the default.** The app exposes the effective native policy in Server Settings and does not force generic TurboQuant encoding onto models whose instantiated cache topology uses another representation. In-RAM paged, vision, and SSM payload caches remain disabled in the SSD-only product path.
+
+### Compatibility
+
+- Raised the bundled/runtime JANG floor to **2.5.46**, matching the public JANG release used by the verified DeepSeek V4 path.
+- The reported DeepSeek V4 Flash bundle now produces visible completions through both the Electron Chat UI and raw Responses streaming on the release source. The live hardware-safe prompt ceiling is model- and machine-derived; this release does not promise the bundle's declared 1M context on every Mac.
+
 ## [1.6.35] - 2026-08-21
 
 ### Fixed

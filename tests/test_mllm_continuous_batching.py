@@ -501,6 +501,10 @@ def test_gemma4_partial_media_tail_requires_pure_text_hit_and_live_capabilities(
     generator._media_safe_capture_limit = lambda _tokens: 192
     generator._media_prefix_cache_allowed = lambda _request, _tokens: True
     request = MLLMBatchRequest(uid=1, request_id="gemma-tail", prompt="x")
+    request._media_cache_scope = {
+        "mode": "per_media_placeholder",
+        "modalities": ["image"],
+    }
 
     assert generator._supports_pure_text_prefix_with_media_tail(
         request, list(range(512)), 128
@@ -514,7 +518,20 @@ def test_gemma4_partial_media_tail_requires_pure_text_hit_and_live_capabilities(
         request, list(range(512)), 128
     ), "uninspected wrapper families must stay fail-closed"
 
-    generator._model_type = "gemma4"
+    generator._model_type = "gemma4_unified"
+    assert generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 128
+    ), "the inspected JANG promotion must retain the named-capability path"
+
+    request._media_cache_scope["modalities"] = ["audio"]
+    assert not generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 128
+    ), "E2B/E4B audio requires its own payload/cache proof"
+    request._media_cache_scope["modalities"] = ["image", "video"]
+    assert not generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 128
+    ), "mixed image/video payload slicing remains fail-closed"
+    request._media_cache_scope["modalities"] = ["image"]
 
     class WrapperWithoutNamedCache:
         def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):

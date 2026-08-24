@@ -7615,7 +7615,21 @@ class MLLMBatchGenerator:
         offset.  Other families stay fail-closed until their actual wrapper is
         inspected and admitted separately.
         """
-        if str(getattr(self, "_model_type", "") or "").lower() != "gemma4":
+        runtime_type = str(getattr(self, "_model_type", "") or "").lower()
+        if runtime_type not in {"gemma4", "gemma4_unified"}:
+            return False
+        # JANG Gemma VL artifacts are promoted from on-disk ``gemma4`` to the
+        # vendored ``gemma4_unified`` wrapper. That runtime is shared with the
+        # E2B/E4B audio artifacts, so the type label alone cannot admit audio
+        # or mixed-media tails. This receipt is for the inspected image-only
+        # 26B/31B wrapper path; audio and image+video remain separate gates.
+        media_scope = getattr(request, "_media_cache_scope", None) or {}
+        modalities = {
+            str(value).lower()
+            for value in (media_scope.get("modalities") or [])
+            if value
+        }
+        if modalities != {"image"}:
             return False
         if cached_tokens <= 0:
             return False

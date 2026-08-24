@@ -30,9 +30,8 @@ describe("a saved lossy stored codec cannot reach a mixed-SWA launch", () => {
   it("the main process rewrites a saved q8/q4 rather than only hiding it", () => {
     const main = read(MAIN)
     expect(main).toContain("config.kvCacheQuantization = 'auto'")
-    // 'auto' and NOT 'none': an explicit none sets VMLX_DISABLE_TQ_KV=1 in the
-    // engine and would also kill the calibrated LIVE TurboQuant cache, whereas
-    // auto now resolves to exact stored KV for these bundles anyway.
+    // 'auto' and NOT 'none': both now preserve native state, but Auto is the
+    // canonical app value and omits a redundant CLI flag.
     const idx = main.indexOf("storedKvQuantMustBeExact(")
     const window = main.slice(idx, idx + 1400)
     expect(window).toContain("'auto'")

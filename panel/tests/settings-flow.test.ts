@@ -569,6 +569,7 @@ function buildCommandPreview(
 
     // JIT compilation
     if (effectiveEnableJit) parts.push('--enable-jit')
+    else parts.push('--no-jit')
 
     if (omniBackendActive && config.omniBackend && config.omniBackend !== 'stage1') {
         parts.push('--omni-backend', config.omniBackend)
@@ -949,14 +950,14 @@ describe('KV Cache Quantization', () => {
 
         const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(source).toContain("t('sessions.config.codecEngineNative')")
-        expect(enLocale).toContain('Engine-selected native cache')
+        expect(enLocale).toContain('Architecture-native cache')
         expect(source).toContain("t('sessions.config.hybridStatefulHint')")
         expect(enLocale).toContain('Generic TurboQuant KV is disabled unless a tested override exists')
         expect(source).not.toContain('ON · Default')
         expect(source).not.toContain('TurboQuant only')
     })
 
-    it('describes mixed-SWA and explicit live TurboQuant state truthfully', () => {
+    it('describes mixed-SWA and explicit stored-codec state truthfully', () => {
         const fs = require('fs')
         const source = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -966,18 +967,18 @@ describe('KV Cache Quantization', () => {
         expect(source).toContain("isMixedSwaBundle(")
         const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(source).toContain("t('sessions.config.codecMixedSwa')")
-        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + exact stored prefixes')
+        expect(enLocale).toContain('Native full/sliding KV + rotating metadata')
         expect(enLocale).toContain("preserves the model's native cache-slot and rotating-window metadata")
-        expect(enLocale).toContain('whether live full-attention TurboQuant is active')
+        expect(enLocale).toContain('Generic TurboQuant is not added')
         expect(source).toContain("t('sessions.config.codecTqOffAll')")
         expect(enLocale).toContain('Live TurboQuant and stored quantization disabled')
         expect(source).toContain("t('sessions.config.codecTqOffStored', { codec: effectiveStoredCacheQuantization })")
         expect(enLocale).toContain('Live TurboQuant disabled; stored cache {codec}')
-        expect(source).toContain("? 'TURBOQUANT OFF'")
-        expect(source).toContain("? bonsaiActive ? 'TQ8 AUTO' : 'TQ4 AUTO'")
+        expect(source).toContain("'NATIVE · GENERIC TQ OFF'")
+        expect(source).not.toContain("'TQ8 AUTO'")
     })
 
-    it('reports HY3 q4 stored-prefix Auto separately from native live KV', () => {
+    it('reports HY3 native cache and MTP copy semantics', () => {
         const fs = require('fs')
         const source = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -987,12 +988,12 @@ describe('KV Cache Quantization', () => {
         expect(source).toContain("normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'")
         const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(source).toContain("t('sessions.config.codecHy3')")
-        expect(enLocale).toContain('Native HY3 KV + TQ4 stored prefixes')
-        expect(source).toContain("? 'TQ4 AUTO'")
+        expect(enLocale).toContain('Native HY3 KV (no added cache codec)')
+        expect(source).toContain("'NATIVE · GENERIC TQ OFF'")
         expect(enLocale).toContain('Native MTP D1 copies this cache independently before batch split/verify')
     })
 
-    it('reports Qwen mixed full-KV Auto and the Bonsai-only all-TQ8 exception', () => {
+    it('reports Qwen and Bonsai architecture-native cache layouts', () => {
         const fs = require('fs')
         const source = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -1003,15 +1004,14 @@ describe('KV Cache Quantization', () => {
         expect(source).toContain("const qwenFullTqActive = !isMambaCache")
         const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(source).toContain("t('sessions.config.codecQwenFull')")
-        expect(enLocale).toContain('TQ4 bulk attention KV + TQ8 boundary layers')
-        expect(source).toContain('MIXED TQ4/8 AUTO')
-        expect(enLocale).toContain('protects the first/last six boundary layers with TQ8')
+        expect(enLocale).toContain('Native Qwen full-attention KV')
+        expect(source).not.toContain('MIXED TQ4/8 AUTO')
         expect(source).toContain("t('sessions.config.codecQwenHybrid')")
-        expect(enLocale).toContain('TQ4 attention KV + native hybrid state')
+        expect(enLocale).toContain('Native Qwen attention KV + native hybrid state')
         expect(source).toContain("t('sessions.config.codecBonsaiHybrid')")
-        expect(enLocale).toContain('TQ8 attention KV + native hybrid state')
-        expect(enLocale).toContain('Qwen hybrid cache detected — Auto applies TQ4')
-        expect(enLocale).toContain('Bonsai hybrid cache detected — Auto applies TQ8')
+        expect(enLocale).toContain('Native Bonsai attention KV + native hybrid state')
+        expect(enLocale).toContain('Qwen hybrid cache detected — Auto preserves native attention KV')
+        expect(enLocale).toContain('Bonsai hybrid cache detected — Auto preserves native attention KV')
     })
 
     it('chat reasoning Auto copy avoids force-language', () => {
@@ -3298,7 +3298,7 @@ describe('Default IP and New Settings', () => {
 })
 
 describe('JIT Toggle', () => {
-    it('applies and scrubs the real Laguna affine-JIT child environment contract', () => {
+    it('does not invent a Laguna cache-JIT opt-out in native Auto mode', () => {
         const env: Record<string, string | undefined> = {
             [DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]: 'stale-parent-value',
         }
@@ -3316,8 +3316,8 @@ describe('JIT Toggle', () => {
             kvCacheQuantization: 'auto',
             explicitKvCacheQuantizationApplied: false,
             enableJitRequested: true,
-        })).toBe(true)
-        expect(env[DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]).toBe('1')
+        })).toBe(false)
+        expect(env[DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]).toBe('stale-parent-value')
 
         const unrelatedEnv: Record<string, string | undefined> = {
             [DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV]: 'parent-shell-opt-out',
@@ -3339,9 +3339,9 @@ describe('JIT Toggle', () => {
 
     it.each([
         ['auto', false, false, true],
-        ['auto', false, true, true],
+        ['auto', false, true, false],
         ['q4', false, false, true],
-        ['q4', false, true, true],
+        ['q4', false, true, false],
         ['q4', true, false, true],
         ['q8', true, false, true],
         ['none', true, false, true],
@@ -3391,14 +3391,16 @@ describe('JIT Toggle', () => {
         })).toBe(false)
     })
 
-    it('enableJit false does not emit --enable-jit flag', () => {
+    it('enableJit false emits the explicit --no-jit polarity', () => {
         const out = preview({ enableJit: false })
         expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(hasFlag(out, '--no-jit')).toBe(true)
     })
 
     it('enableJit true emits --enable-jit flag', () => {
         const out = preview({ enableJit: true })
         expect(hasFlag(out, '--enable-jit')).toBe(true)
+        expect(hasFlag(out, '--no-jit')).toBe(false)
     })
 
     it('deepseek-v4 detection suppresses --enable-jit even when saved config requests it', () => {
@@ -3408,6 +3410,7 @@ describe('JIT Toggle', () => {
         )
 
         expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(hasFlag(out, '--no-jit')).toBe(true)
         expect(getFlagValue(out, '--max-num-seqs')).toBe('1')
     })
 
@@ -3418,6 +3421,7 @@ describe('JIT Toggle', () => {
         )
 
         expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(hasFlag(out, '--no-jit')).toBe(true)
     })
 
     it('multimodal/VLM detection suppresses --enable-jit because mlx-vlm streaming is not compile-safe', () => {
@@ -3431,6 +3435,7 @@ describe('JIT Toggle', () => {
 
         expect(hasFlag(out, '--is-mllm')).toBe(true)
         expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(hasFlag(out, '--no-jit')).toBe(true)
     })
 
     it('ZAYA typed CCA detection suppresses --enable-jit because cache path is faster uncompiled', () => {
@@ -3440,6 +3445,7 @@ describe('JIT Toggle', () => {
         )
 
         expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(hasFlag(out, '--no-jit')).toBe(true)
     })
 
     it('hybrid and Mamba cache detection suppresses --enable-jit like the real launcher', () => {
@@ -3454,9 +3460,11 @@ describe('JIT Toggle', () => {
 
         expect(hasFlag(hybrid, '--enable-jit')).toBe(false)
         expect(hasFlag(mamba, '--enable-jit')).toBe(false)
+        expect(hasFlag(hybrid, '--no-jit')).toBe(true)
+        expect(hasFlag(mamba, '--no-jit')).toBe(true)
     })
 
-    it('Laguna mixed full/sliding Auto TurboQuant suppresses JIT without changing KV cache controls', () => {
+    it('Laguna mixed full/sliding Auto preserves native cache and JIT choice', () => {
         const detected = {
             family: 'laguna',
             cacheType: 'kv',
@@ -3477,8 +3485,8 @@ describe('JIT Toggle', () => {
             detected,
         )
 
-        expect(hasFlag(out, '--enable-jit')).toBe(false)
-        expect(out).toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
+        expect(hasFlag(out, '--enable-jit')).toBe(true)
+        expect(out).not.toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
         expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
@@ -3567,7 +3575,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain("t('sessions.config.jitDisabledLaguna')")
         expect(
             readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8'),
-        ).toContain('Auto cache quantization uses TurboQuantKVCache')
+        ).toContain('Cache Auto therefore does not suppress JIT')
     })
 
     it('Flash MoE and distributed launch modes suppress --enable-jit in preview and runtime policy', () => {
@@ -3576,8 +3584,10 @@ describe('JIT Toggle', () => {
 
         expect(hasFlag(flash, '--flash-moe')).toBe(true)
         expect(hasFlag(flash, '--enable-jit')).toBe(false)
+        expect(hasFlag(flash, '--no-jit')).toBe(true)
         expect(hasFlag(distributed, '--distributed')).toBe(true)
         expect(hasFlag(distributed, '--enable-jit')).toBe(false)
+        expect(hasFlag(distributed, '--no-jit')).toBe(true)
     })
 
     it('manual multimodal mode suppresses --enable-jit even without detection', () => {
@@ -3585,6 +3595,7 @@ describe('JIT Toggle', () => {
 
         expect(hasFlag(out, '--is-mllm')).toBe(true)
         expect(hasFlag(out, '--enable-jit')).toBe(false)
+        expect(hasFlag(out, '--no-jit')).toBe(true)
     })
 
     it('settings form surfaces DeepSeek-V4 JIT as effectively disabled', () => {
@@ -3670,7 +3681,7 @@ describe('JIT Toggle', () => {
         expect(sessions).toContain('mlx-vlm streaming path')
     })
 
-    it('does not promise live full-attention TQ before mixed-SWA runtime health resolves the boundary', () => {
+    it('does not promise generic TQ for a native mixed-SWA runtime', () => {
         const form = readFileSync(
             resolve(__dirname, '../src/renderer/src/components/sessions/SessionConfigForm.tsx'),
             'utf8',
@@ -3678,8 +3689,8 @@ describe('JIT Toggle', () => {
 
         expect(form).toContain("t('sessions.config.codecMixedSwa')")
         const enLocale = readFileSync(resolve(__dirname, '../src/renderer/src/i18n/locales/en.json'), 'utf8')
-        expect(enLocale).toContain('Engine-selected mixed-SWA live cache + exact stored prefixes')
-        expect(enLocale).toContain('whether live full-attention TurboQuant is active')
+        expect(enLocale).toContain('Native full/sliding KV + rotating metadata')
+        expect(enLocale).toContain('Generic TurboQuant is not added')
         expect(form).not.toContain('TQ4 full-attention KV + native rotating SWA')
     })
 
@@ -3980,7 +3991,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain("? 'none'")
         expect(form).toContain("? t('sessions.config.codecOpenPangu')")
         expect(form).toContain("? t('sessions.config.codecM3')")
-        expect(form).toContain('openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec')
+        expect(form).toContain("explicitStoredCacheCodec && effectiveStoredCacheQuantization !== 'none'")
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(enLocale).toContain('openPangu typed composite cache')
         expect(enLocale).toContain('MiniMax-M3 native MSA cache')
@@ -4030,11 +4041,13 @@ describe('JIT Toggle', () => {
     it('enableJit does not affect other flags', () => {
         const without = preview({ enableJit: false })
         const withJit = preview({ enableJit: true })
-        // Only difference should be the --enable-jit flag
+        // Only the explicit JIT polarity should differ.
         const normalized1 = without.replace(/\s*\\\n\s*/g, ' ')
         const normalized2 = withJit.replace(/\s*\\\n\s*/g, ' ')
         expect(normalized2).toContain('--enable-jit')
+        expect(normalized2).not.toContain('--no-jit')
         expect(normalized1).not.toContain('--enable-jit')
+        expect(normalized1).toContain('--no-jit')
         // Both should have the same host/port/timeout etc
         expect(getFlagValue(without, '--host')).toBe(getFlagValue(withJit, '--host'))
         expect(getFlagValue(without, '--port')).toBe(getFlagValue(withJit, '--port'))

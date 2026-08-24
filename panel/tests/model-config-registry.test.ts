@@ -1918,7 +1918,8 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     expect(detected.architectureHints).toMatchObject({
       attentionArch: 'full_and_sliding_kv',
       cacheSchema: 'mixed_swa_kv_v1',
-      selectiveTurboQuantKv: true,
+      selectiveTurboQuantKv: false,
+      nativeCacheDefault: true,
     })
   })
 
@@ -1957,7 +1958,8 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
     expect(detectModelConfigFromDir(dir).architectureHints).toMatchObject({
       attentionArch: 'full_and_sliding_kv',
       cacheSchema: 'mixed_swa_kv_v1',
-      selectiveTurboQuantKv: true,
+      selectiveTurboQuantKv: false,
+      nativeCacheDefault: true,
       loaderTurboQuantEnabled: false,
     })
   })

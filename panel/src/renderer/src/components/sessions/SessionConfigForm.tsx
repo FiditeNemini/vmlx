@@ -250,7 +250,9 @@ export const CASUAL_CONFIG: SessionConfig = {
   cacheMemoryPercent: 15,     // 15% vs 30% — more headroom for model weights
   maxCacheBlocks: 500,        // Fewer paged blocks (half)
   prefixCacheSize: 50,        // Fewer cached prefixes
-  kvCacheQuantization: 'auto', // Do not pass explicit q4; that disables calibrated live TQ-KV.
+  // Auto omits the CLI flag. The engine's production default preserves each
+  // architecture's native cache objects and imposes no generic TQ codec.
+  kvCacheQuantization: 'auto',
   maxTokens: 0,               // Bundle/engine-owned output cap. Users can set an explicit cap per server/chat/API request.
   enableJit: true,            // JIT on by default (includes warmup for cold-start OOM prevention)
 }
@@ -531,9 +533,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   })
   const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')
   const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache
-  // openPangu's typed snapshot stays full precision and explicitly opts out of
-  // generic live/stored KV codecs. Do not leave the disabled selector saying
-  // "Auto / TurboQuant" when the runtime contract is intentionally "None".
+  // openPangu's typed snapshot explicitly opts out of generic live/stored KV
+  // codecs. Auto is architecture-native for every other family too; family
+  // labels below describe native topology, never permission to add TQ.
   const effectiveStoredCacheQuantization = openPanguExactTypedCache
     ? 'none'
     : nativeTypedCacheOwnsStoredCodec
@@ -564,17 +566,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   : t('sessions.config.codecQwenHybrid')
               : t('sessions.config.codecEngineNative')
   const liveCacheCodecBadge =
-    openPanguExactTypedCache || dsv4Active || m3Active || explicitStoredCacheCodec
-      ? 'TURBOQUANT OFF'
-      : hy3Active
-        ? 'TQ4 AUTO'
-        : mixedSwaCacheActive
-          ? 'MIXED AUTO'
-          : qwenFullTqActive
-            ? 'MIXED TQ4/8 AUTO'
-          : qwenHybridTqActive
-            ? bonsaiActive ? 'TQ8 AUTO' : 'TQ4 AUTO'
-            : 'AUTO'
+    explicitStoredCacheCodec && effectiveStoredCacheQuantization !== 'none'
+      ? `STORED ${effectiveStoredCacheQuantization.toUpperCase()} · GENERIC TQ OFF`
+      : 'NATIVE · GENERIC TQ OFF'
   const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
   const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
   const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
@@ -1249,12 +1243,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         )}
       </Section>
 
-      {/* KV Cache Quantization — split into two clearly-distinct controls so
-          users stop assuming the dropdown's "None" default means "no cache
-          compression at all". Auto mode intentionally omits the CLI flag:
-          the engine can then use calibrated TurboQuant for compatible live
-          KV caches, or native typed cache contracts for path-dependent
-          architectures such as DSV4, ZAYA, and hybrid SSM. */}
+      {/* Cache representation. Auto intentionally omits the CLI flag and the
+          engine preserves model.make_cache() exactly: full KV, rotating/SWA,
+          recurrent, sparse, or native compressed/typed composite state. q4/q8
+          remain explicit diagnostic stored codecs where the architecture
+          allows them; they are never silently selected by Auto. */}
       <Section title={t('sessions.config.kvCacheQuantization')} expanded={expandedSections.kvCacheQuant} onToggle={() => toggleSection('kvCacheQuant')} hidden={isImage}>
         {batchingOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
         {!batchingOff && prefixOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresPrefix')} />}
@@ -1267,7 +1260,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectivelyNoBatching && dsv4Active && <PerformanceHint text={t('sessions.config.dsv4KvQuantHint')} />}
         {!effectivelyNoBatching && m3Active && <PerformanceHint text={t('sessions.config.m3KvQuantHint')} />}
         {!effectivelyNoBatching && openPanguExactTypedCache && <PerformanceHint text={t('sessions.config.openPanguKvQuantHint')} />}
-        {/* Live/native cache codec — automatic per architecture. */}
+        {/* Live/native cache representation — automatic per architecture. */}
         <div className="block">
           <span className="text-xs font-medium text-muted-foreground">
             {t('sessions.config.liveCacheCodec')}
@@ -1308,7 +1301,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           </>
         )}
 
-        {/* Stored prefix-cache compression — orthogonal to TurboQuant. */}
+        {/* Stored prefix representation. Auto adds no codec. */}
         <div className="block">
           <span className="text-xs font-medium text-muted-foreground">
             {t('sessions.config.storedCacheQuantization')}

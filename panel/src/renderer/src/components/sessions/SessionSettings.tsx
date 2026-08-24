@@ -544,7 +544,10 @@ function buildCommandPreview(
 
   // Thinking defaults are resolved by the engine and explicit chat/API requests.
 
+  // Match the launcher exactly. Omitting --enable-jit is not an explicit Off:
+  // the engine may auto-enable affine-JANG JIT when neither polarity is sent.
   if (effectiveEnableJit) parts.push('--enable-jit')
+  else parts.push('--no-jit')
 
   if (omniBackendActive && (config as any).omniBackend && (config as any).omniBackend !== 'stage1') {
     parts.push('--omni-backend', (config as any).omniBackend)

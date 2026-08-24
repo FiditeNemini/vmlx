@@ -1348,14 +1348,15 @@ function applyConfigMetadataOverrides(
     configDeclaresCompleteLagunaMixedSwaAttention(parsedConfig)
   ) {
     // Laguna is still a KV family: every layer is attention-backed. Record the
-    // per-layer full/sliding topology separately so the panel can mirror the
-    // loader's Auto policy without routing Laguna through SSM-hybrid cache
-    // controls or changing the user's paged/SSD choices.
+    // per-layer full/sliding topology separately so the panel can preserve the
+    // native rotating/full cache contract without routing Laguna through
+    // SSM-hybrid controls or inferring a generic TQ wrapper.
     next.architectureHints = {
       ...(next.architectureHints ?? {}),
       attentionArch: 'full_and_sliding_kv',
       cacheSchema: 'mixed_swa_kv_v1',
-      selectiveTurboQuantKv: true,
+      selectiveTurboQuantKv: false,
+      nativeCacheDefault: true,
     }
   }
   // 2026-07-12 (paged default ON, MLLM/#98 guard): a family can be marked

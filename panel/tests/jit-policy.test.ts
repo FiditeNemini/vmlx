@@ -78,6 +78,20 @@ describe("JIT suppression policy", () => {
     }
   })
 
+  it("renders the same explicit JIT polarity that the main process launches", () => {
+    // The engine can auto-enable affine JANG JIT when neither flag is present.
+    // Therefore a suppressed/unchecked setting must be visible as --no-jit;
+    // merely omitting --enable-jit makes the preview disagree with the process.
+    for (const rel of CONSUMERS.slice(0, 2)) {
+      const src = readFileSync(resolve(__dirname, "..", rel), "utf8")
+      const start = src.indexOf("if (effectiveEnableJit)")
+      expect(start, `${rel} must emit an explicit JIT choice`).toBeGreaterThanOrEqual(0)
+      const polarity = src.slice(start, start + 180)
+      expect(polarity, `${rel} must show/launch JIT on`).toContain("--enable-jit")
+      expect(polarity, `${rel} must show/launch JIT off`).toContain("--no-jit")
+    }
+  })
+
   it("derives runtime suppression independently of the saved toggle", () => {
     const runtime = {
       isMultimodal: false,

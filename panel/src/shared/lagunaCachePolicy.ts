@@ -67,22 +67,16 @@ export function isLagunaMixedFullSlidingTopology(
 }
 
 /**
- * Match the engine's Laguna Auto policy without changing its cache topology.
+ * Compatibility seam for the retired Laguna Auto-TQ launch policy.
  *
- * Laguna remains a KV family because every layer is attention-backed, but its
- * native cache interleaves full KVCache and sliding RotatingKVCache slots.
- * With Auto cache quantization the JANG loader replaces only full-attention
- * slots with TurboQuantKVCache. That selective wrapper is not mx.compile-safe.
- * Explicit q4/q8/none disables the loader-owned live wrapper, so preserve the
- * user's explicit choice instead of family-wide disabling JIT.
+ * Production Auto now preserves Laguna's native interleaved KVCache and
+ * RotatingKVCache slots. The Electron app has no control that requests the
+ * environment-only generic-TQ diagnostic override, so this must remain false;
+ * otherwise the preview suppresses JIT for a wrapper the spawned engine never
+ * instantiates.
  */
-export function isLagunaMixedSwaTurboQuantEffective({
-  detected,
-  kvCacheQuantization,
-  explicitKvCacheQuantizationApplied,
-}: LagunaTurboQuantPolicyInput): boolean {
-  if (!isLagunaMixedFullSlidingTopology(detected)) return false
-  if (detected?.architectureHints?.loaderTurboQuantEnabled === false) return false
-  const mode = String(kvCacheQuantization || 'auto').toLowerCase()
-  return mode === 'auto' || !explicitKvCacheQuantizationApplied
+export function isLagunaMixedSwaTurboQuantEffective(
+  _input: LagunaTurboQuantPolicyInput,
+): boolean {
+  return false
 }

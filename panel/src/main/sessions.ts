@@ -2680,10 +2680,10 @@ export class SessionManager extends EventEmitter {
     ].join(':')
     const spawnEnv: Record<string, string | undefined> = { ...process.env, PATH: `${extraPath}:${process.env.PATH || ''}` }
     // The Python CLI defaults mx.compile back ON for affine JANG bundles when
-    // --enable-jit is absent. Laguna's complete full/sliding layout installs a
-    // selective TurboQuant cache in Auto mode, which is not compile-safe.
-    // Preserve any deliberate parent-shell opt-out, honor Laguna's saved Off
-    // choice, and explicitly disable the source-detected unsafe topology.
+    // --enable-jit is absent. Production Auto now preserves Laguna's native
+    // full/sliding cache and does not install selective TurboQuant, so cache
+    // Auto must not suppress JIT. Preserve any deliberate parent-shell opt-out
+    // and honor only Laguna's saved JIT-Off choice here.
     // `args` is authoritative for whether an explicit q4/q8/none cache mode
     // will reach the engine.
     const lagunaJitPolicyInput = {
@@ -2703,7 +2703,7 @@ export class SessionManager extends EventEmitter {
         sessionId,
         `[ENV] ${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1 (${
           lagunaMixedSwaTurboQuantActive
-            ? 'Laguna mixed full/sliding Auto TurboQuant is not mx.compile-safe'
+            ? 'Laguna diagnostic TurboQuant cache is not mx.compile-safe'
             : 'Laguna JIT is Off; preventing the affine-JANG CLI auto-default'
         })`,
       )

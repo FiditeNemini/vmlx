@@ -541,27 +541,45 @@ class EngineCore:
             request._dsv4_thinking_soft_cap = int(dsv4_thinking_soft_cap)
 
         # A prior terminal output may already be visible to the caller while
-        # its prefix/TQ/SSM state is still being persisted.  Wait before
-        # creating request bookkeeping or entering scheduler admission so a
-        # cancelled waiter cannot leak a collector and prefix lookup cannot
-        # observe a stale partial cache entry.
-        await self._terminal_cleanup_complete.wait()
-
-        # Setup output collector with stream_interval from config
-        self._output_collectors[request_id] = RequestOutputCollector(aggregate=True)
-        self._stream_states[request_id] = RequestStreamState(
-            stream_interval=self.config.stream_interval
+        # its prefix/TQ/SSM state is still being persisted. Mark this foreground
+        # admission BEFORE waiting so idle cache-maintenance tasks yield rather
+        # than starting a full Metal prefill in the gap before scheduler lookup.
+        # The marker is cleared for success, validation failure, and cancellation.
+        begin_admission = getattr(
+            self.scheduler, "_begin_foreground_admission", None
         )
-        self._finished_events[request_id] = asyncio.Event()
+        end_admission = getattr(self.scheduler, "_end_foreground_admission", None)
+        admission_marked = False
+        if callable(begin_admission):
+            begin_admission(request_id)
+            admission_marked = True
 
-        # Add to scheduler. If validation rejects the request (for example,
-        # DSV4 long-prefill guard), clean up the collector/event state we just
-        # created so a rejected request cannot leave ghost bookkeeping behind.
         try:
-            self.scheduler.add_request(request)
-        except Exception:
-            self._cleanup_request(request_id)
-            raise
+            # Wait before creating request bookkeeping so a cancelled waiter
+            # cannot leak a collector and prefix lookup cannot observe a stale
+            # partial cache entry.
+            await self._terminal_cleanup_complete.wait()
+
+            # Setup output collector with stream_interval from config
+            self._output_collectors[request_id] = RequestOutputCollector(
+                aggregate=True
+            )
+            self._stream_states[request_id] = RequestStreamState(
+                stream_interval=self.config.stream_interval
+            )
+            self._finished_events[request_id] = asyncio.Event()
+
+            # If validation rejects the request (for example, DSV4 long-prefill
+            # guard), remove the collector/event state so no ghost bookkeeping
+            # remains.
+            try:
+                self.scheduler.add_request(request)
+            except Exception:
+                self._cleanup_request(request_id)
+                raise
+        finally:
+            if admission_marked and callable(end_admission):
+                end_admission(request_id)
 
         return request_id
 

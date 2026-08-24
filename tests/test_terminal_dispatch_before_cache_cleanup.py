@@ -195,9 +195,16 @@ def test_mllm_deferred_cleanup_clears_allocator_after_cleanup_frame(
 @pytest.mark.asyncio
 async def test_llm_request_admission_waits_for_terminal_cache_cleanup() -> None:
     added: list[str] = []
+    pending_admissions: set[str] = set()
     engine = EngineCore.__new__(EngineCore)
 
     class _Scheduler:
+        def _begin_foreground_admission(self, request_id: str) -> None:
+            pending_admissions.add(request_id)
+
+        def _end_foreground_admission(self, request_id: str) -> None:
+            pending_admissions.discard(request_id)
+
         def add_request(self, request) -> None:
             added.append(request.request_id)
 
@@ -214,10 +221,26 @@ async def test_llm_request_admission_waits_for_terminal_cache_cleanup() -> None:
     await asyncio.sleep(0)
     assert not pending.done()
     assert added == []
+    assert pending_admissions == {"next"}
 
     engine._terminal_cleanup_complete.set()
     assert await pending == "next"
     assert added == ["next"]
+    assert pending_admissions == set()
+
+
+def test_llm_pending_admission_parks_idle_tasks_before_scheduler_lookup() -> None:
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.waiting = []
+    scheduler.running = {}
+    scheduler.unprocessed_requests = []
+    scheduler._pending_aborts = set()
+
+    assert scheduler._foreground_pending() is False
+    scheduler._begin_foreground_admission("next")
+    assert scheduler._foreground_pending() is True
+    scheduler._end_foreground_admission("next")
+    assert scheduler._foreground_pending() is False
 
 
 @pytest.mark.asyncio

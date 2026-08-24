@@ -7118,6 +7118,26 @@ class Scheduler:
             tasks.appendleft((name, fn))
         return True
 
+    def _begin_foreground_admission(self, request_id: str) -> None:
+        """Mark a foreground request before scheduler lookup can begin.
+
+        EngineCore may need to wait for the previous request's terminal cache
+        cleanup before calling ``add_request``.  Idle cache-maintenance work
+        must still yield during that gap or it can occupy Metal with a full
+        shadow prefill before the waiting request reaches ``self.waiting``.
+        """
+        pending = getattr(self, "_foreground_admissions_pending", None)
+        if pending is None:
+            pending = set()
+            self._foreground_admissions_pending = pending
+        pending.add(str(request_id))
+
+    def _end_foreground_admission(self, request_id: str) -> None:
+        """Clear a foreground-admission marker after admission or failure."""
+        pending = getattr(self, "_foreground_admissions_pending", None)
+        if pending is not None:
+            pending.discard(str(request_id))
+
     def _foreground_pending(self) -> bool:
         """Cheap poll: has foreground work arrived? (idle-task park signal)"""
         return bool(
@@ -7125,6 +7145,7 @@ class Scheduler:
             or self.running
             or getattr(self, "unprocessed_requests", None)
             or self._pending_aborts
+            or getattr(self, "_foreground_admissions_pending", None)
         )
 
     def _ensure_ssm_rederive_idle_task(self) -> None:

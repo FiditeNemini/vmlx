@@ -6946,21 +6946,19 @@ class MLLMBatchGenerator:
             )
             return False
 
-    def _maybe_capture_mixed_swa_media_boundary(
+    def _maybe_capture_mixed_swa_boundary(
         self,
         request: "MLLMBatchRequest",
         cache: Optional[List[Any]],
     ) -> bool:
-        """Capture the exact N-1 prompt-boundary rotating-SWA state at prefill end.
+        """Capture the exact N-1 rotating-SWA state at the end of prefill.
 
-        A mixed-SWA media prompt cannot be re-prefilled from token ids alone
-        (that would silently discard vision-conditioned state), and the cache
-        available at request FINISH is the live post-generation cache — its
-        RotatingKVCache rings have advanced past the prompt boundary by the
-        reply length, so the store's boundary cutter rightly refuses them and
-        every media turn's rotating anchors go ``rotating_kv_pending``.
-        Measured live on Gemma-4-26B: cached_tokens plateaued at the last
-        pre-media exact anchor (7168) for the rest of the conversation.
+        The cache available at request FINISH is post-generation: every
+        RotatingKVCache ring has advanced beyond the prompt boundary. Text
+        turns previously recovered that boundary with a second prompt forward;
+        measured on Step-3.7, that redundant prefill took 21.7 seconds before
+        the 3.1-second native SSD publication. Media prompts are stricter:
+        rebuilding from token ids would also discard vision-conditioned state.
 
         This capture runs at the END OF PREFILL, before any decode step
         advances the rings. At that point every rotating layer's buffer is the
@@ -6976,9 +6974,9 @@ class MLLMBatchGenerator:
 
         The copy is bounded by the window size (``mx.contiguous`` breaks the
         lazy reference to the full prefill buffer), so this costs one window
-        per rotating layer per media request — unlike the aux clean media
-        prefill it replaces on this family, which was a full second forward
-        pass over the whole prompt.
+        per rotating layer per request. It is transient request state, not a
+        retained RAM prefix-cache mirror. Cleanup combines it with exact slices
+        of the append-only full-attention KV, publishes it, and releases it.
 
         Declines honestly (returns False, leaves no capture) whenever the
         buffer is not in temporal order (e.g. a single-token tail went through
@@ -6987,7 +6985,10 @@ class MLLMBatchGenerator:
         does not hold. A declined capture means the store falls back to the
         existing ``rotating_kv_pending`` path — visible, never corrupt.
         """
-        if not getattr(self, "_mixed_attention_cache_model", False):
+        if (
+            not getattr(self, "_prefix_cache_enabled", False)
+            or not getattr(self, "_mixed_attention_cache_model", False)
+        ):
             return False
         if getattr(request, "_aux_clean_path_prefill", False):
             # Nested bookkeeping prefill (clean media prefix path) — never
@@ -7004,18 +7005,26 @@ class MLLMBatchGenerator:
         # _run_vision_encoding then finds the ring rolled. A capture already
         # taken at THIS boundary must be kept, not clobbered. A capture at a
         # DIFFERENT boundary is stale (aborted prefill) and is dropped.
-        _prior = getattr(request, "_mixed_swa_media_boundary", None)
+        _prior = getattr(request, "_mixed_swa_boundary", None)
         if _prior is not None and int(_prior[0]) == len(orig_tokens) - 1:
             return True
-        request._mixed_swa_media_boundary = None  # type: ignore[attr-defined]
+        request._mixed_swa_boundary = None  # type: ignore[attr-defined]
         try:
-            if not self._request_has_media_cache_context(request, orig_tokens):
-                return False
-            if not self._media_prefix_cache_allowed(request, orig_tokens):
+            has_media_context = self._request_has_media_cache_context(
+                request, orig_tokens
+            )
+            if (
+                has_media_context
+                and not self._media_prefix_cache_allowed(request, orig_tokens)
+            ):
                 return False
         except Exception:
             return False
         boundary = len(orig_tokens) - 1
+        if int(getattr(request, "_cached_tokens", 0) or 0) >= boundary:
+            # Cleanup skips a store when the durable chain already covers N-1.
+            # Do not create a transient window capture that no consumer needs.
+            return False
         try:
             snap_map: Dict[int, Any] = {}
             materialize: List[Any] = []
@@ -7028,7 +7037,7 @@ class MLLMBatchGenerator:
                 values = getattr(layer, "values", None)
                 if keys is None or values is None:
                     logger.info(
-                        "mixed-SWA media boundary capture declined for %s: "
+                        "mixed-SWA boundary capture declined for %s: "
                         "rotating layer %d has no buffer",
                         request.request_id,
                         layer_idx,
@@ -7049,7 +7058,7 @@ class MLLMBatchGenerator:
                     or physical - trim < required
                 ):
                     logger.info(
-                        "mixed-SWA media boundary capture declined for %s: "
+                        "mixed-SWA boundary capture declined for %s: "
                         "layer %d offset=%d physical=%d idx=%d trim=%d "
                         "required=%d keep=%d (boundary=%d) — not a temporal "
                         "post-prefill buffer covering the N-1 window",
@@ -7101,12 +7110,12 @@ class MLLMBatchGenerator:
                 return False
             if materialize:
                 mx.eval(*materialize)
-            request._mixed_swa_media_boundary = (  # type: ignore[attr-defined]
+            request._mixed_swa_boundary = (  # type: ignore[attr-defined]
                 boundary,
                 snap_map,
             )
             logger.info(
-                "mixed-SWA media boundary captured for %s: %d rotating layers "
+                "mixed-SWA boundary captured for %s: %d rotating layers "
                 "at N-1 boundary=%d (window<=%d tokens each) before decode",
                 request.request_id,
                 len(snap_map),
@@ -7116,13 +7125,13 @@ class MLLMBatchGenerator:
             return True
         except Exception as e:
             logger.warning(
-                "mixed-SWA media boundary capture failed for %s (non-fatal, "
+                "mixed-SWA boundary capture failed for %s (non-fatal, "
                 "store will fall back to rotating_kv_pending): %s",
                 getattr(request, "request_id", "?"),
                 e,
             )
             try:
-                request._mixed_swa_media_boundary = None  # type: ignore[attr-defined]
+                request._mixed_swa_boundary = None  # type: ignore[attr-defined]
             except Exception:
                 pass
             return False
@@ -7714,13 +7723,13 @@ class MLLMBatchGenerator:
         # JANGTQ Metal kernel + scheduler thread stream-isolation rationale.
         with _MaybeStream():
             logits = self._run_vision_encoding_inner(request, cache)
-            # Mixed-SWA media prompts: snapshot the N-1 prompt-boundary
+            # Mixed-SWA prompts: snapshot the N-1 prompt-boundary
             # rotating windows NOW, before any decode step advances the
             # rings. This is the only moment the exact boundary state
             # exists; the finish-time cache has rolled past it by the
             # reply length. Guarded inside to be a no-op for every other
             # family/request shape.
-            self._maybe_capture_mixed_swa_media_boundary(request, cache)
+            self._maybe_capture_mixed_swa_boundary(request, cache)
             return logits
 
     def _run_vision_encoding_inner(self, request: "MLLMBatchRequest", cache: Optional[List[Any]] = None) -> "mx.array":
@@ -8261,12 +8270,12 @@ class MLLMBatchGenerator:
                                 and not prefill_keep_alloc_enabled()
                             ):
                                 mx.clear_cache()
-                    # Mixed-SWA media context: the final-token forward below
+                    # Mixed-SWA context: the final-token forward below
                     # is a single-token ring write that trims the rotating
                     # buffers' overhang — after it the N-1 boundary window is
                     # unrecoverable. Capture it NOW, while the buffer is still
                     # a temporal post-concat state.
-                    self._maybe_capture_mixed_swa_media_boundary(request, cache)
+                    self._maybe_capture_mixed_swa_boundary(request, cache)
                     output = lm(
                         input_ids[:, final_start:],
                         **_lm_kwargs_for(final_start, seq_len),
@@ -9230,10 +9239,10 @@ class MLLMBatchGenerator:
                             self._span_largest_peak / (1024**3),
                         )
 
-                # Mixed-SWA media context: capture the N-1 boundary window
+                # Mixed-SWA context: capture the N-1 boundary window
                 # BEFORE the single-token final forward trims the rotating
                 # buffers' overhang (see the short-prompt lane above).
-                self._maybe_capture_mixed_swa_media_boundary(request, cache)
+                self._maybe_capture_mixed_swa_boundary(request, cache)
                 # Final chunk: get logits from last token
                 last_chunk = input_ids[:, processed:]
                 output = lm(last_chunk, **_lm_kwargs_for(processed, seq_len))
@@ -11123,7 +11132,7 @@ class MLLMBatchGenerator:
                     # engine time on the text lane).
                     _swa_boundary_captured = bool(
                         getattr(self, "_mixed_attention_cache_model", False)
-                        and getattr(req, "_mixed_swa_media_boundary", None)
+                        and getattr(req, "_mixed_swa_boundary", None)
                         is not None
                     )
                     if (
@@ -11214,8 +11223,8 @@ class MLLMBatchGenerator:
                         # Same hardening for the mixed-SWA boundary snapshot:
                         # it may have been taken over the corrupt restored
                         # cache the retry is discarding.
-                        if hasattr(req, "_mixed_swa_media_boundary"):
-                            req._mixed_swa_media_boundary = None
+                        if hasattr(req, "_mixed_swa_boundary"):
+                            req._mixed_swa_boundary = None
                         try:
                             cache_model = getattr(self, "_cache_model", None)
                             if cache_model is not None:
@@ -11774,8 +11783,8 @@ class MLLMBatchGenerator:
                         req._inline_ssm_checkpoints = None
                     # Same hardening for the mixed-SWA boundary snapshot: it
                     # may reference the discarded cache state.
-                    if hasattr(req, "_mixed_swa_media_boundary"):
-                        req._mixed_swa_media_boundary = None
+                    if hasattr(req, "_mixed_swa_boundary"):
+                        req._mixed_swa_boundary = None
                     # Flush stale GPU state before retry
                     mx.clear_cache()
                     try:
@@ -13430,7 +13439,7 @@ class MLLMBatchGenerator:
                 # the scheduler's paged store. The scheduler works with its
                 # own request wrapper, so hand off by request_id — mirroring
                 # _clean_boundary_snapshots.
-                _swa_capture = getattr(req, "_mixed_swa_media_boundary", None)
+                _swa_capture = getattr(req, "_mixed_swa_boundary", None)
                 if _swa_capture is not None:
                     try:
                         _swa_snaps = getattr(
@@ -13447,7 +13456,7 @@ class MLLMBatchGenerator:
                                 _swa_snaps.pop(_stale, None)
                     except Exception:
                         pass
-                    req._mixed_swa_media_boundary = None
+                    req._mixed_swa_boundary = None
 
             responses.append(
                 MLLMBatchResponse(

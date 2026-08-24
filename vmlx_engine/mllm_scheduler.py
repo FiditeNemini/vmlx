@@ -3814,13 +3814,33 @@ class MLLMScheduler:
                                 request._extracted_cache = None
                             else:
                                 raw = request._extracted_cache
-                                if raw is None:
-                                    cache_blocks = None
-                                elif (
-                                    media_cache_allowed
-                                    and _uses_mixed_attention_cache
+                                _mixed_swa_boundary_cache = None
+                                if (
+                                    _uses_mixed_attention_cache
                                     and isinstance(raw, (list, tuple))
                                 ):
+                                    _mixed_swa_boundary_cache = (
+                                        _assemble_mixed_swa_boundary_cache(
+                                            self.batch_generator,
+                                            request,
+                                            raw,
+                                            len(truncated_tokens),
+                                        )
+                                    )
+                                if raw is None:
+                                    cache_blocks = None
+                                elif _mixed_swa_boundary_cache is not None:
+                                    cache_blocks = _mixed_swa_boundary_cache
+                                    logger.info(
+                                        "Mixed-SWA store for %s: exact prompt-"
+                                        "boundary cache assembled (%d layers, "
+                                        "boundary=%d) — skipped the second "
+                                        "prefill",
+                                        request_id,
+                                        len(cache_blocks),
+                                        len(truncated_tokens),
+                                    )
+                                elif media_cache_allowed and _uses_mixed_attention_cache:
                                     # A media-conditioned mixed-SWA prefix can
                                     # never be rebuilt from token ids (the
                                     # ordinary path-dependent helper would run
@@ -3844,38 +3864,19 @@ class MLLMScheduler:
                                     # fetches walk back to the newest exact
                                     # anchor instead of restoring a rolled
                                     # window as if it were the prompt boundary.
-                                    cache_blocks = (
-                                        _assemble_mixed_swa_media_boundary_cache(
-                                            self.batch_generator,
-                                            request,
-                                            raw,
-                                            len(truncated_tokens),
-                                        )
+                                    cache_blocks = list(raw)
+                                    logger.warning(
+                                        "Mixed-SWA media store for %s has "
+                                        "NO prompt-boundary capture "
+                                        "(boundary=%d, %d layers): storing "
+                                        "the live cache — rotating layers "
+                                        "will be marked rotating_kv_pending "
+                                        "and fetches walk back to the "
+                                        "newest exact anchor",
+                                        request_id,
+                                        len(truncated_tokens),
+                                        len(cache_blocks),
                                     )
-                                    if cache_blocks is not None:
-                                        logger.info(
-                                            "Mixed-SWA media store for %s: "
-                                            "exact prompt-boundary cache "
-                                            "assembled (%d layers, "
-                                            "boundary=%d)",
-                                            request_id,
-                                            len(cache_blocks),
-                                            len(truncated_tokens),
-                                        )
-                                    else:
-                                        cache_blocks = list(raw)
-                                        logger.warning(
-                                            "Mixed-SWA media store for %s has "
-                                            "NO prompt-boundary capture "
-                                            "(boundary=%d, %d layers): storing "
-                                            "the live cache — rotating layers "
-                                            "will be marked rotating_kv_pending "
-                                            "and fetches walk back to the "
-                                            "newest exact anchor",
-                                            request_id,
-                                            len(truncated_tokens),
-                                            len(cache_blocks),
-                                        )
                                 elif (
                                     _uses_zaya_cache
                                     or _uses_mixed_attention_cache
@@ -4531,6 +4532,20 @@ class MLLMScheduler:
                     finally:
                         if request is not None:
                             request._extracted_cache = None
+            # The generator and scheduler own distinct request wrappers. A
+            # mixed-SWA boundary is handed across by request ID, so every exit
+            # path must consume or retire it. Otherwise a skipped store (for
+            # example an already-complete hit) can retain a window-sized Metal
+            # snapshot after the request is gone, creating the RAM cache this
+            # SSD-only mode explicitly forbids.
+            if self.batch_generator is not None:
+                _swa_snapshots = getattr(
+                    self.batch_generator,
+                    "_mixed_swa_boundary_snapshots",
+                    None,
+                )
+                if isinstance(_swa_snapshots, dict):
+                    _swa_snapshots.pop(str(request_id), None)
             _trace_mark("cache_store_s")
 
             # Remove per-request stop tokens from batch generator.
@@ -5816,19 +5831,19 @@ def _assemble_clean_hybrid_boundary_cache(
     return assembled
 
 
-def _assemble_mixed_swa_media_boundary_cache(
+def _assemble_mixed_swa_boundary_cache(
     batch_generator: Any,
     request: Any,
     live_cache: Any,
     boundary: int,
 ) -> Optional[List[Any]]:
-    """Assemble the exact N-1 media-conditioned mixed-SWA boundary cache.
+    """Assemble the exact N-1 mixed-SWA prompt-boundary cache.
 
     Provenance-checked, mirroring ``_assemble_clean_hybrid_boundary_cache``:
 
     * Rotating layers come ONLY from the end-of-prefill snapshot the batch
       generator captured before decode advanced the rings
-      (``_maybe_capture_mixed_swa_media_boundary`` →
+      (``_maybe_capture_mixed_swa_boundary`` →
       ``batch_generator._mixed_swa_boundary_snapshots[request_id]``). A live
       finish-time RotatingKVCache has rolled past the prompt boundary by the
       reply length and its evicted rows are unrecoverable — substituting it
@@ -5862,18 +5877,18 @@ def _assemble_mixed_swa_media_boundary_cache(
     snaps = getattr(batch_generator, "_mixed_swa_boundary_snapshots", None) or {}
     entry = snaps.pop(str(getattr(request, "request_id", "")), None)
     if not entry:
-        entry = getattr(request, "_mixed_swa_media_boundary", None)
+        entry = getattr(request, "_mixed_swa_boundary", None)
     if not entry:
         if _rotating_offsets_prove_boundary():
             logger.info(
-                "mixed-SWA media boundary assembly: live cache already sits "
+                "mixed-SWA boundary assembly: live cache already sits "
                 "at boundary=%d (clean aux-prefill provenance proven by "
                 "rotating offsets)",
                 boundary,
             )
             return list(live_cache)
         logger.info(
-            "mixed-SWA media boundary assembly declined: no end-of-prefill "
+            "mixed-SWA boundary assembly declined: no end-of-prefill "
             "snapshot for %s and live rotating offsets do not sit at "
             "boundary=%d",
             getattr(request, "request_id", "?"),
@@ -5887,7 +5902,7 @@ def _assemble_mixed_swa_media_boundary_cache(
         return None
     if cap_boundary != int(boundary) or not isinstance(snap_map, dict):
         logger.info(
-            "mixed-SWA media boundary assembly declined for %s: snapshot "
+            "mixed-SWA boundary assembly declined for %s: snapshot "
             "boundary=%s does not match store boundary=%d (a gen-prompt "
             "suffix or aligned store key moved the goalposts)",
             getattr(request, "request_id", "?"),
@@ -5907,7 +5922,7 @@ def _assemble_mixed_swa_media_boundary_cache(
         if snap is not None:
             if int(getattr(snap, "offset", -1) or -1) != int(boundary):
                 logger.warning(
-                    "mixed-SWA media boundary assembly declined for %s: "
+                    "mixed-SWA boundary assembly declined for %s: "
                     "snapshot layer %d offset=%s != boundary=%d",
                     getattr(request, "request_id", "?"),
                     idx,
@@ -5921,7 +5936,7 @@ def _assemble_mixed_swa_media_boundary_cache(
             # A rotating layer the capture did not cover — refusing beats
             # writing a rolled window under an exact anchor.
             logger.warning(
-                "mixed-SWA media boundary assembly declined for %s: rotating "
+                "mixed-SWA boundary assembly declined for %s: rotating "
                 "layer %d (%s) has no boundary snapshot",
                 getattr(request, "request_id", "?"),
                 idx,

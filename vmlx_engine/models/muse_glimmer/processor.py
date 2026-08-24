@@ -257,6 +257,55 @@ def _as_frame_sequence(videos: Any) -> List[Any]:
     return [candidate]
 
 
+def _as_video_sequences(videos: Any) -> List[List[Any]]:
+    """Normalize processor input into one frame sequence per video item.
+
+    The engine hands one video over as ``[ndarray[T,H,W,C]]`` and multiple
+    videos as ``[ndarray[T,H,W,C], ...]``.  Treating the outer list as one
+    frame sequence works for the first shape but feeds whole 4-D clips to PIL
+    for the second.  Keep media-item boundaries so repeated video turns remain
+    one-to-one with their prompt placeholders and cache side keys.
+    """
+    if videos is None:
+        return []
+    ndim = getattr(videos, "ndim", None)
+    if ndim in (3, 4):
+        return [_as_frame_sequence(videos)]
+    if not isinstance(videos, (list, tuple)):
+        return [_as_frame_sequence(videos)]
+    if not videos:
+        return []
+
+    # A flat list of 3-D arrays/PIL images is one video's frame sequence.
+    # A list containing 4-D arrays or nested frame lists is multiple videos.
+    if any(
+        getattr(item, "ndim", None) == 4 or isinstance(item, (list, tuple))
+        for item in videos
+    ):
+        return [_as_frame_sequence(item) for item in videos]
+    return [list(videos)]
+
+
+def _split_patches_by_grid(
+    patches: np.ndarray,
+    grids: Sequence[Tuple[int, int, int]],
+) -> List[Tuple[np.ndarray, Tuple[int, int, int]]]:
+    """Split a concatenated raw-patch buffer back into media-owned spans."""
+    items: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
+    cursor = 0
+    for raw_grid in grids:
+        grid = tuple(int(v) for v in raw_grid)
+        span = grid[0] * grid[1] * grid[2]
+        items.append((patches[cursor : cursor + span], grid))
+        cursor += span
+    if cursor != int(patches.shape[0]):
+        raise ValueError(
+            "Muse Glimmer: media grids account for "
+            f"{cursor} raw patches but the processor produced {patches.shape[0]}."
+        )
+    return items
+
+
 def expand_media_placeholders(
     input_ids: List[int],
     grids: Sequence[Tuple[int, int, int]],
@@ -341,29 +390,63 @@ class MuseGlimmerProcessor:
         ids = self.tokenizer.encode(text or "", add_special_tokens=False)
         out = {}
 
-        # Images and videos are NOT mutually exclusive. `elif` silently dropped
-        # every image in a mixed prompt while expanding only the video, so the
-        # placeholder count and the feature rows disagreed downstream.
-        media_patches, image_grids, video_grids = [], [], []
-        if videos:
-            patches, video_grids = self.video_processor(_as_frame_sequence(videos))
-            if len(patches):
-                media_patches.append(patches)
-            ids = expand_media_placeholders(
-                ids, video_grids, self.video_token_id, self.image_processor.merge_size
-            )
+        # Images and videos are NOT mutually exclusive, and their raw patches
+        # must follow PLACEHOLDER order.  The previous implementation always
+        # concatenated video first and image second, then exposed only separate
+        # grids.  The model chose image_grid_thw when both were present, encoded
+        # a wrongly sliced prefix of that buffer, and live image->video history
+        # failed with 765 placeholders vs 345 feature rows.
+        original_ids = list(ids)
+        image_items: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
+        video_items: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
+        image_grids: List[Tuple[int, int, int]] = []
+        video_grids: List[Tuple[int, int, int]] = []
         if images:
             patches, image_grids = self.image_processor(images)
-            if len(patches):
-                media_patches.append(patches)
+            image_items = _split_patches_by_grid(patches, image_grids)
             ids = expand_media_placeholders(
                 ids, image_grids, self.image_token_id, self.image_processor.merge_size
             )
-        if media_patches:
-            out["pixel_values"] = (
-                media_patches[0] if len(media_patches) == 1
-                else np.concatenate(media_patches, axis=0)
+        if videos:
+            for frames in _as_video_sequences(videos):
+                patches, grids = self.video_processor(frames)
+                video_grids.extend(grids)
+                video_items.extend(_split_patches_by_grid(patches, grids))
+            ids = expand_media_placeholders(
+                ids, video_grids, self.video_token_id, self.image_processor.merge_size
             )
+
+        image_queue = list(image_items)
+        video_queue = list(video_items)
+        ordered_media: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
+        for token_id in original_ids:
+            if token_id == self.image_token_id:
+                if not image_queue:
+                    raise ValueError(
+                        "Muse Glimmer: image placeholder has no matching image payload."
+                    )
+                ordered_media.append(image_queue.pop(0))
+            elif token_id == self.video_token_id:
+                if not video_queue:
+                    raise ValueError(
+                        "Muse Glimmer: video placeholder has no matching video payload."
+                    )
+                ordered_media.append(video_queue.pop(0))
+        if image_queue or video_queue:
+            raise ValueError(
+                "Muse Glimmer: media payload count exceeds prompt placeholders "
+                f"(images={len(image_queue)}, videos={len(video_queue)} unmatched)."
+            )
+        if ordered_media:
+            ordered_patches = [patches for patches, _grid in ordered_media]
+            out["pixel_values"] = (
+                ordered_patches[0]
+                if len(ordered_patches) == 1
+                else np.concatenate(ordered_patches, axis=0)
+            )
+            # This unified grid is the authoritative contract for the combined
+            # pixel buffer.  Separate grids remain available for diagnostics.
+            out["grid_thw"] = [grid for _patches, grid in ordered_media]
         if image_grids:
             out["image_grid_thw"] = image_grids
         if video_grids:

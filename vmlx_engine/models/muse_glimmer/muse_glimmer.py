@@ -47,6 +47,30 @@ def _as_grid_list(grid_thw: Any) -> List[tuple]:
     raise ValueError(f"Muse Glimmer: unrecognised grid_thw {grid_thw!r}")
 
 
+def _resolve_media_grids(
+    *,
+    grid_thw: Any = None,
+    image_grid_thw: Any = None,
+    video_grid_thw: Any = None,
+) -> List[tuple]:
+    """Resolve the grid list that owns the single combined pixel buffer.
+
+    Mixed image+video inputs require the processor's unified prompt-ordered
+    grid.  Falling back to either modality's separate grid silently truncates
+    the other modality, so ambiguous callers fail closed instead.
+    """
+    if grid_thw is not None:
+        return _as_grid_list(grid_thw)
+    if image_grid_thw is not None and video_grid_thw is not None:
+        raise ValueError(
+            "Muse Glimmer mixed image+video input requires unified grid_thw in "
+            "the same order as the combined pixel_values buffer."
+        )
+    return _as_grid_list(
+        image_grid_thw if image_grid_thw is not None else video_grid_thw
+    )
+
+
 class Model(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -86,10 +110,16 @@ class Model(nn.Module):
         if pixel_values is None or self.vision_tower is None:
             return embeds
 
-        grid_thw = image_grid_thw if image_grid_thw is not None else video_grid_thw
-        if grid_thw is None:
-            grid_thw = kwargs.get("grid_thw")
-        grid_thw = _as_grid_list(grid_thw)
+        # The Muse processor emits one pixel buffer containing every media item
+        # in prompt order and a matching unified ``grid_thw``.  Prefer that
+        # contract when present.  Choosing image_grid_thw merely because an
+        # earlier image exists drops every later video grid and makes the tower
+        # encode only a wrongly sliced prefix of the combined pixels.
+        grid_thw = _resolve_media_grids(
+            grid_thw=kwargs.get("grid_thw"),
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+        )
         if not grid_thw:
             raise ValueError(
                 "Muse Glimmer received pixel_values without a grid_thw. Positions, "

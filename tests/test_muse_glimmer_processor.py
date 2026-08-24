@@ -30,6 +30,7 @@ _spec.loader.exec_module(proc_mod)
 
 MuseGlimmerImageProcessor = proc_mod.MuseGlimmerImageProcessor
 MuseGlimmerVideoProcessor = proc_mod.MuseGlimmerVideoProcessor
+MuseGlimmerProcessor = proc_mod.MuseGlimmerProcessor
 expand_media_placeholders = proc_mod.expand_media_placeholders
 merged_token_count = proc_mod.merged_token_count
 
@@ -245,6 +246,101 @@ class TestMultiMediaPrompts:
 
     IMAGE_TOKEN = 200092
     VIDEO_TOKEN = 200091
+
+    class _Tokenizer:
+        def __init__(self, ids):
+            self.ids = list(ids)
+
+        def encode(self, _text, add_special_tokens=False):
+            assert add_special_tokens is False
+            return list(self.ids)
+
+    @staticmethod
+    def _video_array(frame_count=4, size=(112, 112)):
+        return np.stack(
+            [np.asarray(_image(size), dtype=np.uint8) for _ in range(frame_count)],
+            axis=0,
+        )
+
+    def test_top_processor_orders_image_then_video_pixels_and_grids(self):
+        processor = MuseGlimmerProcessor(
+            self._Tokenizer([1, self.IMAGE_TOKEN, 2, self.VIDEO_TOKEN, 3])
+        )
+        out = processor(
+            text="ignored",
+            images=[_image((224, 224))],
+            videos=[self._video_array()],
+        )
+
+        image_grid = tuple(out["image_grid_thw"][0])
+        video_grid = tuple(out["video_grid_thw"][0])
+        assert out["grid_thw"] == [image_grid, video_grid]
+        assert out["pixel_values"].shape[0] == sum(
+            t * h * w for t, h, w in out["grid_thw"]
+        )
+        assert out["input_ids"][0].count(self.IMAGE_TOKEN) == merged_token_count(
+            image_grid, 2
+        )
+        assert out["input_ids"][0].count(self.VIDEO_TOKEN) == merged_token_count(
+            video_grid, 2
+        )
+
+    def test_top_processor_orders_video_then_image_pixels_and_grids(self):
+        processor = MuseGlimmerProcessor(
+            self._Tokenizer([1, self.VIDEO_TOKEN, 2, self.IMAGE_TOKEN, 3])
+        )
+        out = processor(
+            text="ignored",
+            images=[_image((224, 224))],
+            videos=[self._video_array()],
+        )
+
+        assert out["grid_thw"] == [
+            tuple(out["video_grid_thw"][0]),
+            tuple(out["image_grid_thw"][0]),
+        ]
+
+    def test_top_processor_preserves_repeated_video_item_boundaries(self):
+        processor = MuseGlimmerProcessor(
+            self._Tokenizer(
+                [1, self.VIDEO_TOKEN, 2, self.IMAGE_TOKEN, 3, self.VIDEO_TOKEN, 4]
+            )
+        )
+        out = processor(
+            text="ignored",
+            images=[_image((112, 112))],
+            videos=[self._video_array(2), self._video_array(6)],
+        )
+
+        video_grids = [tuple(grid) for grid in out["video_grid_thw"]]
+        assert len(video_grids) == 2
+        assert out["grid_thw"] == [
+            video_grids[0],
+            tuple(out["image_grid_thw"][0]),
+            video_grids[1],
+        ]
+        assert out["pixel_values"].shape[0] == sum(
+            t * h * w for t, h, w in out["grid_thw"]
+        )
+
+    def test_model_prefers_unified_prompt_ordered_grid_for_mixed_media(self):
+        from mlx_vlm.models.muse_glimmer.muse_glimmer import _resolve_media_grids
+
+        unified = [(1, 16, 16), (2, 8, 8)]
+        assert _resolve_media_grids(
+            grid_thw=unified,
+            image_grid_thw=[(1, 16, 16)],
+            video_grid_thw=[(2, 8, 8)],
+        ) == unified
+
+    def test_model_rejects_mixed_media_without_unified_grid(self):
+        from mlx_vlm.models.muse_glimmer.muse_glimmer import _resolve_media_grids
+
+        with pytest.raises(ValueError, match="requires unified grid_thw"):
+            _resolve_media_grids(
+                image_grid_thw=[(1, 16, 16)],
+                video_grid_thw=[(2, 8, 8)],
+            )
 
     def test_processor_keeps_both_images_and_video(self):
         proc = MuseGlimmerImageProcessor()

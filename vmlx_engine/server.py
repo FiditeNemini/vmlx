@@ -4897,6 +4897,43 @@ def _is_required_tool_choice(tool_choice: Any) -> bool:
     return bool(tool_choice.get("type") in {"required", "function"} or target_name)
 
 
+_TOOL_CHOICE_FULFILLED_HEADER = "x-vmlx-tool-choice-fulfilled"
+
+
+def _attach_tool_choice_fulfilled_marker(request: Any, http_request: Any) -> bool:
+    """Attach the panel's private already-executed tool marker to one request.
+
+    The Electron tool loop repeats the identical scoped schema and specific
+    choice after it has executed that call so the tool-result prompt is a
+    causal extension of the SSD-cached selection prompt.  This header relaxes
+    only the *new-call* requirement; it does not remove the schema, alter the
+    rendered template kwargs, or change public API semantics for callers that
+    did not explicitly send the private marker.
+    """
+    value = _request_header_value(http_request, _TOOL_CHOICE_FULFILLED_HEADER)
+    fulfilled = str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        object.__setattr__(request, "_vmlx_tool_choice_fulfilled", fulfilled)
+    except Exception:
+        logger.debug("Could not attach fulfilled tool-choice marker to request")
+        return False
+    if fulfilled:
+        logger.info(
+            "Tool choice already fulfilled by the Electron continuation; "
+            "retaining the scoped schema/choice for cache-stable rendering"
+        )
+    return fulfilled
+
+
+def _is_pending_required_tool_choice(request: Any) -> bool:
+    """Return whether this HTTP pass must produce a new function call."""
+    return bool(
+        request is not None
+        and _is_required_tool_choice(getattr(request, "tool_choice", None))
+        and not getattr(request, "_vmlx_tool_choice_fulfilled", False)
+    )
+
+
 def _describe_required_tool_choice(tool_choice: Any) -> str:
     """Render the caller's own tool_choice for an error message.
 
@@ -7156,7 +7193,7 @@ def _parse_tool_calls_with_parser(
         do not infer a tool name unless the request forced tool use, exposed one
         tool, and the JSON object maps to that tool's declared parameters.
         """
-        if not request or not _is_required_tool_choice(getattr(request, "tool_choice", None)):
+        if not _is_pending_required_tool_choice(request):
             return text, None
         allowed = _allowed_tool_names()
         if len(allowed) != 1:
@@ -7332,9 +7369,7 @@ def _parse_tool_calls_with_parser(
                 # request explicitly required a tool call.
                 if _has_tool_marker_or_partial_suffix(output_text) or (
                     request is not None
-                    and _is_required_tool_choice(
-                        getattr(request, "tool_choice", None)
-                    )
+                    and _is_pending_required_tool_choice(request)
                 ):
                     _record_tool_call_drop(
                         f"The '{active_parser}' native tool parser did not produce "
@@ -7353,8 +7388,7 @@ def _parse_tool_calls_with_parser(
         logger.warning(f"Tool parser error: {e}")
         if bool(getattr(locals().get("parser_cls", None), "STRICT_NATIVE_TOOL_FORMAT", False)):
             if _has_tool_marker_or_partial_suffix(output_text) or (
-                request is not None
-                and _is_required_tool_choice(getattr(request, "tool_choice", None))
+                _is_pending_required_tool_choice(request)
             ):
                 _record_tool_call_drop(
                     f"The '{active_parser}' native tool parser failed; generic "
@@ -7531,9 +7565,7 @@ def _request_explicitly_requests_tool_use(
     would violate the user's contract.  Explicit negative instructions remain
     eligible for tools-free recovery.
     """
-    if request is None or _is_required_tool_choice(
-        getattr(request, "tool_choice", None)
-    ):
+    if request is None or _is_pending_required_tool_choice(request):
         return request is not None
 
     latest_user_text = _latest_request_user_text(request)
@@ -15419,7 +15451,7 @@ async def create_anthropic_message(
                         fastapi_request=fastapi_request,
                         **_msg_kwargs,
                     ),
-                    required_tool_call=_is_required_tool_choice(chat_req.tool_choice),
+                    required_tool_call=_is_pending_required_tool_choice(chat_req),
                 ):
                     # Pass through SSE comments (keep-alive) to prevent client timeout
                     if chunk_str.startswith(":"):
@@ -16402,7 +16434,7 @@ async def ollama_chat(fastapi_request: Request):
                 fastapi_request=fastapi_request,
                 **chat_kwargs,
             ),
-            required_tool_call=_is_required_tool_choice(chat_req.tool_choice),
+            required_tool_call=_is_pending_required_tool_choice(chat_req),
         ):
             if stream_errored:
                 continue
@@ -18152,6 +18184,7 @@ async def create_chat_completion(
     }
     ```
     """
+    _attach_tool_choice_fulfilled_marker(request, fastapi_request)
     _log_inbound_request_fields("chat.completions", request)
     # Model name validation: accept served name, actual name, or any name (permissive)
     resolved_name = _resolve_model_name()
@@ -18711,7 +18744,7 @@ async def create_chat_completion(
                     response_id=response_id,
                     **chat_kwargs,
                 ),
-                required_tool_call=_is_required_tool_choice(request.tool_choice),
+                required_tool_call=_is_pending_required_tool_choice(request),
             ),
             media_type="text/event-stream",
         )
@@ -19278,7 +19311,7 @@ async def create_chat_completion(
             logger.warning(f"JSON validation failed: {error}")
 
     # Enforce tool_choice="required": model MUST produce at least one tool call
-    if _is_required_tool_choice(_tool_choice) and not tool_calls:
+    if _is_pending_required_tool_choice(request) and not tool_calls:
         tool_required_preview = (_cc_parse_text or content_for_parsing or "")
         tool_required_preview = tool_required_preview.replace("\n", "\\n")[:500]
         logger.warning(
@@ -21425,6 +21458,7 @@ async def create_response(
     }
     ```
     """
+    _attach_tool_choice_fulfilled_marker(request, fastapi_request)
     # The vMLX app talks to THIS endpoint, not /v1/chat/completions -- the Chat
     # Settings panel shows its API URL as /v1/responses. Logging only the chat
     # endpoint left every UI request invisible.
@@ -22610,7 +22644,7 @@ async def create_response(
 
     # Enforce tool_choice="required": model MUST produce at least one tool call
     _resp_tool_choice = getattr(request, "tool_choice", None)
-    if _is_required_tool_choice(_resp_tool_choice) and not tool_calls:
+    if _is_pending_required_tool_choice(request) and not tool_calls:
         tool_required_preview = (parse_text or content_for_parsing or "")
         tool_required_preview = tool_required_preview.replace("\n", "\\n")[:500]
         logger.warning(
@@ -25343,7 +25377,7 @@ async def stream_chat_completion(
 
     # Enforce tool_choice="required" in streaming: emit error SSE if no tool calls
     _stream_tool_choice = getattr(request, "tool_choice", None)
-    if _is_required_tool_choice(_stream_tool_choice) and not tool_calls_emitted:
+    if _is_pending_required_tool_choice(request) and not tool_calls_emitted:
         # tool_calls_emitted is set True only when tool calls were actually parsed and yielded.
         # tool_call_buffering can be True even on false-positive marker detection with no actual calls.
         logger.warning(
@@ -27519,7 +27553,7 @@ async def stream_responses_api(
     # event for incremental consumers, then terminate with response.failed.
     _resp_stream_tc = getattr(request, "tool_choice", None)
     _required_tool_contract_failed = bool(
-        _is_required_tool_choice(_resp_stream_tc) and not tool_calls
+        _is_pending_required_tool_choice(request) and not tool_calls
     )
     _required_tool_error = None
     if _required_tool_contract_failed:

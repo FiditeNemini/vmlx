@@ -6612,6 +6612,47 @@ class TestV4bToolChoiceRequired:
 class TestResponsesStreamingExactToolResult:
     """Tool-result continuations must stay on the real Responses stream."""
 
+    def test_private_fulfilled_marker_preserves_schema_without_requiring_second_call(self):
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.server import (
+            _attach_tool_choice_fulfilled_marker,
+            _is_pending_required_tool_choice,
+        )
+
+        tool = {
+            "type": "function",
+            "name": "file_info",
+            "parameters": {"type": "object"},
+        }
+        choice = {"type": "function", "name": "file_info"}
+        request = ResponsesRequest(
+            model="test",
+            input=[{"role": "user", "content": "call file_info exactly once"}],
+            tools=[tool],
+            tool_choice=choice,
+        )
+
+        assert _is_pending_required_tool_choice(request)
+        assert _attach_tool_choice_fulfilled_marker(
+            request,
+            SimpleNamespace(headers={"x-vmlx-tool-choice-fulfilled": "1"}),
+        )
+        assert not _is_pending_required_tool_choice(request)
+        assert request.tools == [tool]
+        assert request.tool_choice == choice
+
+        ordinary_request = ResponsesRequest(
+            model="test",
+            input=[{"role": "user", "content": "call file_info"}],
+            tools=[tool],
+            tool_choice=choice,
+        )
+        assert not _attach_tool_choice_fulfilled_marker(
+            ordinary_request,
+            SimpleNamespace(headers={}),
+        )
+        assert _is_pending_required_tool_choice(ordinary_request)
+
     def test_responses_streaming_has_no_nonstream_exact_reply_finalizer(self):
         import inspect
         from vmlx_engine.server import stream_responses_api

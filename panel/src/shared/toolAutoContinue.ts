@@ -17,6 +17,55 @@ export type CurrentTurnToolChoice =
   | { type: 'function'; function: { name: string } }
   | undefined
 
+export interface ToolRequestFields {
+  hasTools: boolean
+  tools?: unknown
+  hasToolChoice: boolean
+  toolChoice?: unknown
+}
+
+export function captureToolRequestFields(
+  request: Record<string, unknown>,
+): ToolRequestFields {
+  return {
+    hasTools: Object.prototype.hasOwnProperty.call(request, 'tools'),
+    tools: request.tools,
+    hasToolChoice: Object.prototype.hasOwnProperty.call(request, 'tool_choice'),
+    toolChoice: request.tool_choice,
+  }
+}
+
+export function applyPostToolRequestFields(
+  request: Record<string, unknown>,
+  options: {
+    finalAnswerRecovery: boolean
+    plannedDirectAnswerPass: boolean
+    isRemote: boolean
+    previous?: ToolRequestFields
+  },
+): void {
+  if (options.finalAnswerRecovery) {
+    delete request.tools
+    request.tool_choice = 'none'
+    return
+  }
+  if (!options.plannedDirectAnswerPass || !options.previous) return
+
+  // A local exact-tool continuation must render the identical scoped schema
+  // prefix that selected the tool. The app has already validated and executed
+  // the call; an out-of-band fulfilled marker tells vmlx-engine that the
+  // repeated choice is for stable prompt identity, not a second-call demand.
+  if (options.previous.hasTools) request.tools = options.previous.tools
+  else delete request.tools
+  if (!options.isRemote && options.previous.hasToolChoice) {
+    request.tool_choice = options.previous.toolChoice
+  } else {
+    // Remote providers do not understand vMLX's fulfilled marker. Keep their
+    // schema prefix stable but return the standard choice policy to auto.
+    delete request.tool_choice
+  }
+}
+
 export function requiredToolChoiceNamesForCurrentTurn(
   exactFinalToolNames: string[],
   exactlyOnceToolNames: string[],

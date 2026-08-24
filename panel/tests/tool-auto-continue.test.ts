@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
+  applyPostToolRequestFields,
+  captureToolRequestFields,
   isToolAuthorizedForCurrentTurn,
   isToolNameProvidedForCurrentTurn,
   requiredToolChoiceNamesForCurrentTurn,
@@ -20,6 +22,42 @@ import {
 } from '../src/shared/toolAutoContinue'
 
 describe('tool auto-continue policy', () => {
+  it('keeps the local fulfilled-tool render stable and reserves schema removal for recovery', () => {
+    const tool = {
+      type: 'function',
+      name: 'file_info',
+      parameters: { type: 'object' },
+    }
+    const choice = { type: 'function', name: 'file_info' }
+    const previous = captureToolRequestFields({ tools: [tool], tool_choice: choice })
+
+    const localPlanned: Record<string, unknown> = { tools: [] }
+    applyPostToolRequestFields(localPlanned, {
+      finalAnswerRecovery: false,
+      plannedDirectAnswerPass: true,
+      isRemote: false,
+      previous,
+    })
+    expect(localPlanned).toEqual({ tools: [tool], tool_choice: choice })
+
+    const remotePlanned: Record<string, unknown> = { tools: [] }
+    applyPostToolRequestFields(remotePlanned, {
+      finalAnswerRecovery: false,
+      plannedDirectAnswerPass: true,
+      isRemote: true,
+      previous,
+    })
+    expect(remotePlanned).toEqual({ tools: [tool] })
+
+    applyPostToolRequestFields(localPlanned, {
+      finalAnswerRecovery: true,
+      plannedDirectAnswerPass: true,
+      isRemote: false,
+      previous,
+    })
+    expect(localPlanned).toEqual({ tool_choice: 'none' })
+  })
+
   it('continues when a model stops after tools with no visible response', () => {
     expect(
       shouldAutoContinueAfterToolUse({
@@ -592,7 +630,7 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('requestedScopedToolNames(')
     expect(source).toContain('exactlyOnceToolsComplete')
     expect(source).toContain('obj.tool_choice = requestToolChoice')
-    expect(source).toContain('obj.tool_choice = "none"')
+    expect(source).toContain('applyPostToolRequestFields(obj')
   })
 
   it('checks the terminal AppleScript round before sending a follow-up', () => {
@@ -622,14 +660,14 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('const MAX_AUTO_CONTINUES = 1')
     expect(source).toContain('let finalAnswerRecovery = false')
     expect(source).toContain('finalAnswerRecovery = true')
-    expect(source).toContain('delete obj.tools')
+    expect(source).toContain('applyPostToolRequestFields(obj')
     expect(source).toContain('obj.enable_thinking = false')
     expect(source).toContain(
       'The tool completed, but the model produced no visible answer after one direct-answer recovery.',
     )
   })
 
-  it('retires completed tools before the exact-final follow-up', () => {
+  it('preserves the completed tool render before the exact-final follow-up', () => {
     const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
     const planned = source.indexOf('plannedDirectAnswerPass =')
     const followUp = source.indexOf('if (!(await sendFollowUp())) break;', planned)
@@ -655,14 +693,16 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('exactFinalToolNames.every((name) =>')
     expect(authorization).toContain('currentToolNames')
     expect(authorization).not.toContain('availableToolDefinitions()')
-    expect(source).toContain('if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return')
-    expect(policy).toContain('delete obj.tools')
+    expect(policy).toContain('applyPostToolRequestFields(obj')
+    expect(policy).toContain('previous: previousToolRequestFields')
     expect(policy).toContain('if (!finalAnswerRecovery) return')
     expect(policy.indexOf('if (!finalAnswerRecovery) return')).toBeLessThan(
       policy.indexOf('obj.enable_thinking = false'),
     )
     expect(planned).toBeGreaterThan(-1)
     expect(followUp).toBeGreaterThan(planned)
+    expect(source).toContain('"X-vMLX-Tool-Choice-Fulfilled": "1"')
+    expect(source).toContain('logRequestShape(followUpBody, "follow_up")')
   })
 
   it('marks exactly-once completion only after valid authorized arguments', () => {

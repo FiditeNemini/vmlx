@@ -40,6 +40,8 @@ import {
   visibleReasoningSegments,
 } from "../../shared/interleavedReasoning";
 import {
+  applyPostToolRequestFields,
+  captureToolRequestFields,
   isToolAuthorizedForCurrentTurn,
   requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
@@ -54,6 +56,7 @@ import {
   shouldAutoContinueAfterToolUse,
   shouldFinishZayaAppleScriptToolRound,
   toolChoiceForCurrentTurn,
+  type ToolRequestFields,
   unavailableRequestedToolNames,
 } from "../../shared/toolAutoContinue";
 import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
@@ -1910,10 +1913,11 @@ export function registerChatHandlers(
       // user's reasoning setting and supports additional tool calls.
       let finalAnswerRecovery = false;
       // An explicit "exactly once; after the tool result, reply exactly ..."
-      // contract has no valid second tool round. Put only that planned
-      // follow-up on the same direct-answer rail as bounded recovery so native
-      // tool-tuned models cannot re-enter an unbounded tool-call prefix.
+      // contract has no valid second execution. Keep its rendered schema prefix
+      // stable for SSD reuse; the local fulfilled header plus the execution
+      // dedupe below prevent a second call without rewriting that prefix.
       let plannedDirectAnswerPass = false;
+      let previousToolRequestFields: ToolRequestFields | undefined;
       // Accumulates content across tool iterations so abort during tool execution can recover
       // earlier content that would otherwise be lost when fullContent is reset between iterations
       let allGeneratedContent = "";
@@ -2111,17 +2115,17 @@ export function registerChatHandlers(
             };
           };
           const applyPostToolAnswerPolicy = (obj: Record<string, any>) => {
-            if (!(finalAnswerRecovery || plannedDirectAnswerPass)) return;
-            delete obj.tools;
-            // Retiring a completed exact tool must also retire the local
-            // engine's automatically merged MCP catalog for this follow-up.
-            obj.tool_choice = "none";
+            applyPostToolRequestFields(obj, {
+              finalAnswerRecovery,
+              plannedDirectAnswerPass,
+              isRemote,
+              previous: previousToolRequestFields,
+            });
             // A normal exact-final follow-up is still part of the user's
-            // requested reasoning mode. Retiring the completed tool prevents
-            // a duplicate call; it must not silently turn an explicit On (or
-            // model-owned Auto) into Thinking Off. Only the bounded recovery
-            // after an actually empty/incomplete post-tool pass may request
-            // instruct mode.
+            // requested reasoning mode. It must not silently turn an explicit
+            // On (or model-owned Auto) into Thinking Off. Only the bounded
+            // recovery after an actually empty/incomplete post-tool pass may
+            // remove schemas and request instruct mode.
             if (!finalAnswerRecovery) return;
             if (isRemote) return;
             // Some native templates (currently Step-3.7) have no truthful
@@ -2136,6 +2140,11 @@ export function registerChatHandlers(
             };
             delete obj.reasoning_effort;
             delete obj.max_thinking_tokens;
+          };
+          const finalizeRequestBody = (obj: Record<string, any>) => {
+            applyPostToolAnswerPolicy(obj);
+            previousToolRequestFields = captureToolRequestFields(obj);
+            return obj;
           };
           if (useResponsesApi) {
             const { systemMessages, inputMessages } =
@@ -2224,8 +2233,7 @@ export function registerChatHandlers(
             // Send timeout to server so streaming timeout matches client-side timeout
             if (!isRemote && timeoutSeconds !== 300)
               obj.timeout = timeoutSeconds;
-            applyPostToolAnswerPolicy(obj);
-            return obj;
+            return finalizeRequestBody(obj);
           } else {
             const obj: Record<string, any> = {
               model: modelName,
@@ -2295,16 +2303,19 @@ export function registerChatHandlers(
             // Send timeout to server so streaming timeout matches client-side timeout
             if (!isRemote && timeoutSeconds !== 300)
               obj.timeout = timeoutSeconds;
-            applyPostToolAnswerPolicy(obj);
-            return obj;
+            return finalizeRequestBody(obj);
           }
         };
-        const requestBody = JSON.stringify(buildRequestBody());
         const requestDiagSessionId = chatSession?.id || resolvedSession?.id;
-        if (requestDiagSessionId) {
+        const logRequestShape = (
+          bodyJson: string,
+          phase: "initial" | "follow_up",
+        ) => {
+          if (!requestDiagSessionId) return;
           pushChatSessionLog(
             requestDiagSessionId,
             `[CHAT_DIAG] request_shape=${JSON.stringify({
+              phase,
               chatId: chatId.slice(0, 8),
               wireApi,
               isRemote,
@@ -2314,10 +2325,14 @@ export function registerChatHandlers(
                 chatIsMultimodal || isRemote ? "full" : "text_only",
               detectedFamily: chatDetectedFamily,
               sessionHasReasoningParser,
-              body: summarizeRequestForLog(requestBody, useResponsesApi),
+              plannedDirectAnswerPass,
+              finalAnswerRecovery,
+              body: summarizeRequestForLog(bodyJson, useResponsesApi),
             })}`,
           );
-        }
+        };
+        const requestBody = JSON.stringify(buildRequestBody());
+        logRequestShape(requestBody, "initial");
 
         fetchStartTime = Date.now(); // Capture just before fetch for accurate TTFT
         // Remote internet providers use Electron's net.fetch for certificates
@@ -3589,6 +3604,7 @@ export function registerChatHandlers(
           // Remote internet providers use Electron net.fetch; loopback model
           // servers use Node streaming so SSE tool events are not buffered.
           const followUpBody = JSON.stringify(buildRequestBody());
+          logRequestShape(followUpBody, "follow_up");
           const followUpInit = {
             method: "POST",
             headers: {
@@ -3600,6 +3616,9 @@ export function registerChatHandlers(
               // final-pass TTFT/prefill throughput.
               ...vmlxResponsesUsageHeaders,
               ...nextLocalRequestCorrelationHeaders(),
+              ...(!isRemote && plannedDirectAnswerPass && !finalAnswerRecovery
+                ? { "X-vMLX-Tool-Choice-Fulfilled": "1" }
+                : {}),
             },
             body: followUpBody,
             signal: abortController.signal,

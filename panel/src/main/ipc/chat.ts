@@ -3592,6 +3592,11 @@ export function registerChatHandlers(
             headers: {
               "Content-Type": "application/json",
               ...authHeaders,
+              // Every local Responses HTTP pass needs the same private usage
+              // negotiation. Omitting it only on tool follow-ups left the
+              // final footer with first-pass token/decode counts paired to
+              // final-pass TTFT/prefill throughput.
+              ...vmlxResponsesUsageHeaders,
               ...nextLocalRequestCorrelationHeaders(),
             },
             body: followUpBody,

@@ -183,5 +183,13 @@ describe('tool status responsiveness contract', () => {
     )
     expect(source).toContain('useResponsesApi && !isRemote')
     expect(source).toContain('{ "X-vMLX-Stream-Usage": "incremental" }')
+    const followUp = source.slice(
+      source.indexOf('const sendFollowUp = async'),
+      source.indexOf(
+        '// ─── Helper: execute tool calls',
+        source.indexOf('const sendFollowUp = async'),
+      ),
+    )
+    expect(followUp).toContain('...vmlxResponsesUsageHeaders')
   })
 })

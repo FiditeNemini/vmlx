@@ -147,6 +147,13 @@ export function requestedOnceToolNames(text: string): string[] {
     ...text.matchAll(
       /\b(?:call|use|invoke|run|execute)\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?\s+exactly\s+once\b/gi,
     ),
+    // Natural prompts often put the concrete argument before the cardinality:
+    // "Call read_file with path README.md exactly once." Keep the argument
+    // span inside one clause and reject another tool verb so a later
+    // "then call Y exactly once" cannot accidentally constrain X as well.
+    ...text.matchAll(
+      /\b(?:call|use|invoke|run|execute)\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?\s+(?:with|using|on)\b(?:(?!\b(?:call|use|invoke|run|execute)\b|[!?;\n]|\.(?:\s|$)).){0,96}\bexactly\s+once\b/gi,
+    ),
     ...text.matchAll(
       /\b(?:call|use|invoke|run|execute)\s+exactly\s+(?:one|1)\s+(?:the\s+)?(?:built[- ]in\s+)?`?([a-z][\w-]*)`?(?:\s+(?:tool|function))?(?:\s+call)?\b/gi,
     ),

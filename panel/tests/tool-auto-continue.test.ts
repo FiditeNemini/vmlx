@@ -191,6 +191,27 @@ describe('tool auto-continue policy', () => {
   it('retires explicitly named exactly-once tools even without exact final wording', () => {
     expect(
       requestedOnceToolNames(
+        'Call read_file with path README.md exactly once. After the tool result, reply on one line.',
+      ),
+    ).toEqual(['read_file'])
+    expect(
+      requestsBoundedFinalAnswerAfterToolResult(
+        'Call read_file with path README.md exactly once. After the tool result, reply on one line.',
+        ['read_file'],
+      ),
+    ).toBe(true)
+    expect(
+      requestedOnceToolNames(
+        'Call read_file with path README.md. Then call file_info exactly once.',
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedOnceToolNames(
+        'Call read_file with path README.md and then call file_info exactly once.',
+      ),
+    ).toEqual(['file_info'])
+    expect(
+      requestedOnceToolNames(
         'Call the built-in file_info tool exactly once with path panel/package.json. After the real tool result, report the human-readable size.',
       ),
     ).toEqual(['file_info'])

@@ -623,7 +623,12 @@ def check_and_inject_fallback_tools(
             or _step3p5_has_concrete_tool_examples
             or (
                 _step3p5_has_native_tool_schema
-                and not explicit_tool_requested
+                # An explicit tool name does not invalidate Step's source-owned
+                # schema. Replacing that stable opening system block with a
+                # request-specific fallback only for the named-tool turn makes
+                # the next ordinary/media turn rewrite the whole SSD prefix.
+                # Keep the native schema for auto and explicit calls alike;
+                # ``tool_choice=required`` still takes the stronger fallback.
                 and not tool_choice_required
             )
         )

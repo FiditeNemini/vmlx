@@ -36,6 +36,11 @@ merged_token_count = proc_mod.merged_token_count
 
 IMAGE_TOKEN = 200092
 VIDEO_TOKEN = 200091
+IMAGE_START = 200080
+IMAGE_END = 200081
+VIDEO_START = 200082
+VIDEO_END = 200083
+VIDEO_SEPARATOR = 200087
 
 
 def _image(size=(448, 448)):
@@ -70,13 +75,13 @@ class TestSmartResize:
     def test_tiny_image_is_lifted_to_one_block(self, processor):
         assert processor.smart_resize(37, 37) == (28, 28)
 
-    def test_below_one_block_is_rejected(self, processor):
-        with pytest.raises(ValueError, match="smaller than one merge block"):
-            processor.smart_resize(20, 20)
+    def test_below_one_block_is_lifted_to_one_block(self, processor):
+        assert processor.smart_resize(20, 20) == (28, 28)
 
-    def test_absurd_aspect_ratio_is_rejected(self, processor):
-        with pytest.raises(ValueError, match="aspect ratio"):
-            processor.smart_resize(28, 28 * 300)
+    def test_extreme_aspect_ratio_stays_positive_and_under_budget(self, processor):
+        h, w = processor.smart_resize(28, 28 * 300)
+        assert h >= 28 and w >= 28
+        assert (h // 28) * (w // 28) <= processor.max_image_tokens
 
 
 class TestPatchify:
@@ -250,10 +255,23 @@ class TestMultiMediaPrompts:
     class _Tokenizer:
         def __init__(self, ids):
             self.ids = list(ids)
+            self.fragments = []
 
-        def encode(self, _text, add_special_tokens=False):
+        def convert_tokens_to_ids(self, token):
+            return {
+                "<|image_start|>": IMAGE_START,
+                "<|image_end|>": IMAGE_END,
+                "<|vid_start|>": VIDEO_START,
+                "<|vid_end|>": VIDEO_END,
+                "<|vid_frame_separator|>": VIDEO_SEPARATOR,
+            }[token]
+
+        def encode(self, text, add_special_tokens=False):
             assert add_special_tokens is False
-            return list(self.ids)
+            if text == "ignored":
+                return list(self.ids)
+            self.fragments.append(text)
+            return [150000 + len(self.fragments)]
 
     @staticmethod
     def _video_array(frame_count=4, size=(112, 112)):
@@ -263,13 +281,15 @@ class TestMultiMediaPrompts:
         )
 
     def test_top_processor_orders_image_then_video_pixels_and_grids(self):
-        processor = MuseGlimmerProcessor(
-            self._Tokenizer([1, self.IMAGE_TOKEN, 2, self.VIDEO_TOKEN, 3])
+        tokenizer = self._Tokenizer(
+            [1, self.IMAGE_TOKEN, 2, self.VIDEO_TOKEN, 3]
         )
+        processor = MuseGlimmerProcessor(tokenizer)
         out = processor(
             text="ignored",
             images=[_image((224, 224))],
             videos=[self._video_array()],
+            fps=[2.0],
         )
 
         image_grid = tuple(out["image_grid_thw"][0])
@@ -284,6 +304,12 @@ class TestMultiMediaPrompts:
         assert out["input_ids"][0].count(self.VIDEO_TOKEN) == merged_token_count(
             video_grid, 2
         )
+        assert out["input_ids"][0].count(IMAGE_START) == 1
+        assert out["input_ids"][0].count(IMAGE_END) == 1
+        assert out["input_ids"][0].count(VIDEO_START) == 1
+        assert out["input_ids"][0].count(VIDEO_END) == 1
+        assert out["input_ids"][0].count(VIDEO_SEPARATOR) == video_grid[0] - 1
+        assert tokenizer.fragments == ["Time: 0.0s", "Time: 1.0s"]
 
     def test_top_processor_orders_video_then_image_pixels_and_grids(self):
         processor = MuseGlimmerProcessor(
@@ -299,6 +325,8 @@ class TestMultiMediaPrompts:
             tuple(out["video_grid_thw"][0]),
             tuple(out["image_grid_thw"][0]),
         ]
+        ids = out["input_ids"][0]
+        assert ids.index(VIDEO_START) < ids.index(IMAGE_START)
 
     def test_top_processor_preserves_repeated_video_item_boundaries(self):
         processor = MuseGlimmerProcessor(
@@ -322,6 +350,17 @@ class TestMultiMediaPrompts:
         assert out["pixel_values"].shape[0] == sum(
             t * h * w for t, h, w in out["grid_thw"]
         )
+
+    def test_video_uses_supplied_sample_timestamps_per_temporal_group(self):
+        tokenizer = self._Tokenizer([1, self.VIDEO_TOKEN, 2])
+        processor = MuseGlimmerProcessor(tokenizer)
+        processor(
+            text="ignored",
+            videos=[self._video_array(6)],
+            video_timestamps=[[0.0, 0.5, 1.0, 1.75, 2.25, 2.75]],
+        )
+
+        assert tokenizer.fragments == ["Time: 0.0s", "Time: 1.0s", "Time: 2.2s"]
 
     def test_model_prefers_unified_prompt_ordered_grid_for_mixed_media(self):
         from mlx_vlm.models.muse_glimmer.muse_glimmer import _resolve_media_grids

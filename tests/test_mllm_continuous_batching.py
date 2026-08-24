@@ -546,6 +546,119 @@ def test_gemma4_partial_media_tail_requires_pure_text_hit_and_live_capabilities(
     ), "family label alone must not override the live callable contract"
 
 
+def test_muse_timestamped_video_runs_group_to_one_causal_media_item():
+    from vmlx_engine.mllm_batch_generator import (
+        _media_placeholder_runs,
+        _muse_glimmer_media_item_runs,
+    )
+
+    image_id, video_id = 200092, 200091
+    tokens = [1, image_id, image_id, 2, video_id, video_id, 3, video_id, video_id, 4]
+    runs = _media_placeholder_runs(tokens, {image_id, video_id})
+    request = type("Request", (), {"video_grid_thw": [[2, 2, 2]]})()
+
+    grouped = _muse_glimmer_media_item_runs(
+        request,
+        [("image", "flower.jpg"), ("video", "redgreen.mp4")],
+        tokens,
+        runs,
+        {"image": {image_id}, "video": {video_id}, "audio": set()},
+        model_type="muse_glimmer",
+    )
+
+    assert grouped == ([(1, 3), (4, 9)], [1, 2])
+
+
+def test_muse_partial_media_hit_slices_covered_image_payload_and_keeps_video():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    class MuseWrapper:
+        def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+            return None
+
+        def __call__(
+            self,
+            input_ids,
+            pixel_values=None,
+            mask=None,
+            cache=None,
+            **kwargs,
+        ):
+            return None
+
+    class MuseLanguage:
+        def __call__(
+            self,
+            inputs=None,
+            inputs_embeds=None,
+            mask=None,
+            cache=None,
+            **kwargs,
+        ):
+            return None
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "muse_glimmer"
+    generator.model = MuseWrapper()
+    generator.language_model = MuseLanguage()
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+
+    request = MLLMBatchRequest(uid=1, request_id="muse-tail", prompt="x")
+    request._media_cache_scope = {
+        "mode": "per_media_placeholder",
+        "modalities": ["image", "video"],
+        "item_ranges": [[2, 4], [8, 14]],
+    }
+    request.pixel_values = mx.arange(12 * 3).reshape(12, 3)
+    request.video_pixel_values = None
+    request.image_grid_thw = mx.array([[1, 2, 2]], dtype=mx.int32)
+    request.video_grid_thw = mx.array([[2, 2, 2]], dtype=mx.int32)
+    request.extra_kwargs = {"grid_thw": [(1, 2, 2), (2, 2, 2)]}
+
+    result = generator._prepare_muse_media_tail_for_cache_hit(
+        request, list(range(20)), cached_tokens=6
+    )
+
+    assert result == {
+        "kind": "muse_prompt_ordered_media_items",
+        "removed_items": 1,
+        "remaining_items": 1,
+        "removed_raw_patch_rows": 4,
+        "remaining_raw_patch_rows": 8,
+    }
+    assert request.pixel_values.shape == (8, 3)
+    assert request.pixel_values.tolist() == (
+        mx.arange(12 * 3).reshape(12, 3)[4:].tolist()
+    )
+    assert request.extra_kwargs["grid_thw"] == [(2, 2, 2)]
+    assert request.image_grid_thw is None
+    assert request.video_grid_thw.tolist() == [[2, 2, 2]]
+
+
+def test_muse_partial_media_hit_inside_item_remains_fail_closed():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "muse_glimmer"
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+    request = MLLMBatchRequest(uid=1, request_id="muse-mid-item", prompt="x")
+    request._media_cache_scope = {
+        "mode": "per_media_placeholder",
+        "modalities": ["image", "video"],
+        "item_ranges": [[2, 8], [10, 18]],
+    }
+
+    assert generator._prepare_muse_media_tail_for_cache_hit(
+        request, list(range(20)), cached_tokens=5
+    ) is None
+
+
 def test_mllm_prefill_declines_hit_when_reconstruction_returns_none():
     """A credited paged hit that reconstructs to None must be discarded.
 

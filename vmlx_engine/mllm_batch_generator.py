@@ -1054,6 +1054,104 @@ def _step3p7_media_item_runs(
     return grouped, run_group_sizes
 
 
+def _mllm_grid_rows(value: Any) -> Optional[List[Tuple[int, int, int]]]:
+    """Normalize a processor grid tensor/list without guessing malformed rows."""
+    if value is None:
+        return []
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    if value and not isinstance(value[0], (list, tuple)):
+        value = [value]
+    rows: List[Tuple[int, int, int]] = []
+    for raw in value:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+            return None
+        try:
+            row = tuple(int(component) for component in raw)
+        except (TypeError, ValueError):
+            return None
+        if any(component <= 0 for component in row):
+            return None
+        rows.append(row)
+    return rows
+
+
+def _muse_glimmer_media_item_runs(
+    request: Any,
+    source_items: List[Tuple[str, Any]],
+    token_ids: List[int],
+    runs: List[Tuple[int, int]],
+    grouped_ids: Dict[str, set[int]],
+    *,
+    model_type: Optional[str],
+) -> Optional[Tuple[List[Tuple[int, int]], List[int]]]:
+    """Collapse Muse's timestamp-separated video-frame runs per source clip.
+
+    The native processor emits one video placeholder run per temporal group,
+    separated by timestamp text and ``<|vid_frame_separator|>``. Cache side
+    keys, however, own one source video. Group exactly ``grid_t`` runs for each
+    clip so a later video salts only its first causal position and leaves an
+    unchanged earlier image chain reusable.
+    """
+    if str(model_type or "").lower() != "muse_glimmer":
+        return None
+    expected = {
+        modality: sum(
+            1
+            for item_modality, _source in source_items
+            if item_modality == modality
+        )
+        for modality in ("image", "video")
+    }
+    if expected["image"] + expected["video"] != len(source_items):
+        return None
+    video_grids = _mllm_grid_rows(getattr(request, "video_grid_thw", None))
+    if video_grids is None or len(video_grids) != expected["video"]:
+        return None
+    video_group_sizes: Deque[int] = deque(grid[0] for grid in video_grids)
+
+    grouped: List[Tuple[int, int]] = []
+    group_sizes: List[int] = []
+    seen = {"image": 0, "video": 0}
+    cursor = 0
+    while cursor < len(runs):
+        run_start, _run_end = runs[cursor]
+        token_id = int(token_ids[run_start])
+        modalities = [
+            modality
+            for modality in ("image", "video")
+            if token_id in grouped_ids.get(modality, set())
+        ]
+        if len(modalities) != 1:
+            return None
+        modality = modalities[0]
+        if modality == "image":
+            size = 1
+        else:
+            if not video_group_sizes:
+                return None
+            size = int(video_group_sizes.popleft())
+        if size <= 0 or cursor + size > len(runs):
+            return None
+        owned = runs[cursor : cursor + size]
+        modality_ids = grouped_ids.get(modality, set())
+        if any(int(token_ids[start]) not in modality_ids for start, _end in owned):
+            return None
+        grouped.append((owned[0][0], owned[-1][1]))
+        group_sizes.append(size)
+        seen[modality] += 1
+        cursor += size
+
+    if video_group_sizes or seen != expected or len(grouped) != len(source_items):
+        return None
+    return grouped, group_sizes
+
+
 def _raise_if_image_prefill_exceeds_budget(
     *,
     has_images: bool,
@@ -1513,6 +1611,8 @@ def _call_processor_direct_unscoped(
     prompts: Any,
     images: Optional[List[str]],
     videos: Optional[List[Any]] = None,
+    video_fps: Optional[List[float]] = None,
+    video_timestamps: Optional[List[List[float]]] = None,
     audio: Optional[List[Any]] = None,
     add_special_tokens: bool,
 ) -> Dict[str, Any]:
@@ -1585,9 +1685,13 @@ def _call_processor_direct_unscoped(
         try:
             from mlx_vlm.utils import load_video as _load_video
 
-            _fps_hint = 2.0
             _loaded, _video_fps = [], []
-            for _v in videos:
+            for _index, _v in enumerate(videos):
+                _fps_hint = (
+                    float(video_fps[_index])
+                    if video_fps is not None and _index < len(video_fps)
+                    else 2.0
+                )
                 if isinstance(_v, (str, bytes)):
                     _arr, _s_fps = _load_video(str(_v), fps=_fps_hint)
                 else:
@@ -1595,10 +1699,14 @@ def _call_processor_direct_unscoped(
                 _loaded.append(_arr)
                 _video_fps.append(_s_fps)
             kwargs["videos"] = _loaded
-            if params is None or "fps" in params or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in (params or {}).values()
-            ):
+            accepts_var_kwargs = any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in params.values()
+            )
+            if "fps" in params or accepts_var_kwargs:
                 kwargs["fps"] = _video_fps
+            if video_timestamps is not None and "video_timestamps" in params:
+                kwargs["video_timestamps"] = video_timestamps
         except Exception:
             kwargs["videos"] = videos
     if audio:
@@ -1668,6 +1776,8 @@ def _call_processor_direct(
     prompts: Any,
     images: Optional[List[str]],
     videos: Optional[List[Any]] = None,
+    video_fps: Optional[List[float]] = None,
+    video_timestamps: Optional[List[List[float]]] = None,
     audio: Optional[List[Any]] = None,
     add_special_tokens: bool,
     image_token_budget: Optional[int] = None,
@@ -1678,9 +1788,49 @@ def _call_processor_direct(
             prompts=prompts,
             images=images,
             videos=videos,
+            video_fps=video_fps,
+            video_timestamps=video_timestamps,
             audio=audio,
             add_special_tokens=add_special_tokens,
         )
+
+
+def _sampled_video_timestamps(
+    video_path: Any,
+    frame_count: int,
+    sample_fps: float,
+) -> List[float]:
+    """Rebuild the timestamps used by mlx-vlm's uniform frame sampler."""
+    if frame_count <= 0:
+        return []
+    try:
+        fallback_rate = float(sample_fps)
+    except (TypeError, ValueError):
+        fallback_rate = 2.0
+    if fallback_rate <= 0:
+        fallback_rate = 2.0
+    fallback = [index / fallback_rate for index in range(frame_count)]
+    if not isinstance(video_path, (str, os.PathLike)):
+        return fallback
+    path = str(video_path)
+    if path.startswith("file://"):
+        path = path[7:]
+    try:
+        import cv2
+        import numpy as np
+
+        capture = cv2.VideoCapture(path)
+        if not capture.isOpened():
+            return fallback
+        total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        source_fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        capture.release()
+        if total_frames <= 0 or source_fps <= 0:
+            return fallback
+        indices = np.linspace(0, total_frames - 1, frame_count).round().astype(int)
+        return [float(index) / source_fps for index in indices]
+    except Exception:
+        return fallback
 
 
 def _resolve_mimo_audio_bundle_path(model: Any, processor: Any) -> Optional[Path]:
@@ -6531,6 +6681,8 @@ class MLLMBatchGenerator:
         all_images = []
         video_inputs = []
         video_cache_sources = []
+        video_sample_fps: List[float] = []
+        video_sample_timestamps: List[List[float]] = []
         all_audio = []
 
         if request.images:
@@ -6545,9 +6697,9 @@ class MLLMBatchGenerator:
 
         if request.videos:
             from .models.mllm import (
-                process_video_input,
                 DEFAULT_FPS,
                 MAX_FRAMES,
+                process_video_input,
             )
             from mlx_vlm.video_generate import fetch_video
 
@@ -6558,10 +6710,23 @@ class MLLMBatchGenerator:
                 try:
                     video_path = process_video_input(video)
                     video_cache_sources.append(video_path)
-                    video_input = fetch_video(
-                        {"video": video_path, "fps": fps, "max_frames": max_frames}
+                    video_result = fetch_video(
+                        {"video": video_path, "fps": fps, "max_frames": max_frames},
+                        return_video_sample_fps=True,
                     )
+                    if isinstance(video_result, tuple) and len(video_result) == 2:
+                        video_input, sample_fps = video_result
+                    else:
+                        video_input, sample_fps = video_result, fps
                     video_inputs.append(video_input)
+                    video_sample_fps.append(float(sample_fps))
+                    video_sample_timestamps.append(
+                        _sampled_video_timestamps(
+                            video_path,
+                            len(video_input),
+                            float(sample_fps),
+                        )
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to process video: {e}")
             if request.videos and not video_inputs:
@@ -6639,6 +6804,8 @@ class MLLMBatchGenerator:
                 prompts=request.prompt,
                 images=all_images,
                 videos=video_inputs,
+                video_fps=video_sample_fps,
+                video_timestamps=video_sample_timestamps,
                 audio=all_audio,
                 add_special_tokens=False,
                 image_token_budget=request.image_token_budget,
@@ -7467,14 +7634,25 @@ class MLLMBatchGenerator:
 
         assignment_runs = runs
         run_group_sizes: Optional[List[int]] = None
-        step_grouping = _step3p7_media_item_runs(
+        muse_grouping = _muse_glimmer_media_item_runs(
             request,
             source_items,
+            token_ids,
             runs,
+            grouped_ids,
             model_type=getattr(self, "_model_type", None),
         )
-        if step_grouping is not None:
-            assignment_runs, run_group_sizes = step_grouping
+        if muse_grouping is not None:
+            assignment_runs, run_group_sizes = muse_grouping
+        else:
+            step_grouping = _step3p7_media_item_runs(
+                request,
+                source_items,
+                runs,
+                model_type=getattr(self, "_model_type", None),
+            )
+            if step_grouping is not None:
+                assignment_runs, run_group_sizes = step_grouping
 
         assignments: Optional[List[Tuple[str, Any]]] = None
         modalities = {modality for modality, _value in source_items}
@@ -7535,6 +7713,11 @@ class MLLMBatchGenerator:
             "modalities": [modality for modality, _source in assignments],
             "boundaries": boundaries,
         }
+        if muse_grouping is not None:
+            media_cache_scope["item_ranges"] = [
+                [int(run_start), int(run_end)]
+                for run_start, run_end in assignment_runs
+            ]
         if run_group_sizes is not None:
             media_cache_scope["placeholder_runs"] = len(runs)
             media_cache_scope["run_group_sizes"] = run_group_sizes
@@ -7591,8 +7774,10 @@ class MLLMBatchGenerator:
         media-conditioned N-1 prefill path and are enabled by default. Gemma,
         Step, and Muse captured boundaries include native rotating-SWA state
         plus their compatible full-attention slots. Muse's exact runtime is 39
-        RotatingKVCache + 13 KVCache, all native F16, and the per-placeholder
-        side keys bind the stored KV to the image/video bytes. Other families
+        RotatingKVCache + 13 KVCache, and the per-placeholder
+        side keys bind the stored KV to the image/video bytes. Muse's live K/V
+        tensors are FP32 (with I32 rotating metadata); SSD preserves that exact
+        native representation without applying a storage codec. Other families
         retain the old double opt-in until their cache topology has equivalent
         source and live proof. An explicit false value remains a kill switch
         for every default-enabled family.
@@ -7683,6 +7868,134 @@ class MLLMBatchGenerator:
             and "cache" in language_names
             and _media_embed_kwarg_name(self.language_model) is not None
         )
+
+    def _prepare_muse_media_tail_for_cache_hit(
+        self,
+        request: "MLLMBatchRequest",
+        token_ids: List[int],
+        cached_tokens: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Keep only Muse media items whose placeholders remain after a hit.
+
+        Muse's processor owns one prompt-ordered raw-patch buffer plus one grid
+        per source item. A prefix ending after an earlier image but before a new
+        video can therefore reuse the image-conditioned native KV exactly when
+        it removes the covered image's raw-patch span and grid before forwarding
+        the tail. Hits inside a media item remain fail-closed: splitting a
+        timestamped temporal group or a merged feature run would require
+        feature-level reconstruction, not item-level slicing.
+        """
+        if str(getattr(self, "_model_type", "") or "").lower() != "muse_glimmer":
+            return None
+        if cached_tokens <= 0 or cached_tokens > len(token_ids):
+            return None
+        if not self._media_prefix_cache_allowed(request, token_ids):
+            return None
+
+        scope = getattr(request, "_media_cache_scope", None) or {}
+        if scope.get("mode") != "per_media_placeholder":
+            return None
+        modalities = [str(value).lower() for value in scope.get("modalities") or []]
+        raw_ranges = scope.get("item_ranges") or []
+        ranges: List[Tuple[int, int]] = []
+        for raw in raw_ranges:
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                return None
+            try:
+                start, end = int(raw[0]), int(raw[1])
+            except (TypeError, ValueError):
+                return None
+            if start < 0 or end <= start or end > len(token_ids):
+                return None
+            ranges.append((start, end))
+        if not ranges or len(ranges) != len(modalities):
+            return None
+        if any(modality not in {"image", "video"} for modality in modalities):
+            return None
+
+        removed = 0
+        for start, end in ranges:
+            if start < cached_tokens < end:
+                return None
+            if end <= cached_tokens:
+                removed += 1
+                continue
+            if start < cached_tokens:
+                return None
+            break
+        if removed <= 0 or removed >= len(ranges):
+            return None
+        if any(end <= cached_tokens for start, end in ranges[removed:]):
+            return None
+
+        extra_kwargs = getattr(request, "extra_kwargs", None)
+        if not isinstance(extra_kwargs, dict):
+            return None
+        grids = _mllm_grid_rows(extra_kwargs.get("grid_thw"))
+        if grids is None or len(grids) != len(ranges):
+            return None
+        pixel_values = getattr(request, "pixel_values", None)
+        if (
+            pixel_values is None
+            or getattr(request, "video_pixel_values", None) is not None
+        ):
+            return None
+        spans = [grid_t * grid_h * grid_w for grid_t, grid_h, grid_w in grids]
+        try:
+            physical_rows = int(pixel_values.shape[0])
+        except Exception:
+            return None
+        if sum(spans) != physical_rows:
+            return None
+
+        wrapper_call = getattr(self.model, "__call__", None)
+        wrapper_names = _named_params(wrapper_call) if wrapper_call else set()
+        language_call = getattr(self.language_model, "__call__", None)
+        language_names = _named_params(language_call) if language_call else set()
+        if not (
+            callable(getattr(self.model, "get_input_embeddings", None))
+            and {"input_ids", "pixel_values", "cache"}.issubset(wrapper_names)
+            and "cache" in language_names
+            and _media_embed_kwarg_name(self.language_model) is not None
+        ):
+            return None
+
+        raw_cut = sum(spans[:removed])
+        kept_grids = grids[removed:]
+        kept_modalities = modalities[removed:]
+        request.pixel_values = pixel_values[raw_cut:]
+        extra_kwargs["grid_thw"] = kept_grids
+        request.image_grid_thw = (
+            mx.array(
+                [
+                    grid
+                    for grid, modality in zip(kept_grids, kept_modalities)
+                    if modality == "image"
+                ],
+                dtype=mx.int32,
+            )
+            if "image" in kept_modalities
+            else None
+        )
+        request.video_grid_thw = (
+            mx.array(
+                [
+                    grid
+                    for grid, modality in zip(kept_grids, kept_modalities)
+                    if modality == "video"
+                ],
+                dtype=mx.int32,
+            )
+            if "video" in kept_modalities
+            else None
+        )
+        return {
+            "kind": "muse_prompt_ordered_media_items",
+            "removed_items": removed,
+            "remaining_items": len(kept_grids),
+            "removed_raw_patch_rows": raw_cut,
+            "remaining_raw_patch_rows": physical_rows - raw_cut,
+        }
 
     def _turn_peak_walk_admit(
         self, final_ctx: int, request: "MLLMBatchRequest | None" = None
@@ -10741,11 +11054,22 @@ class MLLMBatchGenerator:
                                                 )
                                                 or 0
                                             )
+                                            _media_tail = None
                                             if self._supports_pure_text_prefix_with_media_tail(
-                                                req,
-                                                list(token_list),
-                                                _hit_tokens,
+                                                req, list(token_list), _hit_tokens
                                             ):
+                                                _media_tail = {
+                                                    "kind": "pure_text_before_first_placeholder"
+                                                }
+                                            else:
+                                                _media_tail = (
+                                                    self._prepare_muse_media_tail_for_cache_hit(
+                                                        req,
+                                                        list(token_list),
+                                                        _hit_tokens,
+                                                    )
+                                                )
+                                            if _media_tail is not None:
                                                 req.input_ids = mx.array(
                                                     [_full_remaining]
                                                 )
@@ -10758,22 +11082,29 @@ class MLLMBatchGenerator:
                                                 _cache_execution.update(
                                                     {
                                                         "media_tail_reencoded": True,
-                                                        "media_tail_prefix_kind": (
-                                                            "pure_text_before_first_placeholder"
-                                                        ),
+                                                        "media_tail_prefix_kind": _media_tail[
+                                                            "kind"
+                                                        ],
+                                                    }
+                                                )
+                                                _cache_execution.update(
+                                                    {
+                                                        key: value
+                                                        for key, value in _media_tail.items()
+                                                        if key != "kind"
                                                     }
                                                 )
                                                 req._cache_execution = dict(
                                                     _cache_execution
                                                 )
                                                 logger.info(
-                                                    "VLM pure-text prefix HIT for %s: "
+                                                    "VLM media-tail prefix HIT for %s: "
                                                     "%d cached tokens, forwarding %d-token "
-                                                    "tail with all media payloads for fresh "
-                                                    "embedding",
+                                                    "tail via %s for fresh embedding",
                                                     req.request_id,
                                                     _hit_tokens,
                                                     len(_full_remaining),
+                                                    _media_tail["kind"],
                                                 )
                                             else:
                                                 self._discard_request_cache_hit(

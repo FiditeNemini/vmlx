@@ -46,6 +46,62 @@ def test_processor_direct_bypasses_noncallable_process_attr():
     assert out["text"] == "look"
 
 
+def test_processor_direct_threads_timestamps_only_to_explicit_native_contract():
+    """Muse timestamp metadata must not leak through unrelated **kwargs processors."""
+    from vmlx_engine.mllm_batch_generator import _call_processor_direct
+
+    generic_kwargs = {}
+    muse_kwargs = {}
+
+    class GenericProcessor:
+        def __call__(self, **kwargs):
+            generic_kwargs.update(kwargs)
+            return {"input_ids": [[1]]}
+
+    class MuseProcessor:
+        def __call__(
+            self,
+            *,
+            text,
+            padding,
+            return_tensors,
+            add_special_tokens,
+            videos,
+            fps,
+            video_timestamps,
+        ):
+            muse_kwargs.update(
+                {
+                    "videos": videos,
+                    "fps": fps,
+                    "video_timestamps": video_timestamps,
+                }
+            )
+            return {"input_ids": [[1]]}
+
+    timestamps = [[0.0, 0.5, 1.0, 1.5]]
+    video_payload = object()
+    common = {
+        "prompts": "watch",
+        "images": None,
+        "videos": [video_payload],
+        "video_fps": [2.0],
+        "video_timestamps": timestamps,
+        "add_special_tokens": False,
+    }
+
+    _call_processor_direct(GenericProcessor(), **common)
+    _call_processor_direct(MuseProcessor(), **common)
+
+    assert generic_kwargs["fps"] == [2.0]
+    assert "video_timestamps" not in generic_kwargs
+    assert muse_kwargs == {
+        "videos": [video_payload],
+        "fps": [2.0],
+        "video_timestamps": timestamps,
+    }
+
+
 class TestProcessorRoutingDecision:
     """vmlx#145 hardening: route around mlx_vlm.process_inputs's TokenizerWrapper trap.
 

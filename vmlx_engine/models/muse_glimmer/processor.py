@@ -2,23 +2,18 @@
 """Muse Glimmer image/video preprocessing.
 
 The shipped bundles name ``MuseGlimmerProcessor`` / ``MuseGlimmerImageProcessor``
-/ ``MuseGlimmerVideoProcessor`` in ``processor_config.json``. Those classes exist
-in neither transformers nor mlx-vlm, so ``AutoProcessor`` silently degrades to a
-TEXT-ONLY processor: it returns ``input_ids`` and nothing else, the chat
-template's single ``<|patch|>`` is never expanded, and the model answers from the
-text alone while confabulating a description of an image it never received.
-That failure is completely silent — no exception, no warning.
+/ ``MuseGlimmerVideoProcessor`` in ``processor_config.json``. Those classes are
+newer than the pinned runtime's transformers/mlx-vlm packages, so
+``AutoProcessor`` degrades to a text-only processor unless vMLX registers this
+source-owned implementation.
 
-Ground truth is the working Swift port,
-``vmlx-swift/Libraries/MLXVLM/Models/MuseGlimmerProcessor.swift``.
-
-Two values the bundle declares and Swift does NOT implement are honoured here,
-because Swift's omission is a bug rather than a contract: ``num_frames`` (96)
-caps sampled frames, and ``max_video_frame_tokens`` (144) sizes video frames.
-Without them a long clip is sized by the 4096-token IMAGE budget and blows the
-context.
+Ground truth is the exact bundle sidecar plus the upstream Transformers Muse
+implementation at revision ``c7e57f79348480f73d3ef0ad8c47f807ef1378c8``.
+In particular, native image spans carry image-start/end delimiters and native
+video spans carry timestamps and one placeholder run per temporal group.
 """
 
+import itertools
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -59,41 +54,38 @@ class MuseGlimmerImageProcessor:
     def smart_resize(
         self, height: int, width: int, max_tokens: Optional[int] = None
     ) -> Tuple[int, int]:
-        """Snap each side to a multiple of ``patch*merge`` under a token budget.
-
-        Both sides are snapped INDEPENDENTLY, so aspect ratio is preserved only
-        approximately — that is the reference behaviour, not an oversight.
-        """
+        """Match the native aspect-ratio search under the merged-token budget."""
         factor = self.factor
         budget = self.max_image_tokens if max_tokens is None else int(max_tokens)
-        max_pixels = budget * factor * factor
-        min_pixels = factor * factor
-
-        if height < factor or width < factor:
+        if height <= 0 or width <= 0 or budget <= 0:
             raise ValueError(
-                f"Muse Glimmer: image {height}x{width} is smaller than one merge "
-                f"block ({factor}x{factor})."
-            )
-        if max(height, width) // min(height, width) > 200:
-            raise ValueError(
-                f"Muse Glimmer: aspect ratio of {height}x{width} exceeds 200:1."
+                "Muse Glimmer: height, width and token budget must be positive."
             )
 
-        h_bar = max(factor, int(round(height / factor)) * factor)
-        w_bar = max(factor, int(round(width / factor)) * factor)
-
-        if h_bar * w_bar > max_pixels:
-            beta = math.sqrt((height * width) / max_pixels)
-            h_bar = int(math.floor(height / beta / factor)) * factor
-            w_bar = int(math.floor(width / beta / factor)) * factor
-        elif h_bar * w_bar < min_pixels:
-            beta = math.sqrt(min_pixels / (height * width))
-            h_bar = int(math.ceil(height * beta / factor)) * factor
-            w_bar = int(math.ceil(width * beta / factor)) * factor
-
-        h_bar = max(factor, (h_bar // factor) * factor)
-        w_bar = max(factor, (w_bar // factor) * factor)
-        return h_bar, w_bar
+        ideal_h = height / factor
+        ideal_w = width / factor
+        ratio = ideal_w / ideal_h if ideal_h > 0 else 1.0
+        if ideal_h * ideal_w > budget:
+            ideal_h = math.sqrt(budget / ratio)
+            ideal_w = ideal_h * ratio
+        candidates = set(
+            itertools.product(
+                (math.floor(ideal_h), math.ceil(ideal_h)),
+                (math.floor(ideal_w), math.ceil(ideal_w)),
+            )
+        )
+        candidates = {
+            (grid_h, grid_w)
+            for grid_h, grid_w in candidates
+            if grid_h >= 1 and grid_w >= 1 and grid_h * grid_w <= budget
+        }
+        if not candidates:
+            candidates = {(max(1, round(ideal_h)), max(1, round(ideal_w)))}
+        grid_h, grid_w = min(
+            candidates,
+            key=lambda grid: abs(grid[0] / grid[1] - height / width),
+        )
+        return grid_h * factor, grid_w * factor
 
     # ---- pixels -----------------------------------------------------------
 
@@ -152,7 +144,7 @@ class MuseGlimmerImageProcessor:
 
         image = self._as_pil(image)
         image = image.convert("RGB").resize(
-            (size[1], size[0]), resample=Image.Resampling.BICUBIC
+            (size[1], size[0]), resample=Image.Resampling.LANCZOS
         )
         arr = np.asarray(image, dtype=np.float32) * self.rescale_factor
         arr = arr.transpose(2, 0, 1)
@@ -362,6 +354,118 @@ class MuseGlimmerProcessor:
         self.video_processor = video_processor or MuseGlimmerVideoProcessor()
         self.image_token_id = int(image_token_id)
         self.video_token_id = int(video_token_id)
+        self.image_start_token_id = self._single_token_id(
+            "<|image_start|>", 200080
+        )
+        self.image_end_token_id = self._single_token_id("<|image_end|>", 200081)
+        self.video_start_token_id = self._single_token_id("<|vid_start|>", 200082)
+        self.video_end_token_id = self._single_token_id("<|vid_end|>", 200083)
+        self.video_separator_token_id = self._single_token_id(
+            "<|vid_frame_separator|>", 200087
+        )
+
+    def _single_token_id(self, token: str, fallback: int) -> int:
+        convert = getattr(self.tokenizer, "convert_tokens_to_ids", None)
+        if callable(convert):
+            try:
+                value = convert(token)
+                if isinstance(value, int) and value >= 0:
+                    return value
+            except Exception:
+                pass
+        try:
+            encoded = self.tokenizer.encode(token, add_special_tokens=False)
+            if hasattr(encoded, "tolist"):
+                encoded = encoded.tolist()
+            if isinstance(encoded, (list, tuple)) and len(encoded) == 1:
+                return int(encoded[0])
+        except Exception:
+            pass
+        return int(fallback)
+
+    def _encode_fragment(self, text: str) -> List[int]:
+        encoded = self.tokenizer.encode(text, add_special_tokens=False)
+        if hasattr(encoded, "tolist"):
+            encoded = encoded.tolist()
+        if not isinstance(encoded, (list, tuple)):
+            raise TypeError(
+                "Muse Glimmer tokenizer returned a non-sequence for video timestamp text."
+            )
+        return [int(value) for value in encoded]
+
+    @staticmethod
+    def _media_value(values: Any, index: int, default: Any = None) -> Any:
+        if values is None:
+            return default
+        if isinstance(values, (list, tuple)):
+            if not values:
+                return default
+            # A flat numeric list is one video's per-frame timestamp sequence.
+            if index == 0 and all(isinstance(value, (int, float)) for value in values):
+                return values
+            return values[index] if index < len(values) else default
+        return values if index == 0 else default
+
+    def _video_group_timestamps(
+        self,
+        *,
+        video_index: int,
+        frame_count: int,
+        grid_t: int,
+        fps: Any,
+        video_timestamps: Any,
+    ) -> List[float]:
+        raw = self._media_value(video_timestamps, video_index)
+        if raw is not None:
+            try:
+                timestamps = [float(value) for value in raw]
+            except (TypeError, ValueError):
+                timestamps = []
+        else:
+            timestamps = []
+        if not timestamps:
+            rate = self._media_value(fps, video_index, self.video_processor.fps)
+            try:
+                rate = float(rate)
+            except (TypeError, ValueError):
+                rate = float(self.video_processor.fps)
+            rate = rate if rate > 0 else float(self.video_processor.fps)
+            timestamps = [index / rate for index in range(frame_count)]
+
+        grouped = timestamps[:: self.video_processor.temporal_patch_size][:grid_t]
+        while len(grouped) < grid_t:
+            grouped.append(grouped[-1] if grouped else 0.0)
+        return grouped
+
+    def _image_replacement(self, grid: Tuple[int, int, int]) -> List[int]:
+        return (
+            [self.image_start_token_id]
+            + [self.image_token_id]
+            * merged_token_count(grid, self.image_processor.merge_size)
+            + [self.image_end_token_id]
+        )
+
+    def _video_replacement(
+        self,
+        grid: Tuple[int, int, int],
+        timestamps: Sequence[float],
+    ) -> List[int]:
+        grid_t, grid_h, grid_w = (int(value) for value in grid)
+        tokens_per_group = (
+            (grid_h // self.video_processor.merge_size)
+            * (grid_w // self.video_processor.merge_size)
+        )
+        output = [self.video_start_token_id]
+        for group in range(grid_t):
+            timestamp = timestamps[group] if group < len(timestamps) else 0.0
+            output.extend(self._encode_fragment(f"Time: {timestamp:.1f}s"))
+            output.extend([self.video_token_id] * tokens_per_group)
+            output.append(
+                self.video_separator_token_id
+                if group < grid_t - 1
+                else self.video_end_token_id
+            )
+        return output
 
     # ---- delegation -------------------------------------------------------
 
@@ -381,7 +485,16 @@ class MuseGlimmerProcessor:
 
     # ---- the call mlx-vlm makes ------------------------------------------
 
-    def __call__(self, text=None, images=None, videos=None, return_tensors=None, **kwargs):
+    def __call__(
+        self,
+        text=None,
+        images=None,
+        videos=None,
+        return_tensors=None,
+        fps=None,
+        video_timestamps=None,
+        **kwargs,
+    ):
         if isinstance(text, (list, tuple)):
             if len(text) != 1:
                 raise ValueError("Muse Glimmer processor handles one prompt at a time.")
@@ -399,44 +512,63 @@ class MuseGlimmerProcessor:
         original_ids = list(ids)
         image_items: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
         video_items: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
+        video_group_timestamps: List[List[float]] = []
         image_grids: List[Tuple[int, int, int]] = []
         video_grids: List[Tuple[int, int, int]] = []
         if images:
             patches, image_grids = self.image_processor(images)
             image_items = _split_patches_by_grid(patches, image_grids)
-            ids = expand_media_placeholders(
-                ids, image_grids, self.image_token_id, self.image_processor.merge_size
-            )
         if videos:
-            for frames in _as_video_sequences(videos):
+            for video_index, frames in enumerate(_as_video_sequences(videos)):
                 patches, grids = self.video_processor(frames)
                 video_grids.extend(grids)
                 video_items.extend(_split_patches_by_grid(patches, grids))
-            ids = expand_media_placeholders(
-                ids, video_grids, self.video_token_id, self.image_processor.merge_size
-            )
+                if len(grids) != 1:
+                    raise ValueError(
+                        "Muse Glimmer: one video payload must produce exactly one grid."
+                    )
+                video_group_timestamps.append(
+                    self._video_group_timestamps(
+                        video_index=video_index,
+                        frame_count=len(frames),
+                        grid_t=int(grids[0][0]),
+                        fps=fps,
+                        video_timestamps=video_timestamps,
+                    )
+                )
 
         image_queue = list(image_items)
         video_queue = list(video_items)
+        video_time_queue = list(video_group_timestamps)
         ordered_media: List[Tuple[np.ndarray, Tuple[int, int, int]]] = []
+        expanded_ids: List[int] = []
         for token_id in original_ids:
             if token_id == self.image_token_id:
                 if not image_queue:
                     raise ValueError(
                         "Muse Glimmer: image placeholder has no matching image payload."
                     )
-                ordered_media.append(image_queue.pop(0))
+                item = image_queue.pop(0)
+                ordered_media.append(item)
+                expanded_ids.extend(self._image_replacement(item[1]))
             elif token_id == self.video_token_id:
-                if not video_queue:
+                if not video_queue or not video_time_queue:
                     raise ValueError(
                         "Muse Glimmer: video placeholder has no matching video payload."
                     )
-                ordered_media.append(video_queue.pop(0))
-        if image_queue or video_queue:
+                item = video_queue.pop(0)
+                ordered_media.append(item)
+                expanded_ids.extend(
+                    self._video_replacement(item[1], video_time_queue.pop(0))
+                )
+            else:
+                expanded_ids.append(int(token_id))
+        if image_queue or video_queue or video_time_queue:
             raise ValueError(
                 "Muse Glimmer: media payload count exceeds prompt placeholders "
                 f"(images={len(image_queue)}, videos={len(video_queue)} unmatched)."
             )
+        ids = expanded_ids
         if ordered_media:
             ordered_patches = [patches for patches, _grid in ordered_media]
             out["pixel_values"] = (

@@ -385,6 +385,107 @@ def test_step_media_cache_groups_adaptive_patch_runs_per_source_item():
     )
 
 
+def test_muse_video_extension_preserves_earlier_image_media_scope():
+    """Timestamped video runs salt only the new clip's causal descendants."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.cache_key import (
+        CACHE_EXTRA_SCOPES_KEY,
+        cache_extra_keys_for_token_range,
+    )
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "muse_glimmer"
+    generator.model = SimpleNamespace(
+        config=SimpleNamespace(image_token_id=200092, video_token_id=200091)
+    )
+    generator.language_model = SimpleNamespace(config=None)
+
+    shared = {
+        "images": ["flower.jpg"],
+        "audio": None,
+        "audios": None,
+        "image_token_budget": None,
+        "image_grid_thw": [[1, 2, 2]],
+        "audio_codes": None,
+        "audio_embeds": None,
+        "audio_features": None,
+        "audio_features_mask": None,
+        "pixel_values": None,
+        "pixel_values_videos": None,
+        "video_pixel_values": None,
+    }
+    image_request = SimpleNamespace(
+        **shared,
+        videos=None,
+        video_grid_thw=None,
+    )
+    extension_request = SimpleNamespace(
+        **shared,
+        videos=["redgreen.mp4"],
+        video_grid_thw=[[2, 2, 2]],
+        video_fps=2.0,
+        video_max_frames=12,
+    )
+
+    image_tokens = [1, 200092, 200092, 2, 3]
+    extension_tokens = [
+        1,
+        200092,
+        200092,
+        2,
+        3,
+        4,
+        200091,
+        200091,
+        5,
+        6,
+        200091,
+        200091,
+        7,
+    ]
+    image_scoped = generator._media_scoped_cache_extra_keys(
+        image_request, image_tokens
+    )
+    extension_scoped = generator._media_scoped_cache_extra_keys(
+        extension_request, extension_tokens
+    )
+
+    assert image_request._media_cache_scope == {
+        "mode": "per_media_placeholder",
+        "items": 1,
+        "modalities": ["image"],
+        "boundaries": [1],
+        "item_ranges": [[1, 3]],
+        "placeholder_runs": 1,
+        "run_group_sizes": [1],
+    }
+    assert extension_request._media_cache_scope == {
+        "mode": "per_media_placeholder",
+        "items": 2,
+        "modalities": ["image", "video"],
+        "boundaries": [1, 6],
+        "item_ranges": [[1, 3], [6, 12]],
+        "placeholder_runs": 3,
+        "run_group_sizes": [1, 2],
+    }
+    assert image_scoped[CACHE_EXTRA_SCOPES_KEY] == {"mllm_media_0000": 1}
+    assert extension_scoped[CACHE_EXTRA_SCOPES_KEY] == {
+        "mllm_media_0000": 1,
+        "mllm_media_0001": 6,
+    }
+    assert cache_extra_keys_for_token_range(image_scoped, 1, 3) == (
+        cache_extra_keys_for_token_range(extension_scoped, 1, 3)
+    )
+    assert cache_extra_keys_for_token_range(image_scoped, 3, 5) == (
+        cache_extra_keys_for_token_range(extension_scoped, 3, 5)
+    )
+    assert cache_extra_keys_for_token_range(extension_scoped, 6, 12) != (
+        cache_extra_keys_for_token_range(image_scoped, 3, 5)
+    )
+
+
 def test_paged_cache_schema_version_tracks_tool_and_rotating_contracts():
     from vmlx_engine.prefix_cache import PAGED_CACHE_SCHEMA_VERSION
 

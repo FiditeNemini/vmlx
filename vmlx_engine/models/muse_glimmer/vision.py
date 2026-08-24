@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Muse Glimmer vision tower and adapter.
 
-Ground truth is the working Swift port,
-``vmlx-swift/Libraries/MLXVLM/Models/MuseGlimmerVision.swift``.
+Ground truth is the exact bundle geometry plus the upstream Transformers Muse
+implementation at revision ``c7e57f79348480f73d3ef0ad8c47f807ef1378c8``.
 
 Read off the checkpoint, and deliberately NOT modelled on the in-tree Qwen-VL
 tower, which differs in every one of these respects:

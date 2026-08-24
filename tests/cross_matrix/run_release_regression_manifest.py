@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -28,6 +32,7 @@ from tests.cross_matrix.release_regression_manifest import (
 DEFAULT_OUT = Path(
     "build/current-release-regression-manifest-after-pr-intake-matrix-refresh-20260609.json"
 )
+GIT = Path("/usr/bin/git")
 PREPACKAGE_ALLOWED_BLOCKERS = {
     "packaged_app_developer_id_signing_blocked",
     "installed_app_runtime_parity_audit",
@@ -54,6 +59,174 @@ PREPACKAGE_ALLOWED_BLOCKERS = {
     "issue176_live_memory_pressure_open",
     "issue177_live_ttft_paged_turboquant_open",
 }
+
+
+def _git_output(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        [str(GIT), "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git failed"
+        raise RuntimeError(detail)
+    return result.stdout.strip()
+
+
+def _canonical_github_identity(remote_url: str) -> str | None:
+    normalized = remote_url.strip()
+    match = re.fullmatch(
+        r"git@github\.com:([^/:\s]+/[^/:\s]+?)(?:\.git)?",
+        normalized,
+        re.IGNORECASE,
+    )
+    if match is not None:
+        return match.group(1).lower()
+    try:
+        parsed = urlsplit(normalized)
+    except ValueError:
+        return None
+    path = re.sub(r"\.git$", "", parsed.path.strip("/"), flags=re.IGNORECASE)
+    https_ok = (
+        parsed.scheme.lower() == "https"
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.port is None
+    )
+    ssh_ok = (
+        parsed.scheme.lower() == "ssh"
+        and parsed.username == "git"
+        and parsed.password is None
+        and parsed.port is None
+    )
+    if (
+        not (https_ok or ssh_ok)
+        or (parsed.hostname or "").lower() != "github.com"
+        or parsed.query
+        or parsed.fragment
+        or re.fullmatch(r"[^/:\s]+/[^/:\s]+", path) is None
+    ):
+        return None
+    return path.lower()
+
+
+def _repository_release_provenance(
+    repo: Path,
+    *,
+    expected_identity: str,
+    failures: list[str],
+) -> dict[str, str]:
+    try:
+        root = Path(_git_output(repo, "rev-parse", "--show-toplevel")).resolve()
+        commit = _git_output(root, "rev-parse", "HEAD")
+        tree = _git_output(root, "rev-parse", "HEAD^{tree}")
+        upstream = _git_output(root, "rev-parse", "@{upstream}")
+        status = _git_output(
+            root,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        )
+        remote_url = _git_output(root, "remote", "get-url", "origin")
+        remote_identity = _canonical_github_identity(remote_url)
+        remote_line = _git_output(
+            root,
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            "refs/heads/main",
+        )
+        remote_main = remote_line.split()[0] if remote_line else ""
+    except (OSError, RuntimeError, IndexError) as exc:
+        failures.append(f"{expected_identity} provenance could not be read: {exc}")
+        return {}
+    if status:
+        failures.append(f"{expected_identity} release source is dirty")
+    if remote_identity != expected_identity:
+        failures.append(
+            f"{expected_identity} canonical origin mismatch: {remote_identity!r}"
+        )
+    if commit != upstream:
+        failures.append(f"{expected_identity} HEAD is not its pushed upstream")
+    if commit != remote_main:
+        failures.append(f"{expected_identity} HEAD is not public origin/main")
+    for label, value in (
+        ("commit", commit),
+        ("tree", tree),
+        ("upstream", upstream),
+        ("origin/main", remote_main),
+    ):
+        if re.fullmatch(r"[0-9a-f]{40}", value) is None:
+            failures.append(f"{expected_identity} {label} is not a full Git object ID")
+    return {
+        "commit": commit,
+        "tree": tree,
+        "upstream_commit": upstream,
+        "remote_main_commit": remote_main,
+        "remote_identity": remote_identity or "",
+    }
+
+
+def collect_production_provenance(
+    root: Path,
+    *,
+    expected_version: str,
+    jang_source: Path,
+) -> tuple[dict[str, dict[str, str] | str], list[str]]:
+    failures: list[str] = []
+    source = _repository_release_provenance(
+        root,
+        expected_identity="jjang-ai/vmlx",
+        failures=failures,
+    )
+    jang = _repository_release_provenance(
+        jang_source,
+        expected_identity="jjang-ai/jangq",
+        failures=failures,
+    )
+    try:
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        source_version = str(project["project"]["version"])
+        jang_specs = [
+            value
+            for value in project["project"]["dependencies"]
+            if isinstance(value, str) and value.startswith("jang>=")
+        ]
+        for extra in ("jang", "mxtq"):
+            jang_specs.extend(
+                value
+                for value in project["project"]["optional-dependencies"][extra]
+                if isinstance(value, str) and value.startswith("jang>=")
+            )
+        if len(jang_specs) != 3 or len(set(jang_specs)) != 1:
+            raise ValueError("vMLX JANG dependency floors do not agree")
+        required_jang_version = jang_specs[0].removeprefix("jang>=")
+        jang_project = tomllib.loads(
+            (jang_source / "pyproject.toml").read_text(encoding="utf-8")
+        )
+        jang_version = str(jang_project["project"]["version"])
+    except (KeyError, OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        failures.append(f"release version provenance could not be read: {exc}")
+        source_version = ""
+        required_jang_version = ""
+        jang_version = ""
+    if source_version != expected_version:
+        failures.append(
+            f"vMLX version {source_version!r} does not match expected "
+            f"{expected_version!r}"
+        )
+    if jang_version != required_jang_version:
+        failures.append(
+            f"JANG source version {jang_version!r} does not match vMLX floor "
+            f"{required_jang_version!r}"
+        )
+    jang["version"] = jang_version
+    return {
+        "version": source_version,
+        "source": source,
+        "jang": jang,
+    }, failures
 
 
 def release_clearance_from_proof_sweep(current_proof_sweep: dict) -> dict:
@@ -193,6 +366,9 @@ def build_manifest_artifact(
     require_current_proof_sweep: bool = False,
     require_release_ready: bool = False,
     require_prepackage_ready: bool = False,
+    require_production_provenance: bool = False,
+    expected_version: str | None = None,
+    jang_source: Path | None = None,
 ) -> dict:
     manifest = build_manifest()
     manifest["current_proof_sweep"] = validate_current_proof_sweep_artifacts(root)
@@ -222,6 +398,23 @@ def build_manifest_artifact(
     prepackage_not_ready = (
         require_prepackage_ready and not manifest["prepackage_ready"]
     )
+    provenance_failures: list[str] = []
+    if require_production_provenance:
+        if expected_version is None or jang_source is None:
+            provenance_failures.append(
+                "production provenance requires expected_version and jang_source"
+            )
+        else:
+            provenance, provenance_failures = collect_production_provenance(
+                root,
+                expected_version=expected_version,
+                jang_source=jang_source,
+            )
+            manifest.update(provenance)
+        manifest["production_provenance"] = {
+            "status": "pass" if not provenance_failures else "fail",
+            "failures": provenance_failures,
+        }
     manifest["status"] = (
         "fail"
         if (
@@ -229,6 +422,7 @@ def build_manifest_artifact(
             and not proof_sweep_failure_allowed_for_release
             or release_not_ready
             or prepackage_not_ready
+            or provenance_failures
         )
         else "pass"
     )
@@ -253,6 +447,13 @@ def main() -> int:
         action="store_true",
         help="Exit nonzero unless current proof sweep passes and only packaging/signing blockers remain.",
     )
+    parser.add_argument(
+        "--require-production-provenance",
+        action="store_true",
+        help="Require clean pushed canonical vMLX/JANG origin/main provenance.",
+    )
+    parser.add_argument("--expected-version")
+    parser.add_argument("--jang-source", type=Path)
     args = parser.parse_args()
 
     manifest = build_manifest_artifact(
@@ -260,6 +461,9 @@ def main() -> int:
         require_current_proof_sweep=args.require_current_proof_sweep,
         require_release_ready=args.require_release_ready,
         require_prepackage_ready=args.require_prepackage_ready,
+        require_production_provenance=args.require_production_provenance,
+        expected_version=args.expected_version,
+        jang_source=args.jang_source,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")

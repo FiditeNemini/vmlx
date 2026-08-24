@@ -492,7 +492,7 @@ def test_r20_release_driver_plan_is_sealed_before_bound_actions():
     assert replace_idx < seal_idx < digest_idx
 
 
-def test_r20_release_builder_reuses_consumed_v5_checks_without_rerunning_suites():
+def test_r20_release_builder_reuses_retained_prepackage_checks_without_rerunning_suites():
     script = Path("panel/scripts/build-release-dmgs.sh").read_text()
     start = script.index(
         'echo "==> Reinstalling exact panel dependencies from package-lock.json"'
@@ -505,11 +505,11 @@ def test_r20_release_builder_reuses_consumed_v5_checks_without_rerunning_suites(
     assert "run_toolchain_action npm test" not in production_gate
     assert "run_toolchain_action npm run typecheck" not in production_gate
     assert (
-        "Reusing exact-head V5 Python, panel, typecheck, and production-build evidence"
+        "Reusing exact-head retained prepackage evidence"
         in production_gate
     )
     assert (
-        'assert_r20_source_identity "after exact-head V5 check reuse"'
+        'assert_r20_source_identity "after retained prepackage evidence reuse"'
         in production_gate
     )
 

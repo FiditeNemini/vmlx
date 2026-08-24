@@ -794,10 +794,6 @@ case "$RELEASE_SCOPE" in
   r20_production)
     (
       cd "$ROOT_DIR"
-      if [[ -z "${VMLX_R20_RELEASE_ATTESTATION:-}" ]]; then
-        echo "ERROR: VMLX_R20_RELEASE_ATTESTATION must point to the external private release attestation" >&2
-        exit 1
-      fi
       if [[ -z "$PRIVATE_EVIDENCE_ROOT" ]]; then
         echo "ERROR: VMLX_R20_PRIVATE_EVIDENCE_ROOT must identify the external private evidence root" >&2
         exit 1
@@ -817,11 +813,15 @@ case "$RELEASE_SCOPE" in
           exit 1
         fi
       done
-      run_release_python "panel/scripts/scoped-release-preflight-20.py" \
-        --consume-v5-manifest \
+      if [[ -n "${VMLX_R20_RELEASE_ATTESTATION:-}" ]]; then
+        echo "ERROR: obsolete VMLX_R20_RELEASE_ATTESTATION is forbidden for the SSD-only release path" >&2
+        exit 1
+      fi
+      run_release_python "tests/cross_matrix/run_release_regression_manifest.py" \
+        --require-prepackage-ready \
+        --require-production-provenance \
         --expected-version "$VERSION" \
-        --manifest "$VMLX_R20_RELEASE_ATTESTATION" \
-        --private-evidence-root "$VMLX_R20_PRIVATE_EVIDENCE_ROOT" \
+        --jang-source "$VMLX_JANG_TOOLS_SOURCE" \
         --out "$PREPACKAGE_READY_MANIFEST_OUT"
     )
     ;;
@@ -1227,16 +1227,13 @@ if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
   echo "==> Reinstalling exact panel dependencies from package-lock.json"
   run_toolchain_action npm ci
   assert_r20_source_identity "after npm ci"
-  # The fail-closed V5 consumer above has already required exact source
-  # commit/tree identity and PASS rows for the complete Python suite, complete
-  # panel suite, typecheck, and production build. Re-running those suites here
-  # duplicates immutable evidence, adds environment-sensitive installed-app
-  # checks, and (before build_one refreshes bundled Python) can fail solely
-  # because a prior packaging bundle is stale. Package from the consumed
-  # exact-head evidence instead; a source change makes that manifest stale and
-  # is rejected before this point.
-  echo "==> Reusing exact-head V5 Python, panel, typecheck, and production-build evidence"
-  assert_r20_source_identity "after exact-head V5 check reuse"
+  # The fail-closed retained-evidence gate above requires prepackage clearance
+  # plus clean, pushed, canonical vMLX and JANG origin/main provenance. Running
+  # the heavy suites again here would duplicate immutable rows and can fail only
+  # because a prior packaging bundle is stale. A source or remote-main change
+  # invalidates the sealed manifest and is rejected before every build phase.
+  echo "==> Reusing exact-head retained prepackage evidence"
+  assert_r20_source_identity "after retained prepackage evidence reuse"
 fi
 
 is_macho_file() {

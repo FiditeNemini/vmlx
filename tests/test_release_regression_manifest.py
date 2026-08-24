@@ -14823,6 +14823,129 @@ def test_release_regression_manifest_runner_can_require_current_proof_sweep(tmp_
     assert artifact["current_proof_sweep"]["missing"]
 
 
+def test_release_regression_manifest_canonical_github_identity_is_fail_closed():
+    from tests.cross_matrix import run_release_regression_manifest as runner
+
+    assert (
+        runner._canonical_github_identity("https://github.com/jjang-ai/vmlx.git")
+        == "jjang-ai/vmlx"
+    )
+    assert (
+        runner._canonical_github_identity("git@github.com:jjang-ai/jangq.git")
+        == "jjang-ai/jangq"
+    )
+    assert (
+        runner._canonical_github_identity(
+            "https://token@github.com/jjang-ai/vmlx.git"
+        )
+        is None
+    )
+    assert (
+        runner._canonical_github_identity(
+            "https://github.com/jjang-ai/vmlx.git?ref=main"
+        )
+        is None
+    )
+
+
+def test_release_regression_manifest_production_repo_provenance_requires_main(
+    monkeypatch,
+):
+    from tests.cross_matrix import run_release_regression_manifest as runner
+
+    commit = "a" * 40
+    tree = "b" * 40
+    refs = {"main": commit}
+
+    def fake_git(_repo, *args):
+        mapping = {
+            ("rev-parse", "--show-toplevel"): "/private/tmp/release-source",
+            ("rev-parse", "HEAD"): commit,
+            ("rev-parse", "HEAD^{tree}"): tree,
+            ("rev-parse", "@{upstream}"): commit,
+            ("status", "--porcelain", "--untracked-files=all"): "",
+            ("remote", "get-url", "origin"): (
+                "https://github.com/jjang-ai/vmlx.git"
+            ),
+            (
+                "ls-remote",
+                "--exit-code",
+                "origin",
+                "refs/heads/main",
+            ): f"{refs['main']}\trefs/heads/main",
+        }
+        return mapping[args]
+
+    monkeypatch.setattr(runner, "_git_output", fake_git)
+    failures = []
+    provenance = runner._repository_release_provenance(
+        Path("/private/tmp/release-source"),
+        expected_identity="jjang-ai/vmlx",
+        failures=failures,
+    )
+
+    assert failures == []
+    assert provenance == {
+        "commit": commit,
+        "tree": tree,
+        "upstream_commit": commit,
+        "remote_main_commit": commit,
+        "remote_identity": "jjang-ai/vmlx",
+    }
+
+    refs["main"] = "c" * 40
+    failures = []
+    runner._repository_release_provenance(
+        Path("/private/tmp/release-source"),
+        expected_identity="jjang-ai/vmlx",
+        failures=failures,
+    )
+    assert failures == ["jjang-ai/vmlx HEAD is not public origin/main"]
+
+
+def test_release_regression_manifest_production_provenance_gates_manifest(
+    monkeypatch,
+    tmp_path,
+):
+    from tests.cross_matrix import run_release_regression_manifest as runner
+
+    monkeypatch.setattr(
+        runner,
+        "validate_current_proof_sweep_artifacts",
+        lambda _root: {
+            "status": "pass",
+            "regression_suite": {"status": "pass", "open_requirements": []},
+            "release_blocker_ledger": {"status": "pass", "blockers": []},
+        },
+    )
+    provenance = {
+        "version": "1.6.36",
+        "source": {"commit": "a" * 40},
+        "jang": {"commit": "b" * 40, "version": "2.5.46"},
+    }
+    monkeypatch.setattr(
+        runner,
+        "collect_production_provenance",
+        lambda *_args, **_kwargs: (provenance, []),
+    )
+
+    artifact = runner.build_manifest_artifact(
+        tmp_path,
+        require_prepackage_ready=True,
+        require_production_provenance=True,
+        expected_version="1.6.36",
+        jang_source=tmp_path / "jang-tools",
+    )
+
+    assert artifact["status"] == "pass"
+    assert artifact["production_provenance"] == {
+        "status": "pass",
+        "failures": [],
+    }
+    assert artifact["source"] == provenance["source"]
+    assert artifact["jang"] == provenance["jang"]
+
+
 def test_release_regression_manifest_runner_fails_when_current_proof_sweep_fails_by_default(
     monkeypatch,
     tmp_path,

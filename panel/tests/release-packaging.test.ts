@@ -1893,15 +1893,15 @@ describe("release packaging", () => {
     }
   });
 
-  it("feeds the completed V5 preflight manifest to the production build", () => {
+  it("feeds retained prepackage evidence and exact provenance to the production build", () => {
     const driver = readFileSync(
       join(repo, "scripts/build-release-dmgs.sh"),
       "utf8",
     );
-    expect(driver).toContain("--consume-v5-manifest");
-    expect(driver).toContain('--manifest "$VMLX_R20_RELEASE_ATTESTATION"');
-    expect(driver).not.toContain(
-      '--attestation "$VMLX_R20_RELEASE_ATTESTATION"',
-    );
+    expect(driver).toContain("--require-prepackage-ready");
+    expect(driver).toContain("--require-production-provenance");
+    expect(driver).toContain('--jang-source "$VMLX_JANG_TOOLS_SOURCE"');
+    expect(driver).toContain("obsolete VMLX_R20_RELEASE_ATTESTATION is forbidden");
+    expect(driver).not.toContain("--consume-v5-manifest");
   });
 });

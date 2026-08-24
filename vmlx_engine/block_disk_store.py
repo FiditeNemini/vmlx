@@ -386,13 +386,14 @@ class BlockDiskStore:
         self._pending_write_bytes = 0
         self._pending_write_byte_drops = 0
         # 4GB, up from 1GB: a single multiturn store burst on a big model is
-        # ~1GB of detached payloads (measured live: dots3-note, 220 blocks at
+        # ~1GB of queued payload buffers (measured live: dots3-note, 220 blocks at
         # ~14k tokens), which saturated the old budget exactly — the burst
         # TAIL then raced the sub-second admission wait against the writer's
         # multi-second drain and lost, and each dropped ancestor poisoned its
-        # descendants. The budget bounds transient HOST RAM (numpy copies
-        # awaiting the writer), not Metal, and per-turn bursts are bounded by
-        # the DELTA being stored, so 4GB holds a whole burst with margin.
+        # descendants. The budget bounds transient writer-owned bytes (read-only
+        # MLX-backed views or copied NumPy inputs), and per-turn bursts are
+        # bounded by the DELTA being stored, so 4GB holds a whole burst with
+        # margin.
         _pending_env = os.environ.get("VMLX_BLOCK_DISK_PENDING_WRITE_BYTES")
         try:
             _pending_default = (
@@ -432,9 +433,9 @@ class BlockDiskStore:
         self._ensure_read_conn()
 
         # Background writer thread
-        # Queue items contain either detached, read-only NumPy tensors awaiting
+        # Queue items contain either frozen, read-only NumPy buffers awaiting
         # CPU safetensors encoding or a lease-owned staged safetensors path.
-        # Live MLX arrays never cross the queue boundary:
+        # MLX-backed entries are evaluated; their memoryviews own the buffer:
         # ("__numpy_block__", block_hash, tensor_dict, dtype, num_layers,
         #  token_count, parent_hash, fence_id, reserved_bytes, replace_existing)
         # or
@@ -1218,7 +1219,7 @@ class BlockDiskStore:
             if amount > self._max_pending_write_bytes:
                 # OVERSIZED SINGLE PAYLOAD: admit EXCLUSIVELY instead of
                 # dropping outright. The budget bounds the AGGREGATE RAM of
-                # detached payloads awaiting the writer — a single payload
+                # frozen payloads awaiting the writer — a single payload
                 # larger than it (measured live: Laguna's 48-layer Mixed-SWA
                 # state at ~19k tokens brushes the 1GB default) can NEVER be
                 # written under a flat cap, which turns congestion control
@@ -1271,7 +1272,7 @@ class BlockDiskStore:
                 or self._pending_write_bytes + delta
                 > self._max_pending_write_bytes
             ):
-                # The estimate was admitted but the detached payload came out
+                # The estimate was admitted but the frozen payload came out
                 # larger than the budget allows alongside other writers. If
                 # this reservation is the ONLY thing pending, the exclusive-
                 # admission rule above applies to the resize too — dropping
@@ -1321,15 +1322,18 @@ class BlockDiskStore:
     def _detach_safetensors_tensors(
         tensors: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Copy a flat tensor map into immutable, CPU-owned NumPy arrays.
+        """Freeze a flat tensor map into immutable, CPU-readable NumPy arrays.
 
         MLX evaluation and unified-memory copies must remain on the
-        model-owning thread. The returned arrays have no live Metal dependency,
-        are C-contiguous, and cannot be mutated by the producer after enqueue.
-        BF16 is carried as its raw uint16 bits (NumPy has no bfloat16 dtype, but
-        it does not need one to move bytes). Block metadata records the original
-        dtype so restore can reinterpret them. Older blocks on disk hold f32 and
-        are still restored by casting -- see _restore_serialized_dtype.
+        model-owning thread. Evaluated, contiguous MLX block tensors cross the
+        queue as read-only NumPy views: their ``memoryview`` base owns the exact
+        per-block allocation until the writer finishes, without allocating a
+        second host image. Caller-owned NumPy inputs are still copied so later
+        producer mutation cannot change queued bytes. BF16 is carried as its
+        raw uint16 bits (NumPy has no bfloat16 dtype, but it does not need one
+        to move bytes). Block metadata records the original dtype so restore
+        can reinterpret it. Older blocks on disk hold f32 and are still
+        restored by casting -- see _restore_serialized_dtype.
         """
 
         import numpy as np
@@ -1370,9 +1374,13 @@ class BlockDiskStore:
         if pending_mlx:
             mx.eval(*(value for _, value in pending_mlx))
         for name, value in pending_mlx:
-            copied = np.array(value, copy=True, order="C")
-            copied.setflags(write=False)
-            detached[name] = copied
+            view = np.asarray(value)
+            if not view.flags.c_contiguous:
+                raise ValueError(
+                    f"materialized MLX tensor {name!r} is not C-contiguous"
+                )
+            view.setflags(write=False)
+            detached[name] = view
         return detached
 
     def _stage_numpy_safetensors_file(
@@ -1380,7 +1388,7 @@ class BlockDiskStore:
         block_hash: bytes,
         tensors: Dict[str, Any],
     ) -> Path:
-        """Encode detached NumPy tensors directly into a durable temp file.
+        """Encode immutable NumPy buffers directly into a durable temp file.
 
         ``safetensors.numpy.save`` builds a full aggregate Python ``bytes``
         image. Its ``save_file`` sibling avoids that aggregate but still calls
@@ -1948,17 +1956,18 @@ class BlockDiskStore:
         _registered: Optional[list] = None,
     ) -> bool:
         """
-        Detach a block on the model-owning thread and queue disk publication.
+        Freeze a block on the model-owning thread and queue disk publication.
 
         ALL MLX operations happen on the calling (main) thread:
         - Serialize cache_data to flat tensor dict
         - Materialize lazy arrays with mx.eval()
-        - Copy tensors into immutable CPU-owned NumPy arrays
+        - Expose each independent MLX block as an immutable NumPy memoryview
 
         The background thread performs CPU safetensors encoding and every
         filesystem operation: temporary write, fsync, atomic publish, SQLite
-        index/accounting, and eviction. No live MLX array crosses the queue
-        boundary.
+        index/accounting, and eviction. No lazy MLX operation crosses the queue
+        boundary; the NumPy ``memoryview`` owns the already-evaluated block
+        allocation until its file is staged.
 
         Args:
             block_hash: Chain hash (BlockHash bytes)
@@ -2093,8 +2102,9 @@ class BlockDiskStore:
 
         hash_hex = block_hash.hex()
 
-        # Flatten and detach on the calling/model-owning thread. The expensive
-        # CPU safetensors encoding runs on the background writer.
+        # Flatten and freeze on the calling/model-owning thread. The expensive
+        # CPU safetensors encoding runs on the background writer. MLX inputs
+        # stay zero-copy here; mutable NumPy inputs are independently snapped.
         try:
             tensors, dtype, num_layers = _serialize_block(cache_data)
             if num_layers == 0:
@@ -2115,7 +2125,7 @@ class BlockDiskStore:
             ):
                 self._write_fence_queue_result(fence_id, dropped=True)
                 logger.warning(
-                    "BlockDiskStore detached payload exceeded pending-write "
+                    "BlockDiskStore frozen payload exceeded pending-write "
                     "byte budget (%d bytes)",
                     self._max_pending_write_bytes,
                 )
@@ -2123,13 +2133,14 @@ class BlockDiskStore:
             reserved_bytes = detached_bytes
         except Exception as e:
             self._release_pending_write_bytes(reserved_bytes)
-            logger.debug(f"Pre-detach failed for block {hash_hex[:12]}: {e}")
+            logger.debug(f"Pre-freeze failed for block {hash_hex[:12]}: {e}")
             self._write_fence_queue_result(fence_id, failed=True)
             return False
 
-        # Queue only immutable CPU arrays. No MLX object is reachable from the
-        # item; the writer will replace this item with immutable bytes before
-        # taking the aggregate publication lock.
+        # Queue only immutable NumPy buffers. An MLX-backed view owns its
+        # evaluated per-block allocation through a memoryview; the writer never
+        # invokes MLX and replaces this item with a staged path before taking
+        # the aggregate publication lock.
         with self._stats_lock:
             # Increment before publication so a fast writer can never make
             # completed temporarily exceed queued in /health telemetry.
@@ -2426,7 +2437,8 @@ class BlockDiskStore:
                     self._complete_write_items(len(batch))
                     # _process_write_batch mutates data slots to None. Clear
                     # the outer list as well so this long-lived thread frame
-                    # cannot pin a completed batch between queue wakeups.
+                    # cannot pin completed NumPy/MLX-backed buffers between
+                    # queue wakeups.
                     batch.clear()
                     item = None
         finally:
@@ -2446,7 +2458,7 @@ class BlockDiskStore:
             self._write_inflight += original_batch_count
 
         # Encode in place. The caller owns this exact list, so replacing each
-        # NumPy item immediately is what releases its detached native tensors.
+        # NumPy item immediately is what releases its frozen native buffers.
         # Building a second ``prepared_batch`` kept the complete NumPy batch
         # alive while also accumulating a complete bytes batch: live Muse
         # publication consequently left ~820 MiB in MALLOC_LARGE (empty), and
@@ -2520,7 +2532,7 @@ class BlockDiskStore:
             finally:
                 # The list slot above is now the sole owner of a successful
                 # staged path. Drop loop locals before disk publication so no
-                # detached NumPy map survives alongside it.
+                # frozen NumPy map survives alongside it.
                 tensors = None
                 staged_path = None
                 item = None

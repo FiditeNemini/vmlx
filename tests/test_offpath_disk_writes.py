@@ -61,7 +61,7 @@ def test_full_cache_numpy_source_view_is_zero_copy_read_only_and_lifetime_safe()
         view[0] = 9
 
 
-def test_positional_store_source_uses_views_before_independent_block_detach():
+def test_positional_store_and_mlx_block_handoff_are_both_zero_copy():
     """Pin zero-copy full sources and immutable per-block writer ownership."""
 
     import inspect
@@ -75,7 +75,89 @@ def test_positional_store_source_uses_views_before_independent_block_detach():
     assert source.count("_readonly_numpy_buffer_view(v_np)") >= 2
 
     detach_source = inspect.getsource(BlockDiskStore._detach_safetensors_tensors)
+    assert "view = np.asarray(value)" in detach_source
+    assert 'np.array(value, copy=True, order="C")' not in detach_source
+    # Mutable NumPy callers still require an independent snapshot.
     assert 'np.array(array, copy=True, order="C")' in detach_source
+
+
+def test_block_disk_mlx_handoff_is_read_only_cross_thread_and_lifetime_safe():
+    """The writer view owns evaluated MLX bytes without a second allocation."""
+
+    source = mx.arange(4096, dtype=mx.float32)
+    mx.eval(source)
+    frozen = BlockDiskStore._detach_safetensors_tensors({"x": source})["x"]
+
+    assert frozen.flags.owndata is False
+    assert isinstance(frozen.base, memoryview)
+    assert frozen.flags.c_contiguous is True
+    assert frozen.flags.writeable is False
+    expected = np.array(frozen[-4:], copy=True)
+
+    del source
+    gc.collect()
+    observed: list[np.ndarray] = []
+    reader = threading.Thread(
+        target=lambda: observed.append(np.array(frozen[-4:], copy=True))
+    )
+    reader.start()
+    reader.join()
+
+    assert len(observed) == 1
+    np.testing.assert_array_equal(observed[0], expected)
+    with pytest.raises(ValueError, match="read-only"):
+        frozen[0] = 9
+
+
+def test_block_disk_numpy_handoff_remains_an_independent_snapshot():
+    """A mutable NumPy producer must not be able to rewrite queued bytes."""
+
+    source = np.arange(16, dtype=np.float32)
+    expected = source.copy()
+    frozen = BlockDiskStore._detach_safetensors_tensors({"x": source})["x"]
+
+    source[:] = -1
+    assert frozen.flags.owndata is True
+    assert frozen.flags.writeable is False
+    np.testing.assert_array_equal(frozen, expected)
+
+
+def test_ssd_only_store_clears_mlx_after_writer_fence(monkeypatch):
+    """Released writer views are cleared only after the disk fence settles."""
+
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    manager = object.__new__(BlockAwarePrefixCache)
+    events: list[str] = []
+    manager._shape_scoped_cache_extra_keys = (
+        lambda tokens, cache_extra_keys, *, stored_prompt_boundary: cache_extra_keys
+    )
+
+    def store_impl(
+        request_id,
+        tokens,
+        cache_data,
+        cache_type="assistant",
+        cache_extra_keys=None,
+        store_cumulative_state=True,
+        *,
+        _write_fence,
+    ):
+        events.append("store")
+        _write_fence["disk_only_fallbacks"] = {b"x" * 32: (None, None)}
+        return "stored"
+
+    def settle(_request_id, _write_fence):
+        events.append("settle")
+
+    manager._store_cache_impl = store_impl
+    manager._settle_native_write_fence = settle
+    monkeypatch.setattr(mx, "clear_cache", lambda: events.append("clear"))
+
+    result = BlockAwarePrefixCache.store_cache(manager, "req", [1], [])
+
+    assert result == "stored"
+    assert events == ["store", "settle", "clear"]
 
 
 def _wait_for_fence(

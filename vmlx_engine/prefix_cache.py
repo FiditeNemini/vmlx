@@ -1462,10 +1462,11 @@ def _readonly_numpy_buffer_view(obj):
     """Expose a materialized MLX buffer to NumPy without a full-size copy.
 
     ``BlockAwarePrefixCache.store_cache`` keeps the model-owned cache state
-    alive while it cuts independent per-block payloads.  Positional source K/V
-    tensors therefore only need a read-only CPU view at this stage; the block
-    disk store still performs its existing C-contiguous, immutable copy of each
-    exact block before handing it to the asynchronous writer.
+    alive while it cuts independent per-block payloads. Positional source K/V
+    tensors therefore only need a read-only CPU view at this stage. The block
+    slicer materializes each exact payload independently; the block-disk store
+    then queues evaluated MLX payloads as immutable NumPy memoryviews and copies
+    only caller-owned NumPy inputs.
 
     This distinction is material on macOS unified memory.  Measured on the
     shipping MLX stack, ``np.array`` of one 64 MiB F16 tensor raised process RSS
@@ -1473,7 +1474,8 @@ def _readonly_numpy_buffer_view(obj):
     ``np.asarray`` raised it by 0 KiB.  A NumPy ``memoryview`` base keeps the MLX
     buffer alive even when the temporary producer reference is a BF16-to-F32
     bridge array.  Marking the view read-only protects the live cache from
-    accidental NumPy mutation until the per-block detach owns its bytes.
+    accidental NumPy mutation until the independent per-block payload owns its
+    lifetime.
     """
 
     import numpy as np
@@ -2727,7 +2729,7 @@ class BlockAwarePrefixCache:
         minimax_m3: bool,
         native_tq: bool,
     ) -> bool:
-        """Whether one detached page must be queued before extracting the next."""
+        """Whether one frozen page must be queued before extracting the next."""
 
         return bool(disk_only or minimax_m3 or native_tq)
 
@@ -4293,6 +4295,24 @@ class BlockAwarePrefixCache:
                 _write_fence=write_fence,
             )
             self._settle_native_write_fence(request_id, write_fence)
+            # SSD-only publication waits for the writer fence above, so every
+            # MLX-backed NumPy view has been released before this point. The
+            # per-block allocations were evaluated on this model-owning thread;
+            # clear their allocator pages here as well. Calling clear_cache()
+            # earlier in _store_cache_impl cannot release buffers still owned by
+            # the writer queue and produced the measured +202 MiB quiet RSS
+            # ratchet on Muse despite every retained cache tier reporting 0 B.
+            if write_fence.get("disk_only_fallbacks") and HAS_MLX:
+                try:
+                    import gc as _gc
+
+                    _gc.collect()
+                    mx.clear_cache()
+                except Exception as clear_error:  # noqa: BLE001
+                    logger.debug(
+                        "Could not clear settled SSD-only MLX writer buffers: %s",
+                        clear_error,
+                    )
             return result
         except BaseException:
             producer_aborted = True
@@ -4689,8 +4709,9 @@ class BlockAwarePrefixCache:
         # numpy views of the synchronized full source arrays let both
         # _extract_block_tensor_slice (for block cache_data) and
         # _numpy_block_slice (for disk writes) do per-block slicing in numpy
-        # space.  The disk store still detaches each exact block before async
-        # enqueue, so the writer never aliases model-owned state.
+        # space. The slicer still materializes each exact block independently
+        # before async enqueue, so the writer never aliases mutable model cache
+        # state.
         np_sources: dict = {}  # layer_idx → (np_keys, np_values)
         if is_tensor_data and HAS_MLX:
             import numpy as np
@@ -5331,7 +5352,7 @@ class BlockAwarePrefixCache:
                                 # SSD-only plain KV has the same boundedness need:
                                 # deferring every independent page duplicates the
                                 # whole prompt in pending_disk_writes before queue
-                                # admission even begins. Serialize/detach one page
+                                # admission even begins. Materialize/freeze one page
                                 # now; the disk store still performs encoding,
                                 # publication and indexing off-thread.
                                 logger.debug(
@@ -5379,8 +5400,8 @@ class BlockAwarePrefixCache:
         # Release every full-cache numpy VIEW immediately after extraction.
         # These views no longer duplicate F16/F32 source storage, but their
         # memoryview bases deliberately keep source/bridge MLX buffers alive.
-        # Pending disk writes below already own immutable per-block copies, so
-        # the full-buffer lifetimes can end before writer admission.
+        # Pending disk writes below already own immutable per-block payload
+        # buffers, so the full-buffer lifetimes can end before writer admission.
         if np_sources:
             np_sources.clear()
         np_sources = None

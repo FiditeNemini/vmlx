@@ -1458,6 +1458,31 @@ def _to_numpy_tree(obj):
     return obj
 
 
+def _readonly_numpy_buffer_view(obj):
+    """Expose a materialized MLX buffer to NumPy without a full-size copy.
+
+    ``BlockAwarePrefixCache.store_cache`` keeps the model-owned cache state
+    alive while it cuts independent per-block payloads.  Positional source K/V
+    tensors therefore only need a read-only CPU view at this stage; the block
+    disk store still performs its existing C-contiguous, immutable copy of each
+    exact block before handing it to the asynchronous writer.
+
+    This distinction is material on macOS unified memory.  Measured on the
+    shipping MLX stack, ``np.array`` of one 64 MiB F16 tensor raised process RSS
+    by 128 MiB and left that anonymous malloc high-water resident, while
+    ``np.asarray`` raised it by 0 KiB.  A NumPy ``memoryview`` base keeps the MLX
+    buffer alive even when the temporary producer reference is a BF16-to-F32
+    bridge array.  Marking the view read-only protects the live cache from
+    accidental NumPy mutation until the per-block detach owns its bytes.
+    """
+
+    import numpy as np
+
+    view = np.asarray(obj)
+    view.setflags(write=False)
+    return view
+
+
 _DSV4_SHARED_POOL_KEYS = ("compressor_pool", "indexer_pool")
 
 
@@ -4656,15 +4681,16 @@ class BlockAwarePrefixCache:
             f"cumulative={'block' if store_cumulative_state else 'external-companion'}"
         )
 
-        # Pre-convert source KV arrays to numpy for safe slicing.
+        # Expose source KV arrays to numpy for safe slicing.
         # MLX has a Metal command buffer bug: any evaluation of lazy slices
         # whose source was previously evaluated triggers fatal Metal
         # assertions ("addCompletedHandler after commit") or kernel panics
-        # ("completeMemory() prepare count underflow").  By converting the
-        # full evaluated source arrays to numpy here (just a CPU memcpy on
-        # unified memory), both _extract_block_tensor_slice (for block
-        # cache_data) and _numpy_block_slice (for disk writes) can do all
-        # per-block slicing in numpy space — zero Metal operations.
+        # ("completeMemory() prepare count underflow").  Read-only zero-copy
+        # numpy views of the synchronized full source arrays let both
+        # _extract_block_tensor_slice (for block cache_data) and
+        # _numpy_block_slice (for disk writes) do per-block slicing in numpy
+        # space.  The disk store still detaches each exact block before async
+        # enqueue, so the writer never aliases model-owned state.
         np_sources: dict = {}  # layer_idx → (np_keys, np_values)
         if is_tensor_data and HAS_MLX:
             import numpy as np
@@ -4695,11 +4721,16 @@ class BlockAwarePrefixCache:
                         if hasattr(k_np, "dtype") and "bfloat16" in str(k_np.dtype):
                             k_np = k_np.astype(mx.float32)
                             v_np = v_np.astype(mx.float32)
+                            mx.eval(k_np, v_np)
                         cca_state = subs[1].get("state")
                         cca_np = _to_numpy_tree(cca_state)
                         np_sources[idx] = {
                             "type": "zaya_cca",
-                            "kv": (np.array(k_np), np.array(v_np), keys.dtype),
+                            "kv": (
+                                _readonly_numpy_buffer_view(k_np),
+                                _readonly_numpy_buffer_view(v_np),
+                                keys.dtype,
+                            ),
                             "cca_state": cca_np,
                             "cca_meta": subs[1].get("meta_state", ""),
                             "cache_meta": {
@@ -4774,8 +4805,8 @@ class BlockAwarePrefixCache:
                                 v_dq = v_dq.astype(mx.float32)
                             mx.eval(k_dq, v_dq)
                             np_sources[idx] = (
-                                np.array(k_dq),
-                                np.array(v_dq),
+                                _readonly_numpy_buffer_view(k_dq),
+                                _readonly_numpy_buffer_view(v_dq),
                                 original_dtype,
                             )
                             continue
@@ -4787,7 +4818,12 @@ class BlockAwarePrefixCache:
                             if hasattr(k_np, 'dtype') and 'bfloat16' in str(k_np.dtype):
                                 k_np = k_np.astype(mx.float32)
                                 v_np = v_np.astype(mx.float32)
-                            np_sources[idx] = (np.array(k_np), np.array(v_np), keys.dtype)
+                                mx.eval(k_np, v_np)
+                            np_sources[idx] = (
+                                _readonly_numpy_buffer_view(k_np),
+                                _readonly_numpy_buffer_view(v_np),
+                                keys.dtype,
+                            )
                     except Exception as _npe:
                         logger.debug(f"np_sources skip layer {idx}: {_npe}")
 
@@ -5340,14 +5376,11 @@ class BlockAwarePrefixCache:
 
             parent_hash = block_chain_hash
 
-        # Free the full-cache numpy mirror immediately. np_sources duplicates
-        # the entire live KV cache (bundle-derived MiniMax-M2.7 geometry is 62
-        # full-attention layers × 8 KV heads × head_dim 128 × K/V × F16 =
-        # 248 KiB/token, or about 4.0 GiB at 17K tokens) and was previously held
-        # until function exit. The block-extraction
-        # loop above is finished, so dropping this here cuts peak resident
-        # RAM during _store by exactly the live-KV size. Pending disk writes
-        # below already have their own per-block numpy slices captured.
+        # Release every full-cache numpy VIEW immediately after extraction.
+        # These views no longer duplicate F16/F32 source storage, but their
+        # memoryview bases deliberately keep source/bridge MLX buffers alive.
+        # Pending disk writes below already own immutable per-block copies, so
+        # the full-buffer lifetimes can end before writer admission.
         if np_sources:
             np_sources.clear()
         np_sources = None

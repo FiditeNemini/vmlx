@@ -13,6 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
+import numpy as np
+import pytest
 
 from vmlx_engine.block_disk_store import BlockDiskStore
 from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
@@ -34,6 +36,46 @@ class _ArraysState:
 
 class _TrackedTensorMap(dict):
     pass
+
+
+def test_full_cache_numpy_source_view_is_zero_copy_read_only_and_lifetime_safe():
+    """Full-prompt source views must not allocate a second host-owned image."""
+
+    from vmlx_engine.prefix_cache import _readonly_numpy_buffer_view
+
+    source = mx.arange(4096, dtype=mx.float16)
+    mx.eval(source)
+    view = _readonly_numpy_buffer_view(source)
+
+    assert view.flags.owndata is False
+    assert isinstance(view.base, memoryview)
+    assert view.flags.c_contiguous is True
+    assert view.flags.writeable is False
+    np.testing.assert_array_equal(view[:4], np.arange(4, dtype=np.float16))
+    expected_tail = np.array(view[-4:], copy=True)
+
+    del source
+    gc.collect()
+    np.testing.assert_array_equal(view[-4:], expected_tail)
+    with pytest.raises(ValueError, match="read-only"):
+        view[0] = 9
+
+
+def test_positional_store_source_uses_views_before_independent_block_detach():
+    """Pin zero-copy full sources and immutable per-block writer ownership."""
+
+    import inspect
+
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    source = inspect.getsource(BlockAwarePrefixCache.store_cache)
+    assert "np.array(k_np)" not in source
+    assert "np.array(v_np)" not in source
+    assert source.count("_readonly_numpy_buffer_view(k_np)") >= 2
+    assert source.count("_readonly_numpy_buffer_view(v_np)") >= 2
+
+    detach_source = inspect.getsource(BlockDiskStore._detach_safetensors_tensors)
+    assert 'np.array(array, copy=True, order="C")' in detach_source
 
 
 def _wait_for_fence(

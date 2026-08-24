@@ -2259,6 +2259,11 @@ class BlockDiskStore:
                 try:
                     item = self._write_queue.get(timeout=0.2)
                     batch.append(item)
+                    # Do not let the long-lived writer frame retain the first
+                    # dequeued native NumPy payload while the queue is idle.
+                    # The batch owns it now and _process_write_batch() clears
+                    # each data slot as soon as publication settles.
+                    item = None
                 except queue.Empty:
                     continue
 
@@ -2295,6 +2300,11 @@ class BlockDiskStore:
                     )
                 finally:
                     self._complete_write_items(len(batch))
+                    # _process_write_batch mutates data slots to None. Clear
+                    # the outer list as well so this long-lived thread frame
+                    # cannot pin a completed batch between queue wakeups.
+                    batch.clear()
+                    item = None
         finally:
             write_conn.close()
 
@@ -2311,10 +2321,15 @@ class BlockDiskStore:
             # report an idle writer while it is encoding a large page.
             self._write_inflight += original_batch_count
 
-        prepared_batch: List[Tuple[Any, ...]] = []
-        for item in batch:
+        # Encode in place. The caller owns this exact list, so replacing each
+        # NumPy item immediately is what releases its detached native tensors.
+        # Building a second ``prepared_batch`` kept the complete NumPy batch
+        # alive while also accumulating a complete bytes batch: live Muse
+        # publication consequently left ~820 MiB in MALLOC_LARGE (empty), and
+        # the 4 GiB pending budget allowed a much larger duplicate high-water
+        # mark on long prompts.
+        for item_idx, item in enumerate(batch):
             if not item or item[0] != "__numpy_block__":
-                prepared_batch.append(item)
                 continue
             (
                 _,
@@ -2334,6 +2349,7 @@ class BlockDiskStore:
                     reserved_bytes,
                     len(payload),
                 ):
+                    batch[item_idx] = None
                     self._write_fence_completion(fence_id, failed=True)
                     with self._stats_lock:
                         self._offthread_serialization_failures += 1
@@ -2345,20 +2361,19 @@ class BlockDiskStore:
                     continue
                 with self._stats_lock:
                     self._offthread_serializations_completed += 1
-                prepared_batch.append(
-                    (
-                        block_hash,
-                        payload,
-                        dtype,
-                        num_layers,
-                        token_count,
-                        parent_hash,
-                        fence_id,
-                        len(payload),
-                        bool(replace_existing),
-                    )
+                batch[item_idx] = (
+                    block_hash,
+                    payload,
+                    dtype,
+                    num_layers,
+                    token_count,
+                    parent_hash,
+                    fence_id,
+                    len(payload),
+                    bool(replace_existing),
                 )
             except Exception as exc:
+                batch[item_idx] = None
                 self._release_pending_write_bytes(reserved_bytes)
                 self._write_fence_completion(fence_id, failed=True)
                 with self._stats_lock:
@@ -2368,8 +2383,14 @@ class BlockDiskStore:
                     bytes(block_hash).hex()[:12],
                     exc,
                 )
+            finally:
+                # The list slot above is now the sole owner of a successful
+                # bytes payload. Drop loop locals before disk publication so
+                # no detached NumPy map survives alongside it.
+                tensors = None
+                payload = None
+                item = None
 
-        batch = prepared_batch
         batch_fence_ids = {
             str(item[6])
             for item in batch
@@ -2444,6 +2465,8 @@ class BlockDiskStore:
                     terminal_fences,
                 )
                 for idx, item in enumerate(batch):
+                    if not item:
+                        continue
                     fence_id: Optional[str] = None
                     try:
                         if item[0] == "__access__":
@@ -2513,6 +2536,11 @@ class BlockDiskStore:
                         if reserved_now:
                             batch[idx] = None
                             self._release_pending_write_bytes(reserved_now)
+                        # ``item`` and the unpacked ``payload`` otherwise keep
+                        # the final, often-largest block alive until this
+                        # method returns after eviction/fence accounting.
+                        payload = None
+                        item = None
 
                 # A fence control sentinel may be deferred when the bounded
                 # data FIFO is full. Finalize it from the writer only after

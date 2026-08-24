@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import queue
 import sqlite3
 import threading
 import time
+import weakref
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -27,6 +29,14 @@ class _ArraysState:
         self.cache = [values]
         self.lengths = mx.array([values.shape[0]], dtype=mx.int32)
         self.left_padding = None
+
+
+class _TrackedTensorMap(dict):
+    pass
+
+
+class _TrackedPayload(bytearray):
+    pass
 
 
 def _wait_for_fence(
@@ -145,6 +155,74 @@ def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
         assert pipeline["offthread_serializations_queued"] == 1
         assert pipeline["offthread_serializations_completed"] == 1
         assert pipeline["offthread_serialization_failures"] == 0
+    finally:
+        store.shutdown()
+
+
+def test_block_disk_writer_releases_each_native_copy_at_its_own_boundary(
+    monkeypatch,
+    tmp_path,
+):
+    """SSD publication must not retain parallel NumPy and bytes batches."""
+
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    original_detach = store._detach_safetensors_tensors
+    original_save = store._freeze_numpy_safetensors_bytes
+    original_write = store._write_payload_file
+    original_account = store.global_budget.account_finalized_write_locked
+    tensor_refs: list[weakref.ReferenceType] = []
+    payload_refs: list[weakref.ReferenceType] = []
+
+    def tracked_detach(tensors):
+        tracked = _TrackedTensorMap(original_detach(tensors))
+        tensor_refs.append(weakref.ref(tracked))
+        return tracked
+
+    def tracked_save(tensors):
+        payload = _TrackedPayload(original_save(tensors))
+        payload_refs.append(weakref.ref(payload))
+        return payload
+
+    def observed_write(path, payload):
+        gc.collect()
+        assert tensor_refs and tensor_refs[0]() is None, (
+            "the writer still owns detached NumPy tensors while writing the "
+            "second safetensors copy"
+        )
+        return original_write(path, payload)
+
+    def observed_account(*args, **kwargs):
+        gc.collect()
+        assert payload_refs and payload_refs[0]() is None, (
+            "the writer retained a completed safetensors payload through "
+            "budget/fence finalization"
+        )
+        return original_account(*args, **kwargs)
+
+    monkeypatch.setattr(store, "_detach_safetensors_tensors", tracked_detach)
+    monkeypatch.setattr(store, "_freeze_numpy_safetensors_bytes", tracked_save)
+    monkeypatch.setattr(store, "_write_payload_file", observed_write)
+    monkeypatch.setattr(
+        store.global_budget,
+        "account_finalized_write_locked",
+        observed_account,
+    )
+
+    fence_id = store.begin_write_fence("release-native-copies")
+    try:
+        assert store.write_block_async(
+            b"r" * 32,
+            _block(),
+            8,
+            request_id="release-native-copies",
+            fence_id=fence_id,
+        )
+        assert store.seal_write_fence(fence_id)
+        fence = _wait_for_fence(store, fence_id)
+        assert fence["completed"] == 1
+        assert fence["failed"] == 0
+        assert tensor_refs[0]() is None
+        assert payload_refs[0]() is None
     finally:
         store.shutdown()
 

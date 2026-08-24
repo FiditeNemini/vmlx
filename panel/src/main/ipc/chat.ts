@@ -45,6 +45,7 @@ import {
   requestedExactFinalToolNames,
   requestedOnceToolNames,
   requestedScopedToolNames,
+  replaySafeToolCallKey,
   requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -1506,6 +1507,7 @@ export function registerChatHandlers(
         exactlyOnceToolNames.filter((name) => isBuiltinTool(name));
       const completedExactFinalTools = new Set<string>();
       const completedExactlyOnceTools = new Set<string>();
+      let lastReplaySafeToolResultKey: string | null = null;
       const suppressGenericAgenticToolPromptForNativeTools =
         overrides?.builtinToolsEnabled === true &&
         shouldSuppressGenericAgenticPromptForNativeTools(
@@ -3673,6 +3675,9 @@ export function registerChatHandlers(
               isExactlyOnceTool &&
               completedExactlyOnceTools.has(normalizedToolName)
             ) {
+              // A rejected tool call is still an intervening action in the
+              // model transcript, so it ends any replay-safe read chain.
+              lastReplaySafeToolResultKey = null;
               resultText = `Duplicate ${tc.function.name} call was not executed because the user requested it exactly once.`;
               emitToolStatus(
                 "error",
@@ -3701,6 +3706,9 @@ export function registerChatHandlers(
               try {
                 toolArgs = JSON.parse(tc.function.arguments || "{}");
               } catch (parseErr) {
+                // Invalid arguments cannot be compared safely and therefore
+                // break consecutiveness before the model is allowed to retry.
+                lastReplaySafeToolResultKey = null;
                 resultText = `Invalid tool arguments: ${(parseErr as Error).message}`;
                 emitToolStatus(
                   "error",
@@ -3734,6 +3742,47 @@ export function registerChatHandlers(
                 currentPromptAlreadyForbidsTools,
                 restrictedToolNamesForCurrentTurn,
               );
+              const replaySafeKey = toolAuthorized
+                ? replaySafeToolCallKey(normalizedToolName, toolArgs)
+                : undefined;
+              if (
+                replaySafeKey &&
+                lastReplaySafeToolResultKey === replaySafeKey
+              ) {
+                resultText =
+                  `Duplicate ${tc.function.name} call was deduplicated: ` +
+                  `the immediately preceding call used identical arguments and ` +
+                  `completed successfully. Use its real result above.`;
+                console.log(
+                  `[CHAT] Deduplicated consecutive replay-safe tool call: ${tc.function.name}`,
+                );
+                emitToolStatus(
+                  "result",
+                  tc.function.name,
+                  resultText,
+                  toolIteration,
+                  tc.id,
+                );
+                await flushToolStatusToRenderer();
+                requestMessages.push(
+                  useResponsesApi
+                    ? {
+                        type: "function_call_output",
+                        call_id: tc.id,
+                        output: resultText,
+                      }
+                    : {
+                        role: "tool",
+                        tool_call_id: tc.id,
+                        content: resultText,
+                      },
+                );
+                continue;
+              }
+              // Only consecutive successful replay-safe reads qualify. Any
+              // different, rejected, failed, mutating, command, or MCP call
+              // breaks the chain before execution.
+              lastReplaySafeToolResultKey = null;
               if (toolAuthorized) {
                 if (isExactlyOnceTool) {
                   // Mark only after schema-valid arguments and current-turn
@@ -3860,6 +3909,9 @@ export function registerChatHandlers(
                     overrides?.toolResultMaxChars,
                   );
                   resultText = result.content;
+                  if (replaySafeKey && !result.is_error) {
+                    lastReplaySafeToolResultKey = replaySafeKey;
+                  }
                   // For read_image/read_video: inject media as multimodal
                   // content for VLM follow-ups. Tool result text is not enough
                   // for vision models to actually inspect local media bytes.

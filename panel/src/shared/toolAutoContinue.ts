@@ -111,6 +111,33 @@ export function shouldFinishZayaAppleScriptToolRound(
   )
 }
 
+const CONSECUTIVE_REPLAY_SAFE_BUILTIN_TOOLS = new Set(['read_file'])
+
+function stableToolArgumentValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableToolArgumentValue)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, stableToolArgumentValue(item)]),
+    )
+  }
+  return value
+}
+
+export function replaySafeToolCallKey(
+  toolName: string,
+  args: Record<string, unknown>,
+): string | undefined {
+  const normalizedName = toolName.toLowerCase()
+  // Keep this intentionally narrow. Replaying run_command, write/edit/delete,
+  // MCP, network, clipboard, process, or clock calls can be semantically
+  // required or side-effecting. An immediately repeated successful read_file
+  // with byte-identical arguments is the one live-proven redundant case.
+  if (!CONSECUTIVE_REPLAY_SAFE_BUILTIN_TOOLS.has(normalizedName)) return undefined
+  return `${normalizedName}:${JSON.stringify(stableToolArgumentValue(args))}`
+}
+
 export function requestedOnceToolNames(text: string): string[] {
   // An explicit per-tool `exactly once` directive is an execution invariant,
   // independent of how the user phrases the final-answer request. Retire each

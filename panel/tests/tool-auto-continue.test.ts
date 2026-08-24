@@ -7,6 +7,7 @@ import {
   requestedExactFinalToolNames,
   requestedOnceToolNames,
   requestedScopedToolNames,
+  replaySafeToolCallKey,
   requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -63,6 +64,55 @@ describe('tool auto-continue policy', () => {
       shouldFinishZayaAppleScriptToolRound(true, ['run_applescript', 'read_file']),
     ).toBe(false)
     expect(shouldFinishZayaAppleScriptToolRound(true, [])).toBe(false)
+  })
+
+  it('deduplicates only consecutive identical replay-safe reads', () => {
+    const first = replaySafeToolCallKey('read_file', {
+      path: 'README.md',
+      line_start: 1,
+      line_end: 20,
+    })
+    const reordered = replaySafeToolCallKey('READ_FILE', {
+      line_end: 20,
+      path: 'README.md',
+      line_start: 1,
+    })
+
+    expect(first).toBe(reordered)
+    expect(
+      replaySafeToolCallKey('read_file', {
+        path: 'README.md',
+        line_start: 2,
+        line_end: 20,
+      }),
+    ).not.toBe(first)
+    expect(replaySafeToolCallKey('write_file', { path: 'README.md' })).toBeUndefined()
+    expect(replaySafeToolCallKey('run_command', { command: 'pwd' })).toBeUndefined()
+    expect(replaySafeToolCallKey('fetch_url', { url: 'https://example.com' })).toBeUndefined()
+  })
+
+  it('wires replay-safe read dedupe before builtin execution and breaks on errors', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const key = source.indexOf('const replaySafeKey = toolAuthorized')
+    const dedupe = source.indexOf('lastReplaySafeToolResultKey === replaySafeKey', key)
+    const reset = source.indexOf('lastReplaySafeToolResultKey = null;', dedupe)
+    const execute = source.indexOf('const result = await executeBuiltinTool(', dedupe)
+    const retain = source.indexOf('if (replaySafeKey && !result.is_error)', execute)
+
+    expect(key).toBeGreaterThan(-1)
+    expect(dedupe).toBeGreaterThan(key)
+    expect(reset).toBeGreaterThan(dedupe)
+    expect(execute).toBeGreaterThan(reset)
+    expect(retain).toBeGreaterThan(execute)
+    expect(source).toContain(
+      '[CHAT] Deduplicated consecutive replay-safe tool call: ${tc.function.name}',
+    )
+    expect(source).toContain(
+      '// Invalid arguments cannot be compared safely and therefore',
+    )
+    expect(source).toContain(
+      '// A rejected tool call is still an intervening action in the',
+    )
   })
 
   it('recognizes explicit exact-final tool scopes', () => {
@@ -640,7 +690,9 @@ describe('tool auto-continue policy', () => {
 
     expect(source).toContain('const liveTpsHistory: number[] = []')
     expect(source).toContain('liveTpsHistory.push(liveTps)')
-    expect(source).toContain('const finalTps = selectFinalDecodeTps({')
+    expect(source).toContain('const finalTps =')
+    expect(source).toContain('serverDecodeSummary?.tokensPerSecond ??')
+    expect(source).toContain('selectFinalDecodeTps({')
     expect(source).toContain('cumulativeTps: cumulativeDecodeTps')
     expect(source).toContain('rollingTps: liveTpsHistory')
   })

@@ -412,8 +412,8 @@ export function requestsNoToolCalls(text: string): boolean {
   // this returns true; that is the stable no-tool request contract for both
   // Responses and Chat Completions.
   const explicitProhibition =
-    /(?:^|[.!?\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:(?:a|the|any|another|additional|more)\s+)?tools?\b(?!\s+unless)/i
+    /(?:^|[.!?;:\]\n])\s*(?:please\s+)?(?:do not|don['’]?t|dont|never)\s+(?:call|use)\s+(?:(?:a|the|any|another|additional|more)\s+)?tools?\b(?!\s+unless)/i
   const explicitWithoutTools =
-    /(?:^|[.!?\]\n])\s*(?:please\s+)?without\s+(?:(?:using|calling)\s+)?(?:any\s+)?tools?\b/i
+    /(?:^|[.!?;:\]\n])\s*(?:please\s+)?without\s+(?:(?:using|calling)\s+)?(?:any\s+)?tools?\b/i
   return explicitProhibition.test(text) || explicitWithoutTools.test(text)
 }

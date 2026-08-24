@@ -517,6 +517,16 @@ describe('tool auto-continue policy', () => {
     expect(requestsNoToolCalls('Do not use additional tools.')).toBe(true)
     expect(
       requestsNoToolCalls(
+        'Describe the attached video; do not call any tool.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsNoToolCalls(
+        'Use only the prior image: without calling any tool, answer directly.',
+      ),
+    ).toBe(true)
+    expect(
+      requestsNoToolCalls(
         '[FOLLOW] Without tools, retrieve the value from the previous turn.',
       ),
     ).toBe(true)

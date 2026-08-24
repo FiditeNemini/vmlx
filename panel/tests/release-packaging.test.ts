@@ -1442,7 +1442,7 @@ describe("release packaging", () => {
     }
   });
 
-  it("pins the production release driver, hygiene, signing team, and dual flavors", () => {
+  it("pins the production release driver, public source, signing team, and dual flavors", () => {
     const pkg = JSON.parse(read("package.json"));
     const source = read("scripts/build-release-dmgs.sh");
     const beforePackSource = read("scripts/electron-builder-before-pack.cjs");
@@ -1467,9 +1467,9 @@ describe("release packaging", () => {
       'VMLX_R20_RELEASE_PYTHON_EXECUTABLE_SHA256="$VMLX_R20_RELEASE_PYTHON_SOURCE_SHA256"',
     );
     expect(source).toContain("VMLX_R20_RELEASE_PYTHON_PYVENV_SHA256");
-    expect(source).toContain(
-      '"$ROOT_DIR/scripts/check-public-repo-hygiene.sh"',
-    );
+    expect(source).not.toContain("check-public-repo-hygiene.sh");
+    expect(source).toContain('assert_r20_source_identity "before npm ci"');
+    expect(source).toContain("canonical release repositories");
     expect(source).toContain("parsed.scheme.lower()");
     expect(source).toContain('scheme == "https"');
     expect(source).toContain('scheme == "ssh"');

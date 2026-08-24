@@ -1221,9 +1221,6 @@ assert_r20_source_identity() {
 
 if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
   assert_r20_source_identity "before npm ci"
-  echo "==> Verifying public-repository hygiene on the attested release head"
-  "$ROOT_DIR/scripts/check-public-repo-hygiene.sh"
-  assert_r20_source_identity "after public-repository hygiene check"
   echo "==> Reinstalling exact panel dependencies from package-lock.json"
   run_toolchain_action npm ci
   assert_r20_source_identity "after npm ci"

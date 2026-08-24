@@ -10870,6 +10870,31 @@ class Scheduler:
             count=len(finished_ids),
         )
 
+    def _cleanup_finished_after_terminal_dispatch(
+        self,
+        finished_ids: Set[str],
+    ) -> None:
+        """Release text-request cache buffers after the cleanup frame returns."""
+        self._cleanup_finished(finished_ids)
+        # _cleanup_finished() publishes the native prompt-boundary state and
+        # detaches every persistent request/cache owner, but its own final loop
+        # locals still reference the just-stored ``request``/``cache_to_store``
+        # graph when the in-function allocator clear runs.  The frame returning
+        # here is the first point where those references are actually gone.
+        # Reclaim again on the same model worker so SSD-only text serving does
+        # not retain one MLX allocator step after every completed request.
+        if finished_ids and not self.running:
+            try:
+                import gc as _gc
+
+                _gc.collect()
+            except Exception as gc_error:  # noqa: BLE001
+                logger.debug(
+                    "Could not collect released text terminal cache refs: %s",
+                    gc_error,
+                )
+            clear_mlx_memory_cache(log=logger)
+
     def _is_cache_corruption_error(self, error: Exception) -> bool:
         """Check if an error indicates cache corruption.
 

@@ -75,7 +75,9 @@ async def test_llm_engine_dispatches_terminal_before_deferred_cleanup() -> None:
                 finished_request_ids={"req"},
             )
 
-        def _cleanup_finished(self, finished_ids: set[str]) -> None:
+        def _cleanup_finished_after_terminal_dispatch(
+            self, finished_ids: set[str]
+        ) -> None:
             assert finished_ids == {"req"}
             assert not engine._terminal_cleanup_complete.is_set()
             order.append("cleanup")
@@ -95,6 +97,29 @@ async def test_llm_engine_dispatches_terminal_before_deferred_cleanup() -> None:
 
     assert order == ["dispatch", "cleanup"]
     assert engine._terminal_cleanup_complete.is_set()
+
+
+def test_llm_deferred_cleanup_clears_allocator_after_cleanup_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final clear must run after text cache-owning cleanup locals are gone."""
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.running = {}
+    order: list[str] = []
+
+    def _cleanup(self, finished_ids: set[str]) -> None:
+        assert finished_ids == {"req"}
+        order.append("cleanup-returned")
+
+    scheduler._cleanup_finished = MethodType(_cleanup, scheduler)
+    monkeypatch.setattr(
+        "vmlx_engine.scheduler.clear_mlx_memory_cache",
+        lambda **_kwargs: order.append("allocator-cleared"),
+    )
+
+    scheduler._cleanup_finished_after_terminal_dispatch({"req"})
+
+    assert order == ["cleanup-returned", "allocator-cleared"]
 
 
 @pytest.mark.asyncio

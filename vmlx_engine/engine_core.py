@@ -303,11 +303,13 @@ class EngineCore:
                             if _step_executor is not None:
                                 await _async_loop.run_in_executor(
                                     _step_executor,
-                                    self.scheduler._cleanup_finished,
+                                    self.scheduler._cleanup_finished_after_terminal_dispatch,
                                     finished_ids,
                                 )
                             else:
-                                self.scheduler._cleanup_finished(finished_ids)
+                                self.scheduler._cleanup_finished_after_terminal_dispatch(
+                                    finished_ids
+                                )
                         finally:
                             self._terminal_cleanup_complete.set()
                 else:

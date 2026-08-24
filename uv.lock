@@ -1274,11 +1274,15 @@ wheels = [
 [[package]]
 name = "dflash"
 version = "0.1.0"
-source = { git = "https://github.com/z-lab/dflash.git?rev=07ebd93db9f472af339b644bb70221ad8428328a#07ebd93db9f472af339b644bb70221ad8428328a" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "datasets" },
-    { name = "requests" },
-    { name = "tqdm" },
+    { name = "datasets", marker = "sys_platform == 'darwin'" },
+    { name = "requests", marker = "sys_platform == 'darwin'" },
+    { name = "tqdm", marker = "sys_platform == 'darwin'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/cb/72a6e7b09210b745990d16c2b6186cc35591748811298ff2970b5cd88a52/dflash-0.1.0.tar.gz", hash = "sha256:2872f29c177cd301791dd7473eafe0420aa85b7d2608f67b9fa6ded1050f4163", size = 25894, upload-time = "2026-08-18T21:14:51.989Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/01/d6/7d9ccb78d957097e58f0a45181bca89771c4230b3adc904d2f3409dc71d1/dflash-0.1.0-py3-none-any.whl", hash = "sha256:b3fe38d9413efc30a952c8b38b34f1dcc696ba6d7b865acbf540a34cc53afaa2", size = 25587, upload-time = "2026-08-18T21:14:50.947Z" },
 ]
 
 [[package]]
@@ -8357,7 +8361,7 @@ name = "vmlx"
 version = "1.6.36"
 source = { editable = "." }
 dependencies = [
-    { name = "dflash" },
+    { name = "dflash", marker = "sys_platform == 'darwin'" },
     { name = "dflash-mlx" },
     { name = "einops" },
     { name = "fastapi" },
@@ -8447,7 +8451,6 @@ vllm = [
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
     { name = "cn2an", marker = "extra == 'audio'", specifier = ">=0.5.0" },
-    { name = "dflash", git = "https://github.com/z-lab/dflash.git?rev=07ebd93db9f472af339b644bb70221ad8428328a" },
     { name = "dflash", marker = "sys_platform == 'darwin'", specifier = "==0.1.0" },
     { name = "dflash-mlx", specifier = "==0.1.8" },
     { name = "einops", specifier = ">=0.8.0" },

@@ -43,15 +43,12 @@ dependencies = [
     # stock MLX QuantizedLinear dispatch.
     "dflash-mlx==0.1.8",
     # The matched-DFlash2 draft path (`--speculative-model` with a
-    # DFlash2DraftModel checkpoint) loads the drafter via z-lab's reference
-    # runtime (`import dflash.model_mlx`). Without this pin the import only
-    # resolved through an editable install pointing at /private/tmp, which the
-    # OS periodically wipes - every session then silently fell back to plain
-    # AR at ~21 t/s while the launch flags still looked correct.
+    # DFlash2DraftModel checkpoint) loads `dflash.model_mlx`. The public 0.1.0
+    # wheel contains the same five runtime files as audited upstream commit
+    # 07ebd93, and it is the exact dependency the signed app bundle installs.
+    # Keep this registry-only: PyPI rejects distributions whose core metadata
+    # contains a direct Git dependency.
     "dflash==0.1.0; sys_platform == 'darwin'",
-    # Matched Qwen3.8 DFlash2 draft runtime. Pin the audited upstream commit;
-    # PyPI's dflash-mlx package currently implements DFlash-1 checkpoints only.
-    "dflash @ git+https://github.com/z-lab/dflash.git@07ebd93db9f472af339b644bb70221ad8428328a",
     # MiniCPM-V-4.6 model class added in mlx-vlm 0.5.0; Gemma 4 remains covered.
     # Keep the floor Darwin-specific so optional Linux image-extra resolution
     # does not inherit mlx-vlm's macOS MLX wheel floor.

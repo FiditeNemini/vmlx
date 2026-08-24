@@ -8121,6 +8121,22 @@ class TestStartupCompatibilityGuards:
         assert '"mlx-lm>=0.31.3"' in pyproject
         assert pyproject.count('"jang>=2.5.46"') >= 3
 
+    def test_pypi_dependencies_are_registry_safe_and_match_bundled_dflash(self):
+        import tomllib
+
+        pyproject_path = Path("./pyproject.toml")
+        project = tomllib.loads(pyproject_path.read_text())["project"]
+        direct_dependencies = [
+            dependency
+            for dependency in project["dependencies"]
+            if " @ " in dependency or "git+" in dependency
+        ]
+        bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
+
+        assert direct_dependencies == []
+        assert "dflash==0.1.0; sys_platform == 'darwin'" in project["dependencies"]
+        assert '"dflash==0.1.0" "dflash-mlx==0.1.8"' in bundle_script
+
     def test_bundled_python_installs_distutils_version_shim_for_radio(self):
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
 

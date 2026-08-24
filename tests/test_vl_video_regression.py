@@ -520,8 +520,29 @@ def test_mimo_video_processor_outputs_stay_on_video_kwargs():
         'if pixel_values is None:\n            pixel_values = inputs.get("pixel_values_videos")'
         not in module_src
     )
-    assert 'kwargs["video_pixel_values"] = request.video_pixel_values' in module_src
+    assert "_video_pixel_values_kwarg_name(self.model)" in module_src
     assert 'kwargs["video_grid_thw"] = request.video_grid_thw' in module_src
+
+
+def test_video_tensor_forwarding_uses_loaded_wrapper_named_contract():
+    """Do not strand Gemma video pixels under an ignored legacy alias."""
+    from vmlx_engine.mllm_batch_generator import _video_pixel_values_kwarg_name
+
+    class GemmaLike:
+        def get_input_embeddings(self, pixel_values_videos=None, **kwargs):
+            return None
+
+    class LegacyLike:
+        def __call__(self, input_ids=None, video_pixel_values=None, **kwargs):
+            return None
+
+    class OpaqueLike:
+        def __call__(self, input_ids=None, **kwargs):
+            return None
+
+    assert _video_pixel_values_kwarg_name(GemmaLike()) == "pixel_values_videos"
+    assert _video_pixel_values_kwarg_name(LegacyLike()) == "video_pixel_values"
+    assert _video_pixel_values_kwarg_name(OpaqueLike()) == "video_pixel_values"
 
 
 def test_vision_pixel_cache_round_trips_native_video_tensors():

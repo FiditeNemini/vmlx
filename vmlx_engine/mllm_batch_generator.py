@@ -909,6 +909,35 @@ def _media_embed_kwarg_name(language_model) -> Optional[str]:
     return None
 
 
+def _video_pixel_values_kwarg_name(model: Any) -> str:
+    """Return the video tensor kwarg the loaded wrapper actually consumes.
+
+    Processor output is standardized as ``pixel_values_videos``, but older
+    vMLX wrappers name the forwarded model argument ``video_pixel_values``.
+    Do not count ``**kwargs`` as support: Gemma 4 accepts the legacy spelling
+    there and silently ignores it in ``get_input_embeddings``.
+    """
+    get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    if callable(get_input_embeddings):
+        names = _named_params(get_input_embeddings)
+        if "pixel_values_videos" in names:
+            return "pixel_values_videos"
+        if "video_pixel_values" in names:
+            return "video_pixel_values"
+
+    call = getattr(model, "__call__", None)
+    if callable(call):
+        names = _named_params(call)
+        if "pixel_values_videos" in names:
+            return "pixel_values_videos"
+        if "video_pixel_values" in names:
+            return "video_pixel_values"
+
+    # Preserve the established bridge spelling for wrappers whose contract is
+    # opaque or intentionally resolves the alias from **kwargs.
+    return "video_pixel_values"
+
+
 def _media_chunk_boundaries(
     seq_len: int,
     chunk: int,
@@ -7802,7 +7831,9 @@ class MLLMBatchGenerator:
         if request.pixel_values is not None:
             kwargs["pixel_values"] = request.pixel_values
         if request.video_pixel_values is not None:
-            kwargs["video_pixel_values"] = request.video_pixel_values
+            kwargs[_video_pixel_values_kwarg_name(self.model)] = (
+                request.video_pixel_values
+            )
         has_mimo_media_payload = (
             self._model_type == "mimo_v2"
             and (

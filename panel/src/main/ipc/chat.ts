@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import { request as httpsRequest } from "node:https";
 import { request as httpRequest } from "node:http";
 import type { ClientRequest } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { db, Chat, Message, Folder } from "../database";
 import { sessionManager, resolveUrl, connectHost } from "../sessions";
@@ -78,6 +78,7 @@ import {
   toolMarkupHoldbackLength,
 } from "../../shared/toolMarkupSanitizer";
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
+import { replayPersistedUserContentParts } from "../../shared/mediaHistoryReplay";
 import {
   calculatePrefillTps,
   parseServerDecodeUsage,
@@ -256,59 +257,6 @@ function inferKind(a: ComposerAttachment): "image" | "video" | "audio" | "text" 
 
 function mimeFromDataUrl(dataUrl?: string): string | undefined {
   return dataUrl?.match(/^data:([^;,]+)[;,]/)?.[1]?.toLowerCase();
-}
-
-function summarizeHistoricalMediaPart(part: any): string {
-  const partType = String(part?.type || "media");
-  if (partType === "image_url" || partType === "input_image" || partType === "image") {
-    const url = part.image_url?.url || part.image_url || part.url || part.image;
-    const mime = mimeFromDataUrl(typeof url === "string" ? url : undefined) || "image";
-    return `[Prior ${mime} attachment omitted from replay; use the surrounding chat text and prior assistant answer for continuity.]`;
-  }
-  if (partType === "video_url" || partType === "input_video" || partType === "video") {
-    const url = part.video_url?.url || part.video_url || part.url || part.video;
-    const mime = mimeFromDataUrl(typeof url === "string" ? url : undefined) || "video";
-    return `[Prior ${mime} attachment omitted from replay; use the surrounding chat text and prior assistant answer for continuity.]`;
-  }
-  if (partType === "input_audio" || partType === "audio") {
-    const format = part.input_audio?.format || part.audio?.format || "audio";
-    return `[Prior ${format} audio attachment omitted from replay; use the surrounding chat text and prior assistant answer for continuity.]`;
-  }
-  return `[Prior ${partType} attachment omitted from replay.]`;
-}
-
-function stripHistoricalMediaPartsForReplay(parts: any[]): any[] {
-  const out: any[] = [];
-  for (const part of parts) {
-    if (!part || typeof part !== "object") continue;
-    const partType = String(part.type || "");
-    if (partType === "text") {
-      const text = String(part.text || "");
-      if (text.trim()) out.push({ type: "text", text });
-      continue;
-    }
-    if (partType === "input_text") {
-      const text = String(part.text || "");
-      if (text.trim()) out.push({ type: "text", text });
-      continue;
-    }
-    out.push({ type: "text", text: summarizeHistoricalMediaPart(part) });
-  }
-  return out.length ? out : [{ type: "text", text: "[Prior media attachment omitted from replay.]" }];
-}
-
-function shouldPreserveHistoricalMediaForOmni(
-  detectedFamily?: string,
-  modelPath?: string,
-): boolean {
-  if (!modelPath) return false;
-  const family = String(detectedFamily || "").toLowerCase().replace(/_/g, "-");
-  if (family !== "nemotron-h") return false;
-  try {
-    return existsSync(join(modelPath, "config_omni.json"));
-  } catch {
-    return false;
-  }
 }
 
 function redactContentForLog(content: any): any {
@@ -1218,16 +1166,6 @@ export function registerChatHandlers(
           } catch (_) {}
         }
       }
-      // Nemotron Omni's media route owns a persistent KV+SSM conversation
-      // session. Its prefix identity includes historical media bytes; replacing
-      // those bytes with a text placeholder makes a post-audio/image turn look
-      // text-only and silently routes it through the ordinary scheduler. Keep
-      // the real media envelope for this one stateful dispatcher family.
-      const preserveHistoricalMediaForOmni = shouldPreserveHistoricalMediaForOmni(
-        chatDetectedFamily,
-        chat.modelPath,
-      );
-      if (preserveHistoricalMediaForOmni) chatIsMultimodal = true;
       const fetchTimeout = setTimeout(() => {
         timedOut = true;
         abortController.abort();
@@ -1808,32 +1746,15 @@ export function registerChatHandlers(
           try {
             const parsed = JSON.parse(msgContent);
             if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].type) {
-              if (chatIsMultimodal || isRemote) {
-                // Keep only the current turn's media bytes in the API replay,
-                // except for Nemotron Omni. Its stateful dispatcher needs the
-                // prior media identity to validate/reuse (or safely rehydrate)
-                // its persistent KV+SSM conversation cache.
-                // Re-sending historical image/audio/video parts on every later
-                // text/tool turn keeps local engines on the media route, which
-                // breaks native tool prompting for families like MiniMax-M3 and
-                // wastes prefix-cache/storage budget. The prior assistant text
-                // remains in history, and the media user turn is represented by
-                // a text placeholder for continuity.
-                msgContent =
-                  !isRemote &&
-                  m.id !== userMessage.id &&
-                  !preserveHistoricalMediaForOmni
-                    ? stripHistoricalMediaPartsForReplay(parsed)
-                    : parsed;
-              } else {
-                // Multimodal is disabled for this model.
-                // Strip images entirely to prevent standard text-only engines from throwing 400 Bad Request
-                msgContent =
-                  parsed
-                    .filter((p: any) => p.type === "text")
-                    .map((p: any) => p.text)
-                    .join("\n") || "[Image omitted]";
-              }
+              // Preserve every historical media item for a real multimodal
+              // route. Replacing prior bytes with explanatory text rewrites
+              // both the token stream and media identity, defeating causal SSD
+              // prefix reuse and cold/restart reconstruction. Text-only routes
+              // still strip media defensively.
+              msgContent = replayPersistedUserContentParts(
+                parsed,
+                chatIsMultimodal || isRemote,
+              );
             }
           } catch {
             /* not JSON, use as plain string */
@@ -2385,7 +2306,8 @@ export function registerChatHandlers(
               isRemote,
               baseUrl,
               chatIsMultimodal,
-              preserveHistoricalMediaForOmni,
+              historicalMediaReplay:
+                chatIsMultimodal || isRemote ? "full" : "text_only",
               detectedFamily: chatDetectedFamily,
               sessionHasReasoningParser,
               body: summarizeRequestForLog(requestBody, useResponsesApi),

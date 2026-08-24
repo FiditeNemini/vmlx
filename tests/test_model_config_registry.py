@@ -267,6 +267,7 @@ class TestModelConfigRegistry:
         assert config.reasoning_parser == "gemma4"
         assert config.supports_thinking is True
         assert config.think_in_template is False
+        assert config.architecture_hints["default_enable_thinking"] is False
 
     def test_tool_parser(self, empty_registry):
         config = ModelConfig(

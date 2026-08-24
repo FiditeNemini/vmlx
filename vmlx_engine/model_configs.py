@@ -985,7 +985,16 @@ def register_all(registry=None):
             eos_tokens=["<eos>", "<turn|>"],
             special_tokens_to_clean=["<turn|>", "<|turn>", "<|channel>", "<channel|>"],
             is_mllm=True,
-            architecture_hints={"inject_pixel_values": True},
+            # Gemma 4's native template defaults ``enable_thinking`` false and
+            # emits a closed empty thought channel when the caller leaves the
+            # control on Auto.  Preserve that artifact contract instead of
+            # falling through to the generic reasoning-capable default-ON
+            # policy.  Explicit On remains supported and wins in the request
+            # resolver.
+            architecture_hints={
+                "inject_pixel_values": True,
+                "default_enable_thinking": False,
+            },
             priority=5,
         )
     )
@@ -1000,6 +1009,7 @@ def register_all(registry=None):
             supports_thinking=True,
             eos_tokens=["<eos>", "<turn|>"],
             special_tokens_to_clean=["<turn|>", "<|turn>", "<|channel>", "<channel|>"],
+            architecture_hints={"default_enable_thinking": False},
             priority=4,
         )
     )

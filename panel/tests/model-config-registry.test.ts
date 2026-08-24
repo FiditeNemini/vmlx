@@ -1099,6 +1099,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('gemma4')
     expect(detected.toolParser).toBe('gemma4')
     expect(detected.enableAutoToolChoice).toBe(true)
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.thinkInTemplate).toBe(false)
+    expect(detected.defaultEnableThinking).toBe(false)
     // Gemma4 mixed-SWA is typed block-disk L2 only: in-RAM paged cache is OFF
     // for every family, mixed-SWA included.
     expect(detected.cacheType).toBe('rotating_kv')
@@ -1131,6 +1134,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('gemma4')
     expect(detected.toolParser).toBe('gemma4')
     expect(detected.isMultimodal).toBe(true)
+    expect(detected.supportsThinking).toBe(true)
+    expect(detected.thinkInTemplate).toBe(false)
+    expect(detected.defaultEnableThinking).toBe(false)
   })
 
   it('marks Gemma 4 mixed-SWA wrappers as rotating KV so cache UI cannot treat them as plain KV', () => {

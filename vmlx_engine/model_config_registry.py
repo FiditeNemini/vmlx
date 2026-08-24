@@ -808,8 +808,11 @@ class ModelConfigRegistry:
                 hints["runtime_scope"] = "text_runtime_no_gemma4_unified_vlm"
                 hints["vl_runtime_available"] = False
                 hints["audio_runtime_available"] = False
-                # Eric directive: reasoning-capable families default reasoning ON.
-                hints["default_enable_thinking"] = True
+                # Gemma 4's own template defaults enable_thinking false.  The
+                # generic reasoning-capable default-ON policy must not override
+                # that artifact contract merely because this unified bundle is
+                # currently routed through the text runtime.
+                hints["default_enable_thinking"] = False
                 updates["is_mllm"] = False
                 updates["architecture_hints"] = hints
             elif is_gemma4_unified_text_runtime and gemma4_unified_runtime_ready:
@@ -817,8 +820,9 @@ class ModelConfigRegistry:
                 hints["runtime_scope"] = "source_gemma4_unified_vlm"
                 hints["vl_runtime_available"] = True
                 hints["audio_runtime_available"] = True
-                # Eric directive: reasoning-capable families default reasoning ON.
-                hints["default_enable_thinking"] = True
+                # The unified VL/audio runtime uses the same native Gemma 4
+                # template: Auto is thinking-off; explicit On still wins.
+                hints["default_enable_thinking"] = False
                 updates["is_mllm"] = True
                 updates["architecture_hints"] = hints
             elif _is_step3p7_text_bridge(local_model_config):

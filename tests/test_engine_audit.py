@@ -10409,33 +10409,52 @@ class TestZayaCCACachePolicy:
         assert auto_resolved is True
         assert explicit_on is True
 
-    def test_gemma4_tools_auto_stays_unset_and_explicit_thinking_still_works(self):
-        from vmlx_engine import server
+    def test_gemma4_auto_preserves_native_off_and_explicit_thinking_still_works(self):
+        from unittest.mock import patch
 
+        from vmlx_engine import server
+        from vmlx_engine.model_config_registry import get_model_config_registry
+
+        registry = get_model_config_registry()
+        registry.clear_cache()
         old_default = server._default_enable_thinking
         server._default_enable_thinking = None
         try:
-            resolved = server._resolve_enable_thinking(
-                request_value=None,
-                ct_kwargs={},
-                tools_present=True,
-                model_key="gemma4",
-                engine=None,
-                auto_detect=True,
-            )
-            explicit_on = server._resolve_enable_thinking(
-                request_value=True,
-                ct_kwargs={},
-                tools_present=True,
-                model_key="gemma4",
-                engine=None,
-                auto_detect=True,
-            )
+            with patch(
+                "vmlx_engine.model_config_registry.load_config",
+                lambda _path: {"model_type": "gemma4"},
+            ):
+                resolved = server._resolve_enable_thinking(
+                    request_value=None,
+                    ct_kwargs={},
+                    tools_present=True,
+                    model_key="google/gemma-4-26b-it",
+                    engine=None,
+                    auto_detect=True,
+                )
+                explicit_on = server._resolve_enable_thinking(
+                    request_value=True,
+                    ct_kwargs={},
+                    tools_present=True,
+                    model_key="google/gemma-4-26b-it",
+                    engine=None,
+                    auto_detect=True,
+                )
+                explicit_off = server._resolve_enable_thinking(
+                    request_value=False,
+                    ct_kwargs={},
+                    tools_present=True,
+                    model_key="google/gemma-4-26b-it",
+                    engine=None,
+                    auto_detect=True,
+                )
         finally:
             server._default_enable_thinking = old_default
+            registry.clear_cache()
 
-        assert resolved is None
+        assert resolved is False
         assert explicit_on is True
+        assert explicit_off is False
 
     def test_gemma4_supports_thinking_is_explicit_not_implicit(self):
         from unittest.mock import patch
@@ -10453,6 +10472,7 @@ class TestZayaCCACachePolicy:
         assert cfg.reasoning_parser == "gemma4"
         assert cfg.supports_thinking is True
         assert cfg.think_in_template is False
+        assert cfg.architecture_hints["default_enable_thinking"] is False
 
     def test_cli_enables_typed_paged_cache_and_forces_tq_off_for_zaya_cca(self):
         source = Path("./vmlx_engine/cli.py").read_text()
@@ -11908,10 +11928,9 @@ class TestJangVLMFallbacks:
         assert cfg.architecture_hints["runtime_scope"] == "source_gemma4_unified_vlm"
         assert cfg.architecture_hints["vl_runtime_available"] is True
         assert cfg.architecture_hints["audio_runtime_available"] is True
-        # gemma4's jinja template defaults thinking OFF; per the 2026-07-12
-        # uniform default-ON directive the registry stamps default_enable_thinking
-        # True so Auto resolves reasoning ON (live-confirmed on Gemma-4-26B).
-        assert cfg.architecture_hints["default_enable_thinking"] is True
+        # The unified VL/audio runtime uses the same Gemma 4 template, whose
+        # omitted/Auto control is a closed empty thought channel.
+        assert cfg.architecture_hints["default_enable_thinking"] is False
 
     def test_batched_model_wrapper_does_not_inject_pixel_values_for_gemma4_text_wrapper(
         self,

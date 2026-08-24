@@ -232,8 +232,12 @@ registerFamily('glm4', { cacheType: 'kv', toolParser: 'glm47', enableAutoToolCho
 // Gemma
 registerFamily('medgemma', { cacheType: 'kv', isMultimodal: true, description: 'Google MedGemma (medical multimodal)', priority: 3 })
 registerFamily('paligemma', { cacheType: 'kv', isMultimodal: true, description: 'Google PaliGemma', priority: 5 })
-registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'Gemma 4 (multimodal)', priority: 5 })
-registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, usePagedCache: false, description: 'Gemma 4 (text-only)', priority: 4 })
+// Gemma 4's native template defaults enable_thinking=false and emits a closed
+// empty thought channel for Auto/Off. Keep the UI's Auto label and the raw API
+// on that same native default; explicit On remains available and creates its
+// own prompt/cache chain.
+registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: false, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'Gemma 4 (multimodal)', priority: 5 })
+registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: false, enableAutoToolChoice: true, usePagedCache: false, description: 'Gemma 4 (text-only)', priority: 4 })
 // Muse Glimmer: Gemma-shaped text backbone (sliding/full 3:1) + windowed ViT,
 // vision AND video. Reasoning is routed by recipient (to=self / to=user), not an
 // inline think pair, and its only live control is the reasoning_strength template

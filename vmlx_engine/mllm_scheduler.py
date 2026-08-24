@@ -4626,6 +4626,31 @@ class MLLMScheduler:
         """Run deferred terminal cleanup with the normal scheduler lock held."""
         with self._queue_lock:
             self._cleanup_finished(finished_ids)
+        # _cleanup_finished() releases every persistent request/cache owner, but
+        # its own frame still holds the just-stored ``raw``/``cache_to_store``
+        # locals when its in-function clear runs.  The batch generator has the
+        # same ordering constraint: its final response closure owns the cache
+        # until scheduler cleanup consumes it.  Clearing at either earlier site
+        # therefore cannot return those newly freed buffers to Metal.
+        #
+        # The deferred wrapper is the first point where both cache-owning frames
+        # are gone, and it still executes on the model's single step executor.
+        # A connected Muse image -> video SSD hit measured a fully settled
+        # +105.8 MiB process-RSS ratchet (including +34.5 MiB MLX cache) despite
+        # every retained cache tier reporting 0 B.  Reclaim after the frame
+        # returns so SSD-only serving does not accumulate one allocator step per
+        # completed multimodal turn.
+        if finished_ids and not self.running:
+            try:
+                import gc as _gc
+
+                _gc.collect()
+            except Exception as gc_error:  # noqa: BLE001
+                logger.debug(
+                    "Could not collect released MLLM terminal cache refs: %s",
+                    gc_error,
+                )
+            clear_mlx_memory_cache(log=logger)
 
     def step(self, *, defer_finished_cleanup: bool = False) -> MLLMSchedulerOutput:
         """Execute one scheduling step -- the core generation loop tick.

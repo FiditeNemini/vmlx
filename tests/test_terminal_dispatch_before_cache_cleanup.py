@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -140,6 +141,30 @@ async def test_mllm_loop_dispatches_terminal_before_worker_cleanup() -> None:
 
     assert order == ["dispatch", "cleanup"]
     assert scheduler._terminal_cleanup_complete.is_set()
+
+
+def test_mllm_deferred_cleanup_clears_allocator_after_cleanup_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final clear must run after cache-owning cleanup locals are gone."""
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler.running = {}
+    scheduler._queue_lock = Lock()
+    order: list[str] = []
+
+    def _cleanup(self, finished_ids: set[str]) -> None:
+        assert finished_ids == {"req"}
+        order.append("cleanup-returned")
+
+    scheduler._cleanup_finished = MethodType(_cleanup, scheduler)
+    monkeypatch.setattr(
+        "vmlx_engine.mllm_scheduler.clear_mlx_memory_cache",
+        lambda **_kwargs: order.append("allocator-cleared"),
+    )
+
+    scheduler._cleanup_finished_after_terminal_dispatch({"req"})
+
+    assert order == ["cleanup-returned", "allocator-cleared"]
 
 
 @pytest.mark.asyncio

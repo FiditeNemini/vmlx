@@ -463,6 +463,72 @@ def test_mllm_discarded_hit_restores_full_prefill_and_reconciles_paged_credit():
     )
 
 
+def test_gemma4_partial_media_tail_requires_pure_text_hit_and_live_capabilities():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    class GemmaWrapper:
+        def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+            return None
+
+        def __call__(
+            self,
+            input_ids,
+            pixel_values=None,
+            mask=None,
+            cache=None,
+            **kwargs,
+        ):
+            return None
+
+    class GemmaLanguage:
+        def __call__(
+            self,
+            inputs=None,
+            inputs_embeds=None,
+            mask=None,
+            cache=None,
+            **kwargs,
+        ):
+            return None
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "gemma4"
+    generator.model = GemmaWrapper()
+    generator.language_model = GemmaLanguage()
+    generator._media_safe_capture_limit = lambda _tokens: 192
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+    request = MLLMBatchRequest(uid=1, request_id="gemma-tail", prompt="x")
+
+    assert generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 128
+    )
+    assert not generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 193
+    ), "a hit past the first media placeholder would need sliced pixel payloads"
+
+    generator._model_type = "uninspected_vlm"
+    assert not generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 128
+    ), "uninspected wrapper families must stay fail-closed"
+
+    generator._model_type = "gemma4"
+
+    class WrapperWithoutNamedCache:
+        def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+            return None
+
+        def __call__(self, input_ids, pixel_values=None, **kwargs):
+            return None
+
+    generator.model = WrapperWithoutNamedCache()
+    assert not generator._supports_pure_text_prefix_with_media_tail(
+        request, list(range(512)), 128
+    ), "family label alone must not override the live callable contract"
+
+
 def test_mllm_prefill_declines_hit_when_reconstruction_returns_none():
     """A credited paged hit that reconstructs to None must be discarded.
 

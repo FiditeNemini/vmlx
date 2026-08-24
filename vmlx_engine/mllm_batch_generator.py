@@ -7592,6 +7592,52 @@ class MLLMBatchGenerator:
             return False
         return self._request_has_media_cache_context(request, token_ids)
 
+    def _supports_pure_text_prefix_with_media_tail(
+        self,
+        request: "MLLMBatchRequest",
+        token_ids: List[int],
+        cached_tokens: int,
+    ) -> bool:
+        """Whether this live wrapper can resume before *all* media placeholders.
+
+        This is deliberately narrower than generic partial-media reuse.  If a
+        hit already covers one image but not a later video, the processor-owned
+        pixel arrays would have to be sliced to the remaining placeholders; we
+        do not guess at that mapping.  A hit in the pure-text region before the
+        first placeholder is different: every media placeholder and every
+        processor payload remain together in the forwarded tail.
+
+        The exact Gemma 4 runtime contract is capability-checked, not inferred
+        from the family name alone.  Its wrapper names ``input_ids``,
+        ``pixel_values`` and ``cache``; exposes ``get_input_embeddings``; and
+        its language model names both an embeddings input and ``cache``.  That
+        path encodes the tail's pixels, then builds masks from the restored KV
+        offset.  Other families stay fail-closed until their actual wrapper is
+        inspected and admitted separately.
+        """
+        if str(getattr(self, "_model_type", "") or "").lower() != "gemma4":
+            return False
+        if cached_tokens <= 0:
+            return False
+        pure_text_limit = self._media_safe_capture_limit(token_ids)
+        if pure_text_limit <= 0 or cached_tokens > pure_text_limit:
+            return False
+        if not self._media_prefix_cache_allowed(request, token_ids):
+            return False
+
+        wrapper_call = getattr(self.model, "__call__", None)
+        wrapper_names = _named_params(wrapper_call) if wrapper_call else set()
+        language_call = getattr(self.language_model, "__call__", None)
+        language_names = (
+            _named_params(language_call) if language_call else set()
+        )
+        return bool(
+            callable(getattr(self.model, "get_input_embeddings", None))
+            and {"input_ids", "pixel_values", "cache"}.issubset(wrapper_names)
+            and "cache" in language_names
+            and _media_embed_kwarg_name(self.language_model) is not None
+        )
+
     def _turn_peak_walk_admit(
         self, final_ctx: int, request: "MLLMBatchRequest | None" = None
     ) -> None:
@@ -10625,30 +10671,73 @@ class MLLMBatchGenerator:
                                     # for attention-only thinking VLMs).
                                     _full_remaining = (remaining or []) + list(_gpl_suffix)
                                     if _full_remaining:
-                                        # Check if remaining tokens contain image placeholders.
-                                        # If so, we'd need partial pixel_values which is complex —
-                                        # fall back to full prefill instead.
+                                        # A tail with media is reusable only when
+                                        # the hit ends before the FIRST media
+                                        # placeholder. In that narrow case all
+                                        # processor payloads still correspond to
+                                        # placeholders in this tail and the live
+                                        # wrapper can merge fresh media embeddings
+                                        # over the restored pure-text cache. A hit
+                                        # covering only some media would require
+                                        # slicing processor-owned arrays and stays
+                                        # fail-closed.
                                         has_images = self._tokens_contain_media_placeholders(
                                             _full_remaining
                                         )
                                         if has_images:
-                                            self._discard_request_cache_hit(
+                                            _hit_tokens = int(
+                                                getattr(
+                                                    block_table,
+                                                    "num_tokens",
+                                                    0,
+                                                )
+                                                or 0
+                                            )
+                                            if self._supports_pure_text_prefix_with_media_tail(
                                                 req,
-                                                reason="media_placeholders_in_uncached_tail",
-                                                attempted_cached_tokens=int(
-                                                    getattr(
-                                                        block_table,
-                                                        "num_tokens",
-                                                        0,
-                                                    )
-                                                    or 0
-                                                ),
-                                            )
-                                            logger.info(
-                                                f"VLM prefix cache HIT for {req.request_id}: "
-                                                f"{block_table.num_tokens} cached tokens, "
-                                                f"remaining has images — full prefill"
-                                            )
+                                                list(token_list),
+                                                _hit_tokens,
+                                            ):
+                                                req.input_ids = mx.array(
+                                                    [_full_remaining]
+                                                )
+                                                # The processor mask describes
+                                                # the original full prompt. Let
+                                                # the language model rebuild its
+                                                # causal/sliding masks from the
+                                                # restored cache offset instead.
+                                                req.attention_mask = None
+                                                _cache_execution.update(
+                                                    {
+                                                        "media_tail_reencoded": True,
+                                                        "media_tail_prefix_kind": (
+                                                            "pure_text_before_first_placeholder"
+                                                        ),
+                                                    }
+                                                )
+                                                req._cache_execution = dict(
+                                                    _cache_execution
+                                                )
+                                                logger.info(
+                                                    "VLM pure-text prefix HIT for %s: "
+                                                    "%d cached tokens, forwarding %d-token "
+                                                    "tail with all media payloads for fresh "
+                                                    "embedding",
+                                                    req.request_id,
+                                                    _hit_tokens,
+                                                    len(_full_remaining),
+                                                )
+                                            else:
+                                                self._discard_request_cache_hit(
+                                                    req,
+                                                    reason="media_placeholders_in_uncached_tail",
+                                                    attempted_cached_tokens=_hit_tokens,
+                                                )
+                                                logger.info(
+                                                    f"VLM prefix cache HIT for {req.request_id}: "
+                                                    f"{block_table.num_tokens} cached tokens, "
+                                                    f"remaining has images — full prefill"
+                                                )
                                         else:
                                             req.input_ids = mx.array([_full_remaining])
                                             req.pixel_values = None

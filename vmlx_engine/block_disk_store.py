@@ -415,12 +415,12 @@ class BlockDiskStore:
 
         # Background writer thread
         # Queue items contain either detached, read-only NumPy tensors awaiting
-        # CPU safetensors encoding or an immutable safetensors image. Live MLX
-        # arrays never cross the queue boundary:
+        # CPU safetensors encoding or a lease-owned staged safetensors path.
+        # Live MLX arrays never cross the queue boundary:
         # ("__numpy_block__", block_hash, tensor_dict, dtype, num_layers,
         #  token_count, parent_hash, fence_id, reserved_bytes, replace_existing)
         # or
-        # (block_hash, payload_bytes, dtype, num_layers, token_count,
+        # (block_hash, staged_payload_path, dtype, num_layers, token_count,
         #  parent_hash, fence_id, reserved_bytes, replace_existing)
         # or special commands: ("__access__", ...) or ("__cleanup__", ...)
         self._write_queue: queue.Queue = queue.Queue(maxsize=1000)
@@ -1357,13 +1357,43 @@ class BlockDiskStore:
             detached[name] = copied
         return detached
 
-    @staticmethod
-    def _freeze_numpy_safetensors_bytes(tensors: Dict[str, Any]) -> bytes:
-        """Encode detached NumPy tensors without touching Metal."""
+    def _stage_numpy_safetensors_file(
+        self,
+        block_hash: bytes,
+        tensors: Dict[str, Any],
+    ) -> Path:
+        """Encode detached NumPy tensors directly into a durable temp file.
 
-        from safetensors.numpy import save as numpy_safetensors_save
+        ``safetensors.numpy.save`` builds a full Python ``bytes`` image after
+        it has already copied every NumPy tensor into the serializer. A writer
+        batch therefore occupied separate NumPy and bytes allocator arenas;
+        both stayed resident after publication on macOS even with no retained
+        cache payload. ``save_file`` removes the aggregate bytes image while
+        preserving the exact safetensors wire format.
 
-        return numpy_safetensors_save(tensors)
+        The path uses the existing lease-tagged ``.tmp.safetensors`` contract:
+        root-budget scans protect active-writer temps, and abandoned files are
+        ordinary orphan-cleanup candidates after the lease disappears.
+        """
+
+        from safetensors.numpy import save_file as numpy_safetensors_save_file
+
+        final_path = self._hash_to_path(bytes(block_hash).hex())
+        staged_path = self._new_payload_temp_path(final_path)
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(staged_path, flags, 0o600)
+        os.close(fd)
+        try:
+            numpy_safetensors_save_file(tensors, staged_path)
+            self._fsync_existing_file(staged_path)
+            return staged_path
+        except Exception:
+            staged_path.unlink(missing_ok=True)
+            raise
 
     def _disable_global_budget_writes(self) -> None:
         self._global_budget_write_enabled = False
@@ -2343,13 +2373,20 @@ class BlockDiskStore:
                 reserved_bytes,
                 replace_existing,
             ) = item
+            staged_path: Path | None = None
             try:
-                payload = self._freeze_numpy_safetensors_bytes(tensors)
+                staged_path = self._stage_numpy_safetensors_file(
+                    block_hash,
+                    tensors,
+                )
+                payload_size = max(1, int(staged_path.stat().st_size))
                 if not self._resize_pending_write_reservation(
                     reserved_bytes,
-                    len(payload),
+                    payload_size,
                 ):
                     batch[item_idx] = None
+                    staged_path.unlink(missing_ok=True)
+                    staged_path = None
                     self._write_fence_completion(fence_id, failed=True)
                     with self._stats_lock:
                         self._offthread_serialization_failures += 1
@@ -2363,17 +2400,20 @@ class BlockDiskStore:
                     self._offthread_serializations_completed += 1
                 batch[item_idx] = (
                     block_hash,
-                    payload,
+                    staged_path,
                     dtype,
                     num_layers,
                     token_count,
                     parent_hash,
                     fence_id,
-                    len(payload),
+                    payload_size,
                     bool(replace_existing),
                 )
+                staged_path = None
             except Exception as exc:
                 batch[item_idx] = None
+                if staged_path is not None:
+                    staged_path.unlink(missing_ok=True)
                 self._release_pending_write_bytes(reserved_bytes)
                 self._write_fence_completion(fence_id, failed=True)
                 with self._stats_lock:
@@ -2385,10 +2425,10 @@ class BlockDiskStore:
                 )
             finally:
                 # The list slot above is now the sole owner of a successful
-                # bytes payload. Drop loop locals before disk publication so
-                # no detached NumPy map survives alongside it.
+                # staged path. Drop loop locals before disk publication so no
+                # detached NumPy map survives alongside it.
                 tensors = None
-                payload = None
+                staged_path = None
                 item = None
 
         batch_fence_ids = {
@@ -2526,19 +2566,17 @@ class BlockDiskStore:
                         )
                         logger.warning(f"Background writer error ({h}): {e}")
                     finally:
-                        # Settle this block's byte reservation now — its
-                        # payload is either persisted or failed, and either
-                        # way the RAM copy is dead. Dropping the batch slot
-                        # releases the bytes object so admission waiters see
-                        # budget as soon as the writer makes real progress,
-                        # not after the batch-end eviction pass.
+                        # Settle this block's byte reservation now — its staged
+                        # payload is either renamed or failed. Remove any temp
+                        # that survived an early return before dropping the
+                        # batch slot, so admission waiters see real progress.
                         reserved_now = outstanding_reservations.pop(idx, 0)
                         if reserved_now:
+                            if isinstance(payload, Path):
+                                payload.unlink(missing_ok=True)
                             batch[idx] = None
                             self._release_pending_write_bytes(reserved_now)
-                        # ``item`` and the unpacked ``payload`` otherwise keep
-                        # the final, often-largest block alive until this
-                        # method returns after eviction/fence accounting.
+                        # Drop loop references before eviction/fence accounting.
                         payload = None
                         item = None
 
@@ -2715,6 +2753,16 @@ class BlockDiskStore:
                     )
                     self._fail_write_fence(fence_id, str(exc))
         finally:
+            # A publication-lock failure can return before the per-item loop.
+            # Remove any lease-owned staged files that never reached rename.
+            for pending_item in batch:
+                if (
+                    pending_item
+                    and not isinstance(pending_item[0], str)
+                    and len(pending_item) > 1
+                    and isinstance(pending_item[1], Path)
+                ):
+                    pending_item[1].unlink(missing_ok=True)
             # Blocks the write loop settled already popped their entries; this
             # covers early returns (publication lock unavailable) and batch
             # exceptions that skipped the per-item settlement.
@@ -2902,9 +2950,42 @@ class BlockDiskStore:
                 continue
         return removed_bytes
 
+    def _new_payload_temp_path(self, file_path: Path) -> Path:
+        """Return one lease-owned temp path beside its finalized payload."""
+
+        seq = self._tmp_seq
+        self._tmp_seq += 1
+        return file_path.with_name(
+            f"{file_path.stem}.{self.global_budget.lease_id}.{seq}."
+            f"{uuid.uuid4().hex}.tmp.safetensors"
+        )
+
     @staticmethod
-    def _write_payload_file(path: Path, payload: bytes) -> None:
-        """Durably write an immutable payload (writer thread only)."""
+    def _fsync_existing_file(path: Path) -> None:
+        """Make an existing staged payload durable without following links."""
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _write_payload_file(path: Path, payload: bytes | Path) -> None:
+        """Durably stage an immutable payload (writer thread only)."""
+
+        if isinstance(payload, Path):
+            # ``payload`` was already written and fsynced by save_file(). Move
+            # it without materializing a second aggregate bytes image. The
+            # caller still performs the final atomic rename and directory
+            # fsync before publishing the SQLite row.
+            os.replace(str(payload), str(path))
+            return
 
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
         if hasattr(os, "O_CLOEXEC"):
@@ -2967,7 +3048,7 @@ class BlockDiskStore:
         self,
         conn: sqlite3.Connection,
         block_hash: bytes,
-        payload: bytes,
+        payload: bytes | Path,
         dtype: str,
         num_layers: int,
         token_count: int,
@@ -3039,12 +3120,7 @@ class BlockDiskStore:
 
         file_path = self._hash_to_path(hash_hex)
         rel_path = file_path.relative_to(self.cache_dir)
-        seq = self._tmp_seq
-        self._tmp_seq += 1
-        tmp_path = file_path.with_name(
-            f"{file_path.stem}.{self.global_budget.lease_id}.{seq}."
-            f"{uuid.uuid4().hex}.tmp.safetensors"
-        )
+        tmp_path = self._new_payload_temp_path(file_path)
 
         try:
             self._write_payload_file(tmp_path, payload)
@@ -3264,6 +3340,7 @@ class BlockDiskStore:
                     self.selective_rotating_layers_omitted
                 ),
                 "write_pipeline": {
+                    "serialization_mode": "direct_safetensors_file",
                     "queue_depth": self._write_queue.qsize(),
                     "inflight": self._write_inflight,
                     "active_producers": self._active_write_producers,

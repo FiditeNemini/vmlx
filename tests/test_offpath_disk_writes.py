@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
 import mlx.core as mx
@@ -32,10 +33,6 @@ class _ArraysState:
 
 
 class _TrackedTensorMap(dict):
-    pass
-
-
-class _TrackedPayload(bytearray):
     pass
 
 
@@ -104,7 +101,8 @@ def test_block_disk_slow_file_io_is_off_caller_and_fence_is_durable(
         assert fence["retained"] == 1
         assert stats["pending_bytes"] == 0
         assert writer_threads == ["block-disk-writer"]
-        assert payload_types == [bytes]
+        assert len(payload_types) == 1
+        assert issubclass(payload_types[0], Path)
     finally:
         store.shutdown()
 
@@ -114,21 +112,25 @@ def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
     tmp_path,
 ):
     import numpy as np
+    from safetensors.numpy import save as numpy_safetensors_save
 
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
     save_threads: list[str] = []
     save_inputs: list[dict] = []
-    original_save = store._freeze_numpy_safetensors_bytes
+    original_save = store._stage_numpy_safetensors_file
 
-    def observed_save(tensors):
+    def observed_save(block_hash, tensors):
         save_threads.append(threading.current_thread().name)
         save_inputs.append(tensors)
         assert all(isinstance(value, np.ndarray) for value in tensors.values())
         assert all(not value.flags.writeable for value in tensors.values())
+        expected_wire = numpy_safetensors_save(tensors)
         time.sleep(0.35)
-        return original_save(tensors)
+        staged_path = original_save(block_hash, tensors)
+        assert staged_path.read_bytes() == expected_wire
+        return staged_path
 
-    monkeypatch.setattr(store, "_freeze_numpy_safetensors_bytes", observed_save)
+    monkeypatch.setattr(store, "_stage_numpy_safetensors_file", observed_save)
     block_hash = b"f" * 32
     fence_id = store.begin_write_fence("bf16-freeze")
     try:
@@ -155,6 +157,7 @@ def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
         assert pipeline["offthread_serializations_queued"] == 1
         assert pipeline["offthread_serializations_completed"] == 1
         assert pipeline["offthread_serialization_failures"] == 0
+        assert pipeline["serialization_mode"] == "direct_safetensors_file"
     finally:
         store.shutdown()
 
@@ -163,44 +166,45 @@ def test_block_disk_writer_releases_each_native_copy_at_its_own_boundary(
     monkeypatch,
     tmp_path,
 ):
-    """SSD publication must not retain parallel NumPy and bytes batches."""
+    """SSD publication releases NumPy tensors and lease-owned temp files."""
 
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
     original_detach = store._detach_safetensors_tensors
-    original_save = store._freeze_numpy_safetensors_bytes
+    original_save = store._stage_numpy_safetensors_file
     original_write = store._write_payload_file
     original_account = store.global_budget.account_finalized_write_locked
     tensor_refs: list[weakref.ReferenceType] = []
-    payload_refs: list[weakref.ReferenceType] = []
+    staged_paths: list[Path] = []
 
     def tracked_detach(tensors):
         tracked = _TrackedTensorMap(original_detach(tensors))
         tensor_refs.append(weakref.ref(tracked))
         return tracked
 
-    def tracked_save(tensors):
-        payload = _TrackedPayload(original_save(tensors))
-        payload_refs.append(weakref.ref(payload))
-        return payload
+    def tracked_save(block_hash, tensors):
+        staged_path = original_save(block_hash, tensors)
+        staged_paths.append(staged_path)
+        return staged_path
 
     def observed_write(path, payload):
         gc.collect()
         assert tensor_refs and tensor_refs[0]() is None, (
             "the writer still owns detached NumPy tensors while writing the "
-            "second safetensors copy"
+            "staged safetensors file"
         )
+        assert isinstance(payload, Path)
+        assert payload.exists()
         return original_write(path, payload)
 
     def observed_account(*args, **kwargs):
-        gc.collect()
-        assert payload_refs and payload_refs[0]() is None, (
-            "the writer retained a completed safetensors payload through "
-            "budget/fence finalization"
+        assert staged_paths and all(not path.exists() for path in staged_paths), (
+            "the writer retained a staged safetensors file through budget/"
+            "fence finalization"
         )
         return original_account(*args, **kwargs)
 
     monkeypatch.setattr(store, "_detach_safetensors_tensors", tracked_detach)
-    monkeypatch.setattr(store, "_freeze_numpy_safetensors_bytes", tracked_save)
+    monkeypatch.setattr(store, "_stage_numpy_safetensors_file", tracked_save)
     monkeypatch.setattr(store, "_write_payload_file", observed_write)
     monkeypatch.setattr(
         store.global_budget,
@@ -222,7 +226,8 @@ def test_block_disk_writer_releases_each_native_copy_at_its_own_boundary(
         assert fence["completed"] == 1
         assert fence["failed"] == 0
         assert tensor_refs[0]() is None
-        assert payload_refs[0]() is None
+        assert staged_paths
+        assert all(not path.exists() for path in staged_paths)
     finally:
         store.shutdown()
 
@@ -233,12 +238,12 @@ def test_block_disk_background_serialization_failure_settles_fence(
 ):
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
 
-    def fail_serialization(_tensors):
+    def fail_serialization(_block_hash, _tensors):
         raise RuntimeError("injected CPU encoding failure")
 
     monkeypatch.setattr(
         store,
-        "_freeze_numpy_safetensors_bytes",
+        "_stage_numpy_safetensors_file",
         fail_serialization,
     )
     fence_id = store.begin_write_fence("encoding-failure")

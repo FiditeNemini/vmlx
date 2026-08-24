@@ -318,7 +318,7 @@ def test_failed_parent_publication_rejects_child_and_rolls_back_batch(
     original_write = store._write_payload_file
     attempts = 0
 
-    def fail_first(path: Path, payload: bytes) -> None:
+    def fail_first(path: Path, payload: bytes | Path) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:

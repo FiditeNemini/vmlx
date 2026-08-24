@@ -170,6 +170,9 @@ STAGED_APP_ENGINE_HASH_FILES = (
     "metal/codebook_matvec.metal",
     "metal/codebook_moe.metal",
 )
+R20_RUNTIME_SOURCE_ONLY_FILES = (
+    "models/minimax_m3/MODEL-MATRIX-AUTODETECT.txt",
+)
 
 SOURCE_HASH_FILES = (
     "tests/cross_matrix/run_packaged_integrity_contract.py",
@@ -2984,6 +2987,7 @@ def _require_tree_parity(
     *,
     label: str,
     exclude_python_bytecode: bool = False,
+    source_only_files: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     source_records = _tree_file_records(
         source,
@@ -2995,6 +2999,13 @@ def _require_tree_parity(
         label=f"{label} packaged",
         exclude_python_bytecode=exclude_python_bytecode,
     )
+    packaged_source_only = sorted(set(source_only_files) & set(packaged_records))
+    if packaged_source_only:
+        raise ArtifactChainError(
+            f"{label} contains source-only files: {packaged_source_only}"
+        )
+    for relative in source_only_files:
+        source_records.pop(relative, None)
     if source_records != packaged_records:
         source_names = set(source_records)
         packaged_names = set(packaged_records)
@@ -3116,6 +3127,7 @@ def validate_staged_app_parity(
         bundled_candidates[0],
         label="staged bundled-runtime vmlx_engine",
         exclude_python_bytecode=True,
+        source_only_files=R20_RUNTIME_SOURCE_ONLY_FILES,
     )
     renderer_parity = _require_tree_parity(
         root / "panel/out",

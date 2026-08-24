@@ -69,6 +69,43 @@ def test_tree_parity_and_payload_records_accept_empty_regular_files(tmp_path):
     assert payload["entries"]["__init__.py"]["sha256"] == hashlib.sha256(b"").hexdigest()
 
 
+def test_tree_parity_excludes_only_named_source_only_files(tmp_path):
+    source = tmp_path / "source"
+    packaged = tmp_path / "packaged"
+    source.mkdir()
+    packaged.mkdir()
+    (source / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (packaged / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / "diagnostic.txt").write_text("source only\n", encoding="utf-8")
+
+    parity = runner._require_tree_parity(
+        source,
+        packaged,
+        label="runtime package",
+        source_only_files=("diagnostic.txt",),
+    )
+    assert parity["file_count"] == 1
+
+    (source / "unexpected.txt").write_text("not allowlisted\n", encoding="utf-8")
+    with pytest.raises(runner.ArtifactChainError, match="tree differs"):
+        runner._require_tree_parity(
+            source,
+            packaged,
+            label="runtime package",
+            source_only_files=("diagnostic.txt",),
+        )
+
+    (source / "unexpected.txt").unlink()
+    (packaged / "diagnostic.txt").write_text("source only\n", encoding="utf-8")
+    with pytest.raises(runner.ArtifactChainError, match="contains source-only files"):
+        runner._require_tree_parity(
+            source,
+            packaged,
+            label="runtime package",
+            source_only_files=("diagnostic.txt",),
+        )
+
+
 def test_extracted_asar_payload_ignores_only_ambient_finder_metadata(tmp_path):
     extracted = tmp_path / "extracted"
     nested = extracted / "node_modules"

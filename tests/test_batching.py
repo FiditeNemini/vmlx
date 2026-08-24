@@ -1857,6 +1857,179 @@ class TestSchedulerBasic:
         assert scheduler.block_aware_cache.paged_cache.released == []
         assert scheduler.block_aware_cache.paged_cache.detached == []
 
+    def test_ssd_only_hit_yields_to_faster_observed_clean_prefill(
+        self, mock_model, mock_tokenizer
+    ):
+        """A disk-only hit must not be slower than recomputing its prefix.
+
+        Laguna-XS-2.1 restored a 256-token native mixed-SWA prefix in 2.619s
+        after the same process had clean-prefilled 306 tokens in 0.28s.  The
+        old selector still chose the SSD table because it compared cold blocks
+        only with a warm RAM alternative, which disk-only deliberately lacks.
+        """
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        scheduler._cache_admission_prefill_seconds_per_token = 0.001
+        scheduler._cache_admission_prefill_sample_count = 1
+        scheduler._cache_admission_prefill_reference_tokens = 306
+        scheduler._cache_admission_disk_seconds_per_token = 0.01
+        scheduler._cache_admission_disk_sample_count = 1
+        scheduler._cache_admission_disk_reference_tokens = 256
+
+        class _Block:
+            token_count = 64
+            # Disk-only L1 holds metadata, not a resident payload. Before
+            # worker reconstruction the old per-block marker is therefore
+            # false even though every candidate byte must come from SSD.
+            cache_data_from_disk = False
+
+        class _PagedCache:
+            def __init__(self):
+                self.allocated_blocks = {i: _Block() for i in range(1, 5)}
+                self.released = []
+                self.detached = []
+                self.stats = SimpleNamespace(disk_hits=0)
+
+            def release_request_refs(self, block_table):
+                self.released.append(block_table)
+
+            def detach_request(self, request_id):
+                self.detached.append(request_id)
+
+        class _BlockAwareCache:
+            def __init__(self):
+                self.paged_cache = _PagedCache()
+                self.detached = []
+
+            def fetch_cache(self, request_id, tokens, cache_extra_keys=None):
+                return BlockTable(request_id, [1, 2, 3, 4], 256), list(tokens[256:])
+
+            def detach_request(self, request_id):
+                self.detached.append(request_id)
+
+            def get_stats(self):
+                return {}
+
+        scheduler.block_aware_cache = _BlockAwareCache()
+        scheduler.paged_cache_manager = SimpleNamespace(disk_only=True)
+        scheduler.prefix_cache = None
+        scheduler.memory_aware_cache = None
+
+        request = Request("req-ssd-cost", "x", SamplingParams())
+        request.prompt_token_ids = list(range(306))
+
+        scheduler.add_request(request)
+
+        assert request.block_table is None
+        assert request.cached_tokens == 0
+        assert request._cache_selection_attempted_tokens == 256
+        assert request.remaining_tokens == request.prompt_token_ids
+        assert not getattr(
+            request, "_paged_block_table_needs_worker_reconstruct", False
+        )
+        assert request._cache_selection["selected"] == "clean_prefill"
+        assert request._cache_selection["rejected"] == "paged"
+        assert request._cache_selection["paged_cold_tokens"] == 256
+        assert request._cache_selection["reason"] == (
+            "estimated_clean_prefill_faster"
+        )
+        assert request._cache_selection["estimated_disk_seconds"] == 2.56
+        assert request._cache_selection["estimated_prefill_seconds"] == 0.256
+        assert scheduler.block_aware_cache.paged_cache.released
+        assert scheduler.block_aware_cache.detached == ["req-ssd-cost"]
+        assert scheduler.block_aware_cache.paged_cache.detached == ["req-ssd-cost"]
+
+        class _BatchGenerator:
+            stop_tokens = set()
+
+            def insert(self, tokens, max_tokens, caches=None, **_kwargs):
+                self.tokens = tokens
+                self.caches = caches
+                return [7]
+
+        scheduler.batch_generator = _BatchGenerator()
+        scheduler._current_sampler_params = (
+            request.sampling_params.temperature,
+            request.sampling_params.top_p,
+            request.sampling_params.min_p,
+            request.sampling_params.top_k,
+            request.sampling_params.repetition_penalty,
+        )
+
+        assert scheduler._schedule_waiting() == [request]
+        execution = request._cache_execution
+        assert execution["attempted_cached_tokens"] == 256
+        assert execution["cached_tokens"] == 0
+        assert execution["cache_outcome"] == "discarded"
+        assert execution["cache_reuse_applied"] is False
+        assert execution["prefill_tokens"] == 306
+        assert execution["fallback_reason"] == "cache_candidate_discarded"
+
+    def test_ssd_only_unknown_or_noncomparable_cost_preserves_disk_prefix(
+        self, mock_model, mock_tokenizer
+    ):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+
+        reject_unknown, unknown = scheduler._should_clean_prefill_over_disk_only(
+            paged_cached_tokens=256,
+            paged_cold_tokens=256,
+        )
+        assert reject_unknown is False
+        assert unknown["cost_reason"] == "insufficient_cost_history"
+
+        scheduler._cache_admission_prefill_seconds_per_token = 0.001
+        scheduler._cache_admission_prefill_sample_count = 1
+        scheduler._cache_admission_prefill_reference_tokens = 306
+        scheduler._cache_admission_disk_seconds_per_token = 0.01
+        scheduler._cache_admission_disk_sample_count = 1
+        scheduler._cache_admission_disk_reference_tokens = 256
+        reject_long, long = scheduler._should_clean_prefill_over_disk_only(
+            paged_cached_tokens=4096,
+            paged_cold_tokens=4096,
+        )
+
+        assert reject_long is False
+        assert long["cost_reason"] == "noncomparable_context_scale"
+        assert long["cost_history_comparable"] is False
+
+    def test_ssd_only_admission_learns_exact_model_prefill_and_disk_costs(
+        self, mock_model, mock_tokenizer
+    ):
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        request = SimpleNamespace(
+            _cache_execution={"cached_tokens": 0, "prefill_tokens": 300}
+        )
+
+        scheduler._record_clean_prefill_admission_sample(request, 0.3)
+        scheduler._record_disk_reconstruction_admission_sample(
+            cached_tokens=256,
+            reconstruction_seconds=2.56,
+        )
+
+        assert scheduler._cache_admission_prefill_sample_count == 1
+        assert scheduler._cache_admission_disk_sample_count == 1
+        assert scheduler._cache_admission_prefill_reference_tokens == 300
+        assert scheduler._cache_admission_disk_reference_tokens == 256
+        assert scheduler._cache_admission_prefill_seconds_per_token == 0.001
+        assert scheduler._cache_admission_disk_seconds_per_token == 0.01
+        reject, detail = scheduler._should_clean_prefill_over_disk_only(
+            paged_cached_tokens=256,
+            paged_cold_tokens=256,
+        )
+        assert reject is True
+        assert detail["estimated_prefill_seconds"] == 0.256
+        assert detail["estimated_disk_seconds"] == 2.56
+        assert detail["cost_reason"] == "estimated_clean_prefill_faster"
+
+        scheduler._record_clean_prefill_admission_sample(
+            SimpleNamespace(
+                _cache_execution={"cached_tokens": 0, "prefill_tokens": 3000}
+            ),
+            6.0,
+        )
+        assert scheduler._cache_admission_prefill_reference_tokens == 3000
+        assert scheduler._cache_admission_prefill_seconds_per_token == 0.002
+        assert scheduler._cache_admission_prefill_sample_count == 1
+
     def test_paged_quantized_kv_hit_defers_worker_dequant_for_batch_generator(
         self, mock_model, mock_tokenizer
     ):

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { formatCacheStorageBytes } from '../src/renderer/src/components/sessions/CachePanel'
@@ -51,6 +51,38 @@ describe('CachePanel last-request truthfulness', () => {
       'fallback_reason',
     ]) {
       expect(source).toContain(`lastCacheExecution.${field}`)
+    }
+  })
+
+  it('visibly explains adaptive SSD admission instead of showing an unexplained miss', () => {
+    expect(source).toContain('schedulerStats?.last_cache_selection')
+    for (const field of [
+      'selected',
+      'rejected',
+      'reason',
+      'paged_cached_tokens',
+      'cost_history_comparable',
+      'estimated_disk_seconds',
+      'estimated_prefill_seconds',
+    ]) {
+      expect(source).toContain(`lastCacheSelection?.${field}`)
+    }
+    const keys = [
+      'selectionReason',
+      'ssdCandidate',
+      'estimatedSsd',
+      'estimatedPrefill',
+      'costComparable',
+    ]
+    for (const key of keys) {
+      expect(source).toContain(`t('sessions.cache.${key}')`)
+    }
+    const localeDir = join(__dirname, '..', 'src/renderer/src/i18n/locales')
+    for (const file of readdirSync(localeDir).filter((name) => name.endsWith('.json'))) {
+      const catalog = JSON.parse(readFileSync(join(localeDir, file), 'utf8'))
+      for (const key of keys) {
+        expect(catalog.sessions.cache[key], `${file} is missing ${key}`).toBeTruthy()
+      }
     }
   })
 

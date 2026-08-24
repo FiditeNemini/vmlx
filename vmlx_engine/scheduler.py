@@ -781,6 +781,19 @@ class Scheduler:
         self._ewma_ttft: float = 0.0
         self._ttft_sample_count: int = 0
         self._ttft_alpha: float = 0.1
+        # SSD-only prefix admission must compare restoration with recomputing
+        # the reusable prefix.  These rates are learned from this exact loaded
+        # model/runtime; cache bytes per token and prefill speed differ too much
+        # across native KV, mixed-SWA, compressed, sparse, and typed caches for
+        # one family-blind throughput constant to be safe.
+        self._cache_admission_prefill_seconds_per_token: float = 0.0
+        self._cache_admission_prefill_sample_count: int = 0
+        self._cache_admission_prefill_reference_tokens: int = 0
+        self._cache_admission_disk_seconds_per_token: float = 0.0
+        self._cache_admission_disk_sample_count: int = 0
+        self._cache_admission_disk_reference_tokens: int = 0
+        self._cache_admission_alpha: float = 0.25
+        self._cache_admission_max_comparable_ratio: float = 2.0
 
         self._model_type_for_runtime = self._detect_model_type_for_runtime(model)
         self._uses_openpangu_cache = self._model_type_for_runtime == "openpangu_v2"
@@ -4054,6 +4067,199 @@ class Scheduler:
         except (TypeError, ValueError):
             return 64
 
+    def _update_cache_admission_rate(
+        self,
+        name: str,
+        sample: float,
+        reference_tokens: int,
+    ) -> None:
+        if sample <= 0.0 or reference_tokens <= 0:
+            return
+        value_attr = f"_cache_admission_{name}_seconds_per_token"
+        count_attr = f"_cache_admission_{name}_sample_count"
+        reference_attr = f"_cache_admission_{name}_reference_tokens"
+        current = max(0.0, float(getattr(self, value_attr, 0.0) or 0.0))
+        count = max(0, int(getattr(self, count_attr, 0) or 0))
+        prior_reference = max(
+            0,
+            int(getattr(self, reference_attr, 0) or 0),
+        )
+        comparable_ratio = max(
+            1.0,
+            float(self._cache_admission_max_comparable_ratio or 2.0),
+        )
+        same_context_scale = bool(
+            prior_reference > 0
+            and reference_tokens <= prior_reference * comparable_ratio
+            and prior_reference <= reference_tokens * comparable_ratio
+        )
+        if count == 0 or not same_context_scale:
+            updated = float(sample)
+            updated_count = 1
+        else:
+            alpha = min(
+                1.0,
+                max(0.0, float(getattr(self, "_cache_admission_alpha", 0.25))),
+            )
+            updated = alpha * float(sample) + (1.0 - alpha) * current
+            updated_count = count + 1
+        setattr(self, value_attr, updated)
+        setattr(self, count_attr, updated_count)
+        # Use the most recent context scale as the comparison anchor. Prefill
+        # cost is not linear at long context, so a short historical sample must
+        # never veto a much larger restart restore merely because its local
+        # seconds/token happened to be lower.
+        setattr(self, reference_attr, int(reference_tokens))
+
+    def _record_disk_reconstruction_admission_sample(
+        self,
+        *,
+        cached_tokens: int,
+        reconstruction_seconds: float,
+    ) -> None:
+        tokens = max(0, int(cached_tokens or 0))
+        seconds = max(0.0, float(reconstruction_seconds or 0.0))
+        if tokens > 0 and seconds > 0.0:
+            self._update_cache_admission_rate("disk", seconds / tokens, tokens)
+
+    def _record_clean_prefill_admission_sample(
+        self,
+        request: Request,
+        ttft_seconds: float,
+    ) -> None:
+        execution = getattr(request, "_cache_execution", None)
+        if not isinstance(execution, dict):
+            return
+        if int(execution.get("cached_tokens", 0) or 0) > 0:
+            return
+        prefill_tokens = max(0, int(execution.get("prefill_tokens", 0) or 0))
+        seconds = max(0.0, float(ttft_seconds or 0.0))
+        if prefill_tokens > 0 and seconds > 0.0:
+            self._update_cache_admission_rate(
+                "prefill",
+                seconds / prefill_tokens,
+                prefill_tokens,
+            )
+
+    def _should_clean_prefill_over_disk_only(
+        self,
+        *,
+        paged_cached_tokens: int,
+        paged_cold_tokens: int,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        cached = max(0, int(paged_cached_tokens or 0))
+        cold = max(0, int(paged_cold_tokens or 0))
+        prefill_rate = max(
+            0.0,
+            float(
+                getattr(
+                    self,
+                    "_cache_admission_prefill_seconds_per_token",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        disk_rate = max(
+            0.0,
+            float(
+                getattr(
+                    self,
+                    "_cache_admission_disk_seconds_per_token",
+                    0.0,
+                )
+                or 0.0
+            ),
+        )
+        prefill_samples = max(
+            0,
+            int(
+                getattr(self, "_cache_admission_prefill_sample_count", 0) or 0
+            ),
+        )
+        disk_samples = max(
+            0,
+            int(getattr(self, "_cache_admission_disk_sample_count", 0) or 0),
+        )
+        prefill_reference = max(
+            0,
+            int(
+                getattr(self, "_cache_admission_prefill_reference_tokens", 0)
+                or 0
+            ),
+        )
+        disk_reference = max(
+            0,
+            int(
+                getattr(self, "_cache_admission_disk_reference_tokens", 0) or 0
+            ),
+        )
+        comparable_ratio = max(
+            1.0,
+            float(
+                getattr(self, "_cache_admission_max_comparable_ratio", 2.0)
+                or 2.0
+            ),
+        )
+
+        def _comparable(reference: int) -> bool:
+            return bool(
+                cached > 0
+                and reference > 0
+                and cached <= reference * comparable_ratio
+                and reference <= cached * comparable_ratio
+            )
+
+        comparable = bool(
+            prefill_samples > 0
+            and disk_samples > 0
+            and _comparable(prefill_reference)
+            and _comparable(disk_reference)
+        )
+        estimated_disk = disk_rate * cold
+        estimated_prefill = prefill_rate * cached
+        decision: Dict[str, Any] = {
+            "prefill_seconds_per_token": round(prefill_rate, 9),
+            "disk_seconds_per_token": round(disk_rate, 9),
+            "prefill_cost_samples": prefill_samples,
+            "disk_cost_samples": disk_samples,
+            "prefill_reference_tokens": prefill_reference,
+            "disk_reference_tokens": disk_reference,
+            "cost_history_comparable": comparable,
+            "max_comparable_ratio": comparable_ratio,
+            "estimated_disk_seconds": round(estimated_disk, 6),
+            "estimated_prefill_seconds": round(estimated_prefill, 6),
+        }
+        if comparable and prefill_rate > 0.0 and disk_rate > 0.0:
+            reject = estimated_disk >= estimated_prefill
+            decision["cost_reason"] = (
+                "estimated_clean_prefill_faster"
+                if reject
+                else "estimated_disk_restore_faster"
+            )
+            return reject, decision
+        decision["cost_reason"] = (
+            "insufficient_cost_history"
+            if prefill_samples == 0 or disk_samples == 0
+            else "noncomparable_context_scale"
+        )
+        return False, decision
+
+    def _detach_paged_candidate(self, request_id: str, block_table: Any) -> None:
+        """Release a fetched block table that admission chose not to consume."""
+        if self.block_aware_cache is None:
+            return
+        try:
+            self.block_aware_cache.paged_cache.release_request_refs(block_table)
+            # BlockAwarePrefixCache and its PagedCache each own an index entry.
+            # Drop both exactly as the existing warm-prefix preference path did.
+            detach = getattr(self.block_aware_cache, "detach_request", None)
+            if callable(detach):
+                detach(request_id)
+            self.block_aware_cache.paged_cache.detach_request(request_id)
+        except Exception:
+            pass
+
     def _paged_cold_block_tokens(self, block_table: Any) -> int:
         if self.block_aware_cache is None or not block_table:
             return 0
@@ -5959,6 +6165,16 @@ class Scheduler:
                 remaining = list(remaining or []) + list(_gpl_suffix_tokens)
             if block_table and block_table.num_tokens > 0:
                 paged_cold_tokens = self._paged_cold_block_tokens(block_table)
+                _typed_disk_only = bool(
+                    getattr(self.paged_cache_manager, "disk_only", False)
+                )
+                if _typed_disk_only:
+                    # Disk-only keeps hash/chain metadata in L1 but never the
+                    # cache tensors.  Per-block ``cache_data_from_disk`` flips
+                    # only during worker reconstruction, so every candidate
+                    # token is cold even when that pre-reconstruct marker says
+                    # false (the live Laguna selector incorrectly reported 0).
+                    paged_cold_tokens = int(block_table.num_tokens)
                 warm_cache = None
                 warm_remaining: List[int] = []
                 warm_cached_tokens = 0
@@ -5986,30 +6202,48 @@ class Scheduler:
                     paged_cold_tokens=paged_cold_tokens,
                     warm_cached_tokens=warm_cached_tokens,
                 )
-                if prefer_warm and warm_cache is not None and warm_detail is not None:
-                    try:
-                        self.block_aware_cache.paged_cache.release_request_refs(
-                            block_table
+                prefer_clean = False
+                if _typed_disk_only:
+                    prefer_clean, disk_cost = (
+                        self._should_clean_prefill_over_disk_only(
+                            paged_cached_tokens=int(block_table.num_tokens),
+                            paged_cold_tokens=paged_cold_tokens,
                         )
-                        # The BlockAwarePrefixCache entry that fetch_cache
-                        # created must be dropped too. paged_cache.detach_request
-                        # only pops the PAGED table, so that entry survived and
-                        # completion cleanup released the very same block table a
-                        # SECOND time — driving to zero any block whose ref another
-                        # request had legitimately taken through the shared-prefix
-                        # path, then recycling it underneath that live request.
-                        _detach = getattr(
-                            self.block_aware_cache, "detach_request", None
-                        )
-                        if callable(_detach):
-                            _detach(request.request_id)
-                        # Idempotent, and unconditional: the block-aware detach
-                        # forwards to it only when an entry existed.
-                        self.block_aware_cache.paged_cache.detach_request(
-                            request.request_id
-                        )
-                    except Exception:
-                        pass
+                    )
+                    selection.update(disk_cost)
+                if prefer_clean:
+                    self._detach_paged_candidate(request.request_id, block_table)
+                    request._cache_selection_attempted_tokens = int(
+                        block_table.num_tokens
+                    )
+                    request.prompt_cache = None
+                    request.cached_tokens = 0
+                    request.remaining_tokens = list(request.prompt_token_ids)
+                    request._cache_detail = None
+                    request.block_table = None
+                    request.shared_prefix_blocks = 0
+                    request._paged_block_table_needs_worker_reconstruct = False
+                    selection.update(
+                        {
+                            "selected": "clean_prefill",
+                            "rejected": "paged",
+                            "reason": selection.get("cost_reason"),
+                        }
+                    )
+                    request._cache_selection = selection
+                    self._last_cache_selection = selection
+                    logger.info(
+                        "Request %s: selected clean prefill over SSD-only hit "
+                        "(cached=%d, estimated_disk=%.6fs, "
+                        "estimated_prefill=%.6fs, reason=%s)",
+                        request.request_id,
+                        selection["paged_cached_tokens"],
+                        selection["estimated_disk_seconds"],
+                        selection["estimated_prefill_seconds"],
+                        selection["reason"],
+                    )
+                elif prefer_warm and warm_cache is not None and warm_detail is not None:
+                    self._detach_paged_candidate(request.request_id, block_table)
                     request.prompt_cache = warm_cache
                     request.cached_tokens = warm_cached_tokens
                     request.remaining_tokens = warm_remaining
@@ -6042,7 +6276,9 @@ class Scheduler:
                     )
                 else:
                     paged_selection_reason = (
-                        "paged_hot_advantage_sufficient"
+                        selection.get("cost_reason")
+                        if _typed_disk_only
+                        else "paged_hot_advantage_sufficient"
                         if warm_detail is not None
                         else "no_warm_prefix_alternative"
                     )
@@ -6088,9 +6324,6 @@ class Scheduler:
                         request._hybrid_ssm_fetch_tokens = list(_fetch_tokens)
                     if getattr(self, "_kv_cache_bits", 0):
                         request._prompt_cache_needs_worker_dequant = True
-                    _typed_disk_only = bool(
-                        getattr(self.paged_cache_manager, "disk_only", False)
-                    )
                     if self._uses_dsv4_cache:
                         request._cache_detail = _typed_paged_cache_detail(
                             "dsv4",
@@ -7799,7 +8032,12 @@ class Scheduler:
             request = self.waiting.popleft()
             try:
                 _attempted_cached_tokens = int(
-                    getattr(request, "cached_tokens", 0) or 0
+                    getattr(
+                        request,
+                        "_cache_selection_attempted_tokens",
+                        getattr(request, "cached_tokens", 0),
+                    )
+                    or 0
                 )
             except (TypeError, ValueError):
                 _attempted_cached_tokens = 0
@@ -7957,6 +8195,14 @@ class Scheduler:
                     or 0
                 )
                 if cache_to_use is not None and _reconstruct_disk_blocks > 0:
+                    self._record_disk_reconstruction_admission_sample(
+                        cached_tokens=_accepted_cached_tokens,
+                        reconstruction_seconds=float(
+                            cache_execution.get("reconstruction_seconds", 0.0)
+                            if cache_execution is not None
+                            else 0.0
+                        ),
+                    )
                     request._paged_disk_hit = True
                     _worker_detail = str(
                         getattr(request, "_cache_detail", "")
@@ -8657,6 +8903,7 @@ class Scheduler:
                 if is_first_token and hasattr(request, "_schedule_time"):
                     ttft = time.perf_counter() - request._schedule_time
                     self._record_ttft_sample(ttft)
+                    self._record_clean_prefill_admission_sample(request, ttft)
             else:
                 continue
 
@@ -11865,6 +12112,25 @@ class Scheduler:
             "last_cache_reuse_partial": self._last_cache_reuse_partial,
             "last_cache_selection": self._last_cache_selection,
             "last_cache_execution": self._last_cache_execution,
+            "cache_admission_cost": {
+                "prefill_seconds_per_token": round(
+                    self._cache_admission_prefill_seconds_per_token,
+                    9,
+                ),
+                "prefill_samples": self._cache_admission_prefill_sample_count,
+                "prefill_reference_tokens": (
+                    self._cache_admission_prefill_reference_tokens
+                ),
+                "disk_seconds_per_token": round(
+                    self._cache_admission_disk_seconds_per_token,
+                    9,
+                ),
+                "disk_samples": self._cache_admission_disk_sample_count,
+                "disk_reference_tokens": (
+                    self._cache_admission_disk_reference_tokens
+                ),
+                "max_comparable_ratio": self._cache_admission_max_comparable_ratio,
+            },
             "tq_decoder_warmup": self._tq_decoder_warmup_stats,
             "last_turboquant_cache": getattr(
                 self, "_last_turboquant_cache", None

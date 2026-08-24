@@ -268,6 +268,9 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const lastCacheExecution =
     schedulerStats?.last_cache_execution ??
     schedulerStats?.batch_generator?.last_cache_execution
+  const lastCacheSelection =
+    lastCacheExecution?.selection ??
+    schedulerStats?.last_cache_selection
   const diskCache = stats?.disk_cache
   const kvQuant = stats?.kv_cache_quantization
   const nativeCache = stats?.native_cache
@@ -675,6 +678,54 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         </div>
       )}
 
+      {lastCacheSelection && (
+        <div>
+          <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
+            {t('sessions.cache.selection')}
+          </h4>
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            {lastCacheSelection?.selected && (
+              <StatCard
+                label={t('sessions.cache.selection')}
+                value={`${String(lastCacheSelection.selected)}${lastCacheSelection?.rejected ? ` ← ${String(lastCacheSelection.rejected)}` : ''}`}
+              />
+            )}
+            {lastCacheSelection?.reason && (
+              <StatCard
+                label={t('sessions.cache.selectionReason')}
+                value={String(lastCacheSelection.reason)}
+              />
+            )}
+            {lastCacheSelection?.paged_cached_tokens != null && (
+              <StatCard
+                label={t('sessions.cache.ssdCandidate')}
+                value={Number(lastCacheSelection.paged_cached_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheSelection?.cost_history_comparable != null && (
+              <StatCard
+                label={t('sessions.cache.costComparable')}
+                value={lastCacheSelection.cost_history_comparable ? t('common.yes') : t('common.no')}
+              />
+            )}
+            {lastCacheSelection?.cost_history_comparable === true
+              && lastCacheSelection?.estimated_disk_seconds != null && (
+              <StatCard
+                label={t('sessions.cache.estimatedSsd')}
+                value={`${(Number(lastCacheSelection.estimated_disk_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+            {lastCacheSelection?.cost_history_comparable === true
+              && lastCacheSelection?.estimated_prefill_seconds != null && (
+              <StatCard
+                label={t('sessions.cache.estimatedPrefill')}
+                value={`${(Number(lastCacheSelection.estimated_prefill_seconds || 0) * 1000).toFixed(2)} ms`}
+              />
+            )}
+          </div>
+        </div>
+      )}
+
       {lastCacheExecution && (
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">
@@ -683,12 +734,6 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
           <div className="grid grid-cols-2 gap-2 text-sm">
             {lastCacheExecution.cache_detail && (
               <StatCard label={t('sessions.cache.cacheDetail')} value={String(lastCacheExecution.cache_detail)} />
-            )}
-            {(lastCacheExecution.selection?.selected ?? lastCacheExecution.selection) != null && (
-              <StatCard
-                label={t('sessions.cache.selection')}
-                value={String(lastCacheExecution.selection?.selected ?? lastCacheExecution.selection)}
-              />
             )}
             {lastCacheExecution.cache_reuse_applied != null && (
               <StatCard

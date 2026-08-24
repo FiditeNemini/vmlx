@@ -138,7 +138,7 @@ def harmonize_quant_metadata_dtypes(
     mx: Any | None = None,
     log: logging.Logger | None = None,
 ) -> dict[str, int]:
-    """Cast F16 packed-quant metadata to a bundle-declared BF16 compute dtype.
+    """Align F16 quant metadata with a proven BF16 runtime compute dtype.
 
     Several JANG bundles declare BF16 compute but ship packed quantisation
     scales/biases as F16. MLX promotes
@@ -153,10 +153,15 @@ def harmonize_quant_metadata_dtypes(
     ~131-137 KB/token signature appears on other wide-KV bundles too, so this is
     not one model's quirk.
 
+    A BF16 config declaration is necessary but not sufficient. Non-metadata
+    BF16 parameters must also exist and dominate F16 compute anchors. Step-3.7
+    declares BF16 but actually carries 848 F16 anchors and zero BF16 anchors;
+    changing only its 1,060 metadata tensors creates the FP32 promotion this
+    function exists to prevent. Qwen3.8 instead carries 602 BF16 versus 15 F16
+    anchors, so its 1,160 eligible F16 metadata tensors are true outliers.
+
     Only ``*.scales`` and ``*.biases`` leaves whose sibling ``*.weight`` is a
     packed non-floating tensor are eligible. Real F16 weights stay untouched.
-    That distinction matters on Qwen3.8-27B-JANG_4D-CRACK: its artifact contains
-    1,160 eligible F16 quant-metadata tensors *and* 15 genuine F16 MTP tensors.
 
     The caller must invoke this on the model's loader/step worker. MLX streams
     are thread-local; post-load mutation from the server thread is invalid for
@@ -172,6 +177,10 @@ def harmonize_quant_metadata_dtypes(
         "eligible": 0,
         "cast": 0,
         "preserved_f16": 0,
+        "anchor_f16": 0,
+        "anchor_bf16": 0,
+        "anchor_f32": 0,
+        "anchor_policy_match": 0,
     }
     if mx is None:
         try:
@@ -198,6 +207,45 @@ def harmonize_quant_metadata_dtypes(
         elif dt == mx.float32:
             summary["f32"] += 1
 
+    leaves_by_name = {name: arr for name, arr in leaves}
+    floating_dtypes = {mx.float16, mx.bfloat16, mx.float32}
+    packed_metadata_names: set[str] = set()
+    eligible_names: set[str] = set()
+    for name, arr in leaves:
+        stem, separator, leaf_name = name.rpartition(".")
+        if not separator or leaf_name not in {"scales", "biases"}:
+            continue
+        packed_weight = leaves_by_name.get(f"{stem}.weight")
+        packed_dtype = getattr(packed_weight, "dtype", None)
+        if packed_weight is None or packed_dtype in floating_dtypes:
+            continue
+        packed_metadata_names.add(name)
+        if getattr(arr, "dtype", None) == mx.float16:
+            eligible_names.add(name)
+
+    # A config declaration is not enough to establish the runtime compute
+    # dtype. Step-3.7 declares BF16 but its actual packed artifact contains F16
+    # layer/qk norms and zero BF16 parameters. Casting only its quant metadata
+    # to BF16 creates F16/BF16 operations, which MLX promotes to FP32 and then
+    # stores as FP32 K/V. Infer the compute anchor from non-quant-metadata leaves
+    # and only harmonize when BF16 is genuinely present and dominant.
+    for name, arr in leaves:
+        if name in packed_metadata_names:
+            continue
+        dtype = getattr(arr, "dtype", None)
+        if dtype == mx.float16:
+            summary["anchor_f16"] += 1
+        elif dtype == mx.bfloat16:
+            summary["anchor_bf16"] += 1
+        elif dtype == mx.float32:
+            summary["anchor_f32"] += 1
+
+    summary["eligible"] = len(eligible_names)
+    summary["preserved_f16"] = summary["f16"] - summary["eligible"]
+    summary["anchor_policy_match"] = int(
+        summary["anchor_bf16"] > 0
+        and summary["anchor_bf16"] >= summary["anchor_f16"]
+    )
     native_dtype = str(
         declared_dtype or _declared_model_dtype(model_path) or ""
     ).strip().lower()
@@ -212,24 +260,17 @@ def harmonize_quant_metadata_dtypes(
         )
         summary["preserved_f16"] = summary["f16"]
         return summary
-
-    leaves_by_name = {name: arr for name, arr in leaves}
-    floating_dtypes = {mx.float16, mx.bfloat16, mx.float32}
-    eligible_names: set[str] = set()
-    for name, arr in leaves:
-        if getattr(arr, "dtype", None) != mx.float16:
-            continue
-        stem, separator, leaf_name = name.rpartition(".")
-        if not separator or leaf_name not in {"scales", "biases"}:
-            continue
-        packed_weight = leaves_by_name.get(f"{stem}.weight")
-        packed_dtype = getattr(packed_weight, "dtype", None)
-        if packed_weight is None or packed_dtype in floating_dtypes:
-            continue
-        eligible_names.add(name)
-
-    summary["eligible"] = len(eligible_names)
-    summary["preserved_f16"] = summary["f16"] - summary["eligible"]
+    if not summary["anchor_policy_match"]:
+        active_log.info(
+            "Quant metadata dtype harmonisation skipped: config says BF16 but "
+            "runtime anchors are f16=%d bf16=%d f32=%d; preserving the actual "
+            "artifact dtype to avoid FP32 promotion",
+            summary["anchor_f16"],
+            summary["anchor_bf16"],
+            summary["anchor_f32"],
+        )
+        summary["preserved_f16"] = summary["f16"]
+        return summary
     if not eligible_names:
         active_log.info(
             "Quant metadata dtypes need no harmonisation "
@@ -278,10 +319,10 @@ def maybe_harmonize_quant_metadata_dtypes(
     """Apply the native-dtype correction unless explicitly disabled.
 
     The operation itself remains narrowly self-gating: it only changes packed
-    F16 affine metadata in a bundle that declares BF16 compute.  Making that
-    correction the default restores MLX's native BF16 quantized-linear
-    contract; ``VMLX_HARMONIZE_PARAM_DTYPES=0`` remains an emergency A/B
-    escape hatch.
+    F16 affine metadata when the bundle declares BF16 *and* its actual runtime
+    parameters prove BF16 is the dominant compute anchor. Making that
+    correction the default restores MLX's native quantized-linear contract;
+    ``VMLX_HARMONIZE_PARAM_DTYPES=0`` remains an emergency A/B escape hatch.
     """
     setting = os.environ.get("VMLX_HARMONIZE_PARAM_DTYPES")
     if setting is not None and setting.strip().lower() in _FALSE_ENV_VALUES:
@@ -306,7 +347,7 @@ def maybe_harmonize_quant_metadata_dtypes(
             "_vmlx_quant_metadata_dtype_harmonization",
             {
                 "enabled": True,
-                "policy": "bundle_declared_bfloat16_packed_affine_only",
+                "policy": "bundle_declared_bfloat16_with_runtime_bfloat16_anchors",
                 "explicit": bool(
                     setting is not None
                     and setting.strip().lower() in _TRUE_ENV_VALUES

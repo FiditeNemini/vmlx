@@ -174,6 +174,48 @@ class TestEndToEndRoundTrip:
         assert len(kv_layers) == 10
         assert isinstance(kv_layers[0][1], mx.array)
 
+    def test_reconstruction_read_omits_only_nonmatching_rotating_window(
+        self,
+        disk_store,
+    ):
+        """Interior mixed-SWA reads keep KV pages without loading stale rings."""
+        rotating = _make_numpy_rotating_kv_block(seq_len=8)[0]
+        kv = _make_numpy_kv_block(seq_len=8, n_heads=1, head_dim=4)[3]
+        cache_data = [rotating, kv]
+        block_hash = b"\x12" * 32
+
+        assert disk_store.write_block_async(block_hash, cache_data, 8)
+        assert disk_store.wait_for_blocks([block_hash], timeout=5.0) == {
+            block_hash
+        }
+
+        # Ordinary reads and an exact target retain the complete native record.
+        ordinary = disk_store.read_block(block_hash)
+        exact = disk_store.read_block_for_reconstruction(
+            block_hash,
+            rotating_target_offset=20,
+        )
+        assert ordinary is not None and exact is not None
+        assert ordinary[0][0] == exact[0][0] == "rotating_kv"
+        assert exact[0][5:] == (20, 8)
+        assert ordinary[1][0] == exact[1][0] == "kv"
+
+        # A longer chain cannot use the old offset-20 ring at target 24.  The
+        # full-attention page stays available and the omitted native layer is an
+        # explicit pending marker, never an ambiguous cumulative-state skip.
+        selective = disk_store.read_block_for_reconstruction(
+            block_hash,
+            rotating_target_offset=24,
+        )
+        assert selective is not None
+        assert selective[0] == ("rotating_kv_pending", "RotatingKVCache")
+        assert selective[1][0] == "kv"
+        assert selective[1][1].shape == ordinary[1][1].shape
+
+        stats = disk_store.get_stats()
+        assert stats["selective_rotating_reconstruction_reads"] == 1
+        assert stats["selective_rotating_layers_omitted"] == 1
+
 
 class TestWriteBlockAsync:
     """Test end-to-end write through the async path."""

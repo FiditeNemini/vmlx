@@ -346,6 +346,14 @@ class BlockDiskStore:
         self.disk_evictions = 0
         self.tq_native_writes = 0
         self.tq_native_hits = 0
+        # Mixed-SWA reconstruction can encounter old terminal checkpoints in
+        # the interior of a longer content-addressed chain.  Those rotating
+        # windows are not valid for the requested target offset, so loading
+        # their (often 100+ MB) tensors only to discard them is pure read
+        # amplification.  Count the schema-aware selective reads separately so
+        # live /health evidence can prove the optimization actually ran.
+        self.selective_rotating_reconstruction_reads = 0
+        self.selective_rotating_layers_omitted = 0
         # Non-blocking, request-correlated write-fence telemetry.  A fence is
         # complete only after every queued block preceding its sentinel has
         # finished its SQLite transaction *and* the drained batch's LRU
@@ -751,13 +759,53 @@ class BlockDiskStore:
                 self._note_miss("load_failed")
             return None
 
+    def read_block_for_reconstruction(
+        self,
+        block_hash: bytes,
+        *,
+        rotating_target_offset: int,
+    ) -> Optional[List[Tuple]]:
+        """Read one SSD-only reconstruction block without stale SWA windows.
+
+        The target offset is part of the native RotatingKVCache contract.  A
+        rotating checkpoint whose stored absolute offset differs from it cannot
+        contribute to this reconstruction; ``prefix_cache`` already ignores
+        such entries after loading them.  This path performs that same decision
+        from safetensors metadata before materializing the large K/V tensors.
+
+        Callers must treat the result as request-local and transient.  It may
+        contain ``rotating_kv_pending`` markers in place of omitted historical
+        checkpoints and therefore must never be installed as shared block RAM.
+        """
+        executor = getattr(self, "_load_executor", None)
+        prefix = getattr(self, "_load_worker_prefix", "llm-worker")
+        args = (block_hash, max(0, int(rotating_target_offset)))
+        if executor is None or threading.current_thread().name.startswith(prefix):
+            return self._read_block_impl(*args)
+        try:
+            return executor.submit(self._read_block_impl, *args).result()
+        except Exception as exc:
+            logger.warning(
+                "Selective block L2 worker-owned load failed; treating as miss: %s",
+                exc,
+                exc_info=True,
+            )
+            with self._stats_lock:
+                self.disk_misses += 1
+                self._note_miss("load_failed")
+            return None
+
 
     def _note_miss(self, reason: str) -> None:
         """Record WHY a lookup missed. Caller already holds _stats_lock."""
         if reason in self.disk_miss_reasons:
             self.disk_miss_reasons[reason] += 1
 
-    def _read_block_impl(self, block_hash: bytes) -> Optional[List[Tuple]]:
+    def _read_block_impl(
+        self,
+        block_hash: bytes,
+        rotating_target_offset: Optional[int] = None,
+    ) -> Optional[List[Tuple]]:
         # Root-exclusive eviction cannot unlink the payload while validation,
         # MLX load, deserialization, and the durable LRU touch are in flight.
         with self.global_budget.mutation_guard() as locked:
@@ -766,11 +814,16 @@ class BlockDiskStore:
                     self.disk_misses += 1
                     self._note_miss("budget_locked")
                 return None
-            return self._read_block_impl_guarded(block_hash)
+            return self._read_block_impl_guarded(
+                block_hash,
+                rotating_target_offset=rotating_target_offset,
+            )
 
     def _read_block_impl_guarded(
         self,
         block_hash: bytes,
+        *,
+        rotating_target_offset: Optional[int] = None,
     ) -> Optional[List[Tuple]]:
         """
         Read a block from disk by its chain hash.
@@ -861,8 +914,37 @@ class BlockDiskStore:
                         self._note_miss("validation")
                     return None
 
-            data = mx.load(str(file_path))
+            omitted_rotating_layers: set[int] = set()
+            selective_payload = None
+            if rotating_target_offset is not None:
+                selective_payload = _load_reconstruction_payload_without_stale_rotating(
+                    file_path,
+                    target_offset=int(rotating_target_offset),
+                )
+            if selective_payload is None:
+                data = mx.load(str(file_path))
+            else:
+                data, omitted_rotating_layers = selective_payload
             cache_data = _deserialize_block(data, dtype)
+            if omitted_rotating_layers:
+                # Preserve an explicit native marker for every omitted layer.
+                # A bare ("skip",) is reserved for cumulative/SSM state and can
+                # be accepted as a partial hybrid restore; treating rotating
+                # state that way could silently return wrong Gemma/Laguna
+                # logits when the exact terminal checkpoint is absent.
+                for layer_idx in omitted_rotating_layers:
+                    if (
+                        layer_idx >= len(cache_data)
+                        or cache_data[layer_idx] != ("skip",)
+                    ):
+                        raise ValueError(
+                            "selective rotating reconstruction produced an "
+                            f"unexpected layer {layer_idx} payload"
+                        )
+                    cache_data[layer_idx] = (
+                        "rotating_kv_pending",
+                        "RotatingKVCache",
+                    )
             if self._evict_incompatible_tq_block(
                 hash_hex, file_path, cache_data
             ):
@@ -890,6 +972,11 @@ class BlockDiskStore:
                 self.disk_hits += 1
                 if _cache_data_has_tq(cache_data):
                     self.tq_native_hits += 1
+                if omitted_rotating_layers:
+                    self.selective_rotating_reconstruction_reads += 1
+                    self.selective_rotating_layers_omitted += len(
+                        omitted_rotating_layers
+                    )
             # File mtime is the non-droppable cross-process LRU signal.  The
             # SQLite update remains asynchronous for latency, but a full queue
             # can no longer make a just-read block appear old to global trim.
@@ -899,7 +986,20 @@ class BlockDiskStore:
                 pass
             # Queue access metadata update to background (non-blocking)
             self._queue_access_update(hash_hex)
-            logger.debug(f"Disk cache hit: {hash_hex[:12]} ({dtype}, {len(cache_data)} layers)")
+            if omitted_rotating_layers:
+                logger.debug(
+                    "Disk cache selective mixed-SWA hit: %s (%s, %d layers, "
+                    "%d stale rotating checkpoints omitted for target=%d)",
+                    hash_hex[:12],
+                    dtype,
+                    len(cache_data),
+                    len(omitted_rotating_layers),
+                    int(rotating_target_offset or 0),
+                )
+            else:
+                logger.debug(
+                    f"Disk cache hit: {hash_hex[:12]} ({dtype}, {len(cache_data)} layers)"
+                )
             return cache_data
         except Exception as e:
             if self._read_failure_is_transient(file_path, e):
@@ -3129,6 +3229,12 @@ class BlockDiskStore:
                 "tq_native_writes": self.tq_native_writes,
                 "tq_native_hits": self.tq_native_hits,
                 "tq_native_enabled": self._allow_tq_native,
+                "selective_rotating_reconstruction_reads": (
+                    self.selective_rotating_reconstruction_reads
+                ),
+                "selective_rotating_layers_omitted": (
+                    self.selective_rotating_layers_omitted
+                ),
                 "write_pipeline": {
                     "queue_depth": self._write_queue.qsize(),
                     "inflight": self._write_inflight,
@@ -3819,6 +3925,113 @@ def _serialize_block(
 
     num_layers = len(cache_data) if num_layers_with_data else 0
     return tensors, dtype, num_layers
+
+
+def _load_reconstruction_payload_without_stale_rotating(
+    file_path: Path,
+    *,
+    target_offset: int,
+) -> Optional[Tuple[Dict[str, Any], set[int]]]:
+    """Load a mixed-SWA block while omitting unusable rotating checkpoints.
+
+    A content-addressed block can be the terminal checkpoint of an earlier
+    branch and later become an interior block of a longer chain.  Its standard
+    KV slices remain reusable, but its RotatingKVCache window is valid only at
+    the absolute offset recorded in ``layer_N_offset``.  Reading every old
+    window before ``reconstruct_cache`` rejects it caused hundreds of MB of
+    avoidable I/O per short follow-up on Gemma 4.
+
+    This helper opens only the safetensors metadata and tiny offset scalars
+    first.  It returns ``None`` unless at least one stale rotating layer can be
+    omitted, preserving the ordinary ``mx.load`` path for non-mixed and exact
+    terminal blocks.  For omitted layers the offset scalar remains in the
+    returned mapping so deserialization preserves the declared layer index; the
+    caller converts the resulting ``skip`` entry to an explicit
+    ``rotating_kv_pending`` marker before validation.
+    """
+    if not HAS_MLX:
+        return None
+
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(file_path), framework="numpy") as handle:
+            tensor_names = list(handle.keys())
+            meta_key = (
+                "__vmlx_block_meta__"
+                if "__vmlx_block_meta__" in tensor_names
+                else "__metadata__" if "__metadata__" in tensor_names else None
+            )
+            if meta_key is None:
+                return None
+
+            meta_array = handle.get_tensor(meta_key)
+            decoded = json.loads(meta_array.tobytes().decode("utf-8"))
+            if not isinstance(decoded, dict):
+                return None
+            raw_layer_types = decoded.get("__layer_types__")
+            if not isinstance(raw_layer_types, dict):
+                return None
+
+            rotating_layers: set[int] = set()
+            for raw_idx, layer_type in raw_layer_types.items():
+                if layer_type != "rotating_kv":
+                    continue
+                try:
+                    rotating_layers.add(int(raw_idx))
+                except (TypeError, ValueError):
+                    return None
+            if not rotating_layers:
+                return None
+
+            offset_arrays: Dict[int, Any] = {}
+            omitted_layers: set[int] = set()
+            for layer_idx in rotating_layers:
+                offset_name = f"layer_{layer_idx}_offset"
+                if offset_name not in tensor_names:
+                    # Old records without absolute offsets cannot be filtered
+                    # safely. Fall back to the existing full loader.
+                    return None
+                offset_array = handle.get_tensor(offset_name)
+                if int(getattr(offset_array, "size", 0) or 0) != 1:
+                    return None
+                offset_arrays[layer_idx] = offset_array
+                if int(offset_array.reshape(-1)[0]) != int(target_offset):
+                    omitted_layers.add(layer_idx)
+
+            if not omitted_layers:
+                return None
+
+            selected: Dict[str, Any] = {}
+            for name in tensor_names:
+                layer_idx: Optional[int] = None
+                if name.startswith("layer_"):
+                    try:
+                        layer_idx = int(name[6:].split("_", 1)[0])
+                    except (TypeError, ValueError):
+                        layer_idx = None
+
+                if layer_idx in omitted_layers:
+                    # Keep one tiny scalar per omitted layer so legacy
+                    # deserialization still discovers its index. The large
+                    # keys/values and the other unused ring metadata stay on
+                    # SSD.
+                    if name != f"layer_{layer_idx}_offset":
+                        continue
+                    numpy_array = offset_arrays[layer_idx]
+                else:
+                    numpy_array = handle.get_tensor(name)
+                selected[name] = mx.array(numpy_array)
+
+        return selected, omitted_layers
+    except Exception as exc:  # noqa: BLE001 - optimization must fail open
+        logger.debug(
+            "Selective mixed-SWA safetensors read unavailable for %s; "
+            "falling back to full payload: %s",
+            file_path,
+            exc,
+        )
+        return None
 
 
 def _deserialize_block(

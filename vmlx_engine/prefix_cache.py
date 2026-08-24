@@ -6542,7 +6542,9 @@ class BlockAwarePrefixCache:
                     )
                     return None
 
-                if block.cache_data is None:
+                block_data = block.cache_data
+                transient_selective_read = False
+                if block_data is None:
                     # Frugal mode (or post-eviction): in-RAM mirror skipped,
                     # but the block was written to L2 disk during _store. Pull
                     # it back lazily so the in-session reconstruct path still
@@ -6552,30 +6554,62 @@ class BlockAwarePrefixCache:
                     _disk = getattr(self.paged_cache, "_disk_store", None)
                     if _disk is not None and block.block_hash is not None:
                         try:
-                            _disk_data = _disk.read_block(block.block_hash)
+                            _selective_reader = getattr(
+                                _disk,
+                                "read_block_for_reconstruction",
+                                None,
+                            )
+                            if (
+                                bool(getattr(self.paged_cache, "disk_only", False))
+                                and self._validate_rotating_terminal
+                                and callable(_selective_reader)
+                            ):
+                                _disk_data = _selective_reader(
+                                    block.block_hash,
+                                    rotating_target_offset=block_table.num_tokens,
+                                )
+                                # This result may contain explicit pending
+                                # markers in place of stale rotating windows.
+                                # It is request-local reconstruction input, not
+                                # a complete shared block payload.
+                                transient_selective_read = _disk_data is not None
+                            else:
+                                _disk_data = _disk.read_block(block.block_hash)
                         except Exception as _re:
                             logger.warning(
                                 f"Block {block_id} disk read failed: {_re}"
                             )
                             _disk_data = None
                         if _disk_data is not None:
-                            block.cache_data = _disk_data
-                            block.cache_data_from_disk = True
-                            block.cache_data_transient = True
-                            self.paged_cache._note_resident(
-                                block,
-                                self.paged_cache.estimate_block_nbytes(_disk_data),
-                            )
-                            self.paged_cache.transient_disk_promotions += 1
-                            self.paged_cache.transient_disk_peak_bytes = max(
-                                self.paged_cache.transient_disk_peak_bytes,
-                                self.paged_cache.resident_bytes,
-                            )
-                            logger.debug(
-                                f"Block {block_id} rehydrated from L2 disk "
-                                f"(hash={block.block_hash.hex()[:12] if hasattr(block.block_hash, 'hex') else block.block_hash})"
-                            )
-                    if block.cache_data is None:
+                            disk_backed_block_ids.add(block_id)
+                            block_data = _disk_data
+                            if transient_selective_read:
+                                logger.debug(
+                                    "Block %s loaded as request-local L2 "
+                                    "reconstruction input (hash=%s)",
+                                    block_id,
+                                    block.block_hash.hex()[:12]
+                                    if hasattr(block.block_hash, "hex")
+                                    else block.block_hash,
+                                )
+                            else:
+                                block.cache_data = _disk_data
+                                block.cache_data_from_disk = True
+                                block.cache_data_transient = True
+                                self.paged_cache._note_resident(
+                                    block,
+                                    self.paged_cache.estimate_block_nbytes(_disk_data),
+                                )
+                                self.paged_cache.transient_disk_promotions += 1
+                                self.paged_cache.transient_disk_peak_bytes = max(
+                                    self.paged_cache.transient_disk_peak_bytes,
+                                    self.paged_cache.resident_bytes,
+                                )
+                                logger.debug(
+                                    f"Block {block_id} rehydrated from L2 disk "
+                                    f"(hash={block.block_hash.hex()[:12] if hasattr(block.block_hash, 'hex') else block.block_hash})"
+                                )
+                    if block_data is None:
                         logger.debug(f"Block {block_id} has no tensor data stored")
                         # issue #198 (1B): partial eviction diagnostic
                         logger.info(
@@ -6585,7 +6619,11 @@ class BlockAwarePrefixCache:
                         )
                         return None
 
-                if getattr(block, "cache_data_from_disk", False):
+                if transient_selective_read:
+                    # Already accounted as a disk-backed reconstruction input;
+                    # deliberately leave the shared CacheBlock empty.
+                    pass
+                elif getattr(block, "cache_data_from_disk", False):
                     disk_backed_block_ids.add(block_id)
                 elif block.block_hash is not None:
                     disk_store = getattr(self.paged_cache, "_disk_store", None)
@@ -6599,8 +6637,8 @@ class BlockAwarePrefixCache:
                                 l2_readable_block_ids.add(block_id)
                         except Exception:
                             pass
-                all_block_data.append(block.cache_data)
-                if _block_payload_needs_native_residency(block.cache_data):
+                all_block_data.append(block_data)
+                if _block_payload_needs_native_residency(block_data):
                     native_resident_block_ids.add(block_id)
 
             if not all_block_data:

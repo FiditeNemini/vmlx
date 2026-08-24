@@ -1198,6 +1198,94 @@ class TestBlockAwarePrefixCache:
         finally:
             store.shutdown()
 
+    def test_disk_only_mixed_swa_selective_reads_stay_request_local(self):
+        """A partial interior SSD payload must never become shared block RAM."""
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.paged_cache import BlockTable, PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        first_keys = mx.arange(4, dtype=mx.float32).reshape(1, 1, 4, 1)
+        second_keys = mx.arange(4, 8, dtype=mx.float32).reshape(1, 1, 4, 1)
+        rotating_keys = mx.arange(8, dtype=mx.float32).reshape(1, 1, 8, 1)
+        mx.eval(first_keys, second_keys, rotating_keys)
+
+        class _Disk:
+            def __init__(self):
+                self.calls = []
+                self.payloads = {
+                    b"a" * 32: [
+                        ("kv", first_keys, first_keys + 100),
+                        ("rotating_kv_pending", "RotatingKVCache"),
+                    ],
+                    b"b" * 32: [
+                        ("kv", second_keys, second_keys + 100),
+                        (
+                            "rotating_kv",
+                            rotating_keys,
+                            rotating_keys + 100,
+                            8,
+                            0,
+                            8,
+                            8,
+                        ),
+                    ],
+                }
+
+            def partial_token_counts(self, _block_size):
+                return []
+
+            def read_block_for_reconstruction(
+                self,
+                block_hash,
+                *,
+                rotating_target_offset,
+            ):
+                self.calls.append((block_hash, rotating_target_offset))
+                return self.payloads[block_hash]
+
+            def read_block(self, _block_hash):
+                raise AssertionError("SSD-only reconstruction used the full reader")
+
+        disk = _Disk()
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=disk,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        blocks = [manager.allocate_block(), manager.allocate_block()]
+        assert all(block is not None for block in blocks)
+        for block, block_hash in zip(blocks, (b"a" * 32, b"b" * 32)):
+            block.block_hash = block_hash
+            block.token_count = 4
+            assert block.cache_data is None
+
+        table = BlockTable(
+            request_id="selective",
+            block_ids=[block.block_id for block in blocks],
+            num_tokens=8,
+        )
+        prefix = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=manager,
+            uses_dsv4_cache=False,
+            uses_zaya_cache=False,
+            mixed_attention_cache_model=True,
+        )
+
+        restored = prefix.reconstruct_cache(table)
+
+        assert restored is not None
+        assert restored[0].offset == 8
+        assert restored[1].offset == 8
+        assert disk.calls == [(b"a" * 32, 8), (b"b" * 32, 8)]
+        assert prefix._last_reconstruct_disk_blocks == 2
+        assert manager.resident_bytes == 0
+        assert manager.transient_disk_promotions == 0
+        assert all(block.cache_data is None for block in blocks)
+
     def test_block_l2_reads_run_on_model_owner_executor(self, tmp_path):
         """API-thread L2 lookup must create MLX arrays on the model worker."""
         from concurrent.futures import ThreadPoolExecutor

@@ -590,6 +590,13 @@ class SchedulerConfig:
     completion_batch_size: int = 512
     prefill_step_size: int = 2048
 
+    # Multimodal processor-output RAM LRU. Production defaults off: entries
+    # retain pixel/video tensors and grew active MLX memory once per media turn
+    # even in the SSD-only cache profile. This is separate from prefix-cache
+    # RAM and must be explicitly opted into for diagnostics.
+    enable_vision_cache: bool = False
+    vision_cache_size: int = 16
+
     # Prefix cache settings
     enable_prefix_cache: bool = True
     prefix_cache_size: int = 100  # Max cached entries (legacy, ignored if memory-aware)

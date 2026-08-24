@@ -1131,8 +1131,9 @@ class TestMLLMSchedulerConfig:
         assert config.prefill_batch_size == 512
         assert config.prefill_step_size == 2048
         assert config.completion_batch_size == 512
-        assert config.enable_vision_cache is True
-        # Vision embedding cache remains conservative; text batch sizing is separate.
+        assert config.enable_vision_cache is False
+        # Capacity remains available for explicit diagnostics, but the
+        # shipping SSD-only profile retains no processor tensors in RAM.
         assert config.vision_cache_size == 16
 
     def test_batched_engine_mllm_fallback_uses_scheduler_defaults(self):

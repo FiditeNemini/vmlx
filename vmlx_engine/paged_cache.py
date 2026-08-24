@@ -35,6 +35,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, NewType, Optional, Tuple
 
+from .cache_key import cache_extra_keys_for_token_range
+
 logger = logging.getLogger(__name__)
 
 _CACHE_HASH_DEBUG = os.environ.get("VMLX_CACHE_HASH_DEBUG", "") == "1"
@@ -1771,7 +1773,9 @@ class PagedCacheManager:
                 block_hash = compute_block_hash(
                     parent_hash,
                     block_tokens,
-                    extra_keys=extra_keys,
+                    extra_keys=cache_extra_keys_for_token_range(
+                        extra_keys, start, end
+                    ),
                 )
                 block.block_hash = block_hash
                 block.parent_hash = parent_hash
@@ -1819,7 +1823,9 @@ class PagedCacheManager:
             block_hash = compute_block_hash(
                 parent_hash,
                 block_tokens,
-                extra_keys=extra_keys,
+                extra_keys=cache_extra_keys_for_token_range(
+                    extra_keys, start, end
+                ),
             )
 
             if _CACHE_HASH_DEBUG:
@@ -1902,7 +1908,9 @@ class PagedCacheManager:
                     partial_hash = compute_block_hash(
                         parent_hash,
                         partial_tokens,
-                        extra_keys=extra_keys,
+                        extra_keys=cache_extra_keys_for_token_range(
+                            extra_keys, start, start + partial_size
+                        ),
                     )
                     with self._lock:
                         partial_block = (
@@ -1972,7 +1980,11 @@ class PagedCacheManager:
                 block_hash = compute_block_hash(
                     parent_hash,
                     block_tokens,
-                    extra_keys=extra_keys,
+                    extra_keys=cache_extra_keys_for_token_range(
+                        extra_keys,
+                        num_cached_tokens,
+                        num_cached_tokens + size,
+                    ),
                 )
 
                 with self._lock:

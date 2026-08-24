@@ -117,6 +117,28 @@ describe('CachePanel last-request truthfulness', () => {
     expect(source).not.toContain('ssm.nbytes_mb > 0')
   })
 
+  it('visibly accounts for the multimodal processor RAM tier and causal media scope', () => {
+    expect(source).toContain('schedulerStats?.vision_cache')
+    expect(source).toContain('schedulerCache?.vision_cache')
+    expect(source).toContain('visionMemoryCache.retained_bytes')
+    expect(source).toContain("t('sessions.cache.mediaRamTier')")
+    expect(source).toContain("t('sessions.cache.mediaRamBytes')")
+    expect(source).toContain("t('sessions.cache.mediaRamEntries')")
+    expect(source).toContain('lastCacheExecution.media_cache_scope?.mode')
+    expect(source).toContain("t('sessions.cache.mediaScope')")
+    expect(source).toContain("t('sessions.cache.mediaBoundaries')")
+
+    const en = JSON.parse(
+      readFileSync(
+        join(__dirname, '..', 'src/renderer/src/i18n/locales/en.json'),
+        'utf8',
+      ),
+    )
+    expect(en.sessions.cache.mediaRamTier).toBe('Media Preprocess RAM Cache')
+    expect(en.sessions.cache.mediaRamBytes).toBe('Media Tensor RAM')
+    expect(en.sessions.config.ramCacheTradeoffNotice).toContain('released after every request')
+  })
+
   it('shows the instantiated native layer layout and does not call an unquantized codec disabled L2', () => {
     expect(source).toContain('nativeCache.kv_layer_indices.length')
     expect(source).toContain('nativeCache.cache_layer_count')

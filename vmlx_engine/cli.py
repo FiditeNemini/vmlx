@@ -2568,6 +2568,12 @@ def serve_command(args):
             prefill_batch_size=args.prefill_batch_size,
             prefill_step_size=getattr(args, 'prefill_step_size', 2048),
             completion_batch_size=args.completion_batch_size,
+            enable_vision_cache=bool(
+                getattr(args, "enable_vision_cache", False)
+            ),
+            vision_cache_size=max(
+                0, int(getattr(args, "vision_memory_cache_size", 16) or 0)
+            ),
             enable_prefix_cache=enable_prefix_cache,
             prefix_cache_size=args.prefix_cache_size,
             prefix_cache_max_bytes=getattr(args, 'prefix_cache_max_bytes', None),
@@ -2966,6 +2972,12 @@ def bench_command(args):
             prefill_batch_size=args.prefill_batch_size,
             prefill_step_size=getattr(args, 'prefill_step_size', 2048),
             completion_batch_size=args.completion_batch_size,
+            enable_vision_cache=bool(
+                getattr(args, "enable_vision_cache", False)
+            ),
+            vision_cache_size=max(
+                0, int(getattr(args, "vision_memory_cache_size", 16) or 0)
+            ),
             enable_prefix_cache=enable_prefix_cache,
             prefix_cache_size=args.prefix_cache_size,
             prefix_cache_max_bytes=getattr(args, 'prefix_cache_max_bytes', None),
@@ -3690,6 +3702,30 @@ Examples:
         action="store_false",
         help="Use the direct single-request engine and disable cache-stack features "
              "that require continuous batching.",
+    )
+    vision_memory_group = serve_parser.add_mutually_exclusive_group()
+    vision_memory_group.add_argument(
+        "--enable-vision-memory-cache",
+        dest="enable_vision_cache",
+        action="store_true",
+        help="Retain multimodal processor outputs (pixel/video tensors, token "
+             "ids, masks, and grids) in an in-process RAM LRU. Diagnostic "
+             "opt-in; the shipping SSD-only profile leaves this off.",
+    )
+    vision_memory_group.add_argument(
+        "--no-vision-memory-cache",
+        dest="enable_vision_cache",
+        action="store_false",
+        help="Release multimodal processor tensors after each request instead "
+             "of retaining a hidden per-prompt RAM LRU (default).",
+    )
+    serve_parser.set_defaults(enable_vision_cache=False)
+    serve_parser.add_argument(
+        "--vision-memory-cache-size",
+        type=int,
+        default=16,
+        help="Maximum multimodal processor-output RAM entries when explicitly "
+             "enabled. Has no effect with --no-vision-memory-cache.",
     )
     # Paged cache options
     serve_parser.add_argument(

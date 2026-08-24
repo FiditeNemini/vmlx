@@ -123,6 +123,7 @@ from .errors import (
     VLMImagePrefillBudgetError,
 )
 from .vision_embedding_cache import VisionEmbeddingCache
+from .cache_key import CACHE_EXTRA_SCOPES_KEY, scope_cache_extra_key
 from .utils.prefix_hit import (
     disk_prefix_hit_tail_and_cached_tokens as _shared_disk_prefix_hit,
     prefix_hit_tail_and_cached_tokens as _shared_prefix_hit,
@@ -185,6 +186,82 @@ def _mllm_input_ids_token_count(input_ids: Any) -> int:
     return int(getattr(input_ids, "size", 0) or 0)
 
 
+def _hash_mllm_media_text(hasher: Any, label: str, value: Any) -> None:
+    hasher.update(label.encode("utf-8"))
+    hasher.update(hashlib.sha256(str(value).encode("utf-8")).digest())
+
+
+def _hash_mllm_media_source(hasher: Any, label: str, value: Any) -> None:
+    """Hash local media by bytes so equivalent temp paths share a key."""
+    try:
+        path = Path(value)
+        if path.is_file():
+            content_hash = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    content_hash.update(chunk)
+            hasher.update(label.encode("utf-8"))
+            hasher.update(b"local-media-content")
+            hasher.update(content_hash.digest())
+            return
+    except (OSError, TypeError, ValueError):
+        pass
+    _hash_mllm_media_text(hasher, label, value)
+
+
+def _hash_mllm_media_array(hasher: Any, label: str, value: Any) -> None:
+    if value is None:
+        return
+    hasher.update(label.encode("utf-8"))
+    try:
+        hasher.update(str(getattr(value, "shape", "")).encode("utf-8"))
+        hasher.update(str(getattr(value, "dtype", "")).encode("utf-8"))
+        import numpy as np
+
+        hasher.update(np.array(value).tobytes())
+    except Exception:
+        _hash_mllm_media_text(hasher, label, value)
+
+
+def _mllm_media_item_digest(
+    request: Any,
+    modality: str,
+    source: Any,
+) -> str:
+    """Stable identity for one causal media item in a rendered prompt."""
+    hasher = hashlib.sha256()
+    hasher.update(b"vmlx-mllm-media-item-v1")
+    _hash_mllm_media_source(hasher, modality, source)
+    if modality == "image":
+        _hash_mllm_media_text(
+            hasher,
+            "image_token_budget",
+            getattr(request, "image_token_budget", None),
+        )
+    elif modality == "video":
+        _hash_mllm_media_text(
+            hasher, "video_fps", getattr(request, "video_fps", None)
+        )
+        _hash_mllm_media_text(
+            hasher,
+            "video_max_frames",
+            getattr(request, "video_max_frames", None),
+        )
+    return hasher.hexdigest()
+
+
+def _mllm_media_source_items(request: Any) -> List[Tuple[str, Any]]:
+    """Return source-backed media grouped in processor argument order."""
+    items: List[Tuple[str, Any]] = []
+    items.extend(("image", value) for value in getattr(request, "images", None) or [])
+    items.extend(("video", value) for value in getattr(request, "videos", None) or [])
+    audio = getattr(request, "audio", None) or getattr(request, "audios", None)
+    if audio is not None and not isinstance(audio, (list, tuple)):
+        audio = [audio]
+    items.extend(("audio", value) for value in audio or [])
+    return items
+
+
 def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
     """Return a stable media fingerprint for paged VLM prefix-cache keys.
 
@@ -216,69 +293,67 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
 
     hasher = hashlib.sha256()
     hasher.update(b"vmlx-mllm-media-cache-v1")
-    media_sources = list(getattr(request, "images", None) or []) + list(
-        getattr(request, "videos", None) or []
+    audio_sources = getattr(request, "audio", None) or getattr(
+        request, "audios", None
+    )
+    if audio_sources is not None and not isinstance(audio_sources, (list, tuple)):
+        audio_sources = [audio_sources]
+    media_sources = (
+        list(getattr(request, "images", None) or [])
+        + list(getattr(request, "videos", None) or [])
+        + list(audio_sources or [])
     )
 
-    def _hash_text(label: str, value: Any) -> None:
-        hasher.update(label.encode("utf-8"))
-        hasher.update(hashlib.sha256(str(value).encode("utf-8")).digest())
-
-    def _hash_media_source(label: str, value: Any) -> None:
-        """Hash local media by bytes so equivalent temp paths share a key."""
-        try:
-            path = Path(value)
-            if path.is_file():
-                content_hash = hashlib.sha256()
-                with path.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        content_hash.update(chunk)
-                hasher.update(label.encode("utf-8"))
-                hasher.update(b"local-media-content")
-                hasher.update(content_hash.digest())
-                return
-        except (OSError, TypeError, ValueError):
-            pass
-        _hash_text(label, value)
-
-    def _hash_array(label: str, value: Any) -> None:
-        if value is None:
-            return
-        hasher.update(label.encode("utf-8"))
-        try:
-            hasher.update(str(getattr(value, "shape", "")).encode("utf-8"))
-            hasher.update(str(getattr(value, "dtype", "")).encode("utf-8"))
-            import numpy as np
-
-            hasher.update(np.array(value).tobytes())
-        except Exception:
-            _hash_text(label, value)
-
     for source in getattr(request, "images", None) or []:
-        _hash_media_source("image", source)
+        _hash_mllm_media_source(hasher, "image", source)
     if getattr(request, "images", None):
-        _hash_text("image_token_budget", getattr(request, "image_token_budget", None))
+        _hash_mllm_media_text(
+            hasher,
+            "image_token_budget",
+            getattr(request, "image_token_budget", None),
+        )
     for source in getattr(request, "videos", None) or []:
-        _hash_media_source("video", source)
+        _hash_mllm_media_source(hasher, "video", source)
     if getattr(request, "videos", None):
-        _hash_text("video_fps", getattr(request, "video_fps", None))
-        _hash_text("video_max_frames", getattr(request, "video_max_frames", None))
-    for source in getattr(request, "audios", None) or []:
-        _hash_media_source("audio", source)
-    if getattr(request, "audio", None):
-        _hash_text("audio", getattr(request, "audio", None))
-    _hash_array("image_grid_thw", getattr(request, "image_grid_thw", None))
-    _hash_array("video_grid_thw", getattr(request, "video_grid_thw", None))
-    _hash_array("audio_codes", getattr(request, "audio_codes", None))
-    _hash_array("audio_embeds", getattr(request, "audio_embeds", None))
-    _hash_array("audio_features", getattr(request, "audio_features", None))
-    _hash_array("audio_features_mask", getattr(request, "audio_features_mask", None))
+        _hash_mllm_media_text(
+            hasher, "video_fps", getattr(request, "video_fps", None)
+        )
+        _hash_mllm_media_text(
+            hasher,
+            "video_max_frames",
+            getattr(request, "video_max_frames", None),
+        )
+    for source in audio_sources or []:
+        _hash_mllm_media_source(hasher, "audio", source)
+    _hash_mllm_media_array(
+        hasher, "image_grid_thw", getattr(request, "image_grid_thw", None)
+    )
+    _hash_mllm_media_array(
+        hasher, "video_grid_thw", getattr(request, "video_grid_thw", None)
+    )
+    _hash_mllm_media_array(
+        hasher, "audio_codes", getattr(request, "audio_codes", None)
+    )
+    _hash_mllm_media_array(
+        hasher, "audio_embeds", getattr(request, "audio_embeds", None)
+    )
+    _hash_mllm_media_array(
+        hasher, "audio_features", getattr(request, "audio_features", None)
+    )
+    _hash_mllm_media_array(
+        hasher,
+        "audio_features_mask",
+        getattr(request, "audio_features_mask", None),
+    )
     if not media_sources:
         # Fallback for callers that hand us preprocessed pixel tensors without
         # source URLs/paths. Do not hash attention_mask: it changes with text
         # history length and would make the same image miss across turns.
-        _hash_array("pixel_values", getattr(request, "pixel_values", None))
-        _hash_array(
+        _hash_mllm_media_array(
+            hasher, "pixel_values", getattr(request, "pixel_values", None)
+        )
+        _hash_mllm_media_array(
+            hasher,
             "pixel_values_videos",
             getattr(request, "pixel_values_videos", None)
             if getattr(request, "pixel_values_videos", None) is not None
@@ -290,19 +365,28 @@ def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
 
 def _merge_mllm_cache_extra_keys(
     base: Optional[Any],
-    addition: Optional[Dict[str, str]],
-) -> Optional[Dict[str, str]]:
+    addition: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
     """Merge cache side-key dictionaries without dropping request-owned axes."""
     if not base and not addition:
         return None
-    merged: Dict[str, str] = {}
+    merged: Dict[str, Any] = {}
     if base:
         if isinstance(base, dict):
-            merged.update({str(k): str(v) for k, v in base.items()})
+            merged.update({str(k): v for k, v in base.items()})
         else:
             merged["request"] = repr(base)
     if addition:
-        merged.update({str(k): str(v) for k, v in addition.items()})
+        for key, value in addition.items():
+            key = str(key)
+            if (
+                key == CACHE_EXTRA_SCOPES_KEY
+                and isinstance(value, dict)
+                and isinstance(merged.get(key), dict)
+            ):
+                merged[key] = {**merged[key], **value}
+            else:
+                merged[key] = value
     return merged or None
 
 
@@ -5760,7 +5844,7 @@ class MLLMBatchGenerator:
         prefill_batch_size: int = 4,  # Smaller for MLLM due to vision overhead
         completion_batch_size: int = 16,  # Can be larger for text generation
         prefill_step_size: int = 1024,
-        enable_vision_cache: bool = True,
+        enable_vision_cache: bool = False,
         vision_cache_size: int = 16,
         paged_cache_manager: Optional[Any] = None,
         block_aware_cache: Optional[Any] = None,
@@ -7214,15 +7298,13 @@ class MLLMBatchGenerator:
             return block_boundary
         return 0
 
-    def _media_placeholder_token_ids(self) -> set[int]:
-        """Return configured media placeholder token ids for the loaded VLM.
-
-        Different mlx-vlm families name these differently. Qwen-style configs
-        commonly use ``image_token_index`` while Gemma/Nemotron-family configs
-        may expose image/video/audio ids separately. Treat all discovered ids
-        as path-dependent media placeholders for prefix-cache safety.
-        """
-        ids: set[int] = set()
+    def _media_placeholder_token_ids_by_modality(self) -> Dict[str, set[int]]:
+        """Return exact configured placeholder ids grouped by modality."""
+        ids: Dict[str, set[int]] = {
+            "image": set(),
+            "video": set(),
+            "audio": set(),
+        }
 
         def _visit(obj: Any) -> None:
             if obj is None:
@@ -7233,23 +7315,121 @@ class MLLMBatchGenerator:
             else:
                 getter = lambda key, default=None: getattr(obj, key, default)
                 nested = getattr(obj, "text_config", None)
-            for name in (
-                "image_token_index",
-                "image_token_id",
-                "video_token_index",
-                "video_token_id",
-                "audio_token_index",
-                "audio_token_id",
-            ):
-                value = getter(name, None)
-                if isinstance(value, int) and value >= 0:
-                    ids.add(value)
+            for modality in tuple(ids):
+                for suffix in ("token_index", "token_id"):
+                    value = getter(f"{modality}_{suffix}", None)
+                    if isinstance(value, int) and value >= 0:
+                        ids[modality].add(value)
             if nested is not None and nested is not obj:
                 _visit(nested)
 
         _visit(getattr(self.model, "config", None))
         _visit(getattr(self.language_model, "config", None))
         return ids
+
+    def _media_placeholder_token_ids(self) -> set[int]:
+        """Return configured media placeholder token ids for the loaded VLM.
+
+        Different mlx-vlm families name these differently. Qwen-style configs
+        commonly use ``image_token_index`` while Gemma/Nemotron-family configs
+        may expose image/video/audio ids separately. Treat all discovered ids
+        as path-dependent media placeholders for prefix-cache safety.
+        """
+        grouped = self._media_placeholder_token_ids_by_modality()
+        return set().union(*grouped.values())
+
+    def _media_scoped_cache_extra_keys(
+        self,
+        request: "MLLMBatchRequest",
+        token_ids: List[int],
+    ) -> Optional[Dict[str, Any]]:
+        """Scope exact media identities to their causal placeholder runs.
+
+        A single aggregate request digest is safe but needlessly invalidates an
+        unchanged earlier image when a later turn adds a video.  When the live
+        processor exposes a one-to-one source/run mapping, give every media
+        item its own monotonically numbered key at its own placeholder.  The
+        parent hash then preserves the exact earlier media state while a new
+        item partitions only its own block and descendants.
+
+        Any ambiguous mapping falls back to the aggregate digest at the first
+        placeholder.  That costs reuse but can never alias different pixels.
+        """
+        grouped_ids = self._media_placeholder_token_ids_by_modality()
+        all_ids = set().union(*grouped_ids.values())
+        runs = _media_placeholder_runs(token_ids, all_ids)
+        source_items = _mllm_media_source_items(request)
+        if not runs:
+            aggregate = _mllm_media_cache_extra_keys(request)
+            if not aggregate:
+                return None
+            request._media_cache_scope = {
+                "mode": "global_fail_closed",
+                "items": 0,
+                "boundaries": [],
+            }
+            return aggregate
+
+        assignments: Optional[List[Tuple[str, Any]]] = None
+        modalities = {modality for modality, _value in source_items}
+        if len(source_items) == len(runs) and len(modalities) == 1:
+            assignments = list(source_items)
+        elif len(source_items) == len(runs) and source_items:
+            queues = {
+                modality: deque(
+                    value
+                    for item_modality, value in source_items
+                    if item_modality == modality
+                )
+                for modality in grouped_ids
+            }
+            resolved: List[Tuple[str, Any]] = []
+            for run_start, _run_end in runs:
+                token_id = int(token_ids[run_start])
+                candidates = [
+                    modality
+                    for modality, ids in grouped_ids.items()
+                    if token_id in ids and queues[modality]
+                ]
+                if len(candidates) != 1:
+                    resolved = []
+                    break
+                modality = candidates[0]
+                resolved.append((modality, queues[modality].popleft()))
+            if resolved and all(not queue for queue in queues.values()):
+                assignments = resolved
+
+        if assignments is None:
+            aggregate = _mllm_media_cache_extra_keys(request)
+            if not aggregate:
+                return None
+            scoped = dict(aggregate)
+            for key in tuple(aggregate):
+                scoped = scope_cache_extra_key(scoped, key, runs[0][0])
+            request._media_cache_scope = {
+                "mode": "aggregate_first_placeholder",
+                "items": len(source_items),
+                "placeholder_runs": len(runs),
+                "boundaries": [int(runs[0][0])],
+            }
+            return scoped
+
+        scoped: Dict[str, Any] = {}
+        boundaries: List[int] = []
+        for index, ((modality, source), (run_start, _run_end)) in enumerate(
+            zip(assignments, runs)
+        ):
+            key = f"mllm_media_{index:04d}"
+            scoped[key] = _mllm_media_item_digest(request, modality, source)
+            scoped = scope_cache_extra_key(scoped, key, run_start)
+            boundaries.append(int(run_start))
+        request._media_cache_scope = {
+            "mode": "per_media_placeholder",
+            "items": len(assignments),
+            "modalities": [modality for modality, _source in assignments],
+            "boundaries": boundaries,
+        }
+        return scoped
 
     def _tokens_contain_media_placeholders(self, token_ids: List[int]) -> bool:
         media_ids = self._media_placeholder_token_ids()
@@ -9369,10 +9549,6 @@ class MLLMBatchGenerator:
                     )
                 )
                 continue
-            req._cache_extra_keys = _merge_mllm_cache_extra_keys(
-                getattr(req, "_cache_extra_keys", None),
-                _mllm_media_cache_extra_keys(req),
-            )
             # Save full token list BEFORE cache fetch can mutate req.input_ids.
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (
@@ -9381,6 +9557,17 @@ class MLLMBatchGenerator:
                 else req.input_ids[0].tolist()
                 if req.input_ids is not None
                 else []
+            )
+            # Media identity used to salt EVERY block, including root text.
+            # Scope exact item digests to their own causal placeholder runs so
+            # an image->video chain reuses the unchanged image-conditioned
+            # history and partitions only when the new video begins.
+            _media_extra_keys = self._media_scoped_cache_extra_keys(
+                req, _all_tokens
+            )
+            req._cache_extra_keys = _merge_mllm_cache_extra_keys(
+                getattr(req, "_cache_extra_keys", None),
+                _media_extra_keys,
             )
             # Strip generation prompt tokens from the cache key.
             # Chat templates append assistant role tokens (e.g. <|im_start|>assistant\n<think>\n)
@@ -9427,6 +9614,9 @@ class MLLMBatchGenerator:
                 "reconstruction_seconds": 0.0,
                 "dequantization_seconds": 0.0,
                 "total_worker_cache_seconds": 0.0,
+                "media_cache_scope": getattr(
+                    req, "_media_cache_scope", None
+                ),
             }
             trace.set(
                 prompt_tokens=len(_all_tokens),

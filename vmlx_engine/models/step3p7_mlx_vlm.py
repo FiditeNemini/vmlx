@@ -841,7 +841,14 @@ class Model(nn.Module):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        return self._process_image_input(image_input)
+        try:
+            return self._process_image_input(image_input)
+        finally:
+            # Encoder layers and same-sized video frames share RoPE tensors
+            # during this one vision forward. Keeping them in the module-global
+            # map after the request, however, is another hidden retained MLX
+            # cache and makes active memory grow as new media grids arrive.
+            _ENCODER_ROPE_COS_SIN.clear()
 
     def merge_multimodal_embeddings(
         self,

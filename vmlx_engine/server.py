@@ -226,6 +226,8 @@ _CACHE_SCHEDULER_CONFIG_ATTESTATION_FIELDS = (
     "prefill_batch_size",
     "completion_batch_size",
     "prefill_step_size",
+    "enable_vision_cache",
+    "vision_cache_size",
     "enable_prefix_cache",
     "prefix_cache_size",
     "prefix_cache_max_bytes",
@@ -11729,6 +11731,14 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
             scheduler_cache = None
     if scheduler_cache:
         result["scheduler_cache"] = scheduler_cache
+        vision_cache = (
+            scheduler_cache.get("vision_cache")
+            if isinstance(scheduler_cache, dict)
+            and isinstance(scheduler_cache.get("vision_cache"), dict)
+            else None
+        )
+        if vision_cache is not None:
+            result["vision_memory_cache"] = vision_cache
 
     disk_cache = getattr(scheduler, "disk_cache", None) if scheduler else None
     if disk_cache is not None and hasattr(disk_cache, "stats"):
@@ -11861,6 +11871,14 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
         )
         ssm_resident_bytes = int(ssm_snapshot.get("nbytes", 0) or 0)
         ssm_max_resident_bytes = int(ssm_snapshot.get("max_bytes", 0) or 0)
+        vision_snapshot = (
+            result.get("vision_memory_cache")
+            if isinstance(result.get("vision_memory_cache"), dict)
+            else {}
+        )
+        vision_resident_bytes = int(
+            vision_snapshot.get("retained_bytes", 0) or 0
+        )
         paged_ram_enabled = bool(
             paged_cache is not None
             and paged_cache.get("paged_ram_enabled", False)
@@ -11869,8 +11887,12 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
             paged_mgr is None and prefix_max_resident_bytes > 0
         )
         ssm_ram_enabled = bool(ssm_snapshot.get("ram_enabled", False))
+        vision_ram_enabled = bool(vision_snapshot.get("enabled", False))
         retained_cache_bytes = (
-            l1_resident_bytes + prefix_resident_bytes + ssm_resident_bytes
+            l1_resident_bytes
+            + prefix_resident_bytes
+            + ssm_resident_bytes
+            + vision_resident_bytes
         )
         retained_cache_max_bytes = (
             l1_max_resident_bytes
@@ -11878,7 +11900,10 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
             + ssm_max_resident_bytes
         )
         retained_cache_ram_enabled = bool(
-            paged_ram_enabled or prefix_ram_enabled or ssm_ram_enabled
+            paged_ram_enabled
+            or prefix_ram_enabled
+            or ssm_ram_enabled
+            or vision_ram_enabled
         )
         result["totals"] = {
             "ram_tokens_cached": ram_tokens_cached,
@@ -11896,6 +11921,7 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
             ),
             "prefix_resident_bytes": prefix_resident_bytes,
             "ssm_resident_bytes": ssm_resident_bytes,
+            "vision_memory_resident_bytes": vision_resident_bytes,
             "retained_cache_bytes": retained_cache_bytes,
             "retained_cache_bytes_mb": round(
                 retained_cache_bytes / (1024 * 1024), 2
@@ -11912,6 +11938,7 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
                 "block_kv_bytes": l1_resident_bytes,
                 "prefix_bytes": prefix_resident_bytes,
                 "ssm_companion_bytes": ssm_resident_bytes,
+                "vision_processor_bytes": vision_resident_bytes,
             },
             "l2_prompt_tokens_on_disk": disk_tokens,
             "l2_block_tokens_on_disk": block_tokens,
@@ -12391,6 +12418,7 @@ async def health():
             ),
             "last_cache_selection": scheduler_stats.get("last_cache_selection"),
             "last_cache_execution": scheduler_stats.get("last_cache_execution"),
+            "vision_cache": scheduler_stats.get("vision_cache"),
         }
         cache_snapshot = _cache_telemetry_snapshot(scheduler)
         if cache_snapshot:
@@ -12964,6 +12992,7 @@ async def cache_stats():
             "last_cache_reuse_partial": stats.get("last_cache_reuse_partial"),
             "last_cache_selection": stats.get("last_cache_selection"),
             "last_cache_execution": stats.get("last_cache_execution"),
+            "vision_cache": stats.get("vision_cache"),
         }
         # TurboQuant KV cache status (separate path from generic
         # kv_cache_quantization). Use the same recursive detector as /health

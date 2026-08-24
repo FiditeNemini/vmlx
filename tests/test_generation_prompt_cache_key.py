@@ -185,6 +185,7 @@ def test_generation_prompt_cache_context_dsv4_rails_share_constant_key():
 
 
 def test_mllm_media_cache_side_key_merge_preserves_generation_prompt_axis():
+    from vmlx_engine.cache_key import CACHE_EXTRA_SCOPES_KEY
     from vmlx_engine.mllm_batch_generator import _merge_mllm_cache_extra_keys
 
     assert _merge_mllm_cache_extra_keys(
@@ -195,13 +196,141 @@ def test_mllm_media_cache_side_key_merge_preserves_generation_prompt_axis():
         "mllm_media": "def",
     }
 
+    assert _merge_mllm_cache_extra_keys(
+        {
+            "generation_prompt": "v1:1:abc",
+            CACHE_EXTRA_SCOPES_KEY: {"generation_prompt": 2},
+        },
+        {
+            "mllm_media_0000": "def",
+            CACHE_EXTRA_SCOPES_KEY: {"mllm_media_0000": 6},
+        },
+    ) == {
+        "generation_prompt": "v1:1:abc",
+        "mllm_media_0000": "def",
+        CACHE_EXTRA_SCOPES_KEY: {
+            "generation_prompt": 2,
+            "mllm_media_0000": 6,
+        },
+    }
+
+
+def test_mllm_media_cache_scopes_each_item_at_its_own_placeholder():
+    from types import SimpleNamespace
+
+    from vmlx_engine.cache_key import (
+        CACHE_EXTRA_SCOPES_KEY,
+        cache_extra_keys_for_token_range,
+    )
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator.model = SimpleNamespace(config=SimpleNamespace(image_token_id=99))
+    generator.language_model = SimpleNamespace(config=None)
+
+    def request(second: str):
+        return SimpleNamespace(
+            images=["image-a", second],
+            videos=None,
+            audio=None,
+            audios=None,
+            image_token_budget=None,
+            image_grid_thw=None,
+            video_grid_thw=None,
+            audio_codes=None,
+            audio_embeds=None,
+            audio_features=None,
+            audio_features_mask=None,
+            pixel_values=None,
+            pixel_values_videos=None,
+            video_pixel_values=None,
+        )
+
+    tokens = [1, 2, 99, 99, 3, 4, 99, 99, 5]
+    first_request = request("image-b")
+    changed_request = request("image-c")
+    first = generator._media_scoped_cache_extra_keys(first_request, tokens)
+    changed = generator._media_scoped_cache_extra_keys(changed_request, tokens)
+
+    assert first_request._media_cache_scope == {
+        "mode": "per_media_placeholder",
+        "items": 2,
+        "modalities": ["image", "image"],
+        "boundaries": [2, 6],
+    }
+    assert first[CACHE_EXTRA_SCOPES_KEY] == {
+        "mllm_media_0000": 2,
+        "mllm_media_0001": 6,
+    }
+    assert cache_extra_keys_for_token_range(first, 0, 2) is None
+    first_media = cache_extra_keys_for_token_range(first, 2, 6)
+    changed_first_media = cache_extra_keys_for_token_range(changed, 2, 6)
+    assert first_media == changed_first_media
+    assert set(first_media) == {"mllm_media_0000", CACHE_EXTRA_SCOPES_KEY}
+    assert cache_extra_keys_for_token_range(first, 6, 8) != (
+        cache_extra_keys_for_token_range(changed, 6, 8)
+    )
+
+
+def test_mllm_media_cache_maps_video_image_audio_in_causal_token_order():
+    from types import SimpleNamespace
+
+    from vmlx_engine.cache_key import CACHE_EXTRA_SCOPES_KEY
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator.model = SimpleNamespace(
+        config=SimpleNamespace(
+            image_token_id=99,
+            video_token_id=88,
+            audio_token_id=77,
+        )
+    )
+    generator.language_model = SimpleNamespace(config=None)
+    request = SimpleNamespace(
+        images=["image-a"],
+        videos=["video-a"],
+        audio=["audio-a"],
+        audios=None,
+        image_token_budget=None,
+        video_fps=2.0,
+        video_max_frames=8,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        audio_codes=None,
+        audio_embeds=None,
+        audio_features=None,
+        audio_features_mask=None,
+        pixel_values=None,
+        pixel_values_videos=None,
+        video_pixel_values=None,
+    )
+
+    scoped = generator._media_scoped_cache_extra_keys(
+        request,
+        [1, 88, 88, 2, 99, 99, 3, 77, 77, 4],
+    )
+
+    assert request._media_cache_scope == {
+        "mode": "per_media_placeholder",
+        "items": 3,
+        "modalities": ["video", "image", "audio"],
+        "boundaries": [1, 4, 7],
+    }
+    assert scoped[CACHE_EXTRA_SCOPES_KEY] == {
+        "mllm_media_0000": 1,
+        "mllm_media_0001": 4,
+        "mllm_media_0002": 7,
+    }
+
 
 def test_paged_cache_schema_version_tracks_tool_and_rotating_contracts():
     from vmlx_engine.prefix_cache import PAGED_CACHE_SCHEMA_VERSION
 
-    assert "v11" in PAGED_CACHE_SCHEMA_VERSION
-    assert "qwen_tool_continuation" in PAGED_CACHE_SCHEMA_VERSION
-    assert "rotating_terminal_window" in PAGED_CACHE_SCHEMA_VERSION
+    assert "v12" in PAGED_CACHE_SCHEMA_VERSION
+    assert "qwen_tool" in PAGED_CACHE_SCHEMA_VERSION
+    assert "rotating" in PAGED_CACHE_SCHEMA_VERSION
+    assert "media_causal_scopes" in PAGED_CACHE_SCHEMA_VERSION
 
 
 class TestReplayExactFamilyAllowlist:

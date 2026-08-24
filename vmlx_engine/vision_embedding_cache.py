@@ -122,13 +122,64 @@ class VisionEmbeddingCache:
             max_pixel_entries: Max entries in pixel cache (LRU eviction)
             enabled: Whether caching is enabled
         """
-        self.max_pixel_entries = max_pixel_entries
-        self.enabled = enabled
+        self.max_pixel_entries = max(0, int(max_pixel_entries))
+        self.enabled = bool(enabled and self.max_pixel_entries > 0)
 
         # LRU cache using OrderedDict
         self._pixel_cache: OrderedDict[str, PixelCacheEntry] = OrderedDict()
 
         self.stats = VisionCacheStats()
+
+    def _value_nbytes(self, value: Any, seen: set[int]) -> int:
+        """Best-effort retained tensor/array bytes without materializing data."""
+        if value is None or isinstance(value, (str, bytes, int, float, bool)):
+            return 0
+        identity = id(value)
+        if identity in seen:
+            return 0
+        seen.add(identity)
+        nbytes = getattr(value, "nbytes", None)
+        if isinstance(nbytes, int) and nbytes >= 0:
+            return nbytes
+        if isinstance(value, dict):
+            return sum(self._value_nbytes(item, seen) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(self._value_nbytes(item, seen) for item in value)
+        shape = getattr(value, "shape", None)
+        dtype = str(getattr(value, "dtype", "")).lower()
+        if shape is None:
+            return 0
+        elements = 1
+        try:
+            for dim in shape:
+                elements *= int(dim)
+        except (TypeError, ValueError):
+            return 0
+        if any(tag in dtype for tag in ("64", "double")):
+            itemsize = 8
+        elif any(tag in dtype for tag in ("16", "half")):
+            itemsize = 2
+        elif any(tag in dtype for tag in ("8", "bool")):
+            itemsize = 1
+        else:
+            itemsize = 4
+        return max(0, elements * itemsize)
+
+    def retained_bytes(self) -> int:
+        seen: set[int] = set()
+        total = 0
+        for entry in self._pixel_cache.values():
+            for value in (
+                entry.pixel_values,
+                entry.input_ids,
+                entry.attention_mask,
+                entry.image_grid_thw,
+                entry.video_pixel_values,
+                entry.video_grid_thw,
+                entry.extra_kwargs,
+            ):
+                total += self._value_nbytes(value, seen)
+        return total
 
     def _make_key(self, images: List[str], prompt: str) -> str:
         """Create cache key from images and prompt."""
@@ -214,7 +265,12 @@ class VisionEmbeddingCache:
     def get_stats(self) -> dict:
         """Get cache statistics."""
         stats = self.stats.to_dict()
+        retained_bytes = self.retained_bytes()
+        stats["enabled"] = bool(self.enabled)
+        stats["max_entries"] = int(self.max_pixel_entries)
         stats["pixel_cache_size"] = len(self._pixel_cache)
+        stats["retained_bytes"] = retained_bytes
+        stats["retained_bytes_mb"] = retained_bytes / (1024 * 1024)
         return stats
 
     def clear(self) -> None:

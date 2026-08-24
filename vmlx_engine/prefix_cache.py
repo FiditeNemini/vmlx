@@ -34,6 +34,11 @@ except ImportError:
     HAS_MLX = False
 
 from .paged_cache import BlockTable, PagedCacheManager, compute_block_hash
+from .cache_key import (
+    CACHE_EXTRA_SCOPES_KEY,
+    cache_extra_keys_for_token_range,
+    canonical_cache_extra_marker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +90,14 @@ _CACHE_HASH_DEBUG = os.environ.get("VMLX_CACHE_HASH_DEBUG", "") == "1"
 # at a 3712/3798-token boundary. Those states are causally incomplete and can
 # crash the next decode with "Negative dimensions not allowed". Force old L2
 # records to miss; do not pad or reinterpret them.
+# 2026-08-23 v12 bump: multimodal payload identity is now introduced at each
+# causal media placeholder instead of globally salting the root block. This
+# lets unchanged text and earlier image/video state dedupe across connected
+# turns while keeping the placeholder block and every descendant isolated by
+# exact media bytes. Old global-salt records are safe but unreachable under the
+# new hash contract, so isolate them explicitly in packaged builds too.
 PAGED_CACHE_SCHEMA_VERSION = (
-    "paged_n1_keys_v11_qwen_tool_continuation_rotating_terminal_window"
+    "paged_n1_keys_v12_qwen_tool_rotating_media_causal_scopes"
 )
 
 # DSV4 v10 delta records remain wire-compatible, but the engine now donates an
@@ -2725,6 +2736,18 @@ class BlockAwarePrefixCache:
         }
         if cache_extra_keys is None:
             return {"__vmlx_native_cache_shape__": discriminator}
+        # Keep causal per-token scopes at the top level. Nesting the complete
+        # request discriminator under ``__vmlx_request_extra_keys__`` would
+        # hide its media boundary from the block-hash resolver and regress to
+        # salting every M3 media block from token zero.
+        if (
+            isinstance(cache_extra_keys, dict)
+            and CACHE_EXTRA_SCOPES_KEY in cache_extra_keys
+        ):
+            return {
+                "__vmlx_native_cache_shape__": discriminator,
+                **cache_extra_keys,
+            }
         return {
             "__vmlx_native_cache_shape__": discriminator,
             "__vmlx_request_extra_keys__": cache_extra_keys,
@@ -2928,7 +2951,9 @@ class BlockAwarePrefixCache:
                 parent_hash = _compute_chain_hash(
                     parent_hash,
                     tokens[start : start + self.block_size],
-                    extra_keys=cache_extra_keys,
+                    extra_keys=cache_extra_keys_for_token_range(
+                        cache_extra_keys, start, start + self.block_size
+                    ),
                 )
                 touch(parent_hash.hex())
             # The TERMINAL PARTIAL was the one row this walk used to skip, and
@@ -2946,7 +2971,9 @@ class BlockAwarePrefixCache:
                 tail_hash = _compute_chain_hash(
                     parent_hash,
                     tokens[start:total],
-                    extra_keys=cache_extra_keys,
+                    extra_keys=cache_extra_keys_for_token_range(
+                        cache_extra_keys, start, total
+                    ),
                 )
                 touch(tail_hash.hex())
         except Exception:
@@ -4509,7 +4536,9 @@ class BlockAwarePrefixCache:
                 parent_hash = _compute_chain_hash(
                     parent_hash,
                     tokens[eb_start:eb_end],
-                    extra_keys=cache_extra_keys,
+                    extra_keys=cache_extra_keys_for_token_range(
+                        cache_extra_keys, eb_start, eb_end
+                    ),
                 )
 
         disk_write_fence_id: Optional[str] = None
@@ -4786,7 +4815,9 @@ class BlockAwarePrefixCache:
             block_chain_hash = _compute_chain_hash(
                 parent_hash,
                 block_tokens,
-                extra_keys=cache_extra_keys,
+                extra_keys=cache_extra_keys_for_token_range(
+                    cache_extra_keys, global_start, global_end
+                ),
             )
 
             if _CACHE_HASH_DEBUG:
@@ -7925,8 +7956,6 @@ class BlockAwarePrefixCache:
         with self.paged_cache._lock:
             best_match = None
             best_len = 0
-            extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
-
             # Try progressively longer prefixes.
             if self._chained_prefix_index_hash:
                 candidates = list(
@@ -7955,7 +7984,9 @@ class BlockAwarePrefixCache:
                     entry = self._prefix_index[prefix_hash]
                     cached_tokens, block_ids = entry[:2]
                     cached_extra = entry[2] if len(entry) > 2 else None
-                    if cached_extra != extra_marker:
+                    if cached_extra != self._prefix_index_extra_marker(
+                        cache_extra_keys, prefix_len
+                    ):
                         continue
                     if cached_tokens == prefix_tokens and len(cached_tokens) > best_len:
                         valid = self._prefix_index_blocks_are_current(
@@ -7981,9 +8012,11 @@ class BlockAwarePrefixCache:
             for prefix_hash, entry in list(self._prefix_index.items()):
                 cached_tokens, block_ids = entry[:2]
                 cached_extra = entry[2] if len(entry) > 2 else None
-                if cached_extra != extra_marker:
-                    continue
                 cached_len = len(cached_tokens)
+                if cached_extra != self._prefix_index_extra_marker(
+                    cache_extra_keys, cached_len
+                ):
+                    continue
                 if cached_len <= best_len or cached_len > len(tokens):
                     continue
                 if tokens[:cached_len] != cached_tokens:
@@ -8055,7 +8088,9 @@ class BlockAwarePrefixCache:
             expected_hash = compute_block_hash(
                 parent_hash,
                 block_tokens,
-                extra_keys=cache_extra_keys,
+                extra_keys=cache_extra_keys_for_token_range(
+                    cache_extra_keys, start, start + len(block_tokens)
+                ),
             )
             block = self.paged_cache.allocated_blocks.get(block_id)
             if (
@@ -8070,27 +8105,33 @@ class BlockAwarePrefixCache:
         return True
 
     @staticmethod
-    def _prefix_index_extra_marker(cache_extra_keys: Optional[Any]) -> Optional[str]:
-        if cache_extra_keys is None:
-            return None
-        try:
-            import json
-
-            return json.dumps(cache_extra_keys, sort_keys=True, default=str)
-        except Exception:
-            return repr(cache_extra_keys)
+    def _prefix_index_extra_marker(
+        cache_extra_keys: Optional[Any],
+        prefix_len: Optional[int] = None,
+    ) -> Optional[str]:
+        scoped = (
+            cache_extra_keys_for_token_range(
+                cache_extra_keys, 0, max(0, int(prefix_len))
+            )
+            if prefix_len is not None
+            else cache_extra_keys
+        )
+        return canonical_cache_extra_marker(scoped)
 
     def _prefix_index_hash(
         self,
         tokens: List[int],
         cache_extra_keys: Optional[Any] = None,
     ) -> str:
-        if cache_extra_keys is None:
+        scoped_extra_keys = cache_extra_keys_for_token_range(
+            cache_extra_keys, 0, len(tokens)
+        )
+        if scoped_extra_keys is None:
             return self.paged_cache.compute_block_hash(tokens)
         return compute_block_hash(
             None,
             tokens,
-            extra_keys=cache_extra_keys,
+            extra_keys=scoped_extra_keys,
         ).hex()
 
     def _prefix_index_key(
@@ -8157,7 +8198,9 @@ class BlockAwarePrefixCache:
             parent = compute_block_hash(
                 parent,
                 tokens[start:end],
-                extra_keys=cache_extra_keys,
+                extra_keys=cache_extra_keys_for_token_range(
+                    cache_extra_keys, start, end
+                ),
             )
             yield end, parent.hex()
 
@@ -8168,7 +8211,6 @@ class BlockAwarePrefixCache:
         cache_extra_keys: Optional[Any] = None,
     ) -> None:
         """Update prefix index with new token sequence."""
-        extra_marker = self._prefix_index_extra_marker(cache_extra_keys)
         with self.paged_cache._lock:
             # Index block-aligned prefixes.
             if self._chained_prefix_index_hash:
@@ -8181,7 +8223,9 @@ class BlockAwarePrefixCache:
                     self._prefix_index[prefix_hash] = (
                         tokens[:prefix_len],
                         block_ids[:i],
-                        extra_marker,
+                        self._prefix_index_extra_marker(
+                            cache_extra_keys, prefix_len
+                        ),
                     )
                 return
             for i in range(1, len(block_ids) + 1):
@@ -8194,7 +8238,9 @@ class BlockAwarePrefixCache:
                 self._prefix_index[prefix_hash] = (
                     prefix_tokens,
                     block_ids[:i],
-                    extra_marker,
+                    self._prefix_index_extra_marker(
+                        cache_extra_keys, prefix_len
+                    ),
                 )
 
     def get_stats(self) -> Dict[str, Any]:

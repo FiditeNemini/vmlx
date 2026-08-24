@@ -2402,6 +2402,61 @@ class TestBlockAwarePrefixCache:
         assert hit_table.num_tokens == len(tokens)
         assert hit_remaining == [105]
 
+    def test_media_scopes_reuse_only_causally_identical_blocks(self):
+        """Later media must not poison earlier text or earlier media state."""
+        from vmlx_engine.cache_key import scope_cache_extra_key
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        cache = BlockAwarePrefixCache(
+            model=object(),
+            paged_cache_manager=PagedCacheManager(block_size=4, max_blocks=32),
+        )
+        tokens = list(range(12))
+
+        first = scope_cache_extra_key(
+            {"mllm_media_0000": "image-a"},
+            "mllm_media_0000",
+            4,
+        )
+        stored = cache.store_cache(
+            "image-turn",
+            tokens[:8],
+            ["cache-a"],
+            cache_extra_keys=first,
+        )
+        assert stored is not None
+
+        image_then_video = dict(first)
+        image_then_video["mllm_media_0001"] = "video-b"
+        image_then_video = scope_cache_extra_key(
+            image_then_video,
+            "mllm_media_0001",
+            10,
+        )
+        table, remaining = cache.fetch_cache(
+            "video-turn",
+            tokens,
+            cache_extra_keys=image_then_video,
+        )
+        assert table is not None
+        assert table.num_tokens == 8
+        assert remaining == tokens[8:]
+
+        changed_first = scope_cache_extra_key(
+            {"mllm_media_0000": "image-other"},
+            "mllm_media_0000",
+            4,
+        )
+        changed_table, changed_remaining = cache.fetch_cache(
+            "different-image",
+            tokens,
+            cache_extra_keys=changed_first,
+        )
+        assert changed_table is not None
+        assert changed_table.num_tokens == 4
+        assert changed_remaining == tokens[4:]
+
     def test_release_cache(self):
         """Test releasing cache."""
         from vmlx_engine.paged_cache import PagedCacheManager

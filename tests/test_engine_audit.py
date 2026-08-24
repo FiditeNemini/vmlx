@@ -3505,6 +3505,47 @@ class TestVisionCacheStats:
         stats = VisionCacheStats(pixel_cache_hits=3, pixel_cache_misses=7)
         assert stats.pixel_hit_rate == 0.3
 
+    def test_disabled_cache_retains_no_media_tensors(self):
+        from vmlx_engine.vision_embedding_cache import VisionEmbeddingCache
+
+        cache = VisionEmbeddingCache(max_pixel_entries=16, enabled=False)
+        cache.set_pixel_cache(
+            ["image-a"],
+            "prompt",
+            pixel_values=object(),
+            input_ids=object(),
+        )
+
+        assert cache.get_stats() == {
+            "pixel_cache_hits": 0,
+            "pixel_cache_misses": 0,
+            "pixel_hit_rate": 0.0,
+            "total_time_saved": 0.0,
+            "total_images_processed": 0,
+            "enabled": False,
+            "max_entries": 16,
+            "pixel_cache_size": 0,
+            "retained_bytes": 0,
+            "retained_bytes_mb": 0.0,
+        }
+
+    def test_enabled_cache_reports_retained_media_tensor_bytes(self):
+        from vmlx_engine.vision_embedding_cache import VisionEmbeddingCache
+
+        cache = VisionEmbeddingCache(max_pixel_entries=2, enabled=True)
+        cache.set_pixel_cache(
+            ["image-a"],
+            "prompt",
+            pixel_values=SimpleNamespace(nbytes=8),
+            input_ids=SimpleNamespace(nbytes=4),
+            extra_kwargs={"grid": SimpleNamespace(nbytes=2)},
+        )
+
+        stats = cache.get_stats()
+        assert stats["enabled"] is True
+        assert stats["pixel_cache_size"] == 1
+        assert stats["retained_bytes"] == 14
+
 
 class TestRequestStatus:
     """Tests for request status transitions."""
@@ -14140,6 +14181,7 @@ class TestTurboQuantKVTelemetry:
             "block_kv_bytes": 96 * 1024 * 1024,
             "prefix_bytes": 0,
             "ssm_companion_bytes": 448 * 1024 * 1024,
+            "vision_processor_bytes": 0,
         }
         assert cache["totals"]["l2_prompt_tokens_on_disk"] == 384
         assert cache["totals"]["l2_block_tokens_on_disk"] == 256
@@ -14186,6 +14228,42 @@ class TestTurboQuantKVTelemetry:
         assert cache["totals"]["retained_cache_bytes"] == 0
         assert cache["totals"]["retained_cache_ram_enabled"] is False
         assert cache["totals"]["retained_cache_policy"] == "disabled"
+
+    def test_cache_snapshot_counts_hidden_vision_processor_ram(self, monkeypatch):
+        import vmlx_engine.server as server
+
+        retained = 12 * 1024 * 1024
+
+        class _Engine:
+            def get_cache_stats(self):
+                vision = {
+                    "enabled": True,
+                    "max_entries": 16,
+                    "pixel_cache_size": 3,
+                    "retained_bytes": retained,
+                }
+                return {"vision_cache": vision, **vision}
+
+        scheduler = SimpleNamespace(
+            disk_cache=None,
+            paged_cache_manager=None,
+            batch_generator=None,
+            config=SimpleNamespace(
+                ssm_state_cache_size=0,
+                ssm_state_cache_max_mb=0,
+            ),
+        )
+        monkeypatch.setattr(server, "_engine", _Engine())
+
+        cache = server._cache_telemetry_snapshot(scheduler)
+
+        assert cache["vision_memory_cache"]["pixel_cache_size"] == 3
+        assert cache["totals"]["vision_memory_resident_bytes"] == retained
+        assert cache["totals"]["retained_cache_bytes"] == retained
+        assert cache["totals"]["retained_cache_ram_enabled"] is True
+        assert cache["totals"]["retained_cache_components"][
+            "vision_processor_bytes"
+        ] == retained
 
     def test_cache_stats_surfaces_cache_reuse_skip_telemetry(self):
         scheduler_source = Path("./vmlx_engine/scheduler.py").read_text()

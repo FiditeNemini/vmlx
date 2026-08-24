@@ -259,6 +259,12 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
 
   const schedulerCache = stats?.scheduler_cache
   const schedulerStats = stats?.scheduler_stats
+  const visionMemoryCache =
+    schedulerStats?.vision_cache ??
+    schedulerCache?.vision_cache ??
+    (schedulerCache?.pixel_cache_size != null || schedulerCache?.pixel_cache_hits != null
+      ? schedulerCache
+      : null)
   const lastCacheExecution =
     schedulerStats?.last_cache_execution ??
     schedulerStats?.batch_generator?.last_cache_execution
@@ -339,6 +345,26 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                 value={cacheTotals.retained_cache_ram_enabled
                   ? t('sessions.cache.statusEnabled')
                   : t('sessions.cache.statusDisabled')}
+              />
+            )}
+            {visionMemoryCache?.enabled != null && (
+              <StatCard
+                label={t('sessions.cache.mediaRamTier')}
+                value={visionMemoryCache.enabled
+                  ? t('sessions.cache.statusEnabled')
+                  : t('sessions.cache.statusDisabled')}
+              />
+            )}
+            {visionMemoryCache?.retained_bytes != null && (
+              <StatCard
+                label={t('sessions.cache.mediaRamBytes')}
+                value={formatCacheStorageBytes(visionMemoryCache.retained_bytes)}
+              />
+            )}
+            {visionMemoryCache?.pixel_cache_size != null && (
+              <StatCard
+                label={t('sessions.cache.mediaRamEntries')}
+                value={`${Number(visionMemoryCache.pixel_cache_size || 0).toLocaleString()} / ${Number(visionMemoryCache.max_entries || 0).toLocaleString()}`}
               />
             )}
             {cacheTotals.ram_tokens_cached != null && (
@@ -707,6 +733,20 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
               <StatCard
                 label={t('sessions.cache.generationSuffix')}
                 value={Number(lastCacheExecution.generation_prompt_suffix_tokens || 0).toLocaleString()}
+              />
+            )}
+            {lastCacheExecution.media_cache_scope?.mode && (
+              <StatCard
+                label={t('sessions.cache.mediaScope')}
+                value={String(lastCacheExecution.media_cache_scope.mode)}
+              />
+            )}
+            {Array.isArray(lastCacheExecution.media_cache_scope?.boundaries) && (
+              <StatCard
+                label={t('sessions.cache.mediaBoundaries')}
+                value={lastCacheExecution.media_cache_scope.boundaries.length
+                  ? lastCacheExecution.media_cache_scope.boundaries.join(', ')
+                  : '0'}
               />
             )}
             {lastCacheExecution.blocks != null && (

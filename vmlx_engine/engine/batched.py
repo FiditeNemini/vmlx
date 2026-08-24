@@ -1055,8 +1055,12 @@ class BatchedEngine(BaseEngine):
                 "prefill_step_size",
                 default_scheduler.prefill_step_size,
             ),
-            enable_vision_cache=True,
-            vision_cache_size=16,
+            enable_vision_cache=getattr(
+                self._scheduler_config, "enable_vision_cache", False
+            ),
+            vision_cache_size=getattr(
+                self._scheduler_config, "vision_cache_size", 16
+            ),
             # Propagate cache settings from user's SchedulerConfig
             enable_prefix_cache=getattr(self._scheduler_config, "enable_prefix_cache", True),
             use_paged_cache=getattr(self._scheduler_config, "use_paged_cache", False),  # paged OFF by default (Eric policy)
@@ -2919,9 +2923,28 @@ class BatchedEngine(BaseEngine):
             stats = {}
             # Vision cache stats
             if self._mllm_scheduler.batch_generator:
-                stats.update(
+                vision_stats = (
                     self._mllm_scheduler.batch_generator.get_vision_cache_stats()
                 )
+            else:
+                vision_stats = {
+                    "enabled": bool(
+                        getattr(self._mllm_scheduler.config, "enable_vision_cache", False)
+                    ),
+                    "max_entries": int(
+                        getattr(self._mllm_scheduler.config, "vision_cache_size", 0)
+                        or 0
+                    ),
+                    "pixel_cache_size": 0,
+                    "retained_bytes": 0,
+                    "retained_bytes_mb": 0.0,
+                    "pixel_cache_hits": 0,
+                    "pixel_cache_misses": 0,
+                }
+            # Keep the historical flattened fields for monitoring clients and
+            # add an explicit nested tier for unambiguous UI/accounting.
+            stats.update(vision_stats)
+            stats["vision_cache"] = vision_stats
             # Paged cache stats
             if self._mllm_scheduler.block_aware_cache is not None:
                 paged_stats = self._mllm_scheduler.block_aware_cache.get_stats()

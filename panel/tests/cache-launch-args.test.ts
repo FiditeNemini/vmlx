@@ -25,6 +25,7 @@ describe('authoritative cache launch arguments', () => {
     expect(result.policy.effectiveUsePagedCache).toBe(false)
     expect(result.args).toEqual([
       '--no-paged-cache',
+      '--no-vision-memory-cache',
       '--ssm-state-cache-size', '0',
       '--ssm-state-cache-mb', '0',
       '--paged-cache-block-size', '64',
@@ -33,6 +34,7 @@ describe('authoritative cache launch arguments', () => {
       '--block-disk-cache-max-percent', '10',
     ])
     expect(result.args).not.toContain('--use-paged-cache')
+    expect(result.args).not.toContain('--enable-vision-memory-cache')
     expect(result.args).not.toContain('--cache-memory-mb')
     expect(result.args).not.toContain('--cache-memory-percent')
     expect(result.args).not.toContain('--block-disk-cache-max-gb')
@@ -58,6 +60,7 @@ describe('authoritative cache launch arguments', () => {
 
     expect(result.args).toEqual([
       '--no-paged-cache',
+      '--no-vision-memory-cache',
       '--ssm-state-cache-size', '0',
       '--ssm-state-cache-mb', '0',
       '--disable-prefix-cache',

@@ -343,8 +343,9 @@ class MLLMSchedulerConfig:
     completion_batch_size: int = 512
     # Prefill step size for chunked prefill
     prefill_step_size: int = 2048
-    # Enable vision embedding cache
-    enable_vision_cache: bool = True
+    # Processor-output pixel/video tensor LRU. Disabled by default so the
+    # SSD-only product contract has no hidden per-media retained MLX arrays.
+    enable_vision_cache: bool = False
     # Maximum cache entries
     vision_cache_size: int = 16
     # Default max tokens
@@ -5413,6 +5414,18 @@ class MLLMScheduler:
                 "last_cache_reuse_partial": None,
                 "last_cache_selection": None,
                 "tq_decoder_warmup": self._tq_decoder_warmup_stats,
+                # Publish the configured truth before the lazy batch generator
+                # exists so the app can always attest that the hidden
+                # pixel/video preprocessing LRU is disabled in SSD-only mode.
+                "vision_cache": {
+                    "enabled": bool(self.config.enable_vision_cache),
+                    "max_entries": int(self.config.vision_cache_size),
+                    "pixel_cache_size": 0,
+                    "retained_bytes": 0,
+                    "retained_bytes_mb": 0.0,
+                    "pixel_cache_hits": 0,
+                    "pixel_cache_misses": 0,
+                },
             }
 
             if self.batch_generator is not None:

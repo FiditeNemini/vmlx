@@ -64,6 +64,7 @@ export function buildCacheLaunchArgs(input: CacheLaunchArgsInput): CacheLaunchAr
   // fall back to an engine default that re-enables a hidden RAM tier.
   const args: string[] = [
     '--no-paged-cache',
+    '--no-vision-memory-cache',
     '--ssm-state-cache-size', '0',
     '--ssm-state-cache-mb', '0',
   ]

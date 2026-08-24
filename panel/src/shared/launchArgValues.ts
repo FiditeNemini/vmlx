@@ -83,6 +83,7 @@ export const ADDITIONAL_ARG_VALUE_FLAGS = new Set([
   '--tool-call-parser',
   '--uds',
   '--wake-timeout',
+  '--vision-memory-cache-size',
   '--worker-nodes',
 ])
 

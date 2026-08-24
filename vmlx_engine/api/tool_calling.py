@@ -285,7 +285,14 @@ def check_and_inject_fallback_tools(
                 explicitly_requested_tool_names.add(tool_names[0])
             explicit_tool_requested = bool(explicitly_requested_tool_names)
     is_qwen_native_tool_prompt = (
-        parser_id not in {"xml_function", "mimo_xml_function", "qwen3_coder"}
+        parser_id not in {
+            "xml_function",
+            "mimo_xml_function",
+            "qwen3_coder",
+            "step3p5",
+            "step",
+            "stepfun",
+        }
         and "<|im_start|>" in prompt
         and "<tools>" in prompt
         and "<function=example_function_name>" in prompt

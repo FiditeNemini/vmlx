@@ -1200,6 +1200,82 @@ class TestFallbackToolPromptFormat:
         assert rendered == prompt
         assert tokenizer.calls == 0
 
+    def test_step3p5_native_tool_result_continuation_keeps_prefix_stable(self):
+        """A native Step transcript is sufficient for the answer continuation.
+
+        Step's template shares Qwen's ChatML markers, but its explicit
+        ``step3p5`` parser owns a separate tool grammar. Classifying it as Qwen
+        injected a new early system instruction only after a tool result,
+        rewriting the SSD prefix before the tool schema.
+        """
+        from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
+
+        class FakeTokenizer:
+            calls = 0
+
+            def apply_chat_template(self, messages, **kwargs):
+                self.calls += 1
+                return "\n".join(m.get("content", "") for m in messages)
+
+        prompt = (
+            "<|im_start|>system\n<tools>\n"
+            '{"type":"function","function":{"name":"read_file"}}\n'
+            "</tools>\n"
+            "<tool_call>\n<function=example_function_name>\n"
+            "<parameter=example_parameter_1>value_1</parameter>\n"
+            "</function>\n</tool_call>\n<|im_end|>\n"
+            "<|im_start|>user\nInspect the image.<|im_end|>\n"
+            "<|im_start|>assistant\n<think>checked</think>\n"
+            "<tool_call>\n<function=read_file>\n<parameter=path>README.md"
+            "</parameter>\n</function>\n</tool_call><|im_end|>\n"
+            "<|im_start|>tool_response\n<tool_response>contents"
+            "</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+        )
+        messages = [
+            {"role": "user", "content": "Inspect the image."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "read_file",
+                            "arguments": {"path": "README.md"},
+                        }
+                    }
+                ],
+            },
+            {"role": "tool", "content": "contents"},
+        ]
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            }
+        ]
+
+        tokenizer = FakeTokenizer()
+        rendered = check_and_inject_fallback_tools(
+            prompt,
+            messages,
+            tools,
+            tokenizer,
+            {"tokenize": False, "add_generation_prompt": True, "tools": tools},
+            tool_parser_id="step3p5",
+        )
+
+        assert rendered == prompt
+        assert "Native tool-result continuation" not in rendered
+        assert tokenizer.calls == 0
+
     def test_step3p5_fallback_injects_native_xml_tool_example(self):
         from vmlx_engine.api.tool_calling import check_and_inject_fallback_tools
 

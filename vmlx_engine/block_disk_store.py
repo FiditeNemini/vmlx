@@ -53,6 +53,8 @@ import logging
 import os
 import queue
 import sqlite3
+import struct
+import sys
 import threading
 import time
 import uuid
@@ -62,6 +64,22 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
+
+_SAFETENSORS_NUMPY_DTYPE_CODES = {
+    ("f", 8): "F64",
+    ("f", 4): "F32",
+    ("f", 2): "F16",
+    ("i", 8): "I64",
+    ("u", 8): "U64",
+    ("i", 4): "I32",
+    ("u", 4): "U32",
+    ("i", 2): "I16",
+    ("u", 2): "U16",
+    ("i", 1): "I8",
+    ("u", 1): "U8",
+    ("b", 1): "BOOL",
+    ("c", 8): "C64",
+}
 
 try:
     import mlx.core as mx
@@ -1364,19 +1382,17 @@ class BlockDiskStore:
     ) -> Path:
         """Encode detached NumPy tensors directly into a durable temp file.
 
-        ``safetensors.numpy.save`` builds a full Python ``bytes`` image after
-        it has already copied every NumPy tensor into the serializer. A writer
-        batch therefore occupied separate NumPy and bytes allocator arenas;
-        both stayed resident after publication on macOS even with no retained
-        cache payload. ``save_file`` removes the aggregate bytes image while
-        preserving the exact safetensors wire format.
+        ``safetensors.numpy.save`` builds a full aggregate Python ``bytes``
+        image. Its ``save_file`` sibling avoids that aggregate but still calls
+        ``tensor.tobytes()`` for every tensor, retaining another block-sized
+        malloc high-water on macOS. The cache writer emits the same compact,
+        8-byte-padded safetensors header and writes each C-contiguous NumPy
+        buffer directly, so only the small header is copied.
 
         The path uses the existing lease-tagged ``.tmp.safetensors`` contract:
         root-budget scans protect active-writer temps, and abandoned files are
         ordinary orphan-cleanup candidates after the lease disappears.
         """
-
-        from safetensors.numpy import save_file as numpy_safetensors_save_file
 
         final_path = self._hash_to_path(bytes(block_hash).hex())
         staged_path = self._new_payload_temp_path(final_path)
@@ -1388,12 +1404,90 @@ class BlockDiskStore:
         fd = os.open(staged_path, flags, 0o600)
         os.close(fd)
         try:
-            numpy_safetensors_save_file(tensors, staged_path)
-            self._fsync_existing_file(staged_path)
+            self._stream_numpy_safetensors_file(staged_path, tensors)
             return staged_path
         except Exception:
             staged_path.unlink(missing_ok=True)
             raise
+
+    @staticmethod
+    def _write_all_fd(fd: int, payload: Any) -> None:
+        """Write one contiguous buffer completely without materializing bytes."""
+
+        view = memoryview(payload)
+        if view.ndim != 1 or view.format != "B":
+            view = view.cast("B")
+        written = 0
+        while written < len(view):
+            count = os.write(fd, view[written:])
+            if count <= 0:
+                raise OSError("short block-cache payload write")
+            written += count
+
+    def _stream_numpy_safetensors_file(
+        self,
+        path: Path,
+        tensors: dict[str, Any],
+    ) -> None:
+        """Write the standard safetensors wire image from NumPy buffers."""
+
+        header: dict[str, Any] = {}
+        offset = 0
+        for name, array in tensors.items():
+            if not isinstance(name, str):
+                raise TypeError("safetensors tensor names must be strings")
+            flags = getattr(array, "flags", None)
+            if flags is None or not bool(flags.c_contiguous):
+                raise ValueError(
+                    f"safetensors tensor {name!r} must be C-contiguous"
+                )
+            dtype = getattr(array, "dtype", None)
+            dtype_key = (
+                str(getattr(dtype, "kind", "")),
+                int(getattr(dtype, "itemsize", 0)),
+            )
+            dtype_code = _SAFETENSORS_NUMPY_DTYPE_CODES.get(dtype_key)
+            if dtype_code is None:
+                raise TypeError(
+                    f"unsupported safetensors NumPy dtype for {name!r}: {dtype}"
+                )
+            end = offset + int(array.nbytes)
+            header[name] = {
+                "dtype": dtype_code,
+                "shape": [int(dim) for dim in array.shape],
+                "data_offsets": [offset, end],
+            }
+            offset = end
+
+        header_bytes = json.dumps(
+            header,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        header_bytes += b" " * ((-len(header_bytes)) % 8)
+
+        flags = os.O_WRONLY | os.O_TRUNC
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags)
+        try:
+            self._write_all_fd(fd, struct.pack("<Q", len(header_bytes)))
+            self._write_all_fd(fd, header_bytes)
+            for array in tensors.values():
+                byteorder = str(array.dtype.byteorder)
+                needs_swap = byteorder == ">" or (
+                    byteorder == "=" and sys.byteorder != "little"
+                )
+                data = array.byteswap(inplace=False) if needs_swap else array
+                try:
+                    self._write_all_fd(fd, data)
+                finally:
+                    data = None
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _disable_global_budget_writes(self) -> None:
         self._global_budget_write_enabled = False
@@ -2961,29 +3055,14 @@ class BlockDiskStore:
         )
 
     @staticmethod
-    def _fsync_existing_file(path: Path) -> None:
-        """Make an existing staged payload durable without following links."""
-
-        flags = os.O_RDONLY
-        if hasattr(os, "O_CLOEXEC"):
-            flags |= os.O_CLOEXEC
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(path, flags)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-    @staticmethod
     def _write_payload_file(path: Path, payload: bytes | Path) -> None:
         """Durably stage an immutable payload (writer thread only)."""
 
         if isinstance(payload, Path):
-            # ``payload`` was already written and fsynced by save_file(). Move
-            # it without materializing a second aggregate bytes image. The
-            # caller still performs the final atomic rename and directory
-            # fsync before publishing the SQLite row.
+            # ``payload`` was already streamed and fsynced. Move it without
+            # materializing any tensor-data bytes image. The caller still
+            # performs the final atomic rename and directory fsync before
+            # publishing the SQLite row.
             os.replace(str(payload), str(path))
             return
 
@@ -3340,7 +3419,7 @@ class BlockDiskStore:
                     self.selective_rotating_layers_omitted
                 ),
                 "write_pipeline": {
-                    "serialization_mode": "direct_safetensors_file",
+                    "serialization_mode": "streamed_safetensors_file",
                     "queue_depth": self._write_queue.qsize(),
                     "inflight": self._write_inflight,
                     "active_producers": self._active_write_producers,

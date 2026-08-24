@@ -117,7 +117,13 @@ def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
     store = BlockDiskStore(str(tmp_path), max_size_gb=0)
     save_threads: list[str] = []
     save_inputs: list[dict] = []
+    streamed_payloads: list[tuple[type, int]] = []
     original_save = store._stage_numpy_safetensors_file
+    original_write_all = store._write_all_fd
+
+    def observed_write_all(fd, payload):
+        streamed_payloads.append((type(payload), memoryview(payload).nbytes))
+        return original_write_all(fd, payload)
 
     def observed_save(block_hash, tensors):
         save_threads.append(threading.current_thread().name)
@@ -131,6 +137,7 @@ def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
         return staged_path
 
     monkeypatch.setattr(store, "_stage_numpy_safetensors_file", observed_save)
+    monkeypatch.setattr(store, "_write_all_fd", observed_write_all)
     block_hash = b"f" * 32
     fence_id = store.begin_write_fence("bf16-freeze")
     try:
@@ -157,8 +164,52 @@ def test_block_disk_detaches_bfloat16_then_encodes_off_caller(
         assert pipeline["offthread_serializations_queued"] == 1
         assert pipeline["offthread_serializations_completed"] == 1
         assert pipeline["offthread_serialization_failures"] == 0
-        assert pipeline["serialization_mode"] == "direct_safetensors_file"
+        assert pipeline["serialization_mode"] == "streamed_safetensors_file"
+        assert any(issubclass(kind, np.ndarray) for kind, _ in streamed_payloads)
+        assert max(
+            size for kind, size in streamed_payloads if issubclass(kind, bytes)
+        ) < max(
+            size
+            for kind, size in streamed_payloads
+            if issubclass(kind, np.ndarray)
+        )
     finally:
+        store.shutdown()
+
+
+def test_block_disk_streamed_safetensors_roundtrips_supported_numpy_dtypes(
+    tmp_path,
+):
+    import numpy as np
+    from safetensors import safe_open
+
+    tensors = {
+        "f64": np.array([1.5], dtype=np.float64),
+        "f32": np.array([2.5], dtype=np.float32),
+        "f16": np.array([3.5], dtype=np.float16),
+        "i64": np.array([-4], dtype=np.int64),
+        "u64": np.array([5], dtype=np.uint64),
+        "i32": np.array(-6, dtype=np.int32),
+        "u32": np.array([7], dtype=np.uint32),
+        "i16": np.array([-8], dtype=np.int16),
+        "u16": np.array([9], dtype=np.uint16),
+        "i8": np.array([-10], dtype=np.int8),
+        "u8": np.array([11], dtype=np.uint8),
+        "bool": np.array([True, False], dtype=np.bool_),
+        "complex64": np.array([1 + 2j], dtype=np.complex64),
+        "big_endian_i32": np.array([1, 256], dtype=">i4"),
+    }
+    store = BlockDiskStore(str(tmp_path), max_size_gb=0)
+    staged_path = None
+    try:
+        staged_path = store._stage_numpy_safetensors_file(b"w" * 32, tensors)
+        with safe_open(staged_path, framework="np") as handle:
+            assert set(handle.keys()) == set(tensors)
+            for name, expected in tensors.items():
+                np.testing.assert_array_equal(handle.get_tensor(name), expected)
+    finally:
+        if staged_path is not None:
+            staged_path.unlink(missing_ok=True)
         store.shutdown()
 
 

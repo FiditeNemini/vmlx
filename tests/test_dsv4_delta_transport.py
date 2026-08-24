@@ -1513,6 +1513,7 @@ class _NativeHoldPaged:
         self.noted = []
         self.evictable = []
         self.released = []
+        self.discarded = []
         self.enforced = 0
 
     @staticmethod
@@ -1532,18 +1533,34 @@ class _NativeHoldPaged:
         block.keep_resident = False
         self.released.append(block)
 
+    def discard_nondurable_cache_blocks(self, pending):
+        discarded_ids = set()
+        for block_hash, (block, _payload) in pending.items():
+            block.cache_data = None
+            block.cache_data_from_disk = False
+            block.keep_resident = False
+            self.discarded.append((block_hash, block))
+            block_id = getattr(block, "block_id", None)
+            if block_id is not None:
+                discarded_ids.add(block_id)
+        return discarded_ids
+
     def enforce_byte_budget(self):
         self.enforced += 1
 
 
-def test_dsv4_disk_only_fallback_survives_fence_wait_error():
+def test_disk_only_fence_error_discards_payload_instead_of_retaining_ram():
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache
 
     cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
     cache.paged_cache = _NativeHoldPaged()
+    cache._prefix_index = {"failed-prefix": ([1, 2, 3], [7], None)}
+    cache._native_block_disk_admission_timeout = 30.0
     disk = _FenceResultDisk(wait_error=RuntimeError("forced fence error"))
     block_hash = b"f" * 32
     block = SimpleNamespace(
+        block_id=7,
+        block_hash=block_hash,
         cache_data=None,
         cache_data_from_disk=False,
         keep_resident=False,
@@ -1559,10 +1576,13 @@ def test_dsv4_disk_only_fallback_survives_fence_wait_error():
 
     assert fence["sealed"] is True
     assert [call[0] for call in disk.calls] == ["seal", "wait"]
-    assert block.cache_data is payload
+    assert disk.calls[1][3] == 30.0
+    assert block.cache_data is None
     assert block.cache_data_from_disk is False
-    assert block.keep_resident is True
-    assert cache.paged_cache.noted == [(block, 4096)]
+    assert block.keep_resident is False
+    assert cache.paged_cache.noted == []
+    assert cache.paged_cache.discarded == [(block_hash, block)]
+    assert cache._prefix_index == {}
 
 
 def test_dsv4_native_holds_release_only_for_post_eviction_exact_hashes():
@@ -1603,7 +1623,7 @@ def test_dsv4_native_holds_release_only_for_post_eviction_exact_hashes():
     assert cache.paged_cache.evictable == [paged_block]
 
 
-def test_dsv4_disk_only_timeout_releases_fallback_after_eventual_fence_completion():
+def test_disk_only_timeout_discards_immediately_without_eventual_ram_hold():
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache
 
     ready = threading.Event()
@@ -1612,6 +1632,7 @@ def test_dsv4_disk_only_timeout_releases_fallback_after_eventual_fence_completio
     class _EventuallyReadyDisk:
         def __init__(self):
             self.waits = 0
+            self.timeouts = []
 
         @staticmethod
         def seal_write_fence(_fence_id, *, producer_aborted=False):
@@ -1628,6 +1649,7 @@ def test_dsv4_disk_only_timeout_releases_fallback_after_eventual_fence_completio
         ):
             assert allow_partial is True
             self.waits += 1
+            self.timeouts.append(timeout)
             if self.waits == 1:
                 return set()
             assert timeout is None
@@ -1636,9 +1658,12 @@ def test_dsv4_disk_only_timeout_releases_fallback_after_eventual_fence_completio
 
     cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
     cache.paged_cache = _NativeHoldPaged()
+    cache._prefix_index = {}
+    cache._native_block_disk_admission_timeout = 30.0
     disk = _EventuallyReadyDisk()
     payload = _topology_block(9, terminal=True)
     block = SimpleNamespace(
+        block_id=9,
         block_hash=block_hash,
         cache_data=None,
         cache_data_from_disk=False,
@@ -1651,18 +1676,46 @@ def test_dsv4_disk_only_timeout_releases_fallback_after_eventual_fence_completio
     }
 
     cache._settle_native_write_fence("dsv4-fence-eventual", fence)
-    assert block.cache_data is payload
-    assert block.keep_resident is True
-
-    ready.set()
-    deadline = time.monotonic() + 2.0
-    while block.cache_data is not None and time.monotonic() < deadline:
-        time.sleep(0.005)
-
-    assert disk.waits == 2
     assert block.cache_data is None
     assert block.keep_resident is False
+    assert disk.waits == 1
+    assert disk.timeouts == [30.0]
+    assert cache.paged_cache.discarded == [(block_hash, block)]
+    assert block.cache_data is None
     assert cache.paged_cache.released == [block]
+
+
+def test_paged_manager_retires_nondurable_disk_only_mapping_and_payload():
+    from vmlx_engine.paged_cache import PagedCacheManager
+
+    manager = PagedCacheManager(
+        block_size=64,
+        max_blocks=4,
+        disk_store=object(),
+        disk_only=True,
+    )
+    block = manager.allocate_block()
+    assert block is not None
+    block_hash = b"n" * 32
+    block.block_hash = block_hash
+    block.hash_value = "legacy-nondurable"
+    block.cache_data = [object()]
+    block.keep_resident = True
+    manager._note_resident(block, 4096)
+    manager.cached_block_hash_to_block.insert(block_hash, block)
+    manager.hash_to_block[block.hash_value] = block.block_id
+
+    retired = manager.discard_nondurable_cache_blocks(
+        {block_hash: (block, block.cache_data)}
+    )
+
+    assert retired == {block.block_id}
+    assert manager.cached_block_hash_to_block.get_block(block_hash) is None
+    assert "legacy-nondurable" not in manager.hash_to_block
+    assert block.block_hash is None
+    assert block.cache_data is None
+    assert block.keep_resident is False
+    assert manager.resident_bytes == 0
 
 
 def _register_free_native_block(manager, block_id=1):

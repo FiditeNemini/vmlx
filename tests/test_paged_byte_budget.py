@@ -12,7 +12,11 @@ cached blocks — LRU first, disk-L2 write-through first — until under budget.
 These tests drive the accounting/eviction directly (no model needed).
 """
 
-from vmlx_engine.paged_cache import BlockTable, PagedCacheManager
+from vmlx_engine.paged_cache import (
+    BlockTable,
+    PagedCacheManager,
+    compute_block_hash,
+)
 
 
 def _cache_a_block(mgr, block, block_hash, nbytes, ref_count=0, last_access=0.0):
@@ -643,3 +647,49 @@ def test_disk_only_pressure_never_evicts_an_active_reconstruction_buffer():
     mgr.enforce_byte_budget()
 
     assert mgr.blocks[1].cache_data is not None
+
+
+def test_disk_only_abort_drops_transient_payload_without_forgetting_l2_hash():
+    """Cancelling an SSD hit must release RAM without poisoning rediscovery.
+
+    A live MiniMax-M2.7 cancel lands while long-prefix reconstruction still
+    owns transient L2 payloads. Releasing the request ref makes those blocks
+    pressure-evictable; the generic eviction path then resets their hashes,
+    leaving healthy SSD records unreachable until process restart. The abort
+    path must drop only the transient payload and retain the durable hash map.
+    """
+
+    mgr = _disk_only_manager()
+    block = mgr.allocate_block()
+    assert block is not None
+    tokens = [11, 12, 13, 14]
+    block_hash = compute_block_hash(None, tokens)
+    _cache_a_block(
+        mgr,
+        block,
+        block_hash,
+        600,
+        ref_count=1,
+        last_access=1.0,
+    )
+    block.cache_data_from_disk = True
+    block.cache_data_transient = True
+    table = BlockTable(
+        request_id="cancelled-disk-hit",
+        block_ids=[block.block_id],
+        num_tokens=4,
+    )
+    mgr._metal_pressure_overage_bytes = lambda: 10_000
+
+    assert mgr.release_request_refs(table) == 1
+
+    assert block.cache_data is None
+    assert block.resident_bytes == 0
+    assert block.block_hash == block_hash
+    assert mgr.cached_block_hash_to_block.get_block(block_hash) is block
+    assert block.block_id in mgr.allocated_blocks
+    assert mgr.stats.evictions == 0
+
+    matched, cached_tokens = mgr.get_computed_blocks(tokens)
+    assert matched == [block]
+    assert cached_tokens == len(tokens)

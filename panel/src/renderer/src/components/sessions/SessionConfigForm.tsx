@@ -320,7 +320,7 @@ interface SessionConfigFormProps {
   modelIdentity?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedUsePagedCache, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -481,18 +481,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   // and the engine — treats as mixed-SWA. Display-only, but display-only is
   // exactly where a wrong label goes unnoticed.
   const mixedSwaCacheActive = mixedSwaBundle
-  const subtypeRequiresPagedCache =
-    detectedCacheSubtype === 'step3p7_full_sliding_kv' ||
-    detectedCacheSubtype === 'mixed_swa_kv'
-  // 2026-07-12 parity: a native cache-type/subtype only FORCES paged in the UI
-  // when detection actually resolved paged ON for this family. Gemma mixed-SWA is
-  // rotating_kv but paged-OFF (detectedUsePagedCache=false), so it must NOT show a
-  // forced/checked-disabled paged box while the launch emits --no-paged-cache. This
-  // mirrors the launch gate (sessions.ts architectureRequiresPagedCache).
-  const nativePagedFamilyActive =
-    (isMambaCache || subtypeRequiresPagedCache) && detectedUsePagedCache === true
-  const architectureRequiresPagedCache = zayaCcaActive || nativePagedFamilyActive
-  const zayaTypedCacheRequiresPaged = zayaCcaActive && !batchingOff && !prefixOff
+  // No detected family may force the retired RAM tier back on. ZAYA remains an
+  // explicit SSD-reconstruction gap until its CCA companion state is restorable;
+  // the UI says that directly instead of silently showing a forced RAM toggle.
+  const architectureRequiresPagedCache = false
+  const zayaSsdReuseUnavailable = zayaCcaActive && !batchingOff && !prefixOff
   const cacheControlState = {
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
@@ -503,7 +496,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
-  const nativeCacheRequiresPaged = cachePolicy.architectureForcedPagedActive && nativePagedFamilyActive
   const effectiveUsePagedCache = cachePolicy.effectiveUsePagedCache
   const blockDiskOnly = cachePolicy.blockDiskCacheChecked && !effectiveUsePagedCache
   const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache
@@ -762,10 +754,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       {lagunaXsTopKMetadataWarning && (
         <IncompatWarning text={t('sessions.config.lagunaXsTopKWarning')} />
       )}
-      {/* Shown to every user, not gated on RAM: the in-RAM cache buys only a
-          few percent over SSD-only, so most people are better off keeping that
-          memory for the model. Points at the exact control rather than leaving
-          them to hunt for it. */}
+      {/* Product-wide cache contract: the retained paged-RAM tier is locked off
+          and SSD is authoritative. Keep this visible outside the collapsed
+          section so users can confirm the launched memory policy at a glance. */}
       <InfoNote text={t('sessions.config.ramCacheTradeoffNotice')} />
 
       {/* Server Settings */}
@@ -1140,14 +1131,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       {/* In-memory paged cache (RAM) */}
       <Section title={pagedCacheSectionTitle} expanded={expandedSections.pagedCache} onToggle={() => toggleSection('pagedCache')} hidden={isImage}>
-        {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.pagedCacheHint')} />}
+        <PerformanceHint text={t('sessions.config.pagedCacheHint')} />
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4PagedNote')} />}
-        {batchingOff && <IncompatWarning text={t('sessions.config.pagedCacheRequiresBatching')} />}
-        {!dsv4Active && config.enableDiskCache && <IncompatWarning text={t('sessions.config.pagedCacheDiskConflict')} />}
-        {!dsv4Active && !batchingOff && prefixOff && !cachePolicy.architectureRequiresPagedCache && <InfoNote text={t('sessions.config.pagedCacheEnablesPrefix')} />}
-        {!batchingOff && prefixOff && cachePolicy.architectureRequiresPagedCache && <IncompatWarning text={t('sessions.config.nativePagedRequiresPrefix')} />}
-        {zayaTypedCacheRequiresPaged && <InfoNote text={t('sessions.config.zayaTypedCacheNote')} />}
-        {nativeCacheRequiresPaged && !zayaTypedCacheRequiresPaged && <InfoNote text={t('sessions.config.nativeCacheRequiresPagedNote')} />}
+        {zayaSsdReuseUnavailable && <IncompatWarning text={t('sessions.config.zayaTypedCacheNote')} />}
         {dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={blockDiskOnly
           ? t('sessions.config.dsv4SsdOnlyNote')
           : t('sessions.config.dsv4RamL1Note')} />}

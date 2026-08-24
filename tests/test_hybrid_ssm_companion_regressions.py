@@ -646,6 +646,80 @@ def test_block_aligned_clean_boundary_captures_one_block_below():
     assert gen._ssm_block_aligned_boundary(128) == 64
 
 
+def test_text_unaligned_ssm_checkpoint_is_loaded_once_for_delta_seed():
+    """An SSD-only hybrid hit must not refault one checkpoint twice.
+
+    The aligned RESUME ladder may discover a complete checkpoint just below a
+    block boundary but cannot pair it with the block-trimmed KV table.  The
+    delta-derive fallback can use that exact state.  Keep the detached result
+    request-local between those two synchronous paths instead of performing a
+    second physical companion read.
+    """
+
+    class _RecordingCompanion:
+        def __init__(self):
+            self.longest_calls = []
+            self.exact_calls = []
+
+        def fetch_longest_prefix(
+            self,
+            _tokens,
+            max_len,
+            exact_boundary_already_missed=False,
+        ):
+            self.longest_calls.append(
+                (max_len, exact_boundary_already_missed)
+            )
+            if max_len == 128:
+                return (127, ["ssm@127"], True)
+            return None
+
+        def fetch(self, _tokens, num_tokens):
+            self.exact_calls.append(num_tokens)
+            return None
+
+    companion = _RecordingCompanion()
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._ssm_state_cache = companion
+    scheduler._hybrid_kv_positions = [0]
+    request = SimpleNamespace(
+        request_id="request-one-read",
+        prompt_token_ids=list(range(129)),
+    )
+
+    aligned = scheduler._fetch_block_aligned_ssm_checkpoint(
+        request,
+        max_len=128,
+        block_size=64,
+        exact_boundary_already_missed=True,
+        retain_unaligned_checkpoint=True,
+    )
+
+    assert aligned is None
+    assert companion.longest_calls == [(128, True)]
+    assert companion.exact_calls == [64]
+    assert request._hybrid_ssm_prefetched_checkpoint == (
+        128,
+        127,
+        ["ssm@127"],
+        True,
+    )
+
+    seed, checkpoint_len = scheduler._seed_cache_from_ssm_checkpoint(
+        request,
+        reconstructed=[SimpleNamespace(keys=None, values=None)],
+        ssm_tokens=list(range(129)),
+        fetch_num=128,
+    )
+
+    # The dummy KV deliberately prevents composition; the contract under test
+    # is that seed selection consumed the already-loaded checkpoint without a
+    # second fetch_longest_prefix call or retaining its arrays on the request.
+    assert seed is None and checkpoint_len == 0
+    assert companion.longest_calls == [(128, True)]
+    assert not hasattr(request, "_hybrid_ssm_prefetched_checkpoint")
+
+
 def test_l1_companion_hit_touches_the_disk_entry():
     """Row 99: companion files share the aggregate block-cache budget and
     are ranked by file age; an L1 hit must refresh the disk entry or an

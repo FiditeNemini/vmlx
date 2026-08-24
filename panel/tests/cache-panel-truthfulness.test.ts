@@ -103,4 +103,52 @@ describe('CachePanel last-request truthfulness', () => {
     expect(formatCacheStorageBytes(32 * 1024 ** 2)).toBe('32.0 MB')
     expect(formatCacheStorageBytes(1.5 * 1024 ** 3)).toBe('1.50 GB')
   })
+
+  it('visibly accounts for retained SSM RAM even when paged KV RAM is zero', () => {
+    expect(source).toContain('cacheTotals.retained_cache_bytes')
+    expect(source).toContain('cacheTotals.retained_cache_ram_enabled')
+    expect(source).toContain("t('sessions.cache.retainedCacheRam')")
+    expect(source).toContain("t('sessions.cache.retainedRamPolicy')")
+    expect(source).toContain('schedulerCache.reconstruct_memo_allowed')
+    expect(source).toContain('schedulerCache.reconstruct_memo_resident')
+    expect(source).toContain("t('sessions.cache.reconstructMemoDisabledSsd')")
+    expect(source).toContain("t('sessions.cache.ssmRamTier')")
+    expect(source).toContain('formatCacheStorageBytes(ssm.nbytes)')
+    expect(source).not.toContain('ssm.nbytes_mb > 0')
+  })
+
+  it('shows the instantiated native layer layout and does not call an unquantized codec disabled L2', () => {
+    expect(source).toContain('nativeCache.kv_layer_indices.length')
+    expect(source).toContain('nativeCache.cache_layer_count')
+    expect(source).toContain('nativeCache.companion_layer_count')
+    expect(source).toContain('nativeCache.kv_layer_indices.join')
+    expect(source).toContain("'instantiated_make_cache', 'instantiated_runtime_cache_factory'")
+    expect(source).toContain('nativeCache.runtime_cache_effective_class_counts')
+    expect(source).toContain('nativeCache.full_attention_layer_indices.join')
+    expect(source).toContain('nativeCache.sliding_attention_layer_indices.join')
+    expect(source).toContain('nativeCache.runtime_cache_unknown_layer_indices.join')
+
+    const en = JSON.parse(
+      readFileSync(
+        join(__dirname, '..', 'src/renderer/src/i18n/locales/en.json'),
+        'utf8',
+      ),
+    )
+    expect(en.sessions.cache.attentionKvL2).toBe('Stored Attention KV')
+    expect(en.sessions.cache.attentionKvFullPrecision).toBe('full precision')
+    expect(en.sessions.cache.attentionLayers).toBe('Attention Layers')
+    expect(en.sessions.cache.runtimeCacheObjects).toBe('Runtime Cache Objects')
+    expect(en.sessions.cache.runtimeCacheOwners).toBe('Runtime Layer Owners')
+    expect(en.sessions.cache.dtypeHarmonization).toBe('Quant Metadata Dtype')
+    expect(en.sessions.cache.storedKvDtypes).toBe('Stored KV Runtime Dtype')
+    expect(en.sessions.cache.physicalKvDtypes).toBe('Physical SSD Tensor Dtype')
+    expect(en.sessions.cache.ssmCompanion).toBe('Recurrent Companion State')
+    expect(source).toContain('nativeCache.runtime_cache_owner_component_class_counts')
+    expect(source).toContain('blockDiskCache?.latest_payload?.original_attention_kv_dtype_counts')
+    expect(source).toContain('ssm.disk?.latest_payload?.physical_tensor_dtype_counts')
+    expect(en.sessions.cache.fullAttentionLayerIds).toBe('Full Attention Layer IDs')
+    expect(en.sessions.cache.slidingAttentionLayerIds).toBe('Sliding Attention Layer IDs')
+    expect(en.sessions.cache.unclassifiedLayerIds).toBe('Unclassified Runtime Layer IDs')
+    expect(en.sessions.cache.layoutEvidence).toBe('Layout Evidence')
+  })
 })

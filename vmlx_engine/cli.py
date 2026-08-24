@@ -516,12 +516,18 @@ def _apply_zaya_cca_cache_policy(args, logger):
     # ZAYA, so an operator does not have to know which families are affected.
     elif _disable_drifting_prefix_reuse(args, logger, "ZAYA/CCA"):
         changed.append("prefix_reuse=disabled_for_answer_stability")
-    if (
-        getattr(args, "enable_prefix_cache", True)
-        and not getattr(args, "use_paged_cache", False)
-    ):
-        args.use_paged_cache = True
-        changed.append("paged=required_for_zaya_cca")
+    # In-RAM paged cache is OFF for every family; SSD block-disk L2 is the only
+    # tier, so ZAYA no longer escalates to paged RAM here.
+    #
+    # NOTE: prefix reuse is NOT disabled by default -- the answer-stability gate
+    # above is default-OFF and only fires on VMLX_ZAYA_DISABLE_PREFIX_REUSE=1 or
+    # the class-level drift switch. So by default ZAYA keeps prefix cache on and
+    # simply has no RAM tier; the scheduler drops the memory-aware lane, and the
+    # fetch side refuses any chain without terminal CCA conv_state/prev_hs. Net
+    # effect is lost reuse, never a corrupt restore.
+    if getattr(args, "use_paged_cache", False):
+        args.use_paged_cache = False
+        changed.append("paged=off_ssd_l2_only")
     if (
         not getattr(args, "enable_prefix_cache", True)
         and getattr(args, "enable_block_disk_cache", False)
@@ -535,11 +541,11 @@ def _apply_zaya_cca_cache_policy(args, logger):
     os.environ["VMLX_DISABLE_TQ_KV"] = "1"
     os.environ.pop("VMLX_FORCE_TQ_AUTO", None)
     logger.warning(
-        "ZAYA/CCA typed cache enabled. Prefix reuse uses paged "
-        "zaya_cca_v1 records; prefix-only cache is upgraded to paged "
-        "because memory-aware/legacy prefix caches cannot store CCA "
-        "conv_state + prev_hs safely. Generic TurboQuant KV remains "
-        "forced off."
+        "ZAYA/CCA typed cache enabled. Prefix reuse is disabled for answer "
+        "stability, and in-RAM paged cache stays OFF (SSD block-disk L2 is "
+        "the only cache tier). ZAYA turns re-prefill cleanly rather than "
+        "restore incomplete CCA conv_state + prev_hs. Generic TurboQuant KV "
+        "remains forced off."
     )
     return True, tuple(changed)
 
@@ -2537,9 +2543,9 @@ def serve_command(args):
             cache_memory_mb=args.cache_memory_mb,
             cache_memory_percent=args.cache_memory_percent,
             cache_ttl_minutes=getattr(args, 'cache_ttl_minutes', 0),
-            ssm_state_cache_size=max(1, int(getattr(args, 'ssm_state_cache_size', 8))),
+            ssm_state_cache_size=max(0, int(getattr(args, 'ssm_state_cache_size', 0))),
             ssm_state_cache_max_mb=(
-                max(1, int(args.ssm_state_cache_mb))
+                max(0, int(args.ssm_state_cache_mb))
                 if getattr(args, 'ssm_state_cache_mb', None) is not None
                 else None
             ),
@@ -2932,9 +2938,9 @@ def bench_command(args):
             cache_memory_mb=args.cache_memory_mb,
             cache_memory_percent=args.cache_memory_percent,
             cache_ttl_minutes=getattr(args, 'cache_ttl_minutes', 0),
-            ssm_state_cache_size=max(1, int(getattr(args, 'ssm_state_cache_size', 8))),
+            ssm_state_cache_size=max(0, int(getattr(args, 'ssm_state_cache_size', 0))),
             ssm_state_cache_max_mb=(
-                max(1, int(args.ssm_state_cache_mb))
+                max(0, int(args.ssm_state_cache_mb))
                 if getattr(args, 'ssm_state_cache_mb', None) is not None
                 else None
             ),
@@ -3587,21 +3593,16 @@ Examples:
     serve_parser.add_argument(
         "--ssm-state-cache-size",
         type=int,
-        default=8,
-        help="Maximum in-memory SSM companion entries for hybrid models. These "
-             "entries can be large, so the default is conservative. (default: 8)",
+        default=0,
+        help="Maximum retained in-memory SSM companion entries for hybrid models. "
+             "0 keeps typed companion state SSD-only. (default: 0)",
     )
     serve_parser.add_argument(
         "--ssm-state-cache-mb",
         type=int,
-        default=_env_int("VMLX_SSM_STATE_CACHE_MB", 1536, "VMLINUX_SSM_STATE_CACHE_MB"),
-        help="Approximate memory budget in MB for hybrid SSM companion states. "
-             "Entries above the budget are skipped; older entries are evicted "
-             "when the total exceeds it. A 27B hybrid checkpoint is ~157MB and "
-             "one request can capture up to three (full, N-1, block-floor "
-             "boundaries), so 512MB held barely ONE conversation — a single "
-             "intervening prompt flushed the previous chain's companion and "
-             "with it the hybrid multiturn reuse path. (default: 1536)",
+        default=_env_int("VMLX_SSM_STATE_CACHE_MB", 0, "VMLINUX_SSM_STATE_CACHE_MB"),
+        help="Retained RAM budget in MB for hybrid SSM companion states. "
+             "0 keeps typed companion state SSD-only. (default: 0)",
     )
     serve_parser.add_argument(
         "--stream-interval",
@@ -4276,14 +4277,16 @@ Examples:
     bench_parser.add_argument(
         "--ssm-state-cache-size",
         type=int,
-        default=8,
-        help="Maximum in-memory SSM companion entries for hybrid models (default: 8)",
+        default=0,
+        help="Maximum retained in-memory SSM companion entries for hybrid models; "
+             "0 keeps typed state SSD-only (default: 0)",
     )
     bench_parser.add_argument(
         "--ssm-state-cache-mb",
         type=int,
-        default=_env_int("VMLX_SSM_STATE_CACHE_MB", 512, "VMLINUX_SSM_STATE_CACHE_MB"),
-        help="Approximate memory budget in MB for hybrid SSM companion states (default: 512)",
+        default=_env_int("VMLX_SSM_STATE_CACHE_MB", 0, "VMLINUX_SSM_STATE_CACHE_MB"),
+        help="Retained RAM budget in MB for hybrid SSM companion states; 0 is "
+             "SSD-only (default: 0)",
     )
     # Paged cache options (experimental)
     bench_parser.add_argument(

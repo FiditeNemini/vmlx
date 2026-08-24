@@ -19,7 +19,10 @@ describe('cache control policy', () => {
     })
 
     expect(policy.effectiveUsePagedCache).toBe(false)
-    expect(policy.pagedCacheDisabled).toBe(false)
+    expect(policy.userPagedCacheActive).toBe(false)
+    // Paged RAM is retired product-wide: the control is hard-disabled, so the
+    // stale saved toggle can never re-arm it from the UI either.
+    expect(policy.pagedCacheDisabled).toBe(true)
     expect(policy.legacyDiskCacheDisabled).toBe(false)
   })
 
@@ -40,7 +43,7 @@ describe('cache control policy', () => {
     ])
   })
 
-  it('lets paged cache opt in by enabling prefix and clearing legacy disk cache', () => {
+  it('fails a paged-cache opt-in closed without changing any SSD/prefix controls', () => {
     const updates = cacheControlUpdatesForPagedToggle(true, {
       continuousBatching: true,
       enablePrefixCache: false,
@@ -49,12 +52,7 @@ describe('cache control policy', () => {
       enableBlockDiskCache: false,
     })
 
-    expect(updates).toEqual([
-      ['enablePrefixCache', true],
-      ['enableDiskCache', false],
-      ['enableBlockDiskCache', true],
-      ['usePagedCache', true],
-    ])
+    expect(updates).toEqual([['usePagedCache', false]])
   })
 
   it('keeps block disk cache when paged RAM is turned off', () => {
@@ -100,7 +98,11 @@ describe('cache control policy', () => {
     expect(policy.blockDiskCacheChecked).toBe(false)
   })
 
-  it('keeps legacy disk cache disabled for architectures that force paged cache when prefix is enabled', () => {
+  it('ignores an architecture paged-cache requirement — legacy disk gating never cites paged cache', () => {
+    // OLD contract: architectureRequiresPagedCache=true forced paged active and
+    // disabled legacy disk with reason 'architecture-requires-paged-cache'.
+    // NEW contract: no architecture may require the retired RAM tier, so the
+    // input is ignored and legacy disk stays available (prefix-off state).
     const policy = resolveCacheControlPolicy({
       continuousBatching: true,
       enablePrefixCache: false,
@@ -110,8 +112,11 @@ describe('cache control policy', () => {
       architectureRequiresPagedCache: true,
     })
 
-    expect(policy.legacyDiskCacheDisabled).toBe(true)
-    expect(policy.legacyDiskCacheUnavailableReason).toBe('architecture-requires-paged-cache')
+    expect(policy.architectureRequiresPagedCache).toBe(false)
+    expect(policy.architectureForcedPagedActive).toBe(false)
+    expect(policy.effectiveUsePagedCache).toBe(false)
+    expect(policy.legacyDiskCacheDisabled).toBe(false)
+    expect(policy.legacyDiskCacheUnavailableReason).toBeUndefined()
   })
 
   it('launch policy keeps prefix cache off as the master switch', () => {
@@ -129,7 +134,7 @@ describe('cache control policy', () => {
     expect(policy.enableBlockDiskCache).toBe(false)
   })
 
-  it('launch policy emits block disk cache after UI has saved prefix and paged prerequisites', () => {
+  it('launch policy emits block disk cache and keeps paged RAM off despite a saved paged toggle', () => {
     const policy = resolveCacheLaunchPolicy({
       continuousBatching: true,
       enablePrefixCache: true,
@@ -139,9 +144,26 @@ describe('cache control policy', () => {
     })
 
     expect(policy.prefixCacheOff).toBe(false)
-    expect(policy.effectiveUsePagedCache).toBe(true)
+    // A saved usePagedCache=true never launches the RAM tier.
+    expect(policy.effectiveUsePagedCache).toBe(false)
     expect(policy.enableLegacyDiskCache).toBe(false)
     expect(policy.enableBlockDiskCache).toBe(true)
+  })
+
+  it('launch policy returns effectiveUsePagedCache=false even when the saved toggle AND the architecture both demand paged', () => {
+    const policy = resolveCacheLaunchPolicy({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      usePagedCache: true,
+      enableDiskCache: false,
+      enableBlockDiskCache: true,
+      architectureRequiresPagedCache: true,
+      architectureSupportsBlockDiskOnly: false,
+    })
+
+    expect(policy.effectiveUsePagedCache).toBe(false)
+    expect(policy.enableBlockDiskCache).toBe(true)
+    expect(policy.enableLegacyDiskCache).toBe(false)
   })
 
   it('launch policy emits a disk-only block backend when paged RAM is off', () => {
@@ -212,7 +234,8 @@ describe('cache control policy', () => {
     })
 
     expect(ui.architectureForcedPagedActive).toBe(false)
-    expect(ui.pagedCacheDisabled).toBe(false)
+    // The paged control is hard-disabled for every family, hybrid included.
+    expect(ui.pagedCacheDisabled).toBe(true)
     expect(ui.effectiveUsePagedCache).toBe(false)
     expect(launch.effectiveUsePagedCache).toBe(false)
     expect(launch.enableBlockDiskCache).toBe(true)
@@ -234,7 +257,11 @@ describe('cache control policy', () => {
     expect(policy.enableLegacyDiskCache).toBe(false)
   })
 
-  it('still forces paged cache for a hybrid architecture without block SSD L2', () => {
+  it('never escalates a hybrid architecture without block SSD L2 to paged cache — it launches with no cache tier', () => {
+    // OLD contract: this exact state force-enabled paged RAM as the fallback
+    // tier. NEW contract: hybrid/Mamba drop the memory-aware lane instead of
+    // escalating — no paged RAM, no L2, prefix reuse simply absent. That costs
+    // speed, never correctness.
     const policy = resolveCacheLaunchPolicy({
       continuousBatching: true,
       enablePrefixCache: true,
@@ -245,7 +272,9 @@ describe('cache control policy', () => {
       architectureSupportsBlockDiskOnly: true,
     })
 
-    expect(policy.effectiveUsePagedCache).toBe(true)
+    expect(policy.prefixCacheOff).toBe(false)
+    expect(policy.effectiveUsePagedCache).toBe(false)
+    expect(policy.enableLegacyDiskCache).toBe(false)
     expect(policy.enableBlockDiskCache).toBe(false)
   })
 

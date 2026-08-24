@@ -44,14 +44,18 @@ def test_ordinary_families_get_a_bounded_nonzero_write_admission_wait():
 
     idx = src.index('"admission_timeout"')
     window = src[idx : idx + 400]
-    assert "_native_block_disk_admission_timeout" in window, (
+    assert "_write_admission_timeout_for_store" in window
+    helper_idx = src.index("def _write_admission_timeout_for_store")
+    helper = src[helper_idx : helper_idx + 600]
+    assert "_native_block_disk_admission_timeout" in helper, (
         "path-dependent families lost their long admission window"
     )
-    assert "_block_disk_admission_timeout" in window, (
+    assert "_block_disk_admission_timeout" in helper, (
         "ordinary families are back on a literal admission timeout; a hard 0.0 "
         "here discards 33% of blocks on a fast model (measured)"
     )
-    assert not re.search(r"else\s+0\.0\s*\)", window), (
+    assert "disk_only or path_dependent" in helper
+    assert not re.search(r"else\s+0\.0\s*\)", helper), (
         "the non-native branch went back to dropping instead of waiting"
     )
 
@@ -79,6 +83,38 @@ def test_the_ordinary_wait_defaults_short_and_stays_overridable():
         "path-dependent families must keep the LONGER window — for them a "
         "dropped block breaks the chain, not just a re-prefill"
     )
+
+
+def test_disk_only_uses_lossless_admission_even_for_plain_kv():
+    """A zero-RAM cache cannot fall back after a best-effort SSD write."""
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache._block_disk_admission_timeout = 1.0
+    cache._native_block_disk_admission_timeout = 30.0
+
+    assert cache._write_admission_timeout_for_store(
+        disk_only=True,
+        path_dependent=False,
+    ) == 30.0
+    assert cache._write_admission_timeout_for_store(
+        disk_only=False,
+        path_dependent=True,
+    ) == 30.0
+    assert cache._write_admission_timeout_for_store(
+        disk_only=False,
+        path_dependent=False,
+    ) == 1.0
+
+
+def test_disk_only_streams_each_page_instead_of_staging_the_whole_prompt():
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    decide = BlockAwarePrefixCache._write_block_immediately_for_store
+    assert decide(disk_only=True, minimax_m3=False, native_tq=False) is True
+    assert decide(disk_only=False, minimax_m3=True, native_tq=False) is True
+    assert decide(disk_only=False, minimax_m3=False, native_tq=True) is True
+    assert decide(disk_only=False, minimax_m3=False, native_tq=False) is False
 
 
 def test_the_drop_counter_is_still_reported():

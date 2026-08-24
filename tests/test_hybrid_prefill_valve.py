@@ -299,7 +299,7 @@ def test_turn_walk_wiring_in_the_generator():
     # caught live by the engagement-line protocol. The single-shot forward IS
     # the command buffer that aborts.
     call = src.index("self._turn_peak_walk_admit(")
-    branch = src.index("_allow_hybrid_chunked = (")
+    branch = src.index("_hybrid_blocks_chunk = self._is_hybrid")
     assert call < branch, (
         "turn-peak admission moved back below the chunked-branch choice — "
         "single-shot deltas (the crashing path) would bypass it again"

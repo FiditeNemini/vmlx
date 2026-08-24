@@ -1195,6 +1195,49 @@ class PagedCacheManager:
         with self._lock:
             self._release_resident_payload_locked(block)
 
+    def discard_nondurable_cache_blocks(self, pending: Any) -> set[int]:
+        """Retire SSD-only blocks whose request fence did not become durable.
+
+        A failed L2 publication is a cache miss, not permission to create an
+        unbounded RAM tier. Remove each still-current content-addressed mapping
+        and drop its payload/retention flags. Active request tables may keep the
+        numeric block id until normal completion cleanup, but future prefix
+        lookups cannot discover the failed record.
+
+        Returns the retired block ids so the owning prefix index can remove
+        entries that still reference them.
+        """
+
+        retired: set[int] = set()
+        items = getattr(pending, "items", None)
+        if not callable(items):
+            return retired
+        with self._lock:
+            for block_hash, pending_value in items():
+                if (
+                    isinstance(pending_value, (tuple, list))
+                    and pending_value
+                ):
+                    block = pending_value[0]
+                else:
+                    block = pending_value
+                if block is None or getattr(block, "block_hash", None) != block_hash:
+                    continue
+                block_id = int(getattr(block, "block_id", -1))
+                if block_id < 0:
+                    continue
+                self.cached_block_hash_to_block.pop(block_hash, block_id)
+                legacy_hash = getattr(block, "hash_value", None)
+                if (
+                    legacy_hash
+                    and self.hash_to_block.get(legacy_hash) == block_id
+                ):
+                    del self.hash_to_block[legacy_hash]
+                self._release_resident_payload_locked(block)
+                block.reset_hash()
+                retired.add(block_id)
+        return retired
+
     def _release_resident_payload_locked(self, block: CacheBlock) -> None:
         """Drop one RAM mirror while ``self._lock`` is already held."""
 
@@ -2177,7 +2220,21 @@ class PagedCacheManager:
                 # Keep cache mapping (block_hash/hash_value) so prefix hits can
                 # revive this block, but make it reclaimable via free LRU queue.
                 if block.ref_count == 0:
-                    if block.release_resident_when_unreferenced:
+                    # A disk reconstruction payload is request-local scratch,
+                    # not a reusable RAM-tier mirror. Cancellation can release
+                    # the final request ref while reconstruct_cache() is still
+                    # unwinding. If the transient stays attached until the
+                    # byte-budget pass below, Metal pressure sends it through
+                    # _maybe_evict_cached_block(), which resets the content
+                    # hash and makes an otherwise healthy SSD record
+                    # undiscoverable until process restart. Drop only the
+                    # transient payload here; all reconstruction-local Python/
+                    # MLX references remain alive, while the durable hash/index
+                    # metadata stays available for the next request.
+                    if (
+                        block.release_resident_when_unreferenced
+                        or block.cache_data_transient
+                    ):
                         self._release_resident_payload_locked(block)
                     if block.prev_free_block is None and block.next_free_block is None:
                         self.free_block_queue.append(block)

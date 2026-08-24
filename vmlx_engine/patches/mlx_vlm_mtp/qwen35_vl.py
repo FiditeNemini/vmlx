@@ -861,6 +861,14 @@ def _patch_language_model(qlang: Any) -> None:
                 cache_offset = offset
             elif isinstance(offset, qlang.mx.array):
                 cache_offset = (offset if offset.ndim == 0 else offset[0]).item()
+            elif offset is None:
+                # A freshly constructed cache can report a None offset before
+                # the first write; treat that as position 0 rather than crash
+                # the mRoPE delta path. Mirrors the vendored
+                # LanguageModel.__call__ (qwen3_5/language.py) — this patched
+                # wrapper is the live path for MTP/hidden forwards, so it must
+                # carry the same defensive handling.
+                cache_offset = 0
             else:
                 raise ValueError(f"Unexpected cache offset type: {type(offset)}")
 

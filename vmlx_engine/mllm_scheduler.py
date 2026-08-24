@@ -173,7 +173,11 @@ from .utils.head_dim_detection import (
     detect_cache_head_dims,
 )
 from .utils.hybrid_tq_cache import is_turboquant_make_cache
-from .utils.cache_types import expand_cache_class_names
+from .utils.cache_types import (
+    detect_dsv4_cache_contract,
+    describe_runtime_cache_layout,
+    expand_cache_class_names,
+)
 from .utils.ssm_companion_disk_store import SSMCompanionDiskStore
 from .utils.memory_limits import (
     get_effective_metal_working_set_bytes,
@@ -397,7 +401,7 @@ class MLLMSchedulerConfig:
     # These entries can be tens or hundreds of MB each on Nemotron/Gemma
     # hybrid models, so bound by both count and bytes.
     ssm_state_cache_size: int = DEFAULT_SSM_COMPANION_ENTRIES
-    ssm_state_cache_max_mb: Optional[int] = 512
+    ssm_state_cache_max_mb: Optional[int] = 0
 
     # Maximum images per request (guard against Metal OOM from excessive images)
     max_images_per_request: int = 20
@@ -617,6 +621,16 @@ class MLLMScheduler:
 
         # Detect hybrid models (mixed KVCache + MambaCache layers)
         lang_model = self.model.language_model if hasattr(self.model, "language_model") else self.model
+        # This is an observed runtime contract, not a family/config guess.
+        # False proves the DSV4 terminal validator can be skipped; None keeps
+        # BlockAwarePrefixCache fail-closed when make_cache() is unavailable.
+        self._uses_dsv4_cache = detect_dsv4_cache_contract(lang_model)
+        if self._uses_dsv4_cache is None:
+            logger.warning(
+                "MLLM DSV4 cache contract could not be observed from "
+                "language_model.make_cache(); retaining conservative SSD "
+                "terminal validation"
+            )
         # ZAYA/ZAYA1-VL are hybrid-shaped but have a first-class typed CCA
         # cache contract (KV + conv_state + prev_hs). They must not enter
         # the generic Qwen-style SSM companion path.
@@ -653,17 +667,19 @@ class MLLMScheduler:
             logger.debug(f"Mixed-attention detection failed: {e}")
 
         if self._uses_zaya_cache and self.config.enable_prefix_cache:
+            # In-RAM paged cache is OFF for every family; SSD block-disk L2 is
+            # the only tier. ZAYA used to escalate to paged RAM here. It no
+            # longer does: the memory-aware lane cannot hold CCA
+            # conv_state/prev_hs, so that lane is dropped and ZAYA re-prefills
+            # cleanly. The fetch side already refuses a ZAYA chain with no
+            # terminal CCA state, so this costs reuse, never correctness.
             if not self.config.use_paged_cache:
                 logger.info(
-                    "ZAYA/CCA typed cache requires paged prefix cache. "
-                    "Auto-switching VLM prefix-only configuration to paged "
-                    "cache so zaya_cca_v1 records carry KV + conv_state + "
-                    "prev_hs."
+                    "ZAYA/CCA typed cache cannot be served by the VLM "
+                    "memory-aware prefix lane. Paged RAM stays OFF (SSD L2 is "
+                    "the only tier); disabling the memory-aware lane."
                 )
-                self.config.use_paged_cache = True
-                self.config.use_memory_aware_cache = False
-            else:
-                self.config.use_memory_aware_cache = False
+            self.config.use_memory_aware_cache = False
 
         if self._is_hybrid and not self._uses_zaya_cache:
             try:
@@ -676,9 +692,10 @@ class MLLMScheduler:
             except Exception as e:
                 logger.warning(f"Failed to enable Mamba batching support: {e}")
                 self._is_hybrid = False  # Fall back to standard KV-only handling
-            # MambaCache cannot use the legacy memory-aware cache. Paged RAM is
-            # required only when Block Disk L2 is absent; disk-only blocks pair
-            # attention KV with the typed SSM companion L2/rederive path.
+            # MambaCache cannot use the legacy memory-aware cache, and paged RAM
+            # is OFF for every family. With Block Disk L2 also switched off there
+            # is no correct backend for hybrid state, so drop the memory-aware
+            # lane and take the reuse loss rather than reuse it incorrectly.
             if (
                 self._is_hybrid
                 and self.config.enable_prefix_cache
@@ -686,10 +703,10 @@ class MLLMScheduler:
                 and not self.config.enable_block_disk_cache
             ):
                 logger.info(
-                    "Auto-switching VLM to paged cache for hybrid model "
-                    "because neither paged RAM nor Block Disk L2 is available."
+                    "Hybrid VLM with Block Disk L2 disabled: paged RAM stays "
+                    "OFF (SSD L2 is the only tier); disabling the memory-aware "
+                    "lane. Enable --enable-block-disk-cache for hybrid reuse."
                 )
-                self.config.use_paged_cache = True
                 self.config.use_memory_aware_cache = False
 
         # --- Cache initialization chain (block-aware > memory-aware > legacy) ---
@@ -880,6 +897,15 @@ class MLLMScheduler:
                     self.block_aware_cache = BlockAwarePrefixCache(
                         model=lang_model,
                         paged_cache_manager=self.paged_cache_manager,
+                        # All three native/path-dependent validators are derived
+                        # from the instantiated language-model runtime. Unknown
+                        # DSV4 stays conservative; a proven ordinary Qwen/Gemma
+                        # cache skips the otherwise redundant full-chain probe.
+                        uses_dsv4_cache=self._uses_dsv4_cache,
+                        uses_zaya_cache=self._uses_zaya_cache,
+                        mixed_attention_cache_model=(
+                            self._mixed_attention_cache_model
+                        ),
                     )
                     if self._is_hybrid and not self._uses_zaya_cache:
                         effective_kv_bits = (
@@ -1172,28 +1198,45 @@ class MLLMScheduler:
         )
 
     def _log_runtime_cache_contract(self, model: Any) -> None:
-        """Log per-layer cache classes for production-gate topology checks."""
+        """Record and log instantiated per-layer cache classes."""
         if not hasattr(model, "make_cache"):
             return
         try:
             cache = model.make_cache() or []
-            layout = []
-            for idx, slot in enumerate(cache):
-                cls = type(slot).__name__
-                if cls == "CacheList":
-                    sub = [
-                        type(sub_slot).__name__
-                        for sub_slot in getattr(slot, "caches", ())
-                    ]
-                    layout.append(f"{idx}:CacheList({','.join(sub)})")
-                else:
-                    layout.append(f"{idx}:{cls}")
+            runtime_layout = describe_runtime_cache_layout(cache, model=model)
+            runtime_layout["source"] = "instantiated_make_cache"
+            runtime_layout["factory"] = "model.make_cache"
+            runtime_layout["delegated_to_model_make_cache"] = True
+            dtype_status = getattr(
+                self.model,
+                "_vmlx_quant_metadata_dtype_harmonization",
+                None,
+            )
+            if isinstance(dtype_status, dict):
+                runtime_layout["parameter_dtype_harmonization"] = dict(dtype_status)
+            # This is observed from the instantiated runtime cache objects,
+            # not inferred from a family name or registry default. It remains
+            # available while the request-scoped MLLMBatchGenerator is absent,
+            # so startup health can report the real hybrid attention layout.
+            self._runtime_cache_layout = runtime_layout
+            self._runtime_cache_num_layers = runtime_layout["layer_count"]
+            self._runtime_cache_kv_positions = (
+                None
+                if runtime_layout["parallel_layer_indices"]
+                else runtime_layout["attention_layer_indices"]
+            )
+            self._runtime_cache_parallel_hybrid_positions = (
+                runtime_layout["parallel_layer_indices"]
+            )
             model_type = getattr(self.model_config, "model_type", None) or "unknown"
             logger.info(
                 "Runtime cache layout: model_type=%s layers=%d layout=%s",
                 model_type,
-                len(cache),
-                ";".join(layout),
+                runtime_layout["layer_count"],
+                ";".join(
+                    f"{idx}:{slot_type}"
+                    for idx, slot_type in enumerate(runtime_layout["slot_types"])
+                ),
             )
         except Exception as exc:
             logger.debug("Runtime cache layout logging skipped: %s", exc)
@@ -2708,6 +2751,48 @@ class MLLMScheduler:
             )
             return prompt_side + int(getattr(request, "total_output_tokens", 0) or 0)
 
+    def _cleanup_aborted_paged_request(self, request_id: str) -> None:
+        """Release one aborted request without destroying a durable SSD hit.
+
+        ``fetch_cache()`` registers an entry in the block-aware request table
+        only after it has found and pinned an existing prefix. Those blocks are
+        already durable cache records. Deleting their block table removes the
+        promoted block objects from ``allocated_blocks`` and makes the live
+        prefix index fail validation, even though the SSD files still exist.
+
+        A cold request has no block-aware entry, so its request table can hold
+        partially computed, never-published blocks and must still be deleted.
+        """
+
+        paged_entry = None
+        if self.block_aware_cache is not None:
+            finalize_credit = getattr(
+                self.block_aware_cache,
+                "finalize_cache_hit_credit",
+                None,
+            )
+            if callable(finalize_credit):
+                finalize_credit(request_id)
+            paged_entry = self.block_aware_cache._request_tables.pop(
+                request_id,
+                None,
+            )
+
+        if self.paged_cache_manager is None:
+            return
+
+        block_table = (
+            getattr(paged_entry, "block_table", None)
+            if paged_entry is not None
+            else None
+        )
+        if block_table is None:
+            self.paged_cache_manager.delete_block_table(request_id)
+            return
+
+        self.paged_cache_manager.release_request_refs(block_table)
+        self.paged_cache_manager.detach_request(request_id)
+
     def abort_request(self, request_id: str) -> bool:
         """
         Abort a request.
@@ -2744,17 +2829,10 @@ class MLLMScheduler:
             if request_id in self.running:
                 del self.running[request_id]
 
-            # Clean up paged cache block tables (prevent leak)
-            # Use delete_block_table on abort so ref_counts are decremented
-            if self.block_aware_cache is not None:
-                finalize_credit = getattr(
-                    self.block_aware_cache, "finalize_cache_hit_credit", None
-                )
-                if callable(finalize_credit):
-                    finalize_credit(request_id)
-                self.block_aware_cache._request_tables.pop(request_id, None)
-                if self.paged_cache_manager is not None:
-                    self.paged_cache_manager.delete_block_table(request_id)
+            # Cold request blocks were never published and must be deleted.
+            # Existing SSD-hit blocks are durable and only release their
+            # request refs; deleting those mappings poisons same-process reuse.
+            self._cleanup_aborted_paged_request(request_id)
 
             # Clean up streaming detokenizer
             self._cleanup_detokenizer(request_id)
@@ -3737,21 +3815,61 @@ class MLLMScheduler:
                                     and _uses_mixed_attention_cache
                                     and isinstance(raw, (list, tuple))
                                 ):
-                                    # The batch generator captured this exact
-                                    # media-conditioned N-1 boundary before
-                                    # releasing pixel/video tensors. Reuse it
-                                    # directly for Gemma/Step mixed rotating-SWA
-                                    # plus full-attention stores. Calling the
-                                    # ordinary path-dependent helper here would
-                                    # run a second *text-only* prefill and
-                                    # silently discard vision-conditioned state.
-                                    cache_blocks = list(raw)
-                                    logger.info(
-                                        "Using captured media-conditioned mixed-SWA "
-                                        "N-1 cache for %s (%d layers)",
-                                        request_id,
-                                        len(cache_blocks),
+                                    # A media-conditioned mixed-SWA prefix can
+                                    # never be rebuilt from token ids (the
+                                    # ordinary path-dependent helper would run
+                                    # a second *text-only* prefill and silently
+                                    # discard vision-conditioned state), so the
+                                    # only valid rotating state is a boundary
+                                    # capture taken BEFORE decode advanced the
+                                    # rings. `raw` alone does NOT prove that:
+                                    # it is the live finish-time cache on warm
+                                    # media turns (rings rolled past the
+                                    # boundary by the reply length — the
+                                    # Gemma-4 cached_tokens plateau), and only
+                                    # on the cold aux-prefill path is it
+                                    # already an exact prompt-boundary cache.
+                                    # Assemble from the end-of-prefill snapshot
+                                    # when one exists; otherwise accept `raw`
+                                    # only if its rotating offsets PROVE the
+                                    # boundary; otherwise store the live cache
+                                    # loudly — its rotating layers become
+                                    # honest `rotating_kv_pending` markers, and
+                                    # fetches walk back to the newest exact
+                                    # anchor instead of restoring a rolled
+                                    # window as if it were the prompt boundary.
+                                    cache_blocks = (
+                                        _assemble_mixed_swa_media_boundary_cache(
+                                            self.batch_generator,
+                                            request,
+                                            raw,
+                                            len(truncated_tokens),
+                                        )
                                     )
+                                    if cache_blocks is not None:
+                                        logger.info(
+                                            "Mixed-SWA media store for %s: "
+                                            "exact prompt-boundary cache "
+                                            "assembled (%d layers, "
+                                            "boundary=%d)",
+                                            request_id,
+                                            len(cache_blocks),
+                                            len(truncated_tokens),
+                                        )
+                                    else:
+                                        cache_blocks = list(raw)
+                                        logger.warning(
+                                            "Mixed-SWA media store for %s has "
+                                            "NO prompt-boundary capture "
+                                            "(boundary=%d, %d layers): storing "
+                                            "the live cache — rotating layers "
+                                            "will be marked rotating_kv_pending "
+                                            "and fetches walk back to the "
+                                            "newest exact anchor",
+                                            request_id,
+                                            len(truncated_tokens),
+                                            len(cache_blocks),
+                                        )
                                 elif (
                                     _uses_zaya_cache
                                     or _uses_mixed_attention_cache
@@ -4605,21 +4723,10 @@ class MLLMScheduler:
                             req.output_text = f"Generation failed: {step_err}"
                             failed.append(req_id)
                         self._cleanup_detokenizer(req_id)
-                    # Clean up paged cache block tables for all running requests
-                    # to prevent stale entries on retry
-                    if self.block_aware_cache is not None:
-                        for req_id in self.running:
-                            finalize_credit = getattr(
-                                self.block_aware_cache,
-                                "finalize_cache_hit_credit",
-                                None,
-                            )
-                            if callable(finalize_credit):
-                                finalize_credit(req_id)
-                            self.block_aware_cache._request_tables.pop(req_id, None)
-                    if self.paged_cache_manager is not None:
-                        for req_id in self.running:
-                            self.paged_cache_manager.delete_block_table(req_id)
+                    # Preserve already-durable hit blocks across retry while
+                    # still deleting cold, never-published request blocks.
+                    for req_id in self.running:
+                        self._cleanup_aborted_paged_request(req_id)
 
                     self.running.clear()
                     self.request_id_to_uid.clear()
@@ -5472,6 +5579,9 @@ class MLLMScheduler:
                         "max_entries": int(getattr(ssm_cache, "max_entries", 0) or 0),
                         "nbytes": nbytes,
                         "nbytes_mb": round(nbytes / (1024 * 1024), 2),
+                        "ram_enabled": bool(
+                            getattr(ssm_cache, "ram_enabled", False)
+                        ),
                         "evictions": int(getattr(ssm_cache, "evictions", 0) or 0),
                         "evicted_bytes": int(
                             getattr(ssm_cache, "evicted_bytes", 0) or 0
@@ -5483,6 +5593,16 @@ class MLLMScheduler:
                             else None
                         ),
                         "disk_enabled": bool(getattr(ssm_cache, "disk_enabled", False)),
+                        "storage": (
+                            "ram_and_ssd"
+                            if bool(getattr(ssm_cache, "ram_enabled", False))
+                            and bool(getattr(ssm_cache, "disk_enabled", False))
+                            else "ram_only"
+                            if bool(getattr(ssm_cache, "ram_enabled", False))
+                            else "ssd_only"
+                            if bool(getattr(ssm_cache, "disk_enabled", False))
+                            else "disabled"
+                        ),
                     }
 
             return stats
@@ -5673,6 +5793,144 @@ def _assemble_clean_hybrid_boundary_cache(
                 return None
     if next(recurrent_iter, None) is not None:
         return None
+    if len(assembled) != len(live_cache):
+        return None
+    return assembled
+
+
+def _assemble_mixed_swa_media_boundary_cache(
+    batch_generator: Any,
+    request: Any,
+    live_cache: Any,
+    boundary: int,
+) -> Optional[List[Any]]:
+    """Assemble the exact N-1 media-conditioned mixed-SWA boundary cache.
+
+    Provenance-checked, mirroring ``_assemble_clean_hybrid_boundary_cache``:
+
+    * Rotating layers come ONLY from the end-of-prefill snapshot the batch
+      generator captured before decode advanced the rings
+      (``_maybe_capture_mixed_swa_media_boundary`` →
+      ``batch_generator._mixed_swa_boundary_snapshots[request_id]``). A live
+      finish-time RotatingKVCache has rolled past the prompt boundary by the
+      reply length and its evicted rows are unrecoverable — substituting it
+      is exactly the defect that froze Gemma-4 media conversations at the
+      last pre-media anchor.
+    * If no snapshot exists, ``live_cache`` is accepted ONLY when its own
+      rotating offsets prove it already sits at the boundary (the cold-media
+      aux clean prefill produces exactly that). The check is the invariant
+      itself, not a tag that could go stale.
+    * Full-attention ``KVCache`` layers are append-only, so slicing the live
+      buffers to the boundary is exact (same operation the hybrid assembly
+      performs). Anything else (TQ wrappers, quantized, unknown classes)
+      declines rather than guessing.
+
+    Returns None when the exact boundary cannot be PROVEN; the caller then
+    stores the live cache loudly and the store marks rotating layers
+    ``rotating_kv_pending`` — visible, never corrupt.
+    """
+    if boundary <= 0 or not isinstance(live_cache, (list, tuple)):
+        return None
+
+    def _rotating_offsets_prove_boundary() -> bool:
+        saw_rotating = False
+        for layer in live_cache:
+            if type(layer).__name__ == "RotatingKVCache":
+                saw_rotating = True
+                if int(getattr(layer, "offset", -1) or -1) != int(boundary):
+                    return False
+        return saw_rotating
+
+    snaps = getattr(batch_generator, "_mixed_swa_boundary_snapshots", None) or {}
+    entry = snaps.pop(str(getattr(request, "request_id", "")), None)
+    if not entry:
+        entry = getattr(request, "_mixed_swa_media_boundary", None)
+    if not entry:
+        if _rotating_offsets_prove_boundary():
+            logger.info(
+                "mixed-SWA media boundary assembly: live cache already sits "
+                "at boundary=%d (clean aux-prefill provenance proven by "
+                "rotating offsets)",
+                boundary,
+            )
+            return list(live_cache)
+        logger.info(
+            "mixed-SWA media boundary assembly declined: no end-of-prefill "
+            "snapshot for %s and live rotating offsets do not sit at "
+            "boundary=%d",
+            getattr(request, "request_id", "?"),
+            boundary,
+        )
+        return None
+    try:
+        cap_boundary, snap_map = entry
+        cap_boundary = int(cap_boundary)
+    except (TypeError, ValueError):
+        return None
+    if cap_boundary != int(boundary) or not isinstance(snap_map, dict):
+        logger.info(
+            "mixed-SWA media boundary assembly declined for %s: snapshot "
+            "boundary=%s does not match store boundary=%d (a gen-prompt "
+            "suffix or aligned store key moved the goalposts)",
+            getattr(request, "request_id", "?"),
+            cap_boundary,
+            boundary,
+        )
+        return None
+
+    try:
+        from mlx_lm.models.cache import KVCache, QuantizedKVCache
+    except ImportError:
+        return None
+
+    assembled: List[Any] = []
+    for idx, layer in enumerate(live_cache):
+        snap = snap_map.get(idx)
+        if snap is not None:
+            if int(getattr(snap, "offset", -1) or -1) != int(boundary):
+                logger.warning(
+                    "mixed-SWA media boundary assembly declined for %s: "
+                    "snapshot layer %d offset=%s != boundary=%d",
+                    getattr(request, "request_id", "?"),
+                    idx,
+                    getattr(snap, "offset", None),
+                    boundary,
+                )
+                return None
+            assembled.append(snap)
+            continue
+        if "Rotating" in type(layer).__name__:
+            # A rotating layer the capture did not cover — refusing beats
+            # writing a rolled window under an exact anchor.
+            logger.warning(
+                "mixed-SWA media boundary assembly declined for %s: rotating "
+                "layer %d (%s) has no boundary snapshot",
+                getattr(request, "request_id", "?"),
+                idx,
+                type(layer).__name__,
+            )
+            return None
+        if (
+            isinstance(layer, KVCache)
+            and not isinstance(layer, QuantizedKVCache)
+            and getattr(layer, "keys", None) is not None
+        ):
+            keys = layer.keys
+            values = layer.values
+            live_offset = cache_offset(layer)
+            if live_offset < boundary or int(keys.shape[2]) < boundary:
+                return None
+            clone = KVCache()
+            clone.keys = keys[..., :boundary, :]
+            clone.values = values[..., :boundary, :]
+            clone.offset = boundary
+            assembled.append(clone)
+            continue
+        # Unknown/exotic layer class in a mixed-SWA layout: pass it through
+        # untouched. The store's per-block slicing already bounds positional
+        # layers to the stored key length, and this is byte-identical to what
+        # the pre-fix path fed it for non-rotating layers.
+        assembled.append(layer)
     if len(assembled) != len(live_cache):
         return None
     return assembled

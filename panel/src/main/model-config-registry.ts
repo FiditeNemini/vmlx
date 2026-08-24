@@ -162,26 +162,26 @@ function registerFamily(familyName: string, config: Omit<ModelConfig, 'familyNam
 // ZAYA / Zyphra: CCA attention + top-1 MoE. Text ZAYA is reasoning-capable and
 // current engine registry policy defaults Auto reasoning ON while preserving
 // zaya_xml tools and the typed CCA cache contract.
-registerFamily('zaya', { cacheType: 'hybrid', toolParser: 'zaya_xml', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: true, usePagedCache: true, enableAutoToolChoice: true, description: 'ZAYA CCA hybrid MoE', priority: 3 })
+registerFamily('zaya', { cacheType: 'hybrid', toolParser: 'zaya_xml', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: true, usePagedCache: false, enableAutoToolChoice: true, description: 'ZAYA CCA hybrid MoE', priority: 3 })
 // ZAYA1-VL is detected separately so the UI does not fall through to generic
 // VLM defaults. Current plain-template ZAYA1-VL bundles are vision/tool/cache
 // capable, but live proof shows the synthetic qwen3 thinking rail produces
 // hidden-only output, so the panel must not expose a reasoning mode until the
 // artifact ships a real VLM thinking contract.
-registerFamily('zaya1-vl', { cacheType: 'hybrid', toolParser: 'zaya_xml', supportsThinking: false, thinkInTemplate: false, defaultEnableThinking: false, usePagedCache: true, enableAutoToolChoice: true, isMultimodal: true, description: 'ZAYA1-VL CCA hybrid vision-language', priority: 3 })
+registerFamily('zaya1-vl', { cacheType: 'hybrid', toolParser: 'zaya_xml', supportsThinking: false, thinkInTemplate: false, defaultEnableThinking: false, usePagedCache: false, enableAutoToolChoice: true, isMultimodal: true, description: 'ZAYA1-VL CCA hybrid vision-language', priority: 3 })
 
 // Qwen
 // Qwen 3.5 dense and MoE share model_types with VL variants — VL detection
 // relies on config.json vision_config, not the family's isMultimodal flag.
 registerFamily('qwen3.5', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 (dense)', priority: 4 })
 registerFamily('qwen3.5-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 MoE', priority: 4 })
-registerFamily('qwen3-next', { cacheType: 'mamba', toolParser: 'qwen', reasoningParser: 'qwen3', usePagedCache: true, enableAutoToolChoice: true, description: 'Qwen 3 Next (hybrid Mamba)', priority: 1 })
+registerFamily('qwen3-next', { cacheType: 'mamba', toolParser: 'qwen', reasoningParser: 'qwen3', usePagedCache: false, enableAutoToolChoice: true, description: 'Qwen 3 Next (hybrid Mamba)', priority: 1 })
 registerFamily('qwen3-vl', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: true, description: 'Qwen 3 Vision-Language', priority: 5 })
 registerFamily('qwen3-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'Qwen 3 MoE', priority: 5 })
 registerFamily('qwen3', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'Qwen 3 / QwQ', priority: 10 })
 registerFamily('qwen2-vl', { cacheType: 'kv', toolParser: 'qwen', enableAutoToolChoice: true, isMultimodal: true, description: 'Qwen 2 Vision-Language', priority: 10 })
 registerFamily('qwen2', { cacheType: 'kv', toolParser: 'qwen', enableAutoToolChoice: true, description: 'Qwen 2', priority: 20 })
-registerFamily('qwen-mamba', { cacheType: 'mamba', toolParser: 'qwen', usePagedCache: true, description: 'Qwen Mamba', priority: 5 })
+registerFamily('qwen-mamba', { cacheType: 'mamba', toolParser: 'qwen', usePagedCache: false, description: 'Qwen Mamba', priority: 5 })
 // MiMo-V2.5 JANG_2L keeps multimodal assets. Its template emits generic XML
 // function calls and <think> reasoning, not Qwen tool JSON.
 registerFamily('mimo_v2', { cacheType: 'kv', toolParser: 'xml_function', reasoningParser: 'think_xml', supportsThinking: true, thinkInTemplate: false, enableAutoToolChoice: true, isMultimodal: true, description: 'MiMo V2.5 multimodal MoE', priority: 4 })
@@ -208,7 +208,7 @@ registerFamily('mistral', { cacheType: 'kv', toolParser: 'mistral', enableAutoTo
 // DeepSeek
 registerFamily('deepseek-v4', {
   cacheType: 'kv',
-  usePagedCache: true,
+  usePagedCache: false,
   toolParser: 'dsml',
   reasoningParser: 'deepseek_r1',
   supportsThinking: true,
@@ -232,8 +232,8 @@ registerFamily('glm4', { cacheType: 'kv', toolParser: 'glm47', enableAutoToolCho
 // Gemma
 registerFamily('medgemma', { cacheType: 'kv', isMultimodal: true, description: 'Google MedGemma (medical multimodal)', priority: 3 })
 registerFamily('paligemma', { cacheType: 'kv', isMultimodal: true, description: 'Google PaliGemma', priority: 5 })
-registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Gemma 4 (multimodal)', priority: 5 })
-registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, usePagedCache: true, description: 'Gemma 4 (text-only)', priority: 4 })
+registerFamily('gemma4', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'Gemma 4 (multimodal)', priority: 5 })
+registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoningParser: 'gemma4', enableAutoToolChoice: true, usePagedCache: false, description: 'Gemma 4 (text-only)', priority: 4 })
 // Muse Glimmer: Gemma-shaped text backbone (sliding/full 3:1) + windowed ViT,
 // vision AND video. Reasoning is routed by recipient (to=self / to=user), not an
 // inline think pair, and its only live control is the reasoning_strength template
@@ -261,7 +261,7 @@ registerFamily('gemma4-text', { cacheType: 'kv', toolParser: 'gemma4', reasoning
 // The effort levels below are surfaced through the existing reasoning control
 // and translated to `reasoning_strength` in the request builder, so the knob
 // the user sees is the knob the model actually has.
-registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinking: true, supportsInstructMode: false, honorsEnableThinking: false, supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'Muse Glimmer (vision + video)', priority: 5 })
+registerFamily('muse-glimmer', { cacheType: 'kv', toolParser: 'atem', reasoningParser: 'muse_glimmer', supportsThinking: true, supportsInstructMode: false, honorsEnableThinking: false, supportedReasoningEfforts: ['low', 'medium', 'high', 'xhigh'], enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'Muse Glimmer (vision + video)', priority: 5 })
 registerFamily('gemma3', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3 (multimodal)', priority: 10 })
 registerFamily('gemma3-text', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, description: 'Gemma 3 (text-only)', priority: 8 })
 registerFamily('gemma3n', { cacheType: 'kv', toolParser: 'gemma3', enableAutoToolChoice: true, isMultimodal: true, description: 'Gemma 3n (multimodal)', priority: 10 })
@@ -281,13 +281,13 @@ registerFamily('hermes', { cacheType: 'kv', toolParser: 'hermes', enableAutoTool
 
 // Nemotron
 registerFamily('nemotron', { cacheType: 'kv', toolParser: 'nemotron', reasoningParser: 'deepseek_r1', description: 'Nemotron', priority: 10 })
-registerFamily('nemotron-h', { cacheType: 'hybrid', cacheSubtype: 'nemotron_h_ssm_attention', architectureHints: { attentionArch: 'hybrid_ssm_attention' }, toolParser: 'nemotron', reasoningParser: 'deepseek_r1', usePagedCache: true, description: 'Nemotron Hybrid', priority: 10 })
+registerFamily('nemotron-h', { cacheType: 'hybrid', cacheSubtype: 'nemotron_h_ssm_attention', architectureHints: { attentionArch: 'hybrid_ssm_attention' }, toolParser: 'nemotron', reasoningParser: 'deepseek_r1', usePagedCache: false, description: 'Nemotron Hybrid', priority: 10 })
 
 // Poolside / Laguna
 registerFamily('laguna', { cacheType: 'kv', toolParser: 'glm47', reasoningParser: 'qwen3', supportsThinking: true, thinkInTemplate: false, defaultEnableThinking: false, enableAutoToolChoice: true, description: 'Laguna / Poolside coding model', priority: 10 })
 
 // Jamba
-registerFamily('jamba', { cacheType: 'hybrid', usePagedCache: true, description: 'Jamba (Hybrid)', priority: 10 })
+registerFamily('jamba', { cacheType: 'hybrid', usePagedCache: false, description: 'Jamba (Hybrid)', priority: 10 })
 
 // Cohere
 registerFamily('command-r-plus', { cacheType: 'kv', description: 'Command R+', priority: 10 })
@@ -295,7 +295,7 @@ registerFamily('command-r', { cacheType: 'kv', description: 'Command R', priorit
 
 // Granite
 registerFamily('granite', { cacheType: 'kv', toolParser: 'granite', enableAutoToolChoice: true, description: 'Granite', priority: 20 })
-registerFamily('granitemoehybrid', { cacheType: 'hybrid', toolParser: 'granite', enableAutoToolChoice: true, usePagedCache: true, description: 'Granite MoE Hybrid', priority: 10 })
+registerFamily('granitemoehybrid', { cacheType: 'hybrid', toolParser: 'granite', enableAutoToolChoice: true, usePagedCache: false, description: 'Granite MoE Hybrid', priority: 10 })
 
 // Functionary
 registerFamily('functionary', { cacheType: 'kv', toolParser: 'functionary', enableAutoToolChoice: true, description: 'Functionary', priority: 20 })
@@ -333,7 +333,7 @@ registerFamily('dots3_note', { cacheType: 'kv', cacheSubtype: 'dots3_hybrid_full
 // companion state. Eric directive 2026-05-11: treat Ling chat output as plain
 // content. Keep DeepSeek tool parsing, but do not advertise a reasoning parser
 // or thinking capability even when stale JANG sidecars claim deepseek_r1.
-registerFamily('ling', { cacheType: 'hybrid', toolParser: 'deepseek', supportsThinking: false, thinkInTemplate: false, usePagedCache: true, enableAutoToolChoice: true, description: 'Ling / Bailing hybrid', priority: 20 })
+registerFamily('ling', { cacheType: 'hybrid', toolParser: 'deepseek', supportsThinking: false, thinkInTemplate: false, usePagedCache: false, enableAutoToolChoice: true, description: 'Ling / Bailing hybrid', priority: 20 })
 
 // Tencent Hy3-preview: text-only dense GQA KV + MoE. The chat template uses
 // reasoning_effort=no_think|low|high, so Python normalizes the UI thinking
@@ -342,7 +342,7 @@ registerFamily('hy3', { cacheType: 'kv', toolParser: 'hunyuan', reasoningParser:
 
 // StepFun
 registerFamily('step-vl', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: true, description: 'StepFun Step-1V Vision-Language', priority: 3 })
-registerFamily('step-3.7-flash', { cacheType: 'kv', cacheSubtype: 'step3p7_full_sliding_kv', architectureHints: { textModelType: 'step3p5', attentionArch: 'full_and_sliding_kv', slidingWindow: 512 }, toolParser: 'step3p5', reasoningParser: 'qwen3', supportsThinking: true, honorsEnableThinking: false, supportsInstructMode: false, supportedReasoningEfforts: ['low', 'medium', 'high'], thinkInTemplate: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: true, description: 'StepFun Step-3.7-Flash JANG/VL', priority: 4 })
+registerFamily('step-3.7-flash', { cacheType: 'kv', cacheSubtype: 'step3p7_full_sliding_kv', architectureHints: { textModelType: 'step3p5', attentionArch: 'full_and_sliding_kv', slidingWindow: 512 }, toolParser: 'step3p5', reasoningParser: 'qwen3', supportsThinking: true, honorsEnableThinking: false, supportsInstructMode: false, supportedReasoningEfforts: ['low', 'medium', 'high'], thinkInTemplate: true, enableAutoToolChoice: true, isMultimodal: true, usePagedCache: false, description: 'StepFun Step-3.7-Flash JANG/VL', priority: 4 })
 registerFamily('step-3.5-flash', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'StepFun Step-3.5-Flash (MoE)', priority: 5 })
 registerFamily('step', { cacheType: 'kv', toolParser: 'step3p5', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'StepFun Step models', priority: 30 })
 
@@ -365,7 +365,7 @@ registerFamily('exaone', { cacheType: 'kv', description: 'EXAONE', priority: 20 
 registerFamily('olmo', { cacheType: 'kv', description: 'OLMo', priority: 20 })
 
 // Liquid / hybrid SSM
-registerFamily('lfm2', { cacheType: 'hybrid', cacheSubtype: 'lfm2_moe_hybrid_ssm', architectureHints: { attentionArch: 'hybrid_ssm_attention', cacheSchema: 'hybrid_ssm_v1', ssmCompanionCache: true, attentionKvStorageQuantization: true }, toolParser: 'lfm2', reasoningParser: 'qwen3', supportsThinking: true, honorsEnableThinking: false, supportsInstructMode: false, usePagedCache: true, enableAutoToolChoice: true, description: 'Liquid LFM2 / LFM2-MoE hybrid', priority: 10 })
+registerFamily('lfm2', { cacheType: 'hybrid', cacheSubtype: 'lfm2_moe_hybrid_ssm', architectureHints: { attentionArch: 'hybrid_ssm_attention', cacheSchema: 'hybrid_ssm_v1', ssmCompanionCache: true, attentionKvStorageQuantization: true }, toolParser: 'lfm2', reasoningParser: 'qwen3', supportsThinking: true, honorsEnableThinking: false, supportsInstructMode: false, usePagedCache: false, enableAutoToolChoice: true, description: 'Liquid LFM2 / LFM2-MoE hybrid', priority: 10 })
 
 // StarCoder / StableLM / Baichuan
 registerFamily('starcoder', { cacheType: 'kv', description: 'StarCoder', priority: 30 })
@@ -386,10 +386,10 @@ registerFamily('smolvlm', { cacheType: 'kv', isMultimodal: true, description: 'S
 registerFamily('internlm-xcomposer', { cacheType: 'kv', isMultimodal: true, description: 'InternLM-XComposer', priority: 8 })
 
 // Pure SSM
-registerFamily('falcon-h1', { cacheType: 'hybrid', usePagedCache: true, description: 'Falcon H1 hybrid SSM/attention', priority: 5 })
-registerFamily('falcon-mamba', { cacheType: 'mamba', usePagedCache: true, description: 'Falcon Mamba (SSM)', priority: 5 })
-registerFamily('mamba', { cacheType: 'mamba', usePagedCache: true, description: 'Mamba SSM', priority: 30 })
-registerFamily('rwkv', { cacheType: 'mamba', usePagedCache: true, description: 'RWKV', priority: 30 })
+registerFamily('falcon-h1', { cacheType: 'hybrid', usePagedCache: false, description: 'Falcon H1 hybrid SSM/attention', priority: 5 })
+registerFamily('falcon-mamba', { cacheType: 'mamba', usePagedCache: false, description: 'Falcon Mamba (SSM)', priority: 5 })
+registerFamily('mamba', { cacheType: 'mamba', usePagedCache: false, description: 'Mamba SSM', priority: 30 })
+registerFamily('rwkv', { cacheType: 'mamba', usePagedCache: false, description: 'RWKV', priority: 30 })
 
 /**
  * Map model_type values from config.json to registry family names.
@@ -1297,7 +1297,7 @@ function applyConfigMetadataOverrides(
   const isQwen36 = next.family === 'qwen3.5' || next.family === 'qwen3.5-moe'
   if (isQwen36 && configDeclaresLinearAttention(parsedConfig)) {
     next.cacheType = 'hybrid'
-    next.usePagedCache = true
+    next.usePagedCache = false
   }
   if (isQwen36 && configDeclaresMedia(parsedConfig) && !next.forceTextOnly) {
     next.isMultimodal = true
@@ -1317,7 +1317,7 @@ function applyConfigMetadataOverrides(
   ) {
     next.isMultimodal = false
     next.forceTextOnly = true
-    next.usePagedCache = true
+    next.usePagedCache = false
     next.architectureHints = {
       ...(next.architectureHints ?? {}),
       runtimeScope: 'text_only_until_pixtral_processor_is_wired',
@@ -1341,7 +1341,7 @@ function applyConfigMetadataOverrides(
     next.cacheType = 'rotating_kv'
     // Gemma 4's typed mixed-SWA cache supports paged prefix reuse and block-disk
     // restore. Keep the effective UI default aligned with that runtime path.
-    next.usePagedCache = true
+    next.usePagedCache = false
   }
   if (
     next.family === 'laguna' &&
@@ -1415,13 +1415,11 @@ function configToDetected(family: string, config: Omit<ModelConfig, 'pattern' | 
     cacheType: config.cacheType,
     cacheSubtype: config.cacheSubtype,
     architectureHints: config.architectureHints,
-    // 2026-07-12 (paged default ON, UI<->engine parity): families that declare
-    // usePagedCache keep their value (hybrid/SSM/Gemma4 = true, M3/openPangu = false;
-    // M3 flipped off 2026-08-10 — paged tier corrupts M3 partial-prefix reuse).
-    // Undeclared families default ON for TEXT and OFF for multimodal/VL — VL
-    // stays on the memory-aware path until the MLLM paged byte-ceiling (#98)
-    // lands. Gemma4's typed mixed-SWA path is explicitly paged-ON.
-    usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true),
+    // In-RAM paged cache is OFF for EVERY family; SSD block-disk L2 is the only
+    // cache tier. This used to default undeclared TEXT families to ON, which
+    // meant a family could acquire a RAM tier merely by not declaring one.
+    // There is no per-family paged capability any more: the answer is false.
+    usePagedCache: config.usePagedCache ?? false,
     enableAutoToolChoice: config.enableAutoToolChoice ?? false,
     isMultimodal: config.isMultimodal ?? false,
     description: config.description
@@ -1583,7 +1581,7 @@ function applyJangCapabilities(
     if (cacheType === 'kv' || cacheType === 'mamba' || cacheType === 'hybrid' || cacheType === 'rotating_kv') {
       next.cacheType = cacheType
       if (cacheType === 'mamba' || cacheType === 'hybrid') {
-        next.usePagedCache = true
+        next.usePagedCache = false
       }
     }
   }
@@ -1591,7 +1589,7 @@ function applyJangCapabilities(
     next.cacheSubtype = caps.cache_subtype
   }
   if (zayaTypedCca) {
-    next.usePagedCache = true
+    next.usePagedCache = false
   }
   return next
 }
@@ -1782,7 +1780,7 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
               if (isStep37TextBridge(parsed)) {
                 delete detected.forceTextOnly
                 detected.cacheSubtype = 'step3p7_full_sliding_kv'
-                detected.usePagedCache = true
+                detected.usePagedCache = false
                 detected.architectureHints = {
                   ...(detected.architectureHints ?? {}),
                   runtimeScope: 'source_vlm_needs_live_proof',

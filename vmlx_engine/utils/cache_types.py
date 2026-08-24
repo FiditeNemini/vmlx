@@ -9,7 +9,7 @@ ArraysCache, and CacheList.
 
 import logging
 from enum import Enum
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,10 @@ ATTENTION_CACHE_CLASS_NAMES = frozenset(
     {"KVCache", "RotatingKVCache", "QuantizedKVCache", "TurboQuantKVCache"}
 )
 
+DSV4_CACHE_CLASS_NAMES = frozenset(
+    {"DeepseekV4Cache", "PoolQuantizedV4Cache"}
+)
+
 
 def expand_cache_class_names(cache: Any) -> set:
     """Return the *effective* cache class names for a model cache, resolving
@@ -109,6 +113,201 @@ def expand_cache_class_names(cache: Any) -> set:
     for layer in cache or []:
         _visit(layer)
     return names
+
+
+def detect_dsv4_cache_contract(model: Any) -> Optional[bool]:
+    """Observe whether ``model.make_cache()`` creates a DSV4 composite cache.
+
+    ``False`` is returned only after the instantiated cache graph was inspected
+    successfully. ``None`` means the runtime contract could not be observed and
+    callers must retain conservative payload validation. This distinction is
+    important for SSD-only prefix reuse: probing DSV4 terminal records on a
+    runtime-proven ordinary KV/hybrid model reads every block once before the
+    actual reconstruction reads it again.
+
+    CacheList-style wrappers and subclasses are inspected recursively. Family
+    names and bundle/registry metadata deliberately do not participate.
+    """
+    make_cache = getattr(model, "make_cache", None)
+    if not callable(make_cache):
+        return None
+    try:
+        cache = list(make_cache() or [])
+    except Exception:
+        return None
+
+    def _is_dsv4_cache(slot: Any) -> bool:
+        try:
+            if any(
+                cls.__name__ in DSV4_CACHE_CLASS_NAMES
+                for cls in type(slot).__mro__
+            ):
+                return True
+        except Exception:
+            return False
+        nested = getattr(slot, "caches", None)
+        if isinstance(nested, (list, tuple)):
+            return any(_is_dsv4_cache(child) for child in nested)
+        return False
+
+    return any(_is_dsv4_cache(slot) for slot in cache)
+
+
+def describe_runtime_cache_layout(
+    cache: Any,
+    *,
+    model: Any = None,
+) -> Dict[str, Any]:
+    """Describe the cache objects actually returned by ``model.make_cache``.
+
+    Family names and registry metadata are useful launch hints, but neither is
+    proof of the cache topology a loaded model instantiated.  Keep this helper
+    deliberately observational: it records every top-level slot and nested
+    ``CacheList`` leaf, then classifies only cache shapes whose semantics are
+    known.  Unknown native/composite classes stay visible as unknown instead of
+    being guessed into a generic KV or SSM lane.
+
+    The returned values contain class names and integer indices only.  No live
+    tensors or cache objects are retained by telemetry.
+    """
+
+    slots = list(cache or [])
+    slot_types = []
+    slot_class_counts: Dict[str, int] = {}
+    effective_class_counts: Dict[str, int] = {}
+    attention_positions = []
+    cumulative_positions = []
+    parallel_positions = []
+    rotating_positions = []
+    quantized_positions = []
+    unknown_positions = []
+
+    def _leaf_names(slot: Any, depth: int = 0) -> list[str]:
+        class_name = type(slot).__name__
+        nested = getattr(slot, "caches", None)
+        if (
+            class_name == "CacheList"
+            and isinstance(nested, (list, tuple))
+            and nested
+            and depth < 8
+        ):
+            names = []
+            for child in nested:
+                names.extend(_leaf_names(child, depth + 1))
+            return names
+        return [class_name]
+
+    def _slot_label(slot: Any, depth: int = 0) -> str:
+        class_name = type(slot).__name__
+        nested = getattr(slot, "caches", None)
+        if (
+            class_name == "CacheList"
+            and isinstance(nested, (list, tuple))
+            and nested
+            and depth < 8
+        ):
+            return f"CacheList({','.join(_slot_label(child, depth + 1) for child in nested)})"
+        return class_name
+
+    def _is_attention(class_name: str) -> bool:
+        # mlx-lm has Batch* variants and model implementations can provide a
+        # cache subclass with a family-specific prefix.  A KVCache suffix is a
+        # semantic declaration; native composite caches without that suffix
+        # remain unknown and are handled by their architecture-owned branch.
+        return (
+            class_name in ATTENTION_CACHE_CLASS_NAMES
+            or class_name.endswith("KVCache")
+            or class_name == "MiniMaxM3SparseCache"
+        )
+
+    for idx, slot in enumerate(slots):
+        top_level_class = type(slot).__name__
+        slot_class_counts[top_level_class] = (
+            slot_class_counts.get(top_level_class, 0) + 1
+        )
+        slot_types.append(_slot_label(slot))
+
+        leaf_names = _leaf_names(slot)
+        for class_name in leaf_names:
+            effective_class_counts[class_name] = (
+                effective_class_counts.get(class_name, 0) + 1
+            )
+
+        has_attention = any(_is_attention(name) for name in leaf_names)
+        has_cumulative = any(
+            name in CUMULATIVE_CACHE_CLASS_NAMES for name in leaf_names
+        )
+        has_rotating = any("RotatingKVCache" in name for name in leaf_names)
+        has_quantized = any(
+            "QuantizedKVCache" in name or name == "TurboQuantKVCache"
+            for name in leaf_names
+        )
+
+        if has_attention:
+            attention_positions.append(idx)
+        if has_cumulative:
+            cumulative_positions.append(idx)
+        if has_attention and has_cumulative:
+            parallel_positions.append(idx)
+        if has_rotating:
+            rotating_positions.append(idx)
+        if has_quantized:
+            quantized_positions.append(idx)
+        if not has_attention and not has_cumulative:
+            unknown_positions.append(idx)
+
+    result = {
+        "layer_count": len(slots),
+        "slot_types": slot_types,
+        "slot_class_counts": slot_class_counts,
+        "effective_class_counts": effective_class_counts,
+        "attention_layer_indices": attention_positions,
+        "cumulative_layer_indices": cumulative_positions,
+        "parallel_layer_indices": parallel_positions,
+        "rotating_layer_indices": rotating_positions,
+        "quantized_layer_indices": quantized_positions,
+        "unknown_layer_indices": unknown_positions,
+    }
+
+    # Cache classes prove storage semantics, but generic containers such as
+    # ArraysCache do not identify the architecture component that owns them.
+    # Observe the loaded model's matching layer objects too. For Qwen3.5/3.8,
+    # this distinguishes GatedDeltaNet recurrent state from Mamba/SSM even
+    # though both use cumulative cache containers. This is telemetry only; it
+    # never drives routing.
+    try:
+        layers = list(getattr(model, "layers", []) or []) if model is not None else []
+    except Exception:
+        layers = []
+    if len(layers) == len(slots) and layers:
+        owner_types: list[str] = []
+        owner_counts: Dict[str, int] = {}
+        owner_attrs = (
+            "linear_attn",
+            "self_attn",
+            "attention",
+            "attn",
+            "mixer",
+            "mamba",
+            "ssm",
+            "conv",
+        )
+        for layer in layers:
+            owner = None
+            for attr in owner_attrs:
+                candidate = getattr(layer, attr, None)
+                if candidate is not None:
+                    owner = type(candidate).__name__
+                    break
+            if owner is None:
+                owner = type(layer).__name__
+            owner_types.append(owner)
+            owner_counts[owner] = owner_counts.get(owner, 0) + 1
+        result["owner_component_types"] = owner_types
+        result["owner_component_class_counts"] = owner_counts
+        result["owner_component_source"] = "instantiated_model_layers"
+
+    return result
 
 
 def detect_cache_type(cache_obj: Any) -> CacheType:

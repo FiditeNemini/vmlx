@@ -80,7 +80,10 @@ import {
 import { mergeCacheDetails } from "../../shared/cacheMetrics";
 import {
   calculatePrefillTps,
+  parseServerDecodeUsage,
   selectFinalDecodeTps,
+  type ServerDecodePass,
+  summarizeServerDecodePasses,
 } from "../../shared/chatMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
@@ -1935,6 +1938,25 @@ export function registerChatHandlers(
       const liveTpsHistory: number[] = [];
       const MAX_LIVE_TPS_SAMPLES = 512;
       let tpsTokenBase = 0; // re-anchor point for tpsSnapshots after iteration reset
+      // Local vMLX Responses streams negotiate exact engine-side decode
+      // windows. Keep one latest cumulative snapshot per HTTP pass, then sum
+      // passes across the visible agent/tool exchange. SSE arrival timing is
+      // only a fallback: --stream-interval batches tokens, and tool-control
+      // output can advance usage without producing a visible delta.
+      const completedServerDecodePasses: ServerDecodePass[] = [];
+      let currentServerDecodePass: ServerDecodePass | undefined;
+      const recordServerDecodeUsage = (usage: unknown) => {
+        const decoded = parseServerDecodeUsage(usage);
+        if (!decoded) return;
+        currentServerDecodePass = decoded;
+        liveTps = decoded.tokensPerSecond;
+      };
+      const finishServerDecodePass = () => {
+        if (currentServerDecodePass) {
+          completedServerDecodePasses.push(currentServerDecodePass);
+          currentServerDecodePass = undefined;
+        }
+      };
       // No streaming throttle — emit every token. Renderer-side useTypewriter
       // in MessageBubble.tsx handles smooth character reveal via rAF.
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -3080,6 +3102,7 @@ export function registerChatHandlers(
               // Real-time usage from the explicitly negotiated local vMLX
               // response.usage extension (never part of a standard remote stream).
               if (responsesEventType === "response.usage" && parsed.usage) {
+                recordServerDecodeUsage(parsed.usage);
                 if (parsed.usage.output_tokens != null) {
                   tokenCount = parsed.usage.output_tokens;
                   // Detect server token count restart (new HTTP request resets completion_tokens to 0)
@@ -3163,6 +3186,7 @@ export function registerChatHandlers(
                   ) ?? lastFinishReason;
               }
               if (isResponsesTerminalEvent && respUsage) {
+                recordServerDecodeUsage(respUsage);
                 if (respUsage.output_tokens != null) {
                   tokenCount = respUsage.output_tokens;
                   if (tokenCount < iterationTokenBase) iterationTokenBase = 0;
@@ -3615,6 +3639,7 @@ export function registerChatHandlers(
 
         // ─── Helper: send follow-up request and stream response ────────────
         const sendFollowUp = async (): Promise<boolean> => {
+          finishServerDecodePass();
           // Fold the finished stream's prompt/cached counts into the exchange
           // totals so the final metrics pair coherently (cached <= prompt).
           exchangePromptTokens += promptTokens;
@@ -4378,7 +4403,13 @@ export function registerChatHandlers(
               : totalTime;
         const finalGenSec = genTimeSec > 0.05 ? genTimeSec : wallTimeSec;
         // Use cumulative total across all tool iterations (server restarts completion_tokens per request)
-        const totalTokenCount = cumulativeTokenOffset + iterationTokenCount;
+        const serverDecodeSummary = summarizeServerDecodePasses([
+          ...completedServerDecodePasses,
+          currentServerDecodePass,
+        ]);
+        const totalTokenCount =
+          serverDecodeSummary?.outputTokens ??
+          (cumulativeTokenOffset + iterationTokenCount);
         const cumulativeDecodeTps =
           finalGenSec > 0 ? totalTokenCount / finalGenSec : 0;
         // Progressive streams have credible cumulative delta timing even when
@@ -4386,11 +4417,14 @@ export function registerChatHandlers(
         // Buffered answer passes are the opposite: their cumulative rate is an
         // impossible burst, so selectFinalDecodeTps falls back to the median
         // observed rolling stream rate.
-        const finalTps = selectFinalDecodeTps({
-          cumulativeTps: cumulativeDecodeTps,
-          rollingTps: liveTpsHistory,
-          lastRollingTps: liveTps,
-        });
+        const finalTps =
+          serverDecodeSummary?.tokensPerSecond ??
+          selectFinalDecodeTps({
+            cumulativeTps: cumulativeDecodeTps,
+            rollingTps: liveTpsHistory,
+            lastRollingTps: liveTps,
+          });
+        const decodeMetricSource = serverDecodeSummary ? "server" : "client";
         // TTFT measured from fetchStartTime (excludes health check and message building overhead)
         const ttft = Math.max(
           0,
@@ -4541,6 +4575,7 @@ export function registerChatHandlers(
           cachedTokens: cachedTokens || undefined,
           cacheDetail: cacheDetail || undefined,
           tokensPerSecond: finalTps.toFixed(1),
+          decodeMetricSource,
           ppSpeed: finalPpSpeed,
           ttft: ttft.toFixed(2),
           totalTime: totalTime.toFixed(1),
@@ -4739,7 +4774,7 @@ export function registerChatHandlers(
         } catch (_) {}
 
         console.log(
-          `[CHAT] Response complete: ${totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTps.toFixed(1)} t/s, live=${liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPpSpeed ? `, ${finalPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
+          `[CHAT] Response complete: ${totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTps.toFixed(1)} t/s, decode=${decodeMetricSource}${serverDecodeSummary ? `:${serverDecodeSummary.decodeTokens}/${serverDecodeSummary.decodeSeconds.toFixed(3)}s` : ""}, live=${liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPpSpeed ? `, ${finalPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
         );
 
         return assistantMessage;

@@ -2468,6 +2468,9 @@ class BlockAwarePrefixCache:
         smelt_pct: Optional[float] = None,
         tq_enabled: bool = False,
         kv_quant_bits: int = 0,
+        uses_dsv4_cache: Optional[bool] = None,
+        uses_zaya_cache: Optional[bool] = None,
+        mixed_attention_cache_model: Optional[bool] = None,
     ):
         """
         Initialize block-aware prefix cache.
@@ -2479,6 +2482,12 @@ class BlockAwarePrefixCache:
                 Loader fingerprint inputs (F6 + A4 Concern #1). Mixed into
                 paged-cache content hash so divergent loader configs never
                 collide on shared blocks.
+            uses_dsv4_cache, uses_zaya_cache, mixed_attention_cache_model:
+                Observed runtime-cache contracts from the owning scheduler.
+                ``False`` proves that the corresponding path-dependent payload
+                cannot occur and avoids loading every SSD block merely to scan
+                for its terminal tag. ``None`` is conservative and preserves
+                the payload-driven validation used by standalone callers.
         """
         self.model = model
         # Content-derived stable key (replaces id(model)). Includes loader
@@ -2494,6 +2503,29 @@ class BlockAwarePrefixCache:
         )
         self.paged_cache = paged_cache_manager
         self.block_size = paged_cache_manager.block_size
+        # These validators exist to reject incomplete native/path-dependent
+        # checkpoints. In SSD-only mode they must deserialize payloads to inspect
+        # their tags. Running all three against a runtime-proven ordinary KV or
+        # KV+external-SSM layout loads the whole chain once here and once again
+        # during reconstruction (measured on LFM2: 508 physical reads for 254
+        # logical blocks). Only an explicit False from instantiated runtime
+        # detection may skip a validator; unknown standalone/test callers retain
+        # the former fail-closed behavior.
+        self._validate_dsv4_terminal = uses_dsv4_cache is not False
+        self._validate_zaya_terminal = uses_zaya_cache is not False
+        self._validate_rotating_terminal = mixed_attention_cache_model is not False
+        self._native_terminal_validation_source = (
+            "instantiated_runtime_cache"
+            if all(
+                value is not None
+                for value in (
+                    uses_dsv4_cache,
+                    uses_zaya_cache,
+                    mixed_attention_cache_model,
+                )
+            )
+            else "conservative_payload_probe"
+        )
         self._strict_block_disk_write_fence = os.environ.get(
             "VMLX_STRICT_BLOCK_DISK_WRITE_FENCE",
             "",
@@ -2520,9 +2552,11 @@ class BlockAwarePrefixCache:
         # prefill were thrown away, with only a repeated WARNING to show for it.
         # Bigger models have bigger per-block payloads and drop more.
         #
-        # The wait happens on the model-owning thread, so it must stay short —
-        # the 30s above is only defensible for path-dependent families, where a
-        # dropped block breaks the chain instead of merely costing a re-prefill.
+        # The wait happens on the model-owning thread, so ordinary paged-RAM
+        # write-through stays short. The longer window above is required for
+        # path-dependent records AND SSD-only operation: a disk-only request has
+        # no permitted RAM fallback, so a best-effort one-second publication can
+        # only throw away work the engine already paid to prefill.
         # O(n) chained prefix-index hashing. Default OFF: it changes the
         # in-memory index KEYS (not any persisted record), and the win is a
         # lock-hold reduction that still wants a live long-conversation A/B
@@ -2637,6 +2671,29 @@ class BlockAwarePrefixCache:
                 if _ln:
                     self._expected_num_layers = int(_ln)
                     break
+
+    def _write_admission_timeout_for_store(
+        self,
+        *,
+        disk_only: bool,
+        path_dependent: bool,
+    ) -> float:
+        """Choose lossless SSD admission when disk is the only cache tier."""
+
+        if disk_only or path_dependent:
+            return float(self._native_block_disk_admission_timeout)
+        return float(self._block_disk_admission_timeout)
+
+    @staticmethod
+    def _write_block_immediately_for_store(
+        *,
+        disk_only: bool,
+        minimax_m3: bool,
+        native_tq: bool,
+    ) -> bool:
+        """Whether one detached page must be queued before extracting the next."""
+
+        return bool(disk_only or minimax_m3 or native_tq)
 
     def _shape_scoped_cache_extra_keys(
         self,
@@ -3022,13 +3079,17 @@ class BlockAwarePrefixCache:
             # candidate validators without attaching payloads to the blocks;
             # worker reconstruction remains the sole owner of live hydration.
             _validation_payload_cache: Dict[int, Any] = {}
-            dsv4_delta_match = self._normalize_dsv4_delta_candidate(
-                request_id=request_id,
-                blocks=cached_blocks,
-                matched_tokens=num_cached,
-                request_tokens=tokens,
-                disk_store=_disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            dsv4_delta_match = (
+                self._normalize_dsv4_delta_candidate(
+                    request_id=request_id,
+                    blocks=cached_blocks,
+                    matched_tokens=num_cached,
+                    request_tokens=tokens,
+                    disk_store=_disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
+                if self._validate_dsv4_terminal
+                else None
             )
             dsv4_matched_tokens: Optional[int] = None
             dsv4_replayed_tokens = 0
@@ -3070,11 +3131,14 @@ class BlockAwarePrefixCache:
             # to its latest safe anchor before applying the generic mixed-SWA
             # terminal guard; non-DSV4 chains still take the unchanged guard on
             # their original matched boundary.
-            if self._rotating_l2_chain_missing_terminal_state(
-                cached_blocks,
-                target_tokens=num_cached,
-                disk_store=_disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            if (
+                self._validate_rotating_terminal
+                and self._rotating_l2_chain_missing_terminal_state(
+                    cached_blocks,
+                    target_tokens=num_cached,
+                    disk_store=_disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
             ):
                 _rot_anchor = self._normalize_rotating_candidate(
                     cached_blocks,
@@ -3128,10 +3192,13 @@ class BlockAwarePrefixCache:
                     self._misses += 1
                     return None, tokens
 
-            if self._dsv4_l2_chain_missing_terminal_state(
-                cached_blocks,
-                _disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            if (
+                self._validate_dsv4_terminal
+                and self._dsv4_l2_chain_missing_terminal_state(
+                    cached_blocks,
+                    _disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
             ):
                 _reject_table = BlockTable(
                     request_id=request_id,
@@ -3151,10 +3218,13 @@ class BlockAwarePrefixCache:
                 self._misses += 1
                 return None, tokens
 
-            if self._zaya_l2_chain_missing_terminal_state(
-                cached_blocks,
-                _disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            if (
+                self._validate_zaya_terminal
+                and self._zaya_l2_chain_missing_terminal_state(
+                    cached_blocks,
+                    _disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
             ):
                 _reject_table = BlockTable(
                     request_id=request_id,
@@ -3238,13 +3308,17 @@ class BlockAwarePrefixCache:
             )
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
             _validation_payload_cache: Dict[int, Any] = {}
-            dsv4_delta_match = self._normalize_dsv4_delta_candidate(
-                request_id=request_id,
-                blocks=matched_blocks,
-                matched_tokens=len(matched_tokens),
-                request_tokens=tokens,
-                disk_store=_disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            dsv4_delta_match = (
+                self._normalize_dsv4_delta_candidate(
+                    request_id=request_id,
+                    blocks=matched_blocks,
+                    matched_tokens=len(matched_tokens),
+                    request_tokens=tokens,
+                    disk_store=_disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
+                if self._validate_dsv4_terminal
+                else None
             )
             dsv4_matched_tokens: Optional[int] = None
             dsv4_replayed_tokens = 0
@@ -3276,11 +3350,14 @@ class BlockAwarePrefixCache:
                 pinned_table.checkpoint_tokens = int(checkpoint_tokens)
                 pinned_table.replayed_tokens = int(dsv4_replayed_tokens)
 
-            if self._rotating_l2_chain_missing_terminal_state(
-                matched_blocks,
-                target_tokens=pinned_table.num_tokens,
-                disk_store=_disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            if (
+                self._validate_rotating_terminal
+                and self._rotating_l2_chain_missing_terminal_state(
+                    matched_blocks,
+                    target_tokens=pinned_table.num_tokens,
+                    disk_store=_disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
             ):
                 # SAME normalization as the paged lane above. A fix applied to
                 # only one of these two lanes is inert in the other -- that has
@@ -3329,10 +3406,13 @@ class BlockAwarePrefixCache:
                     )
                     self._misses += 1
                     return None, tokens
-            if self._dsv4_l2_chain_missing_terminal_state(
-                matched_blocks,
-                _disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            if (
+                self._validate_dsv4_terminal
+                and self._dsv4_l2_chain_missing_terminal_state(
+                    matched_blocks,
+                    _disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
             ):
                 self.paged_cache.release_request_refs(pinned_table)
                 logger.warning(
@@ -3343,10 +3423,13 @@ class BlockAwarePrefixCache:
                 )
                 self._misses += 1
                 return None, tokens
-            if self._zaya_l2_chain_missing_terminal_state(
-                matched_blocks,
-                _disk_store,
-                validation_payload_cache=_validation_payload_cache,
+            if (
+                self._validate_zaya_terminal
+                and self._zaya_l2_chain_missing_terminal_state(
+                    matched_blocks,
+                    _disk_store,
+                    validation_payload_cache=_validation_payload_cache,
+                )
             ):
                 self.paged_cache.release_request_refs(pinned_table)
                 logger.warning(
@@ -3843,7 +3926,8 @@ class BlockAwarePrefixCache:
                 block, fallback_payload = fallback
                 current_hash = getattr(block, "block_hash", block_hash)
                 if (
-                    current_hash == block_hash
+                    fallback_payload is not None
+                    and current_hash == block_hash
                     and getattr(block, "cache_data", None) is fallback_payload
                 ):
                     release_when_unreferenced = getattr(
@@ -3949,9 +4033,10 @@ class BlockAwarePrefixCache:
         readability as their durability boundary: the background writer commits
         each row before applying the aggregate SSD budget.  Seal the request
         fence, wait for its post-eviction terminal state, and verify every exact
-        hash under the disk store's mutation guard before releasing the only RAM
-        fallback.  Every timeout, error, or retained-hash loss fails closed by
-        preserving that fallback.
+        hash under the disk store's mutation guard before releasing temporary
+        publication state. Paged-RAM native holds remain fail-closed. SSD-only
+        failures instead retire the nondurable suffix: retaining it would create
+        a hidden, unbounded RAM cache in direct conflict with the selected tier.
         """
         disk_store = write_fence.get("disk_store")
         fence_id = write_fence.get("fence_id")
@@ -3964,6 +4049,17 @@ class BlockAwarePrefixCache:
         target_hashes = set(disk_only_fallbacks) | set(native_paged_holds)
         durable_hashes: set[bytes] = set()
         eventual_wait_allowed = False
+        fence_wait_timeout = (
+            float(
+                getattr(
+                    self,
+                    "_native_block_disk_admission_timeout",
+                    30.0,
+                )
+            )
+            if disk_only_fallbacks
+            else 5.0
+        )
 
         sealed = False
         if disk_store is not None and fence_id is not None:
@@ -3990,7 +4086,8 @@ class BlockAwarePrefixCache:
             ):
                 logger.warning(
                     "Native block-disk fence wait is unavailable for %s; "
-                    "retaining RAM fallbacks",
+                    "preserving paged native holds and retiring SSD-only "
+                    "nondurable blocks",
                     request_id,
                 )
             else:
@@ -3999,7 +4096,7 @@ class BlockAwarePrefixCache:
                         disk_store,
                         fence_id,
                         target_hashes,
-                        timeout=5.0,
+                        timeout=fence_wait_timeout,
                     )
                     eventual_wait_allowed = True
                 except Exception as wait_error:
@@ -4015,19 +4112,16 @@ class BlockAwarePrefixCache:
             native_paged_holds,
         )
 
+        discarded_disk_only = 0
         if disk_only_fallbacks:
-            for block, fallback_payload in disk_only_fallbacks.values():
-                block.cache_data = fallback_payload
-                block.cache_data_from_disk = False
-                block.keep_resident = True
-                self.paged_cache._note_resident(
-                    block,
-                    self.paged_cache.estimate_block_nbytes(fallback_payload),
-                )
+            discarded_disk_only = self._discard_nondurable_disk_only_blocks(
+                disk_only_fallbacks
+            )
+            disk_only_fallbacks.clear()
             logger.error(
-                "Block-disk-only post-eviction fence retained %d RAM fallback "
-                "block(s); SSD publication was not durably retained",
-                len(disk_only_fallbacks),
+                "Block-disk-only post-eviction fence discarded %d nondurable "
+                "block(s); persistent RAM fallback remains 0 bytes",
+                discarded_disk_only,
             )
         elif write_fence.get("disk_only_fallbacks"):
             logger.info(
@@ -4047,15 +4141,77 @@ class BlockAwarePrefixCache:
         if (
             sealed
             and eventual_wait_allowed
-            and (disk_only_fallbacks or native_paged_holds)
+            and native_paged_holds
         ):
             self._schedule_eventual_native_fence_release(
                 request_id,
                 disk_store,
                 fence_id,
-                disk_only_fallbacks,
+                {},
                 native_paged_holds,
             )
+
+    def _discard_nondurable_disk_only_blocks(
+        self,
+        pending: dict[bytes, tuple[Any, Any]],
+    ) -> int:
+        """Invalidate an SSD-only suffix without ever installing its payload."""
+
+        retired_ids: set[int] = set()
+        discard = getattr(
+            self.paged_cache,
+            "discard_nondurable_cache_blocks",
+            None,
+        )
+        if callable(discard):
+            try:
+                retired_ids.update(int(value) for value in discard(pending))
+            except Exception:
+                logger.exception(
+                    "Paged cache failed to retire nondurable SSD-only blocks"
+                )
+
+        # Compatibility/fail-safe path for a third-party or test manager. Even
+        # if its lookup map cannot be edited here, never leave a tensor payload
+        # behind under a zero-RAM policy; reset_hash makes the prefix-index
+        # validator reject the stale numeric block id.
+        for block_hash, (block, _payload) in pending.items():
+            if block is None:
+                continue
+            block_id = getattr(block, "block_id", None)
+            current_hash = getattr(block, "block_hash", None)
+            if current_hash == block_hash and block_id is not None:
+                retired_ids.add(int(block_id))
+            release = getattr(self.paged_cache, "release_resident_payload", None)
+            if callable(release):
+                try:
+                    release(block)
+                except Exception:
+                    block.cache_data = None
+            else:
+                block.cache_data = None
+                block.cache_data_from_disk = False
+                block.keep_resident = False
+            if current_hash == block_hash:
+                reset_hash = getattr(block, "reset_hash", None)
+                if callable(reset_hash):
+                    reset_hash()
+
+        if retired_ids:
+            lock = getattr(self.paged_cache, "_lock", None)
+
+            def _prune_index() -> None:
+                for prefix_hash, entry in list(self._prefix_index.items()):
+                    block_ids = entry[1] if len(entry) > 1 else ()
+                    if any(int(block_id) in retired_ids for block_id in block_ids):
+                        del self._prefix_index[prefix_hash]
+
+            if lock is None:
+                _prune_index()
+            else:
+                with lock:
+                    _prune_index()
+        return len(retired_ids)
 
     def store_cache(
         self,
@@ -4212,6 +4368,7 @@ class BlockAwarePrefixCache:
                 )
 
         disk_store = self.paged_cache._disk_store  # May be None
+        _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
 
         # Get or create block table
         block_table = self.paged_cache.get_block_table(request_id)
@@ -4362,10 +4519,9 @@ class BlockAwarePrefixCache:
                 try:
                     begin_kwargs = {
                         "strict_reconcile": self._strict_block_disk_write_fence,
-                        "admission_timeout": (
-                            self._native_block_disk_admission_timeout
-                            if has_native_path_dependent_cache_data
-                            else self._block_disk_admission_timeout
+                        "admission_timeout": self._write_admission_timeout_for_store(
+                            disk_only=_disk_only,
+                            path_dependent=has_native_path_dependent_cache_data,
                         ),
                     }
                     try:
@@ -4457,7 +4613,6 @@ class BlockAwarePrefixCache:
                 disk_write_chain_open = False
             return admitted
 
-        _disk_only = bool(getattr(self.paged_cache, "disk_only", False))
         # Paged RAM and block-disk L2 are separate cache tiers.  The manager
         # defaults ordinary Paged On sessions to a resident L1 write-through
         # mirror, while disk-only sessions and an explicit
@@ -5001,12 +5156,13 @@ class BlockAwarePrefixCache:
                         )
                     )
                     if _disk_only:
-                        # Hold a local fallback until the request fence confirms
-                        # that the SSD record survived aggregate eviction and is
-                        # still readable. Install it solely if that fails.
+                        # Track only metadata until the fence confirms that the
+                        # SSD record survived aggregate eviction. A zero-RAM
+                        # cache must never hold a payload fallback: failure means
+                        # this block is invalidated and later re-prefilled.
                         disk_only_fallbacks[block_chain_hash] = (
                             block,
-                            block_kv_data,
+                            None,
                         )
                     if _paged_frugal and not keep_in_ram:
                         # Disk has it — skip the in-RAM duplicate. L1 lookup
@@ -5099,17 +5255,21 @@ class BlockAwarePrefixCache:
                                 _entry_has_native_tq(_entry)
                                 for _entry in np_block
                             )
-                            if has_minimax_m3_cache_data or _has_native_tq:
+                            if self._write_block_immediately_for_store(
+                                disk_only=_disk_only,
+                                minimax_m3=has_minimax_m3_cache_data,
+                                native_tq=_has_native_tq,
+                            ):
                                 # Native TQ entries contain lazy MLX encode graphs.
-                                # Deferring every page until after the extraction
-                                # loop retains prompt_blocks * layers graphs and can
-                                # exceed Metal's process resource limit on long
-                                # prefixes. Serialize/evaluate one complete packed
-                                # page now; the disk store still queues only the
-                                # rename/index update on its background thread.
+                                # SSD-only plain KV has the same boundedness need:
+                                # deferring every independent page duplicates the
+                                # whole prompt in pending_disk_writes before queue
+                                # admission even begins. Serialize/detach one page
+                                # now; the disk store still performs encoding,
+                                # publication and indexing off-thread.
                                 logger.debug(
                                     f"Block disk: writing bounded "
-                                    f"{'MiniMax-M3' if has_minimax_m3_cache_data else 'TQ'} block "
+                                    f"{'MiniMax-M3' if has_minimax_m3_cache_data else 'TQ' if _has_native_tq else 'SSD-only'} block "
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )
@@ -5150,9 +5310,10 @@ class BlockAwarePrefixCache:
             parent_hash = block_chain_hash
 
         # Free the full-cache numpy mirror immediately. np_sources duplicates
-        # the entire live KV cache (~26 GB on a MiniMax-M2 17K-prefill: 62
-        # layers × 48 heads × 64 head_dim × 17000 tokens × 2 bytes × 2 (k+v))
-        # and was previously held until function exit. The block-extraction
+        # the entire live KV cache (bundle-derived MiniMax-M2.7 geometry is 62
+        # full-attention layers × 8 KV heads × head_dim 128 × K/V × F16 =
+        # 248 KiB/token, or about 4.0 GiB at 17K tokens) and was previously held
+        # until function exit. The block-extraction
         # loop above is finished, so dropping this here cuts peak resident
         # RAM during _store by exactly the live-KV size. Pending disk writes
         # below already have their own per-block numpy slices captured.
@@ -6232,16 +6393,29 @@ class BlockAwarePrefixCache:
         Set by the scheduler when the request it is admitting will be followed
         immediately by a second pass over the same prompt. Kill switch:
         VMLX_DSV4_RECONSTRUCT_MEMO=0 restores the plain double replay.
+
+        An SSD-only manager is an explicit no-retained-cache contract. The
+        memo is a full deep copy of reconstructed KV/native state, so keeping
+        it there would be an unreported in-RAM cache even though the paged
+        manager correctly reports zero resident bytes.
         """
-        if os.environ.get("VMLX_DSV4_RECONSTRUCT_MEMO", "1").strip().lower() in {
+        memo_disabled = os.environ.get(
+            "VMLX_DSV4_RECONSTRUCT_MEMO", "1"
+        ).strip().lower() in {
             "0",
             "off",
             "false",
             "no",
-        }:
+        }
+        if (
+            not enabled
+            or memo_disabled
+            or bool(getattr(self.paged_cache, "disk_only", False))
+        ):
             self._reconstruct_memo_arm = False
+            self._reconstruct_memo = None
             return
-        self._reconstruct_memo_arm = bool(enabled)
+        self._reconstruct_memo_arm = True
 
     def reconstruct_cache(
         self,
@@ -8064,6 +8238,16 @@ class BlockAwarePrefixCache:
             "strict_block_disk_write_fence": bool(
                 getattr(self, "_strict_block_disk_write_fence", False)
             ),
+            "reconstruct_memo_allowed": bool(
+                not getattr(self.paged_cache, "disk_only", False)
+                and os.environ.get(
+                    "VMLX_DSV4_RECONSTRUCT_MEMO", "1"
+                ).strip().lower()
+                not in {"0", "off", "false", "no"}
+            ),
+            "reconstruct_memo_resident": bool(
+                getattr(self, "_reconstruct_memo", None) is not None
+            ),
             "entries_by_type": {
                 t: len(self._entries_by_type[t]) for t in _CACHE_TYPE_PRIORITY
             },
@@ -8092,6 +8276,8 @@ class BlockAwarePrefixCache:
             )
             return False
         self._request_tables.clear()
+        self._reconstruct_memo_arm = False
+        self._reconstruct_memo = None
         with self.paged_cache._lock:
             self._prefix_index.clear()
         for d in self._entries_by_type.values():

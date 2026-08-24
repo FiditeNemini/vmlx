@@ -945,8 +945,8 @@ class TestMLLMSchedulerConfigParity:
 
     def test_ssm_companion_budget_defaults(self):
         config = MLLMSchedulerConfig()
-        assert config.ssm_state_cache_size == 8
-        assert config.ssm_state_cache_max_mb == 512
+        assert config.ssm_state_cache_size == 0
+        assert config.ssm_state_cache_max_mb == 0
 
     def test_disk_cache_fields(self):
         config = MLLMSchedulerConfig()
@@ -2431,6 +2431,45 @@ class TestHybridModelDetection:
     def test_no_make_cache_returns_false(self):
         model = MagicMock(spec=[])  # No make_cache attribute
         assert MLLMScheduler._is_hybrid_model(model) is False
+
+    def test_dsv4_contract_is_observed_from_instantiated_cache_graph(self):
+        """MLLM native validators must follow cache objects, not model names."""
+        from vmlx_engine.utils.cache_types import detect_dsv4_cache_contract
+
+        class KVCache:
+            pass
+
+        class DeepseekV4Cache:
+            pass
+
+        class DerivedDsv4(DeepseekV4Cache):
+            pass
+
+        class CacheList:
+            def __init__(self, caches):
+                self.caches = caches
+
+        class Model:
+            def __init__(self, cache):
+                self._cache = cache
+
+            def make_cache(self):
+                return self._cache
+
+        assert detect_dsv4_cache_contract(Model([KVCache()])) is False
+        assert detect_dsv4_cache_contract(
+            Model([CacheList([KVCache(), DerivedDsv4()])])
+        ) is True
+        assert detect_dsv4_cache_contract(object()) is None
+
+    def test_mllm_passes_observed_dsv4_contract_to_block_cache(self):
+        """Regression: omitting this kwarg doubled every Qwen SSD block read."""
+        import inspect
+
+        source = inspect.getsource(MLLMScheduler.__init__)
+
+        assert "self._uses_dsv4_cache = detect_dsv4_cache_contract(lang_model)" in source
+        assert "uses_dsv4_cache=self._uses_dsv4_cache" in source
 
 
 # ============================================================

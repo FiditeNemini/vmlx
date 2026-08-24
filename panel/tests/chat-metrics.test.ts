@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   calculatePrefillTps,
+  parseServerDecodeUsage,
   selectFinalDecodeTps,
+  summarizeServerDecodePasses,
 } from '../src/shared/chatMetrics'
 
 describe('chat prefill TPS', () => {
@@ -68,6 +70,42 @@ describe('chat prefill TPS', () => {
 })
 
 describe('final chat decode TPS', () => {
+  it('uses authoritative per-request decode windows for a tool-loop exchange', () => {
+    const first = parseServerDecodeUsage({
+      output_tokens: 85,
+      vmlx_decode: {
+        tokens: 84,
+        seconds: 1.85,
+        tokens_per_second: 45.405,
+      },
+    })
+    const followUp = parseServerDecodeUsage({
+      output_tokens: 237,
+      vmlx_decode: {
+        tokens: 236,
+        seconds: 5.25,
+        tokens_per_second: 44.952,
+      },
+    })
+
+    expect(summarizeServerDecodePasses([first, followUp])).toEqual({
+      outputTokens: 322,
+      decodeTokens: 320,
+      decodeSeconds: 7.1,
+      tokensPerSecond: 320 / 7.1,
+    })
+  })
+
+  it('rejects malformed server decode telemetry instead of fabricating a rate', () => {
+    expect(
+      parseServerDecodeUsage({
+        output_tokens: 237,
+        vmlx_decode: { tokens: 236, seconds: 0 },
+      }),
+    ).toBeUndefined()
+    expect(summarizeServerDecodePasses([undefined])).toBeUndefined()
+  })
+
   it('keeps cumulative multi-iteration throughput when only the final tail is slow', () => {
     expect(
       selectFinalDecodeTps({

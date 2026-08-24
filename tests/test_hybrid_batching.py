@@ -107,11 +107,15 @@ class TestHybridBatching:
             # and fall back to Legacy KV caching approach (which doesn't dynamically size physical chunks)
             assert scheduler.config.use_memory_aware_cache is False
             
-            # The system warns the user
+            # 2026-08-23: paged RAM is OFF for every family, so a hybrid model
+            # with no Block Disk L2 no longer escalates to a RAM tier. It drops
+            # the memory-aware lane and takes the reuse loss, and says so.
+            assert scheduler.config.use_paged_cache is False
             mock_logger.info.assert_any_call(
-                "Non-standard cache model detected (MambaCache/hybrid layers). "
-                "Auto-switching to paged cache because neither paged RAM nor "
-                "Block Disk L2 is available for correct cache reuse."
+                "Non-standard cache model detected (MambaCache/hybrid layers) "
+                "with Block Disk L2 disabled. Paged RAM stays OFF (SSD L2 is "
+                "the only tier); disabling the memory-aware lane. Enable "
+                "--enable-block-disk-cache to get hybrid prefix reuse back."
             )
 
     @patch("vmlx_engine.scheduler.Scheduler._is_hybrid_model")
@@ -137,7 +141,9 @@ class TestHybridBatching:
         with patch("vmlx_engine.scheduler.logger") as mock_logger:
             scheduler = Scheduler(mock_hybrid_model, mock_tokenizer, config)
             
-            # It retains paged cache because paged cache implements custom Mamba block mappings
+            # In-RAM paged cache is OFF for every family by default, but an
+            # EXPLICIT operator request (--use-paged-cache) is still honoured.
+            # What was removed is automatic escalation, not the flag.
             assert scheduler.config.use_paged_cache is True
             assert scheduler.block_aware_cache is not None
 

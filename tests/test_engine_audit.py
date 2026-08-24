@@ -4308,7 +4308,7 @@ class TestMLLMAbortCleanup:
         from vmlx_engine.mllm_scheduler import MLLMScheduler
 
         source = inspect.getsource(MLLMScheduler.abort_request)
-        assert "_request_tables" in source, (
+        assert "_cleanup_aborted_paged_request" in source, (
             "abort_request must clean up _request_tables for paged cache"
         )
 
@@ -10417,7 +10417,10 @@ class TestZayaCCACachePolicy:
         source = Path("./vmlx_engine/cli.py").read_text()
 
         assert 'getattr(_mc, "cache_subtype", None) == "zaya_cca"' in source
-        assert 'args.use_paged_cache = True' in source
+        # 2026-08-23: in-RAM paged cache is OFF for every family; SSD block-disk
+        # L2 is the only tier, so the ZAYA policy no longer escalates to paged.
+        assert 'args.use_paged_cache = True' not in source
+        assert 'args.use_paged_cache = False' in source
         assert 'args.kv_cache_quantization = "none"' in source
         assert "ZAYA/CCA typed cache enabled" in source
         assert "conv_state + prev_hs" in source
@@ -10450,9 +10453,10 @@ class TestZayaCCACachePolicy:
         gate, changed = _apply_zaya_cca_cache_policy(args, MagicMock())
 
         assert gate is True
-        assert changed == ("kv_quant=q4",)
+        # Paged RAM is normalized OFF for every family, which the policy reports.
+        assert changed == ("paged=off_ssd_l2_only", "kv_quant=q4")
         assert args.enable_prefix_cache is True
-        assert args.use_paged_cache is True
+        assert args.use_paged_cache is False
         assert args.enable_block_disk_cache is True
         assert args.kv_cache_quantization == "none"
         assert args.kv_cache_quantization_explicit is True
@@ -10477,9 +10481,10 @@ class TestZayaCCACachePolicy:
         gate, changed = _apply_zaya_cca_cache_policy(args, MagicMock())
 
         assert gate is True
-        assert changed == ("kv_quant=q8",)
+        # Paged RAM is normalized OFF for every family, which the policy reports.
+        assert changed == ("paged=off_ssd_l2_only", "kv_quant=q8")
         assert args.enable_prefix_cache is True
-        assert args.use_paged_cache is True
+        assert args.use_paged_cache is False
         assert args.enable_block_disk_cache is True
         assert args.kv_cache_quantization == "none"
         assert args.kv_cache_quantization_explicit is True
@@ -10503,9 +10508,10 @@ class TestZayaCCACachePolicy:
         gate, changed = _apply_zaya_cca_cache_policy(args, MagicMock())
 
         assert gate is True
-        assert changed == ("paged=required_for_zaya_cca",)
+        # Nothing to change: paged RAM was already off, and it stays off.
+        assert changed == ()
         assert args.enable_prefix_cache is True
-        assert args.use_paged_cache is True
+        assert args.use_paged_cache is False
         assert args.enable_block_disk_cache is False
         assert args.kv_cache_quantization == "none"
         assert args.kv_cache_quantization_explicit is True
@@ -10667,7 +10673,7 @@ class TestV6CancelledErrorCallsFailActive:
 
 
 class TestV6AbortUsesDeleteBlockTable:
-    """abort_request must use delete_block_table (not detach_request) for paged cache."""
+    """Abort frees cold blocks but preserves already-durable prefix hits."""
 
     def test_scheduler_abort_uses_delete(self):
         import inspect
@@ -10681,7 +10687,7 @@ class TestV6AbortUsesDeleteBlockTable:
             "Scheduler.abort_request must NOT call detach_request (leaks ref_counts)"
         )
 
-    def test_mllm_scheduler_abort_uses_delete(self):
+    def test_mllm_scheduler_abort_uses_hit_aware_cleanup(self):
         source = Path("./vmlx_engine/mllm_scheduler.py").read_text()
         # Find the abort_request method
         start = source.find("def abort_request(self, request_id")
@@ -10689,25 +10695,56 @@ class TestV6AbortUsesDeleteBlockTable:
         # Find the next method definition
         end = source.find("\n    def ", start + 20)
         abort_body = source[start:end]
-        assert "delete_block_table" in abort_body, (
-            "MLLMScheduler.abort_request must use delete_block_table"
+        assert "_cleanup_aborted_paged_request" in abort_body, (
+            "MLLMScheduler.abort_request must preserve durable hit blocks"
         )
 
-    def test_mllm_scheduler_error_recovery_uses_delete(self):
-        """Error-recovery path must also use delete_block_table."""
+    def test_mllm_abort_preserves_durable_hit_blocks(self):
+        """Cancelling a warm turn must not make its SSD prefix undiscoverable."""
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        table = SimpleNamespace(block_ids=[3, 4], num_tokens=128)
+        block_cache = SimpleNamespace(
+            _request_tables={"warm": SimpleNamespace(block_table=table)},
+        )
+        manager = MagicMock()
+        scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        scheduler.block_aware_cache = block_cache
+        scheduler.paged_cache_manager = manager
+
+        scheduler._cleanup_aborted_paged_request("warm")
+
+        assert block_cache._request_tables == {}
+        manager.release_request_refs.assert_called_once_with(table)
+        manager.detach_request.assert_called_once_with("warm")
+        manager.delete_block_table.assert_not_called()
+
+    def test_mllm_abort_deletes_cold_unstored_blocks(self):
+        """A cold abort still frees request blocks that were never cached."""
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        manager = MagicMock()
+        scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        scheduler.block_aware_cache = SimpleNamespace(_request_tables={})
+        scheduler.paged_cache_manager = manager
+
+        scheduler._cleanup_aborted_paged_request("cold")
+
+        manager.delete_block_table.assert_called_once_with("cold")
+        manager.release_request_refs.assert_not_called()
+        manager.detach_request.assert_not_called()
+
+    def test_mllm_scheduler_error_recovery_uses_abort_cleanup_helper(self):
+        """Retry cleanup preserves durable hits and deletes only cold blocks."""
         source = Path("./vmlx_engine/mllm_scheduler.py").read_text()
-        # Find the error-recovery block (paged_cache_manager.delete_block_table in error path)
-        # This is in the step() method's except block
-        idx = source.find("# Clean up paged cache block tables for all running")
+        # Find the paged-cache cleanup in the step() error-retry path.
+        idx = source.find("# Preserve already-durable hit blocks across retry")
         assert idx != -1, "Error-recovery cache cleanup comment must exist"
         # Window must span the hit-credit finalization block (1657ed312)
         # that now sits between the comment and the delete call.
         nearby = source[idx:idx + 2000]
-        assert "delete_block_table" in nearby, (
-            "Error-recovery path must use delete_block_table (not detach_request)"
-        )
-        assert ".detach_request(" not in nearby, (
-            "Error-recovery path must NOT detach_request (leaks ref_counts)"
+        assert "_cleanup_aborted_paged_request" in nearby, (
+            "Error recovery must use the same hit-aware cleanup as cancellation"
         )
 
     def test_completion_path_uses_detach(self):
@@ -13691,6 +13728,8 @@ class TestTurboQuantKVTelemetry:
 
         assert ssm["entries"] == 1
         assert ssm["max_entries"] == 8
+        assert ssm["ram_enabled"] is True
+        assert ssm["storage"] == "ram_and_ssd"
         assert ssm["disk_enabled"] is True
         assert ssm["disk_directory"] == "/tmp/vmlx-test/ssm_companion"
 
@@ -14086,8 +14125,22 @@ class TestTurboQuantKVTelemetry:
         assert cache["totals"]["l1_evictions"] == 7
         assert cache["ssm_companion"]["nbytes_mb"] == 448.0
         assert cache["ssm_companion"]["max_bytes_mb"] == 512.0
+        assert cache["ssm_companion"]["ram_enabled"] is True
+        assert cache["ssm_companion"]["storage"] == "ram_and_ssd"
         assert cache["ssm_companion"]["evictions"] == 1
         assert cache["ssm_companion"]["evicted_bytes_mb"] == 149.0
+        assert cache["totals"]["prefix_resident_bytes"] == 0
+        assert cache["totals"]["ssm_resident_bytes"] == 448 * 1024 * 1024
+        assert cache["totals"]["retained_cache_bytes"] == 544 * 1024 * 1024
+        assert cache["totals"]["retained_cache_bytes_mb"] == 544.0
+        assert cache["totals"]["retained_cache_max_bytes"] == 768 * 1024 * 1024
+        assert cache["totals"]["retained_cache_ram_enabled"] is True
+        assert cache["totals"]["retained_cache_policy"] == "enabled"
+        assert cache["totals"]["retained_cache_components"] == {
+            "block_kv_bytes": 96 * 1024 * 1024,
+            "prefix_bytes": 0,
+            "ssm_companion_bytes": 448 * 1024 * 1024,
+        }
         assert cache["totals"]["l2_prompt_tokens_on_disk"] == 384
         assert cache["totals"]["l2_block_tokens_on_disk"] == 256
         assert cache["totals"]["l2_ssm_tokens_on_disk"] == 128
@@ -14114,20 +14167,25 @@ class TestTurboQuantKVTelemetry:
             batch_generator=None,
             _ssm_companion_disk_store=_SSMDisk(),
             config=SimpleNamespace(
-                ssm_state_cache_size=8,
-                ssm_state_cache_max_mb=512,
+                ssm_state_cache_size=0,
+                ssm_state_cache_max_mb=0,
             ),
         )
 
         cache = server._cache_telemetry_snapshot(scheduler)
 
         assert cache["ssm_companion"]["entries"] == 0
-        assert cache["ssm_companion"]["max_entries"] == 8
+        assert cache["ssm_companion"]["max_entries"] == 0
+        assert cache["ssm_companion"]["ram_enabled"] is False
+        assert cache["ssm_companion"]["storage"] == "ssd_only"
         assert cache["ssm_companion"]["disk_enabled"] is True
         assert cache["ssm_companion"]["disk_directory"].endswith("ssm_companion")
         assert cache["ssm_companion"]["disk"]["total_tokens_on_disk"] == 192
         assert cache["totals"]["l2_ssm_tokens_on_disk"] == 192
         assert cache["totals"]["l2_tokens_on_disk"] == 192
+        assert cache["totals"]["retained_cache_bytes"] == 0
+        assert cache["totals"]["retained_cache_ram_enabled"] is False
+        assert cache["totals"]["retained_cache_policy"] == "disabled"
 
     def test_cache_stats_surfaces_cache_reuse_skip_telemetry(self):
         scheduler_source = Path("./vmlx_engine/scheduler.py").read_text()
@@ -15186,6 +15244,10 @@ class TestTurboQuantKVTelemetry:
     def test_native_cache_status_reports_mixed_swa_kv(self):
         from types import SimpleNamespace
         from vmlx_engine.server import _native_cache_status
+        from vmlx_engine.utils.cache_types import describe_runtime_cache_layout
+
+        KVCache = type("KVCache", (), {})
+        RotatingKVCache = type("RotatingKVCache", (), {})
 
         scheduler = SimpleNamespace(
             _model_type_for_runtime="gemma4",
@@ -15193,6 +15255,9 @@ class TestTurboQuantKVTelemetry:
             _tq_active=False,
             _kv_cache_bits=4,
             _kv_cache_group_size=64,
+            _runtime_cache_layout=describe_runtime_cache_layout(
+                [RotatingKVCache(), KVCache(), RotatingKVCache(), KVCache()]
+            ),
             block_aware_cache=object(),
             paged_cache_manager=SimpleNamespace(_disk_store=object()),
         )
@@ -15216,6 +15281,14 @@ class TestTurboQuantKVTelemetry:
         }
         assert status["paged"] is True
         assert status["block_disk_l2"] is True
+        assert status["cache_layer_count"] == 4
+        assert status["kv_layer_indices"] == [0, 1, 2, 3]
+        assert status["full_attention_layer_indices"] == [1, 3]
+        assert status["sliding_attention_layer_indices"] == [0, 2]
+        assert status["runtime_cache_effective_class_counts"] == {
+            "RotatingKVCache": 2,
+            "KVCache": 2,
+        }
 
     def test_native_cache_status_distinguishes_mixed_swa_storage_from_live_tq(self):
         from types import SimpleNamespace
@@ -15348,12 +15421,24 @@ class TestTurboQuantKVTelemetry:
     def test_native_cache_status_reports_plain_attention_kv(self):
         from types import SimpleNamespace
         from vmlx_engine.server import _native_cache_status
+        from vmlx_engine.utils.cache_types import describe_runtime_cache_layout
+
+        KVCache = type("KVCache", (), {})
+        runtime_layout = describe_runtime_cache_layout(
+            [KVCache() for _ in range(62)]
+        )
+        runtime_layout.update(
+            source="instantiated_runtime_cache_factory",
+            factory="mlx_lm.models.cache.make_prompt_cache",
+            delegated_to_model_make_cache=False,
+        )
 
         scheduler = SimpleNamespace(
             _model_type_for_runtime="minimax",
             _tq_active=True,
             _kv_cache_bits=3,
             _kv_cache_group_size=64,
+            _runtime_cache_layout=runtime_layout,
             block_aware_cache=object(),
             paged_cache_manager=SimpleNamespace(_disk_store=object()),
         )
@@ -15376,6 +15461,25 @@ class TestTurboQuantKVTelemetry:
         assert status["prefix"] is True
         assert status["paged"] is True
         assert status["block_disk_l2"] is True
+        assert status["runtime_cache_layout_source"] == (
+            "instantiated_runtime_cache_factory"
+        )
+        assert status["runtime_cache_factory"] == (
+            "mlx_lm.models.cache.make_prompt_cache"
+        )
+        assert status[
+            "runtime_cache_factory_delegated_to_model_make_cache"
+        ] is False
+        assert status["runtime_cache_layer_count"] == 62
+        assert status["runtime_cache_effective_class_counts"] == {"KVCache": 62}
+        assert status["cache_layer_count"] == 62
+        assert status["kv_layer_indices"] == list(range(62))
+        assert status["full_attention_layer_indices"] == list(range(62))
+        assert status["sliding_attention_layer_indices"] == []
+        assert status["companion_layer_count"] == 0
+        assert status["kv_layer_indices_source"] == (
+            "instantiated_runtime_cache_factory"
+        )
 
     def test_native_cache_status_reports_hybrid_ssm(self):
         from types import SimpleNamespace
@@ -15475,6 +15579,200 @@ class TestTurboQuantKVTelemetry:
         }
         assert status["ssm_entries"] == 1
         assert status["kv_layer_indices"] == [1, 3, 7]
+
+    def test_native_cache_status_reads_mllm_batch_generator_ssm_tier(self):
+        from types import SimpleNamespace
+        from vmlx_engine.server import _native_cache_status
+
+        ssm_cache = SimpleNamespace(
+            size=0,
+            total_nbytes=0,
+            ram_enabled=False,
+            _disk=object(),
+        )
+        scheduler = SimpleNamespace(
+            config=SimpleNamespace(
+                kv_cache_quantization="none",
+                ssm_state_cache_size=0,
+                ssm_state_cache_max_mb=0,
+            ),
+            _model_type_for_runtime="qwen3_5_moe",
+            _is_hybrid=True,
+            _uses_dsv4_cache=False,
+            _uses_zaya_cache=False,
+            _hybrid_kv_positions=[],
+            _runtime_cache_kv_positions=[3, 7],
+            _runtime_cache_num_layers=8,
+            _hybrid_live_tq_policy=None,
+            _hybrid_live_tq_attention_layers=[],
+            _hybrid_live_tq_companion_layers=[],
+            _kv_cache_bits=0,
+            _kv_cache_group_size=64,
+            _ssm_state_cache=None,
+            batch_generator=SimpleNamespace(
+                _ssm_state_cache=ssm_cache,
+                _hybrid_kv_positions=[],
+            ),
+            block_aware_cache=object(),
+            paged_cache_manager=SimpleNamespace(_disk_store=object()),
+        )
+
+        status = _native_cache_status(scheduler)
+
+        assert status["schema"] == "hybrid_ssm_v1"
+        assert status["ssm_entries"] == 0
+        assert status["ssm_resident_bytes"] == 0
+        assert status["ssm_ram_enabled"] is False
+        assert status["ssm_storage"] == "ssd_only"
+        assert status["kv_layer_indices"] == [3, 7]
+        assert status["kv_layer_indices_source"] == "instantiated_make_cache"
+        assert status["cache_layer_count"] == 8
+        assert status["companion_layer_count"] == 6
+
+    def test_mllm_runtime_cache_contract_records_instantiated_kv_positions(self):
+        from types import SimpleNamespace
+        from vmlx_engine.mllm_scheduler import MLLMScheduler
+
+        KVCache = type("KVCache", (), {})
+        ArraysCache = type("ArraysCache", (), {})
+        runtime_model = SimpleNamespace(
+            make_cache=lambda: [
+                ArraysCache(),
+                KVCache(),
+                ArraysCache(),
+                KVCache(),
+            ]
+        )
+        scheduler = object.__new__(MLLMScheduler)
+        scheduler.model_config = SimpleNamespace(model_type="qwen3_5_text")
+
+        scheduler._log_runtime_cache_contract(runtime_model)
+
+        assert scheduler._runtime_cache_num_layers == 4
+        assert scheduler._runtime_cache_kv_positions == [1, 3]
+        assert scheduler._runtime_cache_parallel_hybrid_positions == []
+        assert scheduler._runtime_cache_layout["effective_class_counts"] == {
+            "ArraysCache": 2,
+            "KVCache": 2,
+        }
+        assert scheduler._runtime_cache_layout["source"] == (
+            "instantiated_make_cache"
+        )
+
+    def test_text_scheduler_runtime_cache_contract_records_instantiated_layout(self):
+        from types import SimpleNamespace
+        from vmlx_engine.scheduler import Scheduler
+
+        # MiniMax-M2.7 has no model.make_cache(). The shipping generator uses
+        # mlx-lm's default factory over model.layers; this is the live gap that
+        # the earlier model.make_cache-only observer missed.
+        runtime_model = SimpleNamespace(layers=[object() for _ in range(62)])
+        scheduler = object.__new__(Scheduler)
+        scheduler._model_type_for_runtime = "minimax_m2"
+
+        scheduler._log_runtime_cache_contract(runtime_model)
+
+        assert scheduler._runtime_cache_num_layers == 62
+        assert scheduler._runtime_cache_kv_positions == list(range(62))
+        assert scheduler._runtime_cache_parallel_hybrid_positions == []
+        assert scheduler._runtime_cache_layout["slot_class_counts"] == {
+            "KVCache": 62,
+        }
+        assert scheduler._runtime_cache_layout["source"] == (
+            "instantiated_runtime_cache_factory"
+        )
+        assert scheduler._runtime_cache_layout["factory"] == (
+            "mlx_lm.models.cache.make_prompt_cache"
+        )
+        assert scheduler._runtime_cache_layout[
+            "delegated_to_model_make_cache"
+        ] is False
+        assert scheduler._runtime_cache_layout["unknown_layer_indices"] == []
+
+    def test_runtime_cache_layout_keeps_parallel_and_unknown_native_slots_visible(self):
+        from vmlx_engine.utils.cache_types import describe_runtime_cache_layout
+
+        KVCache = type("KVCache", (), {})
+        RotatingKVCache = type("RotatingKVCache", (), {})
+        ArraysCache = type("ArraysCache", (), {})
+        NativeCompositeCache = type("NativeCompositeCache", (), {})
+
+        class CacheList:
+            def __init__(self, *caches):
+                self.caches = list(caches)
+
+        layout = describe_runtime_cache_layout(
+            [
+                KVCache(),
+                RotatingKVCache(),
+                CacheList(ArraysCache(), KVCache()),
+                NativeCompositeCache(),
+            ]
+        )
+
+        assert layout["layer_count"] == 4
+        assert layout["slot_types"] == [
+            "KVCache",
+            "RotatingKVCache",
+            "CacheList(ArraysCache,KVCache)",
+            "NativeCompositeCache",
+        ]
+        assert layout["attention_layer_indices"] == [0, 1, 2]
+        assert layout["cumulative_layer_indices"] == [2]
+        assert layout["parallel_layer_indices"] == [2]
+        assert layout["rotating_layer_indices"] == [1]
+        assert layout["unknown_layer_indices"] == [3]
+
+    def test_runtime_cache_layout_reports_instantiated_owner_components(self):
+        from types import SimpleNamespace
+
+        from vmlx_engine.server import _native_cache_status
+        from vmlx_engine.utils.cache_types import describe_runtime_cache_layout
+
+        ArraysCache = type("ArraysCache", (), {})
+        KVCache = type("KVCache", (), {})
+        GatedDeltaNet = type("GatedDeltaNet", (), {})
+        Attention = type("Attention", (), {})
+
+        layers = [
+            SimpleNamespace(linear_attn=GatedDeltaNet()),
+            SimpleNamespace(self_attn=Attention()),
+            SimpleNamespace(linear_attn=GatedDeltaNet()),
+            SimpleNamespace(self_attn=Attention()),
+        ]
+        runtime_layout = describe_runtime_cache_layout(
+            [ArraysCache(), KVCache(), ArraysCache(), KVCache()],
+            model=SimpleNamespace(layers=layers),
+        )
+        runtime_layout["parameter_dtype_harmonization"] = {
+            "enabled": True,
+            "cast": 8,
+            "preserved_f16": 1,
+        }
+        scheduler = SimpleNamespace(
+            _model_type_for_runtime="qwen3_5",
+            _is_hybrid=True,
+            _uses_dsv4_cache=False,
+            _uses_zaya_cache=False,
+            _runtime_cache_layout=runtime_layout,
+            block_aware_cache=object(),
+            paged_cache_manager=SimpleNamespace(
+                _disk_store=object(),
+                disk_only=True,
+            ),
+        )
+
+        status = _native_cache_status(scheduler)
+
+        assert status["runtime_cache_owner_component_class_counts"] == {
+            "GatedDeltaNet": 2,
+            "Attention": 2,
+        }
+        assert status["companion_state_owner_class_counts"] == {
+            "GatedDeltaNet": 2,
+        }
+        assert status["companion_state_owner"] == "GatedDeltaNet"
+        assert status["parameter_dtype_harmonization"]["cast"] == 8
 
     def test_native_cache_status_ignores_legacy_hybrid_tq_override(self, monkeypatch):
         from types import SimpleNamespace
@@ -16921,6 +17219,47 @@ class TestStreamUsagePropagatesCacheDetail:
     non-stream returned cache_detail=paged+zaya_cca, stream returned None.
     """
 
+    def test_private_decode_usage_snapshot_matches_engine_log_math(self):
+        from vmlx_engine.server import _decode_usage_snapshot
+
+        assert _decode_usage_snapshot(
+            completion_tokens=85,
+            first_token_ts=10.0,
+            last_token_ts=11.85,
+        ) == {
+            "tokens": 84,
+            "seconds": pytest.approx(1.85),
+            "tokens_per_second": pytest.approx(84 / 1.85),
+        }
+
+        assert (
+            _decode_usage_snapshot(
+                completion_tokens=1,
+                first_token_ts=10.0,
+                last_token_ts=10.0,
+            )
+            is None
+        )
+
+    def test_negotiated_responses_emits_terminal_decode_receipt_before_completed(self):
+        from pathlib import Path
+
+        source = Path("./vmlx_engine/server.py").read_text()
+        completed_start = source.rindex('    completed_response = {')
+        terminal_start = source.index(
+            '    yield _sse(\n        _response_terminal.event_type,',
+            completed_start,
+        )
+        terminal_preamble = source[completed_start:terminal_start]
+
+        # Per-output emission sits behind parser branches that may ``continue``
+        # after tracking tokens. The negotiated local stream therefore needs
+        # one unconditional full-count receipt immediately before its standard
+        # response.completed/response.incomplete terminal.
+        assert "if incremental_usage_extension:" in terminal_preamble
+        assert '"response.usage"' in terminal_preamble
+        assert '"vmlx_decode"' in terminal_preamble
+
     def test_chat_stream_tracks_cache_detail_alongside_cached_tokens(self):
         from pathlib import Path
         source = Path("./vmlx_engine/server.py").read_text()
@@ -17160,6 +17499,15 @@ class TestStreamUsagePropagatesCacheDetail:
         monkeypatch.setattr(server, "_model_path", None)
         monkeypatch.setattr(server, "_reasoning_parser", None)
         monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(
+            server,
+            "_decode_usage_snapshot",
+            lambda **_kwargs: {
+                "tokens": 1,
+                "seconds": 0.02,
+                "tokens_per_second": 50.0,
+            },
+        )
 
         request = ResponsesRequest(
             model="gemma4-cache-test",
@@ -17184,6 +17532,12 @@ class TestStreamUsagePropagatesCacheDetail:
         expected = {"cached_tokens": 123, "cache_detail": "memory"}
         assert usage["input_tokens_details"] == expected
         assert completed["input_tokens_details"] == expected
+        assert usage["vmlx_decode"] == {
+            "tokens": 1,
+            "seconds": 0.02,
+            "tokens_per_second": 50.0,
+        }
+        assert "vmlx_decode" not in completed
 
     @pytest.mark.asyncio
     async def test_standard_responses_stream_keeps_usage_on_terminal_event_only(

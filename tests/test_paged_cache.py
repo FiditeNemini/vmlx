@@ -1126,6 +1126,78 @@ class TestBlockAwarePrefixCache:
         finally:
             restarted_store.shutdown()
 
+    def test_known_plain_kv_disk_only_hit_reads_each_block_once(self, tmp_path):
+        """Generic KV/hybrid-KV hits must not preload native-only validators.
+
+        In SSD-only mode an in-process block remains indexed with
+        ``cache_data=None`` after publication.  Running the DSV4, ZAYA and
+        rotating-KV terminal validators unconditionally therefore loads the
+        whole chain once, discards those validation payloads, and makes worker
+        reconstruction load the same chain again.  Production passes the
+        instantiated runtime cache kinds explicitly; a known ordinary KV lane
+        must perform exactly one physical L2 read per reconstructed block.
+        """
+        mx = pytest.importorskip("mlx.core")
+
+        from vmlx_engine.block_disk_store import BlockDiskStore
+        from vmlx_engine.paged_cache import PagedCacheManager
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        tokens = list(range(8))
+        keys = mx.arange(16, dtype=mx.float32).reshape(1, 1, 8, 2)
+        values = (keys + 100).astype(mx.float32)
+        state = [{
+            "class_name": "KVCache",
+            "state": (keys, values),
+            "meta_state": ("8",),
+        }]
+        store = BlockDiskStore(
+            cache_dir=str(tmp_path / "single-read-disk-only"),
+            max_size_gb=0.01,
+            expected_num_layers=1,
+        )
+        manager = PagedCacheManager(
+            block_size=4,
+            max_blocks=8,
+            disk_store=store,
+            max_resident_bytes=0,
+            disk_only=True,
+        )
+        cache = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=manager,
+            uses_dsv4_cache=False,
+            uses_zaya_cache=False,
+            mixed_attention_cache_model=False,
+        )
+        try:
+            stored = cache.store_cache("writer", tokens, state)
+            assert stored is not None
+            entry = cache._request_tables.pop("writer")
+            manager.release_request_refs(entry.block_table)
+            manager.detach_request("writer")
+            assert all(
+                manager.allocated_blocks[block_id].cache_data is None
+                for block_id in stored.block_ids
+            )
+
+            reads_before = store.get_stats()["disk_hits"]
+            hit, remaining = cache.fetch_cache("reader", tokens + [99])
+            assert hit is not None
+            assert hit.num_tokens == len(tokens)
+            assert remaining == [99]
+            reads_after_fetch = store.get_stats()["disk_hits"]
+            rebuilt = cache.reconstruct_cache(hit)
+            assert rebuilt is not None
+            reads_after = store.get_stats()["disk_hits"]
+
+            assert reads_after_fetch - reads_before == 0
+            assert reads_after - reads_after_fetch == len(hit.block_ids)
+            assert cache._last_reconstruct_disk_blocks == len(hit.block_ids)
+            assert manager.resident_bytes == 0
+        finally:
+            store.shutdown()
+
     def test_block_l2_reads_run_on_model_owner_executor(self, tmp_path):
         """API-thread L2 lookup must create MLX arrays on the model worker."""
         from concurrent.futures import ThreadPoolExecutor

@@ -10,7 +10,7 @@ import {
   commitActiveSettingsInput,
 } from './SessionConfigForm'
 import { useTranslation } from '../../i18n'
-import { resolveCacheLaunchPolicy } from '../../../../shared/cacheControlPolicy'
+import { buildCacheLaunchArgs } from '../../../../shared/cacheLaunchArgs'
 import {
   DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV,
   isLagunaMixedSwaTurboQuantEffective,
@@ -27,17 +27,12 @@ import {
 } from '../../../../shared/sessionGenerationDefaults'
 import {
   cacheTypeRequiresPaged,
-  cacheSubtypeRequiresPaged,
-  cacheTypeSupportsBlockDiskOnly,
-  cacheSubtypeSupportsBlockDiskOnly,
 } from '../../../../shared/cacheTypeCapabilities'
 import { computeEffectiveJit } from '../../../../shared/jitPolicy'
 import { storedKvQuantMustBeExact } from '../../../../shared/storedKvQuantPolicy'
 import {
   filterAdditionalArgs,
-  finiteNonNegativeNumber,
   finitePositiveInteger,
-  finitePositiveNumber,
 } from '../../../../shared/launchArgValues'
 
 interface Session {
@@ -302,14 +297,6 @@ function buildCommandPreview(
   const zayaCcaActive = isZayaCcaFamily(detectedFamily)
   const turboQuantActive = !!detected?.isTurboQuant
   const hybridCacheActive = cacheTypeRequiresPaged(detected?.cacheType)
-  const architectureBlockDiskOnlySupported =
-    (cacheTypeSupportsBlockDiskOnly(detected?.cacheType) ||
-      cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype) ||
-      m3Active ||
-      dsv4Active) &&
-    !zayaCcaActive &&
-    !openPanguExactTypedCache
-  const subtypePagedCacheActive = cacheSubtypeRequiresPaged(detected?.cacheSubtype)
   const effectiveDistributed = requestedDistributed && !dsv4Active
   const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
   if (dsv4Active && typeof detected?.dsv4PoolQuantDefault === 'boolean') {
@@ -402,69 +389,34 @@ function buildCommandPreview(
     supportsThinking: detected?.supportsThinking,
   })
 
-  // Prefix cache (mirrors buildArgs): explicit user opt-out stays off even
-  // when tools are configured. Tool sessions benefit from cache but do not
-  // silently own the cache toggle.
-  const zayaTypedCacheRequiresPaged = zayaCcaActive
-  const architectureRequiresPagedCache =
-    zayaTypedCacheRequiresPaged ||
-    ((cacheTypeRequiresPaged(detected?.cacheType) || subtypePagedCacheActive) && detected?.usePagedCache === true)
-  const cacheLaunchPolicy = resolveCacheLaunchPolicy({
+  // One shared builder owns every cache-tier and SSD-budget token shown here
+  // and spawned by sessions.ts. Do not rebuild this fragment in the renderer.
+  const cacheLaunch = buildCacheLaunchArgs({
     continuousBatching: cacheStackActive,
     enablePrefixCache: config.enablePrefixCache !== false,
-    usePagedCache: dsv4Active
-      ? config.usePagedCache === true
-      : config.usePagedCache ?? detected?.usePagedCache ?? false,
+    usePagedCache: false,
     enableDiskCache: !!config.enableDiskCache,
-    enableBlockDiskCache: !!config.enableBlockDiskCache,
-    architectureRequiresPagedCache,
-    architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
-  })
-  const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
-  const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
-  const blockDiskOnly = cacheLaunchPolicy.enableBlockDiskCache && !usePagedCache
-
-  if (prefixCacheOff) {
-    parts.push('--disable-prefix-cache')
-  } else {
-    if (!dsv4Active && config.noMemoryAwareCache) {
-      parts.push('--no-memory-aware-cache')
-      const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
-      if (prefixCacheSize != null) parts.push('--prefix-cache-size', prefixCacheSize.toString())
-      const prefixCacheMaxBytes = finitePositiveInteger(config.prefixCacheMaxBytes)
-      if (prefixCacheMaxBytes != null) parts.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
-    } else {
-      // H1 parity: --cache-memory-mb/--cache-memory-percent set the paged L1 RAM
-      // byte ceiling and DO reach the engine under paged (sessions.ts emits them
-      // unconditionally). The preview must show them in both modes or it lies
-      // about the launch. Only --cache-ttl-minutes is genuinely inert under
-      // paged. SSD-only mode omits both controls because no RAM payload tier is
-      // retained.
-      const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-      if (!blockDiskOnly && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
-      const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-      if (!blockDiskOnly && cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
-      const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
-      if (cacheTtlMinutes != null && !usePagedCache && !blockDiskOnly) parts.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
-    }
-  }
-
-  // Paged cache — requires prefix cache ON (works for both LLM and VLM)
-  if (!prefixCacheOff && usePagedCache) {
-    parts.push('--use-paged-cache')
-  } else if (!prefixCacheOff && !usePagedCache) {
-    // Explicit user Off remains real even when block SSD L2 stays enabled.
-    parts.push('--no-paged-cache')
-  }
-  if (!prefixCacheOff && (usePagedCache || cacheLaunchPolicy.enableBlockDiskCache)) {
-    const effectivePagedCacheBlockSize = dsv4Active
+    enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
+    noMemoryAwareCache: !!config.noMemoryAwareCache,
+    forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active,
+    prefixCacheSize: config.prefixCacheSize,
+    prefixCacheMaxBytes: config.prefixCacheMaxBytes,
+    cacheMemoryMb: config.cacheMemoryMb,
+    cacheMemoryPercent: config.cacheMemoryPercent,
+    cacheTtlMinutes: config.cacheTtlMinutes,
+    effectivePagedCacheBlockSize: dsv4Active
       ? DSV4_PAGED_CACHE_BLOCK_SIZE
-      : config.pagedCacheBlockSize
-    const pagedCacheBlockSize = finitePositiveInteger(effectivePagedCacheBlockSize)
-    if (pagedCacheBlockSize != null) parts.push('--paged-cache-block-size', pagedCacheBlockSize.toString())
-    const maxCacheBlocks = finitePositiveInteger(config.maxCacheBlocks)
-    if (maxCacheBlocks != null) parts.push('--max-cache-blocks', maxCacheBlocks.toString())
-  }
+      : config.pagedCacheBlockSize,
+    maxCacheBlocks: config.maxCacheBlocks,
+    diskCacheDir: config.diskCacheDir,
+    diskCacheMaxGb: config.diskCacheMaxGb,
+    blockDiskCacheDir: config.blockDiskCacheDir,
+    blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
+    blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
+  })
+  const cacheLaunchPolicy = cacheLaunch.policy
+  const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
+  parts.push(...cacheLaunch.args)
 
   // KV cache quantization — requires prefix cache ON (works for both LLM and VLM)
   // Hybrid/Mamba models allowed — Python scheduler only quantizes KVCache layers
@@ -488,28 +440,6 @@ function buildCommandPreview(
     if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
       parts.push('--kv-cache-group-size', kvCacheGroupSize.toString())
     }
-  }
-
-  // Disk cache (L2 persistent cache) — mirrors sessions.ts buildArgs().
-  if (cacheLaunchPolicy.enableLegacyDiskCache) {
-    parts.push('--enable-disk-cache')
-    if (config.diskCacheDir) parts.push('--disk-cache-dir', config.diskCacheDir)
-    const diskCacheMaxGb = finiteNonNegativeNumber(config.diskCacheMaxGb)
-    if (diskCacheMaxGb != null) parts.push('--disk-cache-max-gb', diskCacheMaxGb.toString())
-  }
-
-  // Block-level disk cache (L2 for paged cache blocks) — mirrors sessions.ts buildArgs().
-  if (cacheLaunchPolicy.enableBlockDiskCache) {
-    parts.push('--enable-block-disk-cache')
-    if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
-    const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
-    if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
-    const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
-    if (blockDiskCacheMaxPercent != null) parts.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())
-  } else if (cacheLaunchPolicy.effectiveUsePagedCache) {
-    // The engine defaults paged-compatible L2 on. Emit the explicit negative
-    // flag so a user-disabled UI toggle remains a real opt-out.
-    parts.push('--disable-block-disk-cache')
   }
 
   // Performance
@@ -824,7 +754,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
               ? detected.dsv4PoolQuantDefault
               : undefined
             base.enablePrefixCache = true
-            base.usePagedCache = true
+            base.usePagedCache = false
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.kvCacheQuantization = 'auto'
@@ -838,7 +768,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.noMemoryAwareCache = false
             base.kvCacheQuantization = 'none'
           } else {
-            base.usePagedCache = detected.usePagedCache === true
+            base.usePagedCache = false
             base.enableDiskCache = false
             // Generic exact/partial-prefix L2 is independent of paged RAM.
             // The launch policy still suppresses this for model families with

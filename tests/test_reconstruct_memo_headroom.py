@@ -35,6 +35,15 @@ class _Manager:
     _reconstruct_memo_fits_in_headroom = pc.BlockAwarePrefixCache._reconstruct_memo_fits_in_headroom
 
 
+class _ArmManager:
+    arm_reconstruct_memo = pc.BlockAwarePrefixCache.arm_reconstruct_memo
+
+    def __init__(self, *, disk_only):
+        self.paged_cache = type("Paged", (), {"disk_only": disk_only})()
+        self._reconstruct_memo_arm = False
+        self._reconstruct_memo = None
+
+
 @pytest.fixture
 def manager():
     return _Manager()
@@ -50,6 +59,27 @@ def _patch(monkeypatch, *, active, max_ws, copy_bytes):
         lambda mx_module=None: (active, max_ws),
     )
     monkeypatch.setattr(mc, "estimate_kv_cache_memory", lambda _caches: copy_bytes)
+
+
+def test_ssd_only_mode_refuses_and_drops_reconstruct_memo(monkeypatch):
+    """A full deep-copy memo is retained cache RAM, even if paged RAM is off."""
+    monkeypatch.delenv("VMLX_DSV4_RECONSTRUCT_MEMO", raising=False)
+    manager = _ArmManager(disk_only=True)
+    manager._reconstruct_memo = ((1, 2), ["hidden-kv-copy"])
+
+    manager.arm_reconstruct_memo(True)
+
+    assert manager._reconstruct_memo_arm is False
+    assert manager._reconstruct_memo is None
+
+
+def test_ram_backed_mode_can_still_arm_reconstruct_memo(monkeypatch):
+    monkeypatch.delenv("VMLX_DSV4_RECONSTRUCT_MEMO", raising=False)
+    manager = _ArmManager(disk_only=False)
+
+    manager.arm_reconstruct_memo(True)
+
+    assert manager._reconstruct_memo_arm is True
 
 
 def test_a_small_copy_is_kept_even_with_a_huge_model_resident(manager, monkeypatch):

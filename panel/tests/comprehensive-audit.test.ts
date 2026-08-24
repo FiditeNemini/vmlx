@@ -31,7 +31,9 @@ interface DetectedConfig {
 const DEFAULT_CONFIG: DetectedConfig = {
   family: "unknown",
   cacheType: "kv",
-  usePagedCache: true,
+  // Mirrors model-config-registry.ts DEFAULT_CONFIG: in-RAM paged cache is OFF
+  // for every family — SSD block-disk L2 is the only cache tier.
+  usePagedCache: false,
   enableAutoToolChoice: false,
   isMultimodal: false,
   description: "Unknown model",
@@ -341,8 +343,8 @@ describe("Phase 1: Model Config Detection", () => {
       expect(DEFAULT_CONFIG.cacheType).toBe("kv");
     });
 
-    it("defaults to paged cache enabled", () => {
-      expect(DEFAULT_CONFIG.usePagedCache).toBe(true);
+    it("defaults to paged cache disabled — SSD block-disk L2 is the only tier", () => {
+      expect(DEFAULT_CONFIG.usePagedCache).toBe(false);
     });
 
     it("defaults to no tool choice", () => {

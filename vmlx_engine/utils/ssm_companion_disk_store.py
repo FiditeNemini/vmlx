@@ -68,7 +68,7 @@ import queue
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1057,6 +1057,69 @@ class SSMCompanionDiskStore:
                     reverse=True,
                 )
 
+    def has_complete(self, key: str) -> bool:
+        """Cheaply attest a complete durable entry without loading its arrays.
+
+        Disk-only companion mode uses this to avoid an otherwise redundant
+        O(prompt) clean re-derive. Validate both halves of the atomic pair,
+        including the generation ID embedded in the safetensors header, so a
+        torn overwrite can never suppress the repair pass indefinitely.
+        """
+        if os.environ.get("VMLX_DISABLE_SSM_DISK_RESTORE", "").lower() in {
+            "1", "true", "yes", "on",
+        }:
+            return False
+        with self._write_condition:
+            pending_job = self._latest_write_by_key.get(str(key))
+            pending = bool(
+                pending_job is not None
+                and self._last_completed_write < pending_job
+            )
+        if pending and not self.wait_for_write(str(key), timeout=5.0):
+            return False
+
+        def _probe() -> bool:
+            data_path, side_path = self._entry_paths(str(key))
+            if not data_path.is_file() or not side_path.is_file():
+                return False
+            try:
+                sidecar = json.loads(side_path.read_text())
+                record_id = str(sidecar.get("record_id") or "")
+                if (
+                    int(sidecar.get("version") or 0) != _RECORD_VERSION
+                    or not bool(sidecar.get("is_complete", False))
+                    or not record_id
+                    or sidecar.get("runtime_cache_fingerprint")
+                    != _runtime_cache_fingerprint()
+                ):
+                    return False
+                from vmlx_engine.cache_record_validator import (
+                    validate_safetensors_header,
+                )
+
+                valid, _reason = validate_safetensors_header(
+                    str(data_path), source=f"SSM-companion-probe:{str(key)[:12]}"
+                )
+                if not valid:
+                    return False
+                with data_path.open("rb") as handle:
+                    header_size_raw = handle.read(8)
+                    if len(header_size_raw) != 8:
+                        return False
+                    header_size = int.from_bytes(
+                        header_size_raw, "little", signed=False
+                    )
+                    header = json.loads(handle.read(header_size).decode("utf-8"))
+                metadata = header.get("__metadata__") or {}
+                return metadata.get(_RECORD_ID_METADATA_KEY) == record_id
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                return False
+
+        if self._global_budget is None:
+            return _probe()
+        with self._global_budget.mutation_guard() as locked:
+            return bool(locked and _probe())
+
     def touch(self, key: str) -> None:
         """Refresh the on-disk entry's access time for the shared LRU wall.
 
@@ -1185,6 +1248,8 @@ class SSMCompanionDiskStore:
         entries = 0
         total = 0
         total_tokens = 0
+        latest_payload_path: Optional[Path] = None
+        latest_payload_mtime_ns = -1
         try:
             for sub in self._dir.iterdir() if self._dir.exists() else []:
                 if not sub.is_dir():
@@ -1194,7 +1259,11 @@ class SSMCompanionDiskStore:
                         continue
                     entries += 1
                     try:
-                        total += f.stat().st_size
+                        f_stat = f.stat()
+                        total += f_stat.st_size
+                        if f_stat.st_mtime_ns > latest_payload_mtime_ns:
+                            latest_payload_path = f
+                            latest_payload_mtime_ns = f_stat.st_mtime_ns
                     except OSError:
                         pass
                     side = f.with_suffix(".json")
@@ -1209,6 +1278,24 @@ class SSMCompanionDiskStore:
                             pass
         except OSError:
             pass
+        latest_payload = None
+        if latest_payload_path is not None:
+            try:
+                from safetensors import safe_open
+
+                dtype_counts: Counter[str] = Counter()
+                with safe_open(
+                    str(latest_payload_path), framework="numpy"
+                ) as handle:
+                    for name in handle.keys():
+                        dtype_counts[str(handle.get_slice(name).get_dtype())] += 1
+                latest_payload = {
+                    "file_size_bytes": int(latest_payload_path.stat().st_size),
+                    "physical_tensor_dtype_counts": dict(dtype_counts),
+                    "tensor_count": sum(dtype_counts.values()),
+                }
+            except Exception as exc:  # noqa: BLE001 - stats stay best-effort
+                logger.debug("SSM companion dtype inspection failed: %s", exc)
         with self._stats_lock:
             stores = self._stores
             write_failures = self._write_failures
@@ -1232,7 +1319,7 @@ class SSMCompanionDiskStore:
             if self._global_budget is not None
             else None
         )
-        return {
+        result = {
             "enabled": True,
             "directory": str(self._dir),
             "entries": entries,
@@ -1274,6 +1361,9 @@ class SSMCompanionDiskStore:
                 else None
             ),
         }
+        if latest_payload is not None:
+            result["latest_payload"] = latest_payload
+        return result
 
     def _enforce_budget(self) -> None:
         """LRU eviction by mtime under the disk byte budget."""

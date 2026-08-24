@@ -71,6 +71,7 @@ from .utils.hybrid_tq_cache import is_turboquant_make_cache
 from .utils.cache_types import (
     ATTENTION_CACHE_CLASS_NAMES,
     CUMULATIVE_CACHE_CLASS_NAMES,
+    describe_runtime_cache_layout,
     expand_cache_class_names,
 )
 from .utils.ssm_companion_disk_store import SSMCompanionDiskStore
@@ -662,7 +663,7 @@ class SchedulerConfig:
     # `MLLMSchedulerConfig`. Entries can be tens/hundreds of MB, so production
     # defaults are deliberately conservative and byte-bound.
     ssm_state_cache_size: int = DEFAULT_SSM_COMPANION_ENTRIES
-    ssm_state_cache_max_mb: Optional[int] = 512
+    ssm_state_cache_max_mb: Optional[int] = 0
 
     # Dedicated single-worker ThreadPoolExecutor that loaded the model and
     # must run every step()/BatchGenerator call. MLX streams are
@@ -1087,12 +1088,18 @@ class Scheduler:
                     # state on short unique prompts; entry count alone is not
                     # enough because entry size scales with architecture and
                     # prompt.
-                    _ssm_cache_size = (
-                        getattr(self.config, "ssm_state_cache_size", DEFAULT_SSM_COMPANION_ENTRIES)
-                        or DEFAULT_SSM_COMPANION_ENTRIES
+                    _ssm_cache_size = max(
+                        0,
+                        int(
+                            getattr(
+                                self.config,
+                                "ssm_state_cache_size",
+                                DEFAULT_SSM_COMPANION_ENTRIES,
+                            )
+                        ),
                     )
                     _ssm_cache_max_mb = getattr(
-                        self.config, "ssm_state_cache_max_mb", 512
+                        self.config, "ssm_state_cache_max_mb", 0
                     )
                     _ssm_model_key = compute_model_cache_key(
                         model,
@@ -1203,18 +1210,34 @@ class Scheduler:
         # backend even when paged RAM is explicitly disabled: attention KV is
         # restored from SSD and full-precision SSM state comes from the typed
         # companion L2 or clean-prefill rederive.
+        # In-RAM paged cache is OFF for every family: SSD block-disk L2 is the
+        # only cache tier this product ships. Neither of the two cases below may
+        # switch a RAM tier back on. Where an architecture genuinely cannot be
+        # served from L2, the answer is NO REUSE -- never a silent RAM tier and
+        # never an unsafe restore.
         if (
             self.config.enable_prefix_cache
             and not self.config.use_paged_cache
             and self._uses_zaya_cache
         ):
-            logger.info(
-                "ZAYA/CCA typed cache requires paged prefix cache. "
-                "Auto-switching prefix-only configuration to paged cache "
-                "so zaya_cca_v1 records carry KV + conv_state + prev_hs."
+            # zaya_cca_v1 records need KV + conv_state + prev_hs together. The
+            # memory-aware and legacy lanes cannot hold that, and block-disk-only
+            # is not wired for the CCA contract either. Disabling ONLY the
+            # memory-aware lane is not enough: the init chain then falls through
+            # to the LEGACY PrefixCacheManager, which is just as unable to carry
+            # CCA state. Take no prefix lane at all rather than an unsafe one —
+            # ZAYA re-prefills cleanly. Costs speed, never correctness.
+            logger.warning(
+                "ZAYA/CCA typed cache has no safe prefix lane without paged "
+                "RAM, and paged RAM is OFF for every family (SSD block-disk L2 "
+                "is the only tier). Disabling prefix reuse for ZAYA entirely: "
+                "every turn re-prefills cleanly rather than restore incomplete "
+                "conv_state/prev_hs. Wire the CCA contract into the block-disk "
+                "lane to get reuse back."
             )
-            self.config.use_paged_cache = True
             self.config.use_memory_aware_cache = False
+            self.config.enable_prefix_cache = False
+            self.config.enable_block_disk_cache = False
         elif (
             self.config.enable_prefix_cache
             and not self.config.use_paged_cache
@@ -1222,12 +1245,15 @@ class Scheduler:
             and self._is_hybrid
             and not self.config.enable_block_disk_cache
         ):
+            # Hybrid MambaCache/GatedDelta state is path-dependent; the
+            # memory-aware lane would reuse it incorrectly. With Block Disk L2
+            # switched off there is no correct backend, so take the reuse loss.
             logger.info(
-                "Non-standard cache model detected (MambaCache/hybrid layers). "
-                "Auto-switching to paged cache because neither paged RAM nor "
-                "Block Disk L2 is available for correct cache reuse."
+                "Non-standard cache model detected (MambaCache/hybrid layers) "
+                "with Block Disk L2 disabled. Paged RAM stays OFF (SSD L2 is "
+                "the only tier); disabling the memory-aware lane. Enable "
+                "--enable-block-disk-cache to get hybrid prefix reuse back."
             )
-            self.config.use_paged_cache = True
             self.config.use_memory_aware_cache = False
 
         # Active generation KV cache has no explicit memory cap — relies on
@@ -1596,6 +1622,11 @@ class Scheduler:
                             and not self._uses_zaya_cache
                         ),
                         kv_quant_bits=self._kv_cache_bits,
+                        uses_dsv4_cache=self._uses_dsv4_cache,
+                        uses_zaya_cache=self._uses_zaya_cache,
+                        mixed_attention_cache_model=(
+                            self._mixed_attention_cache_model
+                        ),
                     )
                 except Exception:
                     self._cleanup_failed_block_cache_initialization(
@@ -1912,27 +1943,50 @@ class Scheduler:
         return True
 
     def _log_runtime_cache_contract(self, model: Any) -> None:
-        """Log per-layer cache classes for production-gate topology checks."""
-        if not hasattr(model, "make_cache"):
-            return
+        """Record and log instantiated per-layer cache classes."""
         try:
-            cache = model.make_cache() or []
-            layout = []
-            for idx, slot in enumerate(cache):
-                cls = type(slot).__name__
-                if cls == "CacheList":
-                    sub = [
-                        type(sub_slot).__name__
-                        for sub_slot in getattr(slot, "caches", ())
-                    ]
-                    layout.append(f"{idx}:CacheList({','.join(sub)})")
-                else:
-                    layout.append(f"{idx}:{cls}")
+            # This is the exact factory used by both mlx-lm BatchGenerator and
+            # vMLX SingleBatchGenerator. It delegates to model.make_cache()
+            # for native architectures and creates the generator's default
+            # KVCache-per-layer layout otherwise. Calling model.make_cache()
+            # directly and returning early when it did not exist made ordinary
+            # full-KV models (live MiniMax-M2.7) invisible even though the
+            # generator instantiates 62 real KVCache slots.
+            from mlx_lm.models.cache import make_prompt_cache
+
+            delegated_to_model_make_cache = hasattr(model, "make_cache")
+            cache = make_prompt_cache(model) or []
+            runtime_layout = describe_runtime_cache_layout(cache, model=model)
+            runtime_layout["source"] = "instantiated_runtime_cache_factory"
+            runtime_layout["factory"] = "mlx_lm.models.cache.make_prompt_cache"
+            runtime_layout["delegated_to_model_make_cache"] = (
+                delegated_to_model_make_cache
+            )
+            dtype_status = getattr(
+                model,
+                "_vmlx_quant_metadata_dtype_harmonization",
+                None,
+            )
+            if isinstance(dtype_status, dict):
+                runtime_layout["parameter_dtype_harmonization"] = dict(dtype_status)
+            self._runtime_cache_layout = runtime_layout
+            self._runtime_cache_num_layers = runtime_layout["layer_count"]
+            self._runtime_cache_kv_positions = (
+                None
+                if runtime_layout["parallel_layer_indices"]
+                else runtime_layout["attention_layer_indices"]
+            )
+            self._runtime_cache_parallel_hybrid_positions = runtime_layout[
+                "parallel_layer_indices"
+            ]
             logger.info(
                 "Runtime cache layout: model_type=%s layers=%d layout=%s",
                 self._model_type_for_runtime or "unknown",
-                len(cache),
-                ";".join(layout),
+                runtime_layout["layer_count"],
+                ";".join(
+                    f"{idx}:{slot_type}"
+                    for idx, slot_type in enumerate(runtime_layout["slot_types"])
+                ),
             )
         except Exception as exc:
             logger.debug("Runtime cache layout logging skipped: %s", exc)
@@ -4352,6 +4406,8 @@ class Scheduler:
         *,
         max_len: int,
         block_size: int,
+        exact_boundary_already_missed: bool = False,
+        retain_unaligned_checkpoint: bool = False,
     ) -> Optional[Tuple[int, List[Any]]]:
         """Find a hybrid SSM checkpoint aligned to paged-KV block trimming.
 
@@ -4361,6 +4417,19 @@ class Scheduler:
         equals the block-aligned KV length, or an exact SSM checkpoint at that
         aligned length.
         """
+        prefetched_attr = "_hybrid_ssm_prefetched_checkpoint"
+
+        def _clear_prefetched_checkpoint() -> None:
+            try:
+                delattr(request, prefetched_attr)
+            except AttributeError:
+                pass
+
+        if retain_unaligned_checkpoint:
+            # Request objects can be retried. Never let a prior attempt's
+            # detached recurrent state leak into a later lookup.
+            _clear_prefetched_checkpoint()
+
         if (
             self._ssm_state_cache is None
             or max_len <= 0
@@ -4377,7 +4446,27 @@ class Scheduler:
         ssm_tokens = self._hybrid_ssm_fetch_tokens(request)
         search_len = (int(max_len) // block_size) * block_size
         while search_len >= block_size:
-            hit = fetch_longest(ssm_tokens, search_len)
+            skip_exact_probe = bool(
+                exact_boundary_already_missed and search_len == int(max_len)
+            )
+            try:
+                if skip_exact_probe:
+                    hit = fetch_longest(
+                        ssm_tokens,
+                        search_len,
+                        exact_boundary_already_missed=True,
+                    )
+                else:
+                    hit = fetch_longest(ssm_tokens, search_len)
+            except TypeError as exc:
+                # Preserve compatibility with custom/legacy companion-cache
+                # implementations that predate the duplicate-probe hint.
+                if (
+                    not skip_exact_probe
+                    or "exact_boundary_already_missed" not in str(exc)
+                ):
+                    raise
+                hit = fetch_longest(ssm_tokens, search_len)
             if hit is None:
                 request._cache_reuse_partial_unavailable_reason = (
                     "no_block_aligned_ssm_checkpoint"
@@ -4397,12 +4486,29 @@ class Scheduler:
                 )
                 return None
             if is_complete and checkpoint_len == aligned_len:
+                _clear_prefetched_checkpoint()
                 return checkpoint_len, states
+            if (
+                retain_unaligned_checkpoint
+                and is_complete
+                and not hasattr(request, prefetched_attr)
+            ):
+                # The aligned RESUME lane cannot use this state because its KV
+                # table can only be trimmed at whole-block boundaries. The
+                # delta-derive fallback can use the same detached state at any
+                # boundary, so retain it for that immediately following path
+                # instead of physically loading it from SSD a second time.
+                setattr(
+                    request,
+                    prefetched_attr,
+                    (int(max_len), checkpoint_len, states, True),
+                )
             if fetch_exact is not None and aligned_len > 0:
                 exact = fetch_exact(ssm_tokens, aligned_len)
                 if exact is not None:
                     exact_states, exact_complete = exact
                     if exact_complete:
+                        _clear_prefetched_checkpoint()
                         return aligned_len, exact_states
             search_len = aligned_len - block_size
         request._cache_reuse_partial_unavailable_reason = (
@@ -7226,14 +7332,26 @@ class Scheduler:
         """
         if not reconstructed or int(fetch_num or 0) <= 0:
             return None, 0
+        prefetched_attr = "_hybrid_ssm_prefetched_checkpoint"
+        prefetched = getattr(request, prefetched_attr, None)
+        try:
+            delattr(request, prefetched_attr)
+        except AttributeError:
+            pass
         cache = self._ssm_state_cache
         fetch_longest = getattr(cache, "fetch_longest_prefix", None)
-        if cache is None or not callable(fetch_longest):
-            return None, 0
-        try:
-            hit = fetch_longest(ssm_tokens, fetch_num)
-        except Exception:
-            return None, 0
+        hit = None
+        if isinstance(prefetched, tuple) and len(prefetched) == 4:
+            prefetched_max_len, ck_len, ck_states, ck_complete = prefetched
+            if int(prefetched_max_len or 0) == int(fetch_num):
+                hit = (ck_len, ck_states, ck_complete)
+        if hit is None:
+            if cache is None or not callable(fetch_longest):
+                return None, 0
+            try:
+                hit = fetch_longest(ssm_tokens, fetch_num)
+            except Exception:
+                return None, 0
         if not hit:
             return None, 0
         try:
@@ -7405,6 +7523,12 @@ class Scheduler:
                         request,
                         max_len=fetch_num,
                         block_size=block_size,
+                        # The exact worker lookup immediately above already
+                        # missed. Do not probe that same SSD key again, and
+                        # carry any complete non-aligned checkpoint into the
+                        # delta-seed path instead of refaulting it twice.
+                        exact_boundary_already_missed=True,
+                        retain_unaligned_checkpoint=True,
                     )
                 except Exception:
                     missed_ck = None
@@ -11906,9 +12030,19 @@ class Scheduler:
                 ),
                 "nbytes": nbytes,
                 "nbytes_mb": round(nbytes / (1024 * 1024), 2),
+                "ram_enabled": bool(getattr(cache, "ram_enabled", False)),
             }
             disk = getattr(cache, "_disk", None)
             result["disk_enabled"] = disk is not None
+            result["storage"] = (
+                "ram_and_ssd"
+                if result["ram_enabled"] and disk is not None
+                else "ram_only"
+                if result["ram_enabled"]
+                else "ssd_only"
+                if disk is not None
+                else "disabled"
+            )
             if disk is not None:
                 try:
                     result["disk"] = disk.stats()
@@ -11919,7 +12053,14 @@ class Scheduler:
                     }
             return result
         except Exception as _e:
-            return {"entries": 0, "max_entries": 0, "nbytes": 0, "error": str(_e)}
+            return {
+                "entries": 0,
+                "max_entries": 0,
+                "nbytes": 0,
+                "ram_enabled": False,
+                "storage": "disabled",
+                "error": str(_e),
+            }
 
     def reset(self) -> None:
         """Reset the scheduler state."""

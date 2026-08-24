@@ -43,13 +43,20 @@ class TestPagedDefaultFamilyParity:
             "step3p7",
         }
 
-    def test_panel_requires_paged_for_step3p7(self):
-        """Derive the step3p7 claim from the panel instead of asserting a snapshot."""
+    def test_panel_keeps_step3p7_off_paged_ram(self):
+        """step3p7 gets NO in-RAM paged tier: SSD block-disk L2 is the only one.
+
+        2026-08-23: in-RAM paged cache is OFF for every family. This test used
+        to assert the opposite for step3p7; the subtype is still declared (the
+        engine uses it to pick the mixed-SWA lane), but it no longer buys a RAM
+        tier.
+        """
         panel_root = Path(__file__).resolve().parents[1] / "panel" / "src" / "main"
         registry = (panel_root / "model-config-registry.ts").read_text()
         idx = registry.index("registerFamily('step-3.7-flash'")
         window = registry[idx : idx + 800]
-        assert "usePagedCache: true" in window
+        assert "usePagedCache: false" in window
+        assert "usePagedCache: true" not in window
         assert "cacheSubtype: 'step3p7_full_sliding_kv'" in window
         # The cache-shape predicates used to be byte-identical copies in
         # sessions.ts (the argv BUILDER) and SessionSettings.tsx (the argv
@@ -64,7 +71,7 @@ class TestPagedDefaultFamilyParity:
         assert "step3p7_full_sliding_kv" in shared
         assert "cacheTypeCapabilities" in (panel_root / "sessions.ts").read_text()
 
-    def test_panel_opts_muse_into_paged_too(self):
+    def test_panel_keeps_muse_off_paged_ram(self):
         registry = (
             Path(__file__).resolve().parents[1]
             / "panel"
@@ -74,9 +81,12 @@ class TestPagedDefaultFamilyParity:
         )
         src = registry.read_text()
         idx = src.index("registerFamily('muse-glimmer'")
-        assert "usePagedCache: true" in src[idx : idx + 600]
+        window = src[idx : idx + 600]
+        # In-RAM paged cache is OFF for every family (SSD L2 only).
+        assert "usePagedCache: false" in window
+        assert "usePagedCache: true" not in window
 
-    def test_panel_registry_still_opts_gemma4_into_paged(self):
+    def test_panel_registry_keeps_gemma4_off_paged_ram(self):
         registry = (
             Path(__file__).resolve().parents[1]
             / "panel"
@@ -87,4 +97,7 @@ class TestPagedDefaultFamilyParity:
         src = registry.read_text()
         idx = src.index("next.family === 'gemma4'")
         window = src[idx : idx + 600]
-        assert "next.usePagedCache = true" in window
+        # Gemma-4's typed mixed-SWA path restores from block-disk L2; it does
+        # not get a RAM mirror. Paged RAM is OFF for every family.
+        assert "next.usePagedCache = false" in window
+        assert "next.usePagedCache = true" not in window

@@ -63,9 +63,16 @@ def test_construction_custom_max_entries():
     assert cache.size == 0
 
 
+def test_construction_zero_disables_retained_ram():
+    cache = SSMCompanionCache(max_entries=0, max_bytes=0, disk_store=False)
+    assert cache.max_entries == 0
+    assert cache.max_bytes == 0
+    assert cache.ram_enabled is False
+    assert cache.size == 0
+    assert cache.total_nbytes == 0
+
+
 def test_construction_invalid_max_entries():
-    with pytest.raises(ValueError):
-        SSMCompanionCache(max_entries=0)
     with pytest.raises(ValueError):
         SSMCompanionCache(max_entries=-3)
 
@@ -780,6 +787,66 @@ def test_disk_store_round_trips_across_cache_instances(tmp_path):
     assert disk1.shutdown()
     assert disk2.shutdown()
     assert disk3.shutdown()
+
+
+def test_disk_only_companion_survives_restart_without_retained_ram(tmp_path):
+    """Zero RAM budget must retain no L1 payload while durable L2 still works."""
+    from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
+
+    tokens = [10, 20, 30, 40]
+    model_key = "qwen-hybrid|ssd-only-v1"
+    disk1 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache1 = SSMCompanionCache(
+        max_entries=0,
+        max_bytes=0,
+        model_key=model_key,
+        disk_store=disk1,
+    )
+
+    cache1.store(tokens, 4, [_FakeSSMLayer(13.0, n_arrays=2)], is_complete=True)
+    assert disk1.wait_for_pending()
+    assert cache1.ram_enabled is False
+    assert cache1.size == 0
+    assert cache1.total_nbytes == 0
+    assert cache1.has_complete(tokens, 4) is True
+
+    incomplete_tokens = tokens + [50]
+    cache1.store(
+        incomplete_tokens,
+        5,
+        [_FakeSSMLayer(14.0, n_arrays=2)],
+        is_complete=False,
+    )
+    assert disk1.wait_for_pending()
+    assert cache1.has_complete(incomplete_tokens, 5) is False
+    assert cache1.size == 0
+    assert cache1.total_nbytes == 0
+
+    # A fresh cache instance proves process-restart persistence. Fetching the
+    # durable entry must not backfill L1 or create a second retained clone.
+    disk2 = SSMCompanionDiskStore(
+        directory=tmp_path, budget_bytes=32 * 1024 * 1024
+    )
+    cache2 = SSMCompanionCache(
+        max_entries=0,
+        max_bytes=0,
+        model_key=model_key,
+        disk_store=disk2,
+    )
+    entry = cache2.fetch(tokens, 4)
+    assert entry is not None
+    states, is_complete = entry
+    assert is_complete is True
+    assert states[0].cache[0].tolist() == [13.0, 13.0, 13.0, 13.0]
+    assert cache2.ram_enabled is False
+    assert cache2.size == 0
+    assert cache2.total_nbytes == 0
+    assert cache2.has_complete(tokens, 4) is True
+
+    assert disk1.shutdown()
+    assert disk2.shutdown()
 
 
 def test_disk_store_restores_selected_boundary_without_l1_length_index(tmp_path):

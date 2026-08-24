@@ -1088,6 +1088,15 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
     def _finalize_loaded_model(model, tokenizer):
         validate_nanbeige_loop_cache_contract(model, local_model_path)
+        # Must execute here, on the caller's pinned loader/step worker. Moving
+        # this to server startup crosses MLX's thread-local stream boundary.
+        from ..mlx_memory import maybe_harmonize_quant_metadata_dtypes
+
+        maybe_harmonize_quant_metadata_dtypes(
+            model,
+            model_path=local_model_path,
+            log=logger,
+        )
         return model, tokenizer
 
     # ── Architecture-specific routing BEFORE the JANG gate ──

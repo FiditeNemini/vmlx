@@ -16,7 +16,7 @@ import {
   DEFAULT_BLOCK_DISK_CACHE_PERCENT,
   LEGACY_BLOCK_DISK_CACHE_MAX_GB,
 } from '../shared/cacheDefaults'
-import { resolveCacheLaunchPolicy } from '../shared/cacheControlPolicy'
+import { buildCacheLaunchArgs } from '../shared/cacheLaunchArgs'
 import {
   applyLagunaJitDefaultEnvironment,
   DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV,
@@ -85,17 +85,10 @@ import {
   resolveSlowFamilyTimeoutSeconds,
 } from '../shared/slowFamilyTimeouts'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../shared/detectedFamilyNames'
-import {
-  cacheTypeRequiresPaged,
-  cacheSubtypeRequiresPaged,
-  cacheTypeSupportsBlockDiskOnly,
-  cacheSubtypeSupportsBlockDiskOnly,
-} from '../shared/cacheTypeCapabilities'
+import { cacheTypeRequiresPaged } from '../shared/cacheTypeCapabilities'
 import {
   filterAdditionalArgs,
-  finiteNonNegativeNumber,
   finitePositiveInteger,
-  finitePositiveNumber,
 } from '../shared/launchArgValues'
 
 /** Result of findEnginePath: either bundled Python or a system binary */
@@ -316,7 +309,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         changed = true
       }
       if (config.usePagedCache === undefined) {
-        config.usePagedCache = true
+        config.usePagedCache = false
         changed = true
       }
       if (config.enableBlockDiskCache === undefined) {
@@ -385,7 +378,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         changed = true
       }
       if (config.usePagedCache === undefined) {
-        config.usePagedCache = true
+        config.usePagedCache = false
         changed = true
       }
       if (config.enableDiskCache !== false) {
@@ -790,28 +783,34 @@ function liftStaleFlatCacheIndex(
 }
 
 function normalizeCacheStackMutualExclusion(config: Partial<ServerConfig>): boolean {
+  let changed = false
+  // Persist the same hard-off RAM policy the shared launch builder enforces.
+  // Leaving a stale true in SQLite made settings state disagree with the
+  // disabled checkbox and with the actual --no-paged-cache argv.
+  if (config.usePagedCache !== false) {
+    config.usePagedCache = false
+    changed = true
+  }
   // Persist the same mutually-exclusive L2 lane that buildArgs will launch.
-  // Block-disk L2 works with paged RAM either On or Off; the legacy full-prompt
-  // store remains the exact typed exception lane (notably openPangu). Never
-  // retain both disk formats for one session.
+  // The legacy full-prompt store remains the exact typed exception lane
+  // (notably openPangu). Never retain both disk formats for one session.
   if (config.enableBlockDiskCache === true && config.enableDiskCache === true) {
     config.enableDiskCache = false
-    return true
+    changed = true
   }
-  return false
+  return changed
 }
 
 function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, modelPath?: string): boolean {
   const targetPath = modelPath || config.modelPath
   let detectedFamily: string | undefined
-  let detectedUsePaged: boolean | undefined
+  // No per-family paged capability is read here any more: in-RAM paged cache is
+  // OFF for every family and SSD block-disk L2 is the only tier, so there is
+  // nothing for a registry capability to decide.
   if (targetPath) {
     try {
       const detected = detectModelConfigFromDir(targetPath)
       detectedFamily = normalizeDetectedFamilyName(detected.family)
-      // Fully-resolved per-family paged capability (registry default-on when
-      // the engine has a safe generic or typed paged serializer).
-      detectedUsePaged = detected.usePagedCache
     } catch {
       /* detection is best-effort here; buildArgs repeats detection at launch */
     }
@@ -822,11 +821,11 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   )
   const dsv4Active = effectiveFamily === 'deepseek-v4'
   const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
-  // DSV4 and every family with a safe generic or typed block serializer use
-  // the normal hot/warm/cold stack by default: bounded paged RAM backed by
-  // block-disk L2. Users may still explicitly disable the RAM tier and retain
-  // SSD-only longest-prefix reuse.
-  const defaultUsePagedCache = dsv4Active ? true : (detectedUsePaged ?? false)
+  // In-RAM paged cache is OFF for EVERY family, DSV4 included. SSD block-disk
+  // L2 is the only cache tier. Seeding a saved `true` here (even though the
+  // launch choke point forces --no-paged-cache) would persist a config that
+  // disagrees with what actually runs.
+  const defaultUsePagedCache = false
   // Every supported prefix-cache lane gets block SSD L2 by default, even when
   // paged RAM is explicitly Off. openPangu is the path-dependent exact-snapshot
   // exception and continues to use prompt-level typed L2.
@@ -920,37 +919,22 @@ function isZayaCacheStackMigrationTarget(modelPath?: string): boolean {
  */
 function applySsdFirstCacheDefaults(
   config: Partial<ServerConfig>,
-  modelPath?: string,
-  detectedCacheType?: string,
-  detectedCacheSubtype?: string,
+  _modelPath?: string,
+  _detectedCacheType?: string,
+  _detectedCacheSubtype?: string,
   detectedFamily?: string,
 ): boolean {
-  // Two families carry runtime policies that contradict an SSD-only default, and
-  // a persisted value the launcher overrules is worse than no change at all: the
-  // Session Settings checkbox would read Off while the engine ran the RAM tier.
-  //
-  //  - ZAYA CCA: recurrent conv_state is not position-sliceable, so the SSD-only
-  //    lane is not wired (Phase-2). spawn re-enables paged for it regardless.
-  //  - openPangu v2: exact full-precision typed prefix + legacy prompt-L2, with
-  //    the block-disk tier deliberately off. Enabling block disk here would be
-  //    reverted at spawn.
-  if (isZayaCacheStackMigrationTarget(modelPath || config.modelPath)) return false
-  if (normalizeDetectedFamilyName(detectedFamily) === 'openpangu_v2') return false
-
   let changed = false
-  // A shape that REQUIRES the paged tier and cannot serve block-disk-only has no
-  // SSD-only lane to fall back to. Today those two predicates coincide, so this
-  // never fires — but they are independent by design, and when they diverge the
-  // flip must not strand such a family with no cache at all.
-  const pagedRequired =
-    cacheTypeRequiresPaged(detectedCacheType) || cacheSubtypeRequiresPaged(detectedCacheSubtype)
-  const ssdOnlyCapable =
-    cacheTypeSupportsBlockDiskOnly(detectedCacheType) ||
-    cacheSubtypeSupportsBlockDiskOnly(detectedCacheSubtype)
-  if (config.usePagedCache === true && !(pagedRequired && !ssdOnlyCapable)) {
+  // No family may preserve a stale RAM-paged value in persisted state. ZAYA's
+  // missing SSD reconstruction path is a real open runtime gap, not permission
+  // for migrations to silently re-enable the retired tier.
+  if (config.usePagedCache === true) {
     config.usePagedCache = false
     changed = true
   }
+  // openPangu owns the separate exact prompt-L2 format. Apply the RAM-off
+  // normalization above, but do not rewrite its disk format below.
+  if (normalizeDetectedFamilyName(detectedFamily) === 'openpangu_v2') return changed
   if (config.enableBlockDiskCache !== true) {
     // SSD-only is only cheap when the disk tier is actually on.
     config.enableBlockDiskCache = true
@@ -1107,7 +1091,7 @@ function applyLegacyCacheStackMigrations(config: Partial<ServerConfig>, modelPat
     if (!staleV11Dsv4FailClosed && !staleV12Dsv4SsdOnlyDefault) return false
     config.enablePrefixCache = true
     config.dsv4PrefixCache = true
-    config.usePagedCache = true
+    config.usePagedCache = false
     config.enableDiskCache = false
     config.enableBlockDiskCache = true
     config.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
@@ -1137,7 +1121,9 @@ function applyLegacyCacheStackMigrations(config: Partial<ServerConfig>, modelPat
     config.enableDiskCache === false &&
     config.enableBlockDiskCache === true
   ) {
-    config.usePagedCache = true
+    // Paged RAM stays OFF for every family; this migration used to turn a saved
+    // Off back On when the registry reported a per-family paged capability.
+    config.usePagedCache = false
     if (config.maxCacheBlocks === undefined || Number(config.maxCacheBlocks) === 1000) {
       config.maxCacheBlocks = indexBlocksForCapacity(config.pagedCacheBlockSize)
     }
@@ -1333,9 +1319,12 @@ function applyLegacyCacheStackMigrations(config: Partial<ServerConfig>, modelPat
   config.kvCacheQuantization = 'auto'
   config.cacheMemoryPercent = 15
   if (zayaCacheMigrationTarget) {
-    // Path-dependent (ZAYA CCA): recurrent state is not position-sliceable, so the
-    // SSD-only non-paged lane is not yet wired (Phase-2). Keep paged RAM + block-disk.
-    config.usePagedCache = true
+    // Path-dependent (ZAYA CCA): recurrent state is not position-sliceable and
+    // the SSD-only non-paged lane is not wired for it. Paged RAM is OFF for
+    // every family regardless, so ZAYA gets NO prefix reuse and re-prefills
+    // cleanly. That costs speed on ZAYA, never correctness -- the engine's
+    // fetch side refuses a ZAYA chain with no terminal CCA state.
+    config.usePagedCache = false
     config.maxCacheBlocks = 1000
     config.enableDiskCache = false
     config.enableBlockDiskCache = true
@@ -2370,7 +2359,7 @@ export class SessionManager extends EventEmitter {
             const dsv4Changed =
               config.continuousBatching !== true ||
               config.enablePrefixCache === undefined ||
-              config.usePagedCache === undefined ||
+              config.usePagedCache !== false ||
               config.enableBlockDiskCache === undefined ||
               config.maxCacheBlocks === undefined ||
               config.dsv4PrefixCache !== dsv4PrefixEnabled ||
@@ -2389,7 +2378,7 @@ export class SessionManager extends EventEmitter {
               config.isMultimodal !== false
             config.continuousBatching = true
             if (config.enablePrefixCache === undefined) config.enablePrefixCache = true
-            if (config.usePagedCache === undefined) config.usePagedCache = true
+            config.usePagedCache = false
             if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true
             if (config.maxCacheBlocks === undefined) config.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
             config.dsv4PrefixCache = config.enablePrefixCache !== false
@@ -2417,22 +2406,21 @@ export class SessionManager extends EventEmitter {
             if (dsv4Changed) {
               this.pushLog(
                 sessionId,
-                `[INFO] DSV4-Flash native cache policy: prefix=${config.enablePrefixCache !== false ? 'on' : 'off'}, paged_ram=${config.usePagedCache === true ? 'on' : 'off'}, block_disk_l2=${config.enableBlockDiskCache === true ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived, activation_qat=${config.dsv4ActivationQat === true ? 'on' : 'off'}`,
+                `[INFO] DSV4-Flash native cache policy: prefix=${config.enablePrefixCache !== false ? 'on' : 'off'}, paged_ram=off, block_disk_l2=${config.enableBlockDiskCache === true ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived, activation_qat=${config.dsv4ActivationQat === true ? 'on' : 'off'}`,
               )
             }
           } else if (freshFamily === 'minimax_m3') {
             const m3PrefixEnabled = config.enablePrefixCache !== false
-            const m3PagedEnabled = m3PrefixEnabled && config.usePagedCache !== false
             const m3BlockDiskEnabled = m3PrefixEnabled && config.enableBlockDiskCache !== false
             const m3Changed =
               config.enablePrefixCache === undefined ||
-              config.usePagedCache === undefined ||
+              config.usePagedCache !== false ||
               config.enableDiskCache !== false ||
               config.enableBlockDiskCache === undefined ||
               config.kvCacheQuantization !== 'auto' ||
               config.enableJit === true
             if (config.enablePrefixCache === undefined) config.enablePrefixCache = true
-            if (config.usePagedCache === undefined) config.usePagedCache = true
+            config.usePagedCache = false
             config.enableDiskCache = false
             if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true
             config.kvCacheQuantization = 'auto'
@@ -2440,11 +2428,9 @@ export class SessionManager extends EventEmitter {
             if (m3Changed) {
               this.pushLog(sessionId, !m3PrefixEnabled
                 ? '[INFO] MiniMax-M3 detected; native typed prefix cache explicitly disabled for this session'
-                : m3PagedEnabled
-                  ? '[INFO] MiniMax-M3 detected; using typed MSA paged prefix cache + block-disk L2 with idx_keys, generic KV quantization off, and JIT off'
-                  : m3BlockDiskEnabled
-                    ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
-                    : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
+                : m3BlockDiskEnabled
+                  ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
+                  : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
             }
           } else if (freshFamily === 'openpangu_v2') {
             const panguChanged =
@@ -2514,16 +2500,14 @@ export class SessionManager extends EventEmitter {
           // ===false (Force Off) must survive — do NOT let detected VL clobber a
           // deliberate Force Off. buildArgs emits --text-only for a detected-VL model
           // the user forced off so the engine honors it (is_mllm_model force_text_only).
-          if (
-            freshConfig.usePagedCache === true &&
-            (cacheTypeRequiresPaged(freshConfig.cacheType) || cacheSubtypeRequiresPaged(freshConfig.cacheSubtype)) &&
-            !((cacheTypeSupportsBlockDiskOnly(freshConfig.cacheType) || cacheSubtypeSupportsBlockDiskOnly(freshConfig.cacheSubtype)) && !isZayaCcaFamily(freshFamily) && config.enableBlockDiskCache === true) &&
-            config.continuousBatching !== false &&
-            config.enablePrefixCache !== false &&
-            config.usePagedCache === false
-          ) {
-            config.usePagedCache = true
-            this.pushLog(sessionId, `[INFO] ${freshConfig.family} ${freshConfig.cacheSubtype || freshConfig.cacheType} cache requires the in-memory paged tier; stale saved In-Memory Paged Cache (RAM)=Off was reset to auto-safe On`)
+          // In-RAM paged cache is OFF for every family (SSD block-disk L2 is the
+          // only tier), so a saved Off is never "stale" and is never reset to On.
+          // This block used to silently flip a deliberate Off back to On on
+          // re-detect, which is how paged RAM kept coming back after being
+          // turned off.
+          if (config.usePagedCache === true) {
+            config.usePagedCache = false
+            this.pushLog(sessionId, `[INFO] In-Memory Paged Cache (RAM) forced Off — SSD block-disk cache (L2) is the only cache tier`)
           }
           // Log if model type changed
           if (oldFamily && oldFamily !== 'auto' && freshConfig.toolParser && oldFamily !== freshConfig.toolParser) {
@@ -3443,7 +3427,8 @@ export class SessionManager extends EventEmitter {
           // disk-only block-aware prefix backend; typed/path-dependent families
           // still force their detected paged contract. openPangu is the exact
           // typed exception and stays on prompt-level disk L2.
-          usePagedCache: detectedFamily === 'deepseek-v4' ? true : (detected.usePagedCache ?? false),
+          // Paged RAM is OFF for every family, DSV4 included (SSD L2 only).
+          usePagedCache: false,
           enableDiskCache: detectedFamily === 'openpangu_v2',
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           // Size the index to the generic capacity target, never the old flat
@@ -4561,97 +4546,42 @@ export class SessionManager extends EventEmitter {
     // Prefix cache — requires --continuous-batching to take effect in vmlx-engine
     // Tool sessions benefit from prefix reuse, but an explicit user opt-out must
     // stay an opt-out; do not silently re-enable cache because tools are present.
-    const zayaCcaActive = isZayaCcaFamily(detectedFamily)
     const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
-    const hybridCacheActive = cacheTypeRequiresPaged(detected.cacheType)
-    const subtypePagedCacheActive = cacheSubtypeRequiresPaged(detected.cacheSubtype)
-    const architectureRequiresPagedCache =
-      zayaCcaActive ||
-      ((hybridCacheActive || subtypePagedCacheActive) && detected.usePagedCache === true)
-    const architectureBlockDiskOnlySupported =
-      (cacheTypeSupportsBlockDiskOnly(detected.cacheType) ||
-        cacheSubtypeSupportsBlockDiskOnly(detected.cacheSubtype) ||
-        m3Active ||
-        dsv4Active) &&
-      !zayaCcaActive &&
-      !openPanguExactTypedCache
-    const cacheLaunchPolicy = resolveCacheLaunchPolicy({
+    const effectivePagedCacheBlockSize = dsv4Active
+      ? DSV4_PAGED_CACHE_BLOCK_SIZE
+      : config.pagedCacheBlockSize
+    if (dsv4Active && config.pagedCacheBlockSize !== DSV4_PAGED_CACHE_BLOCK_SIZE) {
+      console.log(`[SESSION] DSV4-Flash detected: overriding pagedCacheBlockSize ${config.pagedCacheBlockSize} -> ${DSV4_PAGED_CACHE_BLOCK_SIZE} (native SWA+CSA/HCA composite cache)`)
+    }
+    const cacheLaunch = buildCacheLaunchArgs({
       continuousBatching: cacheStackActive,
       enablePrefixCache: config.enablePrefixCache !== false,
-      usePagedCache: openPanguExactTypedCache
-        ? false
-        : dsv4Active ? config.usePagedCache === true : config.usePagedCache ?? detected.usePagedCache ?? false,
+      // Accepted for migration compatibility only. The shared builder always
+      // emits --no-paged-cache and never its positive counterpart.
+      usePagedCache: false,
       enableDiskCache: !!config.enableDiskCache,
       enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
-      architectureRequiresPagedCache,
-      architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
+      noMemoryAwareCache: !!config.noMemoryAwareCache,
+      forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active,
+      prefixCacheSize: config.prefixCacheSize,
+      prefixCacheMaxBytes: config.prefixCacheMaxBytes,
+      cacheMemoryMb: config.cacheMemoryMb,
+      cacheMemoryPercent: config.cacheMemoryPercent,
+      cacheTtlMinutes: config.cacheTtlMinutes,
+      effectivePagedCacheBlockSize,
+      maxCacheBlocks: config.maxCacheBlocks,
+      diskCacheDir: config.diskCacheDir,
+      diskCacheMaxGb: config.diskCacheMaxGb,
+      blockDiskCacheDir: config.blockDiskCacheDir,
+      blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
+      blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
     })
+    const cacheLaunchPolicy = cacheLaunch.policy
     const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
-    const blockDiskOnly = cacheLaunchPolicy.enableBlockDiskCache && !usePagedCache
+    args.push(...cacheLaunch.args)
     if (dsv4Active) {
       console.log(`[SESSION] DSV4-Flash native cache policy: prefix=${prefixCacheOff ? 'off' : 'on'}, paged_ram=${usePagedCache ? 'on' : 'off'}, block_disk_l2=${cacheLaunchPolicy.enableBlockDiskCache ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived`)
-    }
-
-    if (prefixCacheOff) {
-      args.push('--disable-prefix-cache')
-    } else {
-      if (!dsv4Active && config.noMemoryAwareCache && !openPanguExactTypedCache) {
-        args.push('--no-memory-aware-cache')
-        const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
-        if (prefixCacheSize != null) {
-          args.push('--prefix-cache-size', prefixCacheSize.toString())
-        }
-        const prefixCacheMaxBytes = finitePositiveInteger(config.prefixCacheMaxBytes)
-        if (prefixCacheMaxBytes != null) {
-          args.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
-        }
-      } else {
-        // --cache-memory-mb / --cache-memory-percent bound RAM in both enabled
-        // product cache modes:
-        // for memory-aware cache they cap the prefix store, and for paged cache
-        // (#98) they set the L1 RAM byte ceiling for the block KV mirror that
-        // evicts free blocks. Emit them regardless of usePagedCache so the UI
-        // value actually reaches the engine. In SSD-only mode these controls
-        // stay omitted because there is no retained RAM payload tier.
-        const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-        if (!blockDiskOnly && cacheMemoryMb != null) {
-          args.push('--cache-memory-mb', cacheMemoryMb.toString())
-        }
-        const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-        if (!blockDiskOnly && cacheMemoryPercent != null) {
-          args.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
-        }
-        // Cache TTL (time-to-live for cache entries) — only meaningful for memory-aware cache, not paged cache
-        const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
-        if (cacheTtlMinutes != null && !usePagedCache && !blockDiskOnly) {
-          args.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
-        }
-      }
-    }
-
-    // Paged cache is a prefix cache backend — works for both LLMs and VLMs
-    if (!prefixCacheOff && usePagedCache) {
-      args.push('--use-paged-cache')
-    } else if (!prefixCacheOff && !usePagedCache) {
-      // Explicit user Off remains real even when block SSD L2 stays enabled.
-      args.push('--no-paged-cache')
-    }
-    if (!prefixCacheOff && (usePagedCache || cacheLaunchPolicy.enableBlockDiskCache)) {
-      const effectivePagedCacheBlockSize = dsv4Active
-        ? DSV4_PAGED_CACHE_BLOCK_SIZE
-        : config.pagedCacheBlockSize
-      if (dsv4Active && config.pagedCacheBlockSize !== DSV4_PAGED_CACHE_BLOCK_SIZE) {
-        console.log(`[SESSION] DSV4-Flash detected: overriding pagedCacheBlockSize ${config.pagedCacheBlockSize} -> ${DSV4_PAGED_CACHE_BLOCK_SIZE} (native SWA+CSA/HCA composite cache)`)
-      }
-      const pagedCacheBlockSize = finitePositiveInteger(effectivePagedCacheBlockSize)
-      if (pagedCacheBlockSize != null) {
-        args.push('--paged-cache-block-size', pagedCacheBlockSize.toString())
-      }
-      const maxCacheBlocks = finitePositiveInteger(config.maxCacheBlocks)
-      if (maxCacheBlocks != null) {
-        args.push('--max-cache-blocks', maxCacheBlocks.toString())
-      }
     }
 
     // KV cache quantization for stored prefix cache entries
@@ -4673,55 +4603,6 @@ export class SessionManager extends EventEmitter {
       if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
         args.push('--kv-cache-group-size', kvCacheGroupSize.toString())
       }
-    }
-
-    // Disk cache (L2 persistent cache) — RE-ENABLED in v1.3.15
-    // TQ-native serialization stores 3-bit compressed data directly (26x smaller).
-    // Metal crash fix: all mx.save_safetensors calls now happen on main thread;
-    // background writer only does atomic rename + SQLite update.
-    if (cacheLaunchPolicy.enableLegacyDiskCache) {
-      args.push('--enable-disk-cache')
-      if (config.diskCacheDir) {
-        args.push('--disk-cache-dir', config.diskCacheDir)
-      }
-      const diskCacheMaxGb = finiteNonNegativeNumber(config.diskCacheMaxGb)
-      if (diskCacheMaxGb != null) {
-        args.push('--disk-cache-max-gb', diskCacheMaxGb.toString())
-      }
-    }
-
-    // Block-level disk cache (L2 for paged cache blocks) — RE-ENABLED in v1.3.15
-    // All serialization happens on main thread (same Metal safety as above).
-    // Background writer only does atomic rename + SQLite index update.
-    if (cacheLaunchPolicy.enableBlockDiskCache) {
-      args.push('--enable-block-disk-cache')
-      if (config.blockDiskCacheDir) {
-        args.push('--block-disk-cache-dir', config.blockDiskCacheDir)
-      }
-      // ONLY a positive GB value is a real cap. 0 is NOT "unset": the engine
-      // reads `explicit_gb is not None` and BlockDiskStore documents
-      // `max_size_gb: 0 = unlimited`, so emitting 0 hands the whole disk to the
-      // cache while the UI reads "10%". Seeding 0 into fresh configs and then
-      // emitting it did exactly that on every install.
-      //
-      // There is no GB control in the UI any more. Unlimited is expressed by
-      // the PERCENT slider's 0, which the engine maps to the same 0.0 budget.
-      // So a 0 here only ever means "nobody chose a GB cap" — do not pass it.
-      const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
-      if (blockDiskCacheMaxGb != null && blockDiskCacheMaxGb > 0) {
-        args.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
-      }
-      // The percent is what the slider edits. The engine resolves
-      // explicit-GB-wins, so a stale positive GB still overrides it — which is
-      // why the seed above must not be a number nobody chose.
-      const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
-      if (blockDiskCacheMaxPercent != null) {
-        args.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())
-      }
-    } else if (!prefixCacheOff) {
-      // Prefix cache defaults its SSD L2 on in the engine. Preserve an explicit
-      // UI opt-out even when the paged RAM tier is also off.
-      args.push('--disable-block-disk-cache')
     }
 
     // Performance
@@ -4749,6 +4630,8 @@ export class SessionManager extends EventEmitter {
 
     const requestedDistributed = !!(config as any).distributedEnabled
     const requestedFlashMoe = !!(config as any).flashMoe
+    const zayaCcaActive = isZayaCcaFamily(detectedFamily)
+    const hybridCacheActive = cacheTypeRequiresPaged(detected.cacheType)
     const turboQuantActive = !!(detected as any).isTurboQuant
     const lagunaMixedSwaTurboQuantActive = isLagunaMixedSwaTurboQuantEffective({
       detected,

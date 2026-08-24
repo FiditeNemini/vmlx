@@ -195,19 +195,18 @@ def test_ui_defaults_prefix_on_paged_off_and_hy3_mtp_native_type_visible():
     # DEFAULT_CONFIG pre-detection fallback stays false; the effective default now
     # comes from the detection layer (see registry assertion below).
     assert "usePagedCache: false" in form
-    # The launch default honors the detected per-family policy (text ON / MLLM
-    # OFF). DSV4 no longer fails closed: composite-cache reuse has since been
-    # proven live -- an agentic turn served 12288/17558 prompt tokens from cache
-    # with coherent output, and a cold-L1 restart refaulted the prefix from SSD
-    # (cache_detail "paged+dsv4+disk") -- so DSV4 defaults paged ON, which the
-    # running engine's argv confirms via --use-paged-cache.
-    assert (
-        "const defaultUsePagedCache = dsv4Active ? true : (detectedUsePaged ?? false)"
-        in sessions
-    )
+    # 2026-08-23: in-RAM paged cache is OFF for EVERY family, DSV4 included.
+    # SSD block-disk L2 is the only cache tier, so the launch default is a flat
+    # false and no per-family capability feeds it.
+    assert "const defaultUsePagedCache = false" in sessions
+    assert "dsv4Active ? true" not in sessions
+    assert "detectedUsePaged" not in sessions
     assert "dsv4PrefixOptIn" not in sessions
-    # Registry resolves paged ON for autodetected text families, OFF for multimodal.
-    assert "usePagedCache: config.usePagedCache ?? (config.isMultimodal ? false : true)" in registry
+    # The detection fallback no longer lets an UNDECLARED text family acquire a
+    # RAM tier by omission -- that used to default every plain-KV text model
+    # paged-ON.
+    assert "usePagedCache: config.usePagedCache ?? false" in registry
+    assert "config.isMultimodal ? false : true" not in registry
     assert "'hy_v3'" in registry
     assert "nativeCacheType: hy3 ? 'plain_kv_v1'" in registry
     # The "native cache: <type>" note renders from the locale catalog since the

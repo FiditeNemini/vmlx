@@ -47,6 +47,7 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -638,7 +639,17 @@ def _record_metal_ws_model_baseline(reason: str = "model_loaded") -> None:
         max_ws / (1024**3),
         reason,
     )
+    # `active` here is measured immediately after clear_cache(), so it is the
+    # model's own resident footprint. Bound MLX's allocator cache against it:
+    # unbounded, the allocator retains freed buffers up to the whole wired
+    # working set (115 GB on this box) and vmmap shows them NONVOL, so the OS
+    # cannot reclaim them either. Advisory only -- this never refuses a request.
+    try:
+        from vmlx_engine.mlx_memory import apply_serving_cache_limit
 
+        apply_serving_cache_limit(int(active), mx=mx, log=logger)
+    except Exception as exc:  # noqa: BLE001 - must never break model load
+        logger.warning("Could not bound MLX allocator cache after load: %s", exc)
 
 def _argv_has_option(argv: list[str], option: str) -> bool:
     """Return whether an argparse option was supplied by the caller."""
@@ -8852,6 +8863,32 @@ def _get_responses_usage(output: GenerationOutput) -> "ResponsesUsage":
     )
 
 
+def _decode_usage_snapshot(
+    *,
+    completion_tokens: int,
+    first_token_ts: float | None,
+    last_token_ts: float,
+) -> dict[str, float | int] | None:
+    """Return exact server-side inter-token decode timing for local UI telemetry.
+
+    This receipt is attached only to the explicitly negotiated private
+    ``response.usage`` event. Standard Responses terminal usage stays
+    OpenAI-compatible. ``N`` output tokens contain ``N - 1`` measurable
+    inter-token intervals between the first and last engine output.
+    """
+    if completion_tokens <= 1 or first_token_ts is None:
+        return None
+    seconds = float(last_token_ts) - float(first_token_ts)
+    if not math.isfinite(seconds) or seconds <= 0:
+        return None
+    tokens = int(completion_tokens) - 1
+    return {
+        "tokens": tokens,
+        "seconds": seconds,
+        "tokens_per_second": tokens / seconds,
+    }
+
+
 def _reject_unsupported_logprobs_request(
     *,
     endpoint: str,
@@ -10701,6 +10738,121 @@ def _native_cache_status(
     )
     disk_cache = getattr(scheduler, "disk_cache", None)
 
+    # Cache family/registry metadata is a routing hint.  The source of truth
+    # for what the loaded model will actually carry through decode is the
+    # object graph returned by model.make_cache().  Both schedulers capture a
+    # tensor-free description at startup; attach it to every native-cache
+    # branch so /health and the visible Cache panel can expose disagreements
+    # instead of silently trusting the selected lane.
+    raw_runtime_layout = getattr(scheduler, "_runtime_cache_layout", None)
+    runtime_layout = (
+        dict(raw_runtime_layout)
+        if isinstance(raw_runtime_layout, dict)
+        else {}
+    )
+
+    def _runtime_indices(name: str) -> list[int]:
+        raw = runtime_layout.get(name, [])
+        if not isinstance(raw, (list, tuple)):
+            return []
+        result = []
+        for value in raw:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if index >= 0:
+                result.append(index)
+        return result
+
+    runtime_layer_count = int(runtime_layout.get("layer_count", 0) or 0)
+    runtime_attention_indices = _runtime_indices("attention_layer_indices")
+    runtime_cumulative_indices = _runtime_indices("cumulative_layer_indices")
+    runtime_parallel_indices = _runtime_indices("parallel_layer_indices")
+    runtime_rotating_indices = _runtime_indices("rotating_layer_indices")
+    runtime_quantized_indices = _runtime_indices("quantized_layer_indices")
+    runtime_unknown_indices = _runtime_indices("unknown_layer_indices")
+    runtime_layout_source = str(
+        runtime_layout.get("source") or "instantiated_make_cache"
+    )
+    runtime_layout_complete = bool(
+        runtime_layer_count > 0 and not runtime_unknown_indices
+    )
+
+    runtime_status: dict[str, Any] = {}
+    if runtime_layer_count > 0:
+        runtime_status = {
+            "runtime_cache_layout_source": runtime_layout_source,
+            "runtime_cache_factory": runtime_layout.get("factory"),
+            "runtime_cache_factory_delegated_to_model_make_cache": bool(
+                runtime_layout.get("delegated_to_model_make_cache", False)
+            ),
+            "runtime_cache_layer_count": runtime_layer_count,
+            "runtime_cache_slot_types": list(
+                runtime_layout.get("slot_types", []) or []
+            ),
+            "runtime_cache_slot_class_counts": dict(
+                runtime_layout.get("slot_class_counts", {}) or {}
+            ),
+            "runtime_cache_effective_class_counts": dict(
+                runtime_layout.get("effective_class_counts", {}) or {}
+            ),
+            "runtime_cache_owner_component_types": list(
+                runtime_layout.get("owner_component_types", []) or []
+            ),
+            "runtime_cache_owner_component_class_counts": dict(
+                runtime_layout.get("owner_component_class_counts", {}) or {}
+            ),
+            "runtime_cache_owner_component_source": runtime_layout.get(
+                "owner_component_source"
+            ),
+            "parameter_dtype_harmonization": dict(
+                runtime_layout.get("parameter_dtype_harmonization", {}) or {}
+            ),
+            "runtime_cache_attention_layer_indices": runtime_attention_indices,
+            "runtime_cache_cumulative_layer_indices": runtime_cumulative_indices,
+            "runtime_cache_parallel_layer_indices": runtime_parallel_indices,
+            "runtime_cache_rotating_layer_indices": runtime_rotating_indices,
+            "runtime_cache_quantized_layer_indices": runtime_quantized_indices,
+            "runtime_cache_unknown_layer_indices": runtime_unknown_indices,
+            "runtime_cache_layout_complete": runtime_layout_complete,
+        }
+
+    def _with_runtime_layout(status: dict[str, Any]) -> dict[str, Any]:
+        if not runtime_status:
+            return status
+        status.update(runtime_status)
+        if runtime_layout_complete:
+            # Compatibility aliases drive the existing visible layer cards.
+            # Overwrite registry-derived values only when every instantiated
+            # slot has a known attention/cumulative semantic classification.
+            status["cache_layer_count"] = runtime_layer_count
+            status["kv_layer_indices"] = runtime_attention_indices
+            status["kv_layer_indices_source"] = runtime_layout_source
+            status["companion_layer_indices"] = runtime_cumulative_indices
+            status["companion_layer_count"] = len(runtime_cumulative_indices)
+            status["sliding_attention_layer_indices"] = runtime_rotating_indices
+            rotating = set(runtime_rotating_indices)
+            status["full_attention_layer_indices"] = [
+                index
+                for index in runtime_attention_indices
+                if index not in rotating
+            ]
+            owner_types = list(
+                runtime_layout.get("owner_component_types", []) or []
+            )
+            if len(owner_types) == runtime_layer_count:
+                companion_owners: dict[str, int] = {}
+                for index in runtime_cumulative_indices:
+                    owner = str(owner_types[index])
+                    companion_owners[owner] = companion_owners.get(owner, 0) + 1
+                status["companion_state_owner_class_counts"] = companion_owners
+                if len(companion_owners) == 1:
+                    status["companion_state_owner"] = next(
+                        iter(companion_owners)
+                    )
+        return status
+
     if getattr(scheduler, "_uses_dsv4_cache", False) or family_name == "deepseek_v4":
         pool_quant_requested = str(os.environ.get("DSV4_POOL_QUANT", "0")).lower() in (
             "1",
@@ -10857,7 +11009,7 @@ def _native_cache_status(
         if native_state_memory:
             status["native_state_memory"] = native_state_memory
         status.update(layout)
-        return status
+        return _with_runtime_layout(status)
 
     if (
         family_name == "openpangu_v2"
@@ -10874,7 +11026,7 @@ def _native_cache_status(
                 getattr(getattr(scheduler, "config", None), "enable_prefix_cache", False),
             )
         )
-        return {
+        return _with_runtime_layout({
             "family": "openpangu_v2",
             "schema": "openpangu_v2_composite_v2",
             "cache_type": "native_path_dependent_composite",
@@ -10910,7 +11062,7 @@ def _native_cache_status(
             ),
             "prompt_disk_l2": bool(disk_cache is not None),
             "block_disk_l2": False,
-        }
+        })
 
     family_probe_parts = [family_name, scheduler_family]
     if cfg is not None:
@@ -10979,14 +11131,14 @@ def _native_cache_status(
             "block_disk_l2": bool(block_disk_store is not None),
         }
         status.update(layout)
-        return status
+        return _with_runtime_layout(status)
 
     if (
         family_name == "zaya"
         or cache_subtype == "zaya_cca"
         or getattr(scheduler, "_uses_zaya_cache", False)
     ):
-        return {
+        return _with_runtime_layout({
             "family": "zaya",
             "schema": "zaya_cca_v1",
             "cache_type": "typed_cca",
@@ -11001,19 +11153,55 @@ def _native_cache_status(
             "paged": paged_backend_active,
             "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
-        }
+        })
 
     if (
         (getattr(scheduler, "_is_hybrid", False) or cache_type == "hybrid")
         and not getattr(scheduler, "_uses_dsv4_cache", False)
         and not getattr(scheduler, "_uses_zaya_cache", False)
     ):
+        batch_generator = getattr(scheduler, "batch_generator", None)
         ssm_cache = getattr(scheduler, "_ssm_state_cache", None)
-        ssm_entries = None
-        try:
-            ssm_entries = len(getattr(ssm_cache, "_store", {}) or {})
-        except Exception:
-            pass
+        if ssm_cache is None and batch_generator is not None:
+            ssm_cache = getattr(batch_generator, "_ssm_state_cache", None)
+        ssm_disk = (
+            getattr(ssm_cache, "_disk", None)
+            if ssm_cache is not None
+            else getattr(scheduler, "_ssm_companion_disk_store", None)
+        )
+        if ssm_cache is not None:
+            try:
+                cache_size = getattr(ssm_cache, "size", None)
+                ssm_entries = (
+                    int(cache_size or 0)
+                    if cache_size is not None
+                    else len(getattr(ssm_cache, "_store", {}) or {})
+                )
+            except Exception:
+                ssm_entries = len(getattr(ssm_cache, "_store", {}) or {})
+            ssm_resident_bytes = int(
+                getattr(ssm_cache, "total_nbytes", 0) or 0
+            )
+            ssm_ram_enabled = bool(
+                getattr(ssm_cache, "ram_enabled", False)
+            )
+        else:
+            config = getattr(scheduler, "config", None)
+            configured_entries = int(
+                getattr(config, "ssm_state_cache_size", 0) or 0
+            )
+            configured_mb = getattr(config, "ssm_state_cache_max_mb", None)
+            ssm_entries = 0
+            ssm_resident_bytes = 0
+            ssm_ram_enabled = bool(
+                configured_entries > 0
+                and (configured_mb is None or int(configured_mb) > 0)
+            )
+        ssm_disk_enabled = ssm_disk is not None
+        if ssm_ram_enabled:
+            ssm_storage = "ram_and_ssd" if ssm_disk_enabled else "ram_only"
+        else:
+            ssm_storage = "ssd_only" if ssm_disk_enabled else "disabled"
         hybrid_live_tq_policy = getattr(
             scheduler, "_hybrid_live_tq_policy", None
         )
@@ -11026,6 +11214,41 @@ def _native_cache_status(
         )
         hybrid_tq_companion_layers = list(
             getattr(scheduler, "_hybrid_live_tq_companion_layers", []) or []
+        )
+        # The multimodal scheduler owns the batch generator, and the generator
+        # is the object that resolves the instantiated hybrid cache layout.
+        # Reading only the wrapper scheduler made live Qwen3.8 health claim an
+        # empty attention-layer list even though the runtime had resolved all
+        # 16 full-attention positions. Keep the text-scheduler owner first,
+        # then fall back to the MLLM owner before using TQ metadata.
+        scheduler_kv_positions = list(
+            getattr(scheduler, "_hybrid_kv_positions", []) or []
+        )
+        runtime_kv_positions = list(
+            getattr(scheduler, "_runtime_cache_kv_positions", []) or []
+        )
+        batch_kv_positions = list(
+            getattr(batch_generator, "_hybrid_kv_positions", []) or []
+        )
+        if scheduler_kv_positions:
+            hybrid_kv_positions = scheduler_kv_positions
+            hybrid_kv_positions_source = "scheduler_runtime_cache"
+        elif runtime_kv_positions:
+            hybrid_kv_positions = runtime_kv_positions
+            hybrid_kv_positions_source = "instantiated_make_cache"
+        elif batch_kv_positions:
+            hybrid_kv_positions = batch_kv_positions
+            hybrid_kv_positions_source = "mllm_batch_generator"
+        else:
+            hybrid_kv_positions = hybrid_tq_attention_layers
+            hybrid_kv_positions_source = (
+                "turboquant_runtime" if hybrid_tq_attention_layers else None
+            )
+        hybrid_cache_layer_count = int(
+            getattr(scheduler, "_hybrid_num_layers", 0)
+            or getattr(scheduler, "_runtime_cache_num_layers", 0)
+            or getattr(batch_generator, "_hybrid_num_layers", 0)
+            or 0
         )
         # Live encode is gated by compress_after (default 0 -> objects-only, no
         # live decode-time encoding). Report the truthful mode: "live_decode"
@@ -11057,7 +11280,7 @@ def _native_cache_status(
             stored_kv_group = int(getattr(scheduler, "_kv_cache_group_size", 64) or 64)
         except (TypeError, ValueError):
             stored_kv_group = 64
-        return {
+        return _with_runtime_layout({
             "family": family_name or scheduler_family or "hybrid",
             "schema": "hybrid_ssm_v1",
             "cache_type": "hybrid_ssm_typed",
@@ -11116,11 +11339,16 @@ def _native_cache_status(
             "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
             "ssm_entries": ssm_entries,
-            "kv_layer_indices": list(
-                getattr(scheduler, "_hybrid_kv_positions", [])
-                or hybrid_tq_attention_layers
+            "ssm_resident_bytes": ssm_resident_bytes,
+            "ssm_ram_enabled": ssm_ram_enabled,
+            "ssm_storage": ssm_storage,
+            "kv_layer_indices": hybrid_kv_positions,
+            "kv_layer_indices_source": hybrid_kv_positions_source,
+            "cache_layer_count": hybrid_cache_layer_count,
+            "companion_layer_count": max(
+                0, hybrid_cache_layer_count - len(hybrid_kv_positions)
             ),
-        }
+        })
 
     if (
         getattr(scheduler, "_mixed_attention_cache_model", False)
@@ -11175,7 +11403,7 @@ def _native_cache_status(
             storage_quantization["restore_policy"] = (
                 "decode_full_attention_tq_and_restore_rotating_state"
             )
-        return {
+        return _with_runtime_layout({
             "family": family_name or scheduler_family or "mixed_attention",
             "schema": "mixed_swa_kv_v1",
             "cache_type": "mixed_swa_kv",
@@ -11198,7 +11426,7 @@ def _native_cache_status(
             "paged": paged_backend_active,
             "block_disk_only": block_disk_only,
             "block_disk_l2": bool(block_disk_store is not None),
-        }
+        })
 
     tq_enabled = bool(getattr(scheduler, "_tq_active", False))
     try:
@@ -11209,7 +11437,7 @@ def _native_cache_status(
         stored_kv_group = int(getattr(scheduler, "_kv_cache_group_size", 64) or 64)
     except (TypeError, ValueError):
         stored_kv_group = 64
-    return {
+    return _with_runtime_layout({
         "family": family_name or scheduler_family or "plain_attention",
         "schema": "plain_kv_v1",
         "cache_type": "block_disk_kv" if block_disk_only else "paged_kv",
@@ -11227,7 +11455,7 @@ def _native_cache_status(
         "paged": paged_backend_active,
         "block_disk_only": block_disk_only,
         "block_disk_l2": bool(block_disk_store is not None),
-    }
+    })
 
 
 def _stat_int(stats: dict[str, Any] | None, *keys: str) -> int:
@@ -11404,6 +11632,12 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
             "disk_enabled": True,
             "disk_directory": str(_telemetry_attr(disk, "directory") or ""),
         }
+        snapshot["ram_enabled"] = bool(
+            max_entries > 0 and (max_mb is None or int(max_mb) > 0)
+        )
+        snapshot["storage"] = (
+            "ram_and_ssd" if snapshot["ram_enabled"] else "ssd_only"
+        )
         stats_fn = _telemetry_attr(disk, "stats")
         if callable(stats_fn):
             try:
@@ -11427,6 +11661,15 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
         max_bytes = _telemetry_attr(ssm_cache, "_max_bytes")
     if max_bytes is not None:
         max_bytes = int(max_bytes)
+    ram_enabled = _telemetry_attr(ssm_cache, "ram_enabled")
+    if ram_enabled is None:
+        ram_enabled = bool(
+            int(max_entries or 0) > 0
+            and (max_bytes is None or max_bytes > 0)
+        )
+    disk_enabled = bool(
+        _telemetry_attr(ssm_cache, "disk_enabled", False)
+    )
     snapshot: dict[str, Any] = {
         "entries": int(entries or 0),
         "max_entries": int(max_entries or 0),
@@ -11447,8 +11690,16 @@ def _ssm_companion_snapshot(scheduler: Any) -> dict[str, Any] | None:
             if max_bytes is not None
             else None
         ),
-        "disk_enabled": bool(
-            _telemetry_attr(ssm_cache, "disk_enabled", False)
+        "ram_enabled": bool(ram_enabled),
+        "disk_enabled": disk_enabled,
+        "storage": (
+            "ram_and_ssd"
+            if ram_enabled and disk_enabled
+            else "ram_only"
+            if ram_enabled
+            else "ssd_only"
+            if disk_enabled
+            else "disabled"
         ),
         "disk_directory": _telemetry_attr(ssm_cache, "disk_directory"),
     }
@@ -11592,6 +11843,43 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
             if paged_cache is not None
             else 0
         )
+        # Account every retained prefix-cache payload tier, not just paged KV.
+        # In SSD-only block mode scheduler_cache.nbytes is index metadata (or
+        # absent), while a standalone memory-aware/legacy prefix cache reports
+        # its actual payload bytes there. SSM companion state is a distinct L1
+        # that previously hid >1 GB while this total reported zero.
+        prefix_resident_bytes = (
+            _stat_int(scheduler_cache, "nbytes") if paged_mgr is None else 0
+        )
+        prefix_max_resident_bytes = (
+            _stat_int(scheduler_cache, "max_bytes") if paged_mgr is None else 0
+        )
+        ssm_snapshot = (
+            result.get("ssm_companion")
+            if isinstance(result.get("ssm_companion"), dict)
+            else {}
+        )
+        ssm_resident_bytes = int(ssm_snapshot.get("nbytes", 0) or 0)
+        ssm_max_resident_bytes = int(ssm_snapshot.get("max_bytes", 0) or 0)
+        paged_ram_enabled = bool(
+            paged_cache is not None
+            and paged_cache.get("paged_ram_enabled", False)
+        )
+        prefix_ram_enabled = bool(
+            paged_mgr is None and prefix_max_resident_bytes > 0
+        )
+        ssm_ram_enabled = bool(ssm_snapshot.get("ram_enabled", False))
+        retained_cache_bytes = (
+            l1_resident_bytes + prefix_resident_bytes + ssm_resident_bytes
+        )
+        retained_cache_max_bytes = (
+            l1_max_resident_bytes
+            + prefix_max_resident_bytes
+            + ssm_max_resident_bytes
+        )
+        retained_cache_ram_enabled = bool(
+            paged_ram_enabled or prefix_ram_enabled or ssm_ram_enabled
+        )
         result["totals"] = {
             "ram_tokens_cached": ram_tokens_cached,
             "l1_indexed_tokens": l1_indexed_tokens,
@@ -11606,6 +11894,25 @@ def _cache_telemetry_snapshot(scheduler: Any | None = None) -> dict[str, Any]:
                 if paged_cache is not None
                 else 0
             ),
+            "prefix_resident_bytes": prefix_resident_bytes,
+            "ssm_resident_bytes": ssm_resident_bytes,
+            "retained_cache_bytes": retained_cache_bytes,
+            "retained_cache_bytes_mb": round(
+                retained_cache_bytes / (1024 * 1024), 2
+            ),
+            "retained_cache_max_bytes": retained_cache_max_bytes,
+            "retained_cache_max_bytes_mb": round(
+                retained_cache_max_bytes / (1024 * 1024), 2
+            ),
+            "retained_cache_ram_enabled": retained_cache_ram_enabled,
+            "retained_cache_policy": (
+                "enabled" if retained_cache_ram_enabled else "disabled"
+            ),
+            "retained_cache_components": {
+                "block_kv_bytes": l1_resident_bytes,
+                "prefix_bytes": prefix_resident_bytes,
+                "ssm_companion_bytes": ssm_resident_bytes,
+            },
             "l2_prompt_tokens_on_disk": disk_tokens,
             "l2_block_tokens_on_disk": block_tokens,
             "l2_ssm_tokens_on_disk": ssm_tokens,
@@ -26196,6 +26503,13 @@ async def stream_responses_api(
                     "output_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
                 }
+                _decode_usage = _decode_usage_snapshot(
+                    completion_tokens=completion_tokens,
+                    first_token_ts=_decode_first_ts,
+                    last_token_ts=_decode_last_ts,
+                )
+                if _decode_usage is not None:
+                    usage_obj["vmlx_decode"] = _decode_usage
                 if _cached > 0 or _cache_detail:
                     _ictd = {"cached_tokens": _cached}
                     if _cache_detail:
@@ -26806,6 +27120,13 @@ async def stream_responses_api(
                                 prompt_tokens + completion_tokens + _ans_ct
                             ),
                         }
+                        _answer_decode_usage = _decode_usage_snapshot(
+                            completion_tokens=completion_tokens + _ans_ct,
+                            first_token_ts=_decode_first_ts,
+                            last_token_ts=_decode_last_ts,
+                        )
+                        if _answer_decode_usage is not None:
+                            _answer_usage["vmlx_decode"] = _answer_decode_usage
                         # The answer pass is a continuation of the same
                         # Responses request. Preserve the first pass's cache
                         # accounting instead of making the last incremental
@@ -27294,6 +27615,29 @@ async def stream_responses_api(
             f"{_decode_elapsed:.2f}s "
             f"({(completion_tokens - 1) / _decode_elapsed:.1f} tok/s decode) "
             f"therm={thermal_state_name()}"
+        )
+    # Parser branches can ``continue`` after token tracking (reasoning and
+    # tool-control paths in particular), skipping the per-output private usage
+    # event above. The local Electron client needs one unconditional full-count
+    # receipt before the standard terminal so an agent/tool exchange cannot
+    # end on a stale partial token/timing snapshot. This event remains behind
+    # the explicit local-only negotiation header; public Responses streams keep
+    # their standard terminal usage shape and event union.
+    if incremental_usage_extension:
+        _terminal_private_usage = dict(completed_response["usage"])
+        _terminal_decode_usage = _decode_usage_snapshot(
+            completion_tokens=completion_tokens,
+            first_token_ts=_decode_first_ts,
+            last_token_ts=_decode_last_ts,
+        )
+        if _terminal_decode_usage is not None:
+            _terminal_private_usage["vmlx_decode"] = _terminal_decode_usage
+        yield _sse(
+            "response.usage",
+            {
+                "type": "response.usage",
+                "usage": _terminal_private_usage,
+            },
         )
     yield _sse(
         _response_terminal.event_type,

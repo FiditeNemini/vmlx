@@ -285,6 +285,35 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const tqStoredPrefix = turboQuantKv?.storage_encode_enabled
     ? `${turboQuantKv.stored_prefix_quantization ?? 'TurboQuant'} (K ${tqKeyBits} / V ${tqValueBits})`
     : null
+  const runtimeCacheObjects = nativeCache?.runtime_cache_effective_class_counts
+    ? Object.entries(nativeCache.runtime_cache_effective_class_counts)
+        .map(([className, count]) => `${className} × ${Number(count)}`)
+        .join(', ')
+    : ''
+  const runtimeCacheOwners = nativeCache?.runtime_cache_owner_component_class_counts
+    ? Object.entries(nativeCache.runtime_cache_owner_component_class_counts)
+        .map(([className, count]) => `${className} × ${Number(count)}`)
+        .join(', ')
+    : ''
+  const dtypeHarmonization = nativeCache?.parameter_dtype_harmonization
+  const formatDtypeCounts = (counts: any): string => counts && typeof counts === 'object'
+    ? Object.entries(counts)
+        .map(([dtype, count]) => `${dtype} × ${Number(count)}`)
+        .join(', ')
+    : ''
+  const storedAttentionDtypes = formatDtypeCounts(
+    blockDiskCache?.latest_payload?.original_attention_kv_dtype_counts,
+  )
+  const physicalBlockDtypes = formatDtypeCounts(
+    blockDiskCache?.latest_payload?.physical_tensor_dtype_counts,
+  )
+  const displayComponents = Array.isArray(nativeCache?.components)
+    ? nativeCache.components.map((component: string) => (
+        component === 'ssm_companion_state'
+          ? 'recurrent_companion_state'
+          : component
+      ))
+    : []
 
   return (
     <div className="space-y-4">
@@ -298,6 +327,20 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
         <div>
           <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('sessions.cachePanel.cacheTotals')}</h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
+            {cacheTotals.retained_cache_bytes != null && (
+              <StatCard
+                label={t('sessions.cache.retainedCacheRam')}
+                value={formatCacheStorageBytes(cacheTotals.retained_cache_bytes)}
+              />
+            )}
+            {cacheTotals.retained_cache_ram_enabled != null && (
+              <StatCard
+                label={t('sessions.cache.retainedRamPolicy')}
+                value={cacheTotals.retained_cache_ram_enabled
+                  ? t('sessions.cache.statusEnabled')
+                  : t('sessions.cache.statusDisabled')}
+              />
+            )}
             {cacheTotals.ram_tokens_cached != null && (
               <StatCard label={t('sessions.cache.ramResidentTokens')} value={(cacheTotals.ram_tokens_cached || 0).toLocaleString()} />
             )}
@@ -403,6 +446,16 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             {schedulerCache.cow_copies != null && schedulerCache.cow_copies > 0 && (
               <StatCard label={t('sessions.cache.cowCopies')} value={String(schedulerCache.cow_copies)} />
             )}
+            {schedulerCache.reconstruct_memo_allowed != null && (
+              <StatCard
+                label={t('sessions.cache.reconstructMemo')}
+                value={schedulerCache.reconstruct_memo_allowed
+                  ? (schedulerCache.reconstruct_memo_resident
+                      ? t('sessions.cache.reconstructMemoResident')
+                      : t('sessions.cache.reconstructMemoEmpty'))
+                  : t('sessions.cache.reconstructMemoDisabledSsd')}
+              />
+            )}
             {/* F4 (audit 2026-04-08): Agent 1's PrefixCacheManager
                  cache_type LRU exposes per-type byte / entry counts.
                  Display them when present so users can see system /
@@ -455,14 +508,18 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                     label={t('sessions.cache.entries')}
                     value={`${ssm.entries ?? 0} / ${ssm.max_entries ?? 0}`}
                   />
-                  {ssm.nbytes_mb != null && ssm.nbytes_mb > 0 && (
-                    <StatCard
-                      label={t('sessions.cache.ssmBytes')}
-                      value={ssm.max_bytes_mb != null
-                        ? `${ssm.nbytes_mb.toFixed(1)} / ${ssm.max_bytes_mb.toFixed(1)} MB`
-                        : `${ssm.nbytes_mb.toFixed(1)} MB`}
-                    />
-                  )}
+                  <StatCard
+                    label={t('sessions.cache.ssmRamTier')}
+                    value={ssm.ram_enabled
+                      ? t('sessions.cache.statusEnabled')
+                      : t('sessions.cache.statusDisabled')}
+                  />
+                  <StatCard
+                    label={t('sessions.cache.ssmBytes')}
+                    value={ssm.max_bytes != null && ssm.max_bytes > 0
+                      ? `${formatCacheStorageBytes(ssm.nbytes)} / ${formatCacheStorageBytes(ssm.max_bytes)}`
+                      : formatCacheStorageBytes(ssm.nbytes)}
+                  />
                   {ssm.evictions != null && (
                     <StatCard
                       label={t('sessions.cache.ssmEvictions')}
@@ -481,6 +538,12 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                     <StatCard
                       label={t('sessions.cache.ssmL2HitsMisses')}
                       value={`${ssm.disk.hits || 0} / ${ssm.disk.misses || 0}`}
+                    />
+                  )}
+                  {ssm.disk?.latest_payload?.physical_tensor_dtype_counts && (
+                    <StatCard
+                      label={t('sessions.cache.companionDtypes')}
+                      value={formatDtypeCounts(ssm.disk.latest_payload.physical_tensor_dtype_counts)}
                     />
                   )}
                 </>
@@ -746,7 +809,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                 value={
                   tqStoredPrefix ?? (attentionKvStorage.enabled
                     ? t('sessions.cache.attentionKvL2Value', { bits: attentionKvStorage.bits, groupSize: attentionKvStorage.group_size ?? 64 })
-                    : t('sessions.cache.statusDisabled'))
+                    : t('sessions.cache.attentionKvFullPrecision'))
                 }
               />
             )}
@@ -766,10 +829,84 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
                 }
               />
             )}
-            {nativeCache?.components?.length > 0 && (
+            {displayComponents.length > 0 && (
               <StatCard
                 label={t('sessions.cache.components')}
-                value={nativeCache.components.join(', ')}
+                value={displayComponents.join(', ')}
+              />
+            )}
+            {runtimeCacheObjects && (
+              <StatCard
+                label={t('sessions.cache.runtimeCacheObjects')}
+                value={runtimeCacheObjects}
+              />
+            )}
+            {runtimeCacheOwners && (
+              <StatCard
+                label={t('sessions.cache.runtimeCacheOwners')}
+                value={runtimeCacheOwners}
+              />
+            )}
+            {dtypeHarmonization?.enabled && (
+              <StatCard
+                label={t('sessions.cache.dtypeHarmonization')}
+                value={`${dtypeHarmonization.cast ?? 0} F16→BF16; ${dtypeHarmonization.preserved_f16 ?? 0} F16 preserved`}
+              />
+            )}
+            {storedAttentionDtypes && (
+              <StatCard
+                label={t('sessions.cache.storedKvDtypes')}
+                value={storedAttentionDtypes}
+              />
+            )}
+            {physicalBlockDtypes && (
+              <StatCard
+                label={t('sessions.cache.physicalKvDtypes')}
+                value={physicalBlockDtypes}
+              />
+            )}
+            {Array.isArray(nativeCache?.kv_layer_indices) && nativeCache.cache_layer_count > 0 && (
+              <StatCard
+                label={t('sessions.cache.attentionLayers')}
+                value={`${nativeCache.kv_layer_indices.length} / ${nativeCache.cache_layer_count}`}
+              />
+            )}
+            {nativeCache?.companion_layer_count != null && nativeCache.cache_layer_count > 0 && (
+              <StatCard
+                label={t('sessions.cache.companionLayers')}
+                value={`${nativeCache.companion_layer_count} / ${nativeCache.cache_layer_count}`}
+              />
+            )}
+            {Array.isArray(nativeCache?.kv_layer_indices) && nativeCache.kv_layer_indices.length > 0 && (
+              <StatCard
+                label={t('sessions.cache.attentionLayerIds')}
+                value={nativeCache.kv_layer_indices.join(', ')}
+              />
+            )}
+            {Array.isArray(nativeCache?.full_attention_layer_indices) && nativeCache.full_attention_layer_indices.length > 0 && (
+              <StatCard
+                label={t('sessions.cache.fullAttentionLayerIds')}
+                value={nativeCache.full_attention_layer_indices.join(', ')}
+              />
+            )}
+            {Array.isArray(nativeCache?.sliding_attention_layer_indices) && nativeCache.sliding_attention_layer_indices.length > 0 && (
+              <StatCard
+                label={t('sessions.cache.slidingAttentionLayerIds')}
+                value={nativeCache.sliding_attention_layer_indices.join(', ')}
+              />
+            )}
+            {Array.isArray(nativeCache?.runtime_cache_unknown_layer_indices) && nativeCache.runtime_cache_unknown_layer_indices.length > 0 && (
+              <StatCard
+                label={t('sessions.cache.unclassifiedLayerIds')}
+                value={nativeCache.runtime_cache_unknown_layer_indices.join(', ')}
+              />
+            )}
+            {nativeCache?.kv_layer_indices_source && (
+              <StatCard
+                label={t('sessions.cache.layoutEvidence')}
+                value={['instantiated_make_cache', 'instantiated_runtime_cache_factory'].includes(nativeCache.kv_layer_indices_source)
+                  ? t('sessions.cache.instantiatedRuntimeCache')
+                  : nativeCache.kv_layer_indices_source}
               />
             )}
           </div>

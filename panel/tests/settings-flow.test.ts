@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
-import { resolveCacheLaunchPolicy } from '../src/shared/cacheControlPolicy'
+import { buildCacheLaunchArgs } from '../src/shared/cacheLaunchArgs'
 import { SLOW_FAMILY_TIMEOUTS } from '../src/shared/slowFamilyTimeouts'
 import { buildMcpPolicyArgs } from '../src/shared/mcpPolicy'
 import {
@@ -57,6 +57,7 @@ interface SessionConfig {
     diskCacheDir: string
     enableBlockDiskCache: boolean
     blockDiskCacheMaxGb: number
+    blockDiskCacheMaxPercent?: number
     blockDiskCacheDir: string
     streamInterval: number
     maxTokens: number
@@ -374,11 +375,6 @@ function buildCommandPreview(
                 : false
     const zayaCcaActive = isZayaCcaFamily(detectedFamily)
     const hybridCacheActive = detected?.cacheType === 'hybrid' || detected?.cacheType === 'mamba'
-    const architectureBlockDiskOnlySupported =
-        (cacheTypeSupportsBlockDiskOnly(detected?.cacheType) ||
-            cacheSubtypeSupportsBlockDiskOnly(detected?.cacheSubtype) ||
-            dsv4Active) &&
-        !zayaCcaActive && detectedFamily !== 'openpangu_v2'
     const effectiveDistributed = requestedDistributed && !dsv4Active
     const effectiveFlashMoe = requestedFlashMoe && !effectiveDistributed && !dsv4Active
     if (dsv4Active && typeof detected?.dsv4PoolQuantDefault === 'boolean') {
@@ -450,60 +446,33 @@ function buildCommandPreview(
         supportsThinking: detected?.supportsThinking,
     })
 
-    const cacheLaunchPolicy = resolveCacheLaunchPolicy({
+    const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
+    const cacheLaunch = buildCacheLaunchArgs({
         continuousBatching: cacheStackActive,
         enablePrefixCache: config.enablePrefixCache !== false,
-        usePagedCache: dsv4Active
-            ? config.usePagedCache === true
-            : config.usePagedCache ?? detected?.usePagedCache ?? false,
+        usePagedCache: false,
         enableDiskCache: !!config.enableDiskCache,
-        enableBlockDiskCache: !!config.enableBlockDiskCache,
-        architectureRequiresPagedCache:
-            zayaCcaActive ||
-            ((cacheTypeRequiresPaged(detected?.cacheType) || cacheSubtypeRequiresPaged(detected?.cacheSubtype)) && detected?.usePagedCache === true),
-        architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
-    })
-    const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
-    const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache
-    const blockDiskOnly = cacheLaunchPolicy.enableBlockDiskCache && !usePagedCache
-
-    if (prefixCacheOff) {
-        parts.push('--disable-prefix-cache')
-    } else {
-        if (!dsv4Active && config.noMemoryAwareCache) {
-            parts.push('--no-memory-aware-cache')
-            const prefixCacheSize = finitePositiveInteger(config.prefixCacheSize)
-            if (prefixCacheSize != null) parts.push('--prefix-cache-size', prefixCacheSize.toString())
-            const prefixCacheMaxBytes = finitePositiveInteger(config.prefixCacheMaxBytes)
-            if (prefixCacheMaxBytes != null) parts.push('--prefix-cache-max-bytes', prefixCacheMaxBytes.toString())
-        } else {
-            // --cache-memory-mb / --cache-memory-percent bound RAM in BOTH modes:
-            // memory-aware cap for the prefix store, and the paged L1 RAM byte
-            // ceiling (#98). Mirrors sessions.ts: emit regardless of usePagedCache.
-            const cacheMemoryMb = finitePositiveInteger(config.cacheMemoryMb)
-            if (!blockDiskOnly && cacheMemoryMb != null) parts.push('--cache-memory-mb', cacheMemoryMb.toString())
-            const cacheMemoryPercent = finitePositiveNumber(config.cacheMemoryPercent)
-            if (!blockDiskOnly && cacheMemoryPercent != null) parts.push('--cache-memory-percent', (cacheMemoryPercent / 100).toString())
-            // Cache TTL stays memory-aware-only; paged backend has no TTL.
-            const cacheTtlMinutes = finitePositiveNumber(config.cacheTtlMinutes)
-            if (cacheTtlMinutes != null && !usePagedCache && !blockDiskOnly) parts.push('--cache-ttl-minutes', cacheTtlMinutes.toString())
-        }
-    }
-
-    if (!prefixCacheOff && usePagedCache) {
-        parts.push('--use-paged-cache')
-    } else if (!prefixCacheOff && !usePagedCache) {
-        parts.push('--no-paged-cache')
-    }
-    if (!prefixCacheOff && (usePagedCache || cacheLaunchPolicy.enableBlockDiskCache)) {
-        const effectivePagedCacheBlockSize = dsv4Active
+        enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
+        noMemoryAwareCache: !!config.noMemoryAwareCache,
+        forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active,
+        prefixCacheSize: config.prefixCacheSize,
+        prefixCacheMaxBytes: config.prefixCacheMaxBytes,
+        cacheMemoryMb: config.cacheMemoryMb,
+        cacheMemoryPercent: config.cacheMemoryPercent,
+        cacheTtlMinutes: config.cacheTtlMinutes,
+        effectivePagedCacheBlockSize: dsv4Active
             ? DSV4_PAGED_CACHE_BLOCK_SIZE
-            : config.pagedCacheBlockSize
-        const pagedCacheBlockSize = finitePositiveInteger(effectivePagedCacheBlockSize)
-        if (pagedCacheBlockSize != null) parts.push('--paged-cache-block-size', pagedCacheBlockSize.toString())
-        const maxCacheBlocks = finitePositiveInteger(config.maxCacheBlocks)
-        if (maxCacheBlocks != null) parts.push('--max-cache-blocks', maxCacheBlocks.toString())
-    }
+            : config.pagedCacheBlockSize,
+        maxCacheBlocks: config.maxCacheBlocks,
+        diskCacheDir: config.diskCacheDir,
+        diskCacheMaxGb: config.diskCacheMaxGb,
+        blockDiskCacheDir: config.blockDiskCacheDir,
+        blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
+        blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
+    })
+    const cacheLaunchPolicy = cacheLaunch.policy
+    const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
+    parts.push(...cacheLaunch.args)
 
     if (!prefixCacheOff && !dsv4Active && !m3Active && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
         parts.push('--kv-cache-quantization', config.kvCacheQuantization)
@@ -511,24 +480,6 @@ function buildCommandPreview(
         if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
             parts.push('--kv-cache-group-size', kvCacheGroupSize.toString())
         }
-    }
-
-    if (cacheLaunchPolicy.enableLegacyDiskCache) {
-        parts.push('--enable-disk-cache')
-        if (config.diskCacheDir) parts.push('--disk-cache-dir', config.diskCacheDir)
-        const diskCacheMaxGb = finiteNonNegativeNumber(config.diskCacheMaxGb)
-        if (diskCacheMaxGb != null) parts.push('--disk-cache-max-gb', diskCacheMaxGb.toString())
-    }
-
-    if (cacheLaunchPolicy.enableBlockDiskCache) {
-        parts.push('--enable-block-disk-cache')
-        if (config.blockDiskCacheDir) parts.push('--block-disk-cache-dir', config.blockDiskCacheDir)
-        const blockDiskCacheMaxGb = finiteNonNegativeNumber(config.blockDiskCacheMaxGb)
-        if (blockDiskCacheMaxGb != null) parts.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())
-        const blockDiskCacheMaxPercent = finiteNonNegativeNumber(config.blockDiskCacheMaxPercent)
-        if (blockDiskCacheMaxPercent != null) parts.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())
-    } else if (!prefixCacheOff) {
-        parts.push('--disable-block-disk-cache')
     }
 
     const streamInterval = finitePositiveInteger(config.streamInterval)
@@ -850,7 +801,11 @@ describe('Prefix Cache', () => {
         expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
     })
 
-    it('release cache profile uses a fixed L1/L2 budget without a stale percentage flag', () => {
+    it('release cache profile is SSD-only: L2 budget emitted, no L1 RAM budget flags at all', () => {
+        // Paged RAM is retired, so this profile (stale saved paged toggle and
+        // all) launches block-disk-only. With no persistent L1 payload there is
+        // nothing for --cache-memory-mb/--cache-memory-percent to bound, and
+        // emitting either would claim a RAM tier that does not exist.
         const out = preview({
             enablePrefixCache: true,
             usePagedCache: true,
@@ -859,15 +814,22 @@ describe('Prefix Cache', () => {
             cacheMemoryPercent: 0,
             blockDiskCacheMaxGb: 10,
         })
-        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--cache-memory-mb')).toBe(false)
         expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
         expect(getFlagValue(out, '--block-disk-cache-max-gb')).toBe('10')
     })
 
-    it('session launch emits cache memory mb from a single call site', () => {
-        const source = readFileSync('src/main/sessions.ts', 'utf-8')
-        const matches = source.match(/args\.push\('--cache-memory-mb'/g) ?? []
-        expect(matches).toHaveLength(1)
+    it('cache memory mb has one shared call site consumed by preview and spawn', () => {
+        const shared = readFileSync('src/shared/cacheLaunchArgs.ts', 'utf-8')
+        const launcher = readFileSync('src/main/sessions.ts', 'utf-8')
+        const renderer = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf-8')
+        expect(shared.match(/args\.push\('--cache-memory-mb'/g) ?? []).toHaveLength(1)
+        expect(launcher).toContain("import { buildCacheLaunchArgs }")
+        expect(renderer).toContain("import { buildCacheLaunchArgs }")
+        expect(launcher).not.toContain("args.push('--cache-memory-mb'")
+        expect(renderer).not.toContain("parts.push('--cache-memory-mb'")
     })
 
     it('memory-aware mode: sets --cache-memory-percent as fraction', () => {
@@ -887,9 +849,13 @@ describe('Prefix Cache', () => {
 })
 
 describe('Paged KV Cache', () => {
-    it('includes --use-paged-cache when enabled', () => {
+    it('never emits --use-paged-cache — an enabled toggle still launches --no-paged-cache', () => {
+        // Inverse of the old contract ("includes --use-paged-cache when
+        // enabled"): the RAM tier is retired for every family, so even a saved
+        // usePagedCache=true must launch --no-paged-cache.
         const out = preview({ enablePrefixCache: true, usePagedCache: true })
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
     })
 
     it('sets block size from config', () => {
@@ -913,7 +879,11 @@ describe('Paged KV Cache', () => {
         expect(hasFlag(out, '--use-paged-cache')).toBe(false)
     })
 
-    it('ZAYA typed CCA forces paged cache when prefix cache is enabled', () => {
+    it('ZAYA typed CCA launches SSD block-disk only — the CCA requirement never re-enables paged RAM', () => {
+        // OLD contract: ZAYA CCA force-enabled paged RAM whenever prefix cache
+        // was on. NEW contract: no architecture escalates to the retired RAM
+        // tier; ZAYA launches --no-paged-cache and the engine drops the
+        // memory-aware lane instead (no prefix reuse, never a correctness risk).
         const out = preview(
             {
                 enablePrefixCache: true,
@@ -925,11 +895,12 @@ describe('Paged KV Cache', () => {
         )
 
         expect(hasFlag(out, '--disable-prefix-cache')).toBe(false)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        // #98/H1: cache-memory-% sets the paged L1 RAM byte ceiling, so it is
-        // emitted under paged cache (previously dropped).
-        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.3')
+        // SSD-only launch retains no paged L1 payload, so the RAM byte ceiling
+        // that #98 wired under paged cache is deliberately not sent.
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
     it('ZAYA typed CCA still honors explicit prefix-cache off', () => {
@@ -1096,7 +1067,7 @@ describe('KV Cache Quantization', () => {
         expect(cachePanel).toContain('attention_kv_storage_quantization')
         expect(cachePanel).toContain('nativeCache?.storage_quantization')
         expect(cachePanel).toContain("t('sessions.cache.attentionKvL2')")
-        expect(panelCopy).toContain('Attention KV L2')
+        expect(panelCopy).toContain('Stored Attention KV')
         expect(cachePanel).toContain('storage_encode_enabled')
         expect(cachePanel).toContain('stored_prefix_quantization')
         expect(cachePanel).toContain('storage_key_bits')
@@ -1105,7 +1076,7 @@ describe('KV Cache Quantization', () => {
         expect(cachePanel).toContain('value_bits_values')
         expect(cachePanel).toContain('kvQuant && !tqStoredPrefix')
         expect(cachePanel).toContain("t('sessions.cache.ssmPolicy')")
-        expect(panelCopy).toContain('SSM Policy')
+        expect(panelCopy).toContain('Companion State Policy')
         expect(cachePanel).toContain('single_sequence_only')
         expect(cachePanel).toContain('effective_max_num_seqs')
         expect(cachePanel).toContain("t('sessions.cache.cacheReuseSkips')")
@@ -1609,7 +1580,7 @@ describe('Tool Integration', () => {
         expect(getFlagValue(out, '--reasoning-parser')).toBe('minimax_m3')
     })
 
-    it('uses MiniMax-M3 typed paged plus block-L2 without generic KV quantization or JIT', () => {
+    it('uses MiniMax-M3 typed block-L2 without paged RAM, generic KV quantization, or JIT', () => {
         const out = preview(
             {
                 enablePrefixCache: true,
@@ -1629,7 +1600,10 @@ describe('Tool Integration', () => {
         )
 
         expect(hasFlag(out, '--enable-disk-cache')).toBe(false)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        // Saved AND detected paged capability are both ignored: M3 launches the
+        // typed MSA SSD tier with --no-paged-cache like every family.
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(out, '--enable-jit')).toBe(false)
@@ -2165,6 +2139,8 @@ describe('Additional Arguments', () => {
         expect(normalized).not.toContain('--native-mtp-depth')
         expect(normalized).not.toContain('--native-mtp-sampling-policy')
         expect(normalized).not.toContain('--disable-native-mtp')
+        // Additional args can never resurrect the retired paged RAM tier.
+        expect(normalized).not.toContain('--use-paged-cache')
         expect(normalized).not.toContain('--paged-cache-block-size 1')
         expect(normalized).not.toContain('--kv-cache-quantization')
         expect(normalized).not.toContain('--kv-cache-group-size')
@@ -2622,7 +2598,8 @@ describe('No Hardcoded Values', () => {
             usePagedCache: true,
         })
         expect(hasFlag(nonDsv4, '--dsv4-enable-prefix-cache')).toBe(false)
-        expect(hasFlag(nonDsv4, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(nonDsv4, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(nonDsv4, '--no-paged-cache')).toBe(true)
         expect(hasFlag(nonDsv4, '--enable-block-disk-cache')).toBe(true)
         expect(getFlagValue(nonDsv4, '--kv-cache-quantization')).toBe('q8')
         expect(getFlagValue(nonDsv4, '--kv-cache-group-size')).toBe('32')
@@ -2632,7 +2609,8 @@ describe('No Hardcoded Values', () => {
             usePagedCache: true,
         })
         expect(hasFlag(dsv4, '--dsv4-enable-prefix-cache')).toBe(false)
-        expect(hasFlag(dsv4, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(dsv4, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(dsv4, '--no-paged-cache')).toBe(true)
         expect(getFlagValue(dsv4, '--paged-cache-block-size')).toBe('256')
         expect(hasFlag(dsv4, '--disable-prefix-cache')).toBe(false)
         expect(hasFlag(dsv4, '--enable-block-disk-cache')).toBe(true)
@@ -2679,7 +2657,12 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
-    it('detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false', () => {
+    it('detected Mamba cache never re-enables paged RAM even when Block L2 is absent', () => {
+        // OLD contract: a Mamba architecture without Block L2 escalated to
+        // paged RAM while plain KV honored the saved false — the two argvs
+        // diverged. NEW contract: the escalation is gone; Mamba launches
+        // exactly like plain KV (--no-paged-cache) and simply gets no prefix
+        // reuse when Block L2 is off.
         const mambaOut = preview(
             {
                 enablePrefixCache: true,
@@ -2693,8 +2676,11 @@ describe('No Hardcoded Values', () => {
             { family: 'qwen3', cacheType: 'kv', usePagedCache: true },
         )
 
-        expect(hasFlag(mambaOut, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(mambaOut, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(mambaOut, '--no-paged-cache')).toBe(true)
+        expect(hasFlag(mambaOut, '--disable-block-disk-cache')).toBe(true)
         expect(hasFlag(kvOut, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(kvOut, '--no-paged-cache')).toBe(true)
     })
 
     it('detected Gemma4 mixed-SWA rotating KV honors SSD-only mode with Block L2', () => {
@@ -2725,7 +2711,11 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
-    it('detected Gemma4 mixed-SWA rotating KV still forces paged cache without Block L2', () => {
+    it('detected Gemma4 mixed-SWA rotating KV never forces paged cache — without Block L2 it launches with no cache tier', () => {
+        // OLD contract: mixed_swa_kv without Block L2 escalated to paged RAM.
+        // NEW contract: the retired RAM tier is never a fallback; the launch is
+        // --no-paged-cache with block disk explicitly disabled, so this shape
+        // gets no prefix reuse rather than a RAM tier.
         const out = preview(
             {
                 enablePrefixCache: true,
@@ -2741,8 +2731,10 @@ describe('No Hardcoded Values', () => {
             },
         )
 
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(false)
+        expect(hasFlag(out, '--disable-block-disk-cache')).toBe(true)
     })
 
     it('changing maxCacheBlocks produces different CLI output', () => {
@@ -2827,7 +2819,9 @@ describe('Default IP and New Settings', () => {
         expect(source).toContain('config.prefillBatchSize = 512')
         expect(source).toContain('config.prefillStepSize = 2048')
         expect(source).toContain('config.completionBatchSize = 512')
-        expect(source).toContain('config.usePagedCache = true')
+        // No migration may ever write paged-ON: in-RAM paged cache is retired
+        // for every family, so the literal assignment must not exist anywhere.
+        expect(source).not.toContain('config.usePagedCache = true')
         expect(source).toContain('config.maxCacheBlocks = 1000')
         expect(source).toContain("config.kvCacheQuantization = 'auto'")
         expect(source).toContain('config.enableBlockDiskCache = true')
@@ -2840,6 +2834,19 @@ describe('Default IP and New Settings', () => {
         expect(source).toContain('config.usePagedCache = false')
         expect(source).toContain('config.enableDiskCache = false')
         expect(source).toContain('config.enableBlockDiskCache = false')
+    })
+
+    it('re-detect normalizes a saved In-Memory Paged Cache (RAM)=On to Off and logs it', () => {
+        // Inverse of the removed "stale saved In-Memory Paged Cache (RAM)=Off
+        // was reset to auto-safe On" behaviour: with the RAM tier retired, a
+        // saved On is what is stale, and re-detect must force it Off — never
+        // the other way around.
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        expect(source).toContain('if (config.usePagedCache === true) {')
+        expect(source).toContain(
+            'In-Memory Paged Cache (RAM) forced Off — SSD block-disk cache (L2) is the only cache tier',
+        )
+        expect(source).not.toContain('stale saved In-Memory Paged Cache (RAM)=Off was reset to auto-safe On')
     })
 
     it('cache-stack migration is one-time versioned so saved user toggles stick', () => {
@@ -2888,7 +2895,7 @@ describe('Default IP and New Settings', () => {
         expect(adoptCreateBlock).toContain('maxTokens: 0')
     })
 
-    it('MiniMax-M3 start refresh defaults missing cache fields on but preserves every explicit cache toggle', () => {
+    it('MiniMax-M3 start refresh hardens paged RAM off while preserving explicit SSD/prefix toggles', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const familyStart = source.indexOf("} else if (detectedFamily === 'minimax_m3')")
         const familyEnd = source.indexOf("} else if (detectedFamily === 'openpangu_v2')", familyStart)
@@ -2903,7 +2910,10 @@ describe('Default IP and New Settings', () => {
         expect(familyBlock).not.toContain('config.usePagedCache = m3PrefixOptIn')
         expect(familyBlock).toContain('config.enableDiskCache = false')
         expect(block).toContain('if (config.enablePrefixCache === undefined) config.enablePrefixCache = true')
-        expect(block).toContain('if (config.usePagedCache === undefined) config.usePagedCache = true')
+        // Saved true is stale too: the refresh persists the same hard-Off state
+        // that the disabled control and shared launch builder expose.
+        expect(block).toContain('config.usePagedCache = false')
+        expect(block).not.toContain('if (config.usePagedCache === undefined) config.usePagedCache = false')
         expect(block).toContain('if (config.enableBlockDiskCache === undefined) config.enableBlockDiskCache = true')
         expect(block).toContain('using typed MSA SSD-only prefix cache with idx_keys')
         expect(block).not.toContain('config.usePagedCache = m3PrefixOptIn')
@@ -2972,7 +2982,7 @@ describe('Default IP and New Settings', () => {
         expect(existingBlock).toContain('markCacheStackStartupDefaultsCurrent(merged, modelPath)')
     })
 
-    it('create-session UI persists the same paged plus block-L2 tuple that it displays', () => {
+    it('create-session UI persists the same paged-off plus block-L2 tuple that it displays', () => {
         const source = readFileSync('src/renderer/src/components/sessions/CreateSession.tsx', 'utf8')
         const detectStart = source.indexOf('const applyModelDefaults')
         const detectEnd = source.indexOf('// Auto-detect image model type', detectStart)
@@ -2981,7 +2991,9 @@ describe('Default IP and New Settings', () => {
         const launchEnd = source.indexOf('const handleLaunchRemote', launchStart)
         const launchBlock = source.slice(launchStart, launchEnd)
 
-        expect(detectBlock).toContain("usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache")
+        expect(detectBlock).toContain('usePagedCache: false')
+        expect(detectBlock).not.toContain("usePagedCache: detected?.family === 'deepseek-v4' ? true")
+        expect(detectBlock).not.toContain('usePagedCache: detected?.usePagedCache')
         expect(detectBlock).toContain("enableDiskCache: detected?.family === 'openpangu_v2'")
         expect(detectBlock).toContain("enableBlockDiskCache: detected?.family !== 'openpangu_v2'")
         expect(launchBlock).toContain('const normalizedCacheConfig = config')
@@ -2989,7 +3001,7 @@ describe('Default IP and New Settings', () => {
         expect(launchBlock).toContain('window.api.sessions.create(selectedModel, launchConfig)')
     })
 
-    it('fresh minimal session configs get visible paged-on + block-disk cache defaults (Phase-2)', () => {
+    it('fresh minimal session configs get SSD block-disk cache defaults with paged RAM off for every family', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const start = source.indexOf('function applyMissingCacheStackStartupDefaults')
         const end = source.indexOf('function isZayaCacheStackMigrationTarget', start)
@@ -3000,11 +3012,14 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain("setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto')")
-        // v8 paged-default-ON (2026-07-12): fresh sessions inherit the detected
-        // per-family paged capability — paged ON for autodetected TEXT families,
-        // OFF for VL/MLLM (#98) and arch-incompatible families. DSV4 uses its
-        // typed RAM tier backed by SSD block-disk L2.
-        expect(helper).toContain('const defaultUsePagedCache = dsv4Active ? true : (detectedUsePaged ?? false)')
+        // In-RAM paged cache is OFF for EVERY family, DSV4 included; SSD
+        // block-disk L2 is the only cache tier. A fresh session must not seed a
+        // saved `true` that disagrees with the launch (which always emits
+        // --no-paged-cache), and no per-family registry capability may
+        // reintroduce a RAM tier here.
+        expect(helper).toContain('const defaultUsePagedCache = false')
+        expect(helper).not.toContain('dsv4Active ? true')
+        expect(helper).not.toContain('detectedUsePaged')
         expect(helper).toContain('const defaultEnableDiskCache = openPanguExactTypedCache')
         expect(helper).toContain('const defaultEnableBlockDiskCache = !openPanguExactTypedCache')
     })
@@ -3115,14 +3130,15 @@ describe('Default IP and New Settings', () => {
         expect(block).toContain("enableBlockDiskCache: detectedFamily !== 'openpangu_v2'")
     })
 
-    it('reset persists detected paged L2 and force-text-only values explicitly', () => {
+    it('reset persists paged RAM off, SSD L2, and force-text-only values explicitly', () => {
         const source = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
         const start = source.indexOf('const handleReset = async () =>')
         const end = source.indexOf('if (!session)', start)
         const block = source.slice(start, end)
 
         expect(block).toContain('base.enableDiskCache = false')
-        expect(block).toContain('base.usePagedCache = detected.usePagedCache === true')
+        expect(block).toContain('base.usePagedCache = false')
+        expect(block).not.toContain('base.usePagedCache = detected.usePagedCache')
         expect(block).toContain('base.enableDiskCache = false')
         expect(block).toContain('base.enableBlockDiskCache = true')
         expect(block).toContain('base.isMultimodal = detected.forceTextOnly === true')
@@ -3183,32 +3199,18 @@ describe('Default IP and New Settings', () => {
         expect(block).toContain("config.kvCacheQuantization === 'none'")
     })
 
-    it('cache-shape gating rules exist once, shared by the argv builder and the CLI preview', () => {
-        // sessions.ts BUILDS the engine argv; SessionSettings.tsx PREVIEWS it and
-        // enables/disables the matching toggles from the same predicates. While
-        // each kept a private copy, a divergence was invisible until launch: the
-        // preview could offer an SSD-only tier the launcher never passes, or grey
-        // out a toggle for a shape that supports it.
-        const shared = readFileSync('src/shared/cacheTypeCapabilities.ts', 'utf8')
-        for (const rule of [
-            'cacheTypeRequiresPaged',
-            'cacheSubtypeRequiresPaged',
-            'cacheTypeSupportsBlockDiskOnly',
-            'cacheSubtypeSupportsBlockDiskOnly',
-        ]) {
-            expect(shared).toContain(`export function ${rule}(`)
-            for (const consumer of [
-                'src/main/sessions.ts',
-                'src/renderer/src/components/sessions/SessionSettings.tsx',
-            ]) {
-                const source = readFileSync(consumer, 'utf8')
-                expect(source).toContain(rule)
-                expect(source).not.toContain(`function ${rule}(`)
-                expect(source).toMatch(
-                    new RegExp(`import \\{[^}]*${rule}[^}]*\\} from '[^']*shared/cacheTypeCapabilities'`),
-                )
-            }
-        }
+    it('cache tier argv exists once and is consumed by both spawn and visual preview', () => {
+        const shared = readFileSync('src/shared/cacheLaunchArgs.ts', 'utf8')
+        const launcher = readFileSync('src/main/sessions.ts', 'utf8')
+        const renderer = readFileSync('src/renderer/src/components/sessions/SessionSettings.tsx', 'utf8')
+
+        expect(shared).toContain('export function buildCacheLaunchArgs(')
+        expect(shared).toContain("'--no-paged-cache'")
+        expect(shared).not.toContain("args.push('--use-paged-cache')")
+        expect(launcher).toContain('const cacheLaunch = buildCacheLaunchArgs({')
+        expect(launcher).toContain('args.push(...cacheLaunch.args)')
+        expect(renderer).toContain('const cacheLaunch = buildCacheLaunchArgs({')
+        expect(renderer).toContain('parts.push(...cacheLaunch.args)')
     })
 
     it('ZAYA sessions keep the qwen3 reasoning parser and model-owned no-thinking default', () => {
@@ -3721,7 +3723,7 @@ describe('JIT Toggle', () => {
         expect(hasFlag(omniForceOff, '--text-only')).toBe(true)
     })
 
-    it('settings form and launch code surface ZAYA typed CCA paged-cache requirement', () => {
+    it('settings form and launch code surface the ZAYA SSD reconstruction gap without re-enabling RAM', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -3733,18 +3735,17 @@ describe('JIT Toggle', () => {
         )
         const sessions = fs.readFileSync('src/main/sessions.ts', 'utf-8')
 
-        expect(form).toContain('zayaTypedCacheRequiresPaged')
+        expect(form).toContain('zayaSsdReuseUnavailable')
         expect(form).toContain("t('sessions.config.zayaTypedCacheNote')")
         expect(
             fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
-        ).toContain('ZAYA typed CCA cache requires the in-memory paged tier while Prefix Cache is enabled')
-        expect(settings).toContain('zayaTypedCacheRequiresPaged')
-        expect(sessions).toContain('resolveCacheLaunchPolicy')
-        expect(sessions).toContain('architectureRequiresPagedCache')
-        expect(sessions).toContain('zayaCcaActive ||')
+        ).toContain('ZAYA CCA SSD prefix reconstruction is not yet available')
+        expect(settings).toContain('buildCacheLaunchArgs')
+        expect(sessions).toContain('buildCacheLaunchArgs')
+        expect(sessions).not.toContain("args.push('--use-paged-cache')")
     })
 
-    it('settings form treats Gemma4 mixed-SWA rotating KV as architecture-paged cache', () => {
+    it('settings form treats Gemma4 mixed-SWA rotating KV as typed SSD-only cache', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -3752,7 +3753,8 @@ describe('JIT Toggle', () => {
         )
 
         expect(form).toContain("detectedCacheType === 'rotating_kv'")
-        expect(form).toContain('nativeCacheRequiresPaged')
+        expect(form).toContain("t('sessions.config.mixedSwaSsdOnlyNote')")
+        expect(form).not.toContain('nativeCacheRequiresPaged')
     })
 
     it('settings form surfaces the macOS Metal wired-limit sudo command near memory/cache controls', () => {
@@ -3781,7 +3783,7 @@ describe('JIT Toggle', () => {
         expect(catalog).toContain('{{command}}')
     })
 
-    it('settings form and launch code treat Step3.7 full/sliding KV subtype as typed paged-or-SSD cache', () => {
+    it('settings form and launch code treat Step3.7 full/sliding KV subtype as typed SSD-only cache', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -3809,8 +3811,8 @@ describe('JIT Toggle', () => {
             fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8'),
         ).toContain('Under tight Metal headroom, long cold-prompt stores can be skipped')
         expect(settings).toContain('detectedCacheSubtype={detectedConfig?.cacheSubtype}')
-        expect(settings).toContain('cacheSubtypeRequiresPaged')
-        expect(sessions).toContain('cacheSubtypeRequiresPaged')
+        expect(settings).toContain('buildCacheLaunchArgs')
+        expect(sessions).toContain('buildCacheLaunchArgs')
         expect(sessions).toContain('freshConfig.cacheSubtype')
         expect(createSession).toContain('setDetectedCacheSubtype(detected?.cacheSubtype)')
         expect(createSession).toContain('detectedCacheSubtype={detectedCacheSubtype}')
@@ -3897,8 +3899,8 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain("<CheckField label={t('sessions.config.pagedKVCache')}")
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
-        expect(enLocale).toContain('Apple unified memory (shared by CPU and GPU)')
-        expect(enLocale).toContain('Block Disk Cache (SSD / L2) can remain enabled when this RAM tier is Off')
+        expect(enLocale).toContain('Locked Off')
+        expect(enLocale).toContain('The app always launches --no-paged-cache')
         expect(form).not.toContain('limited GPU RAM')
         expect(form).toContain("e.preventDefault()")
         expect(form).toContain('className="relative inline-flex ml-1"\n      onClick={handleClick}')
@@ -3987,7 +3989,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
     })
 
-    it('settings form exposes MiniMax-M3 typed paged cache while keeping its native codec', () => {
+    it('settings form exposes MiniMax-M3 typed SSD cache while keeping its native codec', () => {
         const form = readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
             'utf-8',
@@ -3996,11 +3998,11 @@ describe('JIT Toggle', () => {
         expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache')
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(form).toContain("t('sessions.config.m3NativeMsaNote')")
-        expect(enLocale).toContain('MiniMax-M3 uses a native typed MSA paged cache that preserves keys, values, idx_keys, and absolute offsets')
+        expect(enLocale).toContain("MiniMax-M3's retained RAM tier is disabled")
         expect(form).toContain("t('sessions.config.m3SsdOnlyNote')")
         expect(enLocale).toContain('MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets')
         expect(form).toContain('architectureBlockDiskOnlySupported && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked')
-        expect(enLocale).toContain('Block Disk Cache provides its persistent L2')
+        expect(enLocale).toContain('Enable Block Disk Cache for persistent typed MSA prefix reuse')
         expect(form).not.toContain('LOCKED OFF')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
     })
@@ -4012,15 +4014,11 @@ describe('JIT Toggle', () => {
             'utf-8',
         )
 
-        expect(form).toContain('{!dsv4Active && config.enableDiskCache &&')
-        expect(form).toContain('{!dsv4Active && !batchingOff && prefixOff &&')
         expect(form).not.toContain('Persist DeepSeek-V4 native SWA+CSA/HCA composite cache records to SSD')
         const enLocale = fs.readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
-        expect(enLocale).toContain('The bounded RAM tier defaults On for hot reuse')
+        expect(enLocale).toContain('Its retained paged-RAM mirror is disabled')
         expect(enLocale).toContain('defaults On as the warm/cold stack')
-        expect(form).not.toContain('In-Memory Paged Cache (RAM) defaults Off')
-        expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'paged-cache-active'")
-        expect(form).toContain("cachePolicy.legacyDiskCacheUnavailableReason === 'architecture-requires-paged-cache'")
+        expect(form).toContain('disabled={dsv4Active || cachePolicy.legacyDiskCacheDisabled}')
         expect(form).toContain("t('sessions.config.dsv4LegacyDiskNote')")
         expect(enLocale).toContain('DSV4 uses Block Disk Cache (SSD / L2) above for persistent native composite blocks')
         expect(form).toContain("t('sessions.config.dsv4SsdOnlyNote')")
@@ -4105,7 +4103,10 @@ describe('Feature Interaction', () => {
         })
         expect(hasFlag(out, '--is-mllm')).toBe(true)
         expect(hasFlag(out, '--continuous-batching')).toBe(true)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        // Paged RAM is not one of the shipping cache features any more: the
+        // saved toggle is ignored and the launch is SSD block-disk only.
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(true)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
     })
@@ -4217,23 +4218,30 @@ describe('Feature Interaction', () => {
         expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
     })
 
-    it('emits cache memory budget flags under paged cache (paged L1 RAM byte ceiling, #98)', () => {
+    it('drops the cache memory budget flags on the SSD-only launch a stale paged toggle now gets (#98 lane retired)', () => {
         const out = preview({
             enablePrefixCache: true,
             usePagedCache: true,
             cacheMemoryMb: 4096,
             cacheMemoryPercent: 35,
         })
-        // #98/H1: --cache-memory-mb/percent set the paged block-pool L1 RAM byte
-        // ceiling (bound RAM + evict free blocks), so they reach the engine under
-        // paged cache. Only --cache-ttl-minutes stays paged-inapplicable.
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
-        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
-        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.35')
+        // #98/H1 wired --cache-memory-mb/percent through as the paged L1 RAM
+        // byte ceiling. With paged RAM retired, this exact config launches
+        // block-disk-only where there is no L1 payload to bound, so BOTH budget
+        // flags are deliberately suppressed (they still flow on the legacy
+        // memory-aware lane — see the 'memory-aware mode' tests).
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--cache-memory-mb')).toBe(false)
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
         expect(hasFlag(out, '--cache-ttl-minutes')).toBe(false)
     })
 
-    it('DSV4 explicit paged RAM emits its L1 memory budget', () => {
+    it('DSV4 explicit paged RAM is ignored — SSD-only launch emits no L1 memory budget', () => {
+        // The saved-true twin of the SSD-only test below: DSV4's explicit paged
+        // opt-in used to be the one lane that kept the RAM tier and its budget
+        // flags. Retired — the same argv must come out whether the saved toggle
+        // is true or false.
         const out = preview({
             enablePrefixCache: true,
             dsv4PrefixCache: true,
@@ -4244,11 +4252,12 @@ describe('Feature Interaction', () => {
         }, { family: 'deepseek-v4' })
 
         expect(hasFlag(out, '--dsv4-enable-prefix-cache')).toBe(false)
-        expect(hasFlag(out, '--use-paged-cache')).toBe(true)
+        expect(hasFlag(out, '--use-paged-cache')).toBe(false)
+        expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--disable-prefix-cache')).toBe(false)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        expect(getFlagValue(out, '--cache-memory-mb')).toBe('4096')
-        expect(getFlagValue(out, '--cache-memory-percent')).toBe('0.15')
+        expect(hasFlag(out, '--cache-memory-mb')).toBe(false)
+        expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
     it('DSV4 SSD-only mode does not claim or emit a retained RAM budget', () => {
@@ -4266,19 +4275,14 @@ describe('Feature Interaction', () => {
         expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
     })
 
-    it('DSV4 launch and preview source do not suppress paged L1 memory flags', () => {
-        const previewSource = readFileSync(
-            resolve(__dirname, '../src/renderer/src/components/sessions/SessionSettings.tsx'),
-            'utf-8',
-        )
-        const launchSource = readFileSync(
-            resolve(__dirname, '../src/main/sessions.ts'),
-            'utf-8',
-        )
-        for (const source of [previewSource, launchSource]) {
-            expect(source).not.toContain('} else if (!dsv4Active) {')
-            expect(source).toContain('!dsv4Active && config.noMemoryAwareCache')
-        }
+    it('DSV4 launch and preview share the same SSD-only cache fragment', () => {
+        const previewSource = readFileSync(resolve(__dirname, '../src/renderer/src/components/sessions/SessionSettings.tsx'), 'utf-8')
+        const launchSource = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf-8')
+        const shared = readFileSync(resolve(__dirname, '../src/shared/cacheLaunchArgs.ts'), 'utf-8')
+        expect(previewSource).toContain('forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active')
+        expect(launchSource).toContain('forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active')
+        expect(shared).toContain("'--no-paged-cache'")
+        expect(shared).not.toContain("args.push('--use-paged-cache')")
     })
 
     it('settings form renders effective paged capacity and ignored memory-budget state', () => {
@@ -4856,8 +4860,10 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         }
     })
 
-    it('mutual exclusion: disk cache NOT emitted when paged cache is active', () => {
-        // enableDiskCache is gated by !(usePagedCache) in buildCommandPreview
+    it('mutual exclusion: legacy disk cache NOT emitted while block-disk L2 owns the lane (stale paged toggle ignored)', () => {
+        // Legacy disk used to be suppressed by an active paged cache. Paged RAM
+        // is retired, so what suppresses it now is the block-disk L2 tier — and
+        // the stale saved paged toggle must not resurface either lane.
         const out = preview({
             enablePrefixCache: true,
             enableDiskCache: true,
@@ -4869,8 +4875,10 @@ describe('Settings → CLI Round-Trip Completeness', () => {
         expect(normalized).not.toContain('--enable-disk-cache')
         expect(normalized).not.toContain('--disk-cache-dir')
         expect(normalized).not.toContain('--disk-cache-max-gb')
-        // But paged cache flags should be present
-        expect(normalized).toContain('--use-paged-cache')
+        // Paged RAM never launches; the block SSD tier is what won the lane.
+        expect(normalized).not.toContain('--use-paged-cache')
+        expect(normalized).toContain('--no-paged-cache')
+        expect(normalized).toContain('--enable-block-disk-cache')
     })
 
     it('block disk cache is emitted with paged RAM either active or disabled', () => {

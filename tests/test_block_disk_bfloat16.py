@@ -151,6 +151,14 @@ class TestEndToEndRoundTrip:
         )
         assert restored_keys.shape == original_keys.shape
 
+        # The visible cache contract must report both the model-owned runtime
+        # dtype and the lossless uint16 SSD carrier used for BF16 bits.
+        latest = disk_store.get_stats()["latest_payload"]
+        assert latest["original_attention_kv_dtype_counts"] == {
+            "bfloat16": 10,
+        }
+        assert latest["physical_tensor_dtype_counts"] == {"U16": 20}
+
     def test_roundtrip_numpy(self, disk_store):
         """numpy KV data should survive write -> read round-trip."""
         import time

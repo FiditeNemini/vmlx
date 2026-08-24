@@ -1479,7 +1479,7 @@ def test_zaya_scheduler_uses_typed_cca_not_hybrid_ssm_companion():
     assert scheduler.block_aware_cache is not None
 
 
-def test_zaya_scheduler_forces_prefix_only_to_paged_cache():
+def test_zaya_scheduler_takes_no_prefix_lane_without_paged_ram():
     """ZAYA CCA must never use memory-aware/legacy prefix cache stores.
 
     Those generic paths do not serialize CCA conv_state/prev_hs, and would
@@ -1510,10 +1510,22 @@ def test_zaya_scheduler_forces_prefix_only_to_paged_cache():
     )
 
     assert scheduler._uses_zaya_cache is True
-    assert scheduler.config.use_paged_cache is True
+    # 2026-08-23: in-RAM paged cache is OFF for every family (SSD block-disk L2
+    # is the only tier), so ZAYA no longer escalates a prefix-only config to
+    # paged. It drops the memory-aware lane instead -- the lane cannot hold CCA
+    # conv_state/prev_hs -- so ZAYA re-prefills cleanly. Lost reuse, never a
+    # corrupt restore: the fetch side already refuses a chain with no terminal
+    # CCA state.
+    assert scheduler.config.use_paged_cache is False
     assert scheduler.config.use_memory_aware_cache is False
-    assert scheduler.block_aware_cache is not None
+    # No prefix lane AT ALL for ZAYA without paged RAM. Disabling only the
+    # memory-aware lane would fall through to the legacy PrefixCacheManager,
+    # which cannot carry CCA conv_state/prev_hs either -- an unsafe lane is
+    # worse than no lane.
     assert scheduler.memory_aware_cache is None
+    assert scheduler.prefix_cache is None
+    assert scheduler.block_aware_cache is None
+    assert scheduler.config.enable_prefix_cache is False
     assert scheduler.prefix_cache is None
 
 
@@ -1757,7 +1769,8 @@ def test_zaya_mllm_scheduler_uses_typed_cca_not_hybrid_ssm_companion():
 
     assert scheduler._uses_zaya_cache is True
     assert scheduler._is_hybrid is True
-    assert scheduler.config.use_paged_cache is True
+    # Paged RAM is OFF for every family; ZAYA does not escalate (see above).
+    assert scheduler.config.use_paged_cache is False
     assert scheduler.config.use_memory_aware_cache is False
     assert scheduler.config.kv_cache_quantization == "none"
     assert scheduler._ssm_companion_disk_store is None

@@ -4465,6 +4465,18 @@ class MLXMultimodalLM:
         resolved_name = resolve_to_local_path(self.model_name)
         _register_local_mlx_vlm_runtime_if_needed(resolved_name)
 
+        def _finalize_loaded_model() -> None:
+            """Finish loading on this same MLX-owning worker thread."""
+            from ..mlx_memory import maybe_harmonize_quant_metadata_dtypes
+
+            maybe_harmonize_quant_metadata_dtypes(
+                self.model,
+                model_path=resolved_name,
+                log=logger,
+            )
+            _set_vlm_inference_mode(self.model)
+            self._loaded = True
+
         # Install mlx_vlm registry patches (gemma4 + kimi_k25) on THIS thread
         # so any module-level `mx.new_stream(...)` in mlx_vlm.generate ends
         # up bound to the loader-executor worker rather than uvicorn
@@ -4517,8 +4529,7 @@ class MLXMultimodalLM:
                 self._patch_video_processor()
                 self.model, self.processor = load(resolved_name)
                 self.config = load_config(resolved_name)
-                _set_vlm_inference_mode(self.model)
-                self._loaded = True
+                _finalize_loaded_model()
                 logger.info("DFlash2 target loaded: %s", self.model_name)
                 return
         except ImportError:
@@ -4547,8 +4558,7 @@ class MLXMultimodalLM:
             except Exception as _e:
                 logger.debug(f"mlx_vlm compat patch after JANG load skipped: {_e}")
             self.config = load_config(resolved_name)
-            _set_vlm_inference_mode(self.model)
-            self._loaded = True
+            _finalize_loaded_model()
             logger.info(f"JANG VL model loaded: {self.model_name}")
             return
 
@@ -4619,8 +4629,7 @@ class MLXMultimodalLM:
                     from ..utils.tokenizer import _apply_turboquant_to_model
                     _apply_turboquant_to_model(_lang, resolved_name)
 
-            _set_vlm_inference_mode(self.model)
-            self._loaded = True
+            _finalize_loaded_model()
             logger.info(f"MLLM loaded successfully: {self.model_name}")
 
         except ImportError as e:

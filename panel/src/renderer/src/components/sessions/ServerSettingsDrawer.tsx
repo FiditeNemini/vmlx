@@ -266,7 +266,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
               ? detected.dsv4PoolQuantDefault
               : undefined
             base.enablePrefixCache = true
-            base.usePagedCache = true
+            base.usePagedCache = false
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.kvCacheQuantization = 'auto'
@@ -280,7 +280,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.noMemoryAwareCache = false
             base.kvCacheQuantization = 'none'
           } else {
-            base.usePagedCache = detected.usePagedCache === true
+            base.usePagedCache = false
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
           }

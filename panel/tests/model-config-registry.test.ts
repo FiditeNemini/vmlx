@@ -484,7 +484,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     // The panel collapses Ling/Bailing's engine-level hybrid_ssm_typed cache
     // contract into the existing hybrid settings category.
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.nativeMtp).toBeUndefined()
   })
 
@@ -566,7 +566,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('zaya')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('zaya_xml')
     expect(detected.reasoningParser).toBe('qwen3')
     expect(detected.supportsThinking).toBe(true)
@@ -598,7 +598,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('zaya1-vl')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('zaya_xml')
     expect(detected.reasoningParser).toBeUndefined()
     expect(detected.supportsThinking).toBe(false)
@@ -640,7 +640,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('zaya1-vl')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('zaya_xml')
     expect(detected.reasoningParser).toBeUndefined()
     expect(detected.supportsThinking).toBe(false)
@@ -743,7 +743,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('zaya1-vl')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('zaya_xml')
     expect(detected.reasoningParser).toBeUndefined()
     expect(detected.supportsThinking).toBe(false)
@@ -773,7 +773,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('ling')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('deepseek')
     expect(detected.reasoningParser).toBeUndefined()
     expect(detected.supportsThinking).toBe(false)
@@ -793,7 +793,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('ling')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('deepseek')
     expect(detected.reasoningParser).toBeUndefined()
     expect(detected.supportsThinking).toBe(false)
@@ -825,9 +825,11 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('hy3')
     expect(detected.cacheType).toBe('kv')
-    // Paged-default-ON campaign (2026-07-12): autodetected plain-KV text models
-    // default paged-ON (Hy3 is not in the excluded set M3/openpangu_v2/gemma4).
-    expect(detected.usePagedCache).toBe(true)
+    // In-RAM paged cache is OFF for EVERY family; SSD block-disk L2 is the only
+    // cache tier. Hy3 declares no paged capability, and an undeclared family
+    // must NOT acquire a RAM tier by omission -- that fallback used to default
+    // every plain-KV text model paged-ON.
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('hunyuan')
     expect(detected.reasoningParser).toBe('qwen3')
     expect(detected.enableAutoToolChoice).toBe(true)
@@ -1097,9 +1099,10 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.reasoningParser).toBe('gemma4')
     expect(detected.toolParser).toBe('gemma4')
     expect(detected.enableAutoToolChoice).toBe(true)
-    // Gemma4 mixed-SWA uses its typed paged prefix/block-L2 path by default.
+    // Gemma4 mixed-SWA is typed block-disk L2 only: in-RAM paged cache is OFF
+    // for every family, mixed-SWA included.
     expect(detected.cacheType).toBe('rotating_kv')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
   })
 
   it('resolves family from JANG capabilities.family when config.json model_type is unrecognized', () => {
@@ -1151,8 +1154,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('gemma4')
     expect(detected.cacheType).toBe('rotating_kv')
-    // The typed mixed-SWA runtime owns paged prefix and block-disk restoration.
-    expect(detected.usePagedCache).toBe(true)
+    // The typed mixed-SWA runtime restores from block-disk L2 only; it must not
+    // claim the retired paged RAM tier.
+    expect(detected.usePagedCache).toBe(false)
   })
 
   it('keeps JANG VLM enabled from capabilities.modality=vision when architecture.has_vision is absent', () => {
@@ -1195,7 +1199,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.supportedReasoningEfforts).toEqual(['low', 'medium', 'high'])
     expect(detected.thinkInTemplate).toBe(true)
     expect(detected.cacheSubtype).toBe('step3p7_full_sliding_kv')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.isMultimodal).toBe(true)
     expect(detected.forceTextOnly).toBeUndefined()
     expect(detected.architectureHints).toMatchObject({
@@ -1393,7 +1397,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('qwen3.5-moe')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('qwen')
     expect(detected.reasoningParser).toBe('qwen3')
     expect(detected.supportsThinking).toBe(true)
@@ -1435,7 +1439,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected.family).toBe('qwen3.5')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.isMultimodal).toBe(true)
     expect(detected.forceTextOnly).toBeUndefined()
   })
@@ -1659,7 +1663,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     const detected = detectModelConfigFromDir(dir)
     expect(detected.family).toBe('qwen3.5-moe')
     expect(detected.cacheType).toBe('hybrid')
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.toolParser).toBe('qwen')
     expect(detected.reasoningParser).toBe('qwen3')
     expect(detected.supportsThinking).toBeUndefined()
@@ -1696,7 +1700,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.family).toBe('mistral3')
     expect(detected.isMultimodal).toBe(false)
     expect(detected.forceTextOnly).toBe(true)
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
     expect(detected.architectureHints).toMatchObject({
       runtimeScope: 'text_only_until_pixtral_processor_is_wired',
       vlRuntimeAvailable: false,
@@ -1767,6 +1771,11 @@ describe('detectModelConfigFromDir backend parity coverage', () => {
       if (row.toolParser !== undefined) expect(detected.toolParser).toBe(row.toolParser)
       if (row.reasoningParser !== undefined) expect(detected.reasoningParser).toBe(row.reasoningParser)
       if (row.isMultimodal !== undefined) expect(detected.isMultimodal).toBe(row.isMultimodal)
+      if (row.cacheType === 'hybrid' || row.cacheType === 'mamba') {
+        // In-RAM paged cache is retired for every family: no hybrid/SSM/Mamba
+        // registry entry may claim the paged capability any more.
+        expect(detected.usePagedCache).toBe(false)
+      }
       if (row.modelType === 'lfm2_moe') {
         expect(detected.supportsThinking).toBe(true)
         expect(detected.supportsInstructMode).toBe(false)
@@ -2380,16 +2389,17 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     expect(detected.supportsInstructMode).toBeUndefined()
   })
 
-  it('keeps Muse paged-ON so the app matches the engine paged-exempt set', () => {
-    // vmlx_engine/cli.py _PAGED_MLLM_EXEMPT_FAMILIES contains muse_glimmer, so a
-    // bare CLI launch runs PAGED. The multimodal paged-off override must not
-    // clear it here or the app spawns --no-paged-cache and diverges from the CLI.
+  it('keeps Muse paged-OFF like every family — SSD block-disk L2 is the only cache tier', () => {
+    // This test used to pin Muse paged-ON to match the engine's
+    // _PAGED_MLLM_EXEMPT_FAMILIES set. That exemption is moot now: in-RAM paged
+    // cache is OFF for EVERY family and the app always spawns --no-paged-cache,
+    // so the registry must not single Muse out with a paged capability.
     const dir = makeModelDir({ model_type: 'muse_glimmer' })
     const detected = detectModelConfigFromDir(dir)
 
     expect(detected.family).toBe('muse-glimmer')
     expect(detected.isMultimodal).toBe(true)
-    expect(detected.usePagedCache).toBe(true)
+    expect(detected.usePagedCache).toBe(false)
   })
 
   it('surfaces Muse reasoning_strength modes as effort buttons (no reasoning_effort_levels)', () => {

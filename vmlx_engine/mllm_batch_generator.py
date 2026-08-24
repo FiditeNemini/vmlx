@@ -1937,6 +1937,35 @@ _HYBRID_ONE_SHOT_GUARD_BYTES = max(
     ),
 )
 
+# Hybrid text model_types whose CHUNKED prefill is MECHANISM-equivalence
+# proven against one-shot (tests/test_hybrid_chunked_prefill_equivalence.py:
+# bit-identical final logits, KV, and GDN conv/ssm state across aligned,
+# non-divisor, ragged and per-token chunk grids, plus warm-cache suffixes, on
+# the fused-SDPA path).
+#
+# This set does NOT flip the default. The flip was tried and RETRACTED
+# (2026-08-23): live A/B at temperature 0 diverged the reasoning trajectory
+# between lanes on Qwen3.8-27B (head_dim=256 → mx.fast SDPA falls back to a
+# kernel that MATERIALIZES softmax(QK^T); (heads, seq, seq) vs
+# (heads, chunk, ctx) tile differently and round differently by ulps; a
+# near-tie eventually flips). The same-lane control was byte-identical, so
+# the stack itself is deterministic — the divergence is lane-attributable.
+# See the path decision inside _run_vision_encoding_inner.
+#
+# The set still labels the auto-chunk OOM escape hatch below as
+# "verified" (the chunked MATH is exact; the hatch only fires where one-shot
+# would die anyway), and it is the allow-list a future answer-byte-proven
+# flip would key on.
+_HYBRID_CHUNKED_PROVEN_TEXT_MODEL_TYPES = frozenset(
+    {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_vl",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+)
+
 # Drain the generation stream before each per-chunk clear_cache.
 #
 # DEFAULT OFF — this was tried against the hybrid retention and MEASURED to do
@@ -5741,7 +5770,7 @@ class MLLMBatchGenerator:
         kv_cache_bits: int = 0,
         kv_cache_group_size: int = 64,
         ssm_state_cache_size: int = DEFAULT_SSM_COMPANION_ENTRIES,
-        ssm_state_cache_max_mb: Optional[int] = 512,
+        ssm_state_cache_max_mb: Optional[int] = 0,
         ssm_state_disk_store: Optional[Any] = None,
         ssm_state_cache_model_key: str = "",
         enable_prefix_cache: bool = True,
@@ -5769,10 +5798,11 @@ class MLLMBatchGenerator:
             disk_cache: Optional DiskCacheManager (L2)
             kv_cache_bits: Quantization bits (0=none, 4=q4, 8=q8)
             kv_cache_group_size: Quantization group size
-            ssm_state_cache_size: Max entries in HybridSSMStateCache (LRU)
-            ssm_state_cache_max_mb: Approximate resident-memory budget for
-                companion SSM state. Large hybrid/VLM entries are skipped or
-                LRU-evicted once this budget is exceeded.
+            ssm_state_cache_size: Max retained RAM entries in
+                HybridSSMStateCache (LRU); 0 keeps companion state SSD-only.
+            ssm_state_cache_max_mb: Approximate retained-memory budget for
+                companion SSM state; 0 keeps it SSD-only. Large hybrid/VLM
+                entries still persist to L2 but are not backfilled into RAM.
             ssm_state_disk_store: Optional scheduler-owned L2 store for SSM
                 companion states. Required for true hybrid cache restore after
                 server restart; paged KV blocks alone are not enough.
@@ -6775,6 +6805,187 @@ class MLLMBatchGenerator:
             )
             return False
 
+    def _maybe_capture_mixed_swa_media_boundary(
+        self,
+        request: "MLLMBatchRequest",
+        cache: Optional[List[Any]],
+    ) -> bool:
+        """Capture the exact N-1 prompt-boundary rotating-SWA state at prefill end.
+
+        A mixed-SWA media prompt cannot be re-prefilled from token ids alone
+        (that would silently discard vision-conditioned state), and the cache
+        available at request FINISH is the live post-generation cache — its
+        RotatingKVCache rings have advanced past the prompt boundary by the
+        reply length, so the store's boundary cutter rightly refuses them and
+        every media turn's rotating anchors go ``rotating_kv_pending``.
+        Measured live on Gemma-4-26B: cached_tokens plateaued at the last
+        pre-media exact anchor (7168) for the rest of the conversation.
+
+        This capture runs at the END OF PREFILL, before any decode step
+        advances the rings. At that point every rotating layer's buffer is the
+        post-``_update_concat`` state: TEMPORAL ORDER (``_idx == len``) with
+        the concat overhang still present (``max_size - 1 + S`` tokens), and
+        ``offset == prompt_len`` (all prompt tokens processed, including any
+        gen-prompt suffix). The state the store needs is the window at
+        ``B = len(_original_token_ids) - 1`` (the N-1 cache key). Because K/V
+        rows are causal — a token's KV depends only on positions <= its own —
+        slicing the newest ``offset - B`` rows off the temporal buffer and
+        bounding to ``min(B, max_size)`` (keep-prefix preserved) yields the
+        EXACT boundary window, not an approximation.
+
+        The copy is bounded by the window size (``mx.contiguous`` breaks the
+        lazy reference to the full prefill buffer), so this costs one window
+        per rotating layer per media request — unlike the aux clean media
+        prefill it replaces on this family, which was a full second forward
+        pass over the whole prompt.
+
+        Declines honestly (returns False, leaves no capture) whenever the
+        buffer is not in temporal order (e.g. a single-token tail went through
+        ``_update_in_place``), the window at B is not fully present, a
+        rotating layer has an unexpected shape/class, or the boundary math
+        does not hold. A declined capture means the store falls back to the
+        existing ``rotating_kv_pending`` path — visible, never corrupt.
+        """
+        if not getattr(self, "_mixed_attention_cache_model", False):
+            return False
+        if getattr(request, "_aux_clean_path_prefill", False):
+            # Nested bookkeeping prefill (clean media prefix path) — never
+            # capture from it, and never clobber the real request's capture.
+            return False
+        if not cache:
+            return False
+        orig_tokens = list(getattr(request, "_original_token_ids", None) or [])
+        if len(orig_tokens) < 2:
+            return False
+        # Idempotent: the text-tail prefill lanes isolate the FINAL token in a
+        # single-token forward (which rolls the ring in place), so they call
+        # this BEFORE that forward; the post-prefill call in
+        # _run_vision_encoding then finds the ring rolled. A capture already
+        # taken at THIS boundary must be kept, not clobbered. A capture at a
+        # DIFFERENT boundary is stale (aborted prefill) and is dropped.
+        _prior = getattr(request, "_mixed_swa_media_boundary", None)
+        if _prior is not None and int(_prior[0]) == len(orig_tokens) - 1:
+            return True
+        request._mixed_swa_media_boundary = None  # type: ignore[attr-defined]
+        try:
+            if not self._request_has_media_cache_context(request, orig_tokens):
+                return False
+            if not self._media_prefix_cache_allowed(request, orig_tokens):
+                return False
+        except Exception:
+            return False
+        boundary = len(orig_tokens) - 1
+        try:
+            snap_map: Dict[int, Any] = {}
+            materialize: List[Any] = []
+            from copy import copy as _shallow_copy
+
+            for layer_idx, layer in enumerate(cache):
+                if type(layer).__name__ != "RotatingKVCache":
+                    continue
+                keys = getattr(layer, "keys", None)
+                values = getattr(layer, "values", None)
+                if keys is None or values is None:
+                    logger.info(
+                        "mixed-SWA media boundary capture declined for %s: "
+                        "rotating layer %d has no buffer",
+                        request.request_id,
+                        layer_idx,
+                    )
+                    return False
+                offset = int(getattr(layer, "offset", 0) or 0)
+                idx = int(getattr(layer, "_idx", -1))
+                max_size = int(getattr(layer, "max_size", 0) or 0)
+                keep = int(getattr(layer, "keep", 0) or 0)
+                physical = int(keys.shape[2])
+                trim = offset - boundary
+                required = min(boundary, max_size)
+                if (
+                    trim < 0
+                    or idx != physical
+                    or max_size <= 0
+                    or required <= keep
+                    or physical - trim < required
+                ):
+                    logger.info(
+                        "mixed-SWA media boundary capture declined for %s: "
+                        "layer %d offset=%d physical=%d idx=%d trim=%d "
+                        "required=%d keep=%d (boundary=%d) — not a temporal "
+                        "post-prefill buffer covering the N-1 window",
+                        request.request_id,
+                        layer_idx,
+                        offset,
+                        physical,
+                        idx,
+                        trim,
+                        required,
+                        keep,
+                        boundary,
+                    )
+                    return False
+                avail = physical - trim
+                if avail == required:
+                    snap_k = keys[..., :avail, :]
+                    snap_v = values[..., :avail, :]
+                elif keep > 0:
+                    snap_k = mx.concatenate(
+                        [
+                            keys[..., :keep, :],
+                            keys[..., avail - (required - keep) : avail, :],
+                        ],
+                        axis=2,
+                    )
+                    snap_v = mx.concatenate(
+                        [
+                            values[..., :keep, :],
+                            values[..., avail - (required - keep) : avail, :],
+                        ],
+                        axis=2,
+                    )
+                else:
+                    snap_k = keys[..., avail - required : avail, :]
+                    snap_v = values[..., avail - required : avail, :]
+                # Break the lazy reference to the full prefill buffer so the
+                # retained copy is window-sized, not prompt-sized.
+                snap_k = mx.contiguous(snap_k)
+                snap_v = mx.contiguous(snap_v)
+                materialize.extend((snap_k, snap_v))
+                snap = _shallow_copy(layer)
+                snap.keys = snap_k
+                snap.values = snap_v
+                snap.offset = boundary
+                snap._idx = int(snap_k.shape[2])
+                snap_map[layer_idx] = snap
+            if not snap_map:
+                return False
+            if materialize:
+                mx.eval(*materialize)
+            request._mixed_swa_media_boundary = (  # type: ignore[attr-defined]
+                boundary,
+                snap_map,
+            )
+            logger.info(
+                "mixed-SWA media boundary captured for %s: %d rotating layers "
+                "at N-1 boundary=%d (window<=%d tokens each) before decode",
+                request.request_id,
+                len(snap_map),
+                boundary,
+                min(boundary, max(s.max_size for s in snap_map.values())),
+            )
+            return True
+        except Exception as e:
+            logger.warning(
+                "mixed-SWA media boundary capture failed for %s (non-fatal, "
+                "store will fall back to rotating_kv_pending): %s",
+                getattr(request, "request_id", "?"),
+                e,
+            )
+            try:
+                request._mixed_swa_media_boundary = None  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            return False
+
     def _mark_required_ssm_checkpoint(
         self,
         request: "MLLMBatchRequest",
@@ -7250,7 +7461,15 @@ class MLLMBatchGenerator:
         # stream — see module-level `_gen_stream()` docstring for the
         # JANGTQ Metal kernel + scheduler thread stream-isolation rationale.
         with _MaybeStream():
-            return self._run_vision_encoding_inner(request, cache)
+            logits = self._run_vision_encoding_inner(request, cache)
+            # Mixed-SWA media prompts: snapshot the N-1 prompt-boundary
+            # rotating windows NOW, before any decode step advances the
+            # rings. This is the only moment the exact boundary state
+            # exists; the finish-time cache has rolled past it by the
+            # reply length. Guarded inside to be a no-op for every other
+            # family/request shape.
+            self._maybe_capture_mixed_swa_media_boundary(request, cache)
+            return logits
 
     def _run_vision_encoding_inner(self, request: "MLLMBatchRequest", cache: Optional[List[Any]] = None) -> "mx.array":
         kwargs = dict(request.extra_kwargs)
@@ -7372,25 +7591,86 @@ class MLLMBatchGenerator:
             except Exception:
                 pass  # never let observability break a request
 
-        # vmlx#89 / mlxstudio#83: opt-in chunked prefill for hybrid SSM models
-        # on text-only requests. Hybrid models default to one-shot prefill
-        # because their mask computation uses cache-position indexing
-        # (fa_idx/ssm_idx) that was only tested for full-sequence processing.
-        # However, long prompts (>~13K tokens at 32-head bfloat16) trigger
-        # Metal single-buffer OOM (~9.5 GB cap per allocation) because
-        # `attention_scores` blows up to (1, heads, seq_len, seq_len) * 2 bytes.
+        # vmlx#89 / mlxstudio#83: chunked prefill for hybrid SSM models on
+        # text-only requests.
         #
-        # Qwen3.5 hybrid (GatedDeltaNet + attention) has an opt-in chunked
-        # prefill path for diagnostics and OOM escape hatches. Live decode
-        # equivalence is not release-cleared, so native-MTP hybrid text splitting
-        # must stay disabled by default. Other hybrid architectures may produce
-        # incorrect output when chunked, so we only override the opt-in default
-        # when one-shot prefill is *guaranteed* to OOM — a wrong answer beats
-        # a hard crash that kills the session.
-        _allow_hybrid_chunked = (
+        # HISTORY: hybrids default to one-shot prefill. The original comment
+        # blamed cache-position mask indexing (fa_idx/ssm_idx) "only tested
+        # for full-sequence processing" — that was caution, not a defect: the
+        # fa mask is KVCache.make_mask ("causal" with the cache offset — the
+        # same mechanism every decode step and every non-hybrid chunked
+        # prefill uses), the ssm mask is None for single-request serve, and
+        # the GDN conv/ssm state carry across chunk boundaries is the exact
+        # recurrence decode and the MTP n_confirmed verify split rely on
+        # constantly. Mechanism equivalence is proven bit-for-bit in
+        # tests/test_hybrid_chunked_prefill_equivalence.py.
+        #
+        # The default was flipped to chunked for the proven families and then
+        # RETRACTED the same day on the answer-byte gate — see the decision
+        # below for the measured A/B. On head_dim-256 models the SDPA
+        # fallback materializes scores with shape-dependent rounding, so the
+        # two lanes produce ulp-different hidden states and temperature-0
+        # reasoning forks on a near-tie. Answers stay correct; bytes differ;
+        # bytes win.
+        #
+        # VMLX_ALLOW_HYBRID_CHUNKED_PREFILL: unset -> one-shot default;
+        # truthy -> chunk every hybrid; falsy -> one-shot every hybrid.
+        # Neither value ever refuses work — this only selects a path.
+        _hybrid_chunk_env = (
             os.environ.get("VMLX_ALLOW_HYBRID_CHUNKED_PREFILL")
             or os.environ.get("VMLINUX_ALLOW_HYBRID_CHUNKED_PREFILL")
-        ) in ("1", "true", "True", "yes", "on")
+        )
+        _hybrid_text_model_type = "unknown"
+        if self._is_hybrid:
+            try:
+                cfg_outer = getattr(self.model, "config", None)
+                cfg_inner = (
+                    _read_config_field(cfg_outer, "text_config")
+                    if cfg_outer is not None
+                    else None
+                )
+                _hybrid_text_model_type = str(
+                    _read_config_field(cfg_inner, "model_type")
+                    or _read_config_field(cfg_outer, "model_type")
+                    or "unknown"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+        if _hybrid_chunk_env is not None:
+            _allow_hybrid_chunked = _hybrid_chunk_env in (
+                "1", "true", "True", "yes", "on"
+            )
+            _hybrid_path_reason = (
+                f"VMLX_ALLOW_HYBRID_CHUNKED_PREFILL={_hybrid_chunk_env!r}"
+            )
+        else:
+            # DEFAULT STAYS ONE-SHOT — the flip was built, proven at the
+            # mechanism level, and then RETRACTED on the answer-byte gate
+            # (2026-08-23 live A/B, Qwen3.8-27B mtp16, temp 0, cold SSD both
+            # arms): a 9,190-token prompt produced 1,388 output tokens chunked
+            # vs 1,915 one-shot; a 29,080-token prompt 2,942 vs 2,663. The
+            # same-lane control (chunked twice) was byte-identical in all four
+            # files, so the stack is deterministic and the divergence is
+            # lane-attributable. Mechanism: head_dim=256 keeps mx.fast SDPA
+            # off its fused kernel, the fallback MATERIALIZES softmax(QK^T)
+            # with shape-dependent matmul tiling, and (heads, seq, seq) vs
+            # (heads, chunk, ctx) round differently by ulps — at temperature 0
+            # a near-tie eventually flips one reasoning token and the
+            # trajectories fork (both arms' final answers stayed correct, and
+            # the warm-suffix turn-2 CONTENT was byte-identical across lanes).
+            # tests/test_hybrid_chunked_prefill_equivalence.py holds the
+            # bitwise proof on the fused-kernel path; the answer-byte gate is
+            # what the default must honor. The OOM escape hatch below still
+            # chunks spans whose one-shot score buffer cannot exist (that IS
+            # the shipped behavior above ~13.4k on 24-head/256-dim), and
+            # spans past ~37k have no one-shot at all (metal::malloc refuses
+            # a ~94GiB score buffer — live-proven, the request fails cleanly).
+            _allow_hybrid_chunked = False
+            _hybrid_path_reason = (
+                "hybrid default one-shot (answer-byte parity; chunked lane "
+                "diverges reasoning trajectories on the head_dim-256 SDPA "
+                "fallback — see the comment at this decision)"
+            )
         _hybrid_blocks_chunk = self._is_hybrid and not _allow_hybrid_chunked
         _allow_native_mtp_hybrid_text_split = (
             os.environ.get("VMLINUX_ENABLE_NATIVE_MTP_HYBRID_TEXT_SPLIT")
@@ -7420,42 +7700,63 @@ class MLLMBatchGenerator:
             and _predicted_attn_bytes > _OOM_GUARD_BYTES
             and os.environ.get("VMLX_DISABLE_HYBRID_AUTO_CHUNK") not in ("1", "true", "True", "yes", "on")
         ):
-            # Family-specific safety: Qwen3.5 GatedDeltaNet (qwen3_next /
-            # qwen3_5_moe text-config) was verified cache-aware end-to-end.
-            # Other hybrid families (Nemotron-Cascade, MiniMax M2, Granite
-            # Hybrid, etc.) take the chunked path as OOM-prevention fallback —
-            # correctness should be spot-checked by the caller for those.
-            _mt = "unknown"
-            try:
-                cfg_outer = getattr(self.model, "config", None)
-                cfg_inner = getattr(cfg_outer, "text_config", None) if cfg_outer is not None else None
-                _mt = (
-                    getattr(cfg_inner, "model_type", None)
-                    or getattr(cfg_outer, "model_type", None)
-                    or "unknown"
-                )
-            except Exception:
-                pass
-            _verified = _mt in ("qwen3_next", "qwen3_5_moe", "qwen3_5_vl", "qwen3_5")
+            # Family-specific safety wording ONLY. Qwen3.5-family GatedDeltaNet
+            # chunking is equivalence-proven at the MECHANISM level (bit-exact
+            # KV/SSM/logits — see the proven set above and
+            # tests/test_hybrid_chunked_prefill_equivalence.py), but it is NOT
+            # the default: the answer-byte gate failed live (the head_dim-256
+            # SDPA fallback rounds differently between lanes and re-words temp-0
+            # reasoning). So these families DO still reach this branch and take
+            # the chunked path here as an OOM escape hatch, exactly like every
+            # other hybrid family — the proven set only decides how confidently
+            # this log line is phrased.
+            #
+            # Hybrid families NOT in the set (Nemotron-Cascade, MiniMax M2,
+            # Granite Hybrid, ...) get the same fallback with no equivalence
+            # evidence at all — spot-check their output.
+            _verified = (
+                _hybrid_text_model_type == "qwen3_next"
+                or _hybrid_text_model_type
+                in _HYBRID_CHUNKED_PROVEN_TEXT_MODEL_TYPES
+            )
             logger.info(
                 "Hybrid model (family=%s) seq_len=%d: one-shot attention buffer "
                 "%.1f GB exceeds Metal single-buffer limit (~9.5 GB). Enabling "
                 "chunked prefill — %s. Set VMLX_DISABLE_HYBRID_AUTO_CHUNK=1 to "
                 "raise an OOM error instead of chunking.",
-                _mt, seq_len, _predicted_attn_bytes / (1024**3),
+                _hybrid_text_model_type, seq_len,
+                _predicted_attn_bytes / (1024**3),
                 (
                     "verified safe on Qwen3.5 GatedDeltaNet" if _verified
                     else "spot-check output for correctness on non-Qwen3.5 hybrid families"
                 ),
             )
             _hybrid_blocks_chunk = False
+            _hybrid_path_reason = (
+                "one-shot attention buffer would exceed the Metal "
+                "single-buffer limit (OOM escape hatch)"
+            )
+
+        # The chosen path must be VISIBLE, never silent: one line per hybrid
+        # text prefill naming the lane and why. (Media prefill is one-shot by
+        # design for every family and logs through the media path.)
+        if self._is_hybrid and not has_media_payload:
+            logger.info(
+                "Hybrid prefill path=%s family=%s seq_len=%d cached=%d — %s",
+                "one-shot" if _hybrid_blocks_chunk else "chunked",
+                _hybrid_text_model_type,
+                seq_len,
+                int(getattr(request, "_cached_tokens", 0) or 0),
+                _hybrid_path_reason,
+            )
 
         # TEXT-ONLY FAST PATH: use language_model directly, skip VLM wrapper.
         # The VLM wrapper adds overhead from vision encoder path and some VLM
         # wrappers (e.g. Gemma 4 loaded via smelt) may not accept pixel_values.
         # Using language_model directly avoids this entirely.
-        # Hybrid SSM models must go through the full model for correct mask
-        # computation UNLESS the opt-in env var is set (vmlx#89).
+        # Hybrid SSM families default to the one-shot full-model forward
+        # (answer-byte parity — vmlx#89, decision + log above); the chunked
+        # lanes below serve the env opt-in and the OOM escape hatch.
         # mlxstudio#83: self.language_model already falls back to self.model
         # when the wrapped model has no `.language_model` attr (see __init__).
         # Using `getattr(self.model, 'language_model', None)` here returned
@@ -7708,6 +8009,12 @@ class MLLMBatchGenerator:
                                 and not prefill_keep_alloc_enabled()
                             ):
                                 mx.clear_cache()
+                    # Mixed-SWA media context: the final-token forward below
+                    # is a single-token ring write that trims the rotating
+                    # buffers' overhang — after it the N-1 boundary window is
+                    # unrecoverable. Capture it NOW, while the buffer is still
+                    # a temporal post-concat state.
+                    self._maybe_capture_mixed_swa_media_boundary(request, cache)
                     output = lm(
                         input_ids[:, final_start:],
                         **_lm_kwargs_for(final_start, seq_len),
@@ -7719,9 +8026,9 @@ class MLLMBatchGenerator:
 
         # Chunked prefill for text-only VLM requests with long prompts.
         # Image requests must run in one shot (vision encoder needs full sequence).
-        # Hybrid SSM default: one-shot (safe). Opt-in via
-        # VMLX_ALLOW_HYBRID_CHUNKED_PREFILL=1 for hybrid architectures that
-        # have been verified cache-aware (Qwen3.5 GatedDeltaNet + attention).
+        # Hybrid SSM families: one-shot by default (answer-byte parity, see
+        # the decision/log above); this chunked lane serves
+        # VMLX_ALLOW_HYBRID_CHUNKED_PREFILL=1 and the OOM escape hatch.
         if (
             not has_media_payload
             and (
@@ -8671,6 +8978,10 @@ class MLLMBatchGenerator:
                             self._span_largest_peak / (1024**3),
                         )
 
+                # Mixed-SWA media context: capture the N-1 boundary window
+                # BEFORE the single-token final forward trims the rotating
+                # buffers' overhang (see the short-prompt lane above).
+                self._maybe_capture_mixed_swa_media_boundary(request, cache)
                 # Final chunk: get logits from last token
                 last_chunk = input_ids[:, processed:]
                 output = lm(last_chunk, **_lm_kwargs_for(processed, seq_len))
@@ -10543,9 +10854,30 @@ class MLLMBatchGenerator:
                     _media_tokens = list(
                         getattr(req, "_original_token_ids", None) or []
                     )
+                    # Mixed-SWA families already hold the exact N-1 boundary
+                    # from the end-of-prefill rotating snapshot — the aux
+                    # clean media prefill would be a redundant SECOND full
+                    # forward pass (the cost class profiled at 40.8% of
+                    # engine time on the text lane).
+                    _swa_boundary_captured = bool(
+                        getattr(self, "_mixed_attention_cache_model", False)
+                        and getattr(req, "_mixed_swa_media_boundary", None)
+                        is not None
+                    )
+                    if (
+                        _swa_boundary_captured
+                        and int(getattr(req, "_cached_tokens", 0) or 0) == 0
+                    ):
+                        logger.info(
+                            "MLLM media prefix cache: skipping aux clean media "
+                            "prefill for %s — mixed-SWA N-1 boundary snapshot "
+                            "already captured at end of prefill",
+                            req.request_id,
+                        )
                     if (
                         int(getattr(req, "_cached_tokens", 0) or 0) == 0
                         and len(_media_tokens) > 1
+                        and not _swa_boundary_captured
                         and self._media_prefix_cache_allowed(req, _media_tokens)
                     ):
                         # BLOCK-ALIGN the clean media boundary. Capturing at
@@ -10617,6 +10949,11 @@ class MLLMBatchGenerator:
                             req._inline_ssm_boundary = 0
                         if hasattr(req, "_inline_ssm_checkpoints"):
                             req._inline_ssm_checkpoints = None
+                        # Same hardening for the mixed-SWA boundary snapshot:
+                        # it may have been taken over the corrupt restored
+                        # cache the retry is discarding.
+                        if hasattr(req, "_mixed_swa_media_boundary"):
+                            req._mixed_swa_media_boundary = None
                         try:
                             cache_model = getattr(self, "_cache_model", None)
                             if cache_model is not None:
@@ -11173,6 +11510,10 @@ class MLLMBatchGenerator:
                         req._inline_ssm_boundary = 0
                     if hasattr(req, "_inline_ssm_checkpoints"):
                         req._inline_ssm_checkpoints = None
+                    # Same hardening for the mixed-SWA boundary snapshot: it
+                    # may reference the discarded cache state.
+                    if hasattr(req, "_mixed_swa_media_boundary"):
+                        req._mixed_swa_media_boundary = None
                     # Flush stale GPU state before retry
                     mx.clear_cache()
                     try:
@@ -12822,6 +13163,29 @@ class MLLMBatchGenerator:
                 if captured_cache is None:
                     captured_cache = batch.extract_cache(i)
                 cache_fn = lambda c=captured_cache: c
+                # Hand the mixed-SWA N-1 boundary snapshot (captured at end
+                # of prefill, before decode advanced the rotating rings) to
+                # the scheduler's paged store. The scheduler works with its
+                # own request wrapper, so hand off by request_id — mirroring
+                # _clean_boundary_snapshots.
+                _swa_capture = getattr(req, "_mixed_swa_media_boundary", None)
+                if _swa_capture is not None:
+                    try:
+                        _swa_snaps = getattr(
+                            self, "_mixed_swa_boundary_snapshots", None
+                        )
+                        if _swa_snaps is None:
+                            _swa_snaps = {}
+                            self._mixed_swa_boundary_snapshots = _swa_snaps
+                        _swa_snaps[str(request_id)] = _swa_capture
+                        # Bound the map: entries are consumed by the store,
+                        # but a dropped request must not leak window copies.
+                        if len(_swa_snaps) > 8:
+                            for _stale in list(_swa_snaps)[:-8]:
+                                _swa_snaps.pop(_stale, None)
+                    except Exception:
+                        pass
+                    req._mixed_swa_media_boundary = None
 
             responses.append(
                 MLLMBatchResponse(
@@ -13065,7 +13429,49 @@ class MLLMBatchGenerator:
             return None
         kv_set = set(self._hybrid_kv_positions or [])
         states = [c for i, c in enumerate(derived) if i not in kv_set]
-        return states or None
+        if not states:
+            return None
+
+        # Hand the attention transients back BEFORE returning.
+        #
+        # This derive materialises the whole prefix KV twice over -- once in
+        # reconstruct_cache(), then again as the forward regrows attention KV up
+        # to fetch_num -- and keeps NONE of it: only the recurrent slots survive
+        # the kv_set filter above. `sliced` holds views into `reconstructed`, and
+        # `derived`'s attention buffers are pure waste, so without an explicit
+        # drop all of it stays resident and OVERLAPS the caller's own forward.
+        #
+        # Measured 2026-08-23 (Qwen3.8-27B, 17.5GB weights, SSD-only tier): Metal
+        # peaks walked to 36.6GB inside a turn while the retained floor tracked
+        # live KV correctly at 61 KB/token. utils/prefill_admission.py then
+        # refuses the turn outright ("Message not sent" at 80,097 tokens). The
+        # transient is the whole problem, so release it here rather than let a
+        # guard decline work because of it.
+        try:
+            import mlx.core as mx
+
+            # Force the recurrent state to be REAL before dropping its parents.
+            # These are lazy graphs until evaluated; freeing the attention
+            # buffers first would only re-materialise them on the next eval.
+            to_eval = []
+            for st in states:
+                st_state = getattr(st, "state", None)
+                if isinstance(st_state, (list, tuple)):
+                    to_eval.extend(a for a in st_state if hasattr(a, "dtype"))
+                elif hasattr(st_state, "dtype"):
+                    to_eval.append(st_state)
+            if to_eval:
+                mx.eval(*to_eval)
+
+            del derived, sliced, reconstructed
+
+            from .mlx_memory import clear_mlx_memory_cache
+
+            clear_mlx_memory_cache(mx=mx, log=logger)
+        except Exception as exc:  # noqa: BLE001 - reclamation is best-effort
+            logger.debug("Companion delta: could not release transients: %s", exc)
+
+        return states
 
     def _complete_hybrid_base_from_companion(
         self,

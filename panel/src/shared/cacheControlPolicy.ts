@@ -17,8 +17,8 @@ export interface CacheControlState {
    * The architecture has non-KV companion state, but the engine can pair the
    * disk-only KV block index with a typed companion SSD store/rederive path.
    * This is true for hybrid/Mamba SSM caches and native rotating/mixed-SWA
-   * caches whose typed metadata is carried in each block record. It is not
-   * This includes DSV4, M3, and hybrid/Mamba cache contracts with a complete
+   * caches whose typed metadata is carried in each block record. This includes
+   * DSV4, M3, and hybrid/Mamba cache contracts with a complete
    * typed block-disk representation. It remains false for ZAYA/openPangu contracts
    * that still require their architecture-specific in-memory or prompt-level
    * cache lane.
@@ -52,14 +52,16 @@ export interface CacheLaunchPolicy {
 export function resolveCacheControlPolicy(state: CacheControlState): CacheControlPolicy {
   const batchingOff = !state.continuousBatching
   const prefixOff = !state.enablePrefixCache
-  const architectureRequiresPagedCache = !!state.architectureRequiresPagedCache
-  const blockDiskOnlyAlternative = !!state.architectureSupportsBlockDiskOnly && !!state.enableBlockDiskCache
-  const architectureForcedPagedActive = architectureRequiresPagedCache && !blockDiskOnlyAlternative && !batchingOff && !prefixOff
-  const userPagedCacheActive = !batchingOff && !prefixOff && !!state.usePagedCache
-  const effectiveUsePagedCache = architectureForcedPagedActive || userPagedCacheActive
+  // In-RAM paged cache is OFF for EVERY family; SSD block-disk L2 is the only
+  // tier. The control stays visible but is never active and never checked, so
+  // the UI cannot disagree with what resolveCacheLaunchPolicy() launches.
+  const architectureRequiresPagedCache = false
+  const architectureForcedPagedActive = false
+  const userPagedCacheActive = false
+  const effectiveUsePagedCache = false
   const blockDiskCacheActive = !batchingOff && !prefixOff && !!state.enableBlockDiskCache
-  const pagedCacheDisabled = batchingOff || architectureForcedPagedActive
-  const legacyDiskCacheDisabled = batchingOff || effectiveUsePagedCache || blockDiskCacheActive || (!batchingOff && architectureRequiresPagedCache)
+  const pagedCacheDisabled = true
+  const legacyDiskCacheDisabled = batchingOff || blockDiskCacheActive
   const blockDiskCacheVisible = !batchingOff
   const blockDiskCacheDisabled = batchingOff
   const legacyDiskCacheChecked = !!state.enableDiskCache && !legacyDiskCacheDisabled && !prefixOff
@@ -91,31 +93,28 @@ export function resolveCacheControlPolicy(state: CacheControlState): CacheContro
 
 export function resolveCacheLaunchPolicy(state: CacheControlState): CacheLaunchPolicy {
   const batchingOff = !state.continuousBatching
-  const architectureRequiresPagedCache = !!state.architectureRequiresPagedCache
   const prefixEnabled = !batchingOff && !!state.enablePrefixCache
-  const blockDiskOnlyAlternative = !!state.architectureSupportsBlockDiskOnly && !!state.enableBlockDiskCache
-  const architectureForcedPagedActive = architectureRequiresPagedCache && !blockDiskOnlyAlternative && prefixEnabled
-  const effectiveUsePagedCache = prefixEnabled && (
-    architectureForcedPagedActive ||
-    !!state.usePagedCache
-  )
+  // In-RAM paged cache is OFF for EVERY family. SSD block-disk L2 is the only
+  // cache tier this product ships. Neither a per-family registry capability
+  // (`detected.usePagedCache`) nor an architecture "requires paged" claim may
+  // reintroduce a RAM tier here -- both previously did, which is how 18
+  // families ended up launching with --use-paged-cache.
+  const effectiveUsePagedCache = false
   const enableBlockDiskCache = !!state.enableBlockDiskCache && prefixEnabled
 
   return {
     prefixCacheOff: !prefixEnabled,
     effectiveUsePagedCache,
-    enableLegacyDiskCache: !!state.enableDiskCache && prefixEnabled && !effectiveUsePagedCache && !enableBlockDiskCache,
+    enableLegacyDiskCache: !!state.enableDiskCache && prefixEnabled && !enableBlockDiskCache,
     enableBlockDiskCache,
   }
 }
 
-export function cacheControlUpdatesForPagedToggle(enabled: boolean, state: CacheControlState): CacheControlUpdate[] {
-  const updates: CacheControlUpdate[] = []
-  if (enabled && !state.enablePrefixCache) updates.push(['enablePrefixCache', true])
-  if (enabled && state.enableDiskCache) updates.push(['enableDiskCache', false])
-  if (enabled && !state.enableBlockDiskCache) updates.push(['enableBlockDiskCache', true])
-  updates.push(['usePagedCache', enabled])
-  return updates
+export function cacheControlUpdatesForPagedToggle(_enabled: boolean, _state: CacheControlState): CacheControlUpdate[] {
+  // The checkbox is disabled, but keep the handler fail-closed too. A stale
+  // renderer event, automation click, or future styling regression must not be
+  // able to persist a value that the launcher will ignore.
+  return [['usePagedCache', false]]
 }
 
 export function cacheControlUpdatesForDiskToggle(enabled: boolean, state: CacheControlState): CacheControlUpdate[] {

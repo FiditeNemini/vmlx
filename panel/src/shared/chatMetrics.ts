@@ -12,6 +12,70 @@ export interface PrefillTpsInput {
   serverUsageKnown: boolean
 }
 
+export interface ServerDecodePass {
+  outputTokens: number
+  decodeTokens: number
+  decodeSeconds: number
+  tokensPerSecond: number
+}
+
+export interface ServerDecodeSummary extends ServerDecodePass {}
+
+/**
+ * Parse vMLX's negotiated, server-authoritative decode timing extension.
+ *
+ * A stream chunk is not a token: the engine deliberately batches multiple
+ * tokens behind --stream-interval, and tool-control output may not create a
+ * visible delta at all. Renderer arrival timing therefore cannot be used as
+ * the final model decode rate when this private local-engine receipt exists.
+ */
+export function parseServerDecodeUsage(usage: unknown): ServerDecodePass | undefined {
+  if (!usage || typeof usage !== 'object') return undefined
+  const record = usage as Record<string, unknown>
+  const decode = record.vmlx_decode
+  if (!decode || typeof decode !== 'object') return undefined
+  const decodeRecord = decode as Record<string, unknown>
+
+  const outputTokens = Number(record.output_tokens)
+  const decodeTokens = Number(decodeRecord.tokens)
+  const decodeSeconds = Number(decodeRecord.seconds)
+  if (
+    !Number.isFinite(outputTokens) || outputTokens <= 0 ||
+    !Number.isFinite(decodeTokens) || decodeTokens <= 0 ||
+    decodeTokens > outputTokens ||
+    !Number.isFinite(decodeSeconds) || decodeSeconds <= 0
+  ) return undefined
+
+  return {
+    outputTokens,
+    decodeTokens,
+    decodeSeconds,
+    // Recompute from the receipt's numerator/denominator instead of trusting
+    // a separately rounded rate field.
+    tokensPerSecond: decodeTokens / decodeSeconds,
+  }
+}
+
+/** Combine completed HTTP passes in one visible agent/tool exchange. */
+export function summarizeServerDecodePasses(
+  passes: Array<ServerDecodePass | undefined>,
+): ServerDecodeSummary | undefined {
+  const valid = passes.filter((pass): pass is ServerDecodePass => !!pass)
+  if (valid.length === 0) return undefined
+
+  const outputTokens = valid.reduce((sum, pass) => sum + pass.outputTokens, 0)
+  const decodeTokens = valid.reduce((sum, pass) => sum + pass.decodeTokens, 0)
+  const decodeSeconds = valid.reduce((sum, pass) => sum + pass.decodeSeconds, 0)
+  if (decodeTokens <= 0 || decodeSeconds <= 0) return undefined
+
+  return {
+    outputTokens,
+    decodeTokens,
+    decodeSeconds,
+    tokensPerSecond: decodeTokens / decodeSeconds,
+  }
+}
+
 /**
  * Calculate prompt-processing throughput for the uncached prefill only.
  *

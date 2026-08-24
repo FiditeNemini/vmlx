@@ -56,7 +56,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -311,6 +311,9 @@ class BlockDiskStore:
 
         # Stats (protected by _stats_lock for cross-thread accuracy)
         self._stats_lock = threading.Lock()
+        self._latest_payload_inspection_cache: tuple[
+            tuple[str, int, int], Dict[str, Any]
+        ] | None = None
         # Pending immutable payload bytes use the same lock as the public
         # write-pipeline counters.  Native request fences may wait for this
         # bounded budget instead of silently dropping a causal chain block;
@@ -2997,6 +3000,86 @@ class BlockDiskStore:
     # Management
     # =========================================================================
 
+    def _inspect_latest_payload(
+        self,
+        row: Optional[Tuple[Any, ...]],
+    ) -> Optional[Dict[str, Any]]:
+        """Read one safetensors header so UI telemetry reports real dtypes.
+
+        The SQLite ``dtype`` column describes the cache tuple tag (``kv``,
+        ``mixed``), not the tensor element dtype.  That made a live Qwen3.8
+        cache panel say only "full precision" while every stored K/V tensor
+        was actually F32 and consumed twice the bundle-declared BF16 size.
+        Inspect the newest finalized payload, cache the result by path/mtime,
+        and load only the tiny JSON metadata tensor -- never K/V data.
+        """
+        if not row:
+            return None
+        file_name, token_count, file_size, cache_tag = row
+        try:
+            payload_path = (self.cache_dir / str(file_name)).resolve(strict=True)
+            cache_root = self.cache_dir.resolve(strict=True)
+            if not payload_path.is_relative_to(cache_root):
+                return None
+            stat = payload_path.stat()
+            cache_key = (str(payload_path), int(stat.st_mtime_ns), int(stat.st_size))
+            cached = self._latest_payload_inspection_cache
+            if cached is not None and cached[0] == cache_key:
+                return dict(cached[1])
+
+            from safetensors import safe_open
+
+            physical_counts: Counter[str] = Counter()
+            meta: Dict[str, Any] = {}
+            with safe_open(str(payload_path), framework="numpy") as handle:
+                keys = list(handle.keys())
+                for name in keys:
+                    if name in {"__vmlx_block_meta__", "__metadata__"}:
+                        continue
+                    physical_counts[str(handle.get_slice(name).get_dtype())] += 1
+                meta_key = (
+                    "__vmlx_block_meta__"
+                    if "__vmlx_block_meta__" in keys
+                    else "__metadata__" if "__metadata__" in keys else None
+                )
+                if meta_key is not None:
+                    raw = handle.get_tensor(meta_key).tobytes()
+                    decoded = json.loads(raw.decode("utf-8"))
+                    if isinstance(decoded, dict):
+                        meta = decoded
+
+            layer_types = meta.get("__layer_types__") or {}
+            orig_dtypes = meta.get("__orig_dtypes__") or {}
+            attention_orig: Counter[str] = Counter()
+            all_orig: Counter[str] = Counter()
+            for layer_key, raw_dtype in orig_dtypes.items():
+                normalized = str(raw_dtype).replace("mlx.core.", "")
+                all_orig[normalized] += 1
+                if (
+                    str(layer_key).isdigit()
+                    and layer_types.get(str(layer_key))
+                    in {"kv", "rotating_kv", "minimax_m3"}
+                ):
+                    attention_orig[normalized] += 1
+            result = {
+                "token_count": int(token_count or 0),
+                "file_size_bytes": int(file_size or stat.st_size),
+                "cache_tag": str(cache_tag or ""),
+                "cache_layer_count": int(meta.get("__num_cache_layers__") or 0),
+                "layer_type_counts": dict(Counter(layer_types.values())),
+                "physical_tensor_dtype_counts": dict(physical_counts),
+                "original_tensor_dtype_counts": dict(all_orig),
+                "original_attention_kv_dtype_counts": dict(attention_orig),
+                "runtime_cache_fingerprint": meta.get(
+                    "__runtime_cache_fingerprint__"
+                ),
+            }
+            self._latest_payload_inspection_cache = (cache_key, dict(result))
+            return result
+        except Exception as exc:  # noqa: BLE001 - telemetry must not break stats
+            logger.debug("Latest block payload inspection failed: %s", exc)
+            return None
+
     def get_stats(self) -> Dict[str, Any]:
         """Return cache statistics."""
         # Fence completion and the SQLite row it certifies must be one coherent
@@ -3012,6 +3095,10 @@ class BlockDiskStore:
                     "SELECT COUNT(*), COALESCE(SUM(file_size), 0), "
                     "COALESCE(SUM(access_count), 0), "
                     "COALESCE(SUM(num_tokens), 0) FROM blocks"
+                ).fetchone()
+                latest_payload_row = conn.execute(
+                    "SELECT file_name, num_tokens, file_size, dtype FROM blocks "
+                    "ORDER BY created_at DESC LIMIT 1"
                 ).fetchone()
             finally:
                 conn.close()
@@ -3065,6 +3152,9 @@ class BlockDiskStore:
                     "recent_fences": recent_write_fences,
                 },
             }
+        latest_payload = self._inspect_latest_payload(latest_payload_row)
+        if latest_payload is not None:
+            stats["latest_payload"] = latest_payload
         # Never hold ``_stats_lock`` while taking the process-shared root lock:
         # the background writer takes those locks in the opposite phase order.
         global_health = self.global_budget.refresh_health()

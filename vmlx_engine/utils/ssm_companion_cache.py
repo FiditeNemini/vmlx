@@ -82,8 +82,10 @@ from __future__ import annotations
 # value previously lived as an inline literal in four places (both scheduler
 # config fields, a getattr fallback, and the MLLM generator's parameter
 # default) — the second-consumer policy-drift class. Direct SSMCompanionCache
-# constructions keep their own documented default (see __init__).
-DEFAULT_SSM_COMPANION_ENTRIES = 8
+# constructions keep their own documented default (see __init__). Production
+# serving is SSD-only: zero disables retained companion payloads while keeping
+# the typed disk store available for write-through and refault.
+DEFAULT_SSM_COMPANION_ENTRIES = 0
 
 import hashlib
 import json
@@ -391,14 +393,14 @@ class SSMCompanionCache:
         disk_store: Any = None,
         max_bytes: Optional[int] = None,
     ):
-        if max_entries < 1:
-            raise ValueError("max_entries must be >= 1")
+        if max_entries < 0:
+            raise ValueError("max_entries must be >= 0")
         # Internal storage: key -> (states, is_complete) tuple.
         self._store: OrderedDict[str, Tuple[List[Any], bool]] = OrderedDict()
         self._max_entries = max_entries
         self._max_bytes = int(max_bytes) if max_bytes is not None else None
-        if self._max_bytes is not None and self._max_bytes < 1:
-            raise ValueError("max_bytes must be >= 1 when set")
+        if self._max_bytes is not None and self._max_bytes < 0:
+            raise ValueError("max_bytes must be >= 0 when set")
         self._entry_nbytes: Dict[str, int] = {}
         self._total_nbytes = 0
         self._evictions = 0
@@ -446,6 +448,14 @@ class SSMCompanionCache:
     def total_nbytes(self) -> int:
         """Approximate resident bytes held by stored SSM states."""
         return self._total_nbytes
+
+    @property
+    def ram_enabled(self) -> bool:
+        """Whether companion payloads may remain resident between requests."""
+        return bool(
+            self._max_entries > 0
+            and (self._max_bytes is None or self._max_bytes > 0)
+        )
 
     @property
     def evictions(self) -> int:
@@ -577,6 +587,10 @@ class SSMCompanionCache:
         """
         if num_tokens <= 0 or not ssm_states:
             return
+        if not self.ram_enabled and self._disk is None:
+            # A zero-sized cache without L2 is fully disabled. Avoid even the
+            # transient clone/materialisation cost in that configuration.
+            return
         stored_states = self._clone_states(ssm_states, key_hint="store")
         if stored_states is None:
             logger.debug(
@@ -585,14 +599,35 @@ class SSMCompanionCache:
             )
             return
         stored_nbytes = self._estimate_state_nbytes(stored_states)
+        key = self._key(token_ids, num_tokens, cache_extra_keys=cache_extra_keys)
+
+        # SSD is authoritative in disk-only mode. Freeze/write the detached
+        # snapshot before deciding whether it also belongs in retained RAM.
+        if self._disk is not None:
+            try:
+                self._disk.store(
+                    key, stored_states, is_complete, token_ids, num_tokens
+                )
+            except Exception as e:
+                logger.debug("SSM disk write-through failed: %s", e)
+
+        if not self.ram_enabled:
+            logger.debug(
+                "SSM companion stored to L2 only: retained RAM disabled "
+                "(N=%d, %.1fMB)",
+                num_tokens,
+                stored_nbytes / (1024 * 1024),
+            )
+            return
         if self._max_bytes is not None and stored_nbytes > self._max_bytes:
             logger.info(
-                "SSM store skipped: entry is %.1fMB, above cache budget %.1fMB",
+                "SSM companion stored to L2 but not retained in L1: entry is "
+                "%.1fMB, above RAM budget %.1fMB",
                 stored_nbytes / (1024 * 1024),
                 self._max_bytes / (1024 * 1024),
             )
             return
-        key = self._key(token_ids, num_tokens, cache_extra_keys=cache_extra_keys)
+
         prefix_hash = self._prefix_hash(
             token_ids, num_tokens, cache_extra_keys=cache_extra_keys
         )
@@ -605,15 +640,6 @@ class SSMCompanionCache:
         # Record in length index so fetch_longest_prefix can locate it.
         self._length_index.setdefault(num_tokens, {})[prefix_hash] = key
         self._evict_if_needed()
-        # vmlx#110 — write-through to L2 disk store. Failures are silent
-        # (L1 still has the data; disk is best-effort warm-start cache).
-        if self._disk is not None:
-            try:
-                self._disk.store(
-                    key, stored_states, is_complete, token_ids, num_tokens
-                )
-            except Exception as e:
-                logger.debug("SSM disk write-through failed: %s", e)
 
     def has_complete(
         self,
@@ -633,7 +659,15 @@ class SSMCompanionCache:
             return False
         key = self._key(token_ids, num_tokens, cache_extra_keys=cache_extra_keys)
         entry = self._store.get(key)
-        return entry is not None and bool(entry[1])
+        if entry is not None:
+            return bool(entry[1])
+        disk_probe = getattr(self._disk, "has_complete", None)
+        if callable(disk_probe):
+            try:
+                return bool(disk_probe(key))
+            except Exception:
+                return False
+        return False
 
     def _clone_states(self, states: List[Any], *, key_hint: str) -> Optional[List[Any]]:
         """Detach SSM state objects from caller-owned/live cache buffers.
@@ -755,19 +789,20 @@ class SSMCompanionCache:
                     disk_complete,
                 )
                 disk_nbytes = self._estimate_state_nbytes(disk_states)
-                if self._max_bytes is not None and disk_nbytes > self._max_bytes:
+                if not self.ram_enabled or (
+                    self._max_bytes is not None and disk_nbytes > self._max_bytes
+                ):
                     logger.info(
-                        "SSM disk hit not backfilled: entry %.1fMB exceeds "
-                        "L1 budget %.1fMB",
+                        "SSM disk hit not backfilled: entry %.1fMB, retained "
+                        "RAM %s (budget %.1fMB)",
                         disk_nbytes / (1024 * 1024),
-                        self._max_bytes / (1024 * 1024),
+                        "enabled" if self.ram_enabled else "disabled",
+                        (self._max_bytes or 0) / (1024 * 1024),
                     )
-                    fresh = self._clone_states(
-                        disk_states, key_hint=f"disk:{key[:12]}"
-                    )
-                    if fresh is None:
-                        return None
-                    return (fresh, disk_complete)
+                    # mx.load reconstructed fresh, materialized arrays. With no
+                    # retained L1 copy, the caller may own and mutate them
+                    # directly; cloning here would briefly double refault RAM.
+                    return (disk_states, disk_complete)
                 # Backfill L1 so subsequent hits skip disk altogether.
                 self._store[key] = (disk_states, disk_complete)
                 self._entry_nbytes[key] = disk_nbytes

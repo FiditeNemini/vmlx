@@ -65,8 +65,11 @@ def test_default_leaves_prefix_reuse_enabled():
 
     assert args.enable_prefix_cache is True
     assert args.enable_block_disk_cache is True
-    # The family's existing contract still applies.
-    assert args.use_paged_cache is True
+    # 2026-08-23: in-RAM paged cache is OFF for every family (SSD block-disk L2
+    # is the only tier), so the ZAYA policy no longer escalates to paged. Prefix
+    # reuse itself is untouched by that -- this gate is still default-OFF, which
+    # is what the rest of this test pins.
+    assert args.use_paged_cache is False
     assert args.kv_cache_quantization == "none"
 
 

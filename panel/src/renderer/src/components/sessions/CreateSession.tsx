@@ -96,7 +96,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               : undefined)
           : prev.dsv4PoolQuant,
         enablePrefixCache: detected?.family === 'openpangu_v2' || detected?.family === 'deepseek-v4' ? true : prev.enablePrefixCache,
-        usePagedCache: detected?.family === 'deepseek-v4' ? true : detected?.usePagedCache,
+        // Paged RAM is retired product-wide. Detection remains informational;
+        // it must not materialize a stale per-family capability into the form.
+        usePagedCache: false,
         enableDiskCache: detected?.family === 'openpangu_v2',
         enableBlockDiskCache: detected?.family !== 'openpangu_v2',
         kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : detected?.family === 'deepseek-v4' ? 'auto' : prev.kvCacheQuantization,
@@ -228,7 +230,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               ? detected.dsv4PoolQuantDefault
               : undefined
             base.enablePrefixCache = true
-            base.usePagedCache = true
+            base.usePagedCache = false
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
             base.kvCacheQuantization = 'auto'
@@ -242,7 +244,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.noMemoryAwareCache = false
             base.kvCacheQuantization = 'none'
           } else {
-            base.usePagedCache = detected.usePagedCache
+            base.usePagedCache = false
             base.enableDiskCache = false
             base.enableBlockDiskCache = true
           }

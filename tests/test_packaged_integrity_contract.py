@@ -106,6 +106,34 @@ def test_tree_parity_excludes_only_named_source_only_files(tmp_path):
         )
 
 
+def test_runtime_tree_parity_applies_source_only_contract_at_every_stage(tmp_path):
+    source = tmp_path / "source"
+    packaged = tmp_path / "packaged"
+    diagnostic = Path(runner.R20_RUNTIME_SOURCE_ONLY_FILES[0])
+    source.mkdir()
+    packaged.mkdir()
+    (source / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (packaged / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source / diagnostic).parent.mkdir(parents=True)
+    (source / diagnostic).write_text("source only\n", encoding="utf-8")
+
+    parity = runner._require_runtime_tree_parity(
+        source,
+        packaged,
+        label="mounted bundled runtime",
+    )
+    assert parity["file_count"] == 1
+
+    (packaged / diagnostic).parent.mkdir(parents=True)
+    (packaged / diagnostic).write_text("must not ship\n", encoding="utf-8")
+    with pytest.raises(runner.ArtifactChainError, match="contains source-only files"):
+        runner._require_runtime_tree_parity(
+            source,
+            packaged,
+            label="mounted bundled runtime",
+        )
+
+
 def test_extracted_asar_payload_ignores_only_ambient_finder_metadata(tmp_path):
     extracted = tmp_path / "extracted"
     nested = extracted / "node_modules"

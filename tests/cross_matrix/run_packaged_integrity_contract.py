@@ -3026,6 +3026,22 @@ def _require_tree_parity(
     return {"file_count": len(source_records), "tree_sha256": digest}
 
 
+def _require_runtime_tree_parity(
+    source: Path,
+    packaged: Path,
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Require installed-runtime parity under the single source-only contract."""
+    return _require_tree_parity(
+        source,
+        packaged,
+        label=label,
+        exclude_python_bytecode=True,
+        source_only_files=R20_RUNTIME_SOURCE_ONLY_FILES,
+    )
+
+
 def _tree_payload_records(
     root: Path,
     *,
@@ -3122,12 +3138,10 @@ def validate_staged_app_parity(
         label="staged source-mirror vmlx_engine",
         exclude_python_bytecode=True,
     )
-    runtime_parity = _require_tree_parity(
+    runtime_parity = _require_runtime_tree_parity(
         source_engine,
         bundled_candidates[0],
         label="staged bundled-runtime vmlx_engine",
-        exclude_python_bytecode=True,
-        source_only_files=R20_RUNTIME_SOURCE_ONLY_FILES,
     )
     renderer_parity = _require_tree_parity(
         root / "panel/out",
@@ -3702,11 +3716,10 @@ def write_dmg_payload_parity_attestation(
         label=f"mounted {flavor} source-mirror vmlx_engine",
         exclude_python_bytecode=True,
     )
-    bundled_runtime = _require_tree_parity(
+    bundled_runtime = _require_runtime_tree_parity(
         source_engine,
         bundled_candidates[0],
         label=f"mounted {flavor} bundled-runtime vmlx_engine",
-        exclude_python_bytecode=True,
     )
     renderer = _require_tree_parity(
         _absolute_path(root) / "panel/out",
@@ -4199,11 +4212,10 @@ def validate_mounted_app_against_final_manifest(
         label="mounted source-mirror vmlx_engine",
         exclude_python_bytecode=True,
     )
-    runtime = _require_tree_parity(
+    runtime = _require_runtime_tree_parity(
         source_engine,
         bundled_candidates[0],
         label="mounted bundled-runtime vmlx_engine",
-        exclude_python_bytecode=True,
     )
     renderer = _require_tree_parity(
         _absolute_path(root) / "panel/out",

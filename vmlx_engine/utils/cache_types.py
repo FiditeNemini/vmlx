@@ -164,8 +164,10 @@ def describe_runtime_cache_layout(
     proof of the cache topology a loaded model instantiated.  Keep this helper
     deliberately observational: it records every top-level slot and nested
     ``CacheList`` leaf, then classifies only cache shapes whose semantics are
-    known.  Unknown native/composite classes stay visible as unknown instead of
-    being guessed into a generic KV or SSM lane.
+    known.  DSV4's explicit composite classes own both a local rotating SWA
+    ring and cumulative compressor/indexer pools. Other unknown native classes
+    stay visible as unknown instead of being guessed into a generic KV or SSM
+    lane.
 
     The returned values contain class names and integer indices only.  No live
     tensors or cache objects are retained by telemetry.
@@ -233,11 +235,18 @@ def describe_runtime_cache_layout(
                 effective_class_counts.get(class_name, 0) + 1
             )
 
-        has_attention = any(_is_attention(name) for name in leaf_names)
+        has_dsv4_composite = any(
+            name in DSV4_CACHE_CLASS_NAMES for name in leaf_names
+        )
+        has_attention = has_dsv4_composite or any(
+            _is_attention(name) for name in leaf_names
+        )
         has_cumulative = any(
             name in CUMULATIVE_CACHE_CLASS_NAMES for name in leaf_names
+        ) or has_dsv4_composite
+        has_rotating = has_dsv4_composite or any(
+            "RotatingKVCache" in name for name in leaf_names
         )
-        has_rotating = any("RotatingKVCache" in name for name in leaf_names)
         has_quantized = any(
             "QuantizedKVCache" in name or name == "TurboQuantKVCache"
             for name in leaf_names

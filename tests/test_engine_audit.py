@@ -15801,6 +15801,31 @@ class TestTurboQuantKVTelemetry:
         assert layout["rotating_layer_indices"] == [1]
         assert layout["unknown_layer_indices"] == [3]
 
+    def test_runtime_cache_layout_classifies_dsv4_composite_slots(self):
+        from vmlx_engine.utils.cache_types import describe_runtime_cache_layout
+
+        rotating_kv_cache_cls = type("RotatingKVCache", (), {})
+        dsv4_cache_cls = type("DeepseekV4Cache", (), {})
+        pool_quantized_v4_cache_cls = type("PoolQuantizedV4Cache", (), {})
+
+        layout = describe_runtime_cache_layout(
+            [
+                rotating_kv_cache_cls(),
+                dsv4_cache_cls(),
+                pool_quantized_v4_cache_cls(),
+            ]
+        )
+
+        # Both DSV4 wrappers own a local rotating SWA ring plus cumulative
+        # compressor/indexer pools. Native pool q8 is attested separately and
+        # must not be mislabeled as generic QuantizedKVCache/TurboQuant KV.
+        assert layout["attention_layer_indices"] == [0, 1, 2]
+        assert layout["cumulative_layer_indices"] == [1, 2]
+        assert layout["parallel_layer_indices"] == [1, 2]
+        assert layout["rotating_layer_indices"] == [0, 1, 2]
+        assert layout["quantized_layer_indices"] == []
+        assert layout["unknown_layer_indices"] == []
+
     def test_runtime_cache_layout_reports_instantiated_owner_components(self):
         from types import SimpleNamespace
 

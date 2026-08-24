@@ -968,6 +968,63 @@ def _media_placeholder_runs(
     return runs
 
 
+def _step3p7_media_item_runs(
+    request: Any,
+    source_items: List[Tuple[str, Any]],
+    runs: List[Tuple[int, int]],
+    *,
+    model_type: Optional[str],
+) -> Optional[Tuple[List[Tuple[int, int]], List[int]]]:
+    """Collapse Step3.7 crop/full-image runs into one span per source image.
+
+    Step's processor expands one source image to ``num_patches`` adaptive-crop
+    ``<im_patch>`` runs plus one final full-image run. Structural
+    ``<patch_start>/<patch_end>`` and ``<im_start>/<im_end>`` tokens separate
+    those runs, so counting consecutive image-token runs does not count media
+    items. The processor preserves the exact per-source ``num_patches`` list in
+    ``request.extra_kwargs``; consume it only when it reconciles every source
+    and every observed run. Any disagreement returns ``None`` so the caller
+    retains its aggregate fail-closed behavior.
+    """
+    if str(model_type or "").lower() != "step3p7":
+        return None
+    if not source_items or any(modality != "image" for modality, _ in source_items):
+        return None
+    extra_kwargs = getattr(request, "extra_kwargs", None)
+    if not isinstance(extra_kwargs, dict):
+        return None
+    num_patches = extra_kwargs.get("num_patches")
+    if hasattr(num_patches, "tolist"):
+        try:
+            num_patches = num_patches.tolist()
+        except Exception:
+            return None
+    if not isinstance(num_patches, (list, tuple)):
+        return None
+    if len(num_patches) != len(source_items):
+        return None
+
+    run_group_sizes: List[int] = []
+    for value in num_patches:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        run_group_sizes.append(value + 1)
+    if sum(run_group_sizes) != len(runs):
+        return None
+
+    grouped: List[Tuple[int, int]] = []
+    cursor = 0
+    for group_size in run_group_sizes:
+        owned_runs = runs[cursor : cursor + group_size]
+        if len(owned_runs) != group_size:
+            return None
+        grouped.append((owned_runs[0][0], owned_runs[-1][1]))
+        cursor += group_size
+    if cursor != len(runs):
+        return None
+    return grouped, run_group_sizes
+
+
 def _raise_if_image_prefill_exceeds_budget(
     *,
     has_images: bool,
@@ -7370,11 +7427,22 @@ class MLLMBatchGenerator:
             }
             return aggregate
 
+        assignment_runs = runs
+        run_group_sizes: Optional[List[int]] = None
+        step_grouping = _step3p7_media_item_runs(
+            request,
+            source_items,
+            runs,
+            model_type=getattr(self, "_model_type", None),
+        )
+        if step_grouping is not None:
+            assignment_runs, run_group_sizes = step_grouping
+
         assignments: Optional[List[Tuple[str, Any]]] = None
         modalities = {modality for modality, _value in source_items}
-        if len(source_items) == len(runs) and len(modalities) == 1:
+        if len(source_items) == len(assignment_runs) and len(modalities) == 1:
             assignments = list(source_items)
-        elif len(source_items) == len(runs) and source_items:
+        elif len(source_items) == len(assignment_runs) and source_items:
             queues = {
                 modality: deque(
                     value
@@ -7384,7 +7452,7 @@ class MLLMBatchGenerator:
                 for modality in grouped_ids
             }
             resolved: List[Tuple[str, Any]] = []
-            for run_start, _run_end in runs:
+            for run_start, _run_end in assignment_runs:
                 token_id = int(token_ids[run_start])
                 candidates = [
                     modality
@@ -7417,18 +7485,22 @@ class MLLMBatchGenerator:
         scoped: Dict[str, Any] = {}
         boundaries: List[int] = []
         for index, ((modality, source), (run_start, _run_end)) in enumerate(
-            zip(assignments, runs)
+            zip(assignments, assignment_runs)
         ):
             key = f"mllm_media_{index:04d}"
             scoped[key] = _mllm_media_item_digest(request, modality, source)
             scoped = scope_cache_extra_key(scoped, key, run_start)
             boundaries.append(int(run_start))
-        request._media_cache_scope = {
+        media_cache_scope = {
             "mode": "per_media_placeholder",
             "items": len(assignments),
             "modalities": [modality for modality, _source in assignments],
             "boundaries": boundaries,
         }
+        if run_group_sizes is not None:
+            media_cache_scope["placeholder_runs"] = len(runs)
+            media_cache_scope["run_group_sizes"] = run_group_sizes
+        request._media_cache_scope = media_cache_scope
         return scoped
 
     def _tokens_contain_media_placeholders(self, token_ids: List[int]) -> bool:

@@ -324,6 +324,67 @@ def test_mllm_media_cache_maps_video_image_audio_in_causal_token_order():
     }
 
 
+def test_step_media_cache_groups_adaptive_patch_runs_per_source_item():
+    """Step emits N crop runs + one full-image run for each source image."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.cache_key import (
+        CACHE_EXTRA_SCOPES_KEY,
+        cache_extra_keys_for_token_range,
+    )
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "step3p7"
+    generator.model = SimpleNamespace(config=SimpleNamespace(image_token_id=99))
+    generator.language_model = SimpleNamespace(config=None)
+
+    def request(second: str):
+        return SimpleNamespace(
+            images=["image-a", second],
+            videos=None,
+            audio=None,
+            audios=None,
+            image_token_budget=None,
+            image_grid_thw=None,
+            video_grid_thw=None,
+            audio_codes=None,
+            audio_embeds=None,
+            audio_features=None,
+            audio_features_mask=None,
+            pixel_values=None,
+            pixel_values_videos=None,
+            video_pixel_values=None,
+            extra_kwargs={"num_patches": [2, 1]},
+        )
+
+    # First image owns three runs (two crops + full image); second owns two.
+    tokens = [1, 2, 99, 99, 3, 99, 4, 99, 99, 5, 6, 99, 99, 7, 99, 99, 8]
+    first_request = request("image-b")
+    changed_request = request("image-c")
+    first = generator._media_scoped_cache_extra_keys(first_request, tokens)
+    changed = generator._media_scoped_cache_extra_keys(changed_request, tokens)
+
+    assert first_request._media_cache_scope == {
+        "mode": "per_media_placeholder",
+        "items": 2,
+        "modalities": ["image", "image"],
+        "boundaries": [2, 11],
+        "placeholder_runs": 5,
+        "run_group_sizes": [3, 2],
+    }
+    assert first[CACHE_EXTRA_SCOPES_KEY] == {
+        "mllm_media_0000": 2,
+        "mllm_media_0001": 11,
+    }
+    assert cache_extra_keys_for_token_range(first, 2, 11) == (
+        cache_extra_keys_for_token_range(changed, 2, 11)
+    )
+    assert cache_extra_keys_for_token_range(first, 11, len(tokens)) != (
+        cache_extra_keys_for_token_range(changed, 11, len(tokens))
+    )
+
+
 def test_paged_cache_schema_version_tracks_tool_and_rotating_contracts():
     from vmlx_engine.prefix_cache import PAGED_CACHE_SCHEMA_VERSION
 

@@ -285,6 +285,29 @@ def _get_encoding(model_path: Optional[Path] = None):
     return _encoding_cache[key]
 
 
+def ensure_dsv4_encoding_available(model_path: str | Path) -> None:
+    """Fail during model startup when the canonical DSV4 encoder is absent.
+
+    DSV4 bundles cannot safely fall back to a generic Jinja template: the
+    bundle-owned encoder defines the model's prompt grammar, reasoning rail,
+    and DSML tool contract. Letting the server become healthy and discovering
+    this only when the first streamed request renders its prompt turns a
+    packaging problem into an opaque ASGI exception. Resolve it before model
+    load completes so the app can report a useful load error instead.
+    """
+    resolved = Path(model_path).expanduser()
+    try:
+        _get_encoding(model_path=resolved)
+    except Exception as exc:
+        raise RuntimeError(
+            "DSV4 model cannot start because its canonical "
+            f"encoding_dsv4.py was not found or could not load for {resolved}. "
+            "Provide <model>/encoding/encoding_dsv4.py or set "
+            "DSV4_ENCODING_DIR to a compatible DeepSeek-V4 source encoder, "
+            "then restart the session."
+        ) from exc
+
+
 def _resolve_mode_and_effort(
     enable_thinking: Optional[bool],
     reasoning_effort: Optional[str],

@@ -249,6 +249,7 @@ def test_dsv4_affine_loader_uses_generic_jang_hydration(monkeypatch, tmp_path, c
     fastpath_calls = []
     caplog.set_level("INFO", logger=loader.__name__)
 
+    monkeypatch.setattr(loader, "ensure_dsv4_encoding_available", lambda path: None)
     monkeypatch.setattr(loader, "_validate_dsv4_control_tensors", lambda path: None)
     monkeypatch.setattr(loader, "_verify_dsv4_attention_contract", lambda: None)
     monkeypatch.setattr(loader, "_install_dsv4_memory_defaults", lambda: None)

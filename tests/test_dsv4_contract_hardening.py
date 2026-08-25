@@ -36,6 +36,25 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ENGINE_ROOT = REPO_ROOT / "vmlx_engine"
 
 
+def test_dsv4_missing_encoder_fails_before_request_render(monkeypatch, tmp_path):
+    """A missing source encoder must be a startup error, not an ASGI crash."""
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    bundle = tmp_path / "DeepSeek-V4-Flash-JANG-CRACK"
+    bundle.mkdir()
+
+    def missing_encoder(*, model_path=None):
+        raise RuntimeError("DSV4 encoding_dsv4.py module path not set")
+
+    monkeypatch.setattr(dsv4_chat_encoder, "_get_encoding", missing_encoder)
+
+    with pytest.raises(RuntimeError, match="DSV4 model cannot start") as caught:
+        dsv4_chat_encoder.ensure_dsv4_encoding_available(bundle)
+
+    assert "encoding_dsv4.py" in str(caught.value)
+    assert "DSV4_ENCODING_DIR" in str(caught.value)
+
+
 def _engine_python_files() -> list[Path]:
     return [p for p in ENGINE_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 

@@ -50,6 +50,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Tuple
 
+from .dsv4_chat_encoder import ensure_dsv4_encoding_available
+
 _log = _logging.getLogger(__name__)
 _PREFILL_PATCH_INSTALLED = False
 _INSTANT_LOAD_PATCH_INSTALLED = False
@@ -1430,6 +1432,10 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
             "Reinstall vMLX from the latest DMG — the bundled Python is out
             of date".
     """
+    # The canonical source encoder owns DSV4 prompt/reasoning/tool grammar.
+    # Validate it before hydration so a missing encoding_dsv4.py cannot leave
+    # a healthy-looking server that crashes only on the first streamed request.
+    ensure_dsv4_encoding_available(model_path)
     _validate_dsv4_control_tensors(model_path)
 
     # DSV4_LONG_CTX=1 is the only supported runtime mode. The installed JANG

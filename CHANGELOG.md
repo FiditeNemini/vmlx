@@ -26,6 +26,14 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.37] - 2026-08-25
+
+### Release hardening
+
+- Refreshed the Electron live-proof contract to bind release evidence to the current locked-off in-memory cache label and current SSD/native-cache settings.
+- Kept the mixed-media parser contract explicit: image, video, and audio markers remain in the user's request order so video-first prompts cannot pair features with the wrong placeholder.
+- Staged the verified 1.6.36 runtime and cache work under a new synchronized source, engine, and panel version for release packaging.
+
 ## [1.6.36] - 2026-08-24
 
 ### Fixed

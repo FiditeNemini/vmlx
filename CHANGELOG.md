@@ -16,6 +16,9 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ### Fixed
 
+- Backported mlx-vlm's Qwen3-VL scalar-repeat correction for MLX 0.32.2, so
+  image and video prefills convert temporal grid counts to Python integers
+  instead of failing before generation with an incompatible `mx.repeat` call.
 - Inherited MLX's sliced-array quantization fix and MXFP8 scale round-up, so
   future conversions cannot bind stale sliced storage or saturate block maxima
   because an E8M0 scale rounded down. Existing JANG model bundles are not

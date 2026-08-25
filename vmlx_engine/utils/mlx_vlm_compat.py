@@ -11,7 +11,9 @@ Patches applied
   Qwen3.5-35B-A3B bf16, issue #69). ``mx.max(ndarray)`` raises
   ``TypeError: max(): incompatible function arguments``. Coerce on entry.
 * Qwen3-VL ``VisionModel.__call__`` — same ``grid_thw`` typing issue when
-  ``fast_pos_embed_interpolate`` iterates over a numpy array.
+  ``fast_pos_embed_interpolate`` iterates over a numpy array. mlx-vlm 0.5.0
+  also passes a scalar MLX array as ``mx.repeat(..., repeats)``; MLX 0.32.2
+  requires a Python integer, so backport upstream mlx-vlm#1982 at runtime.
 * Qwen3.5/3.6 VL ``Model.sanitize`` — HF-native 3D patch-embed weights can
   arrive as ``(out, channels, temporal, height, width)`` while MLX Conv3D
   expects channels-last ``(out, temporal, height, width, channels)``.
@@ -30,6 +32,7 @@ Patches applied
 
 from __future__ import annotations
 
+import inspect
 import logging
 import textwrap
 
@@ -565,6 +568,27 @@ def _patch_qwen35_language_mrope_none_delta() -> None:
     _logger.debug("mlx_vlm_compat: patched Qwen3.5/N2 language mRoPE delta fallback")
 
 
+def _qwen3_vl_repeat_count_compat(original, module_globals, filename):
+    """Backport mlx-vlm#1982 for MLX 0.32.2 scalar repeat counts.
+
+    mlx-vlm 0.5.0 passes ``grid_thw[i, 0]`` (a scalar ``mx.array``) as the
+    ``repeats`` argument to ``mx.repeat``. MLX 0.32.2 intentionally tightened
+    that binding to accept a Python integer only. Upstream fixed the same call
+    in 1249c7db by converting the scalar with ``int``. Recompile the installed
+    method with that exact substitution while leaving the rest of its vision
+    implementation owned by mlx-vlm. Newer mlx-vlm releases already contain
+    the conversion and are returned untouched.
+    """
+    source = textwrap.dedent(inspect.getsource(original))
+    old = "cu_seqlens.append(mx.repeat(seq_len, grid_thw[i, 0]))"
+    new = "cu_seqlens.append(mx.repeat(seq_len, int(grid_thw[i, 0])))"
+    if old not in source:
+        return original, new in source
+    namespace = dict(module_globals)
+    exec(compile(source.replace(old, new, 1), filename, "exec"), namespace)
+    return namespace[original.__name__], True
+
+
 def _patch_qwen3_vl_grid_thw() -> None:
     try:
         import mlx.core as mx
@@ -593,12 +617,35 @@ def _patch_qwen3_vl_grid_thw() -> None:
 
     orig_call = VisionModel.__call__
     if not getattr(orig_call, "_vmlx_patched", False):
+        repeat_safe_call = orig_call
+        repeat_count_scalar_safe = False
+        try:
+            repeat_safe_call, repeat_count_scalar_safe = (
+                _qwen3_vl_repeat_count_compat(
+                    orig_call,
+                    _qv.__dict__,
+                    getattr(_qv, "__file__", "<qwen3_vl_vision>"),
+                )
+            )
+        except (OSError, TypeError, KeyError, SyntaxError) as exc:
+            _logger.warning(
+                "mlx_vlm_compat: could not install Qwen3-VL MLX 0.32.2 "
+                "repeat-count compatibility patch: %s",
+                exc,
+            )
+
         def __call__(self, hidden_states, grid_thw, **kwargs):
-            return orig_call(self, hidden_states, _as_mx(grid_thw), **kwargs)
+            return repeat_safe_call(self, hidden_states, _as_mx(grid_thw), **kwargs)
         __call__._vmlx_patched = True  # type: ignore[attr-defined]
+        __call__._vmlx_repeat_count_scalar_safe = (  # type: ignore[attr-defined]
+            repeat_count_scalar_safe
+        )
         VisionModel.__call__ = __call__  # type: ignore[assignment]
 
-    _logger.debug("mlx_vlm_compat: patched Qwen3-VL VisionModel grid_thw coercion")
+    _logger.debug(
+        "mlx_vlm_compat: patched Qwen3-VL VisionModel grid_thw coercion and "
+        "MLX 0.32.2 repeat-count compatibility"
+    )
 
 
 def _qwen35_patch_embed_to_mlx_layout(key, value):

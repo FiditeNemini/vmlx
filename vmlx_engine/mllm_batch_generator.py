@@ -137,6 +137,14 @@ from .native_mtp_cache_telemetry import (
     native_mtp_cache_lifecycle_snapshot,
     native_mtp_cache_snapshot,
 )
+from .native_mtp_adaptive import (
+    NativeMTPAdaptiveValueState,
+    adaptive_value_snapshot,
+    arm_depth_cycle,
+    choose_depth_by_value,
+    finish_armed_depth_cycle,
+    note_forced_depth_change,
+)
 
 logger = logging.getLogger(__name__)
 _MIMO_AUDIO_TOKENIZER_CACHE: Dict[str, Any] = {}
@@ -3628,6 +3636,7 @@ class MLLMNativeMTPStats:
     mtp_cache_recreated_on_rejects: int = 0
     mtp_cache_retained_on_rejects: int = 0
     mtp_head_cache: Dict[str, Any] = field(default_factory=dict)
+    adaptive_depth_value: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(
         self,
@@ -3701,6 +3710,7 @@ class MLLMNativeMTPStats:
                 recreated_on_rejects=self.mtp_cache_recreated_on_rejects,
                 retained_on_rejects=self.mtp_cache_retained_on_rejects,
             ),
+            "adaptive_depth_value": dict(self.adaptive_depth_value),
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
         }
@@ -3720,10 +3730,14 @@ class MLLMNativeMTPState:
     stats: MLLMNativeMTPStats = field(default_factory=MLLMNativeMTPStats)
     ar_fallback_pending: bool = False
     ar_fallback_reason: Optional[str] = None
-    # Highest depth this request may climb back to.  Every demotion lowers it,
-    # so a depth that already failed its acceptance gate is never retried and
-    # the controller cannot oscillate between two depths for a whole request.
+    # Highest depth this request is allowed to probe.  This is a capability
+    # ceiling, not a one-way latch: workload phases can make a previously slow
+    # depth profitable again, so the rolling wall-value controller may retry it
+    # after a cooldown.
     depth_ceiling: int = 3
+    adaptive_value: NativeMTPAdaptiveValueState = field(
+        default_factory=NativeMTPAdaptiveValueState
+    )
     # Aligned head cache: chain pairs (deeper-level drafts) appended to the
     # head cache during the last draft phase.  Trimmed after every verify so an
     # unverified draft can never persist in the head's context.
@@ -4908,6 +4922,131 @@ def _native_mtp_env_float(default: float, *names: str) -> float:
         return float(default)
 
 
+def _native_mtp_value_policy_enabled() -> bool:
+    return _native_mtp_env_flag(
+        True,
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_VALUE",
+        "VMLX_NATIVE_MTP_ADAPTIVE_VALUE",
+    )
+
+
+def _native_mtp_value_window() -> int:
+    return _native_mtp_env_int(
+        16,
+        "VMLINUX_NATIVE_MTP_VALUE_WINDOW",
+        "VMLX_NATIVE_MTP_VALUE_WINDOW",
+        minimum=4,
+    )
+
+
+def _native_mtp_value_min_samples() -> int:
+    return _native_mtp_env_int(
+        8,
+        "VMLINUX_NATIVE_MTP_VALUE_MIN_SAMPLES",
+        "VMLX_NATIVE_MTP_VALUE_MIN_SAMPLES",
+        minimum=2,
+    )
+
+
+def _native_mtp_finish_value_cycle(
+    state: MLLMNativeMTPState,
+    *,
+    depth: int,
+    accepted: int,
+    now: float,
+) -> None:
+    if not _native_mtp_value_policy_enabled():
+        return
+    finish_armed_depth_cycle(
+        state.adaptive_value,
+        depth=depth,
+        accepted_drafts=accepted,
+        cycle=int(state.stats.cycles),
+        now=now,
+        window=_native_mtp_value_window(),
+    )
+
+
+def _native_mtp_arm_value_cycle(
+    state: MLLMNativeMTPState,
+    *,
+    now: float,
+) -> None:
+    if not _native_mtp_value_policy_enabled() or state.ar_fallback_pending:
+        return
+    arm_depth_cycle(
+        state.adaptive_value,
+        depth=int(state.depth or 1),
+        now=now,
+    )
+
+
+def _native_mtp_maybe_choose_value_depth(
+    request_id: str,
+    state: MLLMNativeMTPState,
+    current: int,
+) -> bool:
+    """Run one bounded adjacent-depth experiment from rolling wall value."""
+
+    if not _native_mtp_value_policy_enabled():
+        return False
+    minimum_samples = _native_mtp_value_min_samples()
+    decision = choose_depth_by_value(
+        state.adaptive_value,
+        current_depth=current,
+        depth_ceiling=int(getattr(state, "depth_ceiling", 3) or 3),
+        cycle=int(state.stats.cycles),
+        minimum_samples=minimum_samples,
+        cooldown_cycles=_native_mtp_env_int(
+            8,
+            "VMLINUX_NATIVE_MTP_VALUE_COOLDOWN_CYCLES",
+            "VMLX_NATIVE_MTP_VALUE_COOLDOWN_CYCLES",
+            minimum=2,
+        ),
+        probe_interval_cycles=_native_mtp_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_VALUE_PROBE_INTERVAL_CYCLES",
+            "VMLX_NATIVE_MTP_VALUE_PROBE_INTERVAL_CYCLES",
+            minimum=4,
+        ),
+        hysteresis=_native_mtp_env_float(
+            0.05,
+            "VMLINUX_NATIVE_MTP_VALUE_HYSTERESIS",
+            "VMLX_NATIVE_MTP_VALUE_HYSTERESIS",
+        ),
+        raise_min_acceptance=_native_mtp_env_float(
+            0.88,
+            "VMLINUX_NATIVE_MTP_VALUE_RAISE_MIN_ACCEPT",
+            "VMLX_NATIVE_MTP_VALUE_RAISE_MIN_ACCEPT",
+        ),
+    )
+    state.stats.adaptive_depth_value = adaptive_value_snapshot(
+        state.adaptive_value,
+        minimum_samples=minimum_samples,
+    )
+    if decision is None:
+        return False
+    target = max(
+        1,
+        min(
+            int(getattr(state, "depth_ceiling", 3) or 3),
+            int(decision.target_depth),
+        ),
+    )
+    if target != current:
+        state.depth = target
+    logger.info(
+        "MLLM MTP[%s] adaptive value %s D%d -> D%d after cycles=%d: %s",
+        request_id,
+        decision.event,
+        current,
+        target,
+        state.stats.cycles,
+        decision.reason,
+    )
+    return True
+
+
 def _native_mtp_depth_rate(stats: MLLMNativeMTPStats, depth: int) -> Optional[float]:
     index = int(depth) - 1
     if index < 0 or index >= len(stats.drafted_by_depth):
@@ -5261,18 +5400,33 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
                 else "n/a"
             ),
         )
-        # A depth that failed its gate is never retried this request —
-        # EXCEPT on restored-prefix requests, whose early windows judge a
-        # cold head: keep the ceiling so the raise path can climb back once
-        # the head cache is warm and d1 sustains the raise floor.
-        if not getattr(state, "restored_prefix", False):
-            state.depth_ceiling = min(
-                int(getattr(state, "depth_ceiling", 3) or 3), target
+        # Acceptance remains a safety gate, but no longer destroys capability.
+        # A later workload phase may make the adjacent depth profitable again;
+        # the rolling wall-value controller can re-probe it after its cooldown.
+        if _native_mtp_value_policy_enabled() and hasattr(
+            state, "adaptive_value"
+        ):
+            note_forced_depth_change(
+                state.adaptive_value,
+                origin=current,
+                target=target,
+                cycle=int(state.stats.cycles),
+                reason="acceptance_gate",
+            )
+            state.stats.adaptive_depth_value = adaptive_value_snapshot(
+                state.adaptive_value,
+                minimum_samples=_native_mtp_value_min_samples(),
             )
         state.depth = target
         return
 
-    _native_mtp_maybe_raise_depth(request_id, state, current)
+    if _native_mtp_maybe_choose_value_depth(request_id, state, current):
+        return
+
+    # Explicitly disabling the wall-value policy restores the older cumulative
+    # acceptance-only promotion path for controlled A/Bs.
+    if not _native_mtp_value_policy_enabled():
+        _native_mtp_maybe_raise_depth(request_id, state, current)
 
 
 def _native_mtp_maybe_raise_depth(
@@ -5289,10 +5443,9 @@ def _native_mtp_maybe_raise_depth(
     .95*.88*.80), which is the entire gap between a 1.5x and a 2.5x speedup.
 
     Raising is deliberately timid: it needs a near-perfect shallow rate over a
-    real sample, climbs one step at a time, and can never exceed a ceiling that
-    every demotion lowers — so a depth that already failed cannot be retried
-    and the controller cannot oscillate.  The existing d2/d3 acceptance gates
-    remain the safety net: an unprofitable deeper chain is demoted right back.
+    real sample, climbs one step at a time, and never exceeds the request's
+    capability ceiling.  This path is retained only for controlled A/Bs with
+    the rolling wall-value policy disabled.
     """
     if not _native_mtp_env_flag(
         True,
@@ -13254,7 +13407,21 @@ class MLLMBatchGenerator:
                 accepted,
                 depth,
             )
+        # Measure the real interval between completed speculative cycles.  It
+        # includes verify prefetch overlap and queued-token draining, exactly
+        # the wall effects that raw acceptance and trace-only phase timings
+        # miss.  The first cycle merely arms the interval; a depth transition
+        # cannot contaminate either depth because the armed/completed depths
+        # must agree.
+        _value_cycle_now = time.perf_counter()
+        _native_mtp_finish_value_cycle(
+            state,
+            depth=depth,
+            accepted=accepted,
+            now=_value_cycle_now,
+        )
         _native_mtp_maybe_adapt_depth(request.request_id, state)
+        _native_mtp_arm_value_cycle(state, now=_value_cycle_now)
         if accepted == depth:
             state.stats.accepts += 1
             _native_mtp_clear_rollback(cache)

@@ -1,4 +1,4 @@
-"""Adaptive depth must be able to climb, not only fall.
+"""Legacy acceptance-only adaptive depth fallback contracts.
 
 The controller could only ever LOWER draft depth, so a bundle whose tuning
 sidecar says depth 1 stayed at depth 1 no matter how well its head performed.
@@ -6,8 +6,9 @@ That caps throughput at (1 + acceptance) tokens per cycle. MTPLX runs the same
 model family at depth 3 with 0.95/0.88/0.80 acceptance = 3.46 tokens per cycle,
 which is the whole difference between a 1.5x and a 2.5x speedup.
 
-Raising is timid on purpose: near-perfect shallow acceptance, over a real
-sample, one step at a time, under a ceiling that every demotion lowers.
+The rolling wall-value controller has its own focused suite.  These tests run
+with that controller disabled so the older cumulative acceptance gates remain
+available as a controlled A/B fallback.
 """
 
 import pytest
@@ -45,8 +46,11 @@ def _clean_env(monkeypatch):
         "VMLX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
         "VMLINUX_NATIVE_MTP_COST_FALLBACK",
         "VMLX_NATIVE_MTP_COST_FALLBACK",
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_VALUE",
+        "VMLX_NATIVE_MTP_ADAPTIVE_VALUE",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_VALUE", "0")
 
 
 class TestRaises:
@@ -117,7 +121,7 @@ class TestHysteresis:
         state = _State(3, [200, 200, 200], [190, 170, 130])
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 2
-        assert state.depth_ceiling == 2
+        assert state.depth_ceiling == 3
 
     def test_accelerated_depth_three_waits_for_a_real_sample(self, monkeypatch):
         from vmlx_engine.metal import native_mtp_verify_qmm
@@ -154,22 +158,22 @@ class TestHysteresis:
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 1
 
-    def test_demotion_lowers_the_ceiling(self):
-        """Depth 2 with bad d2 must demote AND record the ceiling."""
+    def test_demotion_preserves_the_capability_ceiling(self):
+        """A bad phase must not permanently destroy a supported depth."""
         state = _State(2, [200, 200, 0], [195, 40, 0])  # d2 = 20%
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 1
-        assert state.depth_ceiling == 1
+        assert state.depth_ceiling == 3
 
-    def test_no_oscillation_after_a_demotion(self):
-        """Demote on bad d2, then excellent d1 must NOT climb back."""
+    def test_acceptance_fallback_can_recover_after_a_demotion(self):
+        """A later predictable phase can climb back under the same ceiling."""
         state = _State(2, [200, 200, 0], [195, 40, 0])
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 1
-        # Now d1 looks superb; the ceiling must still hold it down.
+        # Now d1 looks superb; the preserved capability ceiling permits D2.
         state.stats = _Stats([400, 200, 0], [395, 40, 0])
         gen._native_mtp_maybe_adapt_depth("req", state)
-        assert state.depth == 1
+        assert state.depth == 2
 
 
 class TestRestoredPrefixGates:
@@ -205,8 +209,57 @@ class TestRestoredPrefixGates:
         assert state.depth == 1
         assert state.depth_ceiling == 3
 
-    def test_fresh_demote_still_lowers_ceiling(self):
+    def test_fresh_demote_also_preserves_capability_ceiling(self):
         state = self._state(2, [800, 800, 0], [780, 160, 0], restored=False)
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 1
-        assert state.depth_ceiling == 1
+        assert state.depth_ceiling == 3
+
+
+class TestRollingValueIntegration:
+    def test_generator_policy_uses_wall_value_and_publishes_telemetry(
+        self, monkeypatch
+    ):
+        from vmlx_engine.native_mtp_adaptive import add_depth_cycle_sample
+
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_VALUE", "1")
+        state = gen.MLLMNativeMTPState(depth=2)
+        state.stats.cycles = 12
+        state.stats.drafted_by_depth = [12, 12, 0]
+        state.stats.accepted_by_depth = [12, 12, 0]
+        for cycle in range(5, 13):
+            add_depth_cycle_sample(
+                state.adaptive_value,
+                depth=2,
+                accepted_drafts=2,
+                elapsed_ms=6.0,
+                cycle=cycle,
+                window=16,
+            )
+
+        gen._native_mtp_maybe_adapt_depth("value-row", state)
+
+        assert state.depth == 3
+        assert state.stats.adaptive_depth_value["basis"] == (
+            "rolling_wall_confirmed_tokens_per_second"
+        )
+        assert state.stats.adaptive_depth_value["active_probe"] == {
+            "origin": 2,
+            "target": 3,
+        }
+
+    def test_generator_interval_helpers_discard_a_depth_transition(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_VALUE", "1")
+        state = gen.MLLMNativeMTPState(depth=2)
+        state.stats.cycles = 1
+        gen._native_mtp_arm_value_cycle(state, now=10.0)
+        gen._native_mtp_finish_value_cycle(
+            state,
+            depth=3,
+            accepted=3,
+            now=10.01,
+        )
+
+        assert state.adaptive_value.samples_by_depth == [[], [], []]

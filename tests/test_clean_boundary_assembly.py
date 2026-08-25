@@ -285,6 +285,35 @@ def test_mixed_swa_assembly_declines_rolled_finish_cache_without_capture():
     ) is None
 
 
+def test_dots3_native_boundary_assembly_preserves_exact_generator_result():
+    """The scheduler must not downgrade an already assembled Dots3 cache."""
+    from vmlx_engine.models.dots3_note.language import Dots3LatentCache
+
+    gen = _mixed_swa_generator(has_media=True)
+    req = SimpleNamespace(request_id="dots3-native")
+    live = []
+    for _ in range(3):
+        cache = Dots3LatentCache(window=None)
+        cache.offset = 10
+        live.append(cache)
+
+    out = _assemble_mixed_swa_boundary_cache(gen, req, live, 10)
+
+    assert out is live or out == live
+    assert [layer.offset for layer in out] == [10, 10, 10]
+
+
+def test_dots3_native_boundary_assembly_declines_rolled_cache():
+    from vmlx_engine.models.dots3_note.language import Dots3LatentCache
+
+    gen = _mixed_swa_generator(has_media=True)
+    req = SimpleNamespace(request_id="dots3-rolled")
+    cache = Dots3LatentCache(window=None)
+    cache.offset = 14
+
+    assert _assemble_mixed_swa_boundary_cache(gen, req, [cache], 10) is None
+
+
 def test_scheduler_prefers_boundary_assembly_and_retires_unconsumed_handoff():
     """Pin the owning cleanup wiring, including the zero-retained-RAM exit."""
     import inspect

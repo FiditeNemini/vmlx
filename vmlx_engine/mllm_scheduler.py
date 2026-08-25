@@ -5883,6 +5883,34 @@ def _assemble_mixed_swa_boundary_cache(
                     return False
         return saw_rotating
 
+    # Dots3 assembles its native mixed-SWA boundary in the batch generator
+    # before handing the cache to this scheduler.  That list intentionally has
+    # no generic RotatingKVCache layers: every attention/recurrent stream is a
+    # Dots3LatentCache, and the exact-boundary proof is its logical offset.
+    # Do not send an already assembled native cache through the generic
+    # RotatingKV-only detector, which would incorrectly downgrade it to
+    # rotating_kv_pending and discard the boundary receipt.
+    if live_cache and all(
+        type(layer).__name__ == "Dots3LatentCache" for layer in live_cache
+    ):
+        if all(
+            int(getattr(layer, "offset", -1) or -1) == int(boundary)
+            for layer in live_cache
+        ):
+            logger.info(
+                "dots3 native boundary assembly: cache already sits at "
+                "boundary=%d; preserving generator assembly",
+                boundary,
+            )
+            return list(live_cache)
+        logger.info(
+            "dots3 native boundary assembly declined for %s: live offsets "
+            "do not sit at boundary=%d",
+            getattr(request, "request_id", "?"),
+            boundary,
+        )
+        return None
+
     snaps = getattr(batch_generator, "_mixed_swa_boundary_snapshots", None) or {}
     entry = snaps.pop(str(getattr(request, "request_id", "")), None)
     if not entry:

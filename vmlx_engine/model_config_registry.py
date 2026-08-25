@@ -579,11 +579,29 @@ class ModelConfigRegistry:
                     }
                 else:
                     return None
-            family = caps.get("family") or ""
+            # `capabilities.family` was added after the first JANG sidecars
+            # shipped. Some valid older bundles carry a partial capabilities
+            # block, while the DSV4-style schema keeps the same identity at
+            # top-level `model_family`. A partial block is not authoritative
+            # enough to select cache/parser behavior by itself:
+            #
+            #   1. prefer the explicit capabilities family;
+            #   2. accept the older top-level structural family;
+            #   3. otherwise ignore the incomplete stamp and let lookup()
+            #      resolve the exact config.json model_type/text_model_type.
+            #
+            # The final fallback remains _DEFAULT_CONFIG (native cache, no
+            # automatic parsers) for an unknown architecture. Malformed JSON
+            # and unreadable config.json still fail closed above.
+            family = caps.get("family") or jcfg.get("model_family") or ""
             if not family:
-                raise RuntimeError(
-                    f"authoritative JANG stamp {jcfg_path} has no family"
+                logger.warning(
+                    "JANG capabilities stamp %s has no family; ignoring the "
+                    "incomplete capabilities block and falling back to "
+                    "config.json architecture detection",
+                    jcfg_path,
                 )
+                return None
 
             # Start from an existing family config if the stamp's family name
             # matches one we know OR if the stamped family is actually a

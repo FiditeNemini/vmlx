@@ -5126,9 +5126,16 @@ def _native_mtp_maybe_choose_value_depth(
 
     if not _native_mtp_value_policy_enabled():
         return False
+    # Preserve compatibility with request-state objects created before the
+    # rolling wall-value controller was added. Acceptance-based adaptation is
+    # still safe for those requests; value-based probing simply has no state to
+    # consume and must decline without crashing the request.
+    adaptive_value = getattr(state, "adaptive_value", None)
+    if adaptive_value is None:
+        return False
     minimum_samples = _native_mtp_value_min_samples()
     decision = choose_depth_by_value(
-        state.adaptive_value,
+        adaptive_value,
         current_depth=current,
         depth_ceiling=int(getattr(state, "depth_ceiling", 3) or 3),
         cycle=int(state.stats.cycles),
@@ -5157,7 +5164,7 @@ def _native_mtp_maybe_choose_value_depth(
         ),
     )
     state.stats.adaptive_depth_value = adaptive_value_snapshot(
-        state.adaptive_value,
+        adaptive_value,
         minimum_samples=minimum_samples,
     )
     if decision is None:

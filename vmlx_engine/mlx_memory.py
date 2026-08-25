@@ -335,6 +335,21 @@ def maybe_harmonize_quant_metadata_dtypes(
         except Exception:
             pass
         return None
+    # Lightweight loader/test doubles and a few legacy model wrappers do not
+    # expose MLX's parameter-tree API.  There is no parameter metadata to
+    # harmonize in that case; leave the model untouched instead of turning a
+    # compatibility load into a startup failure. Real MLX models continue
+    # through the strict parameter-tree path below.
+    if not callable(getattr(model, "parameters", None)):
+        try:
+            setattr(
+                model,
+                "_vmlx_quant_metadata_dtype_harmonization",
+                {"enabled": False, "reason": "parameters_unavailable"},
+            )
+        except Exception:
+            pass
+        return None
     summary = harmonize_quant_metadata_dtypes(
         model,
         model_path=model_path,

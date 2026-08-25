@@ -1215,7 +1215,7 @@ class MLLMScheduler:
             runtime_layout["factory"] = "model.make_cache"
             runtime_layout["delegated_to_model_make_cache"] = True
             dtype_status = getattr(
-                self.model,
+                getattr(self, "model", None),
                 "_vmlx_quant_metadata_dtype_harmonization",
                 None,
             )
@@ -5441,9 +5441,9 @@ class MLLMScheduler:
                 # Publish the configured truth before the lazy batch generator
                 # exists so the app can always attest that the hidden
                 # pixel/video preprocessing LRU is disabled in SSD-only mode.
-                "vision_cache": {
-                    "enabled": bool(self.config.enable_vision_cache),
-                    "max_entries": int(self.config.vision_cache_size),
+            "vision_cache": {
+                    "enabled": bool(getattr(getattr(self, "config", None), "enable_vision_cache", False)),
+                    "max_entries": int(getattr(getattr(self, "config", None), "vision_cache_size", 0) or 0),
                     "pixel_cache_size": 0,
                     "retained_bytes": 0,
                     "retained_bytes_mb": 0.0,

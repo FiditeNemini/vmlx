@@ -62,6 +62,9 @@ class SamplingParams:
     top_k: int = 0  # 0 means disabled
     min_p: float = 0.0
     repetition_penalty: float = 1.0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+    logit_bias: Optional[Dict[int, float]] = None
     seed: Optional[int] = None
     stop: Optional[List[str]] = None
     stop_token_ids: Optional[List[int]] = None
@@ -73,6 +76,8 @@ class SamplingParams:
             self.stop = []
         if self.stop_token_ids is None:
             self.stop_token_ids = []
+        if self.logit_bias is None:
+            self.logit_bias = {}
 
 
 @dataclass

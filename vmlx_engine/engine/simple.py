@@ -231,6 +231,9 @@ class SimpleEngine(BaseEngine):
         top_k = int(kwargs.pop("top_k", 0) or 0)
         min_p = float(kwargs.pop("min_p", 0.0) or 0.0)
         repetition_penalty = float(kwargs.pop("repetition_penalty", 1.0) or 1.0)
+        frequency_penalty = float(kwargs.pop("frequency_penalty", 0.0) or 0.0)
+        presence_penalty = float(kwargs.pop("presence_penalty", 0.0) or 0.0)
+        logit_bias = kwargs.pop("logit_bias", None)
         response_format = kwargs.pop("_vmlx_response_format", None)
         kwargs.pop("use_cache", None)
         kwargs.pop("tools", None)
@@ -246,6 +249,17 @@ class SimpleEngine(BaseEngine):
                     repetition_penalty=repetition_penalty,
                 )
             )
+        from ..utils.token_logits_processors import (
+            make_openai_token_penalty_processor,
+        )
+
+        openai_processor = make_openai_token_penalty_processor(
+            logit_bias=logit_bias,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+        )
+        if openai_processor is not None:
+            logits_processors.append(openai_processor)
         if response_format:
             from ..api.tool_calling import build_guided_json_logits_processor
 

@@ -5723,6 +5723,9 @@ class MLLMBatchRequest:
     top_k: int = 0
     min_p: float = 0.0
     repetition_penalty: float = 1.0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+    logit_bias: Optional[Dict[int, float]] = None
     seed: Optional[int] = None
     max_prompt_tokens: int = 0
     enable_thinking: Optional[bool] = None
@@ -13547,6 +13550,18 @@ class MLLMBatchGenerator:
             from mlx_lm.sample_utils import make_logits_processors
 
             logits_processors.extend(make_logits_processors(repetition_penalty=rep_penalty))
+
+        from .utils.token_logits_processors import (
+            make_openai_token_penalty_processor,
+        )
+
+        openai_processor = make_openai_token_penalty_processor(
+            logit_bias=getattr(request, "logit_bias", None),
+            frequency_penalty=getattr(request, "frequency_penalty", 0.0),
+            presence_penalty=getattr(request, "presence_penalty", 0.0),
+        )
+        if openai_processor is not None:
+            logits_processors.append(openai_processor)
 
         if logits_processors:
             # Use _original_token_ids (saved before cache fetch trims input_ids)

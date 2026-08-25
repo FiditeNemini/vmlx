@@ -4534,7 +4534,7 @@ class TestMLLMTotalPromptTokens:
 
 
 # =============================================================================
-# L1: frequency_penalty / presence_penalty accepted but warned
+# L1: frequency_penalty / presence_penalty accepted and forwarded
 # =============================================================================
 
 
@@ -4567,18 +4567,18 @@ class TestPenaltyParametersAccepted:
         assert req.frequency_penalty == 0.5
         assert req.presence_penalty == 0.8
 
-    def test_server_warns_on_frequency_penalty(self):
-        """Server should log warning when frequency_penalty is non-zero."""
+    def test_server_forwards_frequency_penalty(self):
+        """Chat must forward penalties instead of accepting and ignoring them."""
         import inspect
-        # Read the create_chat_completion source to verify warning logic
+
         from vmlx_engine.server import create_chat_completion
 
         source = inspect.getsource(create_chat_completion)
-        assert "frequency_penalty" in source, (
-            "create_chat_completion must check frequency_penalty"
+        assert "_forward_openai_token_controls" in source, (
+            "create_chat_completion must forward OpenAI token controls"
         )
-        assert "not implemented" in source.lower() or "ignored" in source.lower(), (
-            "create_chat_completion must warn that frequency_penalty is not implemented"
+        assert "not implemented and will be ignored" not in source.lower(), (
+            "create_chat_completion must not silently ignore frequency_penalty"
         )
 
 

@@ -3512,6 +3512,17 @@ def _set_resolved_repetition_penalty(
         target.pop("repetition_penalty", None)
 
 
+def _forward_openai_token_controls(target: dict, request: Any) -> None:
+    """Forward explicit OpenAI token-level controls into generation kwargs."""
+    for field_name in ("frequency_penalty", "presence_penalty"):
+        value = getattr(request, field_name, None)
+        if value is not None:
+            target[field_name] = float(value)
+    logit_bias = getattr(request, "logit_bias", None)
+    if logit_bias is not None:
+        target["logit_bias"] = dict(logit_bias)
+
+
 def _log_resolved_sampling_kwargs(
     route: str,
     model_name: str,
@@ -3528,11 +3539,21 @@ def _log_resolved_sampling_kwargs(
         "top_k",
         "min_p",
         "repetition_penalty",
+        "frequency_penalty",
+        "presence_penalty",
         "max_tokens",
         "enable_thinking",
         "reasoning_effort",
     )
     sample = {key: kwargs[key] for key in keys if key in kwargs}
+    logit_bias = kwargs.get("logit_bias")
+    if isinstance(logit_bias, dict):
+        sample["logit_bias_count"] = len(logit_bias)
+        if logit_bias:
+            sample["logit_bias_range"] = [
+                min(float(value) for value in logit_bias.values()),
+                max(float(value) for value in logit_bias.values()),
+            ]
     ct_kwargs = kwargs.get("chat_template_kwargs")
     if isinstance(ct_kwargs, dict) and ct_kwargs:
         sample["chat_template_kwargs"] = {
@@ -15279,6 +15300,7 @@ async def create_anthropic_message(
     _rp = _resolve_repetition_penalty(chat_req.repetition_penalty, chat_req.model)
     if _rp is not None:
         _msg_kwargs["repetition_penalty"] = _rp
+    _forward_openai_token_controls(_msg_kwargs, chat_req)
     if _compute_bypass_prefix_cache(chat_req):
         _msg_kwargs["_bypass_prefix_cache"] = True
     if chat_req.stop:
@@ -16198,6 +16220,7 @@ async def ollama_chat(fastapi_request: Request):
     _rp = _resolve_repetition_penalty(chat_req.repetition_penalty, chat_req.model)
     if _rp is not None:
         chat_kwargs["repetition_penalty"] = _rp
+    _forward_openai_token_controls(chat_kwargs, chat_req)
     if _compute_bypass_prefix_cache(chat_req):
         chat_kwargs["_bypass_prefix_cache"] = True
     # enable_thinking precedence: per-request > chat_template_kwargs > server default.
@@ -17937,6 +17960,7 @@ async def create_completion(request: CompletionRequest):
             _rp = _resolve_repetition_penalty(request.repetition_penalty, request.model)
             if _rp is not None:
                 gen_kwargs["repetition_penalty"] = _rp
+            _forward_openai_token_controls(gen_kwargs, request)
             if _compute_bypass_prefix_cache(request):
                 gen_kwargs["_bypass_prefix_cache"] = True
             if request.logprobs is not None:
@@ -18108,7 +18132,7 @@ def _log_inbound_request_fields(endpoint: str, request: Any) -> None:
         # exists to observe is worse than no probe, because it reads as proof
         # the UI sent nothing.
         "reasoning", "max_output_tokens", "max_thinking_tokens",
-        "thinking_mode", "frequency_penalty", "presence_penalty",
+        "thinking_mode", "frequency_penalty", "presence_penalty", "logit_bias",
     )
     present = {}
     for name in fields:
@@ -18332,18 +18356,6 @@ async def create_chat_completion(
                        "non-empty text, image, video, or audio content."
             )
 
-    # Warn about unsupported penalty parameters
-    if request.frequency_penalty and request.frequency_penalty != 0:
-        logger.warning(
-            "frequency_penalty=%.2f is not implemented and will be ignored",
-            request.frequency_penalty,
-        )
-    if request.presence_penalty and request.presence_penalty != 0:
-        logger.warning(
-            "presence_penalty=%.2f is not implemented and will be ignored",
-            request.presence_penalty,
-        )
-
     engine = get_engine()
     _chat_requested_modalities = _messages_requested_modalities(request.messages)
     if _chat_requested_modalities and _m3_vl_media_ok(engine):
@@ -18479,6 +18491,7 @@ async def create_chat_completion(
     _rp = _resolve_repetition_penalty(request.repetition_penalty, request.model)
     if _rp is not None:
         chat_kwargs["repetition_penalty"] = _rp
+    _forward_openai_token_controls(chat_kwargs, request)
     if _compute_bypass_prefix_cache(request):
         chat_kwargs["_bypass_prefix_cache"] = True
     if request.logprobs:
@@ -21496,18 +21509,6 @@ async def create_response(
             )
     request.model = resolved_name
 
-    # Warn about unsupported penalty parameters
-    if request.frequency_penalty and request.frequency_penalty != 0:
-        logger.warning(
-            "frequency_penalty=%.2f is not implemented and will be ignored",
-            request.frequency_penalty,
-        )
-    if request.presence_penalty and request.presence_penalty != 0:
-        logger.warning(
-            "presence_penalty=%.2f is not implemented and will be ignored",
-            request.presence_penalty,
-        )
-
     engine = get_engine()
     _responses_has_media = _responses_input_has_multimodal(request.input)
     _responses_requested_modalities = _responses_input_requested_modalities(request.input)
@@ -21692,6 +21693,7 @@ async def create_response(
     _rp = _resolve_repetition_penalty(request.repetition_penalty, request.model)
     if _rp is not None:
         chat_kwargs["repetition_penalty"] = _rp
+    _forward_openai_token_controls(chat_kwargs, request)
     if _compute_bypass_prefix_cache(request):
         chat_kwargs["_bypass_prefix_cache"] = True
 
@@ -22863,6 +22865,7 @@ async def stream_completions_multi(
             _rp = _resolve_repetition_penalty(request.repetition_penalty, request.model)
             if _rp is not None:
                 gen_kwargs["repetition_penalty"] = _rp
+            _forward_openai_token_controls(gen_kwargs, request)
             if _compute_bypass_prefix_cache(request):
                 gen_kwargs["_bypass_prefix_cache"] = True
             if request.logprobs is not None:

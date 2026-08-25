@@ -19,6 +19,20 @@ from pydantic import BaseModel, Field, computed_field, field_validator, model_va
 _NO_REASONING_EFFORTS = {"none", "off", "false", "disabled", "disable", "0"}
 
 
+def _validate_openai_penalty(value: float | None, field_name: str) -> float | None:
+    if value is not None and not (-2.0 <= value <= 2.0):
+        raise ValueError(f"{field_name} must be between -2 and 2")
+    return value
+
+
+def _validate_logit_bias(value):
+    if value is None:
+        return None
+    from ..utils.token_logits_processors import normalize_logit_bias
+
+    return {str(token_id): bias for token_id, bias in normalize_logit_bias(value).items()}
+
+
 def _is_no_reasoning_effort(value: str | None) -> bool:
     return isinstance(value, str) and value.strip().lower() in _NO_REASONING_EFFORTS
 
@@ -235,8 +249,9 @@ class ChatCompletionRequest(BaseModel):
     min_p: float | None = None  # Min-p sampling threshold
     repetition_penalty: float | None = None  # Repetition penalty (1.0 = disabled)
     seed: int | None = None  # Per-request MLX sampling seed
-    frequency_penalty: float | None = None  # Accepted for API compat (not implemented)
-    presence_penalty: float | None = None  # Accepted for API compat (not implemented)
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
     # OpenAI-compatible per-token logprobs. Chat uses a boolean switch plus
     # optional top_logprobs count (0-20).
     logprobs: bool | None = None
@@ -451,6 +466,21 @@ class ChatCompletionRequest(BaseModel):
             raise ValueError("repetition_penalty must be > 0")
         return v
 
+    @field_validator("frequency_penalty")
+    @classmethod
+    def validate_frequency_penalty(cls, v):
+        return _validate_openai_penalty(v, "frequency_penalty")
+
+    @field_validator("presence_penalty")
+    @classmethod
+    def validate_presence_penalty(cls, v):
+        return _validate_openai_penalty(v, "presence_penalty")
+
+    @field_validator("logit_bias")
+    @classmethod
+    def validate_logit_bias(cls, v):
+        return _validate_logit_bias(v)
+
     @field_validator("stop")
     @classmethod
     def normalize_stop(cls, v):
@@ -560,6 +590,9 @@ class CompletionRequest(BaseModel):
     min_p: float | None = None
     repetition_penalty: float | None = None
     seed: int | None = None  # Per-request MLX sampling seed
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    logit_bias: dict[str, float] | None = None
     # Legacy OpenAI Completions logprobs count. None disables logprobs;
     # 0 returns sampled token logprobs without alternate top tokens; 1-20
     # returns that many top alternatives per generated token.
@@ -623,6 +656,21 @@ class CompletionRequest(BaseModel):
         if v is not None and v <= 0:
             raise ValueError("repetition_penalty must be > 0")
         return v
+
+    @field_validator("frequency_penalty")
+    @classmethod
+    def validate_frequency_penalty(cls, v):
+        return _validate_openai_penalty(v, "frequency_penalty")
+
+    @field_validator("presence_penalty")
+    @classmethod
+    def validate_presence_penalty(cls, v):
+        return _validate_openai_penalty(v, "presence_penalty")
+
+    @field_validator("logit_bias")
+    @classmethod
+    def validate_logit_bias(cls, v):
+        return _validate_logit_bias(v)
 
     @field_validator("logprobs")
     @classmethod
@@ -917,8 +965,8 @@ class ResponsesRequest(BaseModel):
     min_p: float | None = None
     repetition_penalty: float | None = None
     seed: int | None = None  # Per-request MLX sampling seed
-    frequency_penalty: float | None = None  # Accepted for API compat (not implemented)
-    presence_penalty: float | None = None  # Accepted for API compat (not implemented)
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
     max_output_tokens: int | None = None
     stop: str | list[str] | None = None
     stream: bool = False
@@ -1062,6 +1110,16 @@ class ResponsesRequest(BaseModel):
         if v is not None and v <= 0:
             raise ValueError("repetition_penalty must be > 0")
         return v
+
+    @field_validator("frequency_penalty")
+    @classmethod
+    def validate_frequency_penalty(cls, v):
+        return _validate_openai_penalty(v, "frequency_penalty")
+
+    @field_validator("presence_penalty")
+    @classmethod
+    def validate_presence_penalty(cls, v):
+        return _validate_openai_penalty(v, "presence_penalty")
 
     @field_validator("stop")
     @classmethod

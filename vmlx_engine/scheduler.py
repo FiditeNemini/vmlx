@@ -3737,23 +3737,35 @@ class Scheduler:
         tokens_to_process: List[int],
     ) -> Optional[List[Callable[[Any, Any], Any]]]:
         """Build BatchGenerator processors with generate_step-compatible context."""
-
+        processors: List[Callable[[Any, Any], Any]] = []
         rep = request.sampling_params.repetition_penalty
-        if not rep or rep == 1.0:
-            return None
+        if rep and rep != 1.0:
+            from mlx_lm.sample_utils import make_logits_processors
 
-        from mlx_lm.sample_utils import make_logits_processors
+            rep_context_size = 512 if self._long_repetition_context else 20
+            repetition_processors = make_logits_processors(
+                repetition_penalty=rep,
+                repetition_context_size=rep_context_size,
+            )
+            skip_prefix_tokens = max(len(tokens_to_process) - 1, 0)
+            processors.extend(
+                self._wrap_generated_only_logits_processor(p, skip_prefix_tokens)
+                for p in repetition_processors
+            )
 
-        rep_context_size = 512 if self._long_repetition_context else 20
-        processors = make_logits_processors(
-            repetition_penalty=rep,
-            repetition_context_size=rep_context_size,
+        params = request.sampling_params
+        from .utils.token_logits_processors import (
+            make_openai_token_penalty_processor,
         )
-        skip_prefix_tokens = max(len(tokens_to_process) - 1, 0)
-        return [
-            self._wrap_generated_only_logits_processor(p, skip_prefix_tokens)
-            for p in processors
-        ]
+
+        openai_processor = make_openai_token_penalty_processor(
+            logit_bias=params.logit_bias,
+            frequency_penalty=params.frequency_penalty,
+            presence_penalty=params.presence_penalty,
+        )
+        if openai_processor is not None:
+            processors.append(openai_processor)
+        return processors or None
 
     def _request_seeded_sampler(self, request: Request):
         """Return a stable request-local sampler when the API supplied a seed."""

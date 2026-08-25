@@ -518,7 +518,8 @@ def test_m3_paged_store_avoids_full_numpy_mirror_and_deferred_disk_payloads():
 
     assert "np.array(" not in m3_mirror_branch
     assert "np_block = block_kv_data" in source
-    assert "if has_minimax_m3_cache_data or _has_native_tq:" in source
+    assert "if has_minimax_m3_cache_data or has_dsv4_delta_cache_data:" in source
+    assert "minimax_m3=has_minimax_m3_cache_data" in source
 
 
 def test_scheduler_memory_aware_m3_store_also_writes_prompt_disk_l2(monkeypatch):

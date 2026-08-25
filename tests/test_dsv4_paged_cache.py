@@ -653,6 +653,8 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
 
     settings = Path("panel/src/renderer/src/components/sessions/SessionSettings.tsx").read_text()
     sessions = Path("panel/src/main/sessions.ts").read_text()
+    cache_helper = Path("panel/src/shared/cacheLaunchArgs.ts").read_text()
+    cache_policy = Path("panel/src/shared/cacheControlPolicy.ts").read_text()
 
     for source in (settings, sessions):
         # DFlash2 speculative sessions run the SimpleEngine lane, which
@@ -671,10 +673,8 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
             "      ? false\n"
             "      : config.continuousBatching !== false"
         ) in source
-        assert "resolveCacheLaunchPolicy" in source
-        assert "architectureRequiresPagedCache" in source
+        assert "buildCacheLaunchArgs" in source
         assert "const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff" in source
-        assert "const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache" in source
         assert "const prefixCacheOff = dsv4Active ? false" not in source
         assert "const effectiveSmelt = !!(config as any).smelt && !dsv4Active" in source
         assert "const isVLM = dsv4Active || effectiveSmelt" in source
@@ -695,6 +695,9 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
         assert "--tool-call-parser" in source
         assert "--reasoning-parser" in source
         assert "dsv4PrefixCacheOptIn" not in source
+    assert "const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache" in sessions
+    assert "resolveCacheLaunchPolicy" in cache_helper
+    assert "architectureRequiresPagedCache" in cache_policy
     assert "config.isMultimodal = false" in sessions
     assert "--dsv4-enable-prefix-cache" in sessions
 
@@ -724,7 +727,7 @@ def test_dsv4_cache_ui_uses_shared_cache_owner_without_duplicate_labels():
     assert '"enablePrefixCache": "Enable Prefix Cache"' in en_catalog
     assert "!dsv4Active && (\n          <CheckField label={t('sessions.config.enablePrefixCache')}" not in form
     assert "<CheckField label={t('sessions.config.pagedKVCache')}" in form
-    assert '"pagedKVCache": "In-Memory Paged Cache (RAM)"' in en_catalog
+    assert '"pagedKVCache": "In-Memory Paged Cache (RAM) — Locked Off"' in en_catalog
     assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
     assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
     assert "nativeTypedCacheOwnsStoredCodec" in form

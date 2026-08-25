@@ -4575,6 +4575,7 @@ def test_r20_v5_main_owned_children_fail_closed_on_unowned_release_rows(
     assert blocked == {
         "settings_defaults_and_persistence",
         "i18n_katex_responsive_ui",
+        "jang_runtime_provenance",
     }
     assert manifest["checks"]["cache_paged_off_ssd_partial"]["status"] == "pass"
     assert (

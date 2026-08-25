@@ -258,6 +258,7 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_advanced_modes() ->
         ROOT / "panel" / "src" / "renderer" / "src" / "components" / "sessions" / "SessionSettings.tsx"
     ).read_text(encoding="utf-8")
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(encoding="utf-8")
+    mtp_helper = (ROOT / "panel" / "src" / "shared" / "nativeMtpLaunchArgs.ts").read_text(encoding="utf-8")
 
     preview_native = preview[
         preview.index("// Native in-model MTP mirrors sessions.ts"):
@@ -276,8 +277,12 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_advanced_modes() ->
         sessions.index("// Generation defaults", sessions.index("// Smelt mode"))
     ]
 
-    assert "finitePositiveInteger(configuredDepth)" in runtime_native
-    assert "finitePositiveInteger(configuredDepth)" in preview_native
+    assert "buildNativeMtpLaunchArgs" in runtime_native
+    assert "buildNativeMtpLaunchArgs" in preview_native
+    assert "input.depthOverride === true" in mtp_helper
+    assert "input.configuredDepth" in mtp_helper
+    assert "finitePositiveInteger(selectedDepth)" in mtp_helper
+    assert "input.depthOverride === true ? 'fixed' : 'adaptive'" in mtp_helper
     assert "Math.round(Number(configuredDepth" not in preview_native
     for expression in (
         "finitePositiveInteger((config as any).smeltExperts)",
@@ -296,6 +301,7 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_core_flags() -> Non
         ROOT / "panel" / "src" / "renderer" / "src" / "components" / "sessions" / "SessionSettings.tsx"
     ).read_text(encoding="utf-8")
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(encoding="utf-8")
+    cache_helper = (ROOT / "panel" / "src" / "shared" / "cacheLaunchArgs.ts").read_text(encoding="utf-8")
 
     preview_body = preview[
         preview.index("function buildCommandPreview("):
@@ -313,19 +319,25 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_core_flags() -> Non
         "finitePositiveInteger(config.prefillBatchSize)",
         "finitePositiveInteger(config.prefillStepSize)",
         "finitePositiveInteger(config.completionBatchSize)",
-        "finitePositiveInteger(config.prefixCacheSize)",
-        "finitePositiveInteger(config.prefixCacheMaxBytes)",
-        "finitePositiveInteger(config.cacheMemoryMb)",
-        "finitePositiveNumber(config.cacheMemoryPercent)",
-        "finitePositiveNumber(config.cacheTtlMinutes)",
-        "finitePositiveInteger(effectivePagedCacheBlockSize)",
-        "finitePositiveInteger(config.maxCacheBlocks)",
         "finitePositiveInteger(config.kvCacheGroupSize)",
-        "finiteNonNegativeNumber(config.diskCacheMaxGb)",
-        "finiteNonNegativeNumber(config.blockDiskCacheMaxGb)",
     ):
         assert expression in runtime_body
         assert expression in preview_body
+
+    assert "buildCacheLaunchArgs" in runtime_body
+    assert "buildCacheLaunchArgs" in preview_body
+    for expression in (
+        "finitePositiveInteger(input.prefixCacheSize)",
+        "finitePositiveInteger(input.prefixCacheMaxBytes)",
+        "finitePositiveInteger(input.cacheMemoryMb)",
+        "finitePositiveNumber(input.cacheMemoryPercent)",
+        "finitePositiveNumber(input.cacheTtlMinutes)",
+        "finitePositiveInteger(input.effectivePagedCacheBlockSize)",
+        "finitePositiveInteger(input.maxCacheBlocks)",
+        "finiteNonNegativeNumber(input.diskCacheMaxGb)",
+        "finiteNonNegativeNumber(input.blockDiskCacheMaxGb)",
+    ):
+        assert expression in cache_helper
 
 
 def test_paged_cache_capacity_is_visible_and_not_memory_mb_driven() -> None:
@@ -336,9 +348,10 @@ def test_paged_cache_capacity_is_visible_and_not_memory_mb_driven() -> None:
 
     assert "pagedCacheCapacityLogLine" in panel
     assert "tokens/block x" in panel
-    # Truthful post-#98 messaging: --cache-memory-mb/percent set the paged L1 RAM
-    # byte ceiling (they are NOT ignored); Max Cache Blocks sizes token capacity.
-    assert "set the L1 RAM byte ceiling for the block KV mirror" in panel
+    # In-memory paged cache is now locked off product-wide. In the remaining
+    # RAM-enabled path these controls bound unified-memory eviction, while the
+    # SSD-only default reports token capacity separately.
+    assert "set the Apple unified-memory ceiling that evicts free blocks" in panel
     assert "evicts free blocks" in panel
     assert "Max Cache Blocks" in panel
     assert "capacity={capacity} tokens" in cli

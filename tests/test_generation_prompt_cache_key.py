@@ -486,8 +486,8 @@ def test_muse_video_extension_preserves_earlier_image_media_scope():
     )
 
 
-def test_dots3_rewritten_video_gets_its_own_causal_media_scope():
-    """Video becomes an image token, but must not globally salt prior image KV."""
+def test_dots3_video_gets_its_own_causal_media_scope():
+    """Video keeps its native token and must not salt prior image KV."""
     from types import SimpleNamespace
 
     from vmlx_engine.cache_key import (
@@ -497,12 +497,13 @@ def test_dots3_rewritten_video_gets_its_own_causal_media_scope():
     from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
 
     image_id = 151660
+    video_id = 151680
     generator = object.__new__(MLLMBatchGenerator)
     generator._model_type = "dots3_note"
     generator.model = SimpleNamespace(
         config=SimpleNamespace(
             image_token_id=image_id,
-            video_token_id=151680,
+            video_token_id=video_id,
             audio_token_id=151720,
         )
     )
@@ -573,10 +574,10 @@ def test_dots3_rewritten_video_gets_its_own_causal_media_scope():
         3,
         4,
         5,
-        image_id,
-        image_id,
-        image_id,
-        image_id,
+        video_id,
+        video_id,
+        video_id,
+        video_id,
         6,
     ]
 

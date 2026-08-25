@@ -9669,7 +9669,7 @@ class TestStartupCompatibilityGuards:
         assert '"%s hybrid/path-dependent cache model detected' in cli_source
         assert '"LFM2" if _mc.family_name == "lfm2" else "Qwen3.6"' in cli_source
         assert "attention KVCache" in cli_source
-        assert "Qwen3.6, Nemotron-H, and LFM2 have a" in cli_source
+        assert "keeping auto live TurboQuant enabled for attention KVCache" in cli_source
         assert "Nemotron-H hybrid/path-dependent cache model detected" in cli_source
         hybrid_idx = cli_source.index('getattr(_mc, "cache_type", None) == "hybrid"')
         hybrid_block = cli_source[hybrid_idx : cli_source.index("if _mc.family_name !=", hybrid_idx)]
@@ -9974,7 +9974,7 @@ class TestStartupCompatibilityGuards:
         assert "def _env_int(" in cli_source
         assert "os.environ.get(name)" in cli_source
         assert '"VMLINUX_SSM_STATE_CACHE_MB"' in cli_source
-        assert 'default=_env_int("VMLX_SSM_STATE_CACHE_MB", 512, "VMLINUX_SSM_STATE_CACHE_MB")' in cli_source
+        assert 'default=_env_int("VMLX_SSM_STATE_CACHE_MB", 0, "VMLINUX_SSM_STATE_CACHE_MB")' in cli_source
 
     def test_metal_ws_pressure_guard_reclaims_cache_before_reject(self):
         """Pressure guard must not 503 while MLX cache memory is reclaimable."""
@@ -14418,10 +14418,12 @@ class TestTurboQuantKVTelemetry:
         assert _panel_label_is_rendered(cache_panel_source, "L1 Indexed Tokens")
         assert _panel_label_is_rendered(cache_panel_source, "L1 Resident Memory")
         assert _panel_label_is_rendered(cache_panel_source, "L1 Evictions")
-        assert "max_bytes_mb" in cache_panel_source
-        assert _panel_label_is_rendered(cache_panel_source, "SSM Evictions")
+        assert "l2_tokens_on_disk" in cache_panel_source
+        assert "l2_block_tokens_on_disk" in cache_panel_source
+        assert "l2_ssm_tokens_on_disk" in cache_panel_source
+        assert _panel_label_is_rendered(cache_panel_source, "Companion Evictions")
         assert _panel_label_is_rendered(cache_panel_source, "L2 Tokens on Disk")
-        assert _panel_label_is_rendered(cache_panel_source, "SSM L2 Tokens")
+        assert _panel_label_is_rendered(cache_panel_source, "Companion L2 Tokens")
         assert _panel_label_is_rendered(cache_panel_source, "Persisted Block Reads")
         assert _panel_label_is_rendered(cache_panel_source, "This Engine Reads H / M")
         assert _panel_label_is_rendered(cache_panel_source, "This Engine Writes")
@@ -14492,7 +14494,11 @@ class TestTurboQuantKVTelemetry:
         sessions_outside_native_mtp = (
             sessions_source[:native_mtp_idx] + sessions_source[generation_defaults_idx:]
         )
-        assert "args.push('--native-mtp-sampling-policy'" in native_mtp_launch_block
+        native_mtp_helper = Path(
+            "./panel/src/shared/nativeMtpLaunchArgs.ts"
+        ).read_text()
+        assert "buildNativeMtpLaunchArgs" in native_mtp_launch_block
+        assert "input.depthOverride === true ? 'fixed' : 'adaptive'" in native_mtp_helper
         assert "args.push('--default-min-p'" not in native_mtp_launch_block
         assert "args.push('--default-min-p'" not in sessions_outside_native_mtp
         assert "args.push('--no-continuous-batching')" in sessions_source
@@ -14621,10 +14627,12 @@ class TestTurboQuantKVTelemetry:
         ).read_text()
         preview_parser_block = preview_source[
             preview_source.index("// Parser resolution"):
-            preview_source.index("// Prefix cache", preview_source.index("// Parser resolution"))
+            preview_source.index("// KV cache quantization", preview_source.index("// Parser resolution"))
         ]
         assert "resolveEffectiveToolParser" in preview_parser_block
         assert "canonicalizeToolParserId" in parser_aliases_source
+        assert "buildCacheLaunchArgs" in preview_source
+        assert "buildCacheLaunchArgs" in sessions_source
 
         assert "server._default_repetition_penalty = 1.0" not in cli_source
         assert "_default_repetition_penalty = 1.0" not in server_source

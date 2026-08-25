@@ -768,9 +768,9 @@ def test_companion_ram_budget_default_holds_multiple_conversations():
         src,
     )
     assert m, "companion RAM budget default disappeared"
-    assert int(m.group(1)) >= 1536, (
-        f"companion RAM default {m.group(1)}MB again holds ~one 27B "
-        "conversation (3x ~157MB checkpoints per request)"
+    assert int(m.group(1)) == 0, (
+        "the current cache contract keeps typed SSM companion state SSD-only "
+        "by default"
     )
 
 

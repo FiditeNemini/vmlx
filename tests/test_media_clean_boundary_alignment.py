@@ -125,13 +125,14 @@ def test_a_hit_that_does_not_cover_the_media_span_is_declined():
     from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
 
     src = inspect.getsource(MLLMBatchGenerator._process_prompts)
-    drop = src.index("req.pixel_values = None")
-    window = src[max(0, drop - 2200):drop]
-    assert "_tail_has_media" in window, (
-        "pixel_values is dropped with no check that the hit covers the media"
-    )
-    assert "_tokens_contain_media_placeholders" in window
-    # The decline must actually release the blocks and zero the credit, or the
-    # refs leak and the next turn hits the same unusable entry forever.
-    assert "release_cache" in window
-    assert "req._cached_tokens = 0" in window
+    # The current implementation uses a media-tail admission helper rather
+    # than the old local `_tail_has_media` variable. A paged hit may clear
+    # processor payloads only after the tail is proven media-free or a
+    # family-specific whole-item re-encode is admitted; otherwise it must
+    # discard the hit and cold-prefill.
+    assert "_tokens_contain_media_placeholders" in src
+    assert "_prepare_muse_media_tail_for_cache_hit" in src
+    assert "_prepare_dots3_media_tail_for_cache_hit" in src
+    assert 'reason="media_placeholders_in_uncached_tail"' in src
+    assert "_discard_request_cache_hit" in src
+    assert "_clear_mllm_request_media_payloads(req)" in src

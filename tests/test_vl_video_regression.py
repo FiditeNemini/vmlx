@@ -7332,7 +7332,7 @@ class TestTurboQuantDefaultAndSpeed:
 
         assert "Hybrid/path-dependent cache model detected" in cli_src
         assert 'os.environ["VMLX_DISABLE_TQ_KV"] = "1"' in cli_src
-        assert "stored attention-KV" in cli_src
+        assert "attention KVCache" in cli_src
         assert "using q4/q8 only at cache storage boundaries" in sched_src
         assert "non-KV state is preserved full precision" in sched_src
 

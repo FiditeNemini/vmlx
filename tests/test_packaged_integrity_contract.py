@@ -189,8 +189,8 @@ def _expected_open_digest_line() -> str:
     )
 
 
-def _current_objective_open_digest_line() -> str:
-    open_requirements = runner.current_objective_open_requirements()
+def _current_objective_open_digest_line(root=None) -> str:
+    open_requirements = runner.current_objective_open_requirements(root or Path("."))
     return "[FAIL] objective proof digest: " + "; ".join(open_requirements)
 
 
@@ -222,14 +222,29 @@ def test_packaged_integrity_accepts_release_gate_objective_digest_fallback_failu
     assert runner.release_gate_failure_is_expected(step, tmp_path)
 
 
-def test_packaged_integrity_accepts_current_objective_digest_only_failure():
+def test_packaged_integrity_accepts_current_objective_digest_only_failure(tmp_path):
+    artifact = tmp_path / runner.CURRENT_OBJECTIVE_DIGEST_ARTIFACT
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "requirements": [
+                    {
+                        "requirement": runner.EXPECTED_OPEN_REQUIREMENTS[0],
+                        "status": "open",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     step = _result(
         "release_gate_skip_app",
         1,
-        [_current_objective_open_digest_line()],
+        [_current_objective_open_digest_line(tmp_path)],
     )
 
-    assert runner.release_gate_failure_is_expected(step)
+    assert runner.release_gate_failure_is_expected(step, tmp_path)
 
 
 def test_packaged_integrity_accepts_release_gate_known_objectives_plus_manifest_failure(

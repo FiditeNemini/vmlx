@@ -25,6 +25,7 @@ import {
     resolveEffectiveReasoningParser,
 } from '../src/shared/reasoningParserAliases'
 import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
+import { buildNativeMtpLaunchArgs } from '../src/shared/nativeMtpLaunchArgs'
 
 // ─── SessionConfig replica (from SessionConfigForm.tsx) ──────────────────────
 
@@ -543,16 +544,14 @@ function buildCommandPreview(
 
     if (!dsv4Active && detected?.nativeMtp?.supported) {
         const mode = config.nativeMtpMode || 'auto'
-        if (mode === 'off') {
-            parts.push('--disable-native-mtp')
-        } else {
-            const configuredDepth = config.nativeMtpDepthOverride === true
-                ? config.nativeMtpDepth
-                : detected.nativeMtp.depth
-            const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(detected.nativeMtp.depth) || 3))
-            parts.push('--native-mtp-depth', String(depth))
-            parts.push('--native-mtp-sampling-policy', 'deterministic-defaults')
-        }
+        parts.push(...buildNativeMtpLaunchArgs({
+            supported: true,
+            detectedDepth: detected.nativeMtp.depth,
+            configuredDepth: config.nativeMtpDepth,
+            depthOverride: config.nativeMtpDepthOverride === true,
+            mode,
+            externalSpeculativeActive: compatibleExternalSpeculative,
+        }))
     }
 
     // Generation defaults are resolved inside vmlx_engine.server from
@@ -1770,7 +1769,8 @@ describe('Speculative Decoding', () => {
         expect(getFlagValue(out, '--speculative-model')).toBe('/models/Qwen3.8-27B-DFlash2')
         expect(hasFlag(out, '--no-continuous-batching')).toBe(true)
         expect(hasFlag(out, '--continuous-batching')).toBe(false)
-        expect(getFlagValue(out, '--native-mtp-depth')).toBe('3')
+        expect(hasFlag(out, '--disable-native-mtp')).toBe(true)
+        expect(hasFlag(out, '--native-mtp-depth')).toBe(false)
     })
 
     it('suppresses external speculative decoding for Nanbeige looped KV', () => {

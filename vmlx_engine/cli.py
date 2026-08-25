@@ -4222,8 +4222,9 @@ Examples:
              "decodes autoregressively -- the skip reason is reported on /health and in the "
              "app's Performance panel. deterministic-defaults instead fills omitted "
              "temperature/top-p/top-k/min-p with greedy values, without applying "
-             "repetition-penalty guards; the app sends it only when a session picks the "
-             "Deterministic MTP mode, never for the default Auto mode.",
+             "repetition-penalty guards; the app sends it for both Auto and Deterministic "
+             "MTP modes so MTP-head bundles do not silently stay on sampled autoregressive "
+             "decode. Off preserves the bundle's own sampling and disables native MTP.",
     )
     serve_parser.add_argument(
         "--disable-native-mtp",

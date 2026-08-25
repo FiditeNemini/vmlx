@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { getJangCompatWarning, KNOWN_INCOMPATIBLE_FAMILIES } from '../src/renderer/src/lib/jangCompat'
+import { validateJangBundleMetadataForLaunch } from '../src/main/model-bundle-validation'
 
 describe('getJangCompatWarning', () => {
   it('returns null when no model_type provided', () => {
@@ -77,5 +81,109 @@ describe('KNOWN_INCOMPATIBLE_FAMILIES schema', () => {
       expect(entry.profiles_warn.length, `${family} profiles_warn empty`).toBeGreaterThan(0)
       expect(typeof entry.message, `${family} missing message`).toBe('string')
     }
+  })
+})
+
+describe('authoritative JANG bundle launch metadata', () => {
+  function withBundle(
+    files: Record<string, unknown | string>,
+    check: (path: string) => void,
+  ): void {
+    const path = mkdtempSync(join(tmpdir(), 'vmlx-jang-contract-'))
+    try {
+      for (const [name, value] of Object.entries(files)) {
+        writeFileSync(
+          join(path, name),
+          typeof value === 'string' ? value : JSON.stringify(value),
+        )
+      }
+      check(path)
+    } finally {
+      rmSync(path, { recursive: true, force: true })
+    }
+  }
+
+  it('preserves config-only and pre-capabilities legacy bundles', () => {
+    withBundle(
+      { 'config.json': { model_type: 'qwen3' } },
+      (path) => expect(validateJangBundleMetadataForLaunch(path)).toMatchObject({
+        ok: true,
+        schema: 'legacy',
+      }),
+    )
+    withBundle(
+      {
+        'config.json': { model_type: 'qwen3' },
+        'jang_config.json': { format: 'JANG', quantization: { bits: 4 } },
+      },
+      (path) => expect(validateJangBundleMetadataForLaunch(path)).toMatchObject({
+        ok: true,
+        schema: 'legacy',
+      }),
+    )
+  })
+
+  it('accepts current capabilities and legacy chat-authoritative schemas', () => {
+    withBundle(
+      {
+        'config.json': { model_type: 'qwen3' },
+        'jang_config.json': { capabilities: { family: 'qwen3' } },
+      },
+      (path) => expect(validateJangBundleMetadataForLaunch(path)).toMatchObject({
+        ok: true,
+        schema: 'capabilities',
+        family: 'qwen3',
+      }),
+    )
+    withBundle(
+      {
+        'config.json': { model_type: 'deepseek_v4' },
+        'jang_config.json': { model_family: 'deepseek_v4', chat: {} },
+      },
+      (path) => expect(validateJangBundleMetadataForLaunch(path)).toMatchObject({
+        ok: true,
+        schema: 'chat',
+        family: 'deepseek_v4',
+      }),
+    )
+  })
+
+  it('rejects malformed or family-less authoritative stamps before spawn', () => {
+    withBundle(
+      {
+        'config.json': { model_type: 'lfm2_moe' },
+        'jang_config.json': { capabilities: { tools: true, reasoning: true } },
+      },
+      (path) => {
+        const result = validateJangBundleMetadataForLaunch(path)
+        expect(result.ok).toBe(false)
+        expect(result.error).toMatch(/capabilities\.family/)
+      },
+    )
+    withBundle(
+      {
+        'config.json': { model_type: 'deepseek_v4' },
+        'jang_config.json': { chat: {} },
+      },
+      (path) => {
+        const result = validateJangBundleMetadataForLaunch(path)
+        expect(result.ok).toBe(false)
+        expect(result.error).toMatch(/model_family/)
+      },
+    )
+    withBundle(
+      {
+        'config.json': { model_type: 'qwen3' },
+        'jang_config.json': '{not-json',
+      },
+      (path) => expect(validateJangBundleMetadataForLaunch(path).ok).toBe(false),
+    )
+    withBundle(
+      {
+        'config.json': '{not-json',
+        'jang_config.json': { capabilities: { family: 'qwen3' } },
+      },
+      (path) => expect(validateJangBundleMetadataForLaunch(path).ok).toBe(false),
+    )
   })
 })

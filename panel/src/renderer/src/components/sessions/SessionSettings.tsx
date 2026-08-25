@@ -34,6 +34,7 @@ import {
   filterAdditionalArgs,
   finitePositiveInteger,
 } from '../../../../shared/launchArgValues'
+import { buildNativeMtpLaunchArgs } from '../../../../shared/nativeMtpLaunchArgs'
 
 interface Session {
   id: string
@@ -529,16 +530,14 @@ function buildCommandPreview(
   const nativeMtp = detected?.nativeMtp
   if (!dsv4Active && nativeMtp?.supported) {
     const mode = (config as any).nativeMtpMode || 'auto'
-    if (mode === 'off') {
-      parts.push('--disable-native-mtp')
-    } else {
-      const configuredDepth = (config as any).nativeMtpDepthOverride === true
-        ? (config as any).nativeMtpDepth
-        : nativeMtp.depth
-      const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 3))
-      parts.push('--native-mtp-depth', depth.toString())
-      parts.push('--native-mtp-sampling-policy', 'deterministic-defaults')
-    }
+    parts.push(...buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: nativeMtp.depth,
+      configuredDepth: (config as any).nativeMtpDepth,
+      depthOverride: (config as any).nativeMtpDepthOverride === true,
+      mode,
+      externalSpeculativeActive: compatibleExternalSpeculative,
+    }))
   }
 
   // Generation defaults are resolved inside vmlx_engine.server from

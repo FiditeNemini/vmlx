@@ -64,6 +64,7 @@ import {
   BACKEND_STDERR_DISCONNECT_NORMALIZED_LINE,
   normalizeBackendStderrChunk,
 } from './backend-stderr'
+import { validateJangBundleMetadataForLaunch } from './model-bundle-validation'
 
 export type { ServerConfig, DetectedProcess } from './server'
 import type { ServerConfig, DetectedProcess } from './server'
@@ -90,6 +91,7 @@ import {
   filterAdditionalArgs,
   finitePositiveInteger,
 } from '../shared/launchArgValues'
+import { buildNativeMtpLaunchArgs } from '../shared/nativeMtpLaunchArgs'
 
 /** Result of findEnginePath: either bundled Python or a system binary */
 type EnginePath =
@@ -2089,6 +2091,13 @@ export class SessionManager extends EventEmitter {
       } catch (e) {
         if ((e as Error).message.includes('GGUF format') || (e as Error).message.includes('missing config.json') || (e as Error).message.includes('model_index.json')) throw e
         // Ignore other filesystem errors — let the server handle them.
+      }
+
+      const metadata = validateJangBundleMetadataForLaunch(config.modelPath)
+      if (!metadata.ok) {
+        throw new Error(
+          `Invalid model metadata. Repair or re-download this bundle before starting it: ${metadata.error}`,
+        )
       }
     }
 
@@ -4761,9 +4770,7 @@ export class SessionManager extends EventEmitter {
     const nativeMtp = (detected as any).nativeMtp
     if (!dsv4Active && nativeMtp?.supported) {
       const mode = (config as any).nativeMtpMode || 'auto'
-      if (mode === 'off') {
-        args.push('--disable-native-mtp')
-      } else if (compatibleExternalSpeculative) {
+      if (compatibleExternalSpeculative) {
         // An external drafter and the bundle's own MTP heads are two
         // speculative decoders bidding for the same decode step. Shipping both
         // is what made decode rates jump around on identical requests -- the
@@ -4772,22 +4779,21 @@ export class SessionManager extends EventEmitter {
         // The drafter is the explicit per-session choice, so it wins, and MTP
         // is turned off LOUDLY rather than left to resolve its own depth from
         // the bundle underneath it.
-        args.push('--disable-native-mtp')
         console.warn(
           `[SESSION] Native MTP disabled because an external speculative ` +
             `model is selected (${externalSpeculativeModel}). The two cannot ` +
             `share a decode step.`,
         )
-      } else {
-        const configuredDepth = (config as any).nativeMtpDepthOverride === true
-          ? (config as any).nativeMtpDepth
-          : nativeMtp.depth
-        // Fallback is 1, not 3. Detection already resolves the bundle's own
-        // depth (measured tuning > declared recommendation > layer count), so
-        // reaching this literal means we know nothing about the head — and an
-        // over-deep draft costs verify + replay for tokens that get rejected.
-        const depth = Math.max(1, Math.min(3, finitePositiveInteger(configuredDepth) || finitePositiveInteger(nativeMtp.depth) || 1))
-        args.push('--native-mtp-depth', depth.toString())
+      }
+      args.push(...buildNativeMtpLaunchArgs({
+        supported: true,
+        detectedDepth: nativeMtp.depth,
+        configuredDepth: (config as any).nativeMtpDepth,
+        depthOverride: (config as any).nativeMtpDepthOverride === true,
+        mode,
+        externalSpeculativeActive: compatibleExternalSpeculative,
+      }))
+      if (mode !== 'off' && !compatibleExternalSpeculative) {
         // 2026-08-17 — `auto` used to map to `compatible-only`, which runs MTP
         // ONLY on requests that are already greedy. Bundles carrying MTP heads
         // ship temperature 1.0, so on default settings the engine logged
@@ -4800,7 +4806,6 @@ export class SessionManager extends EventEmitter {
         // shows is the temperature the engine really uses. Previously the panel
         // displayed 0 while the request went out at 1.0 — a UI/API parity lie.
         // `off` is handled above and remains the way to keep bundle sampling.
-        args.push('--native-mtp-sampling-policy', 'deterministic-defaults')
       }
     }
 

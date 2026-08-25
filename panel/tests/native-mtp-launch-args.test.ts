@@ -1,0 +1,47 @@
+import { describe, expect, it } from 'vitest'
+import { buildNativeMtpLaunchArgs } from '../src/shared/nativeMtpLaunchArgs'
+
+describe('native MTP launch args', () => {
+  it('uses the detected measured depth for auto mode', () => {
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: 3,
+      mode: 'auto',
+    })).toEqual([
+      '--native-mtp-depth',
+      '3',
+      '--native-mtp-sampling-policy',
+      'deterministic-defaults',
+    ])
+  })
+
+  it('falls back conservatively to depth 1 when the bundle declares none', () => {
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      mode: 'auto',
+    })).toContain('1')
+  })
+
+  it('lets a valid manual override win and clamps it to verifier support', () => {
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: 1,
+      configuredDepth: 99,
+      depthOverride: true,
+      mode: 'deterministic',
+    }).slice(0, 2)).toEqual(['--native-mtp-depth', '3'])
+  })
+
+  it('disables native MTP when an external drafter owns the decode step', () => {
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: 3,
+      mode: 'auto',
+      externalSpeculativeActive: true,
+    })).toEqual(['--disable-native-mtp'])
+  })
+
+  it('emits nothing for unsupported bundles', () => {
+    expect(buildNativeMtpLaunchArgs({ supported: false, mode: 'auto' })).toEqual([])
+  })
+})

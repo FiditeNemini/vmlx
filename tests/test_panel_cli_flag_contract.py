@@ -727,13 +727,17 @@ def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
         encoding="utf-8"
     )
+    shared = (
+        ROOT / "panel" / "src" / "shared" / "nativeMtpLaunchArgs.ts"
+    ).read_text(encoding="utf-8")
 
-    assert "--native-mtp-sampling-policy" in sessions
+    assert "buildNativeMtpLaunchArgs" in sessions
+    assert "--native-mtp-sampling-policy" in shared
     # the conditional that made auto a no-op is gone
     assert "mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only'" not in sessions
-    assert "args.push('--native-mtp-sampling-policy', 'deterministic-defaults')" in sessions
+    assert "'deterministic-defaults'" in shared
     # off must still disable the runtime outright
-    assert "args.push('--disable-native-mtp')" in sessions
+    assert "return ['--disable-native-mtp']" in shared
 
 def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> None:
     """2026-08-17: depth fell through to a hardcoded 3 and tanked acceptance.
@@ -757,6 +761,13 @@ def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> Non
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
         encoding="utf-8"
     )
+    settings = (
+        ROOT / "panel" / "src" / "renderer" / "src" / "components" /
+        "sessions" / "SessionSettings.tsx"
+    ).read_text(encoding="utf-8")
+    shared = (
+        ROOT / "panel" / "src" / "shared" / "nativeMtpLaunchArgs.ts"
+    ).read_text(encoding="utf-8")
 
     # the bundle's own recommendation is actually read
     assert "jang_config.mtp.recommended_num_drafts" in registry
@@ -774,5 +785,8 @@ def test_native_mtp_depth_derives_from_the_bundle_not_a_hardcoded_three() -> Non
 
     # and neither call site may fall back to 3
     assert "?? 3," not in registry
-    assert "finitePositiveInteger(nativeMtp.depth) || 3" not in sessions
-    assert "finitePositiveInteger(nativeMtp.depth) || 1" in sessions
+    assert "buildNativeMtpLaunchArgs" in sessions
+    assert "buildNativeMtpLaunchArgs" in settings
+    assert "finitePositiveInteger(input.detectedDepth)" in shared
+    assert "|| 1" in shared
+    assert "|| 3" not in shared

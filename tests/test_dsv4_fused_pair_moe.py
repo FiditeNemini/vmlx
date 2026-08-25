@@ -119,6 +119,7 @@ def _decode_inputs():
 
 def test_b3_gate_installs_and_matches_stock(monkeypatch):
     monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_B3_GATE", raising=False)
     moe_cls, model_cls = _make_moe_cls(gate_bits=3)
     stock = moe_cls._weighted_routed_experts
     model = model_cls()
@@ -140,6 +141,7 @@ def test_b3_gate_installs_and_matches_stock(monkeypatch):
 
 def test_mixed_b2_b3_gate_modules_self_test_both_layouts(monkeypatch):
     monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_B3_GATE", raising=False)
     moe_cls, _ = _make_moe_cls()
 
     class _MixedModel(nn.Module):
@@ -154,6 +156,26 @@ def test_mixed_b2_b3_gate_modules_self_test_both_layouts(monkeypatch):
     assert status["installed_by_gate_bits"] == {2: 1, 3: 1}
     assert set(status["self_test_rel_by_gate_bits"]) == {2, 3}
     assert status["self_test_rel"] <= fpm._SELF_TEST_MAX_REL
+
+
+def test_b3_gate_env_off_retains_b2_modules(monkeypatch):
+    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.setenv("VMLX_DSV4_FUSED_MOE_B3_GATE", "0")
+    moe_cls, _ = _make_moe_cls()
+
+    class _MixedModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.b2 = moe_cls(2)
+            self.b3 = moe_cls(3)
+
+    model = _MixedModel()
+    assert fpm.install_dsv4_fused_pair_moe(model) == 1
+    status = fpm.dsv4_fused_pair_moe_status()
+    assert status["b3_gate_enabled"] is False
+    assert status["installed_by_gate_bits"] == {2: 1}
+    assert getattr(model.b2, fpm._MODULE_OK_ATTR) is True
+    assert getattr(model.b3, fpm._MODULE_OK_ATTR) is False
 
 
 def test_installs_and_matches_stock(monkeypatch):

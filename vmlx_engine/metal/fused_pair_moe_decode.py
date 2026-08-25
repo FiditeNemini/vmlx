@@ -26,6 +26,8 @@ k=6, swiglu_limit=10) are left stock.
 
 Env: ``VMLX_DSV4_FUSED_MOE_PAIR`` — default on; ``0``/``off``/``false``
 disables.
+``VMLX_DSV4_FUSED_MOE_B3_GATE`` independently disables only the mixed b3
+gate modules for a 43-versus-37-module A/B while retaining the b2 fast path.
 """
 
 from __future__ import annotations
@@ -220,6 +222,11 @@ def _enabled() -> bool:
     return value not in {"0", "off", "false", "no"}
 
 
+def _b3_enabled() -> bool:
+    value = os.environ.get("VMLX_DSV4_FUSED_MOE_B3_GATE", "1").strip().lower()
+    return value not in {"0", "off", "false", "no"}
+
+
 def _get_kernels() -> tuple[Any, Any, Any]:
     global _KERNELS
     if _KERNELS is None:
@@ -326,6 +333,8 @@ def _validate_module(mlp: Any) -> str | None:
     gate_bits = getattr(gate, "bits", None)
     if gate_bits not in {2, 3}:
         return "gate_proj bits not in {2, 3}"
+    if gate_bits == 3 and not _b3_enabled():
+        return "b3 gate disabled via env"
     if getattr(gate, "group_size", None) != _GS_GU:
         return f"gate_proj group_size != {_GS_GU}"
     if getattr(gate, "mode", "affine") != "affine":
@@ -382,8 +391,11 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
 
     Returns the number of modules the fused path covers (0 = stock)."""
     if not _enabled():
-        _LAST_STATUS.update(installed=0, reason="disabled via env")
+        _LAST_STATUS.update(
+            installed=0, reason="disabled via env", b3_gate_enabled=_b3_enabled()
+        )
         return 0
+    _LAST_STATUS["b3_gate_enabled"] = _b3_enabled()
     modules = []
     moe_cls = None
     for _name, module in model.named_modules():

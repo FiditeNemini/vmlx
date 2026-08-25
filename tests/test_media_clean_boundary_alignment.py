@@ -20,6 +20,7 @@ Giving up at most block_size-1 tokens of stored prefix buys all of that back.
 """
 
 import inspect
+from types import SimpleNamespace
 
 from vmlx_engine.mllm_batch_generator import (
     MLLMBatchGenerator,
@@ -52,9 +53,36 @@ def test_the_helper_floors_to_a_block_and_steps_back_when_exact():
     assert g.aligned(10) == 0
 
 
+def test_media_kv_only_miss_teaches_the_next_clean_boundary():
+    """A learned KV-only boundary must win once it covers all media.
+
+    The live Qwen tool continuation matched 4,672 KV tokens, but the media
+    lane stored its companion only at the later 6,144-token terminal boundary.
+    Text-only prefills already honor ``_ssm_required_checkpoint_tokens``;
+    media prefills need the same repair when the learned boundary is
+    block-aligned and lies strictly after every media placeholder run.
+    """
+    generator = _Gen(64).gen
+    generator._media_placeholder_token_ids = lambda: {99}
+    request = SimpleNamespace(_ssm_required_checkpoint_tokens=4672)
+    tokens = [1] * 4000 + [99] * 128 + [2] * 2200
+
+    assert generator._media_clean_cache_boundary_for(request, tokens) == 4672
+
+
+def test_media_required_boundary_never_cuts_through_media():
+    generator = _Gen(64).gen
+    generator._media_placeholder_token_ids = lambda: {99}
+    request = SimpleNamespace(_ssm_required_checkpoint_tokens=4032)
+    tokens = [1] * 4000 + [99] * 128 + [2] * 2200
+
+    terminal = generator._ssm_block_aligned_boundary(len(tokens) - 1)
+    assert generator._media_clean_cache_boundary_for(request, tokens) == terminal
+
+
 def test_capture_uses_the_aligned_length_not_n_minus_1():
     src = inspect.getsource(MLLMBatchGenerator._process_prompts)
-    assert "_clean_media_len = self._ssm_block_aligned_boundary(" in src, (
+    assert "_clean_media_len = self._media_clean_cache_boundary_for(" in src, (
         "the clean media capture is back on the unaligned N-1 boundary"
     )
     assert "_media_tokens[:_clean_media_len]" in src, (

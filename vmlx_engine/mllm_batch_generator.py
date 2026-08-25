@@ -8022,6 +8022,57 @@ class MLLMBatchGenerator:
             return block_boundary
         return 0
 
+    def _media_clean_cache_boundary_for(
+        self,
+        request: "MLLMBatchRequest",
+        token_ids: List[int],
+    ) -> int:
+        """Choose the media KV+SSM boundary, honoring a learned safe miss.
+
+        A hybrid KV-only miss records the exact block-aligned boundary whose
+        missing companion forced a full prefill.  Text-only prefills already
+        capture that boundary on the repair pass.  Media prefills cannot split
+        the live VLM forward, but their existing auxiliary clean prefill can
+        target the learned boundary when it lies strictly after every media
+        placeholder run.  In that shape the full request media payload is
+        still exactly the payload needed by the shorter prefix.
+
+        Never cut through or precede a media run: passing the full pixel/video
+        tensors to a prefix that does not contain all of their placeholders
+        can silently pair the wrong embeddings with the token sequence.
+        """
+        if len(token_ids) <= 1:
+            return 0
+        terminal = self._ssm_block_aligned_boundary(len(token_ids) - 1)
+        if terminal <= 0:
+            terminal = len(token_ids) - 1
+        try:
+            required = int(
+                getattr(request, "_ssm_required_checkpoint_tokens", 0) or 0
+            )
+        except (TypeError, ValueError):
+            required = 0
+        block_size = int(getattr(self.block_aware_cache, "block_size", 0) or 0)
+        if (
+            required <= 0
+            or required >= len(token_ids)
+            or block_size <= 0
+            or required % block_size != 0
+        ):
+            return terminal
+        media_ids = self._media_placeholder_token_ids()
+        runs = _media_placeholder_runs(token_ids, media_ids)
+        if not runs or required <= max(end for _start, end in runs):
+            return terminal
+        logger.info(
+            "MLLM media prefix cache: repairing learned KV-only boundary "
+            "for %s at %d tokens instead of terminal %d",
+            getattr(request, "request_id", "?"),
+            required,
+            terminal,
+        )
+        return required
+
     def _media_placeholder_token_ids_by_modality(self) -> Dict[str, set[int]]:
         """Return exact configured placeholder ids grouped by modality."""
         ids: Dict[str, set[int]] = {
@@ -12333,11 +12384,9 @@ class MLLMBatchGenerator:
                         # 35s -> 60s -> 85s until the prompt hit a hard guard
                         # and the conversation died. Giving up <= block_size-1
                         # tokens of stored prefix buys back all of it.
-                        _clean_media_len = self._ssm_block_aligned_boundary(
-                            len(_media_tokens) - 1
+                        _clean_media_len = self._media_clean_cache_boundary_for(
+                            req, _media_tokens
                         )
-                        if _clean_media_len <= 0:
-                            _clean_media_len = len(_media_tokens) - 1
                         clean_media_cache = (
                             self._prefill_for_clean_media_prefix_cache(
                                 req, _media_tokens[:_clean_media_len]

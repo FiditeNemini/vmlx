@@ -16,6 +16,11 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ### Fixed
 
+- Hybrid multimodal SSD cache repair now teaches the media lane the exact
+  block-aligned KV boundary that previously missed its native SSM companion.
+  The auxiliary clean prefill uses that learned boundary only after every
+  media placeholder, so tool continuations can become reusable without ever
+  pairing partial media tokens with the full image or video payload.
 - Backported mlx-vlm's Qwen3-VL scalar-repeat correction for MLX 0.32.2, so
   image and video prefills convert temporal grid counts to Python integers
   instead of failing before generation with an incompatible `mx.repeat` call.

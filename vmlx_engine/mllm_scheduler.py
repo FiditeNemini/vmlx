@@ -163,6 +163,7 @@ from .mllm_batch_generator import (
     MLLMBatchRequest,
     MLLMBatchResponse,
     _mllm_media_cache_extra_keys,
+    _mllm_media_prefix_cache_family_enabled,
     _model_uses_zaya_cache_contract,
 )
 from .errors import PromptTooLongError
@@ -1330,7 +1331,7 @@ class MLLMScheduler:
     ) -> bool:
         """Return True when a media prompt may use media-keyed prefix cache.
 
-        Qwen3.5/3.6 VL, Muse Glimmer, Gemma 4, and Step 3.7 have a clean
+        Qwen3.5/3.6 VL, Muse Glimmer, Gemma 4, Step 3.7, and dots3 have a clean
         media-conditioned N-1 cache producer and are enabled by default. Gemma,
         Step, and Muse store captured native rotating-SWA plus compatible
         full-attention boundaries under per-placeholder media side keys. Other
@@ -1338,9 +1339,6 @@ class MLLMScheduler:
         typed-cache proof. ZAYA CCA remains excluded because its current clean
         store path is text-only.
         """
-        enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
-        if enabled in ("0", "false", "no", "off"):
-            return False
         if request is None or getattr(request, "_bypass_prefix_cache", False):
             return False
         if getattr(self, "_uses_zaya_cache", False):
@@ -1350,23 +1348,8 @@ class MLLMScheduler:
             or getattr(self, "_model_type", "")
             or ""
         ).lower()
-        family_media_safe = model_type in {
-            "qwen3_5",
-            "qwen3_5_moe",
-            "qwen3_5_vl",
-            "muse_glimmer",
-            "gemma4",
-            "gemma4_unified",
-            "step3p7",
-        }
-        if not family_media_safe:
-            if enabled not in ("1", "true", "yes", "on"):
-                return False
-            unsafe_ack = os.environ.get(
-                "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
-            ).strip().lower()
-            if unsafe_ack not in ("1", "true", "yes", "on"):
-                return False
+        if not _mllm_media_prefix_cache_family_enabled(model_type):
+            return False
         extra = getattr(request, "_cache_extra_keys", None)
         if not extra:
             return False

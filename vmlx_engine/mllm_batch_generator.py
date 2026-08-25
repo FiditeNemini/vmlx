@@ -270,6 +270,64 @@ def _mllm_media_source_items(request: Any) -> List[Tuple[str, Any]]:
     return items
 
 
+_MLLM_MEDIA_PREFIX_CACHE_DEFAULT_FAMILIES = frozenset(
+    {
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_5_vl",
+        "muse_glimmer",
+        "gemma4",
+        "gemma4_unified",
+        "step3p7",
+        "dots3_note",
+    }
+)
+
+
+def _mllm_media_prefix_cache_family_enabled(model_type: Any) -> bool:
+    """One policy source for generator lookup and scheduler publication.
+
+    A duplicated allowlist made it possible for one half of the media SSD path
+    to admit a family while the other half silently skipped it. Default-on is
+    restricted to families with a source-owned media-conditioned cache path;
+    every other family retains the historical explicit double opt-in.
+    """
+    enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
+    if enabled in ("0", "false", "no", "off"):
+        return False
+    if str(model_type or "").lower() in _MLLM_MEDIA_PREFIX_CACHE_DEFAULT_FAMILIES:
+        return True
+    if enabled not in ("1", "true", "yes", "on"):
+        return False
+    unsafe_ack = os.environ.get(
+        "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
+    ).strip().lower()
+    return unsafe_ack in ("1", "true", "yes", "on")
+
+
+def _clear_mllm_request_media_payloads(request: Any) -> None:
+    """Drop every processor payload once restored KV covers all media tokens."""
+    for attr in (
+        "pixel_values",
+        "image_grid_thw",
+        "video_pixel_values",
+        "video_grid_thw",
+        "audio_codes",
+        "audio_embeds",
+        "audio_features",
+        "audio_features_mask",
+        "audio_chunk_meta",
+    ):
+        try:
+            setattr(request, attr, None)
+        except Exception:
+            pass
+    try:
+        request.audio_features_are_raw_input_features = False
+    except Exception:
+        pass
+
+
 def _mllm_media_cache_extra_keys(request: Any) -> Optional[Dict[str, str]]:
     """Return a stable media fingerprint for paged VLM prefix-cache keys.
 
@@ -1158,6 +1216,89 @@ def _muse_glimmer_media_item_runs(
     if video_group_sizes or seen != expected or len(grouped) != len(source_items):
         return None
     return grouped, group_sizes
+
+
+def _dots3_media_item_runs(
+    request: Any,
+    token_ids: List[int],
+    grouped_ids: Dict[str, set[int]],
+    *,
+    model_type: Optional[str],
+) -> Optional[
+    Tuple[List[Tuple[int, int]], List[int], List[Tuple[str, Any]]]
+]:
+    """Use processor-owned item intervals after dots video becomes image tokens.
+
+    The dots processor intentionally rewrites every video placeholder to the
+    image token consumed by the vision tower. Token-id inference therefore
+    cannot distinguish an image from a video and used to fall back to one
+    request-global digest. The processor now carries fail-closed item metadata
+    with exact expanded intervals and source indices; validate it against both
+    the processed tokens and the original request payloads before using it.
+    """
+    if str(model_type or "").lower() != "dots3_note":
+        return None
+    extra_kwargs = getattr(request, "extra_kwargs", None)
+    if not isinstance(extra_kwargs, dict):
+        return None
+    raw_items = extra_kwargs.get("_vmlx_dots3_media_items")
+    if not isinstance(raw_items, (list, tuple)) or not raw_items:
+        return None
+
+    sources = {
+        "image": list(getattr(request, "images", None) or []),
+        "video": list(getattr(request, "videos", None) or []),
+        "audio": list(
+            getattr(request, "audio", None)
+            or getattr(request, "audios", None)
+            or []
+        ),
+    }
+    assignments: List[Tuple[str, Any]] = []
+    ranges: List[Tuple[int, int]] = []
+    seen_indices = {modality: set() for modality in sources}
+    prior_end = 0
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return None
+        modality = str(raw.get("modality") or "").lower()
+        if modality not in sources:
+            return None
+        try:
+            source_index = int(raw["source_index"])
+            start = int(raw["token_start"])
+            end = int(raw["token_end"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if (
+            source_index < 0
+            or source_index >= len(sources[modality])
+            or source_index in seen_indices[modality]
+            or start < prior_end
+            or end <= start
+            or end > len(token_ids)
+        ):
+            return None
+        expected_ids = (
+            grouped_ids.get("audio", set())
+            if modality == "audio"
+            else grouped_ids.get("image", set())
+        )
+        if not expected_ids or any(
+            int(token) not in expected_ids for token in token_ids[start:end]
+        ):
+            return None
+        seen_indices[modality].add(source_index)
+        assignments.append((modality, sources[modality][source_index]))
+        ranges.append((start, end))
+        prior_end = end
+
+    if any(
+        seen_indices[modality] != set(range(len(values)))
+        for modality, values in sources.items()
+    ):
+        return None
+    return ranges, [1] * len(ranges), assignments
 
 
 def _raise_if_image_prefill_exceeds_budget(
@@ -7295,6 +7436,170 @@ class MLLMBatchGenerator:
             )
             return False
 
+    @staticmethod
+    def _clone_dots3_cache_at_boundary(
+        layer: Any, boundary: int
+    ) -> Optional[Tuple[Any, List[Any]]]:
+        """Clone one native dots cache at an exact logical boundary."""
+        if type(layer).__name__ != "Dots3LatentCache":
+            return None
+        from copy import copy as _shallow_copy
+
+        clone = _shallow_copy(layer)
+        trim = getattr(clone, "trim_to_boundary", None)
+        if not callable(trim) or not trim(int(boundary)):
+            return None
+        if int(getattr(clone, "offset", 0) or 0) != int(boundary):
+            return None
+        materialize: List[Any] = []
+        for attr in ("latent", "k_pe", "idx_k"):
+            value = getattr(clone, attr, None)
+            if value is None:
+                continue
+            value = mx.contiguous(value)
+            setattr(clone, attr, value)
+            materialize.append(value)
+        return clone, materialize
+
+    def _maybe_capture_dots3_media_boundary(
+        self,
+        request: "MLLMBatchRequest",
+        cache: Optional[List[Any]],
+    ) -> bool:
+        """Snapshot only dots3's windowed native layers at real prefill end.
+
+        Full/DSA layers are positional streams and can be sliced exactly from
+        the finish-time cache regardless of reply length. Windowed layers cannot
+        rewind once decode outruns their bounded overhang, so retain only their
+        exact block-aligned state here. This avoids both a second 95-GiB-model
+        media prefill and a duplicate full-latent cache during generation.
+        """
+        if str(getattr(self, "_model_type", "") or "").lower() != "dots3_note":
+            return False
+        if not getattr(self, "_prefix_cache_enabled", False) or not cache:
+            return False
+        if getattr(request, "_aux_clean_path_prefill", False):
+            return False
+        orig_tokens = list(getattr(request, "_original_token_ids", None) or [])
+        if len(orig_tokens) < 2:
+            return False
+        try:
+            if not self._media_prefix_cache_allowed(request, orig_tokens):
+                return False
+        except Exception:
+            return False
+        boundary = self._ssm_block_aligned_boundary(len(orig_tokens) - 1)
+        if boundary <= 0:
+            boundary = len(orig_tokens) - 1
+        if int(getattr(request, "_cached_tokens", 0) or 0) >= boundary:
+            return False
+        prior = getattr(request, "_dots3_media_boundary", None)
+        if prior is not None and int(prior[0]) == boundary:
+            return True
+        request._dots3_media_boundary = None  # type: ignore[attr-defined]
+
+        snapshots: Dict[int, Any] = {}
+        materialize: List[Any] = []
+        full_layers = 0
+        try:
+            for layer_idx, layer in enumerate(cache):
+                if type(layer).__name__ != "Dots3LatentCache":
+                    logger.info(
+                        "dots3 media boundary capture declined for %s: layer %d "
+                        "is %s, expected native Dots3LatentCache",
+                        request.request_id,
+                        layer_idx,
+                        type(layer).__name__,
+                    )
+                    return False
+                if getattr(layer, "window", None) is None:
+                    full_layers += 1
+                    continue
+                cloned = self._clone_dots3_cache_at_boundary(layer, boundary)
+                if cloned is None:
+                    logger.info(
+                        "dots3 media boundary capture declined for %s: windowed "
+                        "layer %d cannot rewind exactly to %d",
+                        request.request_id,
+                        layer_idx,
+                        boundary,
+                    )
+                    return False
+                snapshot, arrays = cloned
+                snapshots[layer_idx] = snapshot
+                materialize.extend(arrays)
+            if not snapshots or not full_layers or len(snapshots) + full_layers != len(cache):
+                return False
+            if materialize:
+                mx.eval(*materialize)
+            request._dots3_media_boundary = (  # type: ignore[attr-defined]
+                boundary,
+                snapshots,
+            )
+            logger.info(
+                "dots3 native media boundary captured for %s: %d windowed + "
+                "%d positional layers at block boundary=%d",
+                request.request_id,
+                len(snapshots),
+                full_layers,
+                boundary,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "dots3 native media boundary capture failed for %s (non-fatal): %s",
+                getattr(request, "request_id", "?"),
+                exc,
+            )
+            request._dots3_media_boundary = None  # type: ignore[attr-defined]
+            return False
+
+    def _assemble_dots3_media_boundary(
+        self,
+        request: "MLLMBatchRequest",
+        raw_cache: Optional[List[Any]],
+    ) -> Optional[Tuple[List[Any], int]]:
+        """Combine captured windowed state with finish-sliced positional state."""
+        capture = getattr(request, "_dots3_media_boundary", None)
+        if capture is None or not raw_cache:
+            return None
+        try:
+            boundary = int(capture[0])
+            snapshots = dict(capture[1])
+        except Exception:
+            return None
+        assembled: List[Any] = []
+        materialize: List[Any] = []
+        try:
+            for layer_idx, layer in enumerate(raw_cache):
+                if type(layer).__name__ != "Dots3LatentCache":
+                    return None
+                if getattr(layer, "window", None) is not None:
+                    snapshot = snapshots.pop(layer_idx, None)
+                    if snapshot is None or int(getattr(snapshot, "offset", 0) or 0) != boundary:
+                        return None
+                    assembled.append(snapshot)
+                    continue
+                cloned = self._clone_dots3_cache_at_boundary(layer, boundary)
+                if cloned is None:
+                    return None
+                snapshot, arrays = cloned
+                assembled.append(snapshot)
+                materialize.extend(arrays)
+            if snapshots or len(assembled) != len(raw_cache):
+                return None
+            if materialize:
+                mx.eval(*materialize)
+            request._dots3_media_boundary = None  # type: ignore[attr-defined]
+            return assembled, boundary
+        except Exception as exc:
+            logger.warning(
+                "dots3 native media boundary assembly failed for %s: %s",
+                getattr(request, "request_id", "?"),
+                exc,
+            )
+            return None
+
     def _maybe_capture_mixed_swa_boundary(
         self,
         request: "MLLMBatchRequest",
@@ -7334,6 +7639,8 @@ class MLLMBatchGenerator:
         does not hold. A declined capture means the store falls back to the
         existing ``rotating_kv_pending`` path — visible, never corrupt.
         """
+        if str(getattr(self, "_model_type", "") or "").lower() == "dots3_note":
+            return self._maybe_capture_dots3_media_boundary(request, cache)
         if (
             not getattr(self, "_prefix_cache_enabled", False)
             or not getattr(self, "_mixed_attention_cache_model", False)
@@ -7787,31 +8094,49 @@ class MLLMBatchGenerator:
 
         assignment_runs = runs
         run_group_sizes: Optional[List[int]] = None
-        muse_grouping = _muse_glimmer_media_item_runs(
+        assignments: Optional[List[Tuple[str, Any]]] = None
+        dots_grouping = _dots3_media_item_runs(
             request,
-            source_items,
             token_ids,
-            runs,
             grouped_ids,
             model_type=getattr(self, "_model_type", None),
         )
-        if muse_grouping is not None:
-            assignment_runs, run_group_sizes = muse_grouping
+        muse_grouping = None
+        if dots_grouping is not None:
+            assignment_runs, run_group_sizes, assignments = dots_grouping
         else:
-            step_grouping = _step3p7_media_item_runs(
+            muse_grouping = _muse_glimmer_media_item_runs(
                 request,
                 source_items,
+                token_ids,
                 runs,
+                grouped_ids,
                 model_type=getattr(self, "_model_type", None),
             )
-            if step_grouping is not None:
-                assignment_runs, run_group_sizes = step_grouping
+            if muse_grouping is not None:
+                assignment_runs, run_group_sizes = muse_grouping
+            else:
+                step_grouping = _step3p7_media_item_runs(
+                    request,
+                    source_items,
+                    runs,
+                    model_type=getattr(self, "_model_type", None),
+                )
+                if step_grouping is not None:
+                    assignment_runs, run_group_sizes = step_grouping
 
-        assignments: Optional[List[Tuple[str, Any]]] = None
         modalities = {modality for modality, _value in source_items}
-        if len(source_items) == len(assignment_runs) and len(modalities) == 1:
+        if (
+            assignments is None
+            and len(source_items) == len(assignment_runs)
+            and len(modalities) == 1
+        ):
             assignments = list(source_items)
-        elif len(source_items) == len(assignment_runs) and source_items:
+        elif (
+            assignments is None
+            and len(source_items) == len(assignment_runs)
+            and source_items
+        ):
             queues = {
                 modality: deque(
                     value
@@ -7866,13 +8191,13 @@ class MLLMBatchGenerator:
             "modalities": [modality for modality, _source in assignments],
             "boundaries": boundaries,
         }
-        if muse_grouping is not None:
+        if muse_grouping is not None or dots_grouping is not None:
             media_cache_scope["item_ranges"] = [
                 [int(run_start), int(run_end)]
                 for run_start, run_end in assignment_runs
             ]
         if run_group_sizes is not None:
-            media_cache_scope["placeholder_runs"] = len(runs)
+            media_cache_scope["placeholder_runs"] = sum(run_group_sizes)
             media_cache_scope["run_group_sizes"] = run_group_sizes
         request._media_cache_scope = media_cache_scope
         return scoped
@@ -7923,7 +8248,7 @@ class MLLMBatchGenerator:
     ) -> bool:
         """Return True when media prompts may use media-keyed KV+SSM cache.
 
-        Qwen3.5/3.6 VL, Muse Glimmer, Gemma 4, and Step 3.7 own a clean
+        Qwen3.5/3.6 VL, Muse Glimmer, Gemma 4, Step 3.7, and dots3 own a clean
         media-conditioned N-1 prefill path and are enabled by default. Gemma,
         Step, and Muse captured boundaries include native rotating-SWA state
         plus their compatible full-attention slots. Muse's exact runtime is 39
@@ -7935,27 +8260,9 @@ class MLLMBatchGenerator:
         source and live proof. An explicit false value remains a kill switch
         for every default-enabled family.
         """
-        enabled = os.environ.get("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "").strip().lower()
-        if enabled in ("0", "false", "no", "off"):
-            return False
         model_type = str(getattr(self, "_model_type", "") or "").lower()
-        family_media_safe = model_type in {
-            "qwen3_5",
-            "qwen3_5_moe",
-            "qwen3_5_vl",
-            "muse_glimmer",
-            "gemma4",
-            "gemma4_unified",
-            "step3p7",
-        }
-        if not family_media_safe:
-            if enabled not in ("1", "true", "yes", "on"):
-                return False
-            unsafe_ack = os.environ.get(
-                "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", ""
-            ).strip().lower()
-            if unsafe_ack not in ("1", "true", "yes", "on"):
-                return False
+        if not _mllm_media_prefix_cache_family_enabled(model_type):
+            return False
         if getattr(request, "_bypass_prefix_cache", False):
             return False
         if not getattr(request, "_cache_extra_keys", None):
@@ -8148,6 +8455,239 @@ class MLLMBatchGenerator:
             "remaining_items": len(kept_grids),
             "removed_raw_patch_rows": raw_cut,
             "remaining_raw_patch_rows": physical_rows - raw_cut,
+        }
+
+    def _prepare_dots3_media_tail_for_cache_hit(
+        self,
+        request: "MLLMBatchRequest",
+        token_ids: List[int],
+        cached_tokens: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Slice dots3's native visual/audio payloads at whole-item boundaries.
+
+        Dots video frames and images share one prompt-ordered pixel/grid buffer,
+        while audio owns a separate chunk buffer. Processor-authored metadata
+        identifies exact token, row, grid, and chunk spans for each logical item.
+        A hit inside any item or any physical-count disagreement is declined.
+        """
+        if str(getattr(self, "_model_type", "") or "").lower() != "dots3_note":
+            return None
+        if cached_tokens <= 0 or cached_tokens > len(token_ids):
+            return None
+        if not self._media_prefix_cache_allowed(request, token_ids):
+            return None
+        scope = getattr(request, "_media_cache_scope", None) or {}
+        if scope.get("mode") != "per_media_placeholder":
+            return None
+        extra_kwargs = getattr(request, "extra_kwargs", None)
+        if not isinstance(extra_kwargs, dict):
+            return None
+        raw_items = extra_kwargs.get("_vmlx_dots3_media_items")
+        if not isinstance(raw_items, (list, tuple)) or not raw_items:
+            return None
+
+        items: List[Dict[str, int | str]] = []
+        prior_end = 0
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                return None
+            modality = str(raw.get("modality") or "").lower()
+            if modality not in {"image", "video", "audio"}:
+                return None
+            try:
+                item: Dict[str, int | str] = {
+                    "modality": modality,
+                    "token_start": int(raw["token_start"]),
+                    "token_end": int(raw["token_end"]),
+                }
+                if modality in {"image", "video"}:
+                    for key in (
+                        "visual_row_start",
+                        "visual_row_end",
+                        "visual_grid_start",
+                        "visual_grid_end",
+                    ):
+                        item[key] = int(raw[key])
+                else:
+                    item["audio_chunk_start"] = int(raw["audio_chunk_start"])
+                    item["audio_chunk_end"] = int(raw["audio_chunk_end"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            start = int(item["token_start"])
+            end = int(item["token_end"])
+            if start < prior_end or end <= start or end > len(token_ids):
+                return None
+            prior_end = end
+            items.append(item)
+
+        scope_ranges = scope.get("item_ranges") or []
+        if len(scope_ranges) != len(items):
+            return None
+        for raw_range, item in zip(scope_ranges, items):
+            try:
+                if [int(raw_range[0]), int(raw_range[1])] != [
+                    int(item["token_start"]),
+                    int(item["token_end"]),
+                ]:
+                    return None
+            except (IndexError, TypeError, ValueError):
+                return None
+
+        removed = 0
+        for item in items:
+            start = int(item["token_start"])
+            end = int(item["token_end"])
+            if start < cached_tokens < end:
+                return None
+            if end <= cached_tokens:
+                removed += 1
+            elif start < cached_tokens:
+                return None
+            else:
+                break
+        if removed >= len(items):
+            return None
+
+        visual_items = [
+            item for item in items if item["modality"] in {"image", "video"}
+        ]
+        audio_items = [item for item in items if item["modality"] == "audio"]
+        removed_items = items[:removed]
+        removed_visual = [
+            item
+            for item in removed_items
+            if item["modality"] in {"image", "video"}
+        ]
+        removed_audio = [
+            item for item in removed_items if item["modality"] == "audio"
+        ]
+
+        def _contiguous_spans(
+            values: List[Dict[str, int | str]], start_key: str, end_key: str
+        ) -> bool:
+            cursor = 0
+            for value in values:
+                if int(value[start_key]) != cursor or int(value[end_key]) <= cursor:
+                    return False
+                cursor = int(value[end_key])
+            return True
+
+        if not _contiguous_spans(
+            visual_items, "visual_row_start", "visual_row_end"
+        ) or not _contiguous_spans(
+            visual_items, "visual_grid_start", "visual_grid_end"
+        ):
+            return None
+        if not _contiguous_spans(
+            audio_items, "audio_chunk_start", "audio_chunk_end"
+        ):
+            return None
+
+        total_visual_rows = (
+            int(visual_items[-1]["visual_row_end"]) if visual_items else 0
+        )
+        total_visual_grids = (
+            int(visual_items[-1]["visual_grid_end"]) if visual_items else 0
+        )
+        visual_row_cut = (
+            int(removed_visual[-1]["visual_row_end"]) if removed_visual else 0
+        )
+        visual_grid_cut = (
+            int(removed_visual[-1]["visual_grid_end"]) if removed_visual else 0
+        )
+        pixel_values = getattr(request, "pixel_values", None)
+        image_grid = getattr(request, "image_grid_thw", None)
+        if visual_items:
+            try:
+                if (
+                    pixel_values is None
+                    or int(pixel_values.shape[0]) != total_visual_rows
+                    or image_grid is None
+                    or int(image_grid.shape[0]) != total_visual_grids
+                ):
+                    return None
+            except Exception:
+                return None
+            if visual_row_cut == total_visual_rows:
+                request.pixel_values = None
+                request.image_grid_thw = None
+            else:
+                request.pixel_values = pixel_values[visual_row_cut:]
+                request.image_grid_thw = image_grid[visual_grid_cut:]
+            request.video_pixel_values = None
+            request.video_grid_thw = None
+
+        total_audio_chunks = (
+            int(audio_items[-1]["audio_chunk_end"]) if audio_items else 0
+        )
+        audio_chunk_cut = (
+            int(removed_audio[-1]["audio_chunk_end"]) if removed_audio else 0
+        )
+        audio_features = getattr(request, "audio_features", None)
+        audio_meta = getattr(request, "audio_chunk_meta", None)
+        if audio_items:
+            if audio_features is None or not isinstance(audio_meta, dict):
+                return None
+            try:
+                if int(audio_features.shape[0]) != total_audio_chunks:
+                    return None
+                chunk_counts = audio_meta["audio_chunk_counts"]
+                if int(chunk_counts.shape[0]) != len(audio_items):
+                    return None
+                if sum(int(value) for value in chunk_counts.tolist()) != total_audio_chunks:
+                    return None
+                for key in (
+                    "chunk_sample_lens",
+                    "chunk_token_lens",
+                    "chunk_audio_indices",
+                ):
+                    if int(audio_meta[key].shape[0]) != total_audio_chunks:
+                        return None
+            except (KeyError, TypeError, ValueError):
+                return None
+            if audio_chunk_cut == total_audio_chunks:
+                request.audio_features = None
+                request.audio_features_mask = None
+                request.audio_chunk_meta = None
+                request.audio_features_are_raw_input_features = False
+            else:
+                request.audio_features = audio_features[audio_chunk_cut:]
+                audio_features_mask = getattr(request, "audio_features_mask", None)
+                if audio_features_mask is not None:
+                    try:
+                        if int(audio_features_mask.shape[0]) != total_audio_chunks:
+                            return None
+                        request.audio_features_mask = audio_features_mask[
+                            audio_chunk_cut:
+                        ]
+                    except (AttributeError, TypeError, ValueError):
+                        return None
+                kept_meta = dict(audio_meta)
+                for key in (
+                    "chunk_sample_lens",
+                    "chunk_token_lens",
+                    "chunk_audio_indices",
+                ):
+                    kept_meta[key] = audio_meta[key][audio_chunk_cut:]
+                kept_meta["audio_chunk_counts"] = audio_meta[
+                    "audio_chunk_counts"
+                ][len(removed_audio) :]
+                if "chunk_audio_indices" in kept_meta:
+                    kept_meta["chunk_audio_indices"] = (
+                        kept_meta["chunk_audio_indices"] - len(removed_audio)
+                    )
+                request.audio_chunk_meta = kept_meta
+
+        return {
+            "kind": "dots3_prompt_ordered_media_items",
+            "removed_items": removed,
+            "remaining_items": len(items) - removed,
+            "removed_visual_rows": visual_row_cut,
+            "remaining_visual_rows": total_visual_rows - visual_row_cut,
+            "removed_visual_grids": visual_grid_cut,
+            "remaining_visual_grids": total_visual_grids - visual_grid_cut,
+            "removed_audio_chunks": audio_chunk_cut,
+            "remaining_audio_chunks": total_audio_chunks - audio_chunk_cut,
         }
 
     def _turn_peak_walk_admit(
@@ -11120,9 +11660,8 @@ class MLLMBatchGenerator:
                                         continue
                                     if _full_remaining:
                                         req.input_ids = mx.array([_full_remaining])
-                                        req.pixel_values = None
+                                        _clear_mllm_request_media_payloads(req)
                                         req.attention_mask = None
-                                        req.image_grid_thw = None
                                         logger.info(
                                             f"VLM HYBRID cache HIT for {req.request_id}: "
                                             f"{block_table.num_tokens} cached (KV+SSM), "
@@ -11131,9 +11670,8 @@ class MLLMBatchGenerator:
                                         )
                                     else:
                                         req.input_ids = mx.array([token_list[-1:]])
-                                        req.pixel_values = None
+                                        _clear_mllm_request_media_payloads(req)
                                         req.attention_mask = None
-                                        req.image_grid_thw = None
                                         logger.info(
                                             f"VLM HYBRID cache FULL HIT for {req.request_id}: "
                                             f"{block_table.num_tokens} cached (KV+SSM)"
@@ -11222,6 +11760,14 @@ class MLLMBatchGenerator:
                                                         _hit_tokens,
                                                     )
                                                 )
+                                                if _media_tail is None:
+                                                    _media_tail = (
+                                                        self._prepare_dots3_media_tail_for_cache_hit(
+                                                            req,
+                                                            list(token_list),
+                                                            _hit_tokens,
+                                                        )
+                                                    )
                                             if _media_tail is not None:
                                                 req.input_ids = mx.array(
                                                     [_full_remaining]
@@ -11272,9 +11818,8 @@ class MLLMBatchGenerator:
                                                 )
                                         else:
                                             req.input_ids = mx.array([_full_remaining])
-                                            req.pixel_values = None
+                                            _clear_mllm_request_media_payloads(req)
                                             req.attention_mask = None
-                                            req.image_grid_thw = None
                                             logger.info(
                                                 f"VLM prefix cache HIT for {req.request_id}: "
                                                 f"{block_table.num_tokens} cached, "
@@ -11285,9 +11830,8 @@ class MLLMBatchGenerator:
                                         # All tokens cached. Need at least the last token
                                         # for a forward pass to get logits for sampling.
                                         req.input_ids = mx.array([token_list[-1:]])
-                                        req.pixel_values = None
+                                        _clear_mllm_request_media_payloads(req)
                                         req.attention_mask = None
-                                        req.image_grid_thw = None
                                         logger.info(
                                             f"VLM prefix cache FULL HIT for {req.request_id}: "
                                             f"{block_table.num_tokens} cached tokens"
@@ -11751,25 +12295,28 @@ class MLLMBatchGenerator:
                     # clean media prefill would be a redundant SECOND full
                     # forward pass (the cost class profiled at 40.8% of
                     # engine time on the text lane).
-                    _swa_boundary_captured = bool(
-                        getattr(self, "_mixed_attention_cache_model", False)
-                        and getattr(req, "_mixed_swa_boundary", None)
-                        is not None
+                    _native_media_boundary_captured = bool(
+                        getattr(req, "_dots3_media_boundary", None) is not None
+                        or (
+                            getattr(self, "_mixed_attention_cache_model", False)
+                            and getattr(req, "_mixed_swa_boundary", None)
+                            is not None
+                        )
                     )
                     if (
-                        _swa_boundary_captured
+                        _native_media_boundary_captured
                         and int(getattr(req, "_cached_tokens", 0) or 0) == 0
                     ):
                         logger.info(
                             "MLLM media prefix cache: skipping aux clean media "
-                            "prefill for %s — mixed-SWA N-1 boundary snapshot "
-                            "already captured at end of prefill",
+                            "prefill for %s — architecture-native boundary "
+                            "snapshot already captured at end of prefill",
                             req.request_id,
                         )
                     if (
                         int(getattr(req, "_cached_tokens", 0) or 0) == 0
                         and len(_media_tokens) > 1
-                        and not _swa_boundary_captured
+                        and not _native_media_boundary_captured
                         and self._media_prefix_cache_allowed(req, _media_tokens)
                     ):
                         # BLOCK-ALIGN the clean media boundary. Capturing at
@@ -14055,6 +14602,16 @@ class MLLMBatchGenerator:
                 # Do NOT TQ-compress here — the scheduler needs original float16
                 # for block extraction. TQ recompress happens on the fetch path.
                 captured_cache = getattr(req, "_media_clean_prefix_cache", None)
+                if captured_cache is None:
+                    finish_cache = batch.extract_cache(i)
+                    dots3_boundary = self._assemble_dots3_media_boundary(
+                        req, finish_cache
+                    )
+                    if dots3_boundary is not None:
+                        captured_cache, _clean_len = dots3_boundary
+                        req._media_clean_prefix_len = _clean_len  # type: ignore[attr-defined]
+                    else:
+                        captured_cache = finish_cache
                 if captured_cache is not None:
                     # The clean media cache covers a BLOCK-ALIGNED prefix, not
                     # N-1, so the store must be keyed by that prefix + 1 (the
@@ -14066,8 +14623,6 @@ class MLLMBatchGenerator:
                     _orig = getattr(req, "_original_token_ids", None) or []
                     if 0 < _clean_len < len(_orig):
                         _clean_store_tokens = list(_orig[: _clean_len + 1])
-                if captured_cache is None:
-                    captured_cache = batch.extract_cache(i)
                 cache_fn = lambda c=captured_cache: c
                 # Hand the mixed-SWA N-1 boundary snapshot (captured at end
                 # of prefill, before decode advanced the rotating rings) to

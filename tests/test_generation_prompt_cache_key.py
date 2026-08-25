@@ -486,6 +486,129 @@ def test_muse_video_extension_preserves_earlier_image_media_scope():
     )
 
 
+def test_dots3_rewritten_video_gets_its_own_causal_media_scope():
+    """Video becomes an image token, but must not globally salt prior image KV."""
+    from types import SimpleNamespace
+
+    from vmlx_engine.cache_key import (
+        CACHE_EXTRA_SCOPES_KEY,
+        cache_extra_keys_for_token_range,
+    )
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    image_id = 151660
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "dots3_note"
+    generator.model = SimpleNamespace(
+        config=SimpleNamespace(
+            image_token_id=image_id,
+            video_token_id=151680,
+            audio_token_id=151720,
+        )
+    )
+    generator.language_model = SimpleNamespace(config=None)
+
+    image_request = SimpleNamespace(
+        images=["image-a"],
+        videos=None,
+        audio=None,
+        audios=None,
+        image_token_budget=None,
+        video_fps=None,
+        video_max_frames=None,
+        image_grid_thw=[[1, 2, 4]],
+        video_grid_thw=None,
+        audio_codes=None,
+        audio_embeds=None,
+        audio_features=None,
+        audio_features_mask=None,
+        pixel_values=None,
+        pixel_values_videos=None,
+        video_pixel_values=None,
+        extra_kwargs={
+            "_vmlx_dots3_media_items": [
+                {
+                    "modality": "image",
+                    "source_index": 0,
+                    "token_start": 2,
+                    "token_end": 4,
+                    "visual_row_start": 0,
+                    "visual_row_end": 8,
+                    "visual_grid_start": 0,
+                    "visual_grid_end": 1,
+                }
+            ]
+        },
+    )
+    extension_request = SimpleNamespace(
+        **{
+            key: value
+            for key, value in vars(image_request).items()
+            if key not in {"videos", "extra_kwargs", "image_grid_thw"}
+        },
+        videos=["video-b"],
+        image_grid_thw=[[1, 2, 4], [1, 2, 4], [1, 2, 4]],
+        extra_kwargs={
+            "_vmlx_dots3_media_items": [
+                dict(image_request.extra_kwargs["_vmlx_dots3_media_items"][0]),
+                {
+                    "modality": "video",
+                    "source_index": 0,
+                    "token_start": 7,
+                    "token_end": 11,
+                    "visual_row_start": 8,
+                    "visual_row_end": 24,
+                    "visual_grid_start": 1,
+                    "visual_grid_end": 3,
+                },
+            ]
+        },
+    )
+    image_tokens = [1, 2, image_id, image_id, 3, 4]
+    extension_tokens = [
+        1,
+        2,
+        image_id,
+        image_id,
+        3,
+        4,
+        5,
+        image_id,
+        image_id,
+        image_id,
+        image_id,
+        6,
+    ]
+
+    image_scoped = generator._media_scoped_cache_extra_keys(
+        image_request, image_tokens
+    )
+    extension_scoped = generator._media_scoped_cache_extra_keys(
+        extension_request, extension_tokens
+    )
+
+    assert image_request._media_cache_scope["item_ranges"] == [[2, 4]]
+    assert extension_request._media_cache_scope == {
+        "mode": "per_media_placeholder",
+        "items": 2,
+        "modalities": ["image", "video"],
+        "boundaries": [2, 7],
+        "item_ranges": [[2, 4], [7, 11]],
+        "placeholder_runs": 2,
+        "run_group_sizes": [1, 1],
+    }
+    assert extension_scoped[CACHE_EXTRA_SCOPES_KEY] == {
+        "mllm_media_0000": 2,
+        "mllm_media_0001": 7,
+    }
+    assert cache_extra_keys_for_token_range(image_scoped, 2, 4) == (
+        cache_extra_keys_for_token_range(extension_scoped, 2, 4)
+    )
+    assert cache_extra_keys_for_token_range(image_scoped, 4, 6) == (
+        cache_extra_keys_for_token_range(extension_scoped, 4, 6)
+    )
+
+
 def test_paged_cache_schema_version_tracks_tool_and_rotating_contracts():
     from vmlx_engine.prefix_cache import PAGED_CACHE_SCHEMA_VERSION
 

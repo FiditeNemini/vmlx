@@ -34,6 +34,8 @@ class _FakeTokenizer:
                 ids.append(proc_mod._VIDEO_TOKEN_ID)
             elif token == "IMG":
                 ids.append(proc_mod._IMAGE_TOKEN_ID)
+            elif token == "AUD":
+                ids.append(proc_mod._AUDIO_TOKEN_ID)
             else:
                 ids.append(1)
         return ids
@@ -73,6 +75,23 @@ def processor(monkeypatch):
 
     p.image_processor = _ImgProc()
     p.video_processor = _vid_proc
+    p._load_waveform = lambda _item: np.ones((1280,), dtype=np.float32)
+
+    class _AudioProc:
+        sampling_rate = 16_000
+
+        def __call__(self, waveforms):
+            count = len(waveforms)
+            return {
+                "input_features": np.ones((count, 2, 3), dtype=np.float32),
+                "chunk_sample_lens": np.full((count,), 1280, dtype=np.int64),
+                "chunk_token_lens": np.ones((count,), dtype=np.int64),
+                "audio_token_lengths": np.ones((count,), dtype=np.int64),
+                "audio_chunk_counts": np.ones((count,), dtype=np.int64),
+                "chunk_audio_indices": np.arange(count, dtype=np.int64),
+            }
+
+    p.feature_extractor = _AudioProc()
     monkeypatch.setattr(proc_mod, "_as_frame_sequence", lambda v: list(v))
     return p
 
@@ -116,10 +135,37 @@ def test_single_modality_paths_are_unchanged(processor):
     assert np.asarray(image_only["pixel_values"])[0, 0] == pytest.approx(2.0)
 
 
-def test_video_plus_audio_still_refused(processor):
-    """Audio has its own token id and no ordering evidence — keep refusing."""
-    with pytest.raises(ValueError, match="audio"):
-        processor(text="a VID b", videos=["f1"], audio=["sound.wav"])
+def test_video_plus_audio_use_separate_scatter_paths(processor):
+    """Connected video -> audio history preserves both independent payloads."""
+    out = processor(
+        text="a VID b AUD c",
+        videos=["f1"],
+        audio=["sound.wav"],
+    )
+
+    assert _rows(out["pixel_values"]) == 4
+    assert out["input_features"].shape[0] == 1
+    assert out["chunk_audio_indices"].tolist() == [0]
+    assert out["_vmlx_dots3_media_items"] == [
+        {
+            "modality": "video",
+            "source_index": 0,
+            "token_start": 1,
+            "token_end": 2,
+            "visual_row_start": 0,
+            "visual_row_end": 4,
+            "visual_grid_start": 0,
+            "visual_grid_end": 1,
+        },
+        {
+            "modality": "audio",
+            "source_index": 0,
+            "token_start": 3,
+            "token_end": 4,
+            "audio_chunk_start": 0,
+            "audio_chunk_end": 1,
+        },
+    ]
 
 
 def test_both_payloads_but_missing_a_placeholder_is_refused(processor):

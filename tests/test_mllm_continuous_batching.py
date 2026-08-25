@@ -659,6 +659,259 @@ def test_muse_partial_media_hit_inside_item_remains_fail_closed():
     ) is None
 
 
+def test_dots3_partial_media_hit_slices_native_visual_payload_by_item():
+    from types import SimpleNamespace
+
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "dots3_note"
+    generator.model = SimpleNamespace(get_input_embeddings=lambda **_kwargs: None)
+    generator.language_model = SimpleNamespace(
+        __call__=lambda **_kwargs: None,
+    )
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+
+    request = MLLMBatchRequest(uid=1, request_id="dots-tail", prompt="x")
+    request._media_cache_scope = {
+        "mode": "per_media_placeholder",
+        "modalities": ["image", "video", "audio"],
+        "item_ranges": [[2, 4], [8, 11], [14, 16]],
+    }
+    request.extra_kwargs = {
+        "_vmlx_dots3_media_items": [
+            {
+                "modality": "image",
+                "source_index": 0,
+                "token_start": 2,
+                "token_end": 4,
+                "visual_row_start": 0,
+                "visual_row_end": 4,
+                "visual_grid_start": 0,
+                "visual_grid_end": 1,
+            },
+            {
+                "modality": "video",
+                "source_index": 0,
+                "token_start": 8,
+                "token_end": 11,
+                "visual_row_start": 4,
+                "visual_row_end": 12,
+                "visual_grid_start": 1,
+                "visual_grid_end": 3,
+            },
+            {
+                "modality": "audio",
+                "source_index": 0,
+                "token_start": 14,
+                "token_end": 16,
+                "audio_chunk_start": 0,
+                "audio_chunk_end": 1,
+            },
+        ]
+    }
+    request.pixel_values = mx.arange(12 * 3).reshape(12, 3)
+    request.image_grid_thw = mx.array(
+        [[1, 2, 2], [1, 2, 2], [1, 2, 2]], dtype=mx.int32
+    )
+    request.audio_features = mx.arange(6).reshape(1, 2, 3)
+    request.audio_features_mask = mx.array([[True, False]])
+    request.audio_features_are_raw_input_features = True
+    request.audio_chunk_meta = {
+        "chunk_sample_lens": mx.array([1280], dtype=mx.int32),
+        "chunk_token_lens": mx.array([2], dtype=mx.int32),
+        "audio_chunk_counts": mx.array([1], dtype=mx.int32),
+        "chunk_audio_indices": mx.array([0], dtype=mx.int32),
+    }
+
+    result = generator._prepare_dots3_media_tail_for_cache_hit(
+        request, list(range(20)), cached_tokens=6
+    )
+
+    assert result == {
+        "kind": "dots3_prompt_ordered_media_items",
+        "removed_items": 1,
+        "remaining_items": 2,
+        "removed_visual_rows": 4,
+        "remaining_visual_rows": 8,
+        "removed_visual_grids": 1,
+        "remaining_visual_grids": 2,
+        "removed_audio_chunks": 0,
+        "remaining_audio_chunks": 1,
+    }
+    assert request.pixel_values.shape == (8, 3)
+    assert request.image_grid_thw.tolist() == [[1, 2, 2], [1, 2, 2]]
+    assert request.audio_features.shape[0] == 1
+    assert request.audio_features_mask.tolist() == [[True, False]]
+
+
+def test_dots3_partial_media_hit_inside_item_remains_fail_closed():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "dots3_note"
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+    request = MLLMBatchRequest(uid=1, request_id="dots-mid-item", prompt="x")
+    request._media_cache_scope = {
+        "mode": "per_media_placeholder",
+        "modalities": ["video"],
+        "item_ranges": [[2, 8]],
+    }
+    request.extra_kwargs = {
+        "_vmlx_dots3_media_items": [
+            {
+                "modality": "video",
+                "source_index": 0,
+                "token_start": 2,
+                "token_end": 8,
+                "visual_row_start": 0,
+                "visual_row_end": 8,
+                "visual_grid_start": 0,
+                "visual_grid_end": 2,
+            }
+        ]
+    }
+
+    assert generator._prepare_dots3_media_tail_for_cache_hit(
+        request, list(range(12)), cached_tokens=5
+    ) is None
+
+
+def test_dots3_partial_media_hit_slices_audio_feature_mask():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "dots3_note"
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+    request = MLLMBatchRequest(uid=1, request_id="dots-audio-mask", prompt="x")
+    request.images = ["image"]
+    request.audio = ["audio-1", "audio-2"]
+    request._media_cache_scope = {
+        "mode": "per_media_placeholder",
+        "modalities": ["image", "audio", "audio"],
+        "item_ranges": [[2, 3], [5, 6], [8, 9]],
+    }
+    request.extra_kwargs = {
+        "_vmlx_dots3_media_items": [
+            {
+                "modality": "image",
+                "source_index": 0,
+                "token_start": 2,
+                "token_end": 3,
+                "visual_row_start": 0,
+                "visual_row_end": 4,
+                "visual_grid_start": 0,
+                "visual_grid_end": 1,
+            },
+            {
+                "modality": "audio",
+                "source_index": 0,
+                "token_start": 5,
+                "token_end": 6,
+                "audio_chunk_start": 0,
+                "audio_chunk_end": 1,
+            },
+            {
+                "modality": "audio",
+                "source_index": 1,
+                "token_start": 8,
+                "token_end": 9,
+                "audio_chunk_start": 1,
+                "audio_chunk_end": 2,
+            },
+        ]
+    }
+    request.pixel_values = mx.ones((4, 3))
+    request.image_grid_thw = mx.array([[1, 2, 2]], dtype=mx.int32)
+    request.audio_features = mx.arange(12).reshape(2, 2, 3)
+    request.audio_features_mask = mx.array([[True, False], [False, True]])
+    request.audio_features_are_raw_input_features = True
+    request.audio_chunk_meta = {
+        "chunk_sample_lens": mx.array([1280, 1440], dtype=mx.int32),
+        "chunk_token_lens": mx.array([2, 3], dtype=mx.int32),
+        "audio_chunk_counts": mx.array([1, 1], dtype=mx.int32),
+        "chunk_audio_indices": mx.array([0, 1], dtype=mx.int32),
+    }
+
+    result = generator._prepare_dots3_media_tail_for_cache_hit(
+        request, list(range(12)), cached_tokens=6
+    )
+
+    assert result["removed_audio_chunks"] == 1
+    assert result["remaining_audio_chunks"] == 1
+    assert request.audio_features.shape[0] == 1
+    assert request.audio_features_mask.tolist() == [[False, True]]
+    assert request.audio_chunk_meta["audio_chunk_counts"].tolist() == [1]
+
+
+def test_dots3_native_media_boundary_snapshots_only_windowed_layers():
+    from types import SimpleNamespace
+
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMBatchGenerator,
+        MLLMBatchRequest,
+    )
+    from vmlx_engine.models.dots3_note.language import Dots3LatentCache
+
+    def full_cache(offset):
+        cache = Dots3LatentCache(window=None)
+        cache.offset = offset
+        cache.latent = mx.arange(offset * 4).reshape(1, 1, offset, 4)
+        cache.k_pe = mx.arange(offset * 2).reshape(1, 1, offset, 2)
+        cache.idx_k = mx.arange(offset * 3).reshape(1, offset, 3)
+        return cache
+
+    def sliding_cache(offset):
+        cache = Dots3LatentCache(window=4)
+        cache.offset = offset
+        cache.latent = mx.arange(7 * 4).reshape(1, 1, 7, 4)
+        cache.k_pe = mx.arange(7 * 2).reshape(1, 1, 7, 2)
+        return cache
+
+    generator = object.__new__(MLLMBatchGenerator)
+    generator._model_type = "dots3_note"
+    generator._prefix_cache_enabled = True
+    generator.block_aware_cache = SimpleNamespace(block_size=4)
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+    request = MLLMBatchRequest(uid=1, request_id="dots-boundary", prompt="x")
+    request._original_token_ids = list(range(11))
+    request._cached_tokens = 0
+    request._cache_extra_keys = {"mllm_media_0000": "x"}
+
+    full = full_cache(10)
+    sliding = sliding_cache(10)
+    assert generator._maybe_capture_mixed_swa_boundary(request, [full, sliding])
+    boundary, snapshots = request._dots3_media_boundary
+    assert boundary == 8
+    assert list(snapshots) == [1]
+    assert snapshots[1].offset == 8
+    assert full.offset == 10
+    assert sliding.offset == 10
+
+    finish_full = full_cache(12)
+    finish_sliding = sliding_cache(12)
+    assembled = generator._assemble_dots3_media_boundary(
+        request, [finish_full, finish_sliding]
+    )
+    assert assembled is not None
+    assembled_cache, assembled_boundary = assembled
+    assert assembled_boundary == 8
+    assert [layer.offset for layer in assembled_cache] == [8, 8]
+    assert assembled_cache[0].latent.shape[2] == 8
+    assert assembled_cache[1].latent.shape[2] == 3
+    assert finish_full.offset == 12
+    assert finish_sliding.offset == 12
+
+
 def test_mllm_prefill_declines_hit_when_reconstruction_returns_none():
     """A credited paged hit that reconstructs to None must be discarded.
 

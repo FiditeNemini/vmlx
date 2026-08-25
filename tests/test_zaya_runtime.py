@@ -2042,7 +2042,7 @@ def test_non_qwen_mllm_media_paged_store_fails_closed_without_unsafe_ack(monkeyp
     assert scheduler.block_aware_cache.stores == []
 
 
-def test_qwen_muse_gemma_and_step_media_prefix_cache_default_on_and_respect_explicit_off(
+def test_cleared_media_prefix_families_default_on_and_respect_explicit_off(
     monkeypatch,
 ):
     """Cleared media families use their clean media boundary unless disabled."""
@@ -2091,12 +2091,20 @@ def test_qwen_muse_gemma_and_step_media_prefix_cache_default_on_and_respect_expl
     scheduler.batch_generator._model_type = "step3p7"
     assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 128001, 11])
 
+    generator._model_type = "dots3_note"
+    generator._media_placeholder_token_ids_cache = {151660, 151680, 151720}
+    assert generator._media_prefix_cache_allowed(request, [10, 151660, 11])
+
+    scheduler.batch_generator._model_type = "dots3_note"
+    assert scheduler._mllm_media_prefix_cache_allowed(request, [10, 151660, 11])
+
     monkeypatch.setenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "off")
     for model_type, media_tokens in (
         ("qwen3_5", {248056, 248057}),
         ("muse_glimmer", {200091, 200092}),
         ("gemma4", {258880, 258884}),
         ("step3p7", {128001}),
+        ("dots3_note", {151660, 151680, 151720}),
     ):
         media_token = next(iter(media_tokens))
         generator._model_type = model_type

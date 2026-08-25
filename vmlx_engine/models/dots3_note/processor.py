@@ -784,19 +784,17 @@ class Dots3NoteProcessor:
         # class). Order is therefore taken from the PROMPT below, never from
         # the order these branches happen to run in.
         #
-        # Audio still cannot mix with video: audio has its own token id and
-        # feature path, and no ordering evidence has been gathered for it.
-        if videos is not None and audio is not None:
-            raise ValueError(
-                "dots3_note does not support mixing a video with separate "
-                "audio inputs"
-            )
-
         ids = list(self.tokenizer.encode(text or "", add_special_tokens=False))
         out: Dict[str, Any] = {}
-        # (placeholder_position, patches, grids) per visual payload. Merged in
-        # prompt order below so the tower's rows line up with the scatter.
+        original_ids = list(ids)
+        # (placeholder_position, patches, grids, item spec) per logical visual
+        # payload. Merged in prompt order below so the tower rows line up with
+        # the scatter even when image and video turns alternate.
         _visual_parts: list = []
+        _media_specs: list = []
+
+        def _positions(token_id: int) -> list[int]:
+            return [index for index, token in enumerate(original_ids) if token == token_id]
 
         _first_video_at = (
             ids.index(self.video_token_id) if self.video_token_id in ids else None
@@ -839,8 +837,25 @@ class Dots3NoteProcessor:
                 emit_id=_VIDEO_EXPANSION_SENTINEL,
                 modality="video",
             )
-            _visual_parts.append((_first_video_at if _first_video_at is not None else 0,
-                                  patches, list(grids)))
+            video_spec = {
+                "modality": "video",
+                "source_index": 0,
+                "original_position": int(_first_video_at or 0),
+                "token_count": int(total),
+                "visual_row_count": int(
+                    sum(int(t) * int(h) * int(w) for t, h, w in grids)
+                ),
+                "visual_grid_count": len(grids),
+            }
+            _media_specs.append(video_spec)
+            _visual_parts.append(
+                (
+                    video_spec["original_position"],
+                    patches,
+                    list(grids),
+                    video_spec,
+                )
+            )
             expected_image_tokens += total
 
         if images is not None:
@@ -851,8 +866,34 @@ class Dots3NoteProcessor:
             ids = expand_media_placeholders(
                 ids, self.image_token_id, counts, modality="image"
             )
-            _visual_parts.append((_first_image_at if _first_image_at is not None else 0,
-                                  patches, list(grids)))
+            image_positions = _positions(self.image_token_id)
+            row_cursor = 0
+            for source_index, (position, grid, token_count) in enumerate(
+                zip(image_positions, grids, counts)
+            ):
+                row_count = int(grid[0]) * int(grid[1]) * int(grid[2])
+                image_spec = {
+                    "modality": "image",
+                    "source_index": source_index,
+                    "original_position": int(position),
+                    "token_count": int(token_count),
+                    "visual_row_count": row_count,
+                    "visual_grid_count": 1,
+                }
+                _media_specs.append(image_spec)
+                _visual_parts.append(
+                    (
+                        int(position),
+                        patches[row_cursor : row_cursor + row_count],
+                        [grid],
+                        image_spec,
+                    )
+                )
+                row_cursor += row_count
+            if row_cursor != int(np.asarray(patches).shape[0]):
+                raise ValueError(
+                    "dots3_note: image grid rows do not reconcile the pixel buffer"
+                )
             expected_image_tokens += sum(counts)
 
         if audio is not None:
@@ -868,13 +909,90 @@ class Dots3NoteProcessor:
             out["chunk_sample_lens"] = feats["chunk_sample_lens"]
             out["chunk_token_lens"] = feats["chunk_token_lens"]
             out["audio_chunk_counts"] = feats["audio_chunk_counts"]
+            out["chunk_audio_indices"] = feats["chunk_audio_indices"]
             out["audio_token_lengths"] = feats["audio_token_lengths"]
+            audio_positions = _positions(self.audio_token_id)
+            chunk_cursor = 0
+            chunk_counts = feats["audio_chunk_counts"].tolist()
+            for source_index, (position, token_count, chunk_count) in enumerate(
+                zip(audio_positions, token_lengths, chunk_counts)
+            ):
+                audio_spec = {
+                    "modality": "audio",
+                    "source_index": source_index,
+                    "original_position": int(position),
+                    "token_count": int(token_count),
+                    "audio_chunk_start": int(chunk_cursor),
+                    "audio_chunk_end": int(chunk_cursor + int(chunk_count)),
+                }
+                _media_specs.append(audio_spec)
+                chunk_cursor += int(chunk_count)
+            if chunk_cursor != int(feats["input_features"].shape[0]):
+                raise ValueError(
+                    "dots3_note: audio chunk counts do not reconcile input_features"
+                )
             placed = sum(1 for t in ids if t == self.audio_token_id)
             if placed != sum(token_lengths):
                 raise ValueError(
                     f"dots3_note: {placed} audio token(s) in the prompt but the "
                     f"tower will emit {sum(token_lengths)} embedding row(s)"
                 )
+
+        # Resolve each logical item to its exact expanded token interval before
+        # replacing the private video sentinel with the public image token.
+        # The metadata is consumed by SSD side-keying and partial-hit payload
+        # slicing; every field is validated again at the consumer.
+        media_items: list = []
+        token_cursor = 0
+        visual_row_cursor = 0
+        visual_grid_cursor = 0
+        for spec in sorted(_media_specs, key=lambda item: item["original_position"]):
+            modality = spec["modality"]
+            emitted_id = (
+                _VIDEO_EXPANSION_SENTINEL
+                if modality == "video"
+                else self.image_token_id
+                if modality == "image"
+                else self.audio_token_id
+            )
+            while token_cursor < len(ids) and ids[token_cursor] != emitted_id:
+                token_cursor += 1
+            token_start = token_cursor
+            token_end = token_start + int(spec["token_count"])
+            if token_end > len(ids) or any(
+                token != emitted_id for token in ids[token_start:token_end]
+            ):
+                raise ValueError(
+                    f"dots3_note: cannot map {modality} payload to expanded tokens"
+                )
+            token_cursor = token_end
+            item = {
+                "modality": modality,
+                "source_index": int(spec["source_index"]),
+                "token_start": int(token_start),
+                "token_end": int(token_end),
+            }
+            if modality in {"image", "video"}:
+                row_count = int(spec["visual_row_count"])
+                grid_count = int(spec["visual_grid_count"])
+                item.update(
+                    {
+                        "visual_row_start": visual_row_cursor,
+                        "visual_row_end": visual_row_cursor + row_count,
+                        "visual_grid_start": visual_grid_cursor,
+                        "visual_grid_end": visual_grid_cursor + grid_count,
+                    }
+                )
+                visual_row_cursor += row_count
+                visual_grid_cursor += grid_count
+            else:
+                item.update(
+                    {
+                        "audio_chunk_start": int(spec["audio_chunk_start"]),
+                        "audio_chunk_end": int(spec["audio_chunk_end"]),
+                    }
+                )
+            media_items.append(item)
 
         if _VIDEO_EXPANSION_SENTINEL in ids:
             # Video frames ride the IMAGE token path; the sentinel existed only
@@ -887,9 +1005,9 @@ class Dots3NoteProcessor:
 
         if _visual_parts:
             _visual_parts.sort(key=lambda part: part[0])
-            _all_patches = [p for _, p, _ in _visual_parts]
+            _all_patches = [p for _, p, _, _ in _visual_parts]
             _all_grids: list = []
-            for _, _, grids_part in _visual_parts:
+            for _, _, grids_part, _ in _visual_parts:
                 _all_grids.extend(grids_part)
             out["pixel_values"] = (
                 _all_patches[0]
@@ -897,6 +1015,9 @@ class Dots3NoteProcessor:
                 else np.concatenate([np.asarray(p) for p in _all_patches], axis=0)
             )
             out["image_grid_thw"] = np.asarray(_all_grids, dtype=np.int64)
+
+        if media_items:
+            out["_vmlx_dots3_media_items"] = media_items
 
         if expected_image_tokens:
             placed = sum(1 for t in ids if t == self.image_token_id)

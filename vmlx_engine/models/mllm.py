@@ -4929,6 +4929,7 @@ class MLXMultimodalLM:
             msg_image_count = 0
             msg_video_count = 0
             msg_audio_count = 0
+            msg_media_types: list[str] = []
 
             if isinstance(content, str):
                 msg_text = content
@@ -4963,6 +4964,7 @@ class MLXMultimodalLM:
                             else:
                                 all_image_urls.append(img_url.get("url", ""))
                             msg_image_count += 1
+                            msg_media_types.append("image")
 
                         elif item_type == "input_image":
                             img_url = item.get("image_url", item.get("url", ""))
@@ -4971,16 +4973,19 @@ class MLXMultimodalLM:
                             elif isinstance(img_url, dict):
                                 all_image_urls.append(img_url.get("url", ""))
                             msg_image_count += 1
+                            msg_media_types.append("image")
 
                         elif item_type == "image":
                             all_image_urls.append(
                                 item.get("image", item.get("url", ""))
                             )
                             msg_image_count += 1
+                            msg_media_types.append("image")
 
                         elif item_type == "video":
                             videos.append(item.get("video", item.get("url", "")))
                             msg_video_count += 1
+                            msg_media_types.append("video")
 
                         elif item_type == "video_url":
                             vid_url = item.get("video_url", {})
@@ -4989,6 +4994,7 @@ class MLXMultimodalLM:
                             else:
                                 videos.append(vid_url.get("url", ""))
                             msg_video_count += 1
+                            msg_media_types.append("video")
 
                         elif item_type == "input_video":
                             vid_url = item.get("video_url", item.get("url", item.get("file_id", "")))
@@ -4997,11 +5003,13 @@ class MLXMultimodalLM:
                             else:
                                 videos.append(vid_url.get("url", ""))
                             msg_video_count += 1
+                            msg_media_types.append("video")
 
                         elif item_type in ("input_audio", "audio", "audio_url"):
                             src = item.get("input_audio") or item.get("audio") or item.get("audio_url") or item
                             audio_inputs.append(src)
                             msg_audio_count += 1
+                            msg_media_types.append("audio")
 
             # Build properly structured message for Qwen3-VL-MoE
             # Format: {"role": "...", "content": [{"type": "image"|"video"}, ..., {"type": "text", "text": "..."}]}
@@ -5024,12 +5032,13 @@ class MLXMultimodalLM:
                         for _ in range(msg_audio_count):
                             content_list.append({"type": "audio"})
                     else:
-                        for _ in range(msg_image_count):
-                            content_list.append({"type": "image"})
-                        for _ in range(msg_video_count):
-                            content_list.append({"type": "video"})
-                        for _ in range(msg_audio_count):
-                            content_list.append({"type": "audio"})
+                        # Keep the media marker order from the request.  The
+                        # processor merges visual features in placeholder
+                        # order; grouping images before videos here silently
+                        # pairs the wrong feature rows with a video-first
+                        # message.
+                        for media_type in msg_media_types:
+                            content_list.append({"type": media_type})
                         content_list.append(
                             {"type": "text", "text": msg_text, "content": msg_text}
                         )

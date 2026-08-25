@@ -598,6 +598,27 @@ class TestExtractMultimodalMessages:
         assert len(images) == 1
         assert len(videos) == 1
 
+    def test_mixed_media_marker_order_follows_request_order(self):
+        """Image/video placeholders must preserve the user's part order."""
+        from vmlx_engine.models.mllm import MLXMultimodalLM
+
+        def marker_types(first, second):
+            messages = [{
+                "role": "user",
+                "content": [
+                    first,
+                    second,
+                    {"type": "text", "text": "Compare"},
+                ],
+            }]
+            chat_msgs, _, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
+            return [part["type"] for part in chat_msgs[0]["content"]]
+
+        image = {"type": "image_url", "image_url": {"url": "img.png"}}
+        video = {"type": "video_url", "video_url": {"url": "vid.mp4"}}
+        assert marker_types(image, video) == ["image", "video", "text"]
+        assert marker_types(video, image) == ["video", "image", "text"]
+
     def test_tool_role_messages_preserved_as_text(self):
         """Tool role messages should at minimum preserve text content."""
         from vmlx_engine.models.mllm import MLXMultimodalLM

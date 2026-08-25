@@ -172,7 +172,7 @@ def compute_block_hash(
                 )
                 # np.array() RAISES on bfloat16 under mlx >= 0.32 (the PEP-3118
                 # shim was removed): "'bfloat16' is not a valid PEP 3118 buffer
-                # format string". uv.lock pins 0.32.1, so a bf16 vision
+                # format string". uv.lock pins 0.32.2, so a bf16 vision
                 # embedding reaching here would throw inside cache-key hashing
                 # rather than merely miss. Reinterpret the bits instead --
                 # numpy needs no bfloat16 support to hash bytes, and the dtype

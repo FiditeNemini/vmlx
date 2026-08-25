@@ -9564,7 +9564,7 @@ class TestStartupCompatibilityGuards:
     def test_bundle_selects_native_mlx_wheels_with_compat_override(self):
         """Bundling can select Sequoia-compatible or Tahoe-native MLX wheels."""
         bundle_script = Path("./panel/scripts/bundle-python.sh").read_text()
-        assert 'MLX_VERSION="0.32.1"' in bundle_script
+        assert 'MLX_VERSION="0.32.2"' in bundle_script
         assert 'MLX_LM_VERSION="0.31.3"' in bundle_script
         assert 'MLX_VLM_VERSION="0.5.0"' in bundle_script
         assert 'detect_mlx_wheel_platform()' in bundle_script

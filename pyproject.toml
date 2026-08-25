@@ -27,10 +27,11 @@ classifiers = [
 ]
 
 dependencies = [
-    # MLX 0.32.1 is the first release where the M5/G17 four-row verifier is
-    # both numerically correct and faster than stock QMM. Keep non-Darwin's
-    # existing floor because this Metal-only optimization cannot run there.
-    "mlx>=0.32.1; sys_platform == 'darwin'",
+    # MLX 0.32.2 adds the M5/G17 small-row QMM and quantized-MoE kernels plus
+    # fused head-dim-256 prefill attention used by current JANG/MTP bundles.
+    # Keep non-Darwin's existing floor because these Metal-only optimizations
+    # cannot run there.
+    "mlx>=0.32.2; sys_platform == 'darwin'",
     "mlx>=0.29.0; sys_platform != 'darwin'",
     "mlx-lm>=0.31.3",  # 0.31.3 is the release-bundle floor for current JANG
                        # families: ArraysCache.lengths/advance, SequenceStateMachine,

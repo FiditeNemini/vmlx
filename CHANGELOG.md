@@ -4,6 +4,23 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Performance
+
+- Updated the macOS runtime and Electron bundle to MLX 0.32.2. On an M5 Max,
+  the directly affected small-row q4 matmul shape improved by about 24% with
+  identical output bytes, and Qwen3.8's 2K head-dim-256 causal-attention
+  primitive improved by about 2.2x while remaining within the upstream fused
+  kernel's numerical tolerance.
+
+### Fixed
+
+- Inherited MLX's sliced-array quantization fix and MXFP8 scale round-up, so
+  future conversions cannot bind stale sliced storage or saturate block maxima
+  because an E8M0 scale rounded down. Existing JANG model bundles are not
+  rewritten by this dependency update.
+
 > **⚡ DeepSeek V4 Flash — status as of vMLX Engine 1.6.25**
 >
 > As of **1.6.25** the engine ships the full DSV4-Flash speedup + coherency rollup accumulated across 1.6.19 → 1.6.25 (this file). CRACK builds targeting DSV4-Flash-0731 (`dealignai/DeepSeek-V4-Flash-0731-JANG-CRACK`) require vMLX 1.6.25+ to see these numbers.

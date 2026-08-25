@@ -164,6 +164,32 @@ def test_in_media_clean_prefill_encodes_full_media_then_forwards_exact_prefix():
     assert language._position_ids == "main-position"
 
 
+def test_before_media_clean_prefill_also_uses_full_conditioned_embeddings():
+    """The live 4,352 hit ended before 580 later media placeholders."""
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.language_model = object()
+    generator._media_placeholder_token_ids = lambda: {99}
+    observed = {}
+    generator._prefill_for_exact_media_embedding_prefix_cache = (
+        lambda request, tokens, full_tokens: observed.update(
+            tokens=tokens, full_tokens=full_tokens
+        ) or "exact"
+    )
+    request = SimpleNamespace(
+        _original_token_ids=[1] * 5 + [99] * 3 + [2] * 2
+    )
+
+    result = generator._prefill_for_clean_media_prefix_cache(
+        request, [1] * 4
+    )
+
+    assert result == "exact"
+    assert observed == {
+        "tokens": [1] * 4,
+        "full_tokens": [1] * 5 + [99] * 3 + [2] * 2,
+    }
+
+
 def test_capture_uses_the_aligned_length_not_n_minus_1():
     src = inspect.getsource(MLLMBatchGenerator._process_prompts)
     assert "_clean_media_len = self._media_clean_cache_boundary_for(" in src, (

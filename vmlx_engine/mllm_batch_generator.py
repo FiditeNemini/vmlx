@@ -15460,10 +15460,11 @@ class MLLMBatchGenerator:
                 media_ids = self._media_placeholder_token_ids()
             except Exception:
                 pass
-        if any(
-            start < len(tokens) < end
-            for start, end in _media_placeholder_runs(full_tokens, media_ids)
-        ):
+        media_runs = _media_placeholder_runs(full_tokens, media_ids)
+        # A truncated wrapper call is invalid both INSIDE a media run and
+        # BEFORE one: either way the shortened IDs do not contain every
+        # placeholder required by the request's full pixel/video tensor.
+        if media_runs and len(tokens) <= max(end for _start, end in media_runs):
             return self._prefill_for_exact_media_embedding_prefix_cache(
                 request, tokens, full_tokens
             )
@@ -15553,7 +15554,7 @@ class MLLMBatchGenerator:
         tokens: List[int],
         full_tokens: List[int],
     ) -> Optional[List[Any]]:
-        """Snapshot a Qwen hybrid prefix that ends inside expanded media.
+        """Snapshot a Qwen hybrid prefix at or before expanded media.
 
         The complete request is vision-encoded once. Only its exact merged
         embedding and mRoPE prefix is then forwarded into a fresh native cache.

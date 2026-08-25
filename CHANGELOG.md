@@ -18,7 +18,8 @@ All notable changes to vMLX Engine will be documented in this file.
 
 - Hybrid multimodal SSD cache repair now teaches the media lane the exact
   block-aligned KV boundary that previously missed its native SSM companion.
-  For Qwen hybrid prompts whose match ends inside an expanded image/video run,
+  For Qwen hybrid prompts whose match ends before or inside the final expanded
+  image/video run,
   the auxiliary pass first derives the complete media-conditioned embeddings
   and mRoPE positions, then snapshots only the exact matched prefix. Other
   wrappers fail closed to the safe terminal boundary rather than pairing a

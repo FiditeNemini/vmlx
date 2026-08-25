@@ -2458,6 +2458,9 @@ class BlockDiskStore:
     ) -> None:
         """Persist one drained batch and settle fences after aggregate eviction."""
         original_batch_count = len(batch)
+        access_only_batch = bool(batch) and all(
+            item and item[0] == "__access__" for item in batch
+        )
         with self._stats_lock:
             # Count CPU encoding as in-flight writer work too. Durability
             # waiters also observe _pending_write_items, but /health must not
@@ -2737,6 +2740,21 @@ class BlockDiskStore:
                     write_conn,
                     set(fences_to_finalize),
                 )
+                if access_only_batch:
+                    # LRU touches change neither the finalized payload set nor
+                    # its logical byte total. Feeding their SQLite/WAL page
+                    # churn into account_finalized_write_locked made the
+                    # 30-second integrity interval launch a full managed-root
+                    # scan from a cache HIT. The scan holds this same root lock
+                    # exclusively; a 32-block Qwen restore then blocked its own
+                    # remaining reads for 3.9 seconds on a 178 GB root.
+                    #
+                    # Keep the short exclusive section so an eviction cannot
+                    # race the durable LRU update, but leave byte accounting to
+                    # the next real publish/delete (or startup enforcement).
+                    # WAL space is bounded/reused and is reconciled by those
+                    # owning paths; a touch cannot admit new cache payload.
+                    return
                 metadata_delta = self._index_physical_bytes() - metadata_before
                 try:
                     global_result = (

@@ -435,9 +435,9 @@ CURRENT_PUBLIC_APP_ISSUE_AUDIT_ARTIFACT = (
     "build/current-public-app-issue-audit-after-issue179-memory-preflight-20260607.json"
 )
 CURRENT_DEV_UI_PROOF_ARTIFACTS = {
-    "proof": "build/private-evidence/2026-05-31-live-chat-tools-reasoning-proof.json",
-    "chat_settings_screenshot": "build/private-evidence/2026-05-31-live-chat-tools-reasoning-chat-settings.png",
-    "server_cache_screenshot": "build/private-evidence/2026-05-31-live-chat-tools-reasoning-server-cache-settings.png",
+    "proof": "build/private-evidence/2026-08-25-live-chat-tools-reasoning-proof.json",
+    "chat_settings_screenshot": "build/private-evidence/2026-08-25-live-chat-tools-reasoning-chat-settings.png",
+    "server_cache_screenshot": "build/private-evidence/2026-08-25-live-chat-tools-reasoning-server-cache-settings.png",
 }
 CURRENT_REAL_UI_LIVE_MODEL_PROOF_ARTIFACTS = {
     "proof": "build/private-evidence/current-real-ui-live-model-zaya-text-20260526-proof.json",
@@ -2022,12 +2022,12 @@ _ROWS: list[dict[str, Any]] = [
             "This is mock-server UI wiring proof only; it does not clear live-model language quality, cache reuse, speed, VL/video semantics, or DSV4 exact-code quality",
         ],
         "commands": [
-            "VMLX_LIVE_PROOF_BASENAME=2026-05-31-live-chat-tools-reasoning node panel/scripts/live-chat-tools-reasoning-proof.mjs",
+            "VMLX_LIVE_PROOF_BASENAME=2026-08-25-live-chat-tools-reasoning node panel/scripts/live-chat-tools-reasoning-proof.mjs",
         ],
         "artifacts": [
-            "build/private-evidence/2026-05-31-live-chat-tools-reasoning-proof.json",
-            "build/private-evidence/2026-05-31-live-chat-tools-reasoning-chat-settings.png",
-            "build/private-evidence/2026-05-31-live-chat-tools-reasoning-server-cache-settings.png",
+            "build/private-evidence/2026-08-25-live-chat-tools-reasoning-proof.json",
+            "build/private-evidence/2026-08-25-live-chat-tools-reasoning-chat-settings.png",
+            "build/private-evidence/2026-08-25-live-chat-tools-reasoning-server-cache-settings.png",
         ],
     },
     {

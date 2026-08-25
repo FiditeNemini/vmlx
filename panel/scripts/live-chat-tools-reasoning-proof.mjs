@@ -512,7 +512,7 @@ function assertResult(result) {
 
   const serverUi = result.serverCacheUi || {}
   if (!serverUi.visible) failures.push('server cache settings UI was not visible in renderer')
-  for (const label of ['Enable Prefix Cache', 'In-Memory Paged Cache (RAM)', 'Block Disk Cache (SSD / L2)', 'Enable Disk Cache', 'Stored Cache Quantization']) {
+  for (const label of ['Enable Prefix Cache', 'In-Memory Paged Cache (RAM) — Locked Off', 'Block Disk Cache (SSD / L2)', 'Enable Disk Cache', 'Stored Cache Quantization']) {
     if (!serverUi.labels?.includes(label)) failures.push(`server cache UI missing visible label: ${label}`)
   }
   // Current interlock (shared/cacheControlPolicy.ts): Block Disk Cache is a standalone
@@ -840,7 +840,7 @@ async function main() {
         clickSection('In-Memory Paged Cache (RAM)');
         clickSection('KV Cache Quantization');
         clickSection('Disk Cache (Persistent)');
-        const PAGED_LABEL = 'In-Memory Paged Cache (RAM)';
+        const PAGED_LABEL = 'In-Memory Paged Cache (RAM) — Locked Off';
         const BLOCK_LABEL = 'Block Disk Cache (SSD / L2)';
         const labelFor = (text) => [...document.querySelectorAll('label')]
           .find((label) => label.innerText.includes(text));

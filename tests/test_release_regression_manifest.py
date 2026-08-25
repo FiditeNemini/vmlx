@@ -567,7 +567,7 @@ def _write_passing_dev_ui_proof_artifacts(root: Path) -> None:
                         "visible": True,
                         "labels": [
                             "Enable Prefix Cache",
-                            "In-Memory Paged Cache (RAM)",
+                            "In-Memory Paged Cache (RAM) — Locked Off",
                             "Block Disk Cache (SSD / L2)",
                             "Enable Disk Cache",
                             "Stored Cache Quantization",
@@ -4316,9 +4316,9 @@ def test_release_regression_manifest_tracks_electron_dev_ui_wiring_proof():
     joined = " ".join(row["commands"] + row["artifacts"] + row["proves"])
 
     assert row["mode"] == "dev-ui"
-    assert "VMLX_LIVE_PROOF_BASENAME=2026-05-31-live-chat-tools-reasoning" in joined
+    assert "VMLX_LIVE_PROOF_BASENAME=2026-08-25-live-chat-tools-reasoning" in joined
     assert "panel/scripts/live-chat-tools-reasoning-proof.mjs" in joined
-    assert "build/private-evidence/2026-05-31-live-chat-tools-reasoning-proof.json" in joined
+    assert "build/private-evidence/2026-08-25-live-chat-tools-reasoning-proof.json" in joined
     assert "mock-server UI wiring proof only" in joined
     assert "does not clear live-model language quality" in joined
     assert "reasoning segments" in joined
@@ -4868,7 +4868,7 @@ def test_release_regression_manifest_current_sweep_rejects_missing_dev_ui_proof(
 
     assert result["dev_ui_proof"]["status"] == "fail"
     assert (
-        "build/private-evidence/2026-05-31-live-chat-tools-reasoning-proof.json"
+        "build/private-evidence/2026-08-25-live-chat-tools-reasoning-proof.json"
         in result["dev_ui_proof"]["missing"]
     )
 

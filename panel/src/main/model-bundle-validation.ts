@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 export type JangBundleMetadataValidation = {
   ok: boolean
-  schema: 'legacy' | 'capabilities' | 'chat' | 'invalid'
+  schema: 'legacy' | 'config-fallback' | 'capabilities' | 'chat' | 'invalid'
   family?: string
   error?: string
 }
@@ -24,9 +24,11 @@ function readJsonObject(path: string, label: string): Record<string, unknown> {
 /**
  * Mirror the Python runtime's legacy-vs-authoritative JANG family contract.
  *
- * A pre-capabilities bundle may still resolve its family from config.json.
- * Once capabilities or the chat schema is present, its family is authoritative
- * and must be complete before Electron is allowed to spawn the engine.
+ * Complete capability/chat identities are authoritative. Older sidecars may
+ * carry those blocks without the later family field; in that case the Python
+ * runtime intentionally ignores the incomplete block and resolves the exact
+ * config.json model_type/text_model_type. Malformed JSON and non-string family
+ * values remain invalid before Electron is allowed to spawn the engine.
  */
 export function validateJangBundleMetadataForLaunch(
   modelPath: string,
@@ -44,28 +46,34 @@ export function validateJangBundleMetadataForLaunch(
     const jang = readJsonObject(jangPath, jangPath)
     const capabilities = jang.capabilities
     if (capabilities && typeof capabilities === 'object' && !Array.isArray(capabilities)) {
-      const family = (capabilities as Record<string, unknown>).family
-      if (typeof family !== 'string' || !family.trim()) {
-        return {
-          ok: false,
-          schema: 'invalid',
-          error: `${jangPath} capabilities.family must be a non-empty string`,
-        }
+      const familyValue = (capabilities as Record<string, unknown>).family
+      if (familyValue != null && typeof familyValue !== 'string') {
+        throw new Error(`${jangPath} capabilities.family must be a string when present`)
       }
-      return { ok: true, schema: 'capabilities', family: family.trim() }
+      const topFamilyValue = jang.model_family
+      if (topFamilyValue != null && typeof topFamilyValue !== 'string') {
+        throw new Error(`${jangPath} model_family must be a string when present`)
+      }
+      const family = typeof familyValue === 'string' && familyValue.trim()
+        ? familyValue.trim()
+        : typeof topFamilyValue === 'string' && topFamilyValue.trim()
+          ? topFamilyValue.trim()
+          : undefined
+      return family
+        ? { ok: true, schema: 'capabilities', family }
+        : { ok: true, schema: 'config-fallback' }
     }
 
     const chat = jang.chat
     if (chat && typeof chat === 'object' && !Array.isArray(chat)) {
-      const family = jang.model_family
-      if (typeof family !== 'string' || !family.trim()) {
-        return {
-          ok: false,
-          schema: 'invalid',
-          error: `${jangPath} chat-authoritative metadata requires a non-empty model_family`,
-        }
+      const familyValue = jang.model_family
+      if (familyValue != null && typeof familyValue !== 'string') {
+        throw new Error(`${jangPath} model_family must be a string when present`)
       }
-      return { ok: true, schema: 'chat', family: family.trim() }
+      const family = typeof familyValue === 'string' ? familyValue.trim() : ''
+      return family
+        ? { ok: true, schema: 'chat', family }
+        : { ok: true, schema: 'config-fallback' }
     }
 
     return { ok: true, schema: 'legacy' }

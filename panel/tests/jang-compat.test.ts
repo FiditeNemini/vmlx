@@ -148,7 +148,7 @@ describe('authoritative JANG bundle launch metadata', () => {
     )
   })
 
-  it('rejects malformed or family-less authoritative stamps before spawn', () => {
+  it('falls back to config detection for older family-less metadata', () => {
     withBundle(
       {
         'config.json': { model_type: 'lfm2_moe' },
@@ -156,8 +156,7 @@ describe('authoritative JANG bundle launch metadata', () => {
       },
       (path) => {
         const result = validateJangBundleMetadataForLaunch(path)
-        expect(result.ok).toBe(false)
-        expect(result.error).toMatch(/capabilities\.family/)
+        expect(result).toMatchObject({ ok: true, schema: 'config-fallback' })
       },
     )
     withBundle(
@@ -167,8 +166,38 @@ describe('authoritative JANG bundle launch metadata', () => {
       },
       (path) => {
         const result = validateJangBundleMetadataForLaunch(path)
+        expect(result).toMatchObject({ ok: true, schema: 'config-fallback' })
+      },
+    )
+  })
+
+  it('accepts top-level model_family beside a partial capabilities block', () => {
+    withBundle(
+      {
+        'config.json': { model_type: 'unregistered_wrapper' },
+        'jang_config.json': {
+          model_family: 'deepseek_v4',
+          capabilities: { cache_type: 'hybrid' },
+        },
+      },
+      (path) => expect(validateJangBundleMetadataForLaunch(path)).toMatchObject({
+        ok: true,
+        schema: 'capabilities',
+        family: 'deepseek_v4',
+      }),
+    )
+  })
+
+  it('rejects malformed JSON and non-string family values before spawn', () => {
+    withBundle(
+      {
+        'config.json': { model_type: 'qwen3' },
+        'jang_config.json': { capabilities: { family: ['qwen3'] } },
+      },
+      (path) => {
+        const result = validateJangBundleMetadataForLaunch(path)
         expect(result.ok).toBe(false)
-        expect(result.error).toMatch(/model_family/)
+        expect(result.error).toMatch(/family must be a string when present/)
       },
     )
     withBundle(

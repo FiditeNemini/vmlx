@@ -593,7 +593,21 @@ class ModelConfigRegistry:
             # The final fallback remains _DEFAULT_CONFIG (native cache, no
             # automatic parsers) for an unknown architecture. Malformed JSON
             # and unreadable config.json still fail closed above.
-            family = caps.get("family") or jcfg.get("model_family") or ""
+            family = ""
+            for family_path, family_value in (
+                ("capabilities.family", caps.get("family")),
+                ("model_family", jcfg.get("model_family")),
+            ):
+                if family_value is None:
+                    continue
+                if not isinstance(family_value, str):
+                    raise RuntimeError(
+                        f"invalid authoritative JANG stamp {jcfg_path}: "
+                        f"{family_path} must be a string when present"
+                    )
+                if family_value.strip():
+                    family = family_value.strip()
+                    break
             if not family:
                 logger.warning(
                     "JANG capabilities stamp %s has no family; ignoring the "

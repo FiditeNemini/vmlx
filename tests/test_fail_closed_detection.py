@@ -161,6 +161,46 @@ def test_incomplete_jang_stamp_unknown_architecture_stays_conservative(
     assert result.architecture_hints["force_native_cache"] is True
 
 
+def test_incomplete_chat_stamp_falls_back_to_structural_config_family(
+    tmp_path, monkeypatch
+):
+    """The older chat schema is also optional when model_family is absent."""
+    import vmlx_engine.model_config_registry as registry_module
+
+    model_config = {"model_type": "lfm2_moe"}
+    (tmp_path / "config.json").write_text(json.dumps(model_config))
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({"chat": {"reasoning": {"supported": True}}})
+    )
+    monkeypatch.setattr(registry_module, "load_config", lambda _path: model_config)
+    registry = ModelConfigRegistry()
+    registry.register(
+        ModelConfig(
+            family_name="lfm2",
+            model_types=["lfm2", "lfm2_moe"],
+            cache_type="hybrid",
+            tool_parser="lfm2",
+            priority=10,
+        )
+    )
+
+    result = registry.lookup(str(tmp_path))
+
+    assert result.family_name == "lfm2"
+    assert result.cache_type == "hybrid"
+    assert result.tool_parser == "lfm2"
+
+
+def test_non_string_jang_family_is_invalid_instead_of_guessed(tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "lfm2_moe"}))
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({"capabilities": {"family": ["lfm2_moe"]}})
+    )
+
+    with pytest.raises(RuntimeError, match="family must be a string when present"):
+        ModelConfigRegistry().lookup(str(tmp_path))
+
+
 def test_unknown_family_uses_native_cache_and_no_automatic_parser(monkeypatch):
     import vmlx_engine.model_config_registry as registry_module
 

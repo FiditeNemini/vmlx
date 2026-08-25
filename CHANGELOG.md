@@ -6,6 +6,10 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ## [Unreleased]
 
+---
+
+## [1.6.38] - 2026-08-25
+
 ### Performance
 
 - Updated the macOS runtime and Electron bundle to MLX 0.32.2. On an M5 Max,

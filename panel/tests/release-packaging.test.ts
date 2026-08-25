@@ -334,9 +334,9 @@ describe("release packaging", () => {
     expect(beforePack.configuredR20Version({})).toBe("1.6.20");
     expect(
       beforePack.configuredR20Version({
-        VMLX_R20_EXPECTED_VERSION: "1.6.37",
+        VMLX_R20_EXPECTED_VERSION: "1.6.38",
       }),
-    ).toBe("1.6.37");
+    ).toBe("1.6.38");
     expect(() =>
       beforePack.configuredR20Version({
         VMLX_R20_EXPECTED_VERSION: "not-a-release",

@@ -1,19 +1,19 @@
 {
-  "version": "1.6.36",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.36/vMLX-1.6.36-tahoe-arm64.dmg",
-  "sha256": "b7cc2d47a12d60798006c4b0015bbb3fd8c276a63db553da197977dad3fdc05f",
-  "sha512": "OCryEQlWB1uTy/IgkzDrZCOMTT19WkdwIapuYP04gHT/vsYgxv2JNJnOcKuZYFoMsAcYjskOzQ9HqmXamEdQEw==",
+  "version": "1.6.37",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.37/vMLX-1.6.37-tahoe-arm64.dmg",
+  "sha256": "9fdee2d8bc65f72528c87a433bd2a116c6dd848ebfca1dc6cc3d3e5a57358e11",
+  "sha512": "npmKLl73kBqIisOfL7710OhePvcyNWAbxTkfgsY9kJv5K77i3x4wchlk6257Po8fJIcueGrzFWZ6YIefCoCACA==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.36/vMLX-1.6.36-sequoia-arm64.dmg",
-      "sha256": "90fed0a5ab0f5e57eeff419256f542e8f6444589ea2eec33438f08def4756693",
-      "sha512": "ixWLOLJlZ1R6pDSF1nJNyGaQ9qd5qVR5VdZreIe3eo4qzeslDV88Om0fDRqSIkrmOB/QLc2wR/ZIXPZU3EthKg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.37/vMLX-1.6.37-sequoia-arm64.dmg",
+      "sha256": "7ac49c11073371d16652c6d20d58c19b46b1acefebdb5ee6806648b2755e353d",
+      "sha512": "wx0Zyt/VZVE1O0BWb5taD8wQkJP9L4EcrIbmI7FG180dA1qXeY7wc1bipcRnR/fLRHm/0T5fpuizJsYMOjM2NA=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.36/vMLX-1.6.36-tahoe-arm64.dmg",
-      "sha256": "b7cc2d47a12d60798006c4b0015bbb3fd8c276a63db553da197977dad3fdc05f",
-      "sha512": "OCryEQlWB1uTy/IgkzDrZCOMTT19WkdwIapuYP04gHT/vsYgxv2JNJnOcKuZYFoMsAcYjskOzQ9HqmXamEdQEw=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.37/vMLX-1.6.37-tahoe-arm64.dmg",
+      "sha256": "9fdee2d8bc65f72528c87a433bd2a116c6dd848ebfca1dc6cc3d3e5a57358e11",
+      "sha512": "npmKLl73kBqIisOfL7710OhePvcyNWAbxTkfgsY9kJv5K77i3x4wchlk6257Po8fJIcueGrzFWZ6YIefCoCACA=="
     }
   },
-  "notes": "vMLX 1.6.36 \u2014 DeepSeek V4 Flash visible-response and native SSD-cache reliability. Fixes foreground replies waiting behind cache re-key work, zero-sized native DSV4 cache anchors failing durable writes, tool-result schema loss, and multimodal/mixed-attention prefix selection. SSD blocks now stream without full-cache copies or retained writer buffers, use physical-block dedupe, and keep each model's architecture-native full-precision cache format; SSD-only app defaults keep in-RAM paged, vision, and SSM payload caches disabled. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs are Developer ID signed, notarized, stapled, and Gatekeeper verified."
+  "notes": "vMLX 1.6.37 \u2014 release hardening on top of the DeepSeek V4, native SSD-cache, tool-continuation, and multimodal fixes in 1.6.36. Refreshes the Electron live-proof contract, preserves image/video/audio marker order in mixed-media prompts, and synchronizes source, engine, Electron, and cleanly bundled JANG 2.5.46 runtime provenance. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs are Developer ID signed, independently notarized, stapled, Gatekeeper verified, and mounted-artifact smoke-tested."
 }

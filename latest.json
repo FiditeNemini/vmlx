@@ -1,19 +1,19 @@
 {
-  "version": "1.6.37",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.37/vMLX-1.6.37-tahoe-arm64.dmg",
-  "sha256": "9fdee2d8bc65f72528c87a433bd2a116c6dd848ebfca1dc6cc3d3e5a57358e11",
-  "sha512": "npmKLl73kBqIisOfL7710OhePvcyNWAbxTkfgsY9kJv5K77i3x4wchlk6257Po8fJIcueGrzFWZ6YIefCoCACA==",
+  "version": "1.6.38",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.38/vMLX-1.6.38-tahoe-arm64.dmg",
+  "sha256": "914f68edd664de12c4be62affbced5cfe8c556377eea356084e739cd50a83f0c",
+  "sha512": "FZc1xXXOja4XCnRQePhbeyAWpNb3y0QQ0xdjt9qg98WX1ERY5+OB8lNov/3D6EWN+ElR0V2gZkj3ra89kFufZQ==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.37/vMLX-1.6.37-sequoia-arm64.dmg",
-      "sha256": "7ac49c11073371d16652c6d20d58c19b46b1acefebdb5ee6806648b2755e353d",
-      "sha512": "wx0Zyt/VZVE1O0BWb5taD8wQkJP9L4EcrIbmI7FG180dA1qXeY7wc1bipcRnR/fLRHm/0T5fpuizJsYMOjM2NA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.38/vMLX-1.6.38-sequoia-arm64.dmg",
+      "sha256": "70eb7ae7efba3e9edb663c71e4dba572af88c511c20f595ceed48544fa4241d8",
+      "sha512": "f626qaKRjHnmVhsy/xF2+5HTr+iZ/UEEezdcwnSwAj7+ZMSaSDmRZBD36tZbTQZB3ElZBDfAw0XgFWIr6irpjQ=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.37/vMLX-1.6.37-tahoe-arm64.dmg",
-      "sha256": "9fdee2d8bc65f72528c87a433bd2a116c6dd848ebfca1dc6cc3d3e5a57358e11",
-      "sha512": "npmKLl73kBqIisOfL7710OhePvcyNWAbxTkfgsY9kJv5K77i3x4wchlk6257Po8fJIcueGrzFWZ6YIefCoCACA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.38/vMLX-1.6.38-tahoe-arm64.dmg",
+      "sha256": "914f68edd664de12c4be62affbced5cfe8c556377eea356084e739cd50a83f0c",
+      "sha512": "FZc1xXXOja4XCnRQePhbeyAWpNb3y0QQ0xdjt9qg98WX1ERY5+OB8lNov/3D6EWN+ElR0V2gZkj3ra89kFufZQ=="
     }
   },
-  "notes": "vMLX 1.6.37 \u2014 release hardening on top of the DeepSeek V4, native SSD-cache, tool-continuation, and multimodal fixes in 1.6.36. Refreshes the Electron live-proof contract, preserves image/video/audio marker order in mixed-media prompts, and synchronizes source, engine, Electron, and cleanly bundled JANG 2.5.46 runtime provenance. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs are Developer ID signed, independently notarized, stapled, Gatekeeper verified, and mounted-artifact smoke-tested."
+  "notes": "vMLX 1.6.38 \u2014 updates the bundled runtime to MLX 0.32.2, repairs Qwen3.8 hybrid multimodal partial-prefix SSD reuse across native KV+SSM state, backports the Qwen3-VL scalar-repeat correction, and inherits upstream sliced-array quantization and MXFP8 scale fixes for future conversions. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain cleanly pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, and mounted-artifact smoke-tested."
 }

@@ -8027,19 +8027,15 @@ class MLLMBatchGenerator:
         request: "MLLMBatchRequest",
         token_ids: List[int],
     ) -> int:
-        """Choose the media KV+SSM boundary, honoring a learned safe miss.
+        """Choose the media KV+SSM boundary, honoring a learned KV-only miss.
 
         A hybrid KV-only miss records the exact block-aligned boundary whose
         missing companion forced a full prefill.  Text-only prefills already
-        capture that boundary on the repair pass.  Media prefills cannot split
-        the live VLM forward, but their existing auxiliary clean prefill can
-        target the learned boundary when it lies strictly after every media
-        placeholder run.  In that shape the full request media payload is
-        still exactly the payload needed by the shorter prefix.
-
-        Never cut through or precede a media run: passing the full pixel/video
-        tensors to a prefix that does not contain all of their placeholders
-        can silently pair the wrong embeddings with the token sequence.
+        capture that boundary on the repair pass.  Media prefills use the same
+        learned boundary; `_prefill_for_clean_media_prefix_cache` detects a cut
+        through a placeholder run and derives the FULL media-conditioned
+        embedding sequence before forwarding only the requested prefix.  It
+        never passes a full pixel/video tensor to truncated placeholders.
         """
         if len(token_ids) <= 1:
             return 0
@@ -8059,10 +8055,6 @@ class MLLMBatchGenerator:
             or block_size <= 0
             or required % block_size != 0
         ):
-            return terminal
-        media_ids = self._media_placeholder_token_ids()
-        runs = _media_placeholder_runs(token_ids, media_ids)
-        if not runs or required <= max(end for _start, end in runs):
             return terminal
         logger.info(
             "MLLM media prefix cache: repairing learned KV-only boundary "
@@ -12392,6 +12384,31 @@ class MLLMBatchGenerator:
                                 req, _media_tokens[:_clean_media_len]
                             )
                         )
+                        if clean_media_cache is None:
+                            # Exact in-media embedding capture is capability-
+                            # gated. Preserve the safe terminal snapshot when
+                            # a wrapper cannot expose all conditioned state.
+                            _terminal_media_len = self._ssm_block_aligned_boundary(
+                                len(_media_tokens) - 1
+                            )
+                            if _terminal_media_len <= 0:
+                                _terminal_media_len = len(_media_tokens) - 1
+                            if _terminal_media_len != _clean_media_len:
+                                logger.info(
+                                    "MLLM media prefix cache: exact learned "
+                                    "boundary %d unavailable for %s; retaining "
+                                    "safe terminal boundary %d",
+                                    _clean_media_len,
+                                    req.request_id,
+                                    _terminal_media_len,
+                                )
+                                clean_media_cache = (
+                                    self._prefill_for_clean_media_prefix_cache(
+                                        req, _media_tokens[:_terminal_media_len]
+                                    )
+                                )
+                                if clean_media_cache is not None:
+                                    _clean_media_len = _terminal_media_len
                         if clean_media_cache is not None:
                             req._media_clean_prefix_cache = clean_media_cache  # type: ignore[attr-defined]
                             req._media_clean_prefix_len = _clean_media_len  # type: ignore[attr-defined]
@@ -15436,6 +15453,20 @@ class MLLMBatchGenerator:
         """
         if not tokens or self.language_model is None:
             return None
+        full_tokens = list(getattr(request, "_original_token_ids", None) or [])
+        media_ids: set[int] = set()
+        if full_tokens:
+            try:
+                media_ids = self._media_placeholder_token_ids()
+            except Exception:
+                pass
+        if any(
+            start < len(tokens) < end
+            for start, end in _media_placeholder_runs(full_tokens, media_ids)
+        ):
+            return self._prefill_for_exact_media_embedding_prefix_cache(
+                request, tokens, full_tokens
+            )
         _saved_pos_state: Dict[str, Any] = {}
         try:
             # Qwen VL keeps request-local RoPE state on the language model.
@@ -15513,6 +15544,163 @@ class MLLMBatchGenerator:
             for attr, value in _saved_pos_state.items():
                 try:
                     setattr(self.language_model, attr, value)
+                except Exception:
+                    pass
+
+    def _prefill_for_exact_media_embedding_prefix_cache(
+        self,
+        request: "MLLMBatchRequest",
+        tokens: List[int],
+        full_tokens: List[int],
+    ) -> Optional[List[Any]]:
+        """Snapshot a Qwen hybrid prefix that ends inside expanded media.
+
+        The complete request is vision-encoded once. Only its exact merged
+        embedding and mRoPE prefix is then forwarded into a fresh native cache.
+        Wrappers with additional DeepStack/cross-attention/per-layer state are
+        rejected so their caller can retain the safe terminal snapshot.
+        """
+        family = str(getattr(self, "_model_type", "") or "").lower()
+        if family not in {"qwen3_5", "qwen3_5_moe"}:
+            return None
+        if not full_tokens or len(tokens) >= len(full_tokens):
+            return None
+        if full_tokens[:len(tokens)] != list(tokens):
+            logger.warning(
+                "MLLM exact media prefix declined for %s: requested tokens "
+                "are not a prefix of the full media prompt",
+                getattr(request, "request_id", "?"),
+            )
+            return None
+
+        lm = self.language_model
+        get_embeds = getattr(self.model, "get_input_embeddings", None)
+        if not callable(get_embeds) or _media_embed_kwarg_name(lm) != "inputs_embeds":
+            return None
+
+        saved_position_state: Dict[str, Any] = {}
+        try:
+            for attr in ("_rope_deltas", "_position_ids"):
+                if hasattr(lm, attr):
+                    saved_position_state[attr] = getattr(lm, attr)
+                    setattr(lm, attr, None)
+
+            full_input_ids = request.input_ids
+            if full_input_ids is None:
+                return None
+            if full_input_ids.ndim == 1:
+                full_input_ids = full_input_ids[None, :]
+            if full_input_ids.shape[1] < len(full_tokens):
+                return None
+            if full_input_ids[0, :len(tokens)].tolist() != list(tokens):
+                return None
+
+            kwargs = dict(request.extra_kwargs)
+            if request.pixel_values is not None:
+                kwargs["pixel_values"] = request.pixel_values
+            if request.video_pixel_values is not None:
+                kwargs[_video_pixel_values_kwarg_name(self.model)] = (
+                    request.video_pixel_values
+                )
+            if request.attention_mask is not None:
+                kwargs["mask"] = request.attention_mask
+            if request.image_grid_thw is not None:
+                kwargs["image_grid_thw"] = request.image_grid_thw
+            if request.video_grid_thw is not None:
+                kwargs["video_grid_thw"] = request.video_grid_thw
+
+            features = get_embeds(full_input_ids, **kwargs)
+            embeds = getattr(features, "inputs_embeds", None)
+            if embeds is None or getattr(embeds, "ndim", 0) < 3:
+                return None
+            feature_dict = (
+                features.to_dict()
+                if callable(getattr(features, "to_dict", None))
+                else {}
+            )
+            unsupported = sorted(
+                key for key, value in feature_dict.items()
+                if key != "inputs_embeds" and value is not None
+            )
+            if unsupported:
+                logger.info(
+                    "MLLM exact media prefix unavailable for %s: embedding "
+                    "features require unsliced state %s",
+                    getattr(request, "request_id", "?"),
+                    ",".join(unsupported),
+                )
+                return None
+
+            position_ids = getattr(lm, "_position_ids", None)
+            if position_ids is None or position_ids.shape[-1] < len(tokens):
+                return None
+            cache_model = getattr(self, "_cache_model", None)
+            fresh_cache = cache_model.make_cache() if cache_model is not None else None
+            if fresh_cache is None:
+                make_cache = getattr(lm, "make_cache", None)
+                fresh_cache = make_cache() if callable(make_cache) else None
+            if fresh_cache is None:
+                return None
+
+            chunk = max(1, int(self._media_prefill_chunk_tokens(len(tokens))))
+            output = None
+            for start in range(0, len(tokens), chunk):
+                end = min(start + chunk, len(tokens))
+                output = lm(
+                    full_input_ids[:, start:end],
+                    inputs_embeds=embeds[:, start:end],
+                    mask=None,
+                    cache=fresh_cache,
+                    position_ids=position_ids[..., start:end],
+                )
+
+            materialize: List[Any] = []
+            def collect(cache_obj: Any) -> None:
+                if hasattr(cache_obj, "keys") and cache_obj.keys is not None:
+                    if isinstance(cache_obj.keys, tuple):
+                        materialize.extend(cache_obj.keys)
+                        materialize.extend(cache_obj.values)
+                    else:
+                        materialize.extend([cache_obj.keys, cache_obj.values])
+                elif hasattr(cache_obj, "caches") and isinstance(
+                    getattr(cache_obj, "caches", None), (list, tuple)
+                ):
+                    for sub_cache in cache_obj.caches:
+                        collect(sub_cache)
+                elif hasattr(cache_obj, "cache") and isinstance(cache_obj.cache, list):
+                    materialize.extend(
+                        arr for arr in cache_obj.cache if hasattr(arr, "shape")
+                    )
+
+            for cache_obj in fresh_cache:
+                collect(cache_obj)
+            if materialize:
+                try:
+                    mx.eval(materialize)
+                except RuntimeError as eval_err:
+                    if "Stream" in str(eval_err):
+                        mx.synchronize()
+                    else:
+                        raise
+            del output
+            logger.info(
+                "MLLM media prefix cache: captured exact media-conditioned "
+                "embedding boundary for %s at %d tokens",
+                getattr(request, "request_id", "?"),
+                len(tokens),
+            )
+            return fresh_cache
+        except Exception as ex:
+            logger.warning(
+                "MLLM exact media embedding prefix failed for %s (non-fatal): %s",
+                getattr(request, "request_id", "?"),
+                ex,
+            )
+            return None
+        finally:
+            for attr, value in saved_position_state.items():
+                try:
+                    setattr(lm, attr, value)
                 except Exception:
                     pass
 

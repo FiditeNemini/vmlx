@@ -70,14 +70,98 @@ def test_media_kv_only_miss_teaches_the_next_clean_boundary():
     assert generator._media_clean_cache_boundary_for(request, tokens) == 4672
 
 
-def test_media_required_boundary_never_cuts_through_media():
+def test_media_required_boundary_can_target_exact_embedding_prefix_inside_media():
     generator = _Gen(64).gen
     generator._media_placeholder_token_ids = lambda: {99}
     request = SimpleNamespace(_ssm_required_checkpoint_tokens=4032)
     tokens = [1] * 4000 + [99] * 128 + [2] * 2200
 
-    terminal = generator._ssm_block_aligned_boundary(len(tokens) - 1)
-    assert generator._media_clean_cache_boundary_for(request, tokens) == terminal
+    assert generator._media_clean_cache_boundary_for(request, tokens) == 4032
+
+
+def test_in_media_clean_prefill_encodes_full_media_then_forwards_exact_prefix():
+    """The repair must never feed full pixels to truncated placeholders."""
+    import mlx.core as mx
+
+    calls = []
+
+    class FakeFeatures:
+        def __init__(self):
+            self.inputs_embeds = mx.arange(30).reshape(1, 10, 3)
+
+        def to_dict(self):
+            return {"inputs_embeds": self.inputs_embeds}
+
+    class FakeModel:
+        def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+            calls.append(("embed", input_ids.tolist(), pixel_values))
+            language._position_ids = mx.arange(30).reshape(3, 1, 10)
+            return FakeFeatures()
+
+    class FakeLanguage:
+        _rope_deltas = "main-rope"
+        _position_ids = "main-position"
+
+        def make_cache(self):
+            return []
+
+        def __call__(
+            self,
+            inputs,
+            inputs_embeds=None,
+            mask=None,
+            cache=None,
+            **kwargs,
+        ):
+            calls.append(
+                (
+                    "lm",
+                    inputs.tolist(),
+                    inputs_embeds.tolist(),
+                    kwargs["position_ids"].tolist(),
+                )
+            )
+            return mx.array([[0.0]])
+
+    language = FakeLanguage()
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.language_model = language
+    generator.model = FakeModel()
+    generator._model_type = "qwen3_5"
+    generator._cache_model = None
+    generator._media_placeholder_token_ids = lambda: {3}
+    generator._media_prefill_chunk_tokens = lambda _seq_len: 4
+    pixel_marker = object()
+    full_tokens = [0, 1, 2, 3, 3, 3, 3, 7, 8, 9]
+    request = SimpleNamespace(
+        request_id="qwen-in-media-repair",
+        input_ids=mx.array([full_tokens]),
+        _original_token_ids=full_tokens,
+        pixel_values=pixel_marker,
+        video_pixel_values=None,
+        image_grid_thw=mx.array([[1, 1, 4]]),
+        video_grid_thw=None,
+        attention_mask=None,
+        extra_kwargs={},
+    )
+
+    # Placeholder run is [3, 7); boundary 6 is deliberately inside it.
+    result = generator._prefill_for_clean_media_prefix_cache(
+        request, full_tokens[:6]
+    )
+
+    assert result == []
+    assert calls[0] == ("embed", [full_tokens], pixel_marker)
+    assert [entry[1] for entry in calls[1:]] == [
+        [[0, 1, 2, 3]],
+        [[3, 3]],
+    ]
+    assert [entry[2] for entry in calls[1:]] == [
+        [[[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]]],
+        [[[12, 13, 14], [15, 16, 17]]],
+    ]
+    assert language._rope_deltas == "main-rope"
+    assert language._position_ids == "main-position"
 
 
 def test_capture_uses_the_aligned_length_not_n_minus_1():

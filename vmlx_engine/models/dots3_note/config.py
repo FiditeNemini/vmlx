@@ -260,11 +260,9 @@ class ModelConfig(BaseModelConfig):
     vision_config: Optional[VisionConfig] = None
     audio_config: Optional[AudioConfig] = None
     model_type: str = "dots3_note"
-    # Media placeholder ids. 🚨 Video rides the IMAGE token path at runtime:
-    # the processor expands video frames to N x <|imgpad|> (151660);
-    # video_token_id (151680) never appears in a rendered prompt and exists
-    # only for template-side bookkeeping. Scatter at image_token_id for BOTH
-    # image and video, and at audio_token_id for audio.
+    # Media placeholder ids. Image and video share one prompt-ordered visual
+    # feature buffer, but retain native IDs so mixed media remains identifiable
+    # to the language model. Audio uses its own feature path and ID.
     image_token_id: int = 151660
     video_token_id: int = 151680
     audio_token_id: int = 151720

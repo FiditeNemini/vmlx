@@ -1227,14 +1227,13 @@ def _dots3_media_item_runs(
 ) -> Optional[
     Tuple[List[Tuple[int, int]], List[int], List[Tuple[str, Any]]]
 ]:
-    """Use processor-owned item intervals after dots video becomes image tokens.
+    """Use processor-owned item intervals for prompt-ordered dots media.
 
-    The dots processor intentionally rewrites every video placeholder to the
-    image token consumed by the vision tower. Token-id inference therefore
-    cannot distinguish an image from a video and used to fall back to one
-    request-global digest. The processor now carries fail-closed item metadata
-    with exact expanded intervals and source indices; validate it against both
-    the processed tokens and the original request payloads before using it.
+    Image and video retain distinct native token IDs, while their feature rows
+    share one prompt-ordered buffer. The processor carries fail-closed item
+    metadata with exact expanded intervals and source indices; validate it
+    against both the processed tokens and the original request payloads before
+    using it.
     """
     if str(model_type or "").lower() != "dots3_note":
         return None
@@ -1279,11 +1278,7 @@ def _dots3_media_item_runs(
             or end > len(token_ids)
         ):
             return None
-        expected_ids = (
-            grouped_ids.get("audio", set())
-            if modality == "audio"
-            else grouped_ids.get("image", set())
-        )
+        expected_ids = grouped_ids.get(modality, set())
         if not expected_ids or any(
             int(token) not in expected_ids for token in token_ids[start:end]
         ):

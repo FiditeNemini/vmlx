@@ -9,11 +9,11 @@ input_ids and tower-ready tensors.
 
 Contracts that bite:
 
-- 🚨 Video rides the IMAGE token path: the template's video placeholder
-  (``<|video_pad|>`` 151680) is consumed HERE and replaced by N x
-  ``<|imgpad|>`` (151660); ``config.video_token_id`` is vestigial at runtime
-  and must never reach the model. An 8-frame 224x224 clip expands to 968
-  image tokens (frames are upscaled to the 128-merged-block per-frame FLOOR).
+- Video frames preserve the template's native ``<|video_pad|>`` token ID.
+  Each frame still contributes one visual grid row, but keeping image and
+  video IDs distinct is required when they share one prompt. An 8-frame
+  224x224 clip expands to 968 video tokens (frames are upscaled to the
+  128-merged-block per-frame FLOOR).
 - Every placeholder expansion is COUNT-CHECKED against the tensor rows the
   tower will emit. Zero placeholders while media was supplied raises — a
   silently dropped image/audio leaves the model confabulating a description
@@ -60,13 +60,8 @@ _OVERHEAD_FALLBACK = 96
 
 # Placeholder ids (mirrors config.py ModelConfig; constructor can override).
 _IMAGE_TOKEN_ID = 151660  # <|imgpad|>
-_VIDEO_TOKEN_ID = 151680  # <|video_pad|> — consumed here, never emitted
+_VIDEO_TOKEN_ID = 151680  # <|video_pad|>
 _AUDIO_TOKEN_ID = 151720  # <|audio_comp_pad|>
-# Negative, so it can never collide with a real vocabulary id. Video frames are
-# expanded into this first and converted to <|imgpad|> only after the image
-# placeholders have been resolved — otherwise the image expansion counts the
-# video's own expanded tokens as unexpanded placeholders.
-_VIDEO_EXPANSION_SENTINEL = -991680
 
 
 # --------------------------------------------------------------------- shared
@@ -776,13 +771,10 @@ class Dots3NoteProcessor:
             text = text[0]
         # A video and separate images CAN coexist — a multiturn chat that showed
         # a video on one turn and an image on a later turn sends both, because
-        # media is collected across the whole message history. What must not
-        # happen is the two branches overwriting each other's `pixel_values`:
-        # both expand to image_token_id, so the tower's features have to arrive
-        # in the SAME ORDER as the placeholders in the prompt or the scatter
-        # reads shifted features as real ones (silent garbage, the row-148
-        # class). Order is therefore taken from the PROMPT below, never from
-        # the order these branches happen to run in.
+        # media is collected across the whole message history. The prompt's
+        # native image/video IDs must survive expansion so the language model
+        # can distinguish the two modalities after their feature rows are
+        # merged in placeholder order.
         #
         ids = list(self.tokenizer.encode(text or "", add_special_tokens=False))
         out: Dict[str, Any] = {}
@@ -826,15 +818,13 @@ class Dots3NoteProcessor:
             )
             counts = [merged_token_count(g, merge) for g in grids]
             total = sum(counts)
-            # 🚨 The template's <|video_pad|> (151680) becomes IMAGE tokens:
-            # frames are independent images, so the expansion emits 151660.
-            # config.video_token_id is vestigial at runtime — it must never
-            # survive into the ids the model sees.
+            # Keep the native video token ID for every sampled frame. The
+            # vision tower receives one grid row per frame, and the outer model
+            # scatters those rows over both native image and video IDs.
             ids = expand_media_placeholders(
                 ids,
                 self.video_token_id,
                 [total],
-                emit_id=_VIDEO_EXPANSION_SENTINEL,
                 modality="video",
             )
             video_spec = {
@@ -938,8 +928,7 @@ class Dots3NoteProcessor:
                     f"tower will emit {sum(token_lengths)} embedding row(s)"
                 )
 
-        # Resolve each logical item to its exact expanded token interval before
-        # replacing the private video sentinel with the public image token.
+        # Resolve each logical item to its exact expanded token interval.
         # The metadata is consumed by SSD side-keying and partial-hit payload
         # slicing; every field is validated again at the consumer.
         media_items: list = []
@@ -948,13 +937,11 @@ class Dots3NoteProcessor:
         visual_grid_cursor = 0
         for spec in sorted(_media_specs, key=lambda item: item["original_position"]):
             modality = spec["modality"]
-            emitted_id = (
-                _VIDEO_EXPANSION_SENTINEL
-                if modality == "video"
-                else self.image_token_id
-                if modality == "image"
-                else self.audio_token_id
-            )
+            emitted_id = {
+                "video": self.video_token_id,
+                "image": self.image_token_id,
+                "audio": self.audio_token_id,
+            }[modality]
             while token_cursor < len(ids) and ids[token_cursor] != emitted_id:
                 token_cursor += 1
             token_start = token_cursor
@@ -994,15 +981,6 @@ class Dots3NoteProcessor:
                 )
             media_items.append(item)
 
-        if _VIDEO_EXPANSION_SENTINEL in ids:
-            # Video frames ride the IMAGE token path; the sentinel existed only
-            # so the image branch above could tell a real <|imgpad|> apart from
-            # an already-expanded video frame.
-            ids = [
-                self.image_token_id if t == _VIDEO_EXPANSION_SENTINEL else t
-                for t in ids
-            ]
-
         if _visual_parts:
             _visual_parts.sort(key=lambda part: part[0])
             _all_patches = [p for _, p, _, _ in _visual_parts]
@@ -1020,10 +998,14 @@ class Dots3NoteProcessor:
             out["_vmlx_dots3_media_items"] = media_items
 
         if expected_image_tokens:
-            placed = sum(1 for t in ids if t == self.image_token_id)
+            placed = sum(
+                1
+                for t in ids
+                if t in {self.image_token_id, self.video_token_id}
+            )
             if placed != expected_image_tokens:
-                # Stray literal <|imgpad|> in the prompt or a dropped medium —
-                # a mismatched scatter reads shifted features as real ones.
+                # Stray literal media pads or a dropped medium — a mismatched
+                # scatter reads shifted features as real ones.
                 raise ValueError(
                     f"dots3_note: {placed} image token(s) in the prompt but the "
                     f"tower will emit {expected_image_tokens} embedding row(s)"

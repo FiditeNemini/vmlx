@@ -32,6 +32,7 @@ from vmlx_engine.models.dots3_note.processor import (  # noqa: E402
     merged_token_count,
 )
 from vmlx_engine.models.dots3_note.vision import VisionModel  # noqa: E402
+from vmlx_engine.models.dots3_note.dots3_note import Model as Dots3Model  # noqa: E402
 
 IMG_ID = 151660
 VID_ID = 151680
@@ -164,6 +165,22 @@ class TestVisionStructure:
         out = model(pixel_values, np.array([[1, 2, 2], [1, 2, 2]]))
         assert out.shape == (2, 16)
 
+    def test_scatter_accepts_native_image_and_video_tokens_in_order(self):
+        input_ids = mx.array([[1, IMG_ID, VID_ID, 2, VID_ID]])
+        embeds = mx.zeros((1, 5, 3))
+        features = mx.array(
+            [[10.0, 0.0, 0.0], [20.0, 0.0, 0.0], [30.0, 0.0, 0.0]]
+        )
+        out = Dots3Model._scatter_at(
+            None,
+            input_ids,
+            embeds,
+            features,
+            (IMG_ID, VID_ID),
+            "image/video",
+        )
+        assert out[0, :, 0].tolist() == [0.0, 10.0, 20.0, 0.0, 30.0]
+
 
 # -------------------------------------------------------------------- audio
 
@@ -248,13 +265,13 @@ class TestAudioStructure:
 
 
 class TestPlaceholderExpansion:
-    def test_video_expands_to_image_tokens(self):
-        # 🚨 the video placeholder becomes IMAGE tokens (151660, not 151680).
+    def test_video_expands_to_native_video_tokens(self):
+        # Video expansion preserves the native placeholder ID (151680).
         ids = expand_media_placeholders(
-            [1, VID_ID, 2], VID_ID, [968], emit_id=IMG_ID, modality="video"
+            [1, VID_ID, 2], VID_ID, [968], emit_id=VID_ID, modality="video"
         )
-        assert ids.count(IMG_ID) == 968
-        assert VID_ID not in ids
+        assert ids.count(VID_ID) == 968
+        assert IMG_ID not in ids
         assert ids[0] == 1 and ids[-1] == 2
 
     def test_image_expansion_per_occurrence(self):
@@ -315,8 +332,8 @@ class TestVideoProcessor:
         processor = Dots3NoteProcessor(tokenizer)
         out = processor(text="vid", videos=frames)
         ids = out["input_ids"][0]
-        assert ids.count(IMG_ID) == 968
-        assert VID_ID not in ids  # vestigial id must never reach the model
+        assert ids.count(VID_ID) == 968
+        assert IMG_ID not in ids
         assert out["pixel_values"].shape == (8 * 22 * 22, 588)
         assert out["image_grid_thw"].shape == (8, 3)
         assert out["image_grid_thw"].tolist()[0] == [1, 22, 22]

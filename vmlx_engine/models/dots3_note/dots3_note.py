@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """dots3_note outer model — omni wiring (vision + audio towers over the LM).
 
-Scatter contract (04-RUNTIME-HANDOFF §6): ONE processor call is the source
-of truth for placeholder expansion. Image AND video features both land at
-``image_token_id`` (151660) — ``video_token_id`` (151680) is vestigial at
-runtime because the processor expands video frames to ``<|imgpad|>``.
-Audio lands at ``audio_token_id`` (151720). A media payload whose
+Scatter contract: ONE processor call is the source of truth for placeholder
+expansion. Image and video features share one prompt-ordered feature buffer,
+but land on their native ``image_token_id`` (151660) and
+``video_token_id`` (151680) masks. Audio lands at ``audio_token_id`` (151720).
+A media payload whose
 placeholder count is zero means the modality was silently dropped upstream;
 that raises here rather than letting the model confabulate.
 """
@@ -82,7 +82,10 @@ class Model(nn.Module):
                 input_ids,
                 embeds,
                 features,
-                int(self.config.image_token_id),
+                (
+                    int(self.config.image_token_id),
+                    int(self.config.video_token_id),
+                ),
                 "image/video",
             )
 
@@ -98,7 +101,12 @@ class Model(nn.Module):
             # placeholder id is broken output anyway, so raising here can
             # only fire on a genuinely dropped payload.
             self._assert_no_orphan_placeholders(
-                input_ids, int(self.config.image_token_id), "image/video"
+                input_ids,
+                (
+                    int(self.config.image_token_id),
+                    int(self.config.video_token_id),
+                ),
+                "image/video",
             )
 
         if input_features is not None:
@@ -129,9 +137,13 @@ class Model(nn.Module):
 
     @staticmethod
     def _assert_no_orphan_placeholders(
-        input_ids: mx.array, token_id: int, label: str
+        input_ids: mx.array, token_id: int | tuple[int, ...], label: str
     ) -> None:
-        count = int(mx.sum(input_ids == token_id).item())
+        token_ids = (token_id,) if isinstance(token_id, int) else token_id
+        mask = input_ids == token_ids[0]
+        for media_id in token_ids[1:]:
+            mask = mask | (input_ids == media_id)
+        count = int(mx.sum(mask).item())
         if count:
             raise ValueError(
                 f"dots3_note: {count} {label} placeholder token(s) "
@@ -145,10 +157,13 @@ class Model(nn.Module):
         input_ids: mx.array,
         embeds: mx.array,
         features: mx.array,
-        token_id: int,
+        token_id: int | tuple[int, ...],
         label: str,
     ) -> mx.array:
-        is_media = input_ids == token_id
+        token_ids = (token_id,) if isinstance(token_id, int) else token_id
+        is_media = input_ids == token_ids[0]
+        for media_id in token_ids[1:]:
+            is_media = is_media | (input_ids == media_id)
         count = int(mx.sum(is_media).item())
         flat = features.reshape(-1, features.shape[-1]).astype(embeds.dtype)
         if count != flat.shape[0]:

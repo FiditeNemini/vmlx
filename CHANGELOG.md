@@ -21,9 +21,11 @@ All notable changes to vMLX Engine will be documented in this file.
   For Qwen hybrid prompts whose match ends before or inside the final expanded
   image/video run,
   the auxiliary pass first derives the complete media-conditioned embeddings
-  and mRoPE positions, then snapshots only the exact matched prefix. Other
-  wrappers fail closed to the safe terminal boundary rather than pairing a
-  partial placeholder sequence with the full media tensor.
+  and mRoPE positions, then snapshots only the exact matched prefix. A later
+  hit before media begins re-encodes those full conditioned embeddings but
+  forwards only the uncached suffix over restored native KV+SSM state. Other
+  wrappers fail closed rather than pairing partial placeholders with a full
+  media tensor.
 - Backported mlx-vlm's Qwen3-VL scalar-repeat correction for MLX 0.32.2, so
   image and video prefills convert temporal grid counts to Python integers
   instead of failing before generation with an incompatible `mx.repeat` call.

@@ -8374,6 +8374,52 @@ class MLLMBatchGenerator:
             and _media_embed_kwarg_name(self.language_model) is not None
         )
 
+    def _prepare_qwen_hybrid_media_tail_for_cache_hit(
+        self,
+        request: "MLLMBatchRequest",
+        token_ids: List[int],
+        cached_tokens: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Admit a Qwen hybrid hit strictly before every media placeholder.
+
+        The restored KV+SSM state owns the pure-text prefix. The forward path
+        will still vision-encode the complete, untrimmed request so Qwen's
+        merged embeddings and mRoPE positions remain exact, then feed only the
+        uncached suffix over that native state. Hits after media begins stay
+        fail-closed because they require item-level processor payload slicing.
+        """
+        family = str(getattr(self, "_model_type", "") or "").lower()
+        if family not in {"qwen3_5", "qwen3_5_moe"}:
+            return None
+        if cached_tokens <= 0 or cached_tokens > len(token_ids):
+            return None
+        media_limit = self._media_safe_capture_limit(token_ids)
+        if media_limit <= 0 or cached_tokens > media_limit:
+            return None
+        if not self._media_prefix_cache_allowed(request, token_ids):
+            return None
+        if not callable(getattr(self.model, "get_input_embeddings", None)):
+            return None
+        if _media_embed_kwarg_name(self.language_model) != "inputs_embeds":
+            return None
+
+        full_input_ids = getattr(request, "input_ids", None)
+        if full_input_ids is None:
+            return None
+        if full_input_ids.ndim == 1:
+            full_input_ids = full_input_ids[None, :]
+        if full_input_ids.shape[1] < len(token_ids):
+            return None
+        if full_input_ids[0, :len(token_ids)].tolist() != list(token_ids):
+            return None
+        request._qwen_media_tail_full_input_ids = full_input_ids  # type: ignore[attr-defined]
+        request._qwen_media_tail_cached_tokens = cached_tokens  # type: ignore[attr-defined]
+        return {
+            "kind": "qwen_hybrid_conditioned_media_tail",
+            "conditioned_full_tokens": int(full_input_ids.shape[1]),
+            "conditioned_tail_tokens": int(full_input_ids.shape[1]) - cached_tokens,
+        }
+
     def _prepare_muse_media_tail_for_cache_hit(
         self,
         request: "MLLMBatchRequest",
@@ -8996,6 +9042,15 @@ class MLLMBatchGenerator:
                     logger.info(_msg, *_args)
             except Exception:
                 pass  # never let observability break a request
+
+        if int(getattr(request, "_qwen_media_tail_cached_tokens", 0) or 0) > 0:
+            output = self._run_qwen_conditioned_media_tail(
+                request, input_ids, cache, kwargs
+            )
+            request.vision_encoded = True
+            if hasattr(output, "logits"):
+                return output.logits
+            return output
 
         # vmlx#89 / mlxstudio#83: chunked prefill for hybrid SSM models on
         # text-only requests.
@@ -10490,6 +10545,122 @@ class MLLMBatchGenerator:
             return output.logits
         return output
 
+    def _run_qwen_conditioned_media_tail(
+        self,
+        request: "MLLMBatchRequest",
+        input_ids: Any,
+        cache: Optional[List[Any]],
+        kwargs: Dict[str, Any],
+    ) -> Any:
+        """Forward a Qwen media tail over a restored pure-text KV+SSM prefix."""
+        cached_tokens = int(
+            getattr(request, "_qwen_media_tail_cached_tokens", 0) or 0
+        )
+        full_input_ids = getattr(request, "_qwen_media_tail_full_input_ids", None)
+        attempted = int(getattr(request, "_cached_tokens", 0) or cached_tokens)
+        try:
+            if cache is None or full_input_ids is None or cached_tokens <= 0:
+                raise ValueError("missing restored cache or full Qwen media request")
+            if full_input_ids.ndim == 1:
+                full_input_ids = full_input_ids[None, :]
+            if full_input_ids.shape[1] <= cached_tokens:
+                raise ValueError("cached prefix consumes the full Qwen media request")
+            if full_input_ids[:, cached_tokens:].tolist() != input_ids.tolist():
+                raise ValueError("Qwen conditioned tail does not match trimmed input IDs")
+
+            get_embeds = getattr(self.model, "get_input_embeddings", None)
+            if not callable(get_embeds):
+                raise ValueError("Qwen wrapper has no embedding seam")
+            embed_kwargs = dict(kwargs)
+            embed_kwargs.pop("cache", None)
+            features = get_embeds(full_input_ids, **embed_kwargs)
+            embeds = getattr(features, "inputs_embeds", None)
+            if embeds is None or getattr(embeds, "ndim", 0) < 3:
+                raise ValueError("Qwen wrapper returned no merged embeddings")
+            feature_dict = (
+                features.to_dict()
+                if callable(getattr(features, "to_dict", None))
+                else {}
+            )
+            unsupported = sorted(
+                key for key, value in feature_dict.items()
+                if key != "inputs_embeds" and value is not None
+            )
+            if unsupported:
+                raise ValueError(
+                    "Qwen wrapper returned unsliced auxiliary features: "
+                    + ",".join(unsupported)
+                )
+            position_ids = getattr(self.language_model, "_position_ids", None)
+            if position_ids is None or position_ids.shape[-1] != full_input_ids.shape[1]:
+                raise ValueError("Qwen wrapper returned incomplete mRoPE positions")
+
+            output = None
+            tail_len = int(input_ids.shape[1])
+            chunk = max(1, int(self._media_prefill_chunk_tokens(tail_len)))
+            for start in range(0, tail_len, chunk):
+                end = min(start + chunk, tail_len)
+                full_start = cached_tokens + start
+                full_end = cached_tokens + end
+                output = self.language_model(
+                    input_ids[:, start:end],
+                    inputs_embeds=embeds[:, full_start:full_end],
+                    mask=None,
+                    cache=cache,
+                    position_ids=position_ids[..., full_start:full_end],
+                )
+            if output is None:
+                raise ValueError("Qwen conditioned tail produced no output")
+            logger.info(
+                "Qwen HYBRID conditioned media tail forwarded for %s: "
+                "%d cached + %d conditioned tokens",
+                getattr(request, "request_id", "?"),
+                cached_tokens,
+                tail_len,
+            )
+            _clear_mllm_request_media_payloads(request)
+            for attr in (
+                "_qwen_media_tail_full_input_ids",
+                "_qwen_media_tail_cached_tokens",
+            ):
+                try:
+                    delattr(request, attr)
+                except AttributeError:
+                    pass
+            return output
+        except Exception as ex:
+            logger.warning(
+                "Qwen HYBRID conditioned media tail failed for %s; "
+                "retrying a full media prefill: %s",
+                getattr(request, "request_id", "?"),
+                ex,
+            )
+            for attr in (
+                "_qwen_media_tail_full_input_ids",
+                "_qwen_media_tail_cached_tokens",
+            ):
+                try:
+                    delattr(request, attr)
+                except AttributeError:
+                    pass
+            self._discard_request_cache_hit(
+                request,
+                reason="qwen_conditioned_media_tail_failed",
+                attempted_cached_tokens=attempted,
+            )
+            cache_model = getattr(self, "_cache_model", None)
+            fresh_cache = (
+                cache_model.make_cache() if cache_model is not None else None
+            )
+            if fresh_cache is None:
+                make_cache = getattr(self.language_model, "make_cache", None)
+                fresh_cache = make_cache() if callable(make_cache) else None
+            if fresh_cache is None or cache is None:
+                raise
+            cache[:] = fresh_cache
+            request.attention_mask = None
+            return self._run_vision_encoding_inner(request, cache)
+
     def _media_forward(
         self,
         request: "MLLMBatchRequest",
@@ -11685,25 +11856,58 @@ class MLLMBatchGenerator:
                                     except Exception:
                                         _tail_has_media = False
                                     if _tail_has_media:
+                                        _qwen_tail = (
+                                            self._prepare_qwen_hybrid_media_tail_for_cache_hit(
+                                                req,
+                                                list(token_list),
+                                                int(block_table.num_tokens),
+                                            )
+                                        )
+                                        if _qwen_tail is None:
+                                            logger.info(
+                                                "VLM cache hit DECLINED for %s: the "
+                                                "%d-token tail still contains media "
+                                                "placeholders, so the %d-token hit "
+                                                "does not cover the image. Full "
+                                                "prefill (an image-blind answer "
+                                                "would be worse).",
+                                                req.request_id,
+                                                len(_full_remaining),
+                                                int(block_table.num_tokens),
+                                            )
+                                            self._adjust_paged_hit_credit(req.request_id, 0)
+                                            self.block_aware_cache.release_cache(
+                                                req.request_id
+                                            )
+                                            req._cached_tokens = 0
+                                            req.prompt_cache = None
+                                            continue
+                                        req.input_ids = mx.array([_full_remaining])
+                                        req.attention_mask = None
+                                        _cache_execution.update(
+                                            {
+                                                "media_tail_reencoded": True,
+                                                "media_tail_prefix_kind": _qwen_tail["kind"],
+                                            }
+                                        )
+                                        _cache_execution.update(
+                                            {
+                                                key: value
+                                                for key, value in _qwen_tail.items()
+                                                if key != "kind"
+                                            }
+                                        )
+                                        req._cache_execution = dict(_cache_execution)
                                         logger.info(
-                                            "VLM cache hit DECLINED for %s: the "
-                                            "%d-token tail still contains media "
-                                            "placeholders, so the %d-token hit "
-                                            "does not cover the image. Full "
-                                            "prefill (an image-blind answer "
-                                            "would be worse).",
+                                            "VLM HYBRID media-tail HIT for %s: %d "
+                                            "cached KV+SSM tokens, forwarding %d-token "
+                                            "tail via %s",
                                             req.request_id,
-                                            len(_full_remaining),
                                             int(block_table.num_tokens),
+                                            len(_full_remaining),
+                                            _qwen_tail["kind"],
                                         )
-                                        self._adjust_paged_hit_credit(req.request_id, 0)
-                                        self.block_aware_cache.release_cache(
-                                            req.request_id
-                                        )
-                                        req._cached_tokens = 0
-                                        req.prompt_cache = None
-                                        continue
-                                    if _full_remaining:
+                                    elif _full_remaining:
                                         req.input_ids = mx.array([_full_remaining])
                                         _clear_mllm_request_media_payloads(req)
                                         req.attention_mask = None

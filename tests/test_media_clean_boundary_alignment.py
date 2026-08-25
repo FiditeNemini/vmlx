@@ -190,6 +190,120 @@ def test_before_media_clean_prefill_also_uses_full_conditioned_embeddings():
     }
 
 
+def test_qwen_hybrid_media_tail_admits_only_a_pure_text_prefix():
+    import mlx.core as mx
+
+    class Wrapper:
+        def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+            return None
+
+    class Language:
+        def __call__(self, inputs, inputs_embeds=None, cache=None, **kwargs):
+            return None
+
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator._model_type = "qwen3_5"
+    generator.model = Wrapper()
+    generator.language_model = Language()
+    generator._media_safe_capture_limit = lambda _tokens: 5
+    generator._media_prefix_cache_allowed = lambda _request, _tokens: True
+    request = SimpleNamespace(input_ids=mx.array([list(range(12))]))
+
+    result = generator._prepare_qwen_hybrid_media_tail_for_cache_hit(
+        request, list(range(10)), 4
+    )
+
+    assert result == {
+        "kind": "qwen_hybrid_conditioned_media_tail",
+        "conditioned_full_tokens": 12,
+        "conditioned_tail_tokens": 8,
+    }
+    assert request._qwen_media_tail_cached_tokens == 4
+    assert request._qwen_media_tail_full_input_ids.tolist() == [list(range(12))]
+    assert generator._prepare_qwen_hybrid_media_tail_for_cache_hit(
+        request, list(range(10)), 6
+    ) is None
+
+
+def test_qwen_hybrid_media_tail_forwards_conditioned_suffix_over_native_cache():
+    import mlx.core as mx
+
+    calls = []
+
+    class Features:
+        def __init__(self):
+            self.inputs_embeds = mx.arange(30).reshape(1, 10, 3)
+
+        def to_dict(self):
+            return {"inputs_embeds": self.inputs_embeds}
+
+    class Wrapper:
+        def get_input_embeddings(self, input_ids=None, pixel_values=None, **kwargs):
+            calls.append(("embed", input_ids.tolist(), pixel_values))
+            language._position_ids = mx.arange(30).reshape(3, 1, 10)
+            return Features()
+
+    class Language:
+        _position_ids = None
+
+        def __call__(
+            self,
+            inputs,
+            inputs_embeds=None,
+            mask=None,
+            cache=None,
+            **kwargs,
+        ):
+            calls.append(
+                (
+                    "lm",
+                    inputs.tolist(),
+                    inputs_embeds.tolist(),
+                    kwargs["position_ids"].tolist(),
+                )
+            )
+            return SimpleNamespace(logits=mx.array([[1.0]]))
+
+    language = Language()
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.model = Wrapper()
+    generator.language_model = language
+    generator._media_prefill_chunk_tokens = lambda _seq_len: 4
+    full_ids = mx.array([list(range(10))])
+    request = SimpleNamespace(
+        request_id="qwen-tail",
+        _qwen_media_tail_full_input_ids=full_ids,
+        _qwen_media_tail_cached_tokens=4,
+        _cached_tokens=4,
+        input_ids=full_ids[:, 4:],
+        pixel_values=object(),
+        image_grid_thw=object(),
+        video_pixel_values=None,
+        video_grid_thw=None,
+    )
+    cache = []
+
+    output = generator._run_qwen_conditioned_media_tail(
+        request,
+        request.input_ids,
+        cache,
+        {"pixel_values": request.pixel_values, "cache": cache},
+    )
+
+    assert output.logits.tolist() == [[1.0]]
+    assert calls[0][0:2] == ("embed", [list(range(10))])
+    assert [entry[1] for entry in calls[1:]] == [
+        [[4, 5, 6, 7]],
+        [[8, 9]],
+    ]
+    assert [entry[2] for entry in calls[1:]] == [
+        [[[12, 13, 14], [15, 16, 17], [18, 19, 20], [21, 22, 23]]],
+        [[[24, 25, 26], [27, 28, 29]]],
+    ]
+    assert request.pixel_values is None
+    assert not hasattr(request, "_qwen_media_tail_cached_tokens")
+
+
 def test_capture_uses_the_aligned_length_not_n_minus_1():
     src = inspect.getsource(MLLMBatchGenerator._process_prompts)
     assert "_clean_media_len = self._media_clean_cache_boundary_for(" in src, (
@@ -271,6 +385,7 @@ def test_a_hit_that_does_not_cover_the_media_span_is_declined():
     assert "_tokens_contain_media_placeholders" in src
     assert "_prepare_muse_media_tail_for_cache_hit" in src
     assert "_prepare_dots3_media_tail_for_cache_hit" in src
+    assert "_prepare_qwen_hybrid_media_tail_for_cache_hit" in src
     assert 'reason="media_placeholders_in_uncached_tail"' in src
     assert "_discard_request_cache_hit" in src
     assert "_clear_mllm_request_media_payloads(req)" in src

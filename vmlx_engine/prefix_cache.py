@@ -3727,7 +3727,15 @@ class BlockAwarePrefixCache:
                 block_hash = getattr(block, "block_hash", None)
                 if block_hash is not None:
                     try:
-                        cache_data = disk_store.read_block(block_hash)
+                        metadata_reader = getattr(
+                            disk_store,
+                            "read_block_validation_entries",
+                            None,
+                        )
+                        if callable(metadata_reader):
+                            cache_data = metadata_reader(block_hash)
+                        if cache_data is None:
+                            cache_data = disk_store.read_block(block_hash)
                     except Exception:
                         cache_data = None
             if validation_payload_cache is not None:

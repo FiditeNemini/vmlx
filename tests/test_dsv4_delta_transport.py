@@ -816,6 +816,95 @@ def test_dsv4_append_safe_marker_roundtrips_through_block_disk_transport():
     assert valid, reason
 
 
+def test_dsv4_disk_only_warm_hit_loads_each_payload_once(tmp_path):
+    """Native candidate validation must not duplicate full SSD payload reads."""
+    import time
+
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    store = BlockDiskStore(
+        str(tmp_path),
+        max_size_gb=1,
+        expected_num_layers=43,
+        allow_tq_native=False,
+    )
+    try:
+        paged = PagedCacheManager(
+            block_size=256,
+            max_blocks=16,
+            disk_store=store,
+            disk_only=True,
+        )
+        cache = BlockAwarePrefixCache(
+            model=None,
+            paged_cache_manager=paged,
+            uses_dsv4_cache=True,
+            uses_zaya_cache=False,
+            mixed_attention_cache_model=True,
+        )
+        cache._expected_num_layers = 43
+        tokens = list(range(326))
+        stored = cache.store_cache(
+            "metadata-seed",
+            tokens,
+            _native_transport(
+                _topology_interval(0, 256, terminal=True, append_safe=True),
+                _topology_interval(256, 326, terminal=True),
+            ),
+        )
+        assert stored is not None
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            pipeline = store.get_stats()["write_pipeline"]
+            if pipeline["queue_depth"] == 0 and pipeline["inflight"] == 0:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("disk-only DSV4 writes did not settle")
+
+        seed_entry = cache._request_tables.pop("metadata-seed")
+        paged.release_request_refs(seed_entry.block_table)
+        paged.detach_request("metadata-seed")
+        assert all(
+            paged.allocated_blocks[block_id].cache_data is None
+            for block_id in stored.block_ids
+        )
+
+        before = store.get_stats()
+        hit, remaining = cache.fetch_cache("metadata-warm", tokens)
+        after_fetch = store.get_stats()
+
+        assert hit is not None
+        assert remaining == []
+        assert after_fetch["disk_hits"] == before["disk_hits"]
+        assert (
+            after_fetch["validation_metadata_reads"]
+            - before["validation_metadata_reads"]
+            == len(hit.block_ids)
+        )
+
+        rebuilt = cache.reconstruct_cache(hit)
+        after_reconstruct = store.get_stats()
+
+        assert rebuilt is not None
+        assert len(rebuilt) == 43
+        assert all(layer.offset == len(tokens) for layer in rebuilt)
+        assert (
+            after_reconstruct["disk_hits"] - after_fetch["disk_hits"]
+            == len(hit.block_ids)
+        )
+        assert all(
+            paged.allocated_blocks[block_id].cache_data is None
+            for block_id in hit.block_ids
+        )
+        assert paged.resident_bytes == 0
+    finally:
+        store.shutdown()
+
+
 def test_dsv4_append_safe_policy_versions_the_cache_namespace(monkeypatch):
     import vmlx_engine.prefix_cache as prefix_cache
 

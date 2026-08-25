@@ -166,6 +166,183 @@ def _unpack_tree(node: Any, data: Dict[str, Any]) -> Any:
     return None
 
 
+class _ValidationTensor:
+    """Shape-only tensor stand-in for native cache candidate validation.
+
+    Prefix selection needs native tags, interval geometry, anchor flags, and
+    rotating-window shapes. It does not need the multi-megabyte tensor bodies
+    that worker reconstruction will load immediately afterward. Keeping this
+    deliberately tiny object separate from MLX arrays also makes the metadata
+    probe safe on the API thread.
+    """
+
+    __slots__ = ("shape", "dtype")
+
+    def __init__(self, shape: Any, dtype: str = "") -> None:
+        self.shape = tuple(int(dim) for dim in shape)
+        self.dtype = str(dtype or "")
+
+
+def _unpack_validation_tree(node: Any, handle: Any, tensor_names: set[str]) -> Any:
+    """Rebuild literals and tensor shapes from one packed-tree descriptor."""
+    if not isinstance(node, dict):
+        return None
+    kind = node.get("kind")
+    if kind == "none":
+        return None
+    if kind == "literal":
+        return node.get("value")
+    if kind == "tensor":
+        key = str(node.get("key", ""))
+        if key not in tensor_names:
+            return None
+        return _ValidationTensor(
+            handle.get_slice(key).get_shape(),
+            str(node.get("orig_dtype", "")),
+        )
+    if kind == "tuple":
+        return tuple(
+            _unpack_validation_tree(item, handle, tensor_names)
+            for item in node.get("items", [])
+        )
+    if kind == "list":
+        return [
+            _unpack_validation_tree(item, handle, tensor_names)
+            for item in node.get("items", [])
+        ]
+    if kind == "dict":
+        return {
+            str(key): _unpack_validation_tree(value, handle, tensor_names)
+            for key, value in (node.get("items") or {}).items()
+        }
+    return None
+
+
+def _load_block_validation_entries(file_path: Path) -> Optional[List[Tuple]]:
+    """Read only native cache decision metadata from a safetensors block.
+
+    Returned tuples mirror the subset of deserialized cache entries consumed
+    by ``prefix_cache`` candidate validators. Tensor bodies are represented by
+    shape-only stand-ins; full validation and hydration remain on the owning
+    model worker.
+    """
+    try:
+        from safetensors import safe_open
+
+        with safe_open(str(file_path), framework="numpy") as handle:
+            tensor_names = set(handle.keys())
+            meta_key = (
+                "__vmlx_block_meta__"
+                if "__vmlx_block_meta__" in tensor_names
+                else "__metadata__" if "__metadata__" in tensor_names else None
+            )
+            if meta_key is None:
+                return None
+            raw = handle.get_tensor(meta_key).tobytes()
+            meta = json.loads(raw.decode("utf-8"))
+            if not isinstance(meta, dict):
+                return None
+            layer_types = meta.get("__layer_types__")
+            if not isinstance(layer_types, dict):
+                return None
+            try:
+                num_layers = int(meta.get("__num_cache_layers__", 0) or 0)
+            except (TypeError, ValueError):
+                return None
+            if num_layers <= 0:
+                return None
+
+            def _scalar(name: str, default: Any = None) -> Any:
+                if name not in tensor_names:
+                    return default
+                value = handle.get_tensor(name)
+                try:
+                    return int(value.reshape(-1)[0])
+                except (TypeError, ValueError, IndexError):
+                    return default
+
+            entries: List[Tuple] = [("skip",) for _ in range(num_layers)]
+            saw_native = False
+            for i in range(num_layers):
+                layer_type = layer_types.get(str(i))
+                layer_meta = meta.get(str(i), {})
+                if not isinstance(layer_meta, dict):
+                    layer_meta = {}
+                if layer_type == "deepseek_v4_delta_v1":
+                    record = _unpack_validation_tree(
+                        layer_meta.get("record_tree"),
+                        handle,
+                        tensor_names,
+                    )
+                    entries[i] = (
+                        "deepseek_v4_delta_v1",
+                        record,
+                        layer_meta.get("class_name", "DeepseekV4Cache"),
+                        layer_meta.get("cache_meta", {}),
+                    )
+                    saw_native = True
+                elif layer_type == "deepseek_v4":
+                    entries[i] = (
+                        "deepseek_v4",
+                        (),
+                        layer_meta.get("meta", ""),
+                        layer_meta.get("class_name", "DeepseekV4Cache"),
+                        layer_meta.get("cache_meta", {}),
+                    )
+                    saw_native = True
+                elif layer_type == "deepseek_v4_pending":
+                    entries[i] = (
+                        "deepseek_v4_pending",
+                        layer_meta.get("class_name", "DeepseekV4Cache"),
+                        layer_meta.get("cache_meta", {}),
+                    )
+                    saw_native = True
+                elif layer_type == "rotating_kv":
+                    keys_name = f"layer_{i}_keys"
+                    values_name = f"layer_{i}_values"
+                    if keys_name not in tensor_names or values_name not in tensor_names:
+                        return None
+                    orig_dtype = (meta.get("__orig_dtypes__") or {}).get(str(i), "")
+                    entries[i] = (
+                        "rotating_kv",
+                        _ValidationTensor(
+                            handle.get_slice(keys_name).get_shape(), orig_dtype
+                        ),
+                        _ValidationTensor(
+                            handle.get_slice(values_name).get_shape(), orig_dtype
+                        ),
+                        _scalar(f"layer_{i}_max_size", 0),
+                        _scalar(f"layer_{i}_keep", 0),
+                        _scalar(f"layer_{i}_offset"),
+                        _scalar(f"layer_{i}_idx"),
+                    )
+                    saw_native = True
+                elif layer_type == "rotating_kv_pending":
+                    entries[i] = (
+                        "rotating_kv_pending",
+                        layer_meta.get("class_name", "RotatingKVCache"),
+                    )
+                    saw_native = True
+                elif layer_type == "zaya_cca":
+                    entries[i] = (
+                        "zaya_cca",
+                        ("skip",),
+                        object() if layer_meta.get("terminal") is True else None,
+                        layer_meta.get("cca_meta", ""),
+                        layer_meta.get("cache_meta", {}),
+                    )
+                    saw_native = True
+                elif layer_type == "cache_list":
+                    # A future CacheList may nest path-dependent state. Fall
+                    # back to the full fail-closed reader until that schema has
+                    # its own metadata-only validator.
+                    return None
+
+            return entries if saw_native else None
+    except Exception:
+        return None
+
+
 def _cache_data_has_tq(cache_data: Any) -> bool:
     for entry in cache_data or []:
         if not isinstance(entry, (tuple, list)) or not entry:
@@ -372,6 +549,10 @@ class BlockDiskStore:
         # live /health evidence can prove the optimization actually ran.
         self.selective_rotating_reconstruction_reads = 0
         self.selective_rotating_layers_omitted = 0
+        # Candidate selection can inspect native tags/geometry without loading
+        # tensor bodies that reconstruction will immediately load again.
+        self.validation_metadata_reads = 0
+        self.validation_metadata_read_failures = 0
         # Non-blocking, request-correlated write-fence telemetry.  A fence is
         # complete only after every queued block preceding its sentinel has
         # finished its SQLite transaction *and* the drained batch's LRU
@@ -813,6 +994,69 @@ class BlockDiskStore:
                 self.disk_misses += 1
                 self._note_miss("load_failed")
             return None
+
+    def read_block_validation_entries(
+        self,
+        block_hash: bytes,
+    ) -> Optional[List[Tuple]]:
+        """Read native candidate metadata without materializing payload arrays.
+
+        This path is intentionally not counted as a payload ``disk_hit``. It
+        prevents SSD-only DSV4/ZAYA/mixed-SWA validation from loading every
+        block once during candidate selection and once again during worker
+        reconstruction. Missing, legacy, or malformed metadata returns ``None``
+        so callers preserve the established full-reader fallback.
+        """
+        with self.global_budget.mutation_guard() as locked:
+            if not locked:
+                with self._stats_lock:
+                    self.validation_metadata_read_failures += 1
+                return None
+            hash_hex = block_hash.hex()
+            row, _ok = self._query_index_row(
+                "SELECT file_name FROM blocks WHERE block_hash = ?",
+                (hash_hex,),
+            )
+            if row is None:
+                with self._stats_lock:
+                    self.validation_metadata_read_failures += 1
+                return None
+            file_path = self.cache_dir / row[0]
+            if not file_path.exists():
+                with self._stats_lock:
+                    self.validation_metadata_read_failures += 1
+                return None
+            try:
+                from .cache_record_validator import reject_safetensors_or_warn
+
+                if not reject_safetensors_or_warn(
+                    str(file_path),
+                    expected_num_layers=getattr(self, "_expected_num_layers", None),
+                    source=f"L2-validation-metadata:{hash_hex[:12]}",
+                    delete_on_reject=False,
+                ):
+                    with self._stats_lock:
+                        self.validation_metadata_read_failures += 1
+                    return None
+            except Exception:
+                # Keep full read + post-load validation as the fail-closed
+                # compatibility path in reduced installations.
+                with self._stats_lock:
+                    self.validation_metadata_read_failures += 1
+                return None
+            entries = _load_block_validation_entries(file_path)
+            if entries is None:
+                with self._stats_lock:
+                    self.validation_metadata_read_failures += 1
+                return None
+            with self._stats_lock:
+                self.validation_metadata_reads += 1
+            try:
+                os.utime(file_path, None)
+            except OSError:
+                pass
+            self._queue_access_update(hash_hex)
+            return entries
 
 
     def _note_miss(self, reason: str) -> None:
@@ -3454,6 +3698,10 @@ class BlockDiskStore:
                 ),
                 "selective_rotating_layers_omitted": (
                     self.selective_rotating_layers_omitted
+                ),
+                "validation_metadata_reads": self.validation_metadata_reads,
+                "validation_metadata_read_failures": (
+                    self.validation_metadata_read_failures
                 ),
                 "write_pipeline": {
                     "serialization_mode": "streamed_safetensors_file",

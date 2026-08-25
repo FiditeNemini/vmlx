@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -180,6 +181,57 @@ def _coerce_native_mtp_depth(raw: Any) -> int | None:
     return max(1, min(3, value))
 
 
+def _positive_finite_number(raw: Any) -> float | None:
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    value = float(raw)
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _validated_flat_tuning_depth(tuning: dict[str, Any]) -> int | None:
+    """Trust flat producer tuning only when its wall-speed evidence agrees."""
+    if tuning.get("blocked") is True or tuning.get("output_equivalent") is False:
+        return None
+    depth = _coerce_native_mtp_depth(tuning.get("best_depth"))
+    if depth is None:
+        return None
+    # D1 is the conservative legacy seed used by unmeasured bundles. A deeper
+    # producer recommendation changes runtime cost and therefore needs real
+    # matched-output wall-speed evidence, not tokens-per-cycle acceptance.
+    if depth == 1:
+        return 1
+    if tuning.get("validated") is not True:
+        return None
+    if any(
+        _positive_finite_number(tuning.get(key)) is None
+        for key in ("baseline_tok_s", "best_tok_s", "speedup_vs_baseline")
+    ):
+        return None
+    if float(tuning["speedup_vs_baseline"]) <= 1.0:
+        return None
+
+    raw_speeds = tuning.get("measured_tok_s_by_depth")
+    if raw_speeds is not None:
+        if not isinstance(raw_speeds, dict):
+            return None
+        speeds: dict[int, float] = {}
+        for raw_key, raw_speed in raw_speeds.items():
+            try:
+                key = int(raw_key)
+            except (TypeError, ValueError):
+                continue
+            speed = _positive_finite_number(raw_speed)
+            if 1 <= key <= 3 and speed is not None:
+                speeds[key] = speed
+        if depth not in speeds or not speeds:
+            return None
+        fastest_speed = max(speeds.values())
+        fastest_depth = min(key for key, speed in speeds.items() if speed == fastest_speed)
+        if fastest_depth != depth:
+            return None
+    return depth
+
+
 def _model_tuning_depth(
     bundle_path: str | Path | None,
 ) -> tuple[int | None, str | None]:
@@ -217,7 +269,9 @@ def _model_tuning_depth(
             )
         )
 
-    candidates.append(("vmlx_mtp_tuning.json:best_depth", tuning.get("best_depth")))
+    flat_depth = _validated_flat_tuning_depth(tuning)
+    if flat_depth is not None:
+        candidates.append(("vmlx_mtp_tuning.json:best_depth", flat_depth))
 
     for source, raw_depth in candidates:
         depth = _coerce_native_mtp_depth(raw_depth)

@@ -1011,6 +1011,49 @@ function declaredNativeMtpDrafts(jangCfg: any): { depth: number; source: string 
   return { depth, source: 'jang_config.mtp.recommended_num_drafts' }
 }
 
+function positiveFiniteNumber(raw: unknown): number | undefined {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined
+  return raw
+}
+
+function validatedFlatNativeMtpDepth(tuning: any): number | undefined {
+  if (!tuning || typeof tuning !== 'object') return undefined
+  if (tuning.blocked === true || tuning.output_equivalent === false) return undefined
+  const depth = coerceNativeMtpDepth(tuning.best_depth)
+  if (depth === undefined) return undefined
+  // Flat D1 is the conservative legacy seed. D2/D3 must be selected by
+  // matched-output wall throughput; expected tokens/cycle alone is not a
+  // launch recommendation and a hand-edited best_depth cannot override its
+  // own speed table.
+  if (depth === 1) return 1
+  if (tuning.validated !== true) return undefined
+  if (
+    positiveFiniteNumber(tuning.baseline_tok_s) === undefined ||
+    positiveFiniteNumber(tuning.best_tok_s) === undefined ||
+    positiveFiniteNumber(tuning.speedup_vs_baseline) === undefined ||
+    tuning.speedup_vs_baseline <= 1
+  ) return undefined
+
+  const rawSpeeds = tuning.measured_tok_s_by_depth
+  if (rawSpeeds !== undefined) {
+    if (!rawSpeeds || typeof rawSpeeds !== 'object' || Array.isArray(rawSpeeds)) return undefined
+    const speeds = Object.entries(rawSpeeds)
+      .map(([rawDepth, rawSpeed]) => ({
+        depth: Number(rawDepth),
+        speed: positiveFiniteNumber(rawSpeed),
+      }))
+      .filter((row): row is { depth: number; speed: number } =>
+        Number.isInteger(row.depth) && row.depth >= 1 && row.depth <= 3 && row.speed !== undefined,
+      )
+    const selected = speeds.find(row => row.depth === depth)
+    if (!selected || speeds.length === 0) return undefined
+    const fastestSpeed = Math.max(...speeds.map(row => row.speed))
+    const fastestDepth = Math.min(...speeds.filter(row => row.speed === fastestSpeed).map(row => row.depth))
+    if (fastestDepth !== depth) return undefined
+  }
+  return depth
+}
+
 function readNativeMtpTuningDepth(modelPath: string): { depth: number; source: string } | undefined {
   try {
     const tuningPath = join(modelPath, 'vmlx_mtp_tuning.json')
@@ -1034,7 +1077,7 @@ function readNativeMtpTuningDepth(modelPath: string): { depth: number; source: s
         return { depth, source: 'vmlx_mtp_tuning.json:best_native_mtp_depth.best_depth' }
       }
     }
-    const depth = coerceNativeMtpDepth(tuning?.best_depth)
+    const depth = validatedFlatNativeMtpDepth(tuning)
     if (depth) return { depth, source: 'vmlx_mtp_tuning.json:best_depth' }
   } catch {
     return undefined
@@ -1047,6 +1090,7 @@ function nativeMtpBlockedByTuning(modelPath: string): boolean {
     const tuningPath = join(modelPath, 'vmlx_mtp_tuning.json')
     if (!existsSync(tuningPath)) return false
     const tuning = JSON.parse(readFileSync(tuningPath, 'utf-8'))
+    if (tuning?.blocked === true) return true
     const nativeMtp = tuning?.native_mtp
     if (!nativeMtp || typeof nativeMtp !== 'object') return false
     return (

@@ -272,6 +272,68 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     })
   })
 
+  it('uses validated flat Qwen tuning only when wall-speed evidence agrees', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'qwen3_5',
+        text_config: { model_type: 'qwen3_5_text', mtp_num_hidden_layers: 1 },
+      },
+      {
+        format: 'jang',
+        mtp: { kept: true, enabled: true, num_layers: 1, recommended_num_drafts: 1 },
+        capabilities: { family: 'qwen3_5', cache_type: 'hybrid' },
+      },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: { 'mtp.fc.weight': 'model.safetensors' },
+    }))
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({
+      best_depth: 2,
+      blocked: false,
+      validated: true,
+      baseline_tok_s: 46.24,
+      best_tok_s: 56.26,
+      speedup_vs_baseline: 1.216,
+      measured_tok_s_by_depth: { 1: 46.24, 2: 56.26, 3: 30.14 },
+    }))
+
+    expect(detectModelConfigFromDir(dir).nativeMtp).toMatchObject({
+      depth: 2,
+      depthSource: 'vmlx_mtp_tuning.json:best_depth',
+    })
+  })
+
+  it('rejects a flat D3 stamp whose own measured wall speed selects D2', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'qwen3_5',
+        text_config: { model_type: 'qwen3_5_text', mtp_num_hidden_layers: 1 },
+      },
+      {
+        format: 'jang',
+        mtp: { kept: true, enabled: true, num_layers: 1, recommended_num_drafts: 2 },
+        capabilities: { family: 'qwen3_5', cache_type: 'hybrid' },
+      },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: { 'mtp.fc.weight': 'model.safetensors' },
+    }))
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({
+      best_depth: 3,
+      blocked: false,
+      validated: true,
+      baseline_tok_s: 46.24,
+      best_tok_s: 30.14,
+      speedup_vs_baseline: 0.652,
+      measured_tok_s_by_depth: { 1: 46.24, 2: 56.26, 3: 30.14 },
+    }))
+
+    expect(detectModelConfigFromDir(dir).nativeMtp).toMatchObject({
+      depth: 2,
+      depthSource: 'jang_config.mtp.recommended_num_drafts',
+    })
+  })
+
   it('keeps HY3 MTP visible but blocks runtime without token-identity proof', () => {
     const dir = makeModelDir(
       {

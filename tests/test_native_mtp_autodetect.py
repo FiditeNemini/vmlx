@@ -1678,6 +1678,56 @@ class TestNativeMtpAutodetect:
         assert depth == 2
         assert source == "vmlx_mtp_tuning.json:native_mtp.best_depth"
 
+    def test_flat_qwen_tuning_depth_requires_matching_wall_speed(
+        self, monkeypatch, tmp_path
+    ):
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps({"mtp": {"recommended_num_drafts": 1}})
+        )
+        (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({
+            "best_depth": 2,
+            "blocked": False,
+            "validated": True,
+            "baseline_tok_s": 46.24,
+            "best_tok_s": 56.26,
+            "speedup_vs_baseline": 1.216,
+            "measured_tok_s_by_depth": {"1": 46.24, "2": 56.26, "3": 30.14},
+        }))
+
+        depth, source = native_mtp_effective_depth(tmp_path)
+
+        assert depth == 2
+        assert source == "vmlx_mtp_tuning.json:best_depth"
+
+    def test_flat_qwen_d3_contradiction_falls_back_to_bundle_d2(
+        self, monkeypatch, tmp_path
+    ):
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps({"mtp": {"recommended_num_drafts": 2}})
+        )
+        (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({
+            "best_depth": 3,
+            "blocked": False,
+            "validated": True,
+            "baseline_tok_s": 46.24,
+            "best_tok_s": 30.14,
+            "speedup_vs_baseline": 0.652,
+            "measured_tok_s_by_depth": {"1": 46.24, "2": 56.26, "3": 30.14},
+        }))
+
+        depth, source = native_mtp_effective_depth(tmp_path)
+
+        assert depth == 2
+        assert source == "bundle:recommended_num_drafts"
+
     def test_native_mtp_depth_can_disable_model_tuning_sidecar(
         self, monkeypatch, tmp_path
     ):

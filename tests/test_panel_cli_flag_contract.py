@@ -214,6 +214,7 @@ def test_text_stale_value_flags_strip_their_values_in_preview_and_runtime() -> N
         "--wake-timeout",
         "--inference-endpoints",
         "--native-mtp-depth",
+        "--native-mtp-depth-policy",
         "--native-mtp-sampling-policy",
         "--use-paged-cache",
         "--kv-cache-quantization",
@@ -232,6 +233,7 @@ def test_panel_cli_flag_contract_covers_dsv4_cache_and_output_boundaries() -> No
     assert "--max-tokens" in sessions
     assert "--max-prompt-tokens" in sessions
     assert "--native-mtp-depth" in sessions
+    assert "--native-mtp-depth-policy" in sessions
     assert "--native-mtp-sampling-policy" in sessions
 
 

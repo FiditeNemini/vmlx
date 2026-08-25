@@ -232,6 +232,7 @@ class TestNativeMtpAutodetect:
         )
 
         assert "--native-mtp-depth" in result.stdout
+        assert "--native-mtp-depth-policy" in result.stdout
         assert "--native-mtp-sampling-policy" in result.stdout
         assert "--disable-native-mtp" in result.stdout
 

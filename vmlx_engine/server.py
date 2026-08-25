@@ -9623,6 +9623,13 @@ def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
             _native_mtp_sampling_policy,
         )
     )
+    _depth_policy_raw = os.environ.get(
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        os.environ.get("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "1"),
+    ).strip().lower()
+    status["depth_policy"] = (
+        "fixed" if _depth_policy_raw in {"0", "false", "no", "off"} else "adaptive"
+    )
     # Greedy requests take the identity-verify path; stochastic requests
     # take rejection-sampling acceptance (min(1, p_target/p_draft)) which
     # preserves the target distribution. The old "temperature=0 required"
@@ -28095,6 +28102,13 @@ Examples:
         help="Depth for native in-model MTP heads on preserved-MTP bundles (1-3).",
     )
     parser.add_argument(
+        "--native-mtp-depth-policy",
+        choices=["adaptive", "fixed"],
+        default=None,
+        help="Native-MTP depth policy: adaptive may change the selected starting "
+        "depth per request; fixed keeps it exact for non-tool requests.",
+    )
+    parser.add_argument(
         "--native-mtp-sampling-policy",
         choices=["compatible-only", "deterministic-defaults"],
         default="compatible-only",
@@ -28198,6 +28212,10 @@ Examples:
         os.environ["VMLINUX_NATIVE_MTP"] = "0"
     if getattr(args, "native_mtp_depth", None) is not None:
         os.environ["VMLINUX_NATIVE_MTP_DEPTH"] = str(max(1, min(3, int(args.native_mtp_depth))))
+    if getattr(args, "native_mtp_depth_policy", None) is not None:
+        os.environ["VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH"] = (
+            "0" if args.native_mtp_depth_policy == "fixed" else "1"
+        )
     _native_mtp_sampling_policy = getattr(args, "native_mtp_sampling_policy", "compatible-only")
     os.environ["VMLINUX_NATIVE_MTP_SAMPLING_POLICY"] = _native_mtp_sampling_policy
     if _native_mtp_sampling_policy == "deterministic-defaults":

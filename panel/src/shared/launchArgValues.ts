@@ -62,6 +62,7 @@ export const ADDITIONAL_ARG_VALUE_FLAGS = new Set([
   '--model-family',
   '--num-draft-tokens',
   '--native-mtp-depth',
+  '--native-mtp-depth-policy',
   '--native-mtp-sampling-policy',
   '--omni-backend',
   '--paged-cache-block-size',

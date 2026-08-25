@@ -1606,6 +1606,10 @@ def serve_command(args):
             print(f"Error: --native-mtp-depth must be between 1 and 3, got {args.native_mtp_depth}")
             sys.exit(1)
         os.environ["VMLINUX_NATIVE_MTP_DEPTH"] = str(args.native_mtp_depth)
+    if getattr(args, "native_mtp_depth_policy", None) is not None:
+        os.environ["VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH"] = (
+            "0" if args.native_mtp_depth_policy == "fixed" else "1"
+        )
     if getattr(args, "native_mtp_sampling_policy", None):
         os.environ["VMLINUX_NATIVE_MTP_SAMPLING_POLICY"] = args.native_mtp_sampling_policy
         server._native_mtp_sampling_policy = args.native_mtp_sampling_policy
@@ -2376,12 +2380,16 @@ def serve_command(args):
             depth = mtp_status.get("effective_depth") or getattr(args, "native_mtp_depth", None)
             depth_suffix = f" D{depth}" if depth else ""
             scope = mtp_status.get("runtime_scope") or "text"
-            policy = getattr(args, "native_mtp_sampling_policy", "compatible-only")
-            print(f"  Native MTP: {mtp_display}{depth_suffix} (scope: {scope}, policy: {policy})")
-            if policy == "compatible-only" and mtp_status.get("runtime_available"):
+            sampling_policy = getattr(args, "native_mtp_sampling_policy", "compatible-only")
+            depth_policy = mtp_status.get("depth_policy") or "adaptive"
+            print(
+                f"  Native MTP: {mtp_display}{depth_suffix} "
+                f"(scope: {scope}, sampling: {sampling_policy}, depth: {depth_policy})"
+            )
+            if sampling_policy == "compatible-only" and mtp_status.get("runtime_available"):
                 print("    Request gate: greedy=identity-verify; "
                       "stochastic=rejection-sampling acceptance")
-            elif policy == "deterministic-defaults" and mtp_status.get("runtime_available"):
+            elif sampling_policy == "deterministic-defaults" and mtp_status.get("runtime_available"):
                 print("    Startup defaults: temperature=0, top_p=1, top_k=0, min_p=0")
     except Exception:
         pass
@@ -4212,6 +4220,16 @@ Examples:
              "use the bundle's own tuned best_depth. Note this is only the "
              "STARTING depth -- the runtime adapts it per request from measured "
              "acceptance, and caps it to 1 when the request carries tools.",
+    )
+    serve_parser.add_argument(
+        "--native-mtp-depth-policy",
+        choices=["adaptive", "fixed"],
+        default=None,
+        help="Depth policy for native MTP. adaptive treats --native-mtp-depth as "
+             "the starting depth and may promote/demote it per request; fixed "
+             "keeps the exact selected depth for non-tool requests. Tool-bearing "
+             "requests remain capped to depth 1. If omitted, the existing "
+             "environment/default adaptive policy is preserved.",
     )
     serve_parser.add_argument(
         "--native-mtp-sampling-policy",

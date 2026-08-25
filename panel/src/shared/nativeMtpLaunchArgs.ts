@@ -33,6 +33,8 @@ export function buildNativeMtpLaunchArgs(
   return [
     '--native-mtp-depth',
     depth.toString(),
+    '--native-mtp-depth-policy',
+    input.depthOverride === true ? 'fixed' : 'adaptive',
     '--native-mtp-sampling-policy',
     'deterministic-defaults',
   ]

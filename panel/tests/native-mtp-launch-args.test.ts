@@ -10,6 +10,8 @@ describe('native MTP launch args', () => {
     })).toEqual([
       '--native-mtp-depth',
       '3',
+      '--native-mtp-depth-policy',
+      'adaptive',
       '--native-mtp-sampling-policy',
       'deterministic-defaults',
     ])
@@ -29,7 +31,14 @@ describe('native MTP launch args', () => {
       configuredDepth: 99,
       depthOverride: true,
       mode: 'deterministic',
-    }).slice(0, 2)).toEqual(['--native-mtp-depth', '3'])
+    })).toEqual([
+      '--native-mtp-depth',
+      '3',
+      '--native-mtp-depth-policy',
+      'fixed',
+      '--native-mtp-sampling-policy',
+      'deterministic-defaults',
+    ])
   })
 
   it('disables native MTP when an external drafter owns the decode step', () => {

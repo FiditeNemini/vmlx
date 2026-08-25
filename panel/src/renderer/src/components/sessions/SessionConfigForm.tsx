@@ -595,6 +595,9 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const nativeMtpDepth = config.nativeMtpDepthOverride === true
     ? (config.nativeMtpDepth || detectedNativeMtp?.depth || 3)
     : (detectedNativeMtp?.depth || config.nativeMtpDepth || 3)
+  const nativeMtpDepthPolicy = config.nativeMtpDepthOverride === true
+    ? 'fixed'
+    : 'adaptive'
   const hasDeclaredSamplingDefaults =
     config.defaultSamplingDefaultsDeclared === true ||
     config.defaultDoSample === false ||
@@ -1778,6 +1781,21 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             { value: 'off', label: t('chat.settings.thinkingOff') },
           ]}
         />
+        <SelectField
+          label={t('sessions.config.nativeMtpDepthPolicy')}
+          tooltip={t('sessions.config.nativeMtpDepthPolicyTooltip')}
+          value={nativeMtpDepthPolicy}
+          onChange={v => {
+            const fixed = v === 'fixed'
+            if (fixed) onChange('nativeMtpDepth', nativeMtpDepth)
+            onChange('nativeMtpDepthOverride', fixed)
+          }}
+          options={[
+            { value: 'adaptive', label: t('sessions.config.nativeMtpDepthAdaptive') },
+            { value: 'fixed', label: t('sessions.config.nativeMtpDepthFixed') },
+          ]}
+          disabled={nativeMtpMode === 'off'}
+        />
         <SliderField
           label={t('sessions.config.nativeMtpDepth')}
           tooltip={t('sessions.config.nativeMtpDepthTooltip')}
@@ -1790,7 +1808,11 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           max={3}
           step={1}
           defaultValue={3}
-          disabled={nativeMtpMode === 'off'}
+          disabled={nativeMtpMode === 'off' || nativeMtpDepthPolicy !== 'fixed'}
+        />
+        <InfoNote text={nativeMtpDepthPolicy === 'fixed'
+          ? t('sessions.config.nativeMtpDepthFixedNote', { depth: nativeMtpDepth })
+          : t('sessions.config.nativeMtpDepthAdaptiveNote', { depth: nativeMtpDepth })}
         />
         <InfoNote text={t('sessions.config.nativeMtpDetectedNote', { scope: detectedNativeMtp?.runtimeScope || 'text', cache: detectedNativeMtp?.nativeCacheType || detectedCacheSubtype || detectedCacheType || 'unknown', depthSource: detectedNativeMtp?.depthSource || 'default' })} />
           </>

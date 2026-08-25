@@ -1817,6 +1817,7 @@ describe('Native MTP', () => {
         const out = preview({}, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('2')
+        expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
         expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('deterministic-defaults')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
@@ -1829,6 +1830,7 @@ describe('Native MTP', () => {
         const out = preview({ nativeMtpDepth: 3, nativeMtpDepthOverride: true }, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('3')
+        expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('fixed')
     })
 
     it('lets users disable native MTP without leaving deterministic sampling overrides behind', () => {
@@ -1852,6 +1854,7 @@ describe('Native MTP', () => {
         const formSource = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
 
         expect(sessionsSource).toContain('--native-mtp-depth')
+        expect(sessionsSource).toContain('--native-mtp-depth-policy')
         expect(sessionsSource).toContain('--native-mtp-sampling-policy')
         expect(sessionsSource).toContain('--disable-native-mtp')
         expect(sessionsSource).toContain('data?.mtp?.request_policy')
@@ -1860,6 +1863,7 @@ describe('Native MTP', () => {
         expect(formSource).toContain('Native MTP')
         expect(formSource).toContain('nativeMtpMode')
         expect(formSource).toContain('nativeMtpDepth')
+        expect(formSource).toContain('nativeMtpDepthPolicy')
     })
 })
 

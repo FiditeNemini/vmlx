@@ -4380,36 +4380,60 @@ def _sample_mllm_prefill_logits(
     return sampled, logprobs
 
 
-# One device fence per MTP verify cycle, defaulted BY DEPTH.
+# One device fence per MTP verify cycle, defaulted BY DEPTH AND FAMILY.
 #
 # depth >= 2 — fence ON.  Measured 2026-08-15 on 35B MXFP8 MTP depth 2: the
 # fence recovers the cache-on async-accumulation stall (1.45x -> 1.68x, MTP arm
 # 108.5 -> 128.0 t/s, byte-equal) and is free where the stall is absent
 # (cache-off 1.932x fenced vs 1.943x unfenced, within run noise, byte-equal).
 #
-# depth == 1 — fence OFF.  Measured 2026-08-18 live in the app on
+# qwen3.5-family depth == 1 — fence OFF.  Measured 2026-08-18 live in the app on
 # Qwen3.8-27B-JANG_4D-CRACK, 64 prompt, fresh chat, IDENTICAL 4139-token
 # output: fenced 26.5 t/s vs unfenced 37.9 / 37.5 t/s = +43%.  A depth-1 cycle
 # issues one draft forward and one 2-token verify, so there is almost no lazy
 # work for the barrier to bound — only its cost lands, and it lands every
 # single cycle.  Fencing depth 1 was costing more than MTP itself was winning.
 #
+# This cannot be a global depth-1 exemption.  Dots3-note later fell from
+# 43.5 t/s to 11.6 t/s at identical 89% acceptance after its fence was removed;
+# its large MoE path accumulates enough lazy work even at D1 to need the bound.
+# Unknown/unmeasured families therefore fail safe to fenced.  Only the measured
+# Qwen3.5-family runtimes take the unfenced D1 default.
+#
 # VMLX_MTP_CYCLE_FENCE=1/0 forces either way and overrides the depth default.
 _NATIVE_MTP_CYCLE_FENCE_ENV = os.environ.get("VMLX_MTP_CYCLE_FENCE", "").strip().lower()
 
+_NATIVE_MTP_D1_UNFENCED_MODEL_TYPES = frozenset(
+    {
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_vl",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+)
 
-def _native_mtp_cycle_fence_enabled(depth: int) -> bool:
-    """Whether to issue the per-cycle device fence at this draft depth."""
+
+def _native_mtp_cycle_fence_enabled(
+    depth: int,
+    *,
+    model_type: Optional[str] = None,
+) -> bool:
+    """Whether to issue the per-cycle device fence for this runtime lane."""
     if _NATIVE_MTP_CYCLE_FENCE_ENV in {"0", "false", "no", "off"}:
         return False
     if _NATIVE_MTP_CYCLE_FENCE_ENV in {"1", "true", "yes", "on"}:
         return True
-    # Default ON at every depth.  The depth-1 exemption re-exposed the
-    # 2026-08-15 lazy-accumulation stall on dots3-note (102GB MoE, block-disk
-    # populated): same request shape went 43.5 t/s early in the process to
-    # avg_cycle=162ms (11.6 t/s) later, at IDENTICAL 89% acceptance.  The
-    # fence bounds the outstanding lazy queue and is measured free when the
-    # stall is absent (cache-off 1.932x fenced vs 1.943x unfenced).
+    normalized_depth = max(1, int(depth or 1))
+    normalized_model_type = str(model_type or "").strip().lower()
+    if (
+        normalized_depth == 1
+        and normalized_model_type in _NATIVE_MTP_D1_UNFENCED_MODEL_TYPES
+    ):
+        return False
+    # Default ON for depth >= 2 and every unknown/unmeasured family.  This
+    # preserves the Dots3 lazy-accumulation fix while avoiding the separately
+    # measured Qwen3.5 D1 barrier regression above.
     return True
 
 
@@ -14190,7 +14214,10 @@ class MLLMBatchGenerator:
         # stalls later forwards. One fence per cycle bounds the outstanding
         # queue. Gated for A/B; flips default only on byte-equal + speedup
         # proof at the app-default cache shape.
-        if _native_mtp_cycle_fence_enabled(depth):
+        if _native_mtp_cycle_fence_enabled(
+            depth,
+            model_type=getattr(self, "_model_type", None),
+        ):
             try:
                 mx.synchronize()
             except Exception:

@@ -58,10 +58,12 @@ function parseMarkdown(
   return `<div class="code-block-wrapper">${headerHtml}<pre><code class="hljs language-${lang || 'plaintext'}">${highlighted}</code></pre></div>`
   }
   // renderChatMarkdownHtml owns prepare -> marked -> KaTeX-splice ordering so
-  // renderer-owned math HTML never flows through marked (userContent and
-  // assistant text share the same literal pipeline).
-  void userContent
-  return renderChatMarkdownHtml(markdown, { renderer })
+  // renderer-owned math HTML never flows through marked. Assistant-only
+  // presentation guards must not rewrite user content.
+  return renderChatMarkdownHtml(markdown, {
+    renderer,
+    assistantContent: !userContent,
+  })
 }
 
 /**

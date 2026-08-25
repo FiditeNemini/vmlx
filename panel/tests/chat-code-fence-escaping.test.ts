@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   prepareAssistantMarkdownWithMath,
+  renderChatMarkdownHtml,
+  stripRepeatedConfidenceFenceArtifact,
 } from '../src/renderer/src/components/chat/mathMarkdown'
 
 /**
@@ -92,5 +94,35 @@ describe('math delimiters decline the unclosed-span trick', () => {
   it('paired math still renders', () => {
     expect(prepareAssistantMarkdownWithMath('x $a < b$ y')).toContain('math-inline')
     expect(prepareAssistantMarkdownWithMath('x\n\n$$a < b$$\n')).toContain('math-block')
+  })
+})
+
+describe('assistant confidence-fence presentation guard', () => {
+  const malformed =
+    'The secret passphrase is Purple Elephant 17. NEMOTRON_AUDIO_LIVE_OK\n\n' +
+    '```\n' +
+    '```1.0 The secret passphrase is Purple Elephant 17.\n' +
+    '```1.0 NEMOTRON_AUDIO_LIVE_OK\n' +
+    '```'
+
+  it('removes only the duplicated trailing artifact', () => {
+    expect(stripRepeatedConfidenceFenceArtifact(malformed)).toBe(
+      'The secret passphrase is Purple Elephant 17. NEMOTRON_AUDIO_LIVE_OK',
+    )
+  })
+
+  it('leaves ordinary and unique fenced content untouched', () => {
+    const ordinary = '```\n```1.0 unique payload\n```'
+    const unique = 'answer\n```\n```1.0 different payload\n```'
+    expect(stripRepeatedConfidenceFenceArtifact(ordinary)).toBe(ordinary)
+    expect(stripRepeatedConfidenceFenceArtifact(unique)).toBe(unique)
+  })
+
+  it('applies the guard only to assistant presentation rendering', () => {
+    const assistantHtml = renderChatMarkdownHtml(malformed, { assistantContent: true })
+    const userHtml = renderChatMarkdownHtml(malformed, { assistantContent: false })
+    expect(assistantHtml).not.toContain('code')
+    expect(assistantHtml).toContain('NEMOTRON_AUDIO_LIVE_OK')
+    expect(userHtml).toContain('code')
   })
 })

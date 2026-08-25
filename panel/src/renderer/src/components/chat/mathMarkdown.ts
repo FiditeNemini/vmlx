@@ -491,8 +491,43 @@ export function prepareAssistantMarkdownWithMath(markdown: string): string {
   return prepareLiteralMarkdownWithMath(markdown)
 }
 
+/**
+ * Remove one narrowly identified model-output artifact from the assistant's
+ * presentation only.  A Nemotron audio reply once ended with a plain fence
+ * followed by confidence-prefixed copies of the answer lines, for example
+ * ` ```1.0 answer`.  Those lines are not a distinct answer or code payload:
+ * every one repeats a complete line already shown immediately above.  Keep
+ * the persisted/API bytes unchanged and leave ordinary fences, user content,
+ * and unique confidence text untouched.
+ */
+export function stripRepeatedConfidenceFenceArtifact(markdown: string): string {
+  if (!markdown) return ''
+  const lines = markdown.split('\n')
+  if (lines.length < 4 || lines[lines.length - 1].trim() !== '```') return markdown
+
+  const closingIndex = lines.length - 1
+  let openingIndex = closingIndex - 1
+  while (openingIndex >= 0 && lines[openingIndex].trim() !== '```') openingIndex -= 1
+  if (openingIndex < 0) return markdown
+
+  const artifactLines = lines.slice(openingIndex + 1, closingIndex)
+  if (artifactLines.length < 2) return markdown
+  const repeated = artifactLines.map((line) => {
+    const match = line.match(/^```\d+(?:\.\d+)?\s+(.+)$/)
+    return match ? match[1] : null
+  })
+  if (repeated.some((line) => line == null)) return markdown
+
+  const precedingLines = lines.slice(0, openingIndex)
+  const precedingText = precedingLines.join('\n')
+  if (!repeated.every((line) => precedingText.includes(line!))) return markdown
+
+  return precedingLines.join('\n').replace(/\n+$/, '')
+}
+
 export interface RenderChatMarkdownOptions {
   renderer?: InstanceType<typeof marked.Renderer>
+  assistantContent?: boolean
 }
 
 /**
@@ -515,9 +550,11 @@ export function renderChatMarkdownHtml(
   try {
     // Strip pre-existing private-use token delimiters from untrusted text so
     // model output cannot forge a restore token.
-    prepared = prepareLiteralMarkdownWithMath(
-      String(markdown).replace(/[]/g, ''),
-    )
+    const rawMarkdown = String(markdown).replace(/[]/g, '')
+    const presentationMarkdown = options.assistantContent
+      ? stripRepeatedConfidenceFenceArtifact(rawMarkdown)
+      : rawMarkdown
+    prepared = prepareLiteralMarkdownWithMath(presentationMarkdown)
   } finally {
     activeMathHtmlSink = null
   }

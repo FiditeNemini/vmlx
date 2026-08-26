@@ -1337,6 +1337,42 @@ def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
     assert residual.dtype == mx.bfloat16
 
 
+@pytest.mark.parametrize(
+    ("residual_dtype", "kernel_dtype"),
+    [
+        (mx.float16, mx.bfloat16),
+        (mx.bfloat16, mx.float16),
+    ],
+)
+def test_qwen4_exp_ple_short_conv_preserves_dynamic_residual_dtype(
+    residual_dtype, kernel_dtype
+):
+    from vmlx_engine.models.qwen4_exp.language import (
+        PLELayer,
+        _decode_quantized_linears_fused,
+    )
+
+    ple = PLELayer(_tiny_args(), 0)
+    ple.conv1d_weight = ple.conv1d_weight.astype(kernel_dtype)
+    residual = mx.ones((1, 1, 256), dtype=residual_dtype)
+    convolved = ple._short_conv(residual, cache=None)
+    mx.eval(convolved)
+
+    assert convolved.dtype == residual_dtype
+
+    linears = tuple(
+        nn.Linear(256, 256, bias=False).to_quantized(group_size=64, bits=4)
+        for _ in range(4)
+    )
+    for linear in linears:
+        linear.scales = linear.scales.astype(residual_dtype)
+        linear.biases = linear.biases.astype(residual_dtype)
+    fused = _decode_quantized_linears_fused(linears, convolved)
+    assert fused is not None
+    mx.eval(*fused)
+    assert all(output.dtype == residual_dtype for output in fused)
+
+
 def test_qwen4_exp_hyper_projection_fusion_is_bit_identical():
     from vmlx_engine.models.qwen4_exp.language import (
         GatedResidual,

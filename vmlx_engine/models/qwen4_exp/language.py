@@ -616,7 +616,7 @@ class PLELayer(nn.Module):
         for j in range(self.conv_kernel_size):
             start = j * self.conv_dilation
             taps.append(full[:, start : start + S, :] * self.conv1d_weight[:, j])
-        return nn.silu(sum(taps))
+        return nn.silu(sum(taps)).astype(x.dtype)
 
     def __call__(self, hidden_states: mx.array, input_ids: mx.array, cache) -> mx.array:
         emb = self._embed(input_ids, cache)

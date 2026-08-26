@@ -8,6 +8,35 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.40] - 2026-08-25
+
+### Performance
+
+- Qwen3.5-family head-dimension-256 prefill tails now stay on MLX's fused
+  scaled-dot-product attention path for the one-shot prefill lane while
+  preserving the existing chunked-prefill fallback.
+
+### Fixed
+
+- Hybrid Qwen text, image, and video requests now resolve the same scoped
+  media and generation-prompt discriminators for native GatedDelta companion
+  checkpoints as for paged KV blocks. Longest-prefix SSD hits therefore
+  restore the exact pre-media native state across chats and process restarts
+  without retaining a second in-RAM cache.
+- MiniMax-M3 adaptive streams now keep ambiguous initial reasoning private
+  until a real reasoning boundary or marker-free completion establishes the
+  output lane, preventing late end-only reasoning markers from leaking
+  planning into visible content.
+- Electron chat settings now persist and forward OpenAI frequency and presence
+  penalties through the same validated request domain as the Python CLI and
+  gateway APIs.
+- Session creation reports live engine startup progress and allows the active
+  model's bounded startup window to complete instead of timing out early.
+- Release packaging now rejects a bundled Python runtime whose installed MLX
+  or MLX-Metal distribution version differs from the selected release build.
+
+---
+
 ## [1.6.39] - 2026-08-25
 
 ### Performance

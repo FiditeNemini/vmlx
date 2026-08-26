@@ -9666,6 +9666,18 @@ def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
     status = dict(_model_mtp_status(bundle_path))
     from .native_mtp import native_mtp_disabled_by_env
 
+    try:
+        from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_status
+
+        # This is intentionally live rather than bundle-derived.  The
+        # dispatcher used to log itself as active even when dflash-mlx's own
+        # environment gate made every eligible call fall back to stock MLX.
+        # Exposing the dependency bit and eligible-call counter lets health
+        # distinguish configured intent from an actually exercised kernel.
+        status["verify_qmm"] = native_mtp_verify_qmm_status()
+    except Exception:
+        pass
+
     native_disabled = native_mtp_disabled_by_env()
     status["request_policy"] = (
         "disabled" if native_disabled else os.environ.get(

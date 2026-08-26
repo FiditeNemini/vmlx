@@ -14,13 +14,13 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import os
 import platform
+from collections.abc import Iterator
 from importlib import metadata
-from typing import Iterator
 
 import mlx.core as mx
 import mlx.nn as nn
-
 
 logger = logging.getLogger(__name__)
 _VERIFY_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -28,6 +28,7 @@ _VERIFY_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 _PATCH = {
     "installed": False,
+    "kernel_enabled": False,
     "original": None,
     "reason": "not_probed",
     "calls": 0,
@@ -73,10 +74,24 @@ def install_native_mtp_verify_qmm() -> dict[str, object]:
     if not supported:
         return native_mtp_verify_qmm_status()
 
+    # dflash-mlx ships the verifier behind an environment gate.  vMLX already
+    # guards this dispatcher by hardware, OS, MLX version, q4 affine shape and
+    # the native-MTP verify scope, so an unset dependency flag must mean enabled
+    # here.  Previously the dispatcher reported itself active while
+    # verify_matmul silently fell back to stock MLX on every call.
+    verify_flag = os.environ.get("DFLASH_VERIFY_QMM", "").strip()
+    if verify_flag and verify_flag != "1":
+        _PATCH["reason"] = "disabled_by_env"
+        return native_mtp_verify_qmm_status()
+    os.environ["DFLASH_VERIFY_QMM"] = "1"
+
     try:
-        from dflash_mlx.verify_qmm import verify_matmul
+        from dflash_mlx.verify_qmm import is_enabled, verify_matmul
     except Exception as exc:
         _PATCH["reason"] = f"dflash_import_failed:{type(exc).__name__}"
+        return native_mtp_verify_qmm_status()
+    if not is_enabled():
+        _PATCH["reason"] = "dflash_kernel_disabled"
         return native_mtp_verify_qmm_status()
 
     original = nn.QuantizedLinear.__call__
@@ -116,6 +131,7 @@ def install_native_mtp_verify_qmm() -> dict[str, object]:
 
     nn.QuantizedLinear.__call__ = patched
     _PATCH["installed"] = True
+    _PATCH["kernel_enabled"] = True
     _PATCH["original"] = original
     _PATCH["reason"] = "active"
     logger.info(
@@ -128,12 +144,13 @@ def install_native_mtp_verify_qmm() -> dict[str, object]:
 
 
 def native_mtp_verify_qmm_active() -> bool:
-    return bool(_PATCH["installed"])
+    return bool(_PATCH["installed"] and _PATCH["kernel_enabled"])
 
 
 def native_mtp_verify_qmm_status() -> dict[str, object]:
     return {
         "installed": bool(_PATCH["installed"]),
+        "kernel_enabled": bool(_PATCH["kernel_enabled"]),
         "reason": str(_PATCH["reason"]),
         "calls": int(_PATCH["calls"]),
     }
@@ -144,7 +161,7 @@ def native_mtp_verify_qmm_scope() -> Iterator[None]:
     """Enable the custom q4 route only while building one target verify."""
 
     install_native_mtp_verify_qmm()
-    token = _VERIFY_SCOPE.set(bool(_PATCH["installed"]))
+    token = _VERIFY_SCOPE.set(native_mtp_verify_qmm_active())
     try:
         yield
     finally:

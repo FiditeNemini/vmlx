@@ -5224,6 +5224,106 @@ class TestOpenAILogprobsFormatting:
             effective_thinking=True,
         )
 
+    def test_multimodal_latest_user_text_does_not_reuse_prior_tool_intent(self):
+        """Pydantic ContentPart text owns intent on the current media turn."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest
+
+        request = ChatCompletionRequest.model_validate(
+            {
+                "model": "step-test",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Use the list_directory tool exactly once.",
+                    },
+                    {"role": "assistant", "content": "done"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,AA=="
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Do not call any tool. This turn adds exactly "
+                                    "one new image."
+                                ),
+                            },
+                        ],
+                    },
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "list_directory",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert server._latest_request_user_text(request) == (
+            "Do not call any tool. This turn adds exactly one new image."
+        )
+        assert not server._request_explicitly_requires_one_tool_once(request)
+        assert not server._request_explicitly_requests_tool_use(request)
+
+    def test_multimodal_latest_user_text_keeps_current_exact_tool_intent(self):
+        """The fix must not weaken a genuine current multimodal tool contract."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest
+
+        request = ChatCompletionRequest.model_validate(
+            {
+                "model": "step-test",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "data:image/png;base64,AA=="
+                                },
+                            },
+                            {
+                                "type": "text",
+                                "text": "Use list_directory exactly once.",
+                            },
+                        ],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "list_directory",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert server._latest_request_user_text(request) == (
+            "Use list_directory exactly once."
+        )
+        assert server._request_explicitly_requires_one_tool_once(request)
+        assert server._request_explicitly_requests_tool_use(request)
+
     @pytest.mark.asyncio
     async def test_streaming_responses_step_invalid_auto_tool_stays_fail_closed(
         self, monkeypatch

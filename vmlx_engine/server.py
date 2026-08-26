@@ -7582,6 +7582,19 @@ def _latest_request_user_text(
             return "\n".join(
                 part for part in (_content_text(item) for item in value) if part
             )
+        # ChatCompletionRequest normalizes multimodal dictionaries into
+        # ``ContentPart`` Pydantic objects.  Treat those like their wire-format
+        # dictionaries; otherwise a current image+text user turn contributes
+        # no text here and intent gates accidentally reuse an older text-only
+        # turn (for example, a prior "call list_directory exactly once").
+        # Keep this attribute-based so Responses content-part models and future
+        # compatible request models share the same latest-turn semantics.
+        text = getattr(value, "text", None)
+        if text is not None:
+            return _content_text(text)
+        content = getattr(value, "content", None)
+        if content is not None:
+            return _content_text(content)
         return ""
 
     latest_user_text = ""

@@ -244,9 +244,23 @@ def _final_notary_release_identity(
             re.fullmatch(r"[0-9a-f]{64}", artifact_sha) is not None
             and public_sha.lower() == artifact_sha
         )
-    sequoia_sha = artifact_hashes.get("sequoia", "")
+    primary_url = str(public_manifest.get("url") or "")
     primary_sha = str(public_manifest.get("sha256") or "").lower()
-    hashes_match = all(hash_matches) and primary_sha == sequoia_sha
+    primary_flavor = next(
+        (
+            flavor
+            for flavor in ("sequoia", "tahoe")
+            if isinstance(downloads.get(flavor), dict)
+            and str(downloads[flavor].get("url") or "") == primary_url
+        ),
+        "",
+    )
+    primary_artifact_sha = artifact_hashes.get(primary_flavor, "")
+    hashes_match = bool(
+        all(hash_matches)
+        and primary_flavor
+        and primary_sha == primary_artifact_sha
+    )
     checks = {
         "final_notary_manifest_identity_valid": bool(
             final_notary_manifest.get("stage") == "post_notary"
@@ -263,6 +277,7 @@ def _final_notary_release_identity(
         "stage": final_notary_manifest.get("stage"),
         "source_commit": expected_source_commit,
         "source_tree": expected_source_tree,
+        "primary_flavor": primary_flavor,
         "artifact_sha256": artifact_hashes,
         "public_manifest_sha256": public_hashes,
     }

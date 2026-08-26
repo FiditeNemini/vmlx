@@ -677,3 +677,21 @@ def test_release_surface_live_public_uses_public_manifest_and_notarized_commit(
     assert artifact["current_revision"] == "e" * 40
     assert artifact["local_latest"]["version"] == "1.5.47"
     assert artifact["public_manifest"]["version"] == "1.5.48"
+
+
+def test_release_surface_live_public_accepts_tahoe_as_primary_download(tmp_path):
+    from tests.cross_matrix import run_release_surface_contract as gate
+
+    latest = _write_release_root(tmp_path)
+    latest["url"] = latest["downloads"]["tahoe"]["url"]
+    latest["sha256"] = latest["downloads"]["tahoe"]["sha256"]
+    _, final_notary_manifest, _ = _write_live_release_inputs(tmp_path, latest)
+
+    checks, identity = gate._final_notary_release_identity(
+        latest["version"],
+        latest,
+        json.loads(final_notary_manifest.read_text(encoding="utf-8")),
+    )
+
+    assert checks["public_manifest_matches_notarized_artifacts"] is True
+    assert identity["primary_flavor"] == "tahoe"

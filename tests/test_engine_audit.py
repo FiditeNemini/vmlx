@@ -9578,6 +9578,12 @@ class TestStartupCompatibilityGuards:
         assert '"mlx==$MLX_VERSION"' in bundle_script
         assert '"mlx-metal==$MLX_VERSION"' in bundle_script
 
+        verify_script = Path("./panel/scripts/verify-bundled-python.sh").read_text()
+        assert 'EXPECTED_MLX_VERSION="$(' in verify_script
+        assert '"$PANEL/scripts/bundle-python.sh"' in verify_script
+        assert 'records["mlx"]["version"] != expected_version' in verify_script
+        assert "RELEASE BLOCKED — bundled MLX version drift" in verify_script
+
     def test_release_build_declares_sequoia_and_tahoe_dmg_flavors(self):
         """vmlx#169 release packaging must build both wheel-tag variants."""
         script = Path("./panel/scripts/build-release-dmgs.sh")

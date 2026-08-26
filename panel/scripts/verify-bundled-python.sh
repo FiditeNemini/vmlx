@@ -315,7 +315,18 @@ if [ "$RELEASE_SCOPE" = "r20_production" ] && [ -z "$EXPECTED_MLX_WHEEL_PLATFORM
   echo "❌ RELEASE BLOCKED — production bundle verification requires the exact MLX wheel platform"
   exit 1
 fi
-run_bundled_python - "$PROVENANCE_FILE" "$EXPECTED_MLX_WHEEL_PLATFORM" <<'PYEOF'
+EXPECTED_MLX_VERSION="$(
+  sed -n 's/^MLX_VERSION="\([^"]*\)"/\1/p' "$PANEL/scripts/bundle-python.sh" \
+    | head -1
+)"
+if [ -z "$EXPECTED_MLX_VERSION" ]; then
+  echo "❌ RELEASE BLOCKED — cannot resolve the pinned MLX version from bundle-python.sh"
+  exit 1
+fi
+run_bundled_python - \
+  "$PROVENANCE_FILE" \
+  "$EXPECTED_MLX_WHEEL_PLATFORM" \
+  "$EXPECTED_MLX_VERSION" <<'PYEOF'
 import importlib.metadata
 import json
 import pathlib
@@ -323,6 +334,7 @@ import sys
 
 provenance = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
 expected = sys.argv[2] or provenance.get("mlx_wheel_platform", "")
+expected_version = sys.argv[3]
 if expected not in {"macosx_14_0_arm64", "macosx_26_0_arm64"}:
     raise SystemExit(f"invalid expected MLX wheel platform: {expected!r}")
 if provenance.get("mlx_wheel_platform") != expected:
@@ -357,6 +369,11 @@ for distribution_name in ("mlx", "mlx-metal"):
 if records["mlx"]["version"] != records["mlx-metal"]["version"]:
     raise SystemExit(
         "installed mlx and mlx-metal distribution versions do not match"
+    )
+if records["mlx"]["version"] != expected_version:
+    raise SystemExit(
+        "RELEASE BLOCKED — bundled MLX version drift: "
+        f"{records['mlx']['version']} != {expected_version}"
     )
 print(
     "  ok   bundled MLX wheel contract "

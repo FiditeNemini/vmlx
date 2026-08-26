@@ -1,19 +1,19 @@
 {
-  "version": "1.6.39",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.39/vMLX-1.6.39-tahoe-arm64.dmg",
-  "sha256": "0074946805181247839ca4b1410d14368f4282f97abed59731d4124df019e60f",
-  "sha512": "ZfNUAO0k9ZK80ETB8+Me/LSEWwc82pRfA79lnxaT1UI/8pRSmy0A9XiE+eqQ/2gGuFm2yCnuLCX3YBjmXuxlAA==",
+  "version": "1.6.40",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.40/vMLX-1.6.40-tahoe-arm64.dmg",
+  "sha256": "ac4ac2da6df648a5cd1534b77aa416bead70710faa97c29a966458c94a1b14b2",
+  "sha512": "rM8Ve2+zhOBJa4ECHaSC5GUyd6Nd1mbY70diY5JQFoiG742cA68uVrkw+ONhMiclrgGoLmiV3OoH6UFLh4p5Bg==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.39/vMLX-1.6.39-sequoia-arm64.dmg",
-      "sha256": "193bce94060c13be7df9d7837a6c59e81dc6f015c0530de6af3ee4fa97c1fd80",
-      "sha512": "cbDIrOh4uRBr2BgTuzDCPtKQmGxqKJ5ko2REuCHRhrGfaWRb2lQH8Xy/agKYYx0+twS4sHzsXSI5AgHWTuv8VA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.40/vMLX-1.6.40-sequoia-arm64.dmg",
+      "sha256": "4480e0cba1f426dfa8964272a912c75712e5f69831a9169737b9e5048a2bfad7",
+      "sha512": "5HBLDT/8yfwjJdMEDEGzKX+vq00t4Tgq1cfzlFO1fY6QgVXKkP9p2b7a/plrBKMSuNPERfpaIIRC0om5JlWqkA=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.39/vMLX-1.6.39-tahoe-arm64.dmg",
-      "sha256": "0074946805181247839ca4b1410d14368f4282f97abed59731d4124df019e60f",
-      "sha512": "ZfNUAO0k9ZK80ETB8+Me/LSEWwc82pRfA79lnxaT1UI/8pRSmy0A9XiE+eqQ/2gGuFm2yCnuLCX3YBjmXuxlAA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.40/vMLX-1.6.40-tahoe-arm64.dmg",
+      "sha256": "ac4ac2da6df648a5cd1534b77aa416bead70710faa97c29a966458c94a1b14b2",
+      "sha512": "rM8Ve2+zhOBJa4ECHaSC5GUyd6Nd1mbY70diY5JQFoiG742cA68uVrkw+ONhMiclrgGoLmiV3OoH6UFLh4p5Bg=="
     }
   },
-  "notes": "vMLX 1.6.39 \u2014 eliminates redundant full native SSD payload reads during DSV4, ZAYA, and mixed-SWA prefix validation; removes whole-root byte reconciliation from SSD LRU hit touches; avoids an unnecessary Qwen3.5 depth-one native-MTP cycle fence; and completes frequency penalty, presence penalty, and logit-bias forwarding across supported API surfaces. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.39, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, mounted-artifact verified, and installed-app smoke-tested without loading a model."
+  "notes": "vMLX 1.6.40 \u2014 keeps Qwen3.5 head-dimension-256 one-shot prefill tails on MLX's fused attention path; restores exact hybrid Qwen GatedDelta companion state across text, image, video, cross-chat, and restart SSD-prefix reuse; prevents ambiguous MiniMax-M3 reasoning from leaking into visible content; completes Electron frequency and presence penalty parity; reports live startup progress; and enforces exact packaged MLX and MLX-Metal versions. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.40, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, mounted-artifact verified, and installed-app smoke-tested without loading a model."
 }

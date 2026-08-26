@@ -926,6 +926,45 @@ def test_qwen4_exp_video_pixels_reach_vision_tower_under_named_contract():
     )
 
 
+def test_qwen_video_float_255_input_preserves_uint8_processor_scale():
+    from mlx_vlm.models.qwen3_vl.processing_qwen3_vl import (
+        Qwen3VLVideoProcessor,
+    )
+
+    from vmlx_engine.mllm_batch_generator import (
+        _normalize_qwen_video_arrays_for_processor,
+    )
+
+    processor = Qwen3VLVideoProcessor(
+        patch_size=16,
+        temporal_patch_size=2,
+        merge_size=2,
+        min_pixels=32 * 32,
+        max_pixels=32 * 32,
+    )
+    wrapper = type("QwenProcessor", (), {"video_processor": processor})()
+    raw = np.zeros((4, 3, 32, 32), dtype=np.uint8)
+    raw[:, 2, :, :] = 251
+    fetched = raw.astype(np.float32)
+
+    repaired = _normalize_qwen_video_arrays_for_processor(wrapper, [fetched])[0]
+    assert repaired.dtype == np.uint8
+    np.testing.assert_array_equal(repaired, raw)
+
+    expected_patches, expected_grid = processor._process_one(raw)
+    repaired_patches, repaired_grid = processor._process_one(repaired)
+    np.testing.assert_array_equal(repaired_patches, expected_patches)
+    assert repaired_grid == expected_grid
+    assert float(repaired_patches.min()) == -1.0
+    assert float(repaired_patches.max()) < 1.0
+
+    unit_interval = fetched / 255.0
+    untouched = _normalize_qwen_video_arrays_for_processor(
+        wrapper, [unit_interval]
+    )[0]
+    assert untouched is unit_interval
+
+
 def test_qwen4_exp_reasoning_and_tools_preserve_native_bundle_contract():
     from vmlx_engine.model_config_registry import ModelConfigRegistry
     from vmlx_engine.model_configs import register_all

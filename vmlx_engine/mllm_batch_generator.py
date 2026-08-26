@@ -1762,6 +1762,54 @@ def _load_audio_waveforms_for_processor(processor: Any, audio: List[Any]) -> Lis
     return out
 
 
+def _normalize_qwen_video_arrays_for_processor(
+    processor: Any, videos: List[Any]
+) -> List[Any]:
+    """Restore the uint8 contract after mlx-vlm's float32 video resize.
+
+    ``mlx_vlm.video_generate.fetch_video`` returns resized TCHW arrays as
+    float32 while preserving the original 0..255 range.  The numpy Qwen3-VL
+    video processor intentionally rescales only uint8 arrays; feeding that
+    float32 payload skips the 1/255 conversion and turns a blue channel near
+    255 into a normalized value near 509.  Restrict the repair to that exact
+    processor contract and leave already-normalized float video untouched.
+    """
+    video_processor = getattr(processor, "video_processor", None)
+    if video_processor is None:
+        return videos
+    processor_type = type(video_processor)
+    processor_key = (
+        f"{processor_type.__module__}.{processor_type.__name__}".lower()
+    )
+    if "qwen3_vl" not in processor_key or "videoprocessor" not in processor_key:
+        return videos
+    if not bool(getattr(video_processor, "do_rescale", False)):
+        return videos
+
+    import numpy as np
+
+    normalized: List[Any] = []
+    repaired = 0
+    for video in videos:
+        array = np.asarray(video) if not isinstance(video, np.ndarray) else video
+        if (
+            np.issubdtype(array.dtype, np.floating)
+            and array.size
+            and float(array.min()) >= 0.0
+            and 1.5 < float(array.max()) <= 255.5
+        ):
+            array = np.clip(np.rint(array), 0, 255).astype(np.uint8)
+            repaired += 1
+        normalized.append(array)
+    if repaired:
+        logger.info(
+            "Restored uint8 0..255 contract for %d Qwen video tensor(s) "
+            "before processor rescaling",
+            repaired,
+        )
+    return normalized
+
+
 def _call_processor_direct_unscoped(
     processor: Any,
     *,
@@ -1855,6 +1903,9 @@ def _call_processor_direct_unscoped(
                     _arr, _s_fps = _v, _fps_hint
                 _loaded.append(_arr)
                 _video_fps.append(_s_fps)
+            _loaded = _normalize_qwen_video_arrays_for_processor(
+                processor, _loaded
+            )
             kwargs["videos"] = _loaded
             accepts_var_kwargs = any(
                 param.kind == inspect.Parameter.VAR_KEYWORD

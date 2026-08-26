@@ -7693,9 +7693,14 @@ class MLLMBatchGenerator:
         bounding to ``min(B, max_size)`` (keep-prefix preserved) yields the
         EXACT boundary window, not an approximation.
 
-        The copy is bounded by the window size (``mx.contiguous`` breaks the
-        lazy reference to the full prefill buffer), so this costs one window
-        per rotating layer per request. It is transient request state, not a
+        The copy is bounded by the window size plus two cache blocks
+        (``mx.contiguous`` breaks the lazy reference to the full prefill
+        buffer).  The small retained concat overhang is intentional: the block
+        store can cut exact rotating checkpoints at the two boundaries before
+        a terminal partial block.  Truncating immediately to one window made
+        every preceding block ``rotating_kv_pending``; an exact repeat hit the
+        terminal partial, but the same long prefix with a changed suffix went
+        fully cold after restart.  This remains transient request state, not a
         retained RAM prefix-cache mirror. Cleanup combines it with exact slices
         of the append-only full-attention KV, publishes it, and releases it.
 
@@ -7797,27 +7802,55 @@ class MLLMBatchGenerator:
                     )
                     return False
                 avail = physical - trim
-                if avail == required:
+                try:
+                    _resume_block_size = max(
+                        1,
+                        int(
+                            getattr(
+                                getattr(self, "block_aware_cache", None),
+                                "block_size",
+                                64,
+                            )
+                            or 64
+                        ),
+                    )
+                except (TypeError, ValueError):
+                    _resume_block_size = 64
+                # Keep at most two block widths of the causal concat overhang.
+                # _rotating_previous_block_window() consumes this at store time
+                # to publish bounded exact changed-tail resume checkpoints.
+                retained = min(avail, required + 2 * _resume_block_size)
+                if retained == avail:
                     snap_k = keys[..., :avail, :]
                     snap_v = values[..., :avail, :]
                 elif keep > 0:
+                    recent = retained - keep
+                    if recent <= 0:
+                        logger.info(
+                            "mixed-SWA boundary capture declined for %s: "
+                            "retained=%d does not cover keep=%d",
+                            request.request_id,
+                            retained,
+                            keep,
+                        )
+                        return False
                     snap_k = mx.concatenate(
                         [
                             keys[..., :keep, :],
-                            keys[..., avail - (required - keep) : avail, :],
+                            keys[..., avail - recent : avail, :],
                         ],
                         axis=2,
                     )
                     snap_v = mx.concatenate(
                         [
                             values[..., :keep, :],
-                            values[..., avail - (required - keep) : avail, :],
+                            values[..., avail - recent : avail, :],
                         ],
                         axis=2,
                     )
                 else:
-                    snap_k = keys[..., avail - required : avail, :]
-                    snap_v = values[..., avail - required : avail, :]
+                    snap_k = keys[..., avail - retained : avail, :]
+                    snap_v = values[..., avail - retained : avail, :]
                 # Break the lazy reference to the full prefill buffer so the
                 # retained copy is window-sized, not prompt-sized.
                 snap_k = mx.contiguous(snap_k)
@@ -7839,11 +7872,12 @@ class MLLMBatchGenerator:
             )
             logger.info(
                 "mixed-SWA boundary captured for %s: %d rotating layers "
-                "at N-1 boundary=%d (window<=%d tokens each) before decode",
+                "at N-1 boundary=%d (window+resume-overhang<=%d tokens each) "
+                "before decode",
                 request.request_id,
                 len(snap_map),
                 boundary,
-                min(boundary, max(s.max_size for s in snap_map.values())),
+                max(int(s.keys.shape[2]) for s in snap_map.values()),
             )
             return True
         except Exception as e:

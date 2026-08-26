@@ -50,17 +50,25 @@ class _Recurrent:
 class RotatingKVCache:
     """Minimal exact-name rotating cache used by the capture contract."""
 
-    def __init__(self, *, boundary=10, max_size=8):
+    def __init__(self, *, boundary=10, max_size=8, extra_rows=1):
         # End-of-prefill state includes the final prompt token. The concat
         # overhang retains one extra row, so the N-1 boundary is still exact.
         self.max_size = max_size
         self.keep = 0
         self.offset = boundary + 1
-        physical = max_size + 1
+        physical = max_size + extra_rows
         values = mx.arange(physical * 4).reshape(1, 1, physical, 4)
         self.keys = values.astype(mx.float16)
         self.values = self.keys
         self._idx = physical
+
+    @property
+    def state(self):
+        return self.keys, self.values
+
+    @property
+    def meta_state(self):
+        return self.keep, self.max_size, self.offset, self._idx
 
 
 def _kv(n_tokens, physical=None, dim=8, heads=2):
@@ -219,6 +227,86 @@ def test_text_mixed_swa_captures_exact_boundary_without_media_gate():
     assert snap.offset == 10
     assert snap._idx == 8
     assert snap.keys.shape[2] == 8
+
+
+def test_mixed_swa_capture_keeps_bounded_overhang_for_restart_changed_tail(
+    tmp_path,
+):
+    """A terminal partial must leave an exact prior SSD resume checkpoint.
+
+    This is the scaled form of the live Gemma shape: a 10,455-token cold store
+    had an exact 23-token terminal block but all 163 preceding full blocks were
+    ``rotating_kv_pending``.  An exact repeat restored; a changed suffix with a
+    10,434-token LCP went completely cold.  The end-of-prefill concat overhang
+    already contains the prior window, so retain two block widths transiently
+    and let the existing block cutter publish the exact 24-token checkpoint.
+    """
+    from vmlx_engine.block_disk_store import BlockDiskStore
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    gen = _mixed_swa_generator(has_media=False)
+    gen.block_aware_cache = SimpleNamespace(block_size=4)
+    req = SimpleNamespace(request_id="changed-tail", _original_token_ids=list(range(27)))
+    rotating = RotatingKVCache(boundary=26, max_size=8, extra_rows=9)
+
+    assert gen._maybe_capture_mixed_swa_boundary(req, [rotating])
+    boundary, snapshots = req._mixed_swa_boundary
+    assert boundary == 26
+    snap = snapshots[0]
+    assert snap.offset == 26
+    assert snap.keys.shape[2] == 16  # one window + exactly two 4-token blocks
+
+    cache_dir = tmp_path / "mixed-swa-captured-overhang"
+    store = BlockDiskStore(
+        cache_dir=str(cache_dir),
+        max_size_gb=0.05,
+        expected_num_layers=1,
+    )
+    manager = PagedCacheManager(
+        block_size=4,
+        max_blocks=16,
+        disk_store=store,
+        max_resident_bytes=0,
+        disk_only=True,
+    )
+    writer = BlockAwarePrefixCache(model=None, paged_cache_manager=manager)
+    cache_state = [{
+        "class_name": "RotatingKVCache",
+        "state": snap.state,
+        "meta_state": snap.meta_state,
+    }]
+    assert writer.store_cache("writer", list(range(26)), cache_state) is not None
+    store.shutdown()
+
+    restarted_store = BlockDiskStore(
+        cache_dir=str(cache_dir),
+        max_size_gb=0.05,
+        expected_num_layers=1,
+    )
+    restarted_manager = PagedCacheManager(
+        block_size=4,
+        max_blocks=16,
+        disk_store=restarted_store,
+        max_resident_bytes=0,
+        disk_only=True,
+    )
+    restarted = BlockAwarePrefixCache(
+        model=None,
+        paged_cache_manager=restarted_manager,
+    )
+    try:
+        changed = list(range(24)) + [900, 901, 902]
+        hit, remaining = restarted.fetch_cache("reader", changed)
+        assert hit is not None
+        assert hit.num_tokens == 24
+        assert remaining == [900, 901, 902]
+        rebuilt = restarted.reconstruct_cache(hit)
+        assert rebuilt is not None
+        assert rebuilt[0].offset == 24
+        assert restarted_manager.resident_bytes == 0
+    finally:
+        restarted_store.shutdown()
 
 
 def test_mixed_swa_capture_is_skipped_when_no_store_can_consume_it():

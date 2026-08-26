@@ -456,6 +456,19 @@ def _merge_mllm_cache_extra_keys(
     return merged or None
 
 
+def _ssm_companion_cache_extra_keys(request: Any) -> Optional[Any]:
+    """Return every request-owned discriminator used by companion state.
+
+    Generation-prompt identity is present on text and media requests.  It must
+    not be dropped on text-only stores: a later media request can share the
+    same pre-placeholder token/KV prefix, and its scoped media key resolves
+    away at that boundary, leaving the generation-prompt discriminator as the
+    common key.  Media safety is decided by the caller before this helper is
+    used; this function only keeps SSM keying aligned with paged/block keying.
+    """
+    return getattr(request, "_cache_extra_keys", None)
+
+
 def _uses_ssm_companion_cache(
     kv_positions: Optional[List[int]],
     num_layers: Optional[int],
@@ -11345,9 +11358,7 @@ class MLLMBatchGenerator:
                                     # path) — Agent 1's PrefixCacheManager consumes it.
                                     _fetch_num = block_table.num_tokens
                                     _ssm_extra_keys = (
-                                        _cache_extra_keys
-                                        if _media_cache_allowed
-                                        else None
+                                        _ssm_companion_cache_extra_keys(req)
                                     )
                                     _entry = self._ssm_state_cache.fetch(
                                         token_list,
@@ -12924,11 +12935,7 @@ class MLLMBatchGenerator:
                     )
                     if _media_context_for_ssm and not _media_cache_allowed_for_ssm:
                         continue
-                    _ssm_extra_keys = (
-                        getattr(req, "_cache_extra_keys", None)
-                        if _media_cache_allowed_for_ssm
-                        else None
-                    )
+                    _ssm_extra_keys = _ssm_companion_cache_extra_keys(req)
                     if _media_cache_allowed_for_ssm:
                         # The clean N-1 media cache was captured immediately
                         # after the real media forward, before pixel/grid tensor

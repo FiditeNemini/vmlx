@@ -547,6 +547,47 @@ class TestSchedulerBasic:
             "req._cache_extra_keys = _merge_mllm_cache_extra_keys"
         )
 
+    def test_ssm_companion_keeps_generation_prompt_discriminator_for_text(self):
+        """Text stores and pre-media fetches must use the same request axes."""
+        from types import SimpleNamespace
+
+        from vmlx_engine.cache_key import scope_cache_extra_key
+        from vmlx_engine.mllm_batch_generator import (
+            _ssm_companion_cache_extra_keys,
+        )
+        from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
+
+        generation = "assistant-suffix-thinking-off"
+        text_keys = {"generation_prompt": generation}
+        media_keys = scope_cache_extra_key(
+            {
+                "generation_prompt": generation,
+                "mllm_media_0000": "blue-image",
+            },
+            "mllm_media_0000",
+            80,
+        )
+        text_request = SimpleNamespace(_cache_extra_keys=text_keys)
+        media_request = SimpleNamespace(_cache_extra_keys=media_keys)
+        cache = SSMCompanionCache(model_key="qwen38-vl")
+        tokens = list(range(128))
+
+        text_extra = _ssm_companion_cache_extra_keys(text_request)
+        media_extra = _ssm_companion_cache_extra_keys(media_request)
+
+        assert text_extra == text_keys
+        assert media_extra == media_keys
+        assert cache._key(tokens, 64, text_extra) == cache._key(
+            tokens,
+            64,
+            media_extra,
+        )
+        assert cache._key(tokens, 96, text_extra) != cache._key(
+            tokens,
+            96,
+            media_extra,
+        )
+
     def test_mllm_prompt_limit_error_round_trips_to_api_error(self):
         """Structured VLM prefill prompt errors become PromptTooLongError again."""
         from vmlx_engine.engine.batched import _raise_prompt_too_long_from_output

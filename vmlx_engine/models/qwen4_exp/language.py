@@ -49,6 +49,8 @@ from .ngram import NGramHasher
 
 logger = logging.getLogger(__name__)
 
+_HYPER_SPLIT_INDICES = {}
+
 
 def _layer_profile_enabled(input_ids: Optional[mx.array]) -> bool:
     """Enable an explicit one-token fence after each Qwen4 phase.
@@ -331,6 +333,7 @@ class GatedResidual(nn.Module):
         super().__init__()
         self.hc_count = args.hc_count
         self.hidden_size = args.hidden_size
+        self.hc_lowrank = args.hc_lowrank
         hc_hidden = self.hc_count * self.hidden_size
         self.hc_norm = GroupedRMSNorm(
             hc_hidden, self.hidden_size, eps=args.rms_norm_eps
@@ -342,16 +345,41 @@ class GatedResidual(nn.Module):
         self.use_combine = use_combine
 
     def __call__(self, hyper_input: mx.array):
+        expected = self.hc_count * self.hidden_size
+        if hyper_input.shape[-1] != expected:
+            raise ValueError(
+                f"expected {expected} hyper-connection features, "
+                f"got {hyper_input.shape[-1]}"
+            )
+        compiled_forward = getattr(self, "_compiled_forward", None)
+        if compiled_forward is not None and hyper_input.shape[-2] == 1:
+            return compiled_forward(hyper_input)
+        return self._forward(hyper_input)
+
+    def _forward(self, hyper_input: mx.array):
         normed = self.hc_norm(hyper_input)
-        mix = nn.silu(self.input_mix_weight_down(normed) / self.hc_count)
+        input_inject_weight = getattr(self, "input_inject_weight", None)
+        if input_inject_weight is None:
+            mix = self.input_mix_weight_down(normed)
+            block_injection = (
+                self.block_inject_weight(normed) if self.use_combine else None
+            )
+        else:
+            combined = input_inject_weight(normed)
+            mix_indices, injection_indices = _hyper_split_indices(
+                self.hc_lowrank, self.hc_count
+            )
+            mix = mx.take(combined, mix_indices, axis=-1)
+            block_injection = mx.take(combined, injection_indices, axis=-1)
+        mix = nn.silu(mix / self.hc_count)
         mix = mx.sigmoid(self.input_mix_weight_up(mix))
         mix = mix.reshape(*mix.shape[:-1], self.hc_count, self.hidden_size)
         mixed = (
             mix * normed.reshape(*normed.shape[:-1], self.hc_count, self.hidden_size)
         ).mean(-2)
-        if not self.use_combine:
+        if block_injection is None:
             return mixed
-        inject_w = 2.0 * mx.sigmoid(self.block_inject_weight(normed) / self.hc_count)
+        inject_w = 2.0 * mx.sigmoid(block_injection / self.hc_count)
         return mixed, hyper_input, inject_w
 
     def combine(
@@ -361,6 +389,89 @@ class GatedResidual(nn.Module):
         return hyper_input + inj.reshape(
             *inj.shape[:-2], self.hc_count * self.hidden_size
         )
+
+
+def _hyper_split_indices(lowrank: int, hc_count: int) -> tuple[mx.array, mx.array]:
+    key = (lowrank, hc_count)
+    indices = _HYPER_SPLIT_INDICES.get(key)
+    if indices is None:
+        indices = (
+            mx.arange(lowrank, dtype=mx.int32),
+            mx.arange(lowrank, lowrank + hc_count, dtype=mx.int32),
+        )
+        _HYPER_SPLIT_INDICES[key] = indices
+    return indices
+
+
+def _can_fuse_hyper_connection(module: GatedResidual) -> bool:
+    if hasattr(module, "input_inject_weight"):
+        return False
+    injection = getattr(module, "block_inject_weight", None)
+    down = getattr(module, "input_mix_weight_down", None)
+    if injection is None or down is None or type(down) is not type(injection):
+        return False
+    if down.weight.shape[1:] != injection.weight.shape[1:]:
+        return False
+    if down.weight.dtype != injection.weight.dtype:
+        return False
+    for attribute in ("group_size", "bits", "mode"):
+        if getattr(down, attribute, None) != getattr(injection, attribute, None):
+            return False
+    for tensor_name in ("scales", "biases", "bias"):
+        if hasattr(down, tensor_name) != hasattr(injection, tensor_name):
+            return False
+    return True
+
+
+def fuse_hyper_connection_projections(model: nn.Module) -> int:
+    """Fuse each mix-down/injection pair into one row-wise projection."""
+    modules = [model]
+    modules.extend(module for _, module in model.named_modules() if module is not model)
+    targets = []
+    seen = set()
+    for module in modules:
+        if id(module) in seen:
+            continue
+        seen.add(id(module))
+        if isinstance(module, GatedResidual) and _can_fuse_hyper_connection(module):
+            targets.append(module)
+
+    for module in targets:
+        down = module.input_mix_weight_down
+        injection = module.block_inject_weight
+        fused = {"weight": mx.concatenate([down.weight, injection.weight], axis=0)}
+        for tensor_name in ("scales", "biases", "bias"):
+            if hasattr(down, tensor_name):
+                fused[tensor_name] = mx.concatenate(
+                    [getattr(down, tensor_name), getattr(injection, tensor_name)],
+                    axis=0,
+                )
+        mx.eval(*fused.values())
+        for tensor_name, value in fused.items():
+            setattr(down, tensor_name, value)
+        module.input_inject_weight = down
+        del module.input_mix_weight_down
+        del module.block_inject_weight
+    return len(targets)
+
+
+def compile_hyper_connections(model: nn.Module) -> int:
+    """Compile the fixed-shape single-token hyper-connection decode path."""
+    modules = [model]
+    modules.extend(module for _, module in model.named_modules() if module is not model)
+    compiled = 0
+    seen = set()
+    for module in modules:
+        if id(module) in seen:
+            continue
+        seen.add(id(module))
+        if not isinstance(module, GatedResidual) or hasattr(
+            module, "_compiled_forward"
+        ):
+            continue
+        module._compiled_forward = mx.compile(module._forward)
+        compiled += 1
+    return compiled
 
 
 # --------------------------------------------------------------------------- #

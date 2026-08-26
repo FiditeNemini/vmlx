@@ -993,6 +993,63 @@ def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
     assert residual.dtype == mx.bfloat16
 
 
+def test_qwen4_exp_hyper_projection_fusion_is_bit_identical():
+    from vmlx_engine.models.qwen4_exp.language import (
+        GatedResidual,
+        fuse_hyper_connection_projections,
+    )
+
+    module = GatedResidual(_tiny_args())
+    _randomize(module)
+    module.input_mix_weight_down = module.input_mix_weight_down.to_quantized(
+        group_size=64, bits=4
+    )
+    module.block_inject_weight = module.block_inject_weight.to_quantized(
+        group_size=64, bits=4
+    )
+    x = (mx.arange(256, dtype=mx.bfloat16) / 127.0).reshape(1, 1, 256)
+    reference = module(x)
+    mx.eval(*reference)
+
+    assert fuse_hyper_connection_projections(module) == 1
+    candidate = module(x)
+    mx.eval(*candidate)
+    for expected, actual in zip(reference, candidate):
+        np.testing.assert_array_equal(
+            np.asarray(actual.astype(mx.float32)),
+            np.asarray(expected.astype(mx.float32)),
+        )
+
+
+def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
+    from vmlx_engine.models.qwen4_exp.language import (
+        GatedResidual,
+        compile_hyper_connections,
+        fuse_hyper_connection_projections,
+    )
+
+    module = GatedResidual(_tiny_args())
+    _randomize(module)
+    assert fuse_hyper_connection_projections(module) == 1
+    decode = mx.arange(256, dtype=mx.float32).reshape(1, 1, 256) / 127.0
+    eager = module(decode)
+    mx.eval(*eager)
+    assert compile_hyper_connections(module) == 1
+    compiled = module(decode)
+    mx.eval(*compiled)
+    for expected, actual in zip(eager, compiled):
+        np.testing.assert_allclose(
+            np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5
+        )
+
+    def forbidden_decode(_inputs):
+        raise AssertionError("prefill must not use the single-token compiled path")
+
+    module._compiled_forward = forbidden_decode
+    prefill = module(mx.zeros((1, 2, 256), dtype=mx.float32))
+    mx.eval(*prefill)
+
+
 def test_qwen4_exp_ple_manifest_aliases_are_deterministic_and_fail_closed():
     from vmlx_engine.models.qwen4_exp.table_reader import (
         _module_aliases,

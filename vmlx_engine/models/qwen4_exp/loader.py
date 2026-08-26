@@ -332,6 +332,14 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     # entire top-level MTP head to be silently ignored.
     model.load_weights(list(weights.items()), strict=True)
 
+    from mlx_vlm.models.qwen4_exp.language import (
+        compile_hyper_connections,
+        fuse_hyper_connection_projections,
+    )
+
+    fused_hyper = fuse_hyper_connection_projections(model)
+    compiled_hyper = compile_hyper_connections(model)
+
     from vmlx_engine.metal.qwen4_affine_moe_decode import install_qwen4_affine_moe
 
     install_qwen4_affine_moe(model)
@@ -372,8 +380,11 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     if image_processor is not None:
         processor.image_processor = image_processor
     logger.info(
-        "Loaded qwen4_exp with SSD-backed PLE (%s shards, MTP=%s)",
+        "Loaded qwen4_exp with SSD-backed PLE (%s shards, MTP=%s, "
+        "hyper_fused=%s, hyper_compiled=%s)",
         model_config.text_config.split_ngram_parts,
         model_config.text_config.mtp_num_hidden_layers,
+        fused_hyper,
+        compiled_hyper,
     )
     return model, processor

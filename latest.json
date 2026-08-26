@@ -1,19 +1,19 @@
 {
-  "version": "1.6.40",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.40/vMLX-1.6.40-tahoe-arm64.dmg",
-  "sha256": "ac4ac2da6df648a5cd1534b77aa416bead70710faa97c29a966458c94a1b14b2",
-  "sha512": "rM8Ve2+zhOBJa4ECHaSC5GUyd6Nd1mbY70diY5JQFoiG742cA68uVrkw+ONhMiclrgGoLmiV3OoH6UFLh4p5Bg==",
+  "version": "1.6.41",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.41/vMLX-1.6.41-tahoe-arm64.dmg",
+  "sha256": "fc6bf2344acb0426fa5bec2bcf9a1c7752647d2a6390ca2d534520d0fd9d329f",
+  "sha512": "I4re6Jr7Vpwl5zRPC8S44fwQXAWE7GNHg+guq9Ze1y7E/J9Dn9u3OM7PYUqurVa4TbVsHMIrySUTvhXzMIm+Sw==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.40/vMLX-1.6.40-sequoia-arm64.dmg",
-      "sha256": "4480e0cba1f426dfa8964272a912c75712e5f69831a9169737b9e5048a2bfad7",
-      "sha512": "5HBLDT/8yfwjJdMEDEGzKX+vq00t4Tgq1cfzlFO1fY6QgVXKkP9p2b7a/plrBKMSuNPERfpaIIRC0om5JlWqkA=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.41/vMLX-1.6.41-sequoia-arm64.dmg",
+      "sha256": "b0d9183256eddf5199b9ec0d727a89ad4e1ade69257d5b05f10815462be460b5",
+      "sha512": "zS3y5cxDZbynUEM4/7ciYViqyBMmnzAymF68fkQiLORkXPuNlqDjeNmFx4qIZ2AjS8DupD6ycy3DUUk1DLQysQ=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.40/vMLX-1.6.40-tahoe-arm64.dmg",
-      "sha256": "ac4ac2da6df648a5cd1534b77aa416bead70710faa97c29a966458c94a1b14b2",
-      "sha512": "rM8Ve2+zhOBJa4ECHaSC5GUyd6Nd1mbY70diY5JQFoiG742cA68uVrkw+ONhMiclrgGoLmiV3OoH6UFLh4p5Bg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.41/vMLX-1.6.41-tahoe-arm64.dmg",
+      "sha256": "fc6bf2344acb0426fa5bec2bcf9a1c7752647d2a6390ca2d534520d0fd9d329f",
+      "sha512": "I4re6Jr7Vpwl5zRPC8S44fwQXAWE7GNHg+guq9Ze1y7E/J9Dn9u3OM7PYUqurVa4TbVsHMIrySUTvhXzMIm+Sw=="
     }
   },
-  "notes": "vMLX 1.6.40 \u2014 keeps Qwen3.5 head-dimension-256 one-shot prefill tails on MLX's fused attention path; restores exact hybrid Qwen GatedDelta companion state across text, image, video, cross-chat, and restart SSD-prefix reuse; prevents ambiguous MiniMax-M3 reasoning from leaking into visible content; completes Electron frequency and presence penalty parity; reports live startup progress; and enforces exact packaged MLX and MLX-Metal versions. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.40, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, mounted-artifact verified, and installed-app smoke-tested without loading a model."
+  "notes": "vMLX 1.6.41 \u2014 enables the native Qwen MTP verification kernel on supported M5 runtimes; waits for DSV4 SSD durability before shutdown; restores mixed-SWA changed-tail state from SSD across restarts; scopes multimodal tool intent to the current turn; preserves explicit stream intervals; and ignores dead tool directories for new chats. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.41, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, mounted-artifact verified, and installed-app smoke-tested without loading a model."
 }

@@ -1,3 +1,4 @@
+import os
 from typing import Any, Optional
 
 import mlx.core as mx
@@ -13,6 +14,86 @@ from ..base import (
 )
 from ..cache import ArraysCache, KVCache
 from .config import ModelConfig, TextConfig
+
+
+_FALSE_ENV_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _unwrap_attention_cache(cache: Any) -> Any:
+    """Return the cache behind vMLX's batch-offset compatibility proxy."""
+    return getattr(cache, "_inner", cache)
+
+
+def _qwen35_force_fused_prefill(
+    queries: mx.array,
+    keys: mx.array,
+    values: mx.array,
+    cache: Any,
+    mask: Optional[mx.array],
+) -> bool:
+    """Select MLX 0.32.2's low-memory D=256 full-attention kernel.
+
+    MLX 0.32.2 automatically selects the NAX split-head kernel once the query
+    span reaches 1,024 tokens. A non-divisor final chunk can be shorter than
+    that while attending to a much longer cache, so the default heuristic
+    falls back to materializing softmax(QK^T). Besides the memory cost, that
+    fallback rounds differently from the fused one-shot lane. Force the fused
+    kernel only for the exact ordinary-cache geometry MLX advertises.
+
+    Quantized and TurboQuant caches retain their owning attention paths.
+    Decode and short initial prompts retain MLX's latency-tuned heuristic.
+    """
+    enabled = (
+        os.environ.get("VMLINUX_QWEN35_FUSED_PREFILL")
+        or os.environ.get("VMLX_QWEN35_FUSED_PREFILL")
+        or "1"
+    )
+    if enabled.strip().lower() in _FALSE_ENV_VALUES:
+        return False
+
+    raw_cache = _unwrap_attention_cache(cache)
+    cache_name = type(raw_cache).__name__.lower()
+    if hasattr(raw_cache, "bits") or "quant" in cache_name:
+        return False
+
+    query_length = int(queries.shape[-2])
+    key_length = int(keys.shape[-2])
+    return (
+        isinstance(mask, str)
+        and mask == "causal"
+        and query_length > 8
+        and key_length >= 1024
+        and query_length <= key_length
+        and int(queries.shape[-1]) == 256
+        and int(values.shape[-1]) == 256
+    )
+
+
+def _qwen35_scaled_dot_product_attention(
+    queries: mx.array,
+    keys: mx.array,
+    values: mx.array,
+    cache: Any,
+    scale: float,
+    mask: Optional[mx.array],
+) -> mx.array:
+    if _qwen35_force_fused_prefill(queries, keys, values, cache, mask):
+        return mx.fast.scaled_dot_product_attention(
+            queries,
+            keys,
+            values,
+            scale=scale,
+            mask=mask,
+            force_fused=True,
+        )
+    return scaled_dot_product_attention(
+        queries,
+        keys,
+        values,
+        cache=cache,
+        scale=scale,
+        mask=mask,
+    )
 
 
 class Qwen3_5RotaryEmbedding:
@@ -193,7 +274,7 @@ class Qwen3_5Attention(nn.Module):
         if cache is not None:
             keys, values = cache.update_and_fetch(keys, values)
 
-        output = scaled_dot_product_attention(
+        output = _qwen35_scaled_dot_product_attention(
             queries, keys, values, cache=cache, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)

@@ -2407,14 +2407,13 @@ _HYBRID_ONE_SHOT_GUARD_BYTES = max(
 # non-divisor, ragged and per-token chunk grids, plus warm-cache suffixes, on
 # the fused-SDPA path).
 #
-# This set does NOT flip the default. The flip was tried and RETRACTED
-# (2026-08-23): live A/B at temperature 0 diverged the reasoning trajectory
-# between lanes on Qwen3.8-27B (head_dim=256 → mx.fast SDPA falls back to a
-# kernel that MATERIALIZES softmax(QK^T); (heads, seq, seq) vs
-# (heads, chunk, ctx) tile differently and round differently by ulps; a
-# near-tie eventually flips). The same-lane control was byte-identical, so
-# the stack itself is deterministic — the divergence is lane-attributable.
-# See the path decision inside _run_vision_encoding_inner.
+# This set does NOT flip the default yet. The flip was tried and RETRACTED
+# (2026-08-23): on MLX 0.32.1 a live temperature-0 A/B diverged the reasoning
+# trajectory between lanes on Qwen3.8-27B because head_dim=256 used the
+# materializing SDPA fallback. MLX 0.32.2 added a fused NAX D=256 path, and the
+# vendored Qwen attention now forces that path for eligible non-divisor tails,
+# but the replacement live answer-byte gate must pass before the lane default
+# changes. See the path decision inside _run_vision_encoding_inner.
 #
 # The set still labels the auto-chunk OOM escape hatch below as
 # "verified" (the chunked MATH is exact; the hatch only fires where one-shot
@@ -9095,11 +9094,9 @@ class MLLMBatchGenerator:
         #
         # The default was flipped to chunked for the proven families and then
         # RETRACTED the same day on the answer-byte gate — see the decision
-        # below for the measured A/B. On head_dim-256 models the SDPA
-        # fallback materializes scores with shape-dependent rounding, so the
-        # two lanes produce ulp-different hidden states and temperature-0
-        # reasoning forks on a near-tie. Answers stay correct; bytes differ;
-        # bytes win.
+        # below for the measured MLX 0.32.1 A/B. MLX 0.32.2 plus the eligible-
+        # tail fused Qwen path removes that measured rounding mechanism, but
+        # the replacement live answer-byte gate has not passed yet.
         #
         # VMLX_ALLOW_HYBRID_CHUNKED_PREFILL: unset -> one-shot default;
         # truthy -> chunk every hybrid; falsy -> one-shot every hybrid.
@@ -9138,26 +9135,19 @@ class MLLMBatchGenerator:
             # arms): a 9,190-token prompt produced 1,388 output tokens chunked
             # vs 1,915 one-shot; a 29,080-token prompt 2,942 vs 2,663. The
             # same-lane control (chunked twice) was byte-identical in all four
-            # files, so the stack is deterministic and the divergence is
-            # lane-attributable. Mechanism: head_dim=256 keeps mx.fast SDPA
-            # off its fused kernel, the fallback MATERIALIZES softmax(QK^T)
-            # with shape-dependent matmul tiling, and (heads, seq, seq) vs
-            # (heads, chunk, ctx) round differently by ulps — at temperature 0
-            # a near-tie eventually flips one reasoning token and the
-            # trajectories fork (both arms' final answers stayed correct, and
-            # the warm-suffix turn-2 CONTENT was byte-identical across lanes).
-            # tests/test_hybrid_chunked_prefill_equivalence.py holds the
-            # bitwise proof on the fused-kernel path; the answer-byte gate is
-            # what the default must honor. The OOM escape hatch below still
-            # chunks spans whose one-shot score buffer cannot exist (that IS
-            # the shipped behavior above ~13.4k on 24-head/256-dim), and
-            # spans past ~37k have no one-shot at all (metal::malloc refuses
-            # a ~94GiB score buffer — live-proven, the request fails cleanly).
+            # files, so the stack is deterministic and the divergence was
+            # lane-attributable. The old owner was head_dim=256 falling back to
+            # a materialized softmax(QK^T), whose shape-dependent tiling rounded
+            # one-shot and chunked lanes differently. MLX 0.32.2 fuses causal
+            # D=256 spans >=1,024 on NAX; the vendored Qwen path also forces the
+            # supported fused kernel for shorter non-divisor tails over long KV.
+            # Synthetic off-boundary attention is now bit-identical, but the
+            # replacement live answer-byte gate still owns any default flip.
+            # The OOM escape hatch below remains available in the meantime.
             _allow_hybrid_chunked = False
             _hybrid_path_reason = (
-                "hybrid default one-shot (answer-byte parity; chunked lane "
-                "diverges reasoning trajectories on the head_dim-256 SDPA "
-                "fallback — see the comment at this decision)"
+                "hybrid default one-shot (replacement MLX 0.32.2 fused-D256 "
+                "answer-byte gate pending — see the comment at this decision)"
             )
         _hybrid_blocks_chunk = self._is_hybrid and not _allow_hybrid_chunked
         _allow_native_mtp_hybrid_text_split = (
@@ -9192,12 +9182,12 @@ class MLLMBatchGenerator:
             # chunking is equivalence-proven at the MECHANISM level (bit-exact
             # KV/SSM/logits — see the proven set above and
             # tests/test_hybrid_chunked_prefill_equivalence.py), but it is NOT
-            # the default: the answer-byte gate failed live (the head_dim-256
-            # SDPA fallback rounds differently between lanes and re-words temp-0
-            # reasoning). So these families DO still reach this branch and take
-            # the chunked path here as an OOM escape hatch, exactly like every
-            # other hybrid family — the proven set only decides how confidently
-            # this log line is phrased.
+            # the default: the answer-byte gate failed live on MLX 0.32.1. MLX
+            # 0.32.2 plus the eligible-tail fused Qwen path removes that measured
+            # mechanism, but these families remain here until the replacement
+            # live gate passes. They still take chunking as an OOM escape hatch,
+            # exactly like every other hybrid family; the proven set only decides
+            # how confidently this log line is phrased.
             #
             # Hybrid families NOT in the set (Nemotron-Cascade, MiniMax M2,
             # Granite Hybrid, ...) get the same fallback with no equivalence

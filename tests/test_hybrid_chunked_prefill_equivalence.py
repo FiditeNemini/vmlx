@@ -458,6 +458,84 @@ def _clear_hybrid_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+def test_qwen35_fused_prefill_gate_is_narrow_and_default_on(monkeypatch):
+    from mlx_vlm.models.qwen3_5 import language
+
+    monkeypatch.delenv("VMLINUX_QWEN35_FUSED_PREFILL", raising=False)
+    monkeypatch.delenv("VMLX_QWEN35_FUSED_PREFILL", raising=False)
+
+    q = mx.zeros((1, 24, 953, 256), dtype=mx.bfloat16)
+    k = mx.zeros((1, 4, 3001, 256), dtype=mx.bfloat16)
+    v = mx.zeros((1, 4, 3001, 256), dtype=mx.bfloat16)
+
+    class KVCache:
+        pass
+
+    assert language._qwen35_force_fused_prefill(q, k, v, KVCache(), "causal")
+
+    class TurboQuantKVCache:
+        pass
+
+    assert not language._qwen35_force_fused_prefill(
+        q, k, v, TurboQuantKVCache(), "causal"
+    )
+    assert not language._qwen35_force_fused_prefill(q[:, :, :1], k, v, KVCache(), None)
+    assert not language._qwen35_force_fused_prefill(
+        q, k, v, KVCache(), mx.zeros((953, 3001), dtype=mx.bool_)
+    )
+    assert not language._qwen35_force_fused_prefill(
+        q[..., :128], k[..., :128], v[..., :128], KVCache(), "causal"
+    )
+
+    monkeypatch.setenv("VMLX_QWEN35_FUSED_PREFILL", "0")
+    assert not language._qwen35_force_fused_prefill(q, k, v, KVCache(), "causal")
+
+
+def test_qwen35_fused_prefill_routes_only_eligible_attention(monkeypatch):
+    from mlx_vlm.models.qwen3_5 import language
+
+    monkeypatch.delenv("VMLINUX_QWEN35_FUSED_PREFILL", raising=False)
+    monkeypatch.delenv("VMLX_QWEN35_FUSED_PREFILL", raising=False)
+    calls = []
+
+    def fake_fused(*args, **kwargs):
+        calls.append(("fused", args, kwargs))
+        return mx.zeros_like(args[0])
+
+    def fake_fallback(*args, **kwargs):
+        calls.append(("fallback", args, kwargs))
+        return mx.zeros_like(args[0])
+
+    monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", fake_fused)
+    monkeypatch.setattr(language, "scaled_dot_product_attention", fake_fallback)
+
+    class KVCache:
+        pass
+
+    cache = KVCache()
+    q = mx.zeros((1, 24, 9, 256), dtype=mx.bfloat16)
+    k = mx.zeros((1, 4, 1024, 256), dtype=mx.bfloat16)
+    v = mx.zeros((1, 4, 1024, 256), dtype=mx.bfloat16)
+    language._qwen35_scaled_dot_product_attention(q, k, v, cache, 256**-0.5, "causal")
+    assert calls[0][0] == "fused"
+    assert calls[0][2] == {
+        "scale": 256**-0.5,
+        "mask": "causal",
+        "force_fused": True,
+    }
+
+    calls.clear()
+    language._qwen35_scaled_dot_product_attention(
+        q[:, :, :1], k, v, cache, 256**-0.5, None
+    )
+    assert calls[0][0] == "fallback"
+    assert calls[0][2] == {
+        "cache": cache,
+        "scale": 256**-0.5,
+        "mask": None,
+    }
+
+
 def test_mechanism_proven_family_still_defaults_to_one_shot(monkeypatch, caplog):
     """Mechanism-level equivalence is NOT the flip gate — answer bytes are.
 
@@ -477,7 +555,7 @@ def test_mechanism_proven_family_still_defaults_to_one_shot(monkeypatch, caplog)
         {"tokens": 6, "return_logits": True},
     ]
     assert "Hybrid prefill path=one-shot family=qwen3_5_text" in caplog.text
-    assert "answer-byte parity" in caplog.text
+    assert "fused-D256 answer-byte gate pending" in caplog.text
 
 
 def test_unknown_family_defaults_to_one_shot_lane(monkeypatch, caplog):

@@ -13,10 +13,6 @@ down) in ``MoE._weighted_routed_experts`` with two custom simdgroup kernels:
   the activated row, per-expert round to activation dtype. The cross-expert
   fp32 sum stays in stock ``_dsv4_accumulate_moe`` so that boundary is
   untouched.
-* optional accumulated-down kernel — one simdgroup per output row, preserving
-  each per-expert activation-dtype round before summing six routed values in
-  fp32. It emits a singleton route axis, so the unchanged stock accumulator
-  still adds the shared expert and owns the final output cast.
 
 Numerics: residual vs MLX's qmv is last-ulp reassociation only (same
 acceptance class as MoE prefix cold/warm); the installer runs a live
@@ -29,18 +25,13 @@ down b2gs32 (E,4096,128), k=6, swiglu_limit=10) are left stock.
 
 Env: ``VMLX_DSV4_FUSED_MOE_PAIR`` — default on; ``0``/``off``/``false``
 disables.
-
-``VMLX_DSV4_FUSED_MOE_ACCUMULATE`` is a default-off performance candidate.
-It removes the six-row routed output and stock sum graph without changing the
-JANG accumulator contract. It must win a controlled end-to-end A/B before any
-default change.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 import mlx.core as mx
 
@@ -149,52 +140,9 @@ _DOWN_SRC = f"""
     }}
 """
 
-_DOWN_ACCUM_SRC = f"""
-    uint tid = thread_position_in_grid.x;
-    uint sgid = tid / 32;
-    uint lane = thread_index_in_simdgroup;
-    uint d = sgid;
-    if (d >= {_D}) return;
-    float total = 0.0f;
-    for (uint k = 0; k < {_K}; k++) {{
-        uint e = (uint)inds[k];
-        size_t rowoff = ((size_t)e * {_D} + d);
-        const device uint32_t* row = dw + rowoff * {_W_DN};
-        size_t soff = rowoff * {_G_DN};
-        float acc = 0.0f;
-        for (uint i = 0; i < {_W_DN // 32}; i++) {{
-            uint w_idx = lane + 32u * i;
-            uint grp = w_idx >> 1;          // gs32 -> 2 words per group
-            float sc = (float)ds[soff + grp];
-            float bi = (float)db[soff + grp];
-            uint32_t wrd = row[w_idx];
-            uint abase = k * {_M} + w_idx * 16u;
-            float qs = 0.0f;
-            float xs = 0.0f;
-            for (uint j = 0; j < 16; j++) {{
-                float av = (float)act[abase + j];
-                xs += av;
-                qs += av * (float)((wrd >> (2u * j)) & 3u);
-            }}
-            acc += sc * qs + bi * xs;
-        }}
-        acc = simd_sum(acc);
-        // Preserve the stock per-expert hidden-dtype rounding boundary before
-        // its fp32 route sum.
-        total += (float)((T)acc);
-    }}
-    if (lane == 0) {{
-        out[d] = total;
-    }}
-"""
-
-_KERNELS: tuple[Any, Any, Any] | None = None
+_KERNELS: Optional[tuple[Any, Any]] = None
 _INSTALLED_CLASSES: set[type] = set()
-_LAST_STATUS: dict[str, Any] = {
-    "installed": 0,
-    "reason": None,
-    "fused_accumulate": False,
-}
+_LAST_STATUS: dict[str, Any] = {"installed": 0, "reason": None}
 
 
 def _enabled() -> bool:
@@ -202,12 +150,7 @@ def _enabled() -> bool:
     return value not in {"0", "off", "false", "no"}
 
 
-def _fused_accumulate_enabled() -> bool:
-    value = os.environ.get("VMLX_DSV4_FUSED_MOE_ACCUMULATE", "0").strip().lower()
-    return value not in {"", "0", "off", "false", "no"}
-
-
-def _get_kernels() -> tuple[Any, Any, Any]:
+def _get_kernels() -> tuple[Any, Any]:
     global _KERNELS
     if _KERNELS is None:
         pair = mx.fast.metal_kernel(
@@ -224,20 +167,13 @@ def _get_kernels() -> tuple[Any, Any, Any]:
             header=_HEADER,
             source=_DOWN_SRC,
         )
-        down_accum = mx.fast.metal_kernel(
-            name="vmlx_dsv4_down6_accum",
-            input_names=["act", "dw", "ds", "db", "inds"],
-            output_names=["out"],
-            header=_HEADER,
-            source=_DOWN_ACCUM_SRC,
-        )
-        _KERNELS = (pair, down, down_accum)
+        _KERNELS = (pair, down)
     return _KERNELS
 
 
 def _fused_routed(switch_mlp: Any, x_flat: mx.array, inds_flat: mx.array,
                   scores_flat: mx.array, dtype: mx.Dtype) -> mx.array:
-    pair, down, down_accum = _get_kernels()
+    pair, down = _get_kernels()
     g = switch_mlp.gate_proj
     u = switch_mlp.up_proj
     d = switch_mlp.down_proj
@@ -250,22 +186,18 @@ def _fused_routed(switch_mlp: Any, x_flat: mx.array, inds_flat: mx.array,
         output_shapes=[(_K, _M)],
         output_dtypes=[dtype],
     )[0]
-    collapse_routes = _fused_accumulate_enabled()
-    down_kernel = down_accum if collapse_routes else down
-    output_shape = (1, _D) if collapse_routes else (_K, _D)
-    output_dtype = mx.float32 if collapse_routes else dtype
-    out = down_kernel(
+    out = down(
         inputs=[act, d.weight, d.scales, d.biases, inds_flat],
         template=[("T", dtype)],
-        grid=(32 * (_D if collapse_routes else _K * _D), 1, 1),
+        grid=(32 * _K * _D, 1, 1),
         threadgroup=(128, 1, 1),
-        output_shapes=[output_shape],
-        output_dtypes=[output_dtype],
+        output_shapes=[(_K, _D)],
+        output_dtypes=[dtype],
     )[0]
     return out
 
 
-def _validate_module(mlp: Any) -> str | None:
+def _validate_module(mlp: Any) -> Optional[str]:
     switch_mlp = getattr(mlp, "switch_mlp", None)
     if switch_mlp is None:
         return "no switch_mlp"
@@ -300,7 +232,7 @@ def _validate_module(mlp: Any) -> str | None:
     return None
 
 
-def _self_test(mlp: Any, original: Any) -> str | None:
+def _self_test(mlp: Any, original: Any) -> Optional[str]:
     dtype = mlp.switch_mlp.gate_proj.scales.dtype
     x = (mx.random.normal((1, 1, _D)) * 0.5).astype(dtype)
     n_experts = mlp.switch_mlp.gate_proj.weight.shape[0]
@@ -314,12 +246,7 @@ def _self_test(mlp: Any, original: Any) -> str | None:
         got = _fused_routed(
             mlp.switch_mlp, x.reshape(-1), inds.reshape(-1),
             scores.reshape(-1), x.dtype,
-        )
-        if _fused_accumulate_enabled():
-            ref = ref.sum(axis=-2)
-            got = got.reshape(1, 1, 1, _D).astype(mx.float32).sum(axis=-2)
-        else:
-            got = got.reshape(1, 1, _K, _D).astype(mx.float32)
+        ).reshape(1, 1, _K, _D).astype(mx.float32)
         mx.eval(ref, got)
     except Exception as err:  # kernel compile / dispatch failure
         return f"self-test execution failed: {err}"
@@ -336,11 +263,7 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
 
     Returns the number of modules the fused path covers (0 = stock)."""
     if not _enabled():
-        _LAST_STATUS.update(
-            installed=0,
-            reason="disabled via env",
-            fused_accumulate=_fused_accumulate_enabled(),
-        )
+        _LAST_STATUS.update(installed=0, reason="disabled via env")
         return 0
     modules = []
     moe_cls = None
@@ -392,17 +315,13 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
                     scores.reshape(-1).astype(mx.float32),
                     x.dtype,
                 )
-                return out.reshape(1, 1, out.shape[0], _D)
+                return out.reshape(1, 1, _K, _D)
             return original(self, x, inds, scores)
 
         moe_cls._weighted_routed_experts = _pair_weighted
         _INSTALLED_CLASSES.add(moe_cls)
 
-    _LAST_STATUS.update(
-        installed=len(valid),
-        reason=None,
-        fused_accumulate=_fused_accumulate_enabled(),
-    )
+    _LAST_STATUS.update(installed=len(valid), reason=None)
     return len(valid)
 
 

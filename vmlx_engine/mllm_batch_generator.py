@@ -2429,6 +2429,32 @@ _HYBRID_CHUNKED_PROVEN_TEXT_MODEL_TYPES = frozenset(
     }
 )
 
+
+def _qwen_fused_d256_owns_attention_allocation(
+    language_model: Any, model_type: str
+) -> bool:
+    """Whether MLX fused SDPA makes the old materialized-score guard stale."""
+    if model_type not in _HYBRID_CHUNKED_PROVEN_TEXT_MODEL_TYPES:
+        return False
+    enabled = (
+        os.environ.get("VMLINUX_QWEN35_FUSED_PREFILL")
+        or os.environ.get("VMLX_QWEN35_FUSED_PREFILL")
+        or "1"
+    )
+    if enabled.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    args = getattr(language_model, "args", None)
+    head_dim = _read_config_field(args, "head_dim")
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        mlx_version = tuple(
+            int(part) for part in version("mlx").split(".")[:3]
+        )
+    except (ImportError, PackageNotFoundError, ValueError):
+        return False
+    return mlx_version >= (0, 32, 2) and int(head_dim or 0) == 256
+
 # Drain the generation stream before each per-chunk clear_cache.
 #
 # DEFAULT OFF — this was tried against the hybrid retention and MEASURED to do
@@ -9172,9 +9198,15 @@ class MLLMBatchGenerator:
             self.language_model
         )
         _predicted_attn_bytes = _n_heads_guess * seq_len * seq_len * 2
+        _fused_d256_owns_allocation = (
+            _qwen_fused_d256_owns_attention_allocation(
+                self.language_model, _hybrid_text_model_type
+            )
+        )
         if (
             _hybrid_blocks_chunk
             and not has_media_payload
+            and not _fused_d256_owns_allocation
             and _predicted_attn_bytes > _OOM_GUARD_BYTES
             and os.environ.get("VMLX_DISABLE_HYBRID_AUTO_CHUNK") not in ("1", "true", "True", "yes", "on")
         ):

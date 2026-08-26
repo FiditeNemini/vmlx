@@ -536,6 +536,31 @@ def test_qwen35_fused_prefill_routes_only_eligible_attention(monkeypatch):
     }
 
 
+def test_qwen_fused_d256_retires_materialized_score_oom_guard(monkeypatch):
+    from vmlx_engine.mllm_batch_generator import (
+        _qwen_fused_d256_owns_attention_allocation,
+    )
+
+    class Args:
+        head_dim = 256
+
+    class LanguageModel:
+        args = Args()
+
+    monkeypatch.delenv("VMLINUX_QWEN35_FUSED_PREFILL", raising=False)
+    monkeypatch.delenv("VMLX_QWEN35_FUSED_PREFILL", raising=False)
+    assert _qwen_fused_d256_owns_attention_allocation(
+        LanguageModel(), "qwen3_5_text"
+    )
+    assert not _qwen_fused_d256_owns_attention_allocation(
+        LanguageModel(), "minimax_m2"
+    )
+    monkeypatch.setenv("VMLX_QWEN35_FUSED_PREFILL", "0")
+    assert not _qwen_fused_d256_owns_attention_allocation(
+        LanguageModel(), "qwen3_5_text"
+    )
+
+
 def test_mechanism_proven_family_still_defaults_to_one_shot(monkeypatch, caplog):
     """Mechanism-level equivalence is NOT the flip gate — answer bytes are.
 

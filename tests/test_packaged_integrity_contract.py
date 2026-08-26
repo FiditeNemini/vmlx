@@ -31,8 +31,8 @@ def test_packaged_integrity_release_version_is_explicit_and_valid(monkeypatch):
     monkeypatch.delenv("VMLX_R20_EXPECTED_VERSION", raising=False)
     assert runner._configured_r20_artifact_chain_version() == "1.6.20"
 
-    monkeypatch.setenv("VMLX_R20_EXPECTED_VERSION", "1.6.38")
-    assert runner._configured_r20_artifact_chain_version() == "1.6.38"
+    monkeypatch.setenv("VMLX_R20_EXPECTED_VERSION", "1.6.39")
+    assert runner._configured_r20_artifact_chain_version() == "1.6.39"
 
     monkeypatch.setenv("VMLX_R20_EXPECTED_VERSION", "not-a-release")
     with pytest.raises(RuntimeError, match="invalid vMLX production version"):

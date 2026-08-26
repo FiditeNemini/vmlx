@@ -8,6 +8,29 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.39] - 2026-08-25
+
+### Performance
+
+- Native SSD prefix-cache validation now reads safetensors metadata instead of
+  loading each full DSV4, ZAYA, or mixed-SWA payload before reconstruction.
+  The reconstruction worker remains the only full-payload reader, eliminating
+  one redundant full SSD read per retained block while preserving exact native
+  typed state and the full-reader compatibility fallback.
+- SSD LRU access-only touch batches no longer trigger a whole-root byte-accounting
+  reconciliation while serving a cache hit.
+- Qwen3.5-family native-MTP depth-one decode avoids an unnecessary cycle fence;
+  deeper drafts and other families retain the conservative synchronization.
+
+### Fixed
+
+- OpenAI frequency and presence penalties plus `logit_bias` are now validated
+  and forwarded through text, multimodal, Chat Completions, legacy
+  Completions, Responses, Anthropic, and Ollama paths without logging biased
+  token identifiers.
+
+---
+
 ## [1.6.38] - 2026-08-25
 
 ### Performance

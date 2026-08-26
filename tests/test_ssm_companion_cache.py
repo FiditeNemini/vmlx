@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 import mlx.core as mx
 
+from vmlx_engine.cache_key import scope_cache_extra_key
 from vmlx_engine.utils.ssm_companion_cache import (
     HybridSSMStateCache,  # back-compat alias
     SSMCompanionCache,
@@ -507,6 +508,37 @@ def test_media_extra_keys_partition_longest_prefix_index():
     assert hit is not None
     checkpoint_len, _, _ = hit
     assert checkpoint_len == 64
+
+
+def test_media_scoped_extra_key_shares_pre_boundary_companion_only():
+    """Scoped media identity begins at its causal placeholder for SSM too."""
+
+    cache = SSMCompanionCache(model_key="qwen38-vl")
+    tokens = list(range(128))
+    blue = scope_cache_extra_key(
+        {"mllm_media_0000": "blue-image"},
+        "mllm_media_0000",
+        80,
+    )
+    red = scope_cache_extra_key(
+        {"mllm_media_0000": "red-image"},
+        "mllm_media_0000",
+        80,
+    )
+
+    cache.store(tokens, 64, [_FakeSSMLayer(1.0)])
+    pre_media = cache.fetch_longest_prefix(
+        tokens,
+        64,
+        cache_extra_keys=blue,
+    )
+    assert pre_media is not None
+    assert pre_media[0] == 64
+
+    cache.store(tokens, 96, [_FakeSSMLayer(2.0)], cache_extra_keys=blue)
+    assert cache.fetch(tokens, 96, cache_extra_keys=blue) is not None
+    assert cache.fetch(tokens, 96, cache_extra_keys=red) is None
+    assert cache.fetch(tokens, 96) is None
 
 
 # ----------------------------------------------------------------------

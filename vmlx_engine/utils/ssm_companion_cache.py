@@ -98,6 +98,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import mlx.core as mx
 
+from ..cache_key import cache_extra_keys_for_token_range
 from ..model_configs import NEMOTRON_H_MODEL_TYPES
 
 # Local alias for the mlx materialization routine. Keeping it under a
@@ -492,18 +493,31 @@ class SSMCompanionCache:
         self._disk = disk_store
 
     @staticmethod
-    def _extra_key_bytes(cache_extra_keys: Optional[Any]) -> bytes:
-        if cache_extra_keys is None:
+    def _extra_key_bytes(
+        cache_extra_keys: Optional[Any],
+        num_tokens: int,
+    ) -> bytes:
+        # Match paged/block hashing: a causal media discriminator does not
+        # affect companion state before its placeholder boundary. Without
+        # resolving the scoped keys here, KV can find an unsalted pre-media
+        # block while the SSM companion hashes the whole request as salted and
+        # forces a full hybrid prefill.
+        resolved = cache_extra_keys_for_token_range(
+            cache_extra_keys,
+            0,
+            num_tokens,
+        )
+        if resolved is None:
             return b""
         try:
             encoded = json.dumps(
-                cache_extra_keys,
+                resolved,
                 sort_keys=True,
                 separators=(",", ":"),
                 default=str,
             )
         except Exception:
-            encoded = repr(cache_extra_keys)
+            encoded = repr(resolved)
         return b"\x00extra=" + encoded.encode("utf-8")
 
     def _key(
@@ -527,7 +541,7 @@ class SSMCompanionCache:
             self._model_key.encode()
             + b"\x00schema-v2\x00"
             + json.dumps(token_ids[:num_tokens], separators=(",", ":")).encode()
-            + self._extra_key_bytes(cache_extra_keys)
+            + self._extra_key_bytes(cache_extra_keys, num_tokens)
         )
         h = hashlib.sha256(data).hexdigest()
         # VMLX_CACHE_HASH_DEBUG promotes this to INFO. A store and a fetch that
@@ -723,7 +737,7 @@ class SSMCompanionCache:
             self._model_key.encode()
             + b"\x00"
             + json.dumps(token_ids[:num_tokens], separators=(",", ":")).encode()
-            + self._extra_key_bytes(cache_extra_keys)
+            + self._extra_key_bytes(cache_extra_keys, num_tokens)
         )
         return hashlib.sha256(data).hexdigest()
 

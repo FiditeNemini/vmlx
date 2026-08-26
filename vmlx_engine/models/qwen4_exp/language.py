@@ -376,19 +376,21 @@ class GatedResidual(nn.Module):
         mix = mix.reshape(*mix.shape[:-1], self.hc_count, self.hidden_size)
         mixed = (
             mix * normed.reshape(*normed.shape[:-1], self.hc_count, self.hidden_size)
-        ).mean(-2)
+        ).mean(-2).astype(hyper_input.dtype)
         if block_injection is None:
             return mixed
-        inject_w = 2.0 * mx.sigmoid(block_injection / self.hc_count)
+        inject_w = (
+            2.0 * mx.sigmoid(block_injection / self.hc_count)
+        ).astype(hyper_input.dtype)
         return mixed, hyper_input, inject_w
 
     def combine(
         self, hyper_input: mx.array, block_out: mx.array, inject_w: mx.array
     ) -> mx.array:
         inj = block_out[..., None, :] * inject_w[..., :, None]
-        return hyper_input + inj.reshape(
+        return (hyper_input + inj.reshape(
             *inj.shape[:-2], self.hc_count * self.hidden_size
-        )
+        )).astype(hyper_input.dtype)
 
 
 def _hyper_split_indices(lowrank: int, hc_count: int) -> tuple[mx.array, mx.array]:

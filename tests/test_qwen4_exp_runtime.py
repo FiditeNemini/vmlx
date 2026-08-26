@@ -1365,6 +1365,31 @@ def test_qwen4_exp_hyper_projection_fusion_is_bit_identical():
         )
 
 
+def test_qwen4_exp_hyper_connection_preserves_mixed_jang_residual_dtype():
+    from mlx.utils import tree_map
+
+    from vmlx_engine.models.qwen4_exp.language import GatedResidual
+
+    module = GatedResidual(_tiny_args())
+    module.update(
+        tree_map(
+            lambda parameter: parameter.astype(mx.bfloat16),
+            module.parameters(),
+        )
+    )
+    module.hc_norm.weight = module.hc_norm.weight.astype(mx.float32)
+    residual = (mx.arange(256, dtype=mx.float16) / 127.0).reshape(1, 1, 256)
+
+    mixed, hyper, inject = module(residual)
+    combined = module.combine(hyper, mixed, inject)
+    mx.eval(mixed, hyper, inject, combined)
+
+    assert mixed.dtype == mx.float16
+    assert hyper.dtype == mx.float16
+    assert inject.dtype == mx.float16
+    assert combined.dtype == mx.float16
+
+
 def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
     from vmlx_engine.models.qwen4_exp.language import (
         GatedResidual,

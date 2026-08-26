@@ -55,7 +55,7 @@ def is_qwen4_exp_bundle(model_path: str | Path) -> bool:
 
 def _load_runtime_config(
     model_path: Path,
-) -> tuple[dict, frozenset[str], dict[str, object] | None]:
+) -> tuple[dict, frozenset[str], dict[str, object] | None, bool]:
     config = json.loads((model_path / "config.json").read_text())
     embedded = config.get("jang_config")
     if embedded is None:
@@ -72,14 +72,21 @@ def _load_runtime_config(
         )
     jang_config = sidecar if sidecar is not None else embedded
     if jang_config is None:
-        return config, frozenset(), None
+        return config, frozenset(), None, False
+
+    norm_convention = str(jang_config.get("norm_convention") or "").strip()
+    if norm_convention != "runtime_plus1_applied":
+        raise ValueError(
+            "qwen4_exp JANG weights require norm_convention="
+            "runtime_plus1_applied"
+        )
 
     runtime_config, affine1_modules = prepare_affine1_runtime_config(
         config, jang_config
     )
     raw_bit_map = jang_config.get("bit_map")
     if raw_bit_map is None:
-        return runtime_config, affine1_modules, None
+        return runtime_config, affine1_modules, None, True
     if not isinstance(raw_bit_map, Mapping):
         raise ValueError("qwen4_exp JANG bit_map must be an object")
     bit_map = copy.deepcopy(dict(raw_bit_map))
@@ -94,7 +101,7 @@ def _load_runtime_config(
     for key in ("bits", "group_size", "mode"):
         quantization.setdefault(key, default_spec[key])
     runtime_config["quantization"] = quantization
-    return runtime_config, affine1_modules, bit_map
+    return runtime_config, affine1_modules, bit_map, True
 
 
 def _classify_ple_tensor(key: str) -> tuple[str, str] | None:
@@ -277,16 +284,40 @@ def _normalize_runtime_weight_names(
 ) -> dict[str, mx.array]:
     """Map checkpoint roots to the owning VLM wrapper without hiding extras.
 
-    Both the official checkpoint and current MLX conversions store the MTP
-    module at top-level ``mtp.*``.  The runtime deliberately owns it below
-    ``language_model.mtp.*`` so main-model and speculative state stay on one
-    wrapper.  This narrow normalization is required for already-converted MLX
-    bundles, where running the full BF16 sanitizer would corrupt converted
-    tensor layouts.
+    The official checkpoint is sanitized into wrapper-owned names, while the
+    JANG converter writes already-sanitized MLX names without those wrapper
+    segments: ``language_model.*``, ``visual.*``, ``lm_head.*``, and
+    ``mtp.*``.  Normalize both forms to the instantiated VLM tree without
+    hiding extras.  This is deliberately separate from value sanitization:
+    JANG's ``runtime_plus1_applied`` stamp means shifted norms and convolution
+    layouts must not be transformed a second time.
     """
     normalized: dict[str, mx.array] = {}
+
+    def store(source_key: str, runtime_key: str, value: mx.array) -> None:
+        if runtime_key in normalized:
+            raise ValueError(
+                "qwen4_exp weight-name collision after runtime normalization: "
+                f"{source_key} -> {runtime_key}"
+            )
+        normalized[runtime_key] = value
+
     for key, value in weights.items():
-        runtime_key = f"language_model.{key}" if key.startswith("mtp.") else key
+        runtime_key = key
+        if runtime_key.startswith("mtp."):
+            runtime_key = f"language_model.{runtime_key}"
+        elif runtime_key.startswith("visual."):
+            runtime_key = runtime_key.replace("visual.", "vision_tower.", 1)
+        elif runtime_key.startswith("lm_head."):
+            runtime_key = runtime_key.replace(
+                "lm_head.", "language_model.lm_head.", 1
+            )
+        elif runtime_key.startswith("language_model.") and not runtime_key.startswith(
+            ("language_model.model.", "language_model.mtp.", "language_model.lm_head.")
+        ):
+            runtime_key = runtime_key.replace(
+                "language_model.", "language_model.model.", 1
+            )
         if runtime_key.endswith(".ple.conv1d.weight"):
             runtime_key = runtime_key.removesuffix(".conv1d.weight") + ".conv1d_weight"
             if value.ndim == 3:
@@ -301,12 +332,53 @@ def _normalize_runtime_weight_names(
                     "qwen4_exp PLE convolution must resolve to [channels, taps], "
                     f"got {value.shape}"
                 )
-        if runtime_key in normalized:
-            raise ValueError(
-                "qwen4_exp weight-name collision after runtime normalization: "
-                f"{key} -> {runtime_key}"
+        store(key, runtime_key, value)
+
+    # The converter already unfuses every backbone MoE, but preserves the
+    # trained top-level MTP head before reaching that transform.  Normalize its
+    # fused expert tensors here, including packed affine weight/scales/biases;
+    # splitting the expert-intermediate axis preserves each quantization group
+    # byte-for-byte.
+    fused_suffix = ".experts.gate_up_proj.weight"
+    fused_prefixes = [
+        key.removesuffix(fused_suffix)
+        for key in tuple(normalized)
+        if key.startswith("language_model.mtp.") and key.endswith(fused_suffix)
+    ]
+    for prefix in fused_prefixes:
+        gate_up_prefix = f"{prefix}.experts.gate_up_proj"
+        down_prefix = f"{prefix}.experts.down_proj"
+        for suffix in ("weight", "scales", "biases"):
+            gate_up_key = f"{gate_up_prefix}.{suffix}"
+            down_key = f"{down_prefix}.{suffix}"
+            if gate_up_key not in normalized or down_key not in normalized:
+                raise ValueError(
+                    "qwen4_exp fused MTP expert tensors are incomplete for "
+                    f"{prefix}.{suffix}"
+                )
+            gate_up = normalized.pop(gate_up_key)
+            down = normalized.pop(down_key)
+            if gate_up.ndim < 2 or gate_up.shape[-2] % 2:
+                raise ValueError(
+                    "qwen4_exp fused MTP gate/up tensor must have an even "
+                    f"expert-intermediate axis, got {gate_up.shape}"
+                )
+            midpoint = gate_up.shape[-2] // 2
+            store(
+                gate_up_key,
+                f"{prefix}.switch_mlp.gate_proj.{suffix}",
+                gate_up[..., :midpoint, :],
             )
-        normalized[runtime_key] = value
+            store(
+                gate_up_key,
+                f"{prefix}.switch_mlp.up_proj.{suffix}",
+                gate_up[..., midpoint:, :],
+            )
+            store(
+                down_key,
+                f"{prefix}.switch_mlp.down_proj.{suffix}",
+                down,
+            )
     return normalized
 
 
@@ -322,22 +394,36 @@ def _quantize_model(
     model_predicate = getattr(model, "quant_predicate", None)
 
     def predicate(path, module):
-        if callable(model_predicate) and not model_predicate(path, module):
-            return False
+        aliases = (
+            path,
+            path.replace("language_model.model", "language_model", 1),
+            path.replace("language_model.mtp", "mtp", 1),
+        )
+        checkpoint_quantized = any(
+            f"{alias}.scales" in weights for alias in aliases
+        )
+        blocked_by_model = callable(model_predicate) and not model_predicate(
+            path, module
+        )
+        if blocked_by_model:
+            # JANG_4M explicitly stores 8-bit router gates.  They cannot be
+            # treated as float weights or discarded; instantiate the matching
+            # affine module only when the complete prequantized checkpoint
+            # tensor is present. Recurrent coefficients remain forbidden.
+            if not (
+                bit_map is not None
+                and checkpoint_quantized
+                and path.endswith("mlp.gate")
+            ):
+                return False
         override = (
             resolve_jang_bit_map_spec(path, bit_map)
             if bit_map is not None
             else quantization.get(path)
         )
         if isinstance(override, dict):
-            if f"{path}.scales" in weights:
+            if checkpoint_quantized:
                 return override
-            for alias in (
-                path.replace("language_model.model", "language_model", 1),
-                path.replace("language_model.mtp", "mtp", 1),
-            ):
-                if f"{alias}.scales" in weights:
-                    return override
             return False
         if not hasattr(module, "to_quantized"):
             return False
@@ -366,7 +452,9 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     model_path = Path(model_path)
     if not register_qwen4_exp_runtime():
         raise RuntimeError("qwen4_exp MLX-VLM runtime registration failed")
-    config, affine1_modules, bit_map = _load_runtime_config(model_path)
+    config, affine1_modules, bit_map, jang_runtime_sanitized = _load_runtime_config(
+        model_path
+    )
     model_class, _ = get_model_and_args(config)
     config.setdefault("text_config", config.pop("llm_config", {}))
     config.setdefault("vision_config", {})
@@ -379,7 +467,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     weights, is_mlx_format, ple_buffers = _load_non_table_weights(
         model_path, affine1_modules
     )
-    if not is_mlx_format:
+    if not (is_mlx_format or jang_runtime_sanitized):
         weights = model.sanitize(weights)
     weights = _normalize_runtime_weight_names(weights)
     _quantize_model(model, config, weights, bit_map)

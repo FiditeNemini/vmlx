@@ -409,6 +409,7 @@ def test_qwen4_exp_embedded_jang_bit_map_becomes_runtime_quantization(tmp_path):
 
     embedded = {
         "format": "jang_v2",
+        "norm_convention": "runtime_plus1_applied",
         "bit_map": {
             "default": {"bits": 8, "group_size": 64},
             "language_model.layers.*.mlp.switch_mlp": {
@@ -427,9 +428,12 @@ def test_qwen4_exp_embedded_jang_bit_map_becomes_runtime_quantization(tmp_path):
         json.dumps({"model_type": "qwen4_exp", "jang_config": embedded})
     )
 
-    runtime, affine1_modules, bit_map = _load_runtime_config(tmp_path)
+    runtime, affine1_modules, bit_map, runtime_sanitized = _load_runtime_config(
+        tmp_path
+    )
     assert affine1_modules == frozenset()
     assert bit_map == embedded["bit_map"]
+    assert runtime_sanitized is True
     assert runtime["quantization"] == {
         "bits": 8,
         "group_size": 64,
@@ -454,6 +458,7 @@ def test_qwen4_exp_jang_metadata_and_bit_map_conflicts_fail_closed(tmp_path):
 
     embedded = {
         "format": "jang_v2",
+        "norm_convention": "runtime_plus1_applied",
         "bit_map": {"default": {"bits": 4, "group_size": 64}},
     }
     (tmp_path / "config.json").write_text(
@@ -474,6 +479,17 @@ def test_qwen4_exp_jang_metadata_and_bit_map_conflicts_fail_closed(tmp_path):
         resolve_jang_bit_map_spec(
             "language_model.layers.1.self_attn.q_proj", conflicting
         )
+
+    unstamped = {
+        "format": "jang_v2",
+        "bit_map": {"default": {"bits": 4, "group_size": 64}},
+    }
+    (tmp_path / "jang_config.json").unlink()
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "qwen4_exp", "jang_config": unstamped})
+    )
+    with pytest.raises(ValueError, match="runtime_plus1_applied"):
+        _load_runtime_config(tmp_path)
 
 
 def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
@@ -499,6 +515,7 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
         {
             "language_model.layers.3.mlp.switch_mlp.down_proj.scales": mx.ones(1),
             "mtp.layers.0.self_attn.q_proj.scales": mx.ones(1),
+            "language_model.model.layers.3.mlp.gate.scales": mx.ones(1),
         },
         bit_map,
     )
@@ -512,7 +529,26 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
         "group_size": 64,
         "mode": "affine",
     }
-    assert predicate("language_model.model.layers.4.self_attn.q_proj", object()) is False
+    assert (
+        predicate("language_model.model.layers.4.self_attn.q_proj", object())
+        is False
+    )
+
+    class RouterAwareModel:
+        @staticmethod
+        def quant_predicate(path, _module):
+            return not path.endswith("mlp.gate")
+
+    captured.clear()
+    loader._quantize_model(
+        RouterAwareModel(),
+        {"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}},
+        {"language_model.model.layers.3.mlp.gate.scales": mx.ones(1)},
+        bit_map,
+    )
+    assert captured["class_predicate"](
+        "language_model.model.layers.3.mlp.gate", object()
+    ) == {"bits": 8, "group_size": 64, "mode": "affine"}
 
 
 def test_qwen4_exp_ple_layout_resolution_is_complete_and_unambiguous():
@@ -552,7 +588,7 @@ def test_qwen4_exp_ple_layout_resolution_is_complete_and_unambiguous():
         _resolve_ple_module_key_format(ambiguous, 3)
 
 
-def test_qwen4_exp_mtp_root_is_normalized_and_collisions_fail_closed():
+def test_qwen4_exp_converted_roots_are_normalized_and_collisions_fail_closed():
     from vmlx_engine.models.qwen4_exp.loader import _normalize_runtime_weight_names
 
     mtp = mx.ones((2, 2))
@@ -560,18 +596,22 @@ def test_qwen4_exp_mtp_root_is_normalized_and_collisions_fail_closed():
     normalized = _normalize_runtime_weight_names(
         {
             "mtp.fc_embedding.weight": mtp,
-            "language_model.model.embed_tokens.weight": body,
+            "language_model.embed_tokens.weight": body,
+            "visual.blocks.0.attn.qkv.weight": body,
+            "lm_head.weight": body,
         }
     )
     assert set(normalized) == {
         "language_model.mtp.fc_embedding.weight",
         "language_model.model.embed_tokens.weight",
+        "vision_tower.blocks.0.attn.qkv.weight",
+        "language_model.lm_head.weight",
     }
     assert normalized["language_model.mtp.fc_embedding.weight"] is mtp
 
     ple_conv = mx.ones((8, 1, 4))
     normalized = _normalize_runtime_weight_names(
-        {"language_model.model.layers.1.ple.conv1d.weight": ple_conv}
+        {"language_model.layers.1.ple.conv1d_weight": ple_conv.squeeze(1)}
     )
     assert set(normalized) == {
         "language_model.model.layers.1.ple.conv1d_weight"
@@ -579,6 +619,34 @@ def test_qwen4_exp_mtp_root_is_normalized_and_collisions_fail_closed():
     assert normalized[
         "language_model.model.layers.1.ple.conv1d_weight"
     ].shape == (8, 4)
+
+    fused_weight = mx.arange(2 * 8 * 3).reshape(2, 8, 3)
+    fused_scales = mx.arange(2 * 8 * 2).reshape(2, 8, 2)
+    fused_biases = fused_scales + 1
+    down_weight = mx.ones((2, 6, 3))
+    down_scales = mx.ones((2, 6, 2))
+    down_biases = mx.zeros((2, 6, 2))
+    normalized = _normalize_runtime_weight_names(
+        {
+            "mtp.layers.0.mlp.experts.gate_up_proj.weight": fused_weight,
+            "mtp.layers.0.mlp.experts.gate_up_proj.scales": fused_scales,
+            "mtp.layers.0.mlp.experts.gate_up_proj.biases": fused_biases,
+            "mtp.layers.0.mlp.experts.down_proj.weight": down_weight,
+            "mtp.layers.0.mlp.experts.down_proj.scales": down_scales,
+            "mtp.layers.0.mlp.experts.down_proj.biases": down_biases,
+        }
+    )
+    assert set(normalized) == {
+        f"language_model.mtp.layers.0.mlp.switch_mlp.{projection}.{suffix}"
+        for projection in ("gate_proj", "up_proj", "down_proj")
+        for suffix in ("weight", "scales", "biases")
+    }
+    assert normalized[
+        "language_model.mtp.layers.0.mlp.switch_mlp.gate_proj.weight"
+    ].shape == (2, 4, 3)
+    assert normalized[
+        "language_model.mtp.layers.0.mlp.switch_mlp.up_proj.scales"
+    ].shape == (2, 4, 2)
 
     with pytest.raises(ValueError, match="singleton input channel"):
         _normalize_runtime_weight_names(
@@ -594,6 +662,14 @@ def test_qwen4_exp_mtp_root_is_normalized_and_collisions_fail_closed():
             {
                 "mtp.fc_embedding.weight": mtp,
                 "language_model.mtp.fc_embedding.weight": body,
+            }
+        )
+
+    with pytest.raises(ValueError, match="weight-name collision"):
+        _normalize_runtime_weight_names(
+            {
+                "visual.blocks.0.attn.qkv.weight": mtp,
+                "vision_tower.blocks.0.attn.qkv.weight": body,
             }
         )
 

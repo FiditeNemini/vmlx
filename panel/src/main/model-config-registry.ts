@@ -175,6 +175,35 @@ registerFamily('zaya1-vl', { cacheType: 'hybrid', toolParser: 'zaya_xml', suppor
 // relies on config.json vision_config, not the family's isMultimodal flag.
 registerFamily('qwen3.5', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 (dense)', priority: 4 })
 registerFamily('qwen3.5-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: false, description: 'Qwen 3.5 MoE', priority: 4 })
+// Qwen3.8 Flash Next is a Qwen4Exp VL wrapper around the hybrid QSA/Gated
+// DeltaNet decoder.  Base MLX bundles do not require a jang_config sidecar, so
+// every user-visible capability that is invariant for this model_type must be
+// present in the registry just as it is in Python model_configs.py.  Falling
+// through to DEFAULT_CONFIG hid low/medium/xhigh, the Qwen tool parser, and the
+// native-MTP control even while the loaded engine advertised all three.
+registerFamily('qwen4-exp', {
+  cacheType: 'hybrid',
+  cacheSubtype: 'qsa_gdn_ple_v1',
+  toolParser: 'qwen',
+  reasoningParser: 'qwen3',
+  supportsThinking: true,
+  supportsInstructMode: true,
+  supportedReasoningEfforts: ['low', 'medium', 'xhigh'],
+  defaultReasoningEffort: 'xhigh',
+  thinkInTemplate: true,
+  defaultEnableThinking: true,
+  usePagedCache: false,
+  enableAutoToolChoice: true,
+  isMultimodal: true,
+  architectureHints: {
+    attentionArch: 'qsa_gdn_ple',
+    cacheSchema: 'qsa_gdn_ple_v1',
+    cachePrecision: 'full',
+    pleStorage: 'ssd_row_addressed',
+  },
+  description: 'Qwen3.8 Flash Next (QSA + Gated DeltaNet VL)',
+  priority: 3,
+})
 registerFamily('qwen3-next', { cacheType: 'mamba', toolParser: 'qwen', reasoningParser: 'qwen3', usePagedCache: false, enableAutoToolChoice: true, description: 'Qwen 3 Next (hybrid Mamba)', priority: 1 })
 registerFamily('qwen3-vl', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, isMultimodal: true, description: 'Qwen 3 Vision-Language', priority: 5 })
 registerFamily('qwen3-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningParser: 'qwen3', enableAutoToolChoice: true, description: 'Qwen 3 MoE', priority: 5 })
@@ -414,6 +443,8 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'qwen3_5': 'qwen3.5',
   'qwen3_5_moe': 'qwen3.5-moe',
   'qwen3_5_moe_text': 'qwen3.5-moe', // Qwen3.6-35B-A3B inner text_config model_type
+  'qwen4_exp': 'qwen4-exp',
+  'qwen4_exp_text': 'qwen4-exp',
   'qwen3': 'qwen3',
   'qwen3_next': 'qwen3-next',
   'qwen3_moe': 'qwen3-moe',
@@ -1154,6 +1185,8 @@ function detectNativeMtpCapability(
     'qwen3_5_text',
     'qwen3_5_moe',
     'qwen3_5_moe_text',
+    'qwen4_exp',
+    'qwen4_exp_text',
     'hy_v3',
     'dots3_note',
   ])
@@ -1814,10 +1847,6 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
               const jangCfg = JSON.parse(readFileSync(jangConfigPath, 'utf-8'))
               parsedJangConfig = jangCfg
               detected = applyJangCapabilities(detected, jangCfg)
-              const nativeMtp = detectNativeMtpCapability(parsed, jangCfg, modelPath)
-              if (nativeMtp) {
-                detected.nativeMtp = nativeMtp
-              }
               const nativeMtpVlReady = qwenNativeMtpVlArtifactReady(parsed, jangCfg, modelPath)
               if (
                 isAffineJangQwenHybridVlm(parsed, jangCfg) &&
@@ -1846,6 +1875,15 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
             }
           } else if (configDeclaresMedia(parsed)) {
             detected.isMultimodal = true
+          }
+          // Native MTP is an indexed artifact capability, not a JANG-sidecar
+          // capability. Base MLX Qwen4Exp bundles carry their MTP declaration
+          // in config.text_config and their tensors in the safetensors index.
+          // Keeping this call inside the jang_config branch made the engine run
+          // MTP while Electron rendered no control for the exact same bundle.
+          const nativeMtp = detectNativeMtpCapability(parsed, parsedJangConfig, modelPath)
+          if (nativeMtp) {
+            detected.nativeMtp = nativeMtp
           }
           detected = applyLagunaVariantHint(detected, parsed, parsedJangConfig)
           detected = applyConfigMetadataOverrides(detected, parsed)

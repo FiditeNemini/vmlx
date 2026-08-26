@@ -75,6 +75,77 @@ describe('detectModelConfigFromDir DSV4 native cache defaults', () => {
 })
 
 describe('detectModelConfigFromDir JANG multimodal detection', () => {
+  it('detects base Qwen4Exp QSA/GDN reasoning, VL, context, and native MTP without a JANG sidecar', () => {
+    const dir = makeModelDir({
+      model_type: 'qwen4_exp',
+      text_config: {
+        model_type: 'qwen4_exp_text',
+        max_position_embeddings: 262144,
+        mtp_num_hidden_layers: 1,
+        layer_types: ['linear_attention', 'linear_attention', 'linear_attention', 'full_attention'],
+      },
+      vision_config: { model_type: 'qwen4_exp' },
+    })
+    writeFileSync(join(dir, 'chat_template.jinja'), [
+      "{% set resolved_reasoning_effort = reasoning_effort|default('xhigh') %}",
+      "{% if enable_thinking is undefined or enable_thinking is true %}",
+      "{{ resolved_reasoning_effort }}",
+      "{% endif %}",
+    ].join('\n'))
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model-00001-of-00131.safetensors',
+        'vision_tower.patch_embed.proj.weight': 'model-00130-of-00131.safetensors',
+        'mtp.fc_embedding.weight': 'model-00131-of-00131.safetensors',
+        'mtp.layers.0.self_attn.q_proj.weight': 'model-00131-of-00131.safetensors',
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected).toMatchObject({
+      family: 'qwen4-exp',
+      cacheType: 'hybrid',
+      cacheSubtype: 'qsa_gdn_ple_v1',
+      toolParser: 'qwen',
+      reasoningParser: 'qwen3',
+      supportsThinking: true,
+      supportsInstructMode: true,
+      honorsEnableThinking: true,
+      supportedReasoningEfforts: ['low', 'medium', 'xhigh'],
+      defaultReasoningEffort: 'xhigh',
+      thinkInTemplate: true,
+      defaultEnableThinking: true,
+      usePagedCache: false,
+      enableAutoToolChoice: true,
+      isMultimodal: true,
+      maxContextLength: 262144,
+      architectureHints: {
+        attentionArch: 'qsa_gdn_ple',
+        cacheSchema: 'qsa_gdn_ple_v1',
+        cachePrecision: 'full',
+        pleStorage: 'ssd_row_addressed',
+      },
+    })
+    expect(detected.nativeMtp).toMatchObject({
+      supported: true,
+      depth: 1,
+      depthSource: 'config.text_config.mtp_num_hidden_layers',
+      runtimeScope: 'text+vl',
+      requiresDeterministicSampling: true,
+    })
+
+    const textDir = makeModelDir({
+      model_type: 'qwen4_exp_text',
+      max_position_embeddings: 262144,
+    })
+    expect(detectModelConfigFromDir(textDir)).toMatchObject({
+      family: 'qwen4-exp',
+      cacheSubtype: 'qsa_gdn_ple_v1',
+      supportedReasoningEfforts: ['low', 'medium', 'xhigh'],
+    })
+  })
+
   it('detects Nemotron Omni media from its sidecar and matching component tensors', () => {
     const dir = makeModelDir(
       {

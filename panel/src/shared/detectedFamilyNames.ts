@@ -41,6 +41,7 @@ const ENGINE_FAMILY_TO_REGISTRY: Readonly<Record<string, string>> = Object.freez
   qwen3_5: 'qwen3.5',
   qwen3_5_moe: 'qwen3.5-moe',
   qwen3_next: 'qwen3-next',
+  qwen4_exp: 'qwen4-exp',
   nemotron_h: 'nemotron-h',
 })
 

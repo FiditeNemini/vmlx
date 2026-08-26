@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'fs'
+import { buildNativeMtpLaunchArgs } from '../src/shared/nativeMtpLaunchArgs'
 
 /**
  * An external draft model and the bundle's own MTP heads are two speculative
@@ -28,19 +29,24 @@ describe('native MTP and an external drafter are mutually exclusive', () => {
 
   it('an active external drafter disables native MTP explicitly', () => {
     const block = nativeMtpBlock()
-    const guard = block.indexOf('compatibleExternalSpeculative')
-    const disable = block.indexOf("args.push('--disable-native-mtp')", guard)
-    expect(disable).toBeGreaterThan(guard)
+    expect(block).toContain('args.push(...buildNativeMtpLaunchArgs({')
+    expect(block).toContain('externalSpeculativeActive: compatibleExternalSpeculative')
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: 3,
+      mode: 'auto',
+      externalSpeculativeActive: true,
+    })).toEqual(['--disable-native-mtp'])
   })
 
   it('the depth flag is NOT emitted on that branch', () => {
-    // --native-mtp-depth must come after the drafter branch, i.e. only in the
-    // else. If it preceded it, both would ship.
-    const block = nativeMtpBlock()
-    const guard = block.indexOf('} else if (compatibleExternalSpeculative) {')
-    const depth = block.indexOf("args.push('--native-mtp-depth'")
-    expect(guard).toBeGreaterThan(-1)
-    expect(depth).toBeGreaterThan(guard)
+    const args = buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: 3,
+      mode: 'auto',
+      externalSpeculativeActive: true,
+    })
+    expect(args).not.toContain('--native-mtp-depth')
   })
 
   it('the drafter is still pushed when it is compatible', () => {

@@ -376,7 +376,7 @@ class ShardedNGramEmbedding(nn.Module):
         per = -(-padded_vocab_size // n_shards)  # ceil
         self.per = per
         self.head_dim = head_dim
-        self.output_dtype = mx.float16
+        self.output_dtype = None
         # Full Qwen3.8 has ~320M rows. Constructing placeholder Embeddings for
         # those rows allocates the very table that this module is designed to
         # leave on SSD. Tiny parity models retain ordinary embeddings.
@@ -389,18 +389,20 @@ class ShardedNGramEmbedding(nn.Module):
         else:
             self.shards = []
 
-    def set_file_backed(self, table, output_dtype=mx.float16) -> None:
+    def set_file_backed(self, table, output_dtype=None) -> None:
         """Install a FileBackedNGramTable so lookups read only touched pages
         (np.memmap) instead of materializing 800 MB shard tensors."""
         self._file_backed = table
-        self.output_dtype = output_dtype
+        self.output_dtype = table.output_dtype if output_dtype is None else output_dtype
 
     def __call__(self, rows_np: np.ndarray) -> mx.array:
         """rows_np: int64 [B, S, H] row ids into the concatenated table."""
         fb = getattr(self, "_file_backed", None)
         if fb is not None:
             vals = fb.gather_mlx(rows_np.reshape(-1))
-            return vals.astype(self.output_dtype).reshape(*rows_np.shape, self.head_dim)
+            if self.output_dtype is not None and vals.dtype != self.output_dtype:
+                vals = vals.astype(self.output_dtype)
+            return vals.reshape(*rows_np.shape, self.head_dim)
         if not self.shards:
             raise RuntimeError(
                 "qwen4_exp full PLE table requires a file-backed SSD row reader"

@@ -941,6 +941,58 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
     assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
 
 
+def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
+    from vmlx_engine.models.qwen4_exp.language import ShardedNGramEmbedding
+    from vmlx_engine.models.qwen4_exp.table_reader import _AffineShard
+
+    dense = nn.Embedding(4, 64)
+    dense.weight = dense.weight.astype(mx.bfloat16)
+    quantized = dense.to_quantized(group_size=64, bits=4)
+
+    class ArrayRows:
+        def __init__(self, values, dtype_tag):
+            self.values = values
+            self.dtype_tag = dtype_tag
+            self.shape = values.shape
+
+        @property
+        def mlx_dtype(self):
+            return {
+                "BF16": mx.bfloat16,
+                "U32": mx.uint32,
+            }[self.dtype_tag]
+
+        def mlx_rows(self, rows):
+            return self.values[mx.array(rows.astype(np.uint32))]
+
+    shard = _AffineShard.__new__(_AffineShard)
+    shard.weight = ArrayRows(quantized.weight, "U32")
+    shard.scales = ArrayRows(quantized.scales, "BF16")
+    shard.biases = ArrayRows(quantized.biases, "BF16")
+    shard.group_size = 64
+    shard.logical_bits = 4
+    shard.storage_bits = 4
+    shard.mode = "affine"
+    shard.head_dim = 64
+    gathered = shard.gather_mlx(np.array([0, 2], dtype=np.int64))
+    assert gathered.dtype == mx.bfloat16
+
+    class FileBackedTable:
+        output_dtype = mx.bfloat16
+
+        def gather_mlx(self, rows):
+            return shard.gather_mlx(rows % 4)
+
+    embedding = ShardedNGramEmbedding(3_000_000, 64, 128)
+    embedding.set_file_backed(FileBackedTable())
+    ple = embedding(np.array([[[0], [2]]], dtype=np.int64))
+    residual = mx.zeros(ple.shape, dtype=mx.bfloat16) + ple
+    mx.eval(gathered, ple, residual)
+
+    assert ple.dtype == mx.bfloat16
+    assert residual.dtype == mx.bfloat16
+
+
 def test_qwen4_exp_ple_manifest_aliases_are_deterministic_and_fail_closed():
     from vmlx_engine.models.qwen4_exp.table_reader import (
         _module_aliases,

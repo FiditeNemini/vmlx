@@ -19,6 +19,14 @@ _DTYPES = {
     "I64": np.int64,
 }
 
+_MLX_DTYPES = {
+    "BF16": mx.bfloat16,
+    "F16": mx.float16,
+    "F32": mx.float32,
+    "U32": mx.uint32,
+    "I64": mx.int64,
+}
+
 
 def _module_aliases(module_path: str) -> tuple[str, ...]:
     """Return stable official/runtime aliases without set-order ambiguity."""
@@ -145,18 +153,14 @@ class SafetensorsRowReader:
             return (raw.astype(np.uint32) << 16).view(np.float32)
         return np.asarray(values)
 
+    @property
+    def mlx_dtype(self):
+        return _MLX_DTYPES[self.dtype_tag]
+
     def mlx_rows(self, indices: np.ndarray) -> mx.array:
         """Return rows with the safetensors dtype preserved for MLX kernels."""
         values = self.rows(indices)
-        if self.dtype_tag == "BF16":
-            return mx.array(values).astype(mx.bfloat16)
-        if self.dtype_tag == "F16":
-            return mx.array(values).astype(mx.float16)
-        if self.dtype_tag == "F32":
-            return mx.array(values).astype(mx.float32)
-        if self.dtype_tag == "U32":
-            return mx.array(values).astype(mx.uint32)
-        return mx.array(values)
+        return mx.array(values).astype(self.mlx_dtype)
 
 
 class _AffineShard:
@@ -183,6 +187,15 @@ class _AffineShard:
         self.head_dim = int(expected_head_dim)
         if self.mode != "affine":
             raise ValueError(f"PLE row reader requires affine mode, got {self.mode!r}")
+        if self.scales.dtype_tag != self.biases.dtype_tag:
+            raise ValueError(
+                "PLE scales and biases must have identical dtypes: "
+                f"{self.scales.dtype_tag} != {self.biases.dtype_tag}"
+            )
+        if self.scales.dtype_tag not in {"BF16", "F16", "F32"}:
+            raise ValueError(
+                f"PLE affine parameters require a floating dtype, got {self.scales.dtype_tag}"
+            )
         _validate_affine_layout(
             weight_shape=self.weight.shape,
             weight_dtype=self.weight.dtype_tag,
@@ -197,6 +210,10 @@ class _AffineShard:
     @property
     def rows_count(self) -> int:
         return self.weight.shape[0]
+
+    @property
+    def output_dtype(self):
+        return self.scales.mlx_dtype
 
     def gather_mlx(self, rows: np.ndarray) -> mx.array:
         packed = self.weight.mlx_rows(rows)
@@ -213,7 +230,7 @@ class _AffineShard:
             group_size=self.group_size,
             bits=runtime_bits,
             mode=self.mode,
-            dtype=mx.float16,
+            dtype=self.output_dtype,
         )
         if values.shape[-1] != self.head_dim:
             raise ValueError(
@@ -292,11 +309,14 @@ class FileBackedQuantizedNGramTable:
             )
         self.per = self.shards[0].rows_count
         self.head_dim = int(expected_head_dim)
+        self.output_dtype = self.shards[0].output_dtype
         if self.per <= 0:
             raise ValueError("PLE shard 0 is empty")
         for shard_index, shard in enumerate(self.shards):
             if shard.head_dim != self.head_dim:
                 raise ValueError(f"PLE shard {shard_index} head dimension differs")
+            if shard.output_dtype != self.output_dtype:
+                raise ValueError(f"PLE shard {shard_index} output dtype differs")
             if shard_index < len(self.shards) - 1 and shard.rows_count != self.per:
                 raise ValueError(
                     f"PLE shard {shard_index} has {shard.rows_count} rows; "
@@ -322,7 +342,9 @@ class FileBackedQuantizedNGramTable:
             raise IndexError("PLE row exceeds the configured n-gram table")
         shard_indices = flat_rows // self.per
         local_rows = flat_rows % self.per
-        out = mx.zeros((flat_rows.size, self.head_dim), dtype=mx.float16)
+        out = mx.zeros(
+            (flat_rows.size, self.head_dim), dtype=self.output_dtype
+        )
         for shard_index in np.unique(shard_indices):
             selected = np.nonzero(shard_indices == shard_index)[0]
             selected_mx = mx.array(selected.astype(np.uint32))

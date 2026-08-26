@@ -140,3 +140,43 @@ def test_restart_gate_selects_production_off_boundary_prompt(monkeypatch):
         captured["headers"]["X-vMLX-Private-Proof"]
         == gate.PRIVATE_ATTESTATION_PROOF_HEADER
     )
+
+
+def test_restart_gate_waits_for_its_async_disk_write_fence(monkeypatch):
+    snapshots = iter(
+        [
+            {
+                "block_disk_cache": {
+                    "disk_writes": 0,
+                    "blocks_on_disk": 0,
+                    "write_pipeline": {
+                        "active_producers": 1,
+                        "inflight": 1,
+                        "pending_items": 1,
+                        "pending_bytes": 1024,
+                    },
+                }
+            },
+            {
+                "block_disk_cache": {
+                    "disk_writes": 21,
+                    "blocks_on_disk": 21,
+                    "write_pipeline": {
+                        "active_producers": 0,
+                        "inflight": 0,
+                        "pending_items": 0,
+                        "pending_bytes": 0,
+                    },
+                }
+            },
+        ]
+    )
+    monkeypatch.setattr(gate, "get_json", lambda *_args, **_kwargs: next(snapshots))
+    monkeypatch.setattr(gate.time, "sleep", lambda _seconds: None)
+
+    durable = gate.wait_block_disk_durable("http://127.0.0.1:8843", timeout_s=1)
+
+    block = durable["block_disk_cache"]
+    assert block["disk_writes"] == 21
+    assert block["blocks_on_disk"] == 21
+    assert block["write_pipeline"]["inflight"] == 0

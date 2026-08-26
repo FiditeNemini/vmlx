@@ -5633,6 +5633,7 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
                 "native_l2": True,
                 "generic_tq_kv_off": True,
                 "disk_write_before_restart": True,
+                "disk_write_pipeline_quiescent": True,
                 "restart_l2_disk_hit": True,
                 "restart_dsv4_cache_hit": True,
                 "same_block_disk_cache_dir": True,

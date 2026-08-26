@@ -6394,6 +6394,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         and restart_l2_checks.get("native_l2") is True
         and restart_l2_checks.get("generic_tq_kv_off") is True
         and restart_l2_checks.get("disk_write_before_restart") is True
+        and restart_l2_checks.get("disk_write_pipeline_quiescent") is True
         and restart_l2_checks.get("restart_l2_disk_hit") is True
         and restart_l2_checks.get("restart_dsv4_cache_hit") is True
         and restart_l2_checks.get("same_block_disk_cache_dir") is True
@@ -6500,6 +6501,7 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
                     "native_l2",
                     "generic_tq_kv_off",
                     "disk_write_before_restart",
+                    "disk_write_pipeline_quiescent",
                     "restart_l2_disk_hit",
                     "restart_dsv4_cache_hit",
                     "same_block_disk_cache_dir",

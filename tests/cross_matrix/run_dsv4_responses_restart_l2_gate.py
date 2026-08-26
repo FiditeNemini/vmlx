@@ -217,6 +217,40 @@ def block_disk_stats(cache_stats: dict[str, Any]) -> dict[str, Any]:
     return stats if isinstance(stats, dict) else {}
 
 
+def wait_block_disk_durable(
+    base_url: str,
+    *,
+    timeout_s: float = 120.0,
+) -> dict[str, Any]:
+    """Wait for this isolated run's async SSD write fence to become durable."""
+    deadline = time.monotonic() + timeout_s
+    last_stats: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last_stats = get_json(f"{base_url}/v1/cache/stats", timeout=10)
+        block = block_disk_stats(last_stats)
+        pipeline = block.get("write_pipeline")
+        if not isinstance(pipeline, dict):
+            pipeline = {}
+        durable = (
+            int(block.get("disk_writes") or 0) > 0
+            and int(block.get("blocks_on_disk") or 0) > 0
+            and int(pipeline.get("active_producers") or 0) == 0
+            and int(pipeline.get("inflight") or 0) == 0
+            and int(pipeline.get("pending_items") or 0) == 0
+            and int(pipeline.get("pending_bytes") or 0) == 0
+        )
+        if durable:
+            return last_stats
+        time.sleep(0.25)
+    block = block_disk_stats(last_stats)
+    pipeline = block.get("write_pipeline")
+    raise TimeoutError(
+        "block-disk write fence did not become durable before restart: "
+        f"writes={block.get('disk_writes')}, "
+        f"blocks={block.get('blocks_on_disk')}, pipeline={pipeline}"
+    )
+
+
 def native_cache(health: dict[str, Any]) -> dict[str, Any]:
     native = health.get("native_cache")
     if isinstance(native, dict):
@@ -475,8 +509,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             timeout=args.request_timeout,
         )
         store_wall = time.perf_counter() - t0
-        stats_before_restart = get_json(
-            f"http://127.0.0.1:{args.port}/v1/cache/stats", timeout=10
+        stats_before_restart = wait_block_disk_durable(
+            base_url,
+            timeout_s=min(120.0, float(args.request_timeout)),
         )
         health1_after = get_json(f"http://127.0.0.1:{args.port}/health", timeout=10)
         first_pid = proc1.pid
@@ -507,6 +542,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         cache_prompt_tokens = int(
             token_contract_row.get("cache_prompt_token_count") or 0
         )
+        before_pipeline = before_block.get("write_pipeline")
+        if not isinstance(before_pipeline, dict):
+            before_pipeline = {}
         checks = {
             "native_cache": native.get("cache_type") == "native_composite",
             "native_prefix": native.get("prefix") is True,
@@ -517,6 +555,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             is False,
             "disk_write_before_restart": int(before_block.get("disk_writes") or 0) > 0
             and int(before_block.get("blocks_on_disk") or 0) > 0,
+            "disk_write_pipeline_quiescent": int(
+                before_pipeline.get("active_producers") or 0
+            )
+            == 0
+            and int(before_pipeline.get("inflight") or 0) == 0
+            and int(before_pipeline.get("pending_items") or 0) == 0
+            and int(before_pipeline.get("pending_bytes") or 0) == 0,
             "restart_l2_disk_hit": int(after_block.get("disk_hits") or 0) > 0,
             "restart_dsv4_cache_hit": restart_cached > 0 and "dsv4" in restart_detail,
             "same_block_disk_cache_dir": "--block-disk-cache-dir" in cmd1

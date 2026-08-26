@@ -157,33 +157,3 @@ def test_wrong_layout_rejected(monkeypatch):
     model.mlp.switch_mlp.down_proj.group_size = 64  # not the validated layout
     assert fpm.install_dsv4_fused_pair_moe(model) == 0
     assert moe_cls._weighted_routed_experts is stock
-
-
-def test_threadgroup_width_is_validated_and_reported(monkeypatch):
-    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
-    monkeypatch.setenv("VMLX_DSV4_FUSED_MOE_THREADGROUP", "256")
-    moe_cls, model_cls = _make_moe_cls()
-    stock = moe_cls._weighted_routed_experts
-    model = model_cls()
-    assert fpm.install_dsv4_fused_pair_moe(model) == 1
-    assert fpm.dsv4_fused_pair_moe_status()["threadgroup_width"] == 256
-
-    x, inds, scores = _decode_inputs()
-    ref = stock(model.mlp, x, inds, scores).astype(mx.float32)
-    got = moe_cls._weighted_routed_experts(model.mlp, x, inds, scores).astype(
-        mx.float32
-    )
-    mx.eval(ref, got)
-    rel = float(mx.abs(got - ref).max()) / max(float(mx.abs(ref).max()), 1e-9)
-    assert rel < 5e-3
-
-
-def test_invalid_threadgroup_width_fails_closed(monkeypatch):
-    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
-    monkeypatch.setenv("VMLX_DSV4_FUSED_MOE_THREADGROUP", "48")
-    moe_cls, model_cls = _make_moe_cls()
-    stock = moe_cls._weighted_routed_experts
-    model = model_cls()
-    assert fpm.install_dsv4_fused_pair_moe(model) == 0
-    assert moe_cls._weighted_routed_experts is stock
-    assert "not in" in fpm.dsv4_fused_pair_moe_status()["reason"]

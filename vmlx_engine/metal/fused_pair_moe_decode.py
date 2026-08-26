@@ -24,8 +24,7 @@ layout differs from the validated DSV4 shape (gate/up b2gs64 (E,2048,256),
 down b2gs32 (E,4096,128), k=6, swiglu_limit=10) are left stock.
 
 Env: ``VMLX_DSV4_FUSED_MOE_PAIR`` — default on; ``0``/``off``/``false``
-disables. ``VMLX_DSV4_FUSED_MOE_THREADGROUP`` selects a validated launch
-width from 32/64/128/256 and defaults to the proven 128-thread geometry.
+disables.
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ _SELF_TEST_MAX_REL = 2.5e-2
 
 _ORIGINAL_ATTR = "_vmlx_dsv4_pair_original_weighted_call"
 _MODULE_OK_ATTR = "_vmlx_pair_fused_ok"
-_MODULE_TG_ATTR = "_vmlx_pair_fused_threadgroup"
 
 _HEADER = """
 #include <metal_stdlib>
@@ -152,17 +150,6 @@ def _enabled() -> bool:
     return value not in {"0", "off", "false", "no"}
 
 
-def _configured_threadgroup_width() -> tuple[Optional[int], Optional[str]]:
-    raw = os.environ.get("VMLX_DSV4_FUSED_MOE_THREADGROUP", "128").strip()
-    try:
-        width = int(raw)
-    except ValueError:
-        return None, f"invalid threadgroup width {raw!r}"
-    if width not in {32, 64, 128, 256}:
-        return None, f"threadgroup width {width} not in {{32,64,128,256}}"
-    return width, None
-
-
 def _get_kernels() -> tuple[Any, Any]:
     global _KERNELS
     if _KERNELS is None:
@@ -185,8 +172,7 @@ def _get_kernels() -> tuple[Any, Any]:
 
 
 def _fused_routed(switch_mlp: Any, x_flat: mx.array, inds_flat: mx.array,
-                  scores_flat: mx.array, dtype: mx.Dtype,
-                  threadgroup_width: int = 128) -> mx.array:
+                  scores_flat: mx.array, dtype: mx.Dtype) -> mx.array:
     pair, down = _get_kernels()
     g = switch_mlp.gate_proj
     u = switch_mlp.up_proj
@@ -196,7 +182,7 @@ def _fused_routed(switch_mlp: Any, x_flat: mx.array, inds_flat: mx.array,
                 u.weight, u.scales, u.biases, inds_flat, scores_flat],
         template=[("T", dtype)],
         grid=(32 * _M * _K, 1, 1),
-        threadgroup=(threadgroup_width, 1, 1),
+        threadgroup=(128, 1, 1),
         output_shapes=[(_K, _M)],
         output_dtypes=[dtype],
     )[0]
@@ -204,7 +190,7 @@ def _fused_routed(switch_mlp: Any, x_flat: mx.array, inds_flat: mx.array,
         inputs=[act, d.weight, d.scales, d.biases, inds_flat],
         template=[("T", dtype)],
         grid=(32 * _K * _D, 1, 1),
-        threadgroup=(threadgroup_width, 1, 1),
+        threadgroup=(128, 1, 1),
         output_shapes=[(_K, _D)],
         output_dtypes=[dtype],
     )[0]
@@ -246,7 +232,7 @@ def _validate_module(mlp: Any) -> Optional[str]:
     return None
 
 
-def _self_test(mlp: Any, original: Any, threadgroup_width: int) -> Optional[str]:
+def _self_test(mlp: Any, original: Any) -> Optional[str]:
     dtype = mlp.switch_mlp.gate_proj.scales.dtype
     x = (mx.random.normal((1, 1, _D)) * 0.5).astype(dtype)
     n_experts = mlp.switch_mlp.gate_proj.weight.shape[0]
@@ -259,7 +245,7 @@ def _self_test(mlp: Any, original: Any, threadgroup_width: int) -> Optional[str]
         ref = original(mlp, x, inds, scores).astype(mx.float32)
         got = _fused_routed(
             mlp.switch_mlp, x.reshape(-1), inds.reshape(-1),
-            scores.reshape(-1), x.dtype, threadgroup_width,
+            scores.reshape(-1), x.dtype,
         ).reshape(1, 1, _K, _D).astype(mx.float32)
         mx.eval(ref, got)
     except Exception as err:  # kernel compile / dispatch failure
@@ -278,10 +264,6 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
     Returns the number of modules the fused path covers (0 = stock)."""
     if not _enabled():
         _LAST_STATUS.update(installed=0, reason="disabled via env")
-        return 0
-    threadgroup_width, threadgroup_error = _configured_threadgroup_width()
-    if threadgroup_error is not None or threadgroup_width is None:
-        _LAST_STATUS.update(installed=0, reason=threadgroup_error)
         return 0
     modules = []
     moe_cls = None
@@ -308,7 +290,7 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
     if original is None:
         original = moe_cls._weighted_routed_experts
 
-    fail = _self_test(valid[0], original, threadgroup_width)
+    fail = _self_test(valid[0], original)
     if fail is not None:
         _LAST_STATUS.update(installed=0, reason=fail)
         _log.warning("DSV4 fused pair MoE decode refused: %s", fail)
@@ -316,7 +298,6 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
 
     for module in valid:
         setattr(module, _MODULE_OK_ATTR, True)
-        setattr(module, _MODULE_TG_ATTR, threadgroup_width)
 
     if moe_cls not in _INSTALLED_CLASSES:
         setattr(moe_cls, _ORIGINAL_ATTR, original)
@@ -333,7 +314,6 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
                     inds.reshape(-1),
                     scores.reshape(-1).astype(mx.float32),
                     x.dtype,
-                    getattr(self, _MODULE_TG_ATTR, 128),
                 )
                 return out.reshape(1, 1, _K, _D)
             return original(self, x, inds, scores)
@@ -341,11 +321,7 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
         moe_cls._weighted_routed_experts = _pair_weighted
         _INSTALLED_CLASSES.add(moe_cls)
 
-    _LAST_STATUS.update(
-        installed=len(valid),
-        reason=None,
-        threadgroup_width=threadgroup_width,
-    )
+    _LAST_STATUS.update(installed=len(valid), reason=None)
     return len(valid)
 
 

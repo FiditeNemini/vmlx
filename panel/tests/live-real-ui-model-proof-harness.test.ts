@@ -3645,6 +3645,29 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("binds model-native reasoning effort before and during the conversation", () => {
+    const result = structuredClone(goodResult());
+    result.requestedReasoningEffort = "xhigh";
+    result.requestedMidConvReasoningEffort = "low";
+    result.chatSettingsDom.reasoningMode = null;
+    result.chatSettingsDom.thinkingNotice = true;
+    result.chatSettingsDom.reasoningEffort = "xhigh";
+    result.chatOverrides.enableThinking = true;
+    result.chatOverrides.reasoningEffort = "xhigh";
+    result.midConvReasoningFlip = {
+      requested: true,
+      buttonFound: true,
+      saved: true,
+      persistedReasoningEffortAfter: "low",
+    };
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+
+    result.midConvReasoningFlip.persistedReasoningEffortAfter = "medium";
+    expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(
+      /mid-conversation reasoning effort was not visibly changed and persisted/,
+    );
+  });
+
   it("rejects missing visible cache state, contradictory argv, and capacity-only telemetry", () => {
     const result = structuredClone(goodResult());
     result.serverCacheControls.controlScope = "app-mode-navigation";

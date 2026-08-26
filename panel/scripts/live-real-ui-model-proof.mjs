@@ -499,6 +499,25 @@ const checkAudio = envBool('VMLINUX_REAL_UI_CHECK_AUDIO', false)
 // Flip the reasoning mode mid-conversation (after turn 1). Default OFF so
 // every existing row is byte-unchanged.
 const toggleThinkingMidConv = envBool('VMLINUX_REAL_UI_TOGGLE_THINKING_MIDCONV', false)
+const allowedReasoningEfforts = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const reasoningEffortOverride = (
+  process.env.VMLINUX_REAL_UI_REASONING_EFFORT
+  || process.env.VMLX_REAL_UI_REASONING_EFFORT
+  || ''
+).trim().toLowerCase() || undefined
+const midConvReasoningEffortOverride = (
+  process.env.VMLINUX_REAL_UI_MIDCONV_REASONING_EFFORT
+  || process.env.VMLX_REAL_UI_MIDCONV_REASONING_EFFORT
+  || ''
+).trim().toLowerCase() || undefined
+for (const [label, effort] of [
+  ['initial', reasoningEffortOverride],
+  ['mid-conversation', midConvReasoningEffortOverride],
+]) {
+  if (effort && !allowedReasoningEfforts.has(effort)) {
+    throw new Error(`Real UI ${label} reasoning effort is invalid: ${effort}`)
+  }
+}
 const expectPagedCacheLocked = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE_LOCKED', false)
 const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
 // Select the SSD-only lane (block-disk L2 WITHOUT the RAM paged pool) before
@@ -4984,10 +5003,30 @@ export function validateGenerationDefaultsEvidence(result) {
   }
   if (
     result?.requestedEnableThinking === undefined
-      ? stored.enableThinking != null
+      ? (result?.requestedReasoningEffort != null
+        ? stored.enableThinking !== true
+        : stored.enableThinking != null)
       : stored.enableThinking !== result.requestedEnableThinking
   ) {
     failures.push('persisted reasoning mode does not match the requested mode')
+  }
+  if (result?.requestedReasoningEffort != null) {
+    if (stored.reasoningEffort !== result.requestedReasoningEffort) {
+      failures.push('persisted reasoning effort does not match the requested effort')
+    }
+    if (dom?.reasoningEffort !== result.requestedReasoningEffort) {
+      failures.push('reopened visible reasoning effort does not match the requested effort')
+    }
+  }
+  if (result?.requestedMidConvReasoningEffort != null) {
+    const flip = result?.midConvReasoningFlip || {}
+    if (
+      flip.buttonFound !== true
+      || flip.saved !== true
+      || flip.persistedReasoningEffortAfter !== result.requestedMidConvReasoningEffort
+    ) {
+      failures.push('mid-conversation reasoning effort was not visibly changed and persisted')
+    }
   }
   if (result?.requestedBuiltinTools === true) {
     const storedToolExpectations = [
@@ -7900,7 +7939,10 @@ function assertResult(result) {
   if (expectedToolCalls >= 2 && !result.provenSurfaces?.includes('long_tool_loop')) {
     failures.push('UI action profile expected two real built-in tools but proof did not record long_tool_loop surface')
   }
-  if (result.requestedEnableThinking === true && !result.provenSurfaces?.includes('reasoning_display')) {
+  if (
+    (result.requestedEnableThinking === true || result.requestedReasoningEffort != null)
+    && !result.provenSurfaces?.includes('reasoning_display')
+  ) {
     failures.push('requested real reasoning but proof did not record reasoning_display surface')
   }
   if (result.requestedServerCacheControls === true && !result.provenSurfaces?.includes('server_cache_controls')) {
@@ -8872,10 +8914,12 @@ async function main() {
         const wireApi = ${JSON.stringify(wireApi)};
         const uiActionProfile = ${JSON.stringify(uiActionProfile)};
         const uiTurnCount = ${JSON.stringify(uiTurnCount)};
-        const apiActionProfile = ${JSON.stringify(apiActionProfile)};
-        const builtinToolsEnabled = ${JSON.stringify(builtinToolsEnabled)};
-        const enableThinking = ${enableThinkingOverride === undefined ? 'undefined' : JSON.stringify(enableThinkingOverride)};
-        const checkMedia = ${JSON.stringify(checkMedia)};
+          const apiActionProfile = ${JSON.stringify(apiActionProfile)};
+          const builtinToolsEnabled = ${JSON.stringify(builtinToolsEnabled)};
+          const enableThinking = ${enableThinkingOverride === undefined ? 'undefined' : JSON.stringify(enableThinkingOverride)};
+          const requestedReasoningEffort = ${JSON.stringify(reasoningEffortOverride)};
+          const requestedMidConvReasoningEffort = ${JSON.stringify(midConvReasoningEffortOverride)};
+          const checkMedia = ${JSON.stringify(checkMedia)};
         const checkVideo = ${JSON.stringify(checkVideo)};
         const imageDataUrl = ${JSON.stringify(imageDataUrl)};
         const imageExpectRegex = ${JSON.stringify(imageExpectRegex)};
@@ -10036,6 +10080,23 @@ async function main() {
             chatSettingsInteraction.controlsChanged.push('Reasoning ' + thinkingLabel);
             await new Promise((resolve) => setTimeout(resolve, 50));
           }
+          if (requestedReasoningEffort) {
+            const effortControl = await waitFor(() => {
+              const candidate = chatSettingsDrawer?.querySelector(
+                '[data-reasoning-effort="' + CSS.escape(requestedReasoningEffort) + '"]'
+              );
+              return candidate instanceof HTMLButtonElement
+                && isVisible(candidate)
+                && !candidate.disabled
+                ? candidate
+                : null;
+            }, 'visible native reasoning effort ' + requestedReasoningEffort);
+            effortControl.click();
+            chatSettingsInteraction.controlsChanged.push(
+              'Reasoning Effort ' + requestedReasoningEffort,
+            );
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
           const wireSelect = await waitFor(
             () => [...(chatSettingsDrawer?.querySelectorAll('select') || [])]
               .find((candidate) =>
@@ -10240,6 +10301,13 @@ async function main() {
               )
               && String(button.className || '').includes('bg-primary')
             ));
+          const reopenedReasoningEffortButton = [...(reopenedDrawer?.querySelectorAll(
+            '[data-reasoning-effort]'
+          ) || [])].find((button) => (
+            button instanceof HTMLButtonElement
+            && isVisible(button)
+            && String(button.className || '').includes('bg-primary')
+          ));
           const reopenedWorkingDirectory = [...(reopenedDrawer?.querySelectorAll('input[type="text"]') || [])]
             .find((candidate) =>
               (candidate.getAttribute('placeholder') || '').includes('project directory')
@@ -10261,6 +10329,9 @@ async function main() {
             reasoningMode: (reopenedThinkingButton?.textContent || '')
               .replace(/\\s+/g, ' ')
               .trim() || null,
+            reasoningEffort: reopenedReasoningEffortButton?.getAttribute(
+              'data-reasoning-effort'
+            ) || null,
             // Notice families (LFM2.5, MiniMax) render the honesty notice
             // instead of mode buttons — record the shape so the reopen
             // validator can accept a legitimately absent mode control.
@@ -10334,8 +10405,13 @@ async function main() {
             chatOverrides?.wireApi === desiredWire
             && Boolean(chatOverrides?.builtinToolsEnabled) === builtinToolsEnabled
             && (enableThinking === undefined
-              ? chatOverrides?.enableThinking == null
+              ? (requestedReasoningEffort
+                ? chatOverrides?.enableThinking === true
+                : chatOverrides?.enableThinking == null)
               : chatOverrides?.enableThinking === enableThinking)
+            && (requestedReasoningEffort == null
+              ? chatOverrides?.reasoningEffort == null
+              : chatOverrides?.reasoningEffort === requestedReasoningEffort)
             && explicitSamplingPersisted
             && requestedMaxTokensPersisted
             && toolSettingsPersisted
@@ -10346,6 +10422,9 @@ async function main() {
               || (chatSettingsDom.thinkingNotice === true
                 && enableThinking === undefined
                 && !chatSettingsDom.reasoningMode))
+            && (requestedReasoningEffort == null
+              ? chatSettingsDom.reasoningEffort == null
+              : chatSettingsDom.reasoningEffort === requestedReasoningEffort)
             && chatSettingsDom.builtinToolsEnabled === builtinToolsEnabled
             && visibleToolSettingsPersisted
           );
@@ -10533,7 +10612,10 @@ async function main() {
           // reasoning rail reset and the never-empty resolver's reasoning
           // input — had never been exercised here at all.
           let midConvReasoningFlip = null;
-          if (${JSON.stringify(toggleThinkingMidConv)} && firstSent) {
+          if (
+            (${JSON.stringify(toggleThinkingMidConv)} || requestedMidConvReasoningEffort)
+            && firstSent
+          ) {
             try {
               const openBtn = [...document.querySelectorAll('[data-vmlx-control="chat-settings"]')]
                 .find((b) => b instanceof HTMLButtonElement && isVisible(b));
@@ -10589,9 +10671,15 @@ async function main() {
                 .map((b) => (b.textContent || '').replace(/\\s+/g, ' ').trim())
                 .filter((text) => text && text.length <= 24)
                 .slice(0, 30);
-              const btn = [...(drawer?.querySelectorAll('button') || [])]
-                .find((b) => isVisible(b) && !b.disabled
-                  && targetLabels.includes((b.textContent || '').replace(/\\s+/g, ' ').trim()));
+              const btn = requestedMidConvReasoningEffort
+                ? drawer?.querySelector(
+                    '[data-reasoning-effort="'
+                    + CSS.escape(requestedMidConvReasoningEffort)
+                    + '"]'
+                  )
+                : [...(drawer?.querySelectorAll('button') || [])]
+                    .find((b) => isVisible(b) && !b.disabled
+                      && targetLabels.includes((b.textContent || '').replace(/\\s+/g, ' ').trim()));
               const pressedBefore = btn ? btn.getAttribute('aria-pressed') : null;
               if (btn) {
                 btn.scrollIntoView({ block: 'center' });
@@ -10612,10 +10700,12 @@ async function main() {
               // attempt used window.api.chat.get and returned null, which
               // proved nothing.
               let persistedAfter = null;
+              let persistedReasoningEffortAfter = null;
               let overridesAfter = null;
               try {
                 overridesAfter = await window.api.chat.getOverrides(chat.id);
                 persistedAfter = overridesAfter?.enableThinking ?? null;
+                persistedReasoningEffortAfter = overridesAfter?.reasoningEffort ?? null;
               } catch (_) {}
               // CLOSE the drawer. Leaving it open covers the composer, so the
               // NEXT turn's Send control never becomes reachable and the run
@@ -10651,6 +10741,7 @@ async function main() {
                 saved,
                 drawerClosed,
                 persistedEnableThinkingAfterSave: persistedAfter,
+                persistedReasoningEffortAfter,
                 overrideKeysAfterSave: overridesAfter && typeof overridesAfter === 'object'
                   ? Object.keys(overridesAfter).sort()
                   : null,
@@ -11114,6 +11205,8 @@ async function main() {
         requestedWireApi: wireApi,
         requestedBuiltinTools: builtinToolsEnabled,
         requestedEnableThinking: enableThinkingOverride,
+        requestedReasoningEffort: reasoningEffortOverride,
+        requestedMidConvReasoningEffort: midConvReasoningEffortOverride,
         reasoningExpectation,
         requestedServerCacheControls: checkServerCacheControls,
         requestedBlockDiskCacheMaxPercent: blockDiskCacheMaxPercentOverride,
@@ -12084,6 +12177,8 @@ async function main() {
       requestedWireApi: wireApi,
       requestedBuiltinTools: builtinToolsEnabled,
       requestedEnableThinking: enableThinkingOverride,
+      requestedReasoningEffort: reasoningEffortOverride,
+      requestedMidConvReasoningEffort: midConvReasoningEffortOverride,
       reasoningExpectation,
       requestedServerCacheControls: checkServerCacheControls,
       requestedBlockDiskCacheMaxPercent: blockDiskCacheMaxPercentOverride,

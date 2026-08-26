@@ -5768,6 +5768,97 @@ class TestOpenAILogprobsFormatting:
         )
 
     @pytest.mark.asyncio
+    async def test_streaming_responses_minimax_adaptive_holds_end_only_private_prefix(
+        self, monkeypatch
+    ):
+        """M3 adaptive must not publish bytes that a late close makes private."""
+        import json
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.minimax_m3_parser import MiniMaxM3ReasoningParser
+
+        private = "The user wants exactly one sentence."
+
+        class _Engine:
+            tokenizer = SimpleNamespace(has_thinking=False)
+
+            async def stream_chat(self, *, messages, **kwargs):
+                yield GenerationOutput(
+                    text=private,
+                    new_text=private,
+                    prompt_tokens=9,
+                    completion_tokens=7,
+                    finished=False,
+                    finish_reason=None,
+                )
+                yield GenerationOutput(
+                    text=private + "</mm:think>VISIBLE_M3_RESPONSE",
+                    new_text="</mm:think>VISIBLE_M3_RESPONSE",
+                    prompt_tokens=9,
+                    completion_tokens=11,
+                    finished=True,
+                    finish_reason="stop",
+                )
+
+        class _Registry:
+            def lookup(self, _key):
+                return SimpleNamespace(
+                    family_name="minimax_m3",
+                    think_in_template=False,
+                    reasoning_parser="minimax_m3",
+                    tool_parser="minimax_m3",
+                )
+
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "minimax-m3-adaptive-stream-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", MiniMaxM3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", None)
+        monkeypatch.setattr(registry, "get_model_config_registry", lambda: _Registry())
+
+        request = ResponsesRequest(
+            model="minimax-m3-adaptive-stream-test",
+            input="reply in one sentence",
+            stream=True,
+        )
+        events = []
+        async for chunk in server.stream_responses_api(
+            _Engine(),
+            [{"role": "user", "content": "reply in one sentence"}],
+            request,
+            fastapi_request=None,
+            chat_template_kwargs={"thinking_mode": "adaptive"},
+        ):
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        reasoning = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.reasoning_summary_text.delta"
+        )
+        visible = "".join(
+            event.get("delta", "")
+            for event in events
+            if event.get("type") == "response.output_text.delta"
+        )
+        completed = next(
+            event["response"]
+            for event in events
+            if event.get("type") == "response.completed"
+        )
+
+        assert reasoning == private
+        assert visible == "VISIBLE_M3_RESPONSE"
+        assert completed["output_text"] == "VISIBLE_M3_RESPONSE"
+        assert private not in completed["output_text"]
+
+    @pytest.mark.asyncio
     async def test_streaming_responses_without_tools_skips_native_tool_parser(
         self, monkeypatch
     ):

@@ -18227,7 +18227,7 @@ class TestStreamUsagePropagatesCacheDetail:
         }
 
     @pytest.mark.asyncio
-    async def test_minimax_m3_chat_stream_visible_prefix_preserves_native_length(
+    async def test_minimax_m3_adaptive_chat_stream_holds_end_only_private_prefix(
         self, monkeypatch
     ):
         import json
@@ -18257,15 +18257,20 @@ class TestStreamUsagePropagatesCacheDetail:
                     raise AssertionError(
                         "visible native content must not trigger a fresh answer sample"
                     )
+                private = "The user asked for MM3_STREAM_CHAT_OK."
                 yield GenerationOutput(
-                    text=(
-                        "The user asked for MM3_STREAM_CHAT_OK."
-                        "</mm:think>MM3_STREAM_CHAT"
-                    ),
-                    new_text=(
-                        "The user asked for MM3_STREAM_CHAT_OK."
-                        "</mm:think>MM3_STREAM_CHAT"
-                    ),
+                    text=private,
+                    new_text=private,
+                    prompt_tokens=31,
+                    completion_tokens=80,
+                    cached_tokens=21,
+                    cache_detail="memory",
+                    finished=False,
+                    finish_reason=None,
+                )
+                yield GenerationOutput(
+                    text=private + "</mm:think>MM3_STREAM_CHAT",
+                    new_text="</mm:think>MM3_STREAM_CHAT",
                     prompt_tokens=31,
                     completion_tokens=120,
                     cached_tokens=21,
@@ -18304,7 +18309,7 @@ class TestStreamUsagePropagatesCacheDetail:
             stream=True,
             enable_thinking=True,
             max_thinking_tokens=120,
-            chat_template_kwargs={"thinking_mode": "enabled"},
+            chat_template_kwargs={"thinking_mode": "adaptive"},
             stream_options=StreamOptions(include_usage=True),
         )
         chunks = []
@@ -18313,7 +18318,7 @@ class TestStreamUsagePropagatesCacheDetail:
             [m.model_dump(exclude_none=True) for m in request.messages],
             request,
             fastapi_request=None,
-            chat_template_kwargs={"thinking_mode": "enabled"},
+            chat_template_kwargs={"thinking_mode": "adaptive"},
             max_tokens=180,
         ):
             if line.startswith("data: ") and line.strip() != "data: [DONE]":

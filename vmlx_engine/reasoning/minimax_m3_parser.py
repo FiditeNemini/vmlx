@@ -32,6 +32,29 @@ class MiniMaxM3ReasoningParser(ThinkXmlReasoningParser):
     def end_token(self) -> str:
         return "</mm:think>"
 
+    def reset_state(
+        self,
+        think_in_prompt: bool = False,
+        adaptive_mode: bool = False,
+        **kwargs,
+    ) -> None:
+        """Reset request-local streaming state.
+
+        M3 adaptive generation has two valid shapes with the same initial
+        bytes: a marker-free direct answer, or an implicit reasoning rail that
+        emits only ``</mm:think>`` before the answer. Publishing those initial
+        bytes as content is irreversible, so hold them until either a real
+        marker resolves the rail or the engine marks a marker-free generation
+        finished.
+        """
+        super().reset_state(think_in_prompt=think_in_prompt, **kwargs)
+        self._adaptive_stream_pending = bool(adaptive_mode and not think_in_prompt)
+
+    @property
+    def adaptive_stream_pending(self) -> bool:
+        """Whether the adaptive stream still has an ambiguous initial rail."""
+        return bool(getattr(self, "_adaptive_stream_pending", False))
+
     def _matching_aliases(self, text: str) -> list[tuple[str, str]]:
         return [
             (start, end)
@@ -58,6 +81,8 @@ class MiniMaxM3ReasoningParser(ThinkXmlReasoningParser):
         previous_text: str,
         current_text: str,
         delta_text: str,
+        *,
+        finished: bool = False,
     ) -> DeltaMessage | None:
         """Stream M3 reasoning for both documented and fallback tags."""
         markers = tuple(marker for pair in self._ALIASES for marker in pair)
@@ -68,6 +93,21 @@ class MiniMaxM3ReasoningParser(ThinkXmlReasoningParser):
         )
         if not delta_text:
             return None
+
+        if self.adaptive_stream_pending:
+            if not any(marker in current_text for marker in markers):
+                if not finished:
+                    return None
+                self._adaptive_stream_pending = False
+                return DeltaMessage(content=current_text or None)
+
+            # Nothing from the ambiguous prefix has been published yet. Parse
+            # the complete safe prefix once so an end-only rail can move every
+            # preceding byte to reasoning before visible content is sent.
+            self._adaptive_stream_pending = False
+            reasoning, content = self.extract_reasoning(current_text)
+            return DeltaMessage(reasoning=reasoning, content=content)
+
         for start, end in self._ALIASES:
             if start in current_text or end in current_text:
                 if start == self.start_token and end == self.end_token:

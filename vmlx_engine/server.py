@@ -5331,6 +5331,7 @@ def _new_request_reasoning_parser(
     effective_think_in_template: bool,
     harmony_active: bool,
     stream_surface: str,
+    adaptive_mode: bool = False,
 ):
     """Return a per-request reasoning parser for this API surface.
 
@@ -5389,6 +5390,7 @@ def _new_request_reasoning_parser(
     parser.reset_state(
         think_in_prompt=effective_think_in_template,
         harmony_active=harmony_active or _reasoning_parser_is_harmony(parser),
+        adaptive_mode=adaptive_mode,
     )
     logger.debug(
         "[%s] Reasoning parser: %s (source=%s, think_in_template=%s, harmony_active=%s)",
@@ -5399,6 +5401,33 @@ def _new_request_reasoning_parser(
         harmony_active or _reasoning_parser_is_harmony(parser),
     )
     return parser
+
+
+def _extract_reasoning_stream_delta(
+    parser,
+    previous_text: str,
+    current_text: str,
+    delta_text: str,
+    *,
+    finished: bool,
+):
+    """Parse one stream delta, including M3 adaptive boundary resolution.
+
+    Only MiniMax-M3 exposes ``adaptive_stream_pending``. Other parsers retain
+    the exact three-argument contract and behavior they had before this helper.
+    """
+    if getattr(parser, "adaptive_stream_pending", False):
+        return parser.extract_reasoning_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            finished=finished,
+        )
+    return parser.extract_reasoning_streaming(
+        previous_text,
+        current_text,
+        delta_text,
+    )
 
 
 def _has_tool_marker_or_partial_suffix(text: str) -> bool:
@@ -23636,6 +23665,7 @@ async def stream_chat_completion(
         effective_think_in_template=effective_think_in_template,
         harmony_active=_harmony_prefix_active,
         stream_surface="chat",
+        adaptive_mode=bool(_is_minimax_m3 and _m3_thinking_mode == "adaptive"),
     )
     if request_parser is None:
         logger.debug("[chat] No reasoning parser active for this request")
@@ -23993,8 +24023,12 @@ async def stream_chat_completion(
                     if delta_text
                     else accumulated_text
                 )
-                delta_msg = request_parser.extract_reasoning_streaming(
-                    previous_text, accumulated_text, delta_text
+                delta_msg = _extract_reasoning_stream_delta(
+                    request_parser,
+                    previous_text,
+                    accumulated_text,
+                    delta_text,
+                    finished=bool(output.finished),
                 )
                 if delta_msg is None:
                     # Skip this chunk (e.g., <think> token itself)
@@ -26143,6 +26177,7 @@ async def stream_responses_api(
         effective_think_in_template=effective_think_in_template,
         harmony_active=_harmony_prefix_active,
         stream_surface="responses",
+        adaptive_mode=bool(_is_minimax_m3 and _m3_thinking_mode == "adaptive"),
     )
     if request_parser is None:
         logger.debug("[responses] No reasoning parser active for this request")
@@ -26271,8 +26306,12 @@ async def stream_responses_api(
                     previous_text = (
                         full_text[: -len(delta_text)] if delta_text else full_text
                     )
-                    delta_msg = request_parser.extract_reasoning_streaming(
-                        previous_text, full_text, delta_text
+                    delta_msg = _extract_reasoning_stream_delta(
+                        request_parser,
+                        previous_text,
+                        full_text,
+                        delta_text,
+                        finished=bool(output.finished),
                     )
                     if delta_msg is None:
                         # Skip this chunk entirely (e.g., <think> token itself)

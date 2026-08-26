@@ -245,6 +245,45 @@ def test_minimax_m3_canonical_dialect_is_the_parity_reference():
     assert content == "Answer."
 
 
+def test_minimax_m3_adaptive_end_only_stream_never_publishes_private_prefix():
+    parser = MiniMaxM3ReasoningParser()
+    parser.reset_state(adaptive_mode=True)
+
+    first = parser.extract_reasoning_streaming(
+        "",
+        "The user wants a concise answer.",
+        "The user wants a concise answer.",
+    )
+    second = parser.extract_reasoning_streaming(
+        "The user wants a concise answer.",
+        "The user wants a concise answer.</mm:think>Visible answer.",
+        "</mm:think>Visible answer.",
+    )
+
+    assert first is None
+    assert second is not None
+    assert second.reasoning == "The user wants a concise answer."
+    assert second.content == "Visible answer."
+
+
+def test_minimax_m3_adaptive_marker_free_stream_flushes_once_at_finish():
+    parser = MiniMaxM3ReasoningParser()
+    parser.reset_state(adaptive_mode=True)
+
+    first = parser.extract_reasoning_streaming("", "Direct", "Direct")
+    final = parser.extract_reasoning_streaming(
+        "Direct",
+        "Direct answer.",
+        " answer.",
+        finished=True,
+    )
+
+    assert first is None
+    assert final is not None
+    assert final.reasoning is None
+    assert final.content == "Direct answer."
+
+
 def test_minimax_m3_alias_preserves_blank_lines_inside_the_answer():
     _, content = _stream_chunks(
         MiniMaxM3ReasoningParser(), ["<think>", "p", "</think>", "\n\nL1\n\nL2"]

@@ -5,7 +5,10 @@ import {
   ENGINE_UNKNOWN_PROGRESS_GRACE_WINDOWS,
   HEALTH_POLL_INTERVAL_SECONDS,
   MIN_HEALTH_FAIL_COUNT,
+  STARTUP_HARD_TIMEOUT_MULTIPLIER,
+  STARTUP_PROGRESS_IDLE_GRACE_MS,
   healthFailureToleranceCount,
+  shouldContinueStartupWait,
 } from '../src/shared/enginePatienceWindows'
 
 /**
@@ -60,6 +63,44 @@ describe('panel health tolerance vs engine patience', () => {
     const source = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf-8')
     expect(source).toContain('healthFailureToleranceCount(')
     expect(source).not.toContain('Math.ceil(cfg.timeout / 5)')
+  })
+})
+
+describe('startup waits use bounded live-progress grace', () => {
+  const timeoutMs = 900_000
+
+  it('keeps the normal configured startup window unchanged', () => {
+    expect(shouldContinueStartupWait(timeoutMs - 1, timeoutMs)).toBe(true)
+  })
+
+  it('keeps a large model alive beyond 900 seconds while load progress is recent', () => {
+    // The M3 regression completed at about 967 seconds while resident RAM was
+    // still advancing, but the old flat deadline marked the live PID Error.
+    expect(shouldContinueStartupWait(967_000, timeoutMs, 1_000)).toBe(true)
+  })
+
+  it('fails closed after progress has been idle beyond the grace window', () => {
+    expect(shouldContinueStartupWait(
+      967_000,
+      timeoutMs,
+      STARTUP_PROGRESS_IDLE_GRACE_MS + 1,
+    )).toBe(false)
+  })
+
+  it('enforces the absolute cap even if progress keeps changing', () => {
+    expect(shouldContinueStartupWait(
+      timeoutMs * STARTUP_HARD_TIMEOUT_MULTIPLIER,
+      timeoutMs,
+      0,
+    )).toBe(false)
+  })
+
+  it('sessions records resident and phase progress for the shared decision', () => {
+    const source = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf-8')
+    expect(source).toContain('residentHighWaterBytes')
+    expect(source).toContain('lastStartupProgressAt: residentAdvanced')
+    expect(source).toContain('lastStartupProgressAt: Date.now()')
+    expect(source).toContain('shouldContinueStartupWait(now - startTime, maxWait, lastProgressAgeMs)')
   })
 })
 

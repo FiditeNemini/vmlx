@@ -38,6 +38,37 @@ export const HEALTH_POLL_INTERVAL_SECONDS = 5
 export const MIN_HEALTH_FAIL_COUNT = 60
 
 /**
+ * After the configured startup window, a model that is still making observable
+ * load progress gets this much quiet time before the panel calls it stalled.
+ * This is deliberately an idle window, not an unbounded timeout extension.
+ */
+export const STARTUP_PROGRESS_IDLE_GRACE_MS = 120_000
+
+/** Absolute ceiling for a progress-extended startup. */
+export const STARTUP_HARD_TIMEOUT_MULTIPLIER = 3
+
+/**
+ * Decide whether a startup poll may continue.
+ *
+ * The configured timeout remains the normal deadline. Beyond it, only recent
+ * resident/log progress can keep the wait alive, and never beyond the hard
+ * multiple. This prevents an 84 GB model that is visibly loading from being
+ * marked Error at 900 seconds while still ensuring a hung process terminates.
+ */
+export function shouldContinueStartupWait(
+  elapsedMs: number,
+  configuredTimeoutMs: number,
+  lastProgressAgeMs?: number,
+): boolean {
+  const timeoutMs = Math.max(1, configuredTimeoutMs)
+  if (elapsedMs < timeoutMs) return true
+  if (elapsedMs >= timeoutMs * STARTUP_HARD_TIMEOUT_MULTIPLIER) return false
+  return lastProgressAgeMs != null
+    && lastProgressAgeMs >= 0
+    && lastProgressAgeMs <= STARTUP_PROGRESS_IDLE_GRACE_MS
+}
+
+/**
  * How many consecutive health failures to tolerate before declaring a session
  * down, given its configured request timeout in seconds.
  *

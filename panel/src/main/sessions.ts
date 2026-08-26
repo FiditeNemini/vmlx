@@ -1,5 +1,8 @@
 import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
-import { healthFailureToleranceCount } from '../shared/enginePatienceWindows'
+import {
+  healthFailureToleranceCount,
+  shouldContinueStartupWait,
+} from '../shared/enginePatienceWindows'
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
 import { powerSaveBlocker } from 'electron'
@@ -1550,6 +1553,8 @@ export class SessionManager extends EventEmitter {
     lazyResident?: boolean;
     residentMb?: number;
     residentPercent?: number;
+    residentHighWaterBytes?: number;
+    lastStartupProgressAt?: number;
   }>()
   private loadResidentTimers = new Map<string, ReturnType<typeof setInterval>>()
 
@@ -1615,12 +1620,19 @@ export class SessionManager extends EventEmitter {
       const residentProgress = Math.min(90, Math.max(5, Math.round(25 + residentPercent * 0.60)))
       const current = this.loadProgressState.get(sessionId) ?? 0
       const progress = Math.max(current, residentProgress)
+      const previousMeta = this.loadProgressMeta.get(sessionId) || {}
+      const previousHighWater = previousMeta.residentHighWaterBytes || 0
+      const residentAdvanced = residentBytes >= previousHighWater + 1048576
       const meta = {
-        ...(this.loadProgressMeta.get(sessionId) || {}),
+        ...previousMeta,
         modelBytes,
         expectedResidentBytes,
         residentMb: Math.round((residentBytes / 1048576) * 10) / 10,
         residentPercent: Math.round(residentPercent * 10) / 10,
+        residentHighWaterBytes: Math.max(previousHighWater, residentBytes),
+        lastStartupProgressAt: residentAdvanced
+          ? Date.now()
+          : previousMeta.lastStartupProgressAt,
       }
       this.loadProgressMeta.set(sessionId, meta)
       this.loadProgressState.set(sessionId, progress)
@@ -1653,12 +1665,17 @@ export class SessionManager extends EventEmitter {
         const current = this.loadProgressState.get(sessionId) ?? 0
         if (progress > current) {
           this.loadProgressState.set(sessionId, progress)
+          const meta = {
+            ...(this.loadProgressMeta.get(sessionId) || {}),
+            lastStartupProgressAt: Date.now(),
+          }
+          this.loadProgressMeta.set(sessionId, meta)
           this.emit('session:loadProgress', {
             sessionId,
             label,
             labelKey,
             progress,
-            ...(this.loadProgressMeta.get(sessionId) || {}),
+            ...meta,
           })
         }
         break
@@ -5106,7 +5123,7 @@ export class SessionManager extends EventEmitter {
     const startTime = Date.now()
     const healthUrl = `http://${connectHost(host)}:${port}/health`
 
-    while (Date.now() - startTime < maxWait) {
+    while (true) {
       // Abort early if the process exited while we were waiting
       if (sessionId) {
         const managed = this.processes.get(sessionId)
@@ -5141,10 +5158,19 @@ export class SessionManager extends EventEmitter {
           }
         }
       } catch (_) { }
+
+      const now = Date.now()
+      const lastProgressAt = sessionId
+        ? this.loadProgressMeta.get(sessionId)?.lastStartupProgressAt
+        : undefined
+      const lastProgressAgeMs = lastProgressAt == null
+        ? undefined
+        : now - lastProgressAt
+      if (!shouldContinueStartupWait(now - startTime, maxWait, lastProgressAgeMs)) {
+        throw new Error('Server failed to start within timeout period')
+      }
       await new Promise(resolve => setTimeout(resolve, 500))
     }
-
-    throw new Error('Server failed to start within timeout period')
   }
 }
 

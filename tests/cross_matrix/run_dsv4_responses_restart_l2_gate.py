@@ -3,12 +3,15 @@
 
 This proves the cache path that same-process cache gates cannot prove:
 
-- start a real source/app server with native DSV4 prefix+paged+block-disk L2
+- start a real source/app server with native DSV4 prefix+SSD block-disk state
 - write a fresh per-run prefix into an isolated block-disk cache directory
 - stop the server
 - restart a new server process using the same block-disk cache directory
-- replay the same terminal prompt and require disk hits plus ``paged+dsv4`` cached
+- replay the same terminal prompt and require disk hits plus ``dsv4`` cached
   token accounting after restart
+
+The gate keeps in-RAM paged cache disabled and uses the production-render token
+contract to require an off-256-boundary cache key before the first generation.
 
 The per-run nonce and isolated block cache directory are deliberate. A global
 old cache hit must not be able to fake this proof.
@@ -19,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import signal
 import subprocess
@@ -26,7 +30,6 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
-
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_PY = (
@@ -40,6 +43,8 @@ DEFAULT_MODEL_CANDIDATES = (
 )
 DEFAULT_OUT = REPO / "build/current-dsv4-responses-restart-l2-gate-20260606.json"
 DEFAULT_MIN_FREE_GB = 80.0
+DEFAULT_BLOCK_DISK_CACHE_PERCENT = 5.0
+PRIVATE_ATTESTATION_PROOF_HEADER = "vmlx-cache-prefix-attestation-v1"
 
 
 def resolve_default_model() -> str:
@@ -49,11 +54,17 @@ def resolve_default_model() -> str:
     return DEFAULT_MODEL_CANDIDATES[0]
 
 
-def post_json(url: str, payload: dict[str, Any], timeout: int = 600) -> dict[str, Any]:
+def post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout: int = 600,
+    *,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     req = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read())
@@ -129,6 +140,64 @@ def make_long_context(target_words: int = 3400) -> str:
         i += 1
     parts.append(anchors)
     return "\n".join(parts)
+
+
+def select_off_boundary_prompt(
+    *,
+    base_url: str,
+    model_name: str,
+    long_context: str,
+    proof_token: str,
+    timeout: int,
+    block_size: int = 256,
+    max_candidates: int = 64,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """Choose a production-rendered cache prompt off the native block boundary."""
+    if block_size <= 1:
+        raise ValueError("block_size must be greater than one")
+    headers = {
+        "Authorization": f"Bearer {proof_token}",
+        "X-vMLX-Private-Proof": PRIVATE_ATTESTATION_PROOF_HEADER,
+    }
+    final_instruction = "Store the anchor facts. Reply exactly STORED."
+    for batch_start in range(0, max_candidates, 16):
+        candidates: dict[str, str] = {}
+        for index in range(batch_start, min(batch_start + 16, max_candidates)):
+            pad = "" if index == 0 else f"\n\nBOUNDARY PAD {index}: " + ("pad " * index)
+            candidates[f"candidate_{index:03d}"] = (
+                long_context + pad + "\n\n" + final_instruction
+            )
+        payload = {
+            "contract_version": 1,
+            "surface": "responses",
+            "model": model_name,
+            "inputs": candidates,
+            "request_controls": {
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+        }
+        contract = post_json(
+            f"{base_url}/v1/cache/token-contract",
+            payload,
+            timeout=timeout,
+            headers=headers,
+        )
+        rows = contract.get("prompts")
+        if not isinstance(rows, dict):
+            raise RuntimeError("token contract omitted prompt rows")
+        for label, prompt in candidates.items():
+            row = rows.get(label)
+            if not isinstance(row, dict):
+                raise RuntimeError(f"token contract omitted {label}")
+            count = row.get("cache_prompt_token_count")
+            if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+                raise RuntimeError(f"token contract returned invalid count for {label}")
+            if count % block_size != 0:
+                return prompt, row, contract
+    raise RuntimeError(
+        f"could not construct an off-{block_size}-boundary production cache prompt"
+    )
 
 
 def extract_output_text(obj: dict[str, Any]) -> str:
@@ -216,7 +285,12 @@ def blocked_by_memory_preflight(args: argparse.Namespace) -> dict[str, Any] | No
     return None
 
 
-def build_command(args: argparse.Namespace, cache_dir: Path, model_name: str) -> list[str]:
+def build_command(
+    args: argparse.Namespace,
+    cache_dir: Path,
+    model_name: str,
+    proof_token_file: Path,
+) -> list[str]:
     return [
         str(args.python),
         "-B",
@@ -246,7 +320,7 @@ def build_command(args: argparse.Namespace, cache_dir: Path, model_name: str) ->
         "--reasoning-parser",
         "deepseek_r1",
         "--dsv4-enable-prefix-cache",
-        "--use-paged-cache",
+        "--no-paged-cache",
         "--paged-cache-block-size",
         "256",
         "--max-cache-blocks",
@@ -254,8 +328,11 @@ def build_command(args: argparse.Namespace, cache_dir: Path, model_name: str) ->
         "--enable-block-disk-cache",
         "--block-disk-cache-dir",
         str(cache_dir),
-        "--block-disk-cache-max-gb",
-        "10",
+        "--block-disk-cache-max-percent",
+        str(args.block_disk_cache_percent),
+        "--enable-private-cache-attestation",
+        "--private-cache-attestation-token-file",
+        str(proof_token_file),
         "--stream-interval",
         "1",
         "--max-tokens",
@@ -313,8 +390,9 @@ def start_server(
     model_name: str,
     log_path: Path,
     env: dict[str, str],
+    proof_token_file: Path,
 ) -> tuple[subprocess.Popen, list[str]]:
-    cmd = build_command(args, cache_dir, model_name)
+    cmd = build_command(args, cache_dir, model_name, proof_token_file)
     with log_path.open("w") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
     return proc, cmd
@@ -350,6 +428,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if cache_dir.exists() and not args.keep_existing_cache_dir:
         shutil.rmtree(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
+    proof_dir = base_dir / run_id
+    proof_dir.mkdir(parents=True, exist_ok=True)
+    proof_token = secrets.token_urlsafe(48)
+    proof_token_file = proof_dir / "private-cache-attestation.token"
+    proof_token_file.write_text(proof_token + "\n")
+    proof_token_file.chmod(0o600)
 
     env = build_env(args)
     model_name = "dsv4-restart-l2"
@@ -358,17 +442,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         + f"\n\nGATE RUN ID = {run_id}. "
         "This nonce is diagnostic-only and does not modify the anchor facts."
     )
-    store_prompt = long_context + "\n\nStore the anchor facts. Reply exactly STORED."
-    restart_prompt = store_prompt
+    store_prompt = ""
+    restart_prompt = ""
+    token_contract: dict[str, Any] = {}
+    token_contract_row: dict[str, Any] = {}
 
     proc1: subprocess.Popen | None = None
     proc2: subprocess.Popen | None = None
     first_stopped_cleanly = False
     try:
         log1 = log_dir / f"{run_id}-before-restart.log"
-        proc1, cmd1 = start_server(args, cache_dir, model_name, log1, env)
+        proc1, cmd1 = start_server(
+            args, cache_dir, model_name, log1, env, proof_token_file
+        )
         health1_before = wait_health(args.port, proc1, args.timeout)
-        url = f"http://127.0.0.1:{args.port}/v1/responses"
+        base_url = f"http://127.0.0.1:{args.port}"
+        url = f"{base_url}/v1/responses"
+        store_prompt, token_contract_row, token_contract = select_off_boundary_prompt(
+            base_url=base_url,
+            model_name=model_name,
+            long_context=long_context,
+            proof_token=proof_token,
+            timeout=args.request_timeout,
+        )
+        restart_prompt = store_prompt
         t0 = time.perf_counter()
         store_response = post_json(
             url,
@@ -384,7 +481,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         first_stopped_cleanly = stop_server(proc1)
 
         log2 = log_dir / f"{run_id}-after-restart.log"
-        proc2, cmd2 = start_server(args, cache_dir, model_name, log2, env)
+        proc2, cmd2 = start_server(
+            args, cache_dir, model_name, log2, env, proof_token_file
+        )
         health2_before = wait_health(args.port, proc2, args.timeout)
         t1 = time.perf_counter()
         restart_response = post_json(
@@ -403,10 +502,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         native = native_cache(health2_after)
         restart_detail = cache_detail(restart_response)
         restart_cached = cached_tokens(restart_response)
+        cache_prompt_tokens = int(
+            token_contract_row.get("cache_prompt_token_count") or 0
+        )
         checks = {
             "native_cache": native.get("cache_type") == "native_composite",
             "native_prefix": native.get("prefix") is True,
-            "native_paged": native.get("paged") is True,
+            "native_paged_ram_off": native.get("paged") is False,
+            "native_block_disk_only": native.get("block_disk_only") is True,
             "native_l2": native.get("block_disk_l2") is True,
             "generic_tq_kv_off": (native.get("generic_turboquant_kv") or {}).get("enabled")
             is False,
@@ -421,6 +524,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             == str(cache_dir),
             "fresh_run_nonce": run_id in store_prompt and run_id in restart_prompt,
             "restart_replayed_same_terminal_prompt": restart_prompt == store_prompt,
+            "production_cache_prompt_off_boundary": cache_prompt_tokens > 0
+            and cache_prompt_tokens % 256 != 0,
+            "production_token_contract_no_cache_lookup": token_contract.get(
+                "cache_lookup_bypassed"
+            )
+            is True,
             "server_restarted": first_pid != proc2.pid and first_stopped_cleanly,
             "store_turn_fresh": cached_tokens(store_response) == 0
             and not cache_detail(store_response),
@@ -440,6 +549,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "PYTHONNOUSERSITE": env["PYTHONNOUSERSITE"],
                 "VMLINUX_METAL_WS_REJECT_PCT": env.get("VMLINUX_METAL_WS_REJECT_PCT"),
                 "VMLX_METAL_WS_REJECT_PCT": env.get("VMLX_METAL_WS_REJECT_PCT"),
+            },
+            "token_contract": {
+                "method": token_contract.get("method"),
+                "surface": token_contract.get("surface"),
+                "cache_lookup_bypassed": token_contract.get(
+                    "cache_lookup_bypassed"
+                ),
+                "model_bundle_fingerprint_sha256": token_contract.get(
+                    "model_bundle_fingerprint_sha256"
+                ),
+                "cache_topology_fingerprint_sha256": token_contract.get(
+                    "cache_topology_fingerprint_sha256"
+                ),
+                "prompt": token_contract_row,
+                "native_block_size": 256,
+                "production_cache_prompt_remainder": cache_prompt_tokens % 256,
             },
             "before_restart": {
                 "cmd": cmd1,
@@ -491,6 +616,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             stop_server(proc1)
         if proc2 is not None and proc2.poll() is None:
             stop_server(proc2)
+        proof_token_file.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -503,6 +629,11 @@ def main() -> None:
     parser.add_argument("--request-timeout", type=int, default=600)
     parser.add_argument("--words", type=int, default=3400)
     parser.add_argument("--max-output-tokens", type=int, default=192)
+    parser.add_argument(
+        "--block-disk-cache-percent",
+        type=float,
+        default=DEFAULT_BLOCK_DISK_CACHE_PERCENT,
+    )
     parser.add_argument("--pool-quant", action="store_true")
     parser.add_argument("--min-free-gb", type=float, default=DEFAULT_MIN_FREE_GB)
     parser.add_argument("--cache-dir", type=Path)

@@ -6389,7 +6389,8 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         dsv4_responses_restart_l2_gate.get("status") == "pass"
         and restart_l2_checks.get("native_cache") is True
         and restart_l2_checks.get("native_prefix") is True
-        and restart_l2_checks.get("native_paged") is True
+        and restart_l2_checks.get("native_paged_ram_off") is True
+        and restart_l2_checks.get("native_block_disk_only") is True
         and restart_l2_checks.get("native_l2") is True
         and restart_l2_checks.get("generic_tq_kv_off") is True
         and restart_l2_checks.get("disk_write_before_restart") is True
@@ -6397,6 +6398,9 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
         and restart_l2_checks.get("restart_dsv4_cache_hit") is True
         and restart_l2_checks.get("same_block_disk_cache_dir") is True
         and restart_l2_checks.get("fresh_run_nonce") is True
+        and restart_l2_checks.get("production_cache_prompt_off_boundary") is True
+        and restart_l2_checks.get("production_token_contract_no_cache_lookup")
+        is True
         and restart_l2_cached_tokens > 0
         and "dsv4" in restart_l2_cache_detail
         and int(restart_l2_before_block.get("disk_writes") or 0) > 0
@@ -6491,7 +6495,8 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
                 for key in (
                     "native_cache",
                     "native_prefix",
-                    "native_paged",
+                    "native_paged_ram_off",
+                    "native_block_disk_only",
                     "native_l2",
                     "generic_tq_kv_off",
                     "disk_write_before_restart",
@@ -6499,6 +6504,8 @@ def build_digest(root: Path | str = Path(".")) -> dict[str, Any]:
                     "restart_dsv4_cache_hit",
                     "same_block_disk_cache_dir",
                     "fresh_run_nonce",
+                    "production_cache_prompt_off_boundary",
+                    "production_token_contract_no_cache_lookup",
                     "server_restarted",
                     "store_turn_fresh",
                 )

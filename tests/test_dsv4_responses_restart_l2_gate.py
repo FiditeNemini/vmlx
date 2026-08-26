@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Contracts for the DSV4 Responses restart/L2 gate preflight."""
 
-from types import SimpleNamespace
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 from tests.cross_matrix import run_dsv4_responses_restart_l2_gate as gate
 
@@ -59,3 +60,78 @@ def test_dsv4_responses_restart_l2_memory_preflight_labels_binary_units(monkeypa
     assert artifact["memory_gap_gib"] == 6.0
     assert artifact["memory_gap_gb"] == 6.0
     assert artifact["telemetry"][0]["system_memory"]["available_gib"] == 74.0
+
+
+def test_restart_gate_launches_ssd_only_with_percent_budget_and_private_contract():
+    args = SimpleNamespace(
+        python=Path("/tmp/python3"),
+        model="/tmp/dsv4",
+        port=8843,
+        max_output_tokens=192,
+        block_disk_cache_percent=3.5,
+    )
+
+    command = gate.build_command(
+        args,
+        Path("/tmp/block-cache"),
+        "dsv4-restart-l2",
+        Path("/tmp/private.token"),
+    )
+
+    assert "--no-paged-cache" in command
+    assert "--use-paged-cache" not in command
+    assert "--block-disk-cache-max-gb" not in command
+    assert command[command.index("--block-disk-cache-max-percent") + 1] == "3.5"
+    assert "--enable-private-cache-attestation" in command
+    assert (
+        command[command.index("--private-cache-attestation-token-file") + 1]
+        == "/tmp/private.token"
+    )
+
+
+def test_restart_gate_selects_production_off_boundary_prompt(monkeypatch):
+    captured = {}
+
+    def fake_post(url, payload, timeout=600, *, headers=None):
+        captured.update(
+            url=url,
+            payload=payload,
+            timeout=timeout,
+            headers=headers,
+        )
+        rows = {}
+        for index, label in enumerate(payload["inputs"]):
+            rows[label] = {
+                "cache_prompt_token_count": 512 if index == 0 else 513,
+                "cache_prompt_token_ids_sha256": "a" * 64,
+            }
+        return {
+            "method": "final-render-tokenize-no-cache",
+            "surface": "responses",
+            "cache_lookup_bypassed": True,
+            "prompts": rows,
+        }
+
+    monkeypatch.setattr(gate, "post_json", fake_post)
+
+    prompt, row, contract = gate.select_off_boundary_prompt(
+        base_url="http://127.0.0.1:8843",
+        model_name="dsv4-restart-l2",
+        long_context="context",
+        proof_token="x" * 48,
+        timeout=9,
+    )
+
+    assert row["cache_prompt_token_count"] == 513
+    assert "BOUNDARY PAD 1" in prompt
+    assert contract["cache_lookup_bypassed"] is True
+    assert captured["url"].endswith("/v1/cache/token-contract")
+    assert captured["payload"]["request_controls"] == {
+        "enable_thinking": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert captured["headers"]["Authorization"] == "Bearer " + ("x" * 48)
+    assert (
+        captured["headers"]["X-vMLX-Private-Proof"]
+        == gate.PRIVATE_ATTESTATION_PROOF_HEADER
+    )

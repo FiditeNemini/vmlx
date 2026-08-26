@@ -5628,7 +5628,8 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
             "checks": {
                 "native_cache": True,
                 "native_prefix": True,
-                "native_paged": True,
+                "native_paged_ram_off": True,
+                "native_block_disk_only": True,
                 "native_l2": True,
                 "generic_tq_kv_off": True,
                 "disk_write_before_restart": True,
@@ -5636,6 +5637,8 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
                 "restart_dsv4_cache_hit": True,
                 "same_block_disk_cache_dir": True,
                 "fresh_run_nonce": True,
+                "production_cache_prompt_off_boundary": True,
+                "production_token_contract_no_cache_lookup": True,
             },
             "cache_dir": "build/dsv4-restart-l2-cache/proof",
             "before_restart": {
@@ -5652,7 +5655,7 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
                     "usage": {
                         "input_tokens_details": {
                             "cached_tokens": 2048,
-                            "cache_detail": "paged+dsv4",
+                            "cache_detail": "block-disk+dsv4",
                         }
                     },
                     "wall_seconds": 1.25,
@@ -5681,7 +5684,7 @@ def test_objective_proof_digest_keeps_dsv4_restart_l2_equivalence_open_despite_h
     ]
     assert row["details"]["historical_restart_l2_gate_status"] == "pass"
     assert row["details"]["historical_restart_cached_tokens"] == 2048
-    assert row["details"]["historical_restart_cache_detail"] == "paged+dsv4"
+    assert row["details"]["historical_restart_cache_detail"] == "block-disk+dsv4"
     assert row["details"]["historical_restart_l2_disk_hits"] == 6
     assert row["details"]["historical_restart_hit_telemetry_ok"] is True
     assert row["details"]["current_restart_cold_prefill_equivalence_proven"] is False

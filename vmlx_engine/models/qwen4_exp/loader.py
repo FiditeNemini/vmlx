@@ -318,6 +318,17 @@ def _normalize_runtime_weight_names(
             runtime_key = runtime_key.replace(
                 "language_model.", "language_model.model.", 1
             )
+        if (
+            runtime_key == "vision_tower.patch_embed.proj.weight"
+            and value.ndim == 5
+            and value.shape[1] in (1, 3)
+            and value.shape[-1] not in (1, 3)
+        ):
+            # HF Conv3d layout is [out, in, temporal, height, width]; MLX's
+            # convolution kernel keeps input channels last.  The JANG converter
+            # preserves the HF layout for this passthrough tensor, so perform
+            # the same one-time transform used by the established VL converters.
+            value = value.transpose(0, 2, 3, 4, 1)
         if runtime_key.endswith(".ple.conv1d.weight"):
             runtime_key = runtime_key.removesuffix(".conv1d.weight") + ".conv1d_weight"
             if value.ndim == 3:

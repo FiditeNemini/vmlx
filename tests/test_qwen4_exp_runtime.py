@@ -609,6 +609,23 @@ def test_qwen4_exp_converted_roots_are_normalized_and_collisions_fail_closed():
     }
     assert normalized["language_model.mtp.fc_embedding.weight"] is mtp
 
+    hf_patch = mx.ones((8, 3, 2, 4, 4))
+    mlx_patch = mx.ones((8, 2, 4, 4, 3))
+    normalized = _normalize_runtime_weight_names(
+        {"visual.patch_embed.proj.weight": hf_patch}
+    )
+    assert normalized["vision_tower.patch_embed.proj.weight"].shape == (
+        8,
+        2,
+        4,
+        4,
+        3,
+    )
+    normalized = _normalize_runtime_weight_names(
+        {"vision_tower.patch_embed.proj.weight": mlx_patch}
+    )
+    assert normalized["vision_tower.patch_embed.proj.weight"] is mlx_patch
+
     ple_conv = mx.ones((8, 1, 4))
     normalized = _normalize_runtime_weight_names(
         {"language_model.layers.1.ple.conv1d_weight": ple_conv.squeeze(1)}

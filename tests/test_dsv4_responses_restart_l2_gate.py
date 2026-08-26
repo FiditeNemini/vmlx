@@ -102,12 +102,14 @@ def test_restart_gate_selects_production_off_boundary_prompt(monkeypatch):
             timeout=timeout,
             headers=headers,
         )
-        rows = {}
-        for index, label in enumerate(payload["inputs"]):
-            rows[label] = {
+        label = next(iter(payload["inputs"]))
+        index = int(label.rsplit("_", 1)[1])
+        rows = {
+            label: {
                 "cache_prompt_token_count": 512 if index == 0 else 513,
                 "cache_prompt_token_ids_sha256": "a" * 64,
             }
+        }
         return {
             "method": "final-render-tokenize-no-cache",
             "surface": "responses",

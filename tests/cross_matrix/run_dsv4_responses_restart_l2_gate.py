@@ -160,18 +160,15 @@ def select_off_boundary_prompt(
         "X-vMLX-Private-Proof": PRIVATE_ATTESTATION_PROOF_HEADER,
     }
     final_instruction = "Store the anchor facts. Reply exactly STORED."
-    for batch_start in range(0, max_candidates, 16):
-        candidates: dict[str, str] = {}
-        for index in range(batch_start, min(batch_start + 16, max_candidates)):
-            pad = "" if index == 0 else f"\n\nBOUNDARY PAD {index}: " + ("pad " * index)
-            candidates[f"candidate_{index:03d}"] = (
-                long_context + pad + "\n\n" + final_instruction
-            )
+    for index in range(max_candidates):
+        label = f"candidate_{index:03d}"
+        pad = "" if index == 0 else f"\n\nBOUNDARY PAD {index}: " + ("pad " * index)
+        prompt = long_context + pad + "\n\n" + final_instruction
         payload = {
             "contract_version": 1,
             "surface": "responses",
             "model": model_name,
-            "inputs": candidates,
+            "inputs": {label: prompt},
             "request_controls": {
                 "enable_thinking": False,
                 "chat_template_kwargs": {"enable_thinking": False},
@@ -186,15 +183,14 @@ def select_off_boundary_prompt(
         rows = contract.get("prompts")
         if not isinstance(rows, dict):
             raise RuntimeError("token contract omitted prompt rows")
-        for label, prompt in candidates.items():
-            row = rows.get(label)
-            if not isinstance(row, dict):
-                raise RuntimeError(f"token contract omitted {label}")
-            count = row.get("cache_prompt_token_count")
-            if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
-                raise RuntimeError(f"token contract returned invalid count for {label}")
-            if count % block_size != 0:
-                return prompt, row, contract
+        row = rows.get(label)
+        if not isinstance(row, dict):
+            raise RuntimeError(f"token contract omitted {label}")
+        count = row.get("cache_prompt_token_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            raise RuntimeError(f"token contract returned invalid count for {label}")
+        if count % block_size != 0:
+            return prompt, row, contract
     raise RuntimeError(
         f"could not construct an off-{block_size}-boundary production cache prompt"
     )

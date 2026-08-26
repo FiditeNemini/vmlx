@@ -87,6 +87,8 @@ describe('engine path policy', () => {
     expect(findEnginePath).toContain(
       'const projectVenv = getDevelopmentProjectVenv(developmentSourceRoot || null)',
     )
+    expect(findEnginePath).toContain("type: 'development'")
+    expect(findEnginePath).toContain('sourceRoot: developmentSourceRoot!')
     expect(findEnginePath).not.toContain("join(sourceDir, '.venv', 'bin', 'python3')")
   })
 

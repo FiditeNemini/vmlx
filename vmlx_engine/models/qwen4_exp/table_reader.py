@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import struct
+from collections.abc import Mapping
 from pathlib import Path
 
 import mlx.core as mx
@@ -26,6 +28,79 @@ _MLX_DTYPES = {
     "U32": mx.uint32,
     "I64": mx.int64,
 }
+
+
+def resolve_jang_bit_map_spec(
+    module_path: str,
+    bit_map: Mapping[str, object],
+) -> dict:
+    """Resolve one converter-style wildcard/prefix quantization rule.
+
+    The Qwen4-Exp converter matches the original tensor name (including its
+    ``.weight`` suffix), while the MLX quantizer and PLE reader operate on
+    module paths.  Accept both spellings plus the runtime's narrow wrapper
+    aliases, choose the longest matching pattern, and reject equally-specific
+    conflicting rules instead of depending on JSON insertion order.
+    """
+    if not isinstance(bit_map, Mapping):
+        raise ValueError("qwen4_exp JANG bit_map must be an object")
+    default = bit_map.get("default")
+    if not isinstance(default, Mapping):
+        raise ValueError("qwen4_exp JANG bit_map requires an object default")
+
+    aliases = [
+        str(module_path),
+        str(module_path).replace("language_model.model", "language_model", 1),
+        str(module_path).replace("language_model.mtp", "mtp", 1),
+    ]
+    aliases.extend(f"{alias}.weight" for alias in tuple(aliases))
+    aliases = list(dict.fromkeys(aliases))
+
+    matches: list[tuple[int, str, Mapping[str, object]]] = []
+    for raw_pattern, raw_spec in bit_map.items():
+        pattern = str(raw_pattern)
+        if pattern == "default":
+            continue
+        if not isinstance(raw_spec, Mapping):
+            raise ValueError(
+                f"qwen4_exp JANG bit_map rule {pattern!r} must be an object"
+            )
+        if any(
+            fnmatch.fnmatch(alias, pattern)
+            or alias.startswith(pattern)
+            or fnmatch.fnmatch(alias, pattern + "*")
+            for alias in aliases
+        ):
+            matches.append((len(pattern), pattern, raw_spec))
+
+    selected: Mapping[str, object] = default
+    if matches:
+        best_length = max(length for length, _pattern, _spec in matches)
+        best = [item for item in matches if item[0] == best_length]
+        selected = best[0][2]
+        conflicts = [pattern for _length, pattern, spec in best[1:] if spec != selected]
+        if conflicts:
+            raise ValueError(
+                "conflicting equally-specific qwen4_exp JANG bit_map rules for "
+                f"{module_path}: {best[0][1]}, " + ", ".join(conflicts)
+            )
+
+    spec = dict(selected)
+    try:
+        bits = int(spec["bits"])
+        group_size = int(spec["group_size"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            f"invalid qwen4_exp JANG quantization rule for {module_path}"
+        ) from exc
+    if bits not in {1, 2, 3, 4, 5, 6, 8} or group_size <= 0:
+        raise ValueError(
+            f"invalid qwen4_exp JANG quantization rule for {module_path}: "
+            f"bits={bits}, group_size={group_size}"
+        )
+    spec.update({"bits": bits, "group_size": group_size})
+    spec.setdefault("mode", "affine")
+    return spec
 
 
 def _module_aliases(module_path: str) -> tuple[str, ...]:
@@ -255,6 +330,7 @@ class FileBackedQuantizedNGramTable:
         n_shards: int,
         expected_head_dim: int,
         index_name: str = "model.safetensors.index.json",
+        bit_map: Mapping[str, object] | None = None,
     ):
         model_dir = Path(model_dir)
         config = json.loads((model_dir / "config.json").read_text())
@@ -268,8 +344,14 @@ class FileBackedQuantizedNGramTable:
 
         storage_manifest = {}
         jang_path = model_dir / "jang_config.json"
+        jang = None
         if jang_path.is_file():
             jang = json.loads(jang_path.read_text())
+        elif isinstance(config.get("jang_config"), dict):
+            jang = config["jang_config"]
+        elif isinstance(config.get("jang"), dict):
+            jang = config["jang"]
+        if isinstance(jang, dict):
             jq = jang.get("quantization") or {}
             storage_manifest = jq.get("tensor_quantization_manifest") or {}
 
@@ -278,7 +360,11 @@ class FileBackedQuantizedNGramTable:
         self.shards = []
         for shard_index in range(n_shards):
             module_path = module_key_format.format(shard_index)
-            spec = dict(default_spec)
+            spec = (
+                resolve_jang_bit_map_spec(module_path, bit_map)
+                if bit_map is not None
+                else dict(default_spec)
+            )
             aliases = _module_aliases(module_path)
             override = _unique_mapping_override(
                 quantization,

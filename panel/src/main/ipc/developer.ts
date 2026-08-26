@@ -34,7 +34,10 @@ function buildCliEnv(): Record<string, string | undefined> {
 function resolveCliSpawn(subcommandArgs: string[]): { cmd: string; args: string[]; env: Record<string, string | undefined> } {
   const engineResult = sessionManager.findEnginePath()
   const env = buildCliEnv()
-  if (engineResult?.type === 'bundled') {
+  if (engineResult?.type === 'bundled' || engineResult?.type === 'development') {
+    if (engineResult.type === 'development') {
+      env.PYTHONPATH = engineResult.sourceRoot
+    }
     return {
       cmd: engineResult.pythonPath,
       args: ['-B', '-s', '-m', 'vmlx_engine.cli', ...subcommandArgs],

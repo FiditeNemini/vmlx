@@ -96,9 +96,10 @@ import {
 } from '../shared/launchArgValues'
 import { buildNativeMtpLaunchArgs } from '../shared/nativeMtpLaunchArgs'
 
-/** Result of findEnginePath: either bundled Python or a system binary */
+/** Result of findEnginePath: packaged Python, a source-bound dev venv, or a system binary. */
 type EnginePath =
   | { type: 'bundled'; pythonPath: string }
+  | { type: 'development'; pythonPath: string; sourceRoot: string }
   | { type: 'system'; binaryPath: string; sourceRoot?: string }
 
 interface ManagedProcess {
@@ -2826,12 +2827,15 @@ export class SessionManager extends EventEmitter {
     // and the logs panel shows startup progress if mflux does need to fetch missing components.
 
     let proc: ChildProcess
-    if (engineResult.type === 'bundled') {
+    if (engineResult.type === 'bundled' || engineResult.type === 'development') {
       // Bundled Python: spawn python3 -B -s -m vmlx_engine.cli serve <model> --host ... --port ...
       // -B: do not write __pycache__ into the signed app bundle at runtime
       // -s: suppress user site-packages (~/.local/lib/python3.12/site-packages)
       // This avoids shebang path issues with relocatable Python and ensures
       // the app uses ONLY its bundled engine, never system-installed mlx-lm/vmlx-engine.
+      const developmentSourceRoot = engineResult.type === 'development'
+        ? engineResult.sourceRoot
+        : undefined
       const bundledEnv: Record<string, string | undefined> = {
         ...spawnEnv,
         PYTHONDONTWRITEBYTECODE: '1',
@@ -2840,7 +2844,11 @@ export class SessionManager extends EventEmitter {
         // from $HOME can otherwise treat a sibling repo directory named `mlx`
         // as a second package location and abort before model loading.
         PYTHONSAFEPATH: '1',
-        PYTHONPATH: undefined,  // Clear any inherited PYTHONPATH
+        // Packaged Python must not be shadowed. A development venv, however,
+        // may be a symlink to a sibling checkout's dependency environment;
+        // pinning the current source root is what prevents its editable .pth
+        // from silently importing that sibling repository.
+        PYTHONPATH: developmentSourceRoot,
         // vmlx#102/#116: brew-installed mlx/mlx-c can collide with bundled mlx
         // via DYLD_*. Clearing those forces the bundled libmlx to be the only
         // one loaded — fixes "duplicate key 'cpu' to enumeration mlx.core.DeviceType".
@@ -2853,7 +2861,7 @@ export class SessionManager extends EventEmitter {
       this.emit('session:log', { sessionId, data: `$ ${fullCmd}\n` })
       proc = spawn(engineResult.pythonPath, ['-B', '-s', '-m', 'vmlx_engine.cli', ...args], {
         env: bundledEnv,
-        cwd: dirname(engineResult.pythonPath),
+        cwd: developmentSourceRoot || dirname(engineResult.pythonPath),
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,  // Separate process group so we can kill entire group
       })
@@ -4875,7 +4883,11 @@ export class SessionManager extends EventEmitter {
         `[SESSIONS] Using project venv: ${projectVenv.pythonPath} ` +
         `(vmlx_engine ${projectVenv.version})`,
       )
-      return { type: 'bundled', pythonPath: projectVenv.pythonPath }
+      return {
+        type: 'development',
+        pythonPath: projectVenv.pythonPath,
+        sourceRoot: developmentSourceRoot!,
+      }
     }
 
     // Bundled Python: use python3 -m vmlx_engine.cli instead of vmlx-engine binary.

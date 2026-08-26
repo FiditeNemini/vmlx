@@ -401,6 +401,120 @@ def test_qwen4_exp_loader_never_requests_ple_table_tensors():
     assert all("ngram_embedding.shard_0" not in key for key in handle.requested)
 
 
+def test_qwen4_exp_embedded_jang_bit_map_becomes_runtime_quantization(tmp_path):
+    import json
+
+    from vmlx_engine.models.qwen4_exp.loader import _load_runtime_config
+    from vmlx_engine.models.qwen4_exp.table_reader import resolve_jang_bit_map_spec
+
+    embedded = {
+        "format": "jang_v2",
+        "bit_map": {
+            "default": {"bits": 8, "group_size": 64},
+            "language_model.layers.*.mlp.switch_mlp": {
+                "bits": 4,
+                "group_size": 64,
+            },
+            "language_model.layers.*.ple.ngram_embedding.shards.0.weight": {
+                "bits": 3,
+                "group_size": 32,
+            },
+            "mtp.": {"bits": 4, "group_size": 64},
+        },
+        "quantization": {"calibrated": True},
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "qwen4_exp", "jang_config": embedded})
+    )
+
+    runtime, affine1_modules, bit_map = _load_runtime_config(tmp_path)
+    assert affine1_modules == frozenset()
+    assert bit_map == embedded["bit_map"]
+    assert runtime["quantization"] == {
+        "bits": 8,
+        "group_size": 64,
+        "mode": "affine",
+    }
+    assert resolve_jang_bit_map_spec(
+        "language_model.layers.1.ple.ngram_embedding.shards.0", bit_map
+    ) == {"bits": 3, "group_size": 32, "mode": "affine"}
+    assert resolve_jang_bit_map_spec(
+        "language_model.model.layers.7.mlp.switch_mlp.down_proj", bit_map
+    ) == {"bits": 4, "group_size": 64, "mode": "affine"}
+    assert resolve_jang_bit_map_spec(
+        "language_model.mtp.layers.0.self_attn.q_proj", bit_map
+    ) == {"bits": 4, "group_size": 64, "mode": "affine"}
+
+
+def test_qwen4_exp_jang_metadata_and_bit_map_conflicts_fail_closed(tmp_path):
+    import json
+
+    from vmlx_engine.models.qwen4_exp.loader import _load_runtime_config
+    from vmlx_engine.models.qwen4_exp.table_reader import resolve_jang_bit_map_spec
+
+    embedded = {
+        "format": "jang_v2",
+        "bit_map": {"default": {"bits": 4, "group_size": 64}},
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "qwen4_exp", "jang_config": embedded})
+    )
+    (tmp_path / "jang_config.json").write_text(
+        json.dumps({**embedded, "format": "different"})
+    )
+    with pytest.raises(ValueError, match="sidecar and embedded JANG metadata disagree"):
+        _load_runtime_config(tmp_path)
+
+    conflicting = {
+        "default": {"bits": 8, "group_size": 64},
+        "language_model.layers.*.self_attn": {"bits": 8, "group_size": 64},
+        "language_model.layers.?.self_attn": {"bits": 4, "group_size": 64},
+    }
+    with pytest.raises(ValueError, match="conflicting equally-specific"):
+        resolve_jang_bit_map_spec(
+            "language_model.layers.1.self_attn.q_proj", conflicting
+        )
+
+
+def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
+    from vmlx_engine.models.qwen4_exp import loader
+
+    bit_map = {
+        "default": {"bits": 8, "group_size": 64},
+        "language_model.layers.*.mlp.switch_mlp": {
+            "bits": 4,
+            "group_size": 64,
+        },
+        "mtp.": {"bits": 4, "group_size": 64},
+    }
+    captured = {}
+
+    def fake_quantize(_model, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(loader.nn, "quantize", fake_quantize)
+    loader._quantize_model(
+        object(),
+        {"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}},
+        {
+            "language_model.layers.3.mlp.switch_mlp.down_proj.scales": mx.ones(1),
+            "mtp.layers.0.self_attn.q_proj.scales": mx.ones(1),
+        },
+        bit_map,
+    )
+
+    predicate = captured["class_predicate"]
+    assert predicate(
+        "language_model.model.layers.3.mlp.switch_mlp.down_proj", object()
+    ) == {"bits": 4, "group_size": 64, "mode": "affine"}
+    assert predicate("language_model.mtp.layers.0.self_attn.q_proj", object()) == {
+        "bits": 4,
+        "group_size": 64,
+        "mode": "affine",
+    }
+    assert predicate("language_model.model.layers.4.self_attn.q_proj", object()) is False
+
+
 def test_qwen4_exp_ple_layout_resolution_is_complete_and_unambiguous():
     from vmlx_engine.models.qwen4_exp.loader import _resolve_ple_module_key_format
 

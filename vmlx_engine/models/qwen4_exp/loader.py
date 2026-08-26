@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import glob
 import json
 import logging
 import re
 import struct
+from collections.abc import Mapping
 from pathlib import Path
 
 import mlx.core as mx
@@ -19,7 +21,10 @@ from vmlx_engine.utils.jang_affine_storage import (
 )
 
 from .register import register_qwen4_exp_runtime
-from .table_reader import FileBackedQuantizedNGramTable
+from .table_reader import (
+    FileBackedQuantizedNGramTable,
+    resolve_jang_bit_map_spec,
+)
 
 logger = logging.getLogger("vmlx_engine")
 
@@ -48,13 +53,48 @@ def is_qwen4_exp_bundle(model_path: str | Path) -> bool:
     return bool(model_types.intersection({"qwen4_exp", "qwen4_exp_text"}))
 
 
-def _load_runtime_config(model_path: Path) -> tuple[dict, frozenset[str]]:
+def _load_runtime_config(
+    model_path: Path,
+) -> tuple[dict, frozenset[str], dict[str, object] | None]:
     config = json.loads((model_path / "config.json").read_text())
+    embedded = config.get("jang_config")
+    if embedded is None:
+        embedded = config.get("jang")
+    if embedded is not None and not isinstance(embedded, dict):
+        raise ValueError("qwen4_exp embedded JANG metadata must be an object")
     jang_path = model_path / "jang_config.json"
-    if not jang_path.is_file():
-        return config, frozenset()
-    jang_config = json.loads(jang_path.read_text())
-    return prepare_affine1_runtime_config(config, jang_config)
+    sidecar = json.loads(jang_path.read_text()) if jang_path.is_file() else None
+    if sidecar is not None and not isinstance(sidecar, dict):
+        raise ValueError("qwen4_exp jang_config.json must contain an object")
+    if sidecar is not None and embedded is not None and sidecar != embedded:
+        raise ValueError(
+            "qwen4_exp sidecar and embedded JANG metadata disagree"
+        )
+    jang_config = sidecar if sidecar is not None else embedded
+    if jang_config is None:
+        return config, frozenset(), None
+
+    runtime_config, affine1_modules = prepare_affine1_runtime_config(
+        config, jang_config
+    )
+    raw_bit_map = jang_config.get("bit_map")
+    if raw_bit_map is None:
+        return runtime_config, affine1_modules, None
+    if not isinstance(raw_bit_map, Mapping):
+        raise ValueError("qwen4_exp JANG bit_map must be an object")
+    bit_map = copy.deepcopy(dict(raw_bit_map))
+    default_spec = resolve_jang_bit_map_spec("__vmlx_default__", bit_map)
+    quantization = runtime_config.get("quantization")
+    if quantization is None:
+        quantization = {}
+    elif not isinstance(quantization, dict):
+        raise ValueError("qwen4_exp config quantization must be an object")
+    else:
+        quantization = copy.deepcopy(quantization)
+    for key in ("bits", "group_size", "mode"):
+        quantization.setdefault(key, default_spec[key])
+    runtime_config["quantization"] = quantization
+    return runtime_config, affine1_modules, bit_map
 
 
 def _classify_ple_tensor(key: str) -> tuple[str, str] | None:
@@ -270,7 +310,12 @@ def _normalize_runtime_weight_names(
     return normalized
 
 
-def _quantize_model(model, config: dict, weights: dict[str, mx.array]) -> None:
+def _quantize_model(
+    model,
+    config: dict,
+    weights: dict[str, mx.array],
+    bit_map: Mapping[str, object] | None = None,
+) -> None:
     quantization = config.get("quantization")
     if not isinstance(quantization, dict):
         return
@@ -279,9 +324,21 @@ def _quantize_model(model, config: dict, weights: dict[str, mx.array]) -> None:
     def predicate(path, module):
         if callable(model_predicate) and not model_predicate(path, module):
             return False
-        override = quantization.get(path)
+        override = (
+            resolve_jang_bit_map_spec(path, bit_map)
+            if bit_map is not None
+            else quantization.get(path)
+        )
         if isinstance(override, dict):
-            return override
+            if f"{path}.scales" in weights:
+                return override
+            for alias in (
+                path.replace("language_model.model", "language_model", 1),
+                path.replace("language_model.mtp", "mtp", 1),
+            ):
+                if f"{alias}.scales" in weights:
+                    return override
+            return False
         if not hasattr(module, "to_quantized"):
             return False
         if hasattr(module, "weight") and module.weight.size % 64 != 0:
@@ -309,7 +366,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     model_path = Path(model_path)
     if not register_qwen4_exp_runtime():
         raise RuntimeError("qwen4_exp MLX-VLM runtime registration failed")
-    config, affine1_modules = _load_runtime_config(model_path)
+    config, affine1_modules, bit_map = _load_runtime_config(model_path)
     model_class, _ = get_model_and_args(config)
     config.setdefault("text_config", config.pop("llm_config", {}))
     config.setdefault("vision_config", {})
@@ -325,7 +382,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     if not is_mlx_format:
         weights = model.sanitize(weights)
     weights = _normalize_runtime_weight_names(weights)
-    _quantize_model(model, config, weights)
+    _quantize_model(model, config, weights, bit_map)
     # The PLE table and its three hash buffers were intentionally removed from
     # the ordinary parameter tree above.  Everything else, including MTP and
     # vision, must match exactly; a permissive load previously allowed an
@@ -365,6 +422,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         ple_key_format,
         ngram_shards,
         expected_head_dim=ple_head_dim,
+        bit_map=bit_map,
     )
     model.language_model.model.layers[1].ple.ngram_embedding.set_file_backed(table)
 

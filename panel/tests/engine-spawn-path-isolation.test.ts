@@ -9,7 +9,8 @@ describe('engine child path isolation', () => {
 
   it('keeps a packaged Python child from importing a sibling mlx repo from the launcher cwd', () => {
     expect(source).toContain("PYTHONSAFEPATH: '1'")
-    expect(source).toContain('cwd: dirname(engineResult.pythonPath)')
+    expect(source).toContain('cwd: developmentSourceRoot || dirname(engineResult.pythonPath)')
+    expect(source).toContain('PYTHONPATH: developmentSourceRoot')
   })
 
   it('also gives a system engine binary a stable executable-owned cwd', () => {
@@ -22,5 +23,13 @@ describe('engine child path isolation', () => {
     expect(source).toContain('sourceRoot: developmentSourceRoot')
     expect(source).toContain('systemEnv.PYTHONPATH = engineResult.sourceRoot')
     expect(source).toContain('[SESSIONS] Development engine source:')
+  })
+
+  it('pins a symlinked project venv to the current development checkout source', () => {
+    expect(source).toContain("type: 'development'")
+    expect(source).toContain("engineResult.type === 'bundled' || engineResult.type === 'development'")
+    expect(source).toContain("engineResult.type === 'development'")
+    expect(source).toContain('PYTHONPATH: developmentSourceRoot')
+    expect(source).toContain('cwd: developmentSourceRoot || dirname(engineResult.pythonPath)')
   })
 })

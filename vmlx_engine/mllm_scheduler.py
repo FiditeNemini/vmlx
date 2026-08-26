@@ -5745,9 +5745,11 @@ def _assemble_clean_hybrid_boundary_cache(
     For the pure-hybrid layout that second pass is unnecessary, because both
     halves of the boundary state are already in hand:
 
-    * attention layers are plain append-only ``KVCache`` — generation only
-      appends, so slicing to the boundary recovers exactly the prompt-boundary
-      KV (the same operation the truncation path already performs);
+    * attention layers are append-only positional caches — generation only
+      appends, so slicing every native positional lane to the boundary recovers
+      exactly the prompt-boundary state (the same operation the truncation path
+      already performs). QSA/M3-style sparse layers must retain their index-key
+      lane and native cache class; they are never demoted to plain ``KVCache``;
     * recurrent layers were deep-copied at the boundary during the live
       prefill by the vmlx#109 inline capture, before generation advanced them.
 
@@ -5829,6 +5831,27 @@ def _assemble_clean_hybrid_boundary_cache(
             live_offset = cache_offset(layer)
             if live_offset < boundary or int(keys.shape[2]) < boundary:
                 return None
+            if type(layer).__name__ == "MiniMaxM3SparseCache":
+                try:
+                    from .models.minimax_m3.cache import clone_minimax_m3_sparse
+
+                    clone = clone_minimax_m3_sparse(
+                        layer,
+                        boundary,
+                        require_idx_keys=True,
+                    )
+                except Exception:
+                    return None
+                if (
+                    clone is None
+                    or type(clone).__name__ != "MiniMaxM3SparseCache"
+                    or int(getattr(clone, "offset", -1)) != int(boundary)
+                    or getattr(clone, "idx_keys", None) is None
+                    or int(clone.idx_keys.shape[2]) != int(boundary)
+                ):
+                    return None
+                assembled.append(clone)
+                continue
             clone = KVCache()
             clone.keys = keys[..., :boundary, :]
             clone.values = values[..., :boundary, :]

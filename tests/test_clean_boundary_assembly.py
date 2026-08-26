@@ -131,6 +131,55 @@ def test_slices_past_allocation_slack():
     assert float(mx.min(out[0].keys)) == 1.0
 
 
+def test_preserves_sparse_index_cache_type_and_all_three_positional_lanes():
+    """QSA uses KV plus a raw index-key/M-RoPE payload lane.
+
+    Demoting this KVCache subclass to plain KVCache produces a cache hit that
+    fails on the next ``update_index`` call. The clean-boundary assembler must
+    slice all three lanes and retain the native class.
+    """
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+
+    boundary = 29
+    generated = 7
+    sparse = MiniMaxM3SparseCache()
+    keys = mx.arange(
+        (boundary + generated) * 2 * 8,
+        dtype=mx.float32,
+    ).reshape(1, 2, boundary + generated, 8)
+    sparse.keys = keys
+    sparse.values = keys + 1
+    sparse.offset = boundary + generated
+    sparse.idx_keys = mx.arange(
+        (boundary + generated) * 11,
+        dtype=mx.float32,
+    ).reshape(1, 1, boundary + generated, 11)
+    sparse._idx_offset = boundary + generated
+
+    snap = [_Recurrent("boundary")]
+    live = [sparse, _Recurrent("live-recurrent-CONTAMINATED")]
+    out = _assemble_clean_hybrid_boundary_cache(
+        _Gen([0]),
+        _Req([(boundary, list(range(boundary)), snap)]),
+        live,
+        boundary,
+    )
+
+    assert out is not None
+    restored = out[0]
+    assert type(restored).__name__ == "MiniMaxM3SparseCache"
+    assert restored is not sparse
+    assert restored.offset == boundary
+    assert restored.keys.shape[2] == boundary
+    assert restored.values.shape[2] == boundary
+    assert restored.idx_keys.shape[2] == boundary
+    assert callable(restored.update_index)
+    mx.eval(restored.keys, restored.values, restored.idx_keys)
+    assert float(restored.idx_keys[0, 0, -1, -1]) == float(
+        sparse.idx_keys[0, 0, boundary - 1, -1]
+    )
+
+
 def test_declines_without_a_snapshot_at_that_boundary():
     live, snap = _layout(boundary=100)
     req = _Req([(64, list(range(64)), snap)])  # wrong boundary

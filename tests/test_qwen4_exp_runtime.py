@@ -114,12 +114,23 @@ def test_qwen4_exp_native_state_chunk_parity_off_boundaries():
     main_logits, hidden = model(
         ids[:, :5], cache=model.make_cache(), return_hidden=True
     )
+    assert hidden.shape == (1, 5, args.hc_count * args.hidden_size)
     mtp_logits = model.mtp_forward(
         hidden[:, -1:, :], ids[:, 5:6], model.make_mtp_cache()
     )
     mx.eval(main_logits, hidden, mtp_logits)
     assert mtp_logits.shape == (1, 1, args.vocab_size)
     assert not np.isnan(np.asarray(mtp_logits)).any()
+
+    mtp_logits, mtp_hidden = model.mtp_forward(
+        hidden[:, -1:, :],
+        ids[:, 5:6],
+        model.make_mtp_cache(),
+        return_hidden=True,
+    )
+    mx.eval(mtp_logits, mtp_hidden)
+    assert mtp_hidden.shape == (1, 1, args.hc_count * args.hidden_size)
+    assert not np.isnan(np.asarray(mtp_hidden)).any()
 
 
 def test_qwen4_exp_mrope_and_sparse_index_state_survive_chunking():
@@ -169,6 +180,101 @@ def test_qwen4_exp_mrope_and_sparse_index_state_survive_chunking():
         assert layer_cache.offset == 23
         assert keys.shape[2] == values.shape[2] == indexer_keys.shape[2] == 23
         assert indexer_keys.shape[1] == 1
+        assert indexer_keys.shape[-1] == args.indexer_head_dim + 3
+        np.testing.assert_array_equal(
+            np.asarray(indexer_keys[:, 0, :, -3:]),
+            np.asarray(positions.transpose(1, 2, 0)).astype(np.float32),
+        )
+
+
+def test_qwen4_exp_qsa_persists_raw_index_projection_before_pool_norm_and_rope():
+    args = _tiny_args()
+    model = LanguageModel(args)
+    _randomize(model)
+    mx.eval(model.parameters())
+
+    qsa_index = args.layer_types.index("full_attention")
+    indexer = model.layers[qsa_index].self_attn.indexer
+    cache = model.make_cache()[qsa_index]
+    length = 7
+    hidden = (
+        mx.arange(length * args.hidden_size, dtype=mx.float32)
+        .reshape(1, length, args.hidden_size)
+        / 101.0
+    )
+    positions = mx.array(
+        np.stack(
+            [
+                np.arange(40, 40 + length, dtype=np.int32),
+                np.array([3, 3, 4, 4, 5, 5, 6], dtype=np.int32),
+                np.array([9, 10, 9, 10, 9, 10, 9], dtype=np.int32),
+            ],
+            axis=0,
+        )[:, None, :]
+    )
+
+    # The indexer is called after the main K/V lane, so advance the logical KV
+    # offset exactly as QSAAttention does before appending the index payload.
+    cache.update_and_fetch(
+        mx.zeros(
+            (1, args.num_key_value_heads, length, args.head_dim),
+            dtype=mx.float32,
+        ),
+        mx.zeros(
+            (1, args.num_key_value_heads, length, args.head_dim),
+            dtype=mx.float32,
+        ),
+    )
+    projected = indexer.index_qk_proj(hidden)
+    _, expected_raw = mx.split(
+        projected, [args.indexer_n_heads * args.indexer_head_dim], axis=-1
+    )
+    mask = indexer(hidden, cache, offset=0, position_ids=positions)
+    mx.eval(expected_raw, mask, cache.idx_keys)
+
+    payload = np.asarray(cache.idx_keys[:, 0, :, :])
+    np.testing.assert_array_equal(
+        payload[..., : args.indexer_head_dim],
+        np.asarray(expected_raw).astype(np.float32),
+    )
+    np.testing.assert_array_equal(
+        payload[..., -3:],
+        np.asarray(positions.transpose(1, 2, 0)).astype(np.float32),
+    )
+
+
+def test_qwen4_exp_qsa_bypasses_selection_while_all_blocks_fit_budget(monkeypatch):
+    """The native short-context path stores index state but never selects it."""
+    args = _tiny_args()
+    model = LanguageModel(args)
+    _randomize(model)
+    mx.eval(model.parameters())
+
+    qsa_index = args.layer_types.index("full_attention")
+    indexer = model.layers[qsa_index].self_attn.indexer
+    cache = model.make_cache()[qsa_index]
+    length = args.indexer_budget
+    cache.update_and_fetch(
+        mx.zeros(
+            (1, args.num_key_value_heads, length, args.head_dim),
+            dtype=mx.float32,
+        ),
+        mx.zeros(
+            (1, args.num_key_value_heads, length, args.head_dim),
+            dtype=mx.float32,
+        ),
+    )
+
+    def forbidden_argpartition(*_args, **_kwargs):
+        raise AssertionError("short-context QSA must not score/select blocks")
+
+    monkeypatch.setattr(mx, "argpartition", forbidden_argpartition)
+    hidden = mx.zeros((1, length, args.hidden_size), dtype=mx.float32)
+    mask = indexer(hidden, cache, offset=0)
+
+    assert mask is None
+    assert cache.idx_keys is not None
+    assert cache.idx_keys.shape[2] == length
 
 
 def test_qwen4_exp_qsa_and_ple_support_synchronous_batch_chunking():
@@ -204,6 +310,7 @@ def test_qwen4_exp_qsa_and_ple_support_synchronous_batch_chunking():
         if layer_type == "full_attention"
     )
     assert qsa_cache.state[2].shape[:3] == (2, 1, 19)
+    assert qsa_cache.state[2].shape[-1] == args.indexer_head_dim + 3
     ple_cache = cache[args.ple_layer_ids[0] - 1]
     assert ple_cache.cache[2].shape == (2, args.ngram_size - 1)
 
@@ -225,6 +332,9 @@ def test_qwen4_exp_registry_and_runtime_registration_are_source_available():
     assert config.is_mllm is True
     assert config.tool_parser == "qwen"
     assert config.reasoning_parser == "qwen3"
+    assert config.preserve_native_tool_format is True
+    assert config.supports_instruct_mode is True
+    assert config.supported_reasoning_efforts == ["low", "medium", "xhigh"]
     assert config.architecture_hints["ple_storage"] == "ssd_row_addressed"
     assert config.architecture_hints["cache_precision"] == "full"
 
@@ -307,6 +417,71 @@ def test_qwen4_exp_ple_layout_resolution_is_complete_and_unambiguous():
     with pytest.raises(ValueError, match="no complete indexed PLE"):
         _resolve_ple_module_key_format(weight_map, 3)
 
+    jang_prefix = "language_model.layers.1.ple.ngram_embedding.shards."
+    jang_weight_map = {
+        f"{jang_prefix}{shard}.{suffix}": f"part-{shard}.safetensors"
+        for shard in range(3)
+        for suffix in ("weight", "scales", "biases")
+    }
+    assert _resolve_ple_module_key_format(jang_weight_map, 3) == jang_prefix + "{}"
+
+    ambiguous = dict(jang_weight_map)
+    ambiguous.update(
+        {
+            f"{raw_prefix}{shard}.{suffix}": f"other-{shard}.safetensors"
+            for shard in range(3)
+            for suffix in ("weight", "scales", "biases")
+        }
+    )
+    with pytest.raises(ValueError, match="ambiguous PLE"):
+        _resolve_ple_module_key_format(ambiguous, 3)
+
+
+def test_qwen4_exp_mtp_root_is_normalized_and_collisions_fail_closed():
+    from vmlx_engine.models.qwen4_exp.loader import _normalize_runtime_weight_names
+
+    mtp = mx.ones((2, 2))
+    body = mx.zeros((2, 2))
+    normalized = _normalize_runtime_weight_names(
+        {
+            "mtp.fc_embedding.weight": mtp,
+            "language_model.model.embed_tokens.weight": body,
+        }
+    )
+    assert set(normalized) == {
+        "language_model.mtp.fc_embedding.weight",
+        "language_model.model.embed_tokens.weight",
+    }
+    assert normalized["language_model.mtp.fc_embedding.weight"] is mtp
+
+    ple_conv = mx.ones((8, 1, 4))
+    normalized = _normalize_runtime_weight_names(
+        {"language_model.model.layers.1.ple.conv1d.weight": ple_conv}
+    )
+    assert set(normalized) == {
+        "language_model.model.layers.1.ple.conv1d_weight"
+    }
+    assert normalized[
+        "language_model.model.layers.1.ple.conv1d_weight"
+    ].shape == (8, 4)
+
+    with pytest.raises(ValueError, match="singleton input channel"):
+        _normalize_runtime_weight_names(
+            {
+                "language_model.model.layers.1.ple.conv1d.weight": mx.ones(
+                    (8, 2, 4)
+                )
+            }
+        )
+
+    with pytest.raises(ValueError, match="weight-name collision"):
+        _normalize_runtime_weight_names(
+            {
+                "mtp.fc_embedding.weight": mtp,
+                "language_model.mtp.fc_embedding.weight": body,
+            }
+        )
+
 
 def test_qwen4_exp_ple_affine_layout_uses_exact_160_dimensional_rows():
     from vmlx_engine.models.qwen4_exp.table_reader import _validate_affine_layout
@@ -374,6 +549,10 @@ def test_qwen4_exp_nested_config_maps_qsa_ple_and_mtp_contracts():
 
 
 def test_qwen4_exp_ple_companion_is_ssd_only_and_survives_restart(tmp_path):
+    from vmlx_engine.mllm_batch_generator import (
+        _hybrid_cache_layout,
+        _uses_ssm_companion_cache,
+    )
     from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
     from vmlx_engine.utils.ssm_companion_disk_store import SSMCompanionDiskStore
 
@@ -394,7 +573,40 @@ def test_qwen4_exp_ple_companion_is_ssd_only_and_survives_restart(tmp_path):
     ple_cache = cache[args.ple_layer_ids[0] - 1]
     assert len(ple_cache.cache) == 4
     assert all(value is not None for value in ple_cache.cache)
-    expected = [np.asarray(value) for value in ple_cache.cache]
+
+    owner, owner_path, template, kv_positions, error = _hybrid_cache_layout(
+        model, model
+    )
+    assert owner is model
+    assert owner_path == "language_model"
+    assert error is None
+    assert template is not None
+    assert kv_positions == [
+        index
+        for index, layer_type in enumerate(args.layer_types)
+        if layer_type == "full_attention"
+    ]
+    assert _uses_ssm_companion_cache(
+        kv_positions,
+        len(template),
+        mixed_attention=False,
+    ) is True
+
+    kv_set = set(kv_positions)
+    companion_layers = [
+        layer_cache
+        for index, layer_cache in enumerate(cache)
+        if index not in kv_set
+    ]
+    assert len(companion_layers) == args.num_hidden_layers - len(kv_positions)
+    assert [len(layer.cache) for layer in companion_layers].count(4) == 1
+    assert [len(layer.cache) for layer in companion_layers].count(2) == (
+        len(companion_layers) - 1
+    )
+    expected = [
+        [np.asarray(value) for value in layer.cache]
+        for layer in companion_layers
+    ]
 
     disk_dir = tmp_path / "qwen4-ple-companion"
     first_disk = SSMCompanionDiskStore(
@@ -408,7 +620,12 @@ def test_qwen4_exp_ple_companion_is_ssd_only_and_survives_restart(tmp_path):
         disk_store=first_disk,
     )
     assert first.ram_enabled is False
-    first.store(token_ids, len(token_ids), [ple_cache], is_complete=True)
+    first.store(
+        token_ids,
+        len(token_ids),
+        companion_layers,
+        is_complete=True,
+    )
     assert first.size == 0
     assert first.total_nbytes == 0
     assert first_disk.wait_for_pending(timeout=10.0)
@@ -432,12 +649,13 @@ def test_qwen4_exp_ple_companion_is_ssd_only_and_survives_restart(tmp_path):
     assert is_complete is True
     assert second.size == 0
     assert second.total_nbytes == 0
-    assert len(states) == 1
-    assert len(states[0].cache) == 4
-    for got, want in zip(states[0].cache, expected):
-        got_np = np.asarray(got)
-        assert got_np.dtype == want.dtype
-        np.testing.assert_array_equal(got_np, want)
+    assert len(states) == len(companion_layers)
+    for got_layer, want_layer in zip(states, expected):
+        assert len(got_layer.cache) == len(want_layer)
+        for got, want in zip(got_layer.cache, want_layer):
+            got_np = np.asarray(got)
+            assert got_np.dtype == want.dtype
+            np.testing.assert_array_equal(got_np, want)
     assert second_disk.shutdown(timeout=10.0)
 
 
@@ -513,9 +731,95 @@ def test_qwen4_exp_native_mtp_runtime_is_detected_from_the_attached_head():
     assert model_has_native_mtp_runtime(model) is True
 
 
+def test_qwen4_exp_mtp_fusion_preserves_distinct_hyper_connection_branches():
+    from vmlx_engine.models.qwen4_exp.language import MTPModule
+
+    args = _tiny_args()
+    mtp = MTPModule(args)
+    mtp.pre_fc_norm_embedding.weight = mx.zeros((args.hidden_size,))
+    mtp.pre_fc_norm_hidden.weight = mx.zeros((args.hc_count * args.hidden_size,))
+    mtp.fc_embedding.weight = mx.eye(args.hidden_size)
+    mtp.fc_hidden.weight = mx.eye(args.hidden_size)
+
+    token_embeddings = mx.arange(1, args.hidden_size + 1, dtype=mx.float32).reshape(
+        1, 1, args.hidden_size
+    )
+    hidden = mx.zeros((1, 1, args.hc_count, args.hidden_size))
+    hidden[..., 0, 0] = 1.0
+    hidden[..., 1, 1] = 2.0
+    hidden[..., 2, 2] = 3.0
+    hidden[..., 3, 3] = 4.0
+    hidden = hidden.reshape(1, 1, args.hc_count * args.hidden_size)
+    fused = mtp.fuse_inputs(hidden, token_embeddings).reshape(
+        1, 1, args.hc_count, args.hidden_size
+    )
+    mx.eval(fused)
+
+    assert fused.shape == (1, 1, args.hc_count, args.hidden_size)
+    assert not mx.array_equal(fused[..., 0, :], fused[..., 1, :]).item()
+    expected_embedding = mtp.fc_embedding(
+        mtp.pre_fc_norm_embedding(token_embeddings)
+    )
+    expected_hidden = mtp.fc_hidden(
+        mtp.pre_fc_norm_hidden(hidden).reshape(
+            1, 1, args.hc_count, args.hidden_size
+        )
+    )
+    np.testing.assert_allclose(
+        np.asarray(fused),
+        np.asarray(expected_embedding[..., None, :] + expected_hidden),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+@pytest.mark.parametrize("accepted_drafts", [0, 1, 2])
+def test_qwen4_exp_verify_rollback_restores_all_native_states(accepted_drafts):
+    from vmlx_engine.mllm_batch_generator import _native_mtp_rollback_to_confirmed
+
+    args = _tiny_args()
+    model = LanguageModel(args)
+    _randomize(model)
+    mx.eval(model.parameters())
+    prefix = mx.array([[11, 17, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67]])
+    verify = mx.array([[71, 73, 79, 83]])
+
+    reference_cache = model.make_cache()
+    model(prefix, cache=reference_cache)
+    model(verify[:, : 1 + accepted_drafts], cache=reference_cache)
+
+    rollback_cache = model.make_cache()
+    model(prefix, cache=rollback_cache)
+    model(verify, cache=rollback_cache, n_confirmed=1)
+    assert _native_mtp_rollback_to_confirmed(
+        rollback_cache,
+        reject_tokens=3 - accepted_drafts,
+        accepted_drafts=accepted_drafts,
+    )
+
+    reference_arrays = []
+    rollback_arrays = []
+    for reference_layer, rollback_layer in zip(reference_cache, rollback_cache):
+        reference_arrays.extend(array for array in reference_layer.state if array is not None)
+        rollback_arrays.extend(array for array in rollback_layer.state if array is not None)
+        assert getattr(reference_layer, "offset", None) == getattr(
+            rollback_layer, "offset", None
+        )
+    mx.eval(*reference_arrays, *rollback_arrays)
+    assert len(reference_arrays) == len(rollback_arrays)
+    for reference, rolled_back in zip(reference_arrays, rollback_arrays):
+        np.testing.assert_allclose(
+            np.asarray(rolled_back),
+            np.asarray(reference),
+            rtol=2e-4,
+            atol=2e-4,
+        )
+
+
 def test_qwen4_exp_vlm_config_builds_text_image_and_video_contracts():
     from mlx_vlm.utils import update_module_configs
 
+    from vmlx_engine.native_mtp import model_has_native_mtp_runtime
     from vmlx_engine.models.qwen4_exp.register import register_qwen4_exp_runtime
 
     assert register_qwen4_exp_runtime() is True
@@ -549,9 +853,13 @@ def test_qwen4_exp_vlm_config_builds_text_image_and_video_contracts():
     assert parsed.vision_config.model_type == "qwen4_exp"
     assert parsed.image_token_index == 901
     assert parsed.video_token_index == 902
+    wrapper = model_class.Model(parsed)
+    assert wrapper.model_type == "qwen4_exp"
+    assert wrapper.language_model.mtp is not None
+    assert model_has_native_mtp_runtime(wrapper) is True
 
 
-def test_qwen4_exp_reasoning_and_tools_do_not_invent_bundle_defaults():
+def test_qwen4_exp_reasoning_and_tools_preserve_native_bundle_contract():
     from vmlx_engine.model_config_registry import ModelConfigRegistry
     from vmlx_engine.model_configs import register_all
 
@@ -562,9 +870,38 @@ def test_qwen4_exp_reasoning_and_tools_do_not_invent_bundle_defaults():
     assert config.tool_parser == "qwen"
     assert config.supports_thinking is True
     assert config.supports_native_tools is True
-    assert config.architecture_hints["default_enable_thinking"] is None
+    assert config.supports_instruct_mode is True
+    assert config.supported_reasoning_efforts == ["low", "medium", "xhigh"]
+    assert config.preserve_native_tool_format is True
+    assert config.architecture_hints["default_enable_thinking"] is True
     assert config.architecture_hints["modalities"] == ["text", "image", "video"]
     assert config.architecture_hints["audio_input"] is False
+
+
+def test_qwen4_exp_exact_gate_up_projection_is_bit_identical_without_model_weights():
+    from mlx_lm.models.switch_layers import SwitchGLU
+
+    from vmlx_engine.metal.qwen4_affine_moe_decode import (
+        _EXACT_PROJ_ATTR,
+        _ExactGateUpProjection,
+        _exact_gate_up_switchglu,
+    )
+
+    switch = SwitchGLU(64, 64, 4, bias=False)
+    switch.gate_proj = switch.gate_proj.to_quantized(group_size=64, bits=4)
+    switch.up_proj = switch.up_proj.to_quantized(group_size=64, bits=4)
+    switch.down_proj = switch.down_proj.to_quantized(group_size=64, bits=4)
+    x = (mx.arange(64, dtype=mx.float32) / 127.0).reshape(1, 1, 64)
+    indices = mx.array([[[0, 1, 2, 3]]], dtype=mx.uint32)
+    scores = mx.array([[[0.1, 0.2, 0.3, 0.4]]], dtype=mx.float32)
+
+    reference = (switch(x, indices) * scores[..., None]).sum(axis=-2)
+    projection = _ExactGateUpProjection(switch.up_proj, switch.gate_proj)
+    setattr(switch, _EXACT_PROJ_ATTR, projection)
+    candidate = _exact_gate_up_switchglu(switch, x, indices, scores)
+    mx.eval(reference, candidate)
+
+    np.testing.assert_array_equal(np.asarray(candidate), np.asarray(reference))
 
 
 def test_qwen4_exp_ple_manifest_aliases_are_deterministic_and_fail_closed():

@@ -25,7 +25,7 @@ logger = logging.getLogger("vmlx_engine")
 
 _PLE_TABLE_RE = re.compile(
     r"(?:^|\.)layers\.1\.ple\.(?:ple_embedding\.)?"
-    r"ngram_embedding\.shard_(?P<shard>\d+)\."
+    r"ngram_embedding\.(?P<layout>shard_|shards\.)(?P<shard>\d+)\."
     r"(?P<suffix>weight|scales|biases)$"
 )
 _PLE_BUFFER_RE = re.compile(
@@ -76,8 +76,10 @@ def _resolve_ple_module_key_format(weight_map: dict[str, str], n_shards: int) ->
 
     Official and converted checkpoints have used both ``ple.ple_embedding``
     and the runtime's shorter ``ple`` nesting, with either ``model`` or
-    ``language_model.model`` roots.  The index is authoritative: accept one
-    complete layout and reject missing or ambiguous tables before loading.
+    ``language_model.model`` roots.  MLX converters also use both
+    ``shard_N`` and ``shards.N`` spellings.  The index is authoritative:
+    accept one complete layout and reject missing or ambiguous tables before
+    loading.
     """
     if n_shards <= 0:
         raise ValueError("qwen4_exp split_ngram_parts must be positive")
@@ -87,10 +89,10 @@ def _resolve_ple_module_key_format(weight_map: dict[str, str], n_shards: int) ->
         if match is None or match.group("suffix") != "weight":
             continue
         module_path = key.rsplit(".", 1)[0]
-        marker = f"shard_{match.group('shard')}"
+        marker = f"{match.group('layout')}{match.group('shard')}"
         if not module_path.endswith(marker):
             continue
-        candidates.add(module_path[: -len(marker)] + "shard_{}")
+        candidates.add(module_path[: -len(marker)] + match.group("layout") + "{}")
 
     complete = []
     for key_format in sorted(candidates):
@@ -230,6 +232,44 @@ def _validate_ple_hash_buffers(model, ple_buffers: dict[str, mx.array]) -> None:
             raise ValueError(f"qwen4_exp PLE hash buffer mismatch: {suffix}")
 
 
+def _normalize_runtime_weight_names(
+    weights: dict[str, mx.array],
+) -> dict[str, mx.array]:
+    """Map checkpoint roots to the owning VLM wrapper without hiding extras.
+
+    Both the official checkpoint and current MLX conversions store the MTP
+    module at top-level ``mtp.*``.  The runtime deliberately owns it below
+    ``language_model.mtp.*`` so main-model and speculative state stay on one
+    wrapper.  This narrow normalization is required for already-converted MLX
+    bundles, where running the full BF16 sanitizer would corrupt converted
+    tensor layouts.
+    """
+    normalized: dict[str, mx.array] = {}
+    for key, value in weights.items():
+        runtime_key = f"language_model.{key}" if key.startswith("mtp.") else key
+        if runtime_key.endswith(".ple.conv1d.weight"):
+            runtime_key = runtime_key.removesuffix(".conv1d.weight") + ".conv1d_weight"
+            if value.ndim == 3:
+                if value.shape[1] != 1:
+                    raise ValueError(
+                        "qwen4_exp PLE convolution must have a singleton input "
+                        f"channel, got {value.shape}"
+                    )
+                value = value.squeeze(1)
+            if value.ndim != 2:
+                raise ValueError(
+                    "qwen4_exp PLE convolution must resolve to [channels, taps], "
+                    f"got {value.shape}"
+                )
+        if runtime_key in normalized:
+            raise ValueError(
+                "qwen4_exp weight-name collision after runtime normalization: "
+                f"{key} -> {runtime_key}"
+            )
+        normalized[runtime_key] = value
+    return normalized
+
+
 def _quantize_model(model, config: dict, weights: dict[str, mx.array]) -> None:
     quantization = config.get("quantization")
     if not isinstance(quantization, dict):
@@ -284,8 +324,17 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     )
     if not is_mlx_format:
         weights = model.sanitize(weights)
+    weights = _normalize_runtime_weight_names(weights)
     _quantize_model(model, config, weights)
-    model.load_weights(list(weights.items()), strict=False)
+    # The PLE table and its three hash buffers were intentionally removed from
+    # the ordinary parameter tree above.  Everything else, including MTP and
+    # vision, must match exactly; a permissive load previously allowed an
+    # entire top-level MTP head to be silently ignored.
+    model.load_weights(list(weights.items()), strict=True)
+
+    from vmlx_engine.metal.qwen4_affine_moe_decode import install_qwen4_affine_moe
+
+    install_qwen4_affine_moe(model)
 
     _validate_ple_hash_buffers(model, ple_buffers)
     weight_map = json.loads(

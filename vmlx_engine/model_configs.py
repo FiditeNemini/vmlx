@@ -196,7 +196,10 @@ def register_all(registry=None):
             reasoning_parser="qwen3",
             think_in_template=True,
             supports_thinking=True,
+            supports_instruct_mode=True,
+            supported_reasoning_efforts=["low", "medium", "xhigh"],
             supports_native_tools=True,
+            preserve_native_tool_format=True,
             is_mllm=True,
             architecture_hints={
                 "native_cache_state": [
@@ -205,7 +208,7 @@ def register_all(registry=None):
                     "ple_token_context",
                     "ple_dilated_conv",
                     "qsa_kv",
-                    "qsa_indexer_keys",
+                    "qsa_indexer_raw_keys_mrope_positions",
                 ],
                 "cache_precision": "full",
                 "paged_ram_default": False,
@@ -213,7 +216,7 @@ def register_all(registry=None):
                 "modalities": ["text", "image", "video"],
                 "audio_input": False,
                 "native_mtp": True,
-                "default_enable_thinking": None,
+                "default_enable_thinking": True,
             },
             priority=3,
         )

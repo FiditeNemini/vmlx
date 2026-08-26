@@ -17,6 +17,7 @@ class Model(Qwen3VLModel):
     def __init__(self, config: ModelConfig):
         nn.Module.__init__(self)
         self.config = config
+        self.model_type = config.model_type
         self.vision_tower = VisionModel(config.vision_config)
         self.language_model = LanguageModel(config.text_config, config)
 

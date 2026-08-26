@@ -17,12 +17,16 @@ The language core is shared by the text, image, and video lanes.
 """
 
 from dataclasses import dataclass, field, replace
+import logging
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from mlx_lm.models.cache import ArraysCache
+from mlx_lm.models.gated_delta import gated_delta_update
 from mlx_lm.models.qwen3_5 import GatedDeltaNet as _Qwen35GatedDeltaNet
 from mlx_lm.models.qwen3_5 import TextModelArgs as _Qwen35TextArgs
 from mlx_lm.models.switch_layers import SwitchGLU
@@ -38,8 +42,35 @@ from mlx_vlm.models.qwen3_5.language import (
 from vmlx_engine.models.minimax_m3.cache import (
     MiniMaxM3SparseCache as _SparseIndexerKVCache,
 )
+from vmlx_engine.metal.qwen4_affine_moe_decode import qwen4_affine_switchglu
 
 from .ngram import NGramHasher
+
+
+logger = logging.getLogger(__name__)
+
+
+def _layer_profile_enabled(input_ids: Optional[mx.array]) -> bool:
+    """Enable an explicit one-token fence after each Qwen4 phase.
+
+    This is deliberately opt-in because the fences destroy normal graph fusion.
+    It separates SSD PLE lookup, GDN/QSA, routed MoE, and residual mixing wall
+    time instead of attributing the whole lazy graph to a later ``mx.eval``.
+    """
+    if os.environ.get("VMLINUX_QWEN4_PROFILE_LAYERS", "").lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return False
+    return input_ids is not None and input_ids.ndim == 2 and input_ids.shape[-1] == 1
+
+
+def _profile_eval(*values: mx.array) -> float:
+    started = time.perf_counter()
+    mx.eval(*values)
+    return (time.perf_counter() - started) * 1000.0
 
 
 # --------------------------------------------------------------------------- #
@@ -257,6 +288,23 @@ class GroupedRMSNorm(nn.Module):
         x = x.reshape(*shape[:-1], -1, self.group_size)
         x = mx.fast.rms_norm(x, None, self.eps)
         return x.reshape(shape) * self.weight
+
+
+class ZeroCenteredRMSNorm(nn.Module):
+    """Gemma-style RMSNorm for weights stored as a delta from one.
+
+    Qwen4-Exp uses this convention only for the MTP input-fusion pre-norms.
+    Unlike the backbone's shifted norms, these checkpoint tensors must remain
+    zero-centered and are applied as ``1 + weight`` at runtime.
+    """
+
+    def __init__(self, dims: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = mx.zeros((dims,))
+        self.eps = eps
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
 
 
 class RMSNormGatedSigmoid(nn.Module):
@@ -497,13 +545,159 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             )
         # else: keep the inherited silu-gated norm
 
+    def _process_chunk(
+        self,
+        qkv,
+        a,
+        b,
+        conv_state,
+        ssm_state,
+        mask=None,
+        lengths=None,
+    ):
+        batch_size, seq_len = qkv.shape[:2]
+        conv_input = mx.concatenate([conv_state, qkv], axis=1)
+        keep = self.conv_kernel_size - 1
+        if lengths is not None:
+            ends = mx.clip(lengths, 0, seq_len)
+            positions = (ends[:, None] + mx.arange(keep))[..., None]
+            new_conv_state = mx.take_along_axis(conv_input, positions, axis=1)
+        else:
+            new_conv_state = mx.contiguous(conv_input[:, -keep:, :])
+        conv_out = nn.silu(self.conv1d(conv_input))
+        q, k, v = [
+            tensor.reshape(batch_size, seq_len, heads, dim)
+            for tensor, heads, dim in zip(
+                mx.split(conv_out, [self.key_dim, 2 * self.key_dim], -1),
+                [self.num_k_heads, self.num_k_heads, self.num_v_heads],
+                [self.head_k_dim, self.head_k_dim, self.head_v_dim],
+            )
+        ]
+        inv_scale = k.shape[-1] ** -0.5
+        q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
+        k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
+        out, new_ssm_state = gated_delta_update(
+            q,
+            k,
+            v,
+            a,
+            b,
+            self.A_log,
+            self.dt_bias,
+            ssm_state,
+            mask,
+            use_kernel=not self.training,
+        )
+        return out, new_conv_state, new_ssm_state
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        mask: Optional[mx.array] = None,
+        cache: Optional[Any] = None,
+        n_confirmed: int = 0,
+    ) -> mx.array:
+        batch_size, seq_len, _ = inputs.shape
+        if self.sharding_group is not None:
+            if n_confirmed:
+                raise NotImplementedError(
+                    "qwen4_exp MTP rollback is not implemented for sharded GDN"
+                )
+            return super().__call__(inputs, mask=mask, cache=cache)
+
+        qkv = self.in_proj_qkv(inputs)
+        z = self.in_proj_z(inputs).reshape(
+            batch_size, seq_len, self.num_v_heads, self.head_v_dim
+        )
+        b = self.in_proj_b(inputs)
+        a = self.in_proj_a(inputs)
+        conv_state = cache[0] if cache is not None else None
+        if conv_state is None or conv_state.shape[0] != batch_size:
+            conv_state = mx.zeros(
+                (batch_size, self.conv_kernel_size - 1, self.conv_dim),
+                dtype=inputs.dtype,
+            )
+        ssm_state = cache[1] if cache is not None else None
+        if ssm_state is not None and ssm_state.shape[0] != batch_size:
+            ssm_state = None
+        if mask is not None:
+            if mask.shape[0] != batch_size:
+                mask = None
+            else:
+                qkv = mx.where(mask[..., None], qkv, 0)
+
+        if 0 < n_confirmed < seq_len:
+            confirmed_mask = mask[:, :n_confirmed] if mask is not None else None
+            draft_mask = mask[:, n_confirmed:] if mask is not None else None
+            out_c, conv_c, ssm_c = self._process_chunk(
+                qkv[:, :n_confirmed],
+                a[:, :n_confirmed],
+                b[:, :n_confirmed],
+                conv_state,
+                ssm_state,
+                confirmed_mask,
+            )
+            if cache is not None:
+                cache.rollback_state = (conv_c, ssm_c)
+                draft_qkv = qkv[:, n_confirmed:]
+                draft_a = a[:, n_confirmed:]
+                draft_b = b[:, n_confirmed:]
+
+                def rollback_to(
+                    count,
+                    _q=draft_qkv,
+                    _a=draft_a,
+                    _b=draft_b,
+                    _c=conv_c,
+                    _s=ssm_c,
+                    _m=draft_mask,
+                    _self=self,
+                ):
+                    _, conv_k, ssm_k = _self._process_chunk(
+                        _q[:, :count],
+                        _a[:, :count],
+                        _b[:, :count],
+                        _c,
+                        _s,
+                        _m[:, :count] if _m is not None else None,
+                    )
+                    return conv_k, ssm_k
+
+                cache.rollback_to = rollback_to
+            out_d, conv_f, ssm_f = self._process_chunk(
+                qkv[:, n_confirmed:],
+                a[:, n_confirmed:],
+                b[:, n_confirmed:],
+                conv_c,
+                ssm_c,
+                draft_mask,
+            )
+            out = mx.concatenate([out_c, out_d], axis=1)
+        else:
+            lengths = getattr(cache, "lengths", None) if cache is not None else None
+            out, conv_f, ssm_f = self._process_chunk(
+                qkv, a, b, conv_state, ssm_state, mask, lengths=lengths
+            )
+
+        if cache is not None:
+            cache[0] = conv_f
+            cache[1] = ssm_f
+            advance = getattr(cache, "advance", None)
+            if callable(advance):
+                advance(seq_len)
+        out = self.norm(out, z)
+        return self.out_proj(out.reshape(batch_size, seq_len, -1))
+
 
 # --------------------------------------------------------------------------- #
 # QSA attention
 # --------------------------------------------------------------------------- #
 # QSA and MiniMax-M3's MSA have the same persistence shape: full K/V plus an
-# append-only indexer-key lane. QSA stores normalized, M-RoPE-applied indexer
-# keys so a restored multimodal prefix does not need historical position IDs.
+# append-only indexer payload lane. QSA's payload stores each raw index key and
+# its three M-RoPE coordinates. Upstream pools raw keys first, normalizes the
+# pooled block, then rotates it at the block's first token; rotating token keys
+# before pooling is not equivalent. Keeping the coordinates beside the raw key
+# makes that exact order restart-safe for image/video prefixes.
 # Reuse the engine's already hardened
 # three-lane sparse cache transport so RAM cloning, partial-block SSD storage,
 # restart restore, logical-offset trimming, and validation preserve all three
@@ -532,6 +726,28 @@ class QSAIndexer(nn.Module):
             mrope_section=args.mrope_section,
         )
 
+    @staticmethod
+    def _position_payload(position_ids: mx.array, batch: int, length: int) -> mx.array:
+        """Return exact per-token M-RoPE coordinates as ``[B, S, 3]``."""
+        if position_ids.ndim == 2:
+            if position_ids.shape == (batch, length):
+                position_ids = mx.broadcast_to(
+                    position_ids[None, ...], (3, batch, length)
+                )
+            elif batch == 1 and position_ids.shape == (3, length):
+                position_ids = position_ids[:, None, :]
+            else:
+                raise ValueError(
+                    "qwen4_exp QSA position_ids must be [B,S], [3,S] for B=1, "
+                    "or [3,B,S]"
+                )
+        if position_ids.ndim != 3 or position_ids.shape != (3, batch, length):
+            raise ValueError(
+                "qwen4_exp QSA position_ids must resolve to [3,B,S], got "
+                f"{position_ids.shape}"
+            )
+        return position_ids.transpose(1, 2, 0).astype(mx.float32)
+
     def __call__(
         self,
         hidden_states: mx.array,
@@ -540,9 +756,14 @@ class QSAIndexer(nn.Module):
         offset: Optional[int] = None,
         position_ids: Optional[mx.array] = None,
     ) -> Optional[mx.array]:
-        """Returns an additive float mask [B, 1, S, T] (0 = keep, -inf = drop),
-        or None when everything is visible (T <= budget-ish fast path is skipped
-        for exactness: we always compute unless T <= compress_ratio)."""
+        """Return an additive float mask [B, 1, S, T], or ``None``.
+
+        At or below ``block_topk`` complete micro-blocks, every block is in the
+        native QSA budget. Persist the raw index lane, then bypass pooling,
+        scoring, and selection exactly as the upstream Qwen4 implementation
+        does. Doing an ``argpartition`` whose result cannot hide anything is
+        pure decode overhead.
+        """
         B, S, _ = hidden_states.shape
         offset = (
             (cache.offset if cache is not None else 0) if offset is None else offset
@@ -552,35 +773,53 @@ class QSAIndexer(nn.Module):
         q, raw_k = mx.split(qk, [self.n_heads * self.head_dim], axis=-1)
         q = q.reshape(B, S, self.n_heads, self.head_dim)
         q = self.q_layernorm(q).transpose(0, 2, 1, 3)
-        raw_k = self.k_layernorm(raw_k[:, :, None, :]).transpose(0, 2, 1, 3)
 
         if position_ids is None:
             position_ids = mx.arange(offset, offset + S)[None, :]
         qcos, qsin = self.rotary_emb(q, position_ids)
-        q, raw_k = apply_multimodal_rotary_pos_emb(q, raw_k, qcos, qsin)
+        q, _ = apply_multimodal_rotary_pos_emb(q, q, qcos, qsin)
         q = q.transpose(0, 2, 1, 3)
-        raw_k = raw_k.transpose(0, 2, 1, 3)[:, :, 0, :]
+
+        # A single float32 payload preserves the raw projection values and
+        # integer coordinates exactly through the existing three-lane cache
+        # transport. Native positions are <=1M, well inside exact float32 int
+        # representation. The extra three scalars are split before scoring.
+        current_positions = self._position_payload(position_ids, B, S)
+        payload = mx.concatenate(
+            [raw_k.astype(mx.float32), current_positions], axis=-1
+        )
 
         if cache is not None:
-            # Persist the normalized, M-RoPE-applied index keys. This is the
-            # architecture-native selector state: a restored image/video
-            # prefix never has to guess historical 3-axis position IDs.
-            all_keys = cache.update_index(raw_k[:, None, :, :])[:, 0, :, :]
+            all_payload = cache.update_index(payload[:, None, :, :])[:, 0, :, :]
         else:
-            all_keys = raw_k
-        T = all_keys.shape[1]
+            all_payload = payload
+        all_keys = all_payload[..., : self.head_dim]
+        all_positions = all_payload[..., self.head_dim :]
+        T = all_payload.shape[1]
 
-        # pooled block keys (block b = tokens [4b, 4b+4))
+        # pooled block keys (block b = tokens [4b, 4b+4)). QSA selects 512
+        # complete blocks. At or below that count every complete block plus
+        # the current incomplete tail is visible, so building scores and an
+        # argpartition is both redundant and contrary to the upstream Qwen4
+        # fast path.
         num_blocks = T // self.compress_ratio
-        if num_blocks == 0:
-            return None  # everything is tail → fully visible
+        if num_blocks <= self.block_topk:
+            return None
         pooled = (
             all_keys[:, : num_blocks * self.compress_ratio, :]
             .reshape(B, num_blocks, self.compress_ratio, self.head_dim)
             .astype(mx.float32)
             .mean(axis=2)
-            .astype(all_keys.dtype)
         )
+        pooled = self.k_layernorm(pooled[:, :, None, :]).transpose(0, 2, 1, 3)
+        block_positions = all_positions[
+            :, : num_blocks * self.compress_ratio : self.compress_ratio, :
+        ].transpose(2, 0, 1)
+        block_cos, block_sin = self.rotary_emb(pooled, block_positions)
+        pooled, _ = apply_multimodal_rotary_pos_emb(
+            pooled, pooled, block_cos, block_sin
+        )
+        pooled = pooled[:, 0, :, :]
 
         # scores: relu(q·k) summed over heads / sqrt(D) → [B, S, NB]
         scores = mx.einsum(
@@ -736,16 +975,39 @@ class SparseMoeBlock(nn.Module):
         )
         self.shared_expert_gate = nn.Linear(args.hidden_size, 1, bias=False)
 
-    def __call__(self, x: mx.array) -> mx.array:
+    def __call__(
+        self,
+        x: mx.array,
+        profile_phases: Optional[Dict[str, float]] = None,
+    ) -> mx.array:
         gates = mx.softmax(self.gate(x), axis=-1, precise=True)
         k = self.top_k
         inds = mx.argpartition(gates, kth=-k, axis=-1)[..., -k:]
         scores = mx.take_along_axis(gates, inds, axis=-1)
         if self.norm_topk_prob:
             scores = scores / scores.sum(axis=-1, keepdims=True)
-        y = self.switch_mlp(x, inds)
-        y = (y * scores[..., None]).sum(axis=-2)
-        return y + mx.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
+        if profile_phases is not None:
+            profile_phases["moe_router"] = _profile_eval(inds, scores)
+
+        routed, fused_reduction = qwen4_affine_switchglu(
+            self.switch_mlp, x, inds, scores
+        )
+        if profile_phases is not None:
+            profile_phases["moe_routed"] = _profile_eval(routed)
+            profile_phases["moe_reduce"] = 0.0 if fused_reduction else 0.0
+
+        shared_gate = mx.sigmoid(self.shared_expert_gate(x))
+        if profile_phases is not None:
+            profile_phases["moe_shared_gate"] = _profile_eval(shared_gate)
+
+        shared = self.shared_expert(x)
+        if profile_phases is not None:
+            profile_phases["moe_shared"] = _profile_eval(shared)
+
+        output = routed + shared_gate * shared
+        if profile_phases is not None:
+            profile_phases["moe_finalize"] = _profile_eval(output)
+        return output
 
 
 # --------------------------------------------------------------------------- #
@@ -775,13 +1037,53 @@ class DecoderLayer(nn.Module):
         cache=None,
         input_ids=None,
         position_ids=None,
+        profile_layer: Optional[int] = None,
+        n_confirmed: int = 0,
     ):
+        phase_ms: Dict[str, float] = {}
         if self.ple is not None:
-            h = h + self.ple(h, input_ids, cache)
+            if cache is not None and 0 < n_confirmed < h.shape[1]:
+                confirmed_h = h[:, :n_confirmed]
+                draft_h = h[:, n_confirmed:]
+                confirmed_ids = input_ids[:, :n_confirmed]
+                draft_ids = input_ids[:, n_confirmed:]
+                confirmed_h = confirmed_h + self.ple(
+                    confirmed_h, confirmed_ids, cache
+                )
+                ple_context = cache[2]
+                ple_conv = cache[3]
+                cache.rollback_aux_state = (ple_context, ple_conv)
+
+                def rollback_aux_to(
+                    count,
+                    _h=draft_h,
+                    _ids=draft_ids,
+                    _context=ple_context,
+                    _conv=ple_conv,
+                    _cache=cache,
+                    _ple=self.ple,
+                ):
+                    _cache[2] = _context
+                    _cache[3] = _conv
+                    if count:
+                        _ple(_h[:, :count], _ids[:, :count], _cache)
+                    return _cache[2], _cache[3]
+
+                cache.rollback_aux_to = rollback_aux_to
+                draft_h = draft_h + self.ple(draft_h, draft_ids, cache)
+                h = mx.concatenate([confirmed_h, draft_h], axis=1)
+            else:
+                h = h + self.ple(h, input_ids, cache)
+            if profile_layer is not None:
+                phase_ms["ple"] = _profile_eval(h)
 
         x, hyper, inject = self.attn_hyper_connection(h)
+        if profile_layer is not None:
+            phase_ms["attn_hc"] = _profile_eval(x)
         if self.is_linear:
-            r = self.linear_attn(x, mask=mask, cache=cache)
+            r = self.linear_attn(
+                x, mask=mask, cache=cache, n_confirmed=n_confirmed
+            )
         else:
             r = self.self_attn(
                 x,
@@ -789,11 +1091,27 @@ class DecoderLayer(nn.Module):
                 cache=cache,
                 position_ids=position_ids,
             )
+        if profile_layer is not None:
+            phase_ms["gdn" if self.is_linear else "qsa"] = _profile_eval(r)
         h = self.attn_hyper_connection.combine(hyper, r, inject)
+        if profile_layer is not None:
+            phase_ms["attn_combine"] = _profile_eval(h)
 
         x, hyper, inject = self.mlp_hyper_connection(h)
-        r = self.mlp(x)
-        return self.mlp_hyper_connection.combine(hyper, r, inject)
+        if profile_layer is not None:
+            phase_ms["mlp_hc"] = _profile_eval(x)
+        r = self.mlp(x, phase_ms if profile_layer is not None else None)
+        h = self.mlp_hyper_connection.combine(hyper, r, inject)
+        if profile_layer is not None:
+            phase_ms["mlp_combine"] = _profile_eval(h)
+            logger.info(
+                "QWEN4_LAYER_PROFILE layer=%d type=%s total_ms=%.3f phases_ms=%s",
+                profile_layer,
+                "gdn" if self.is_linear else "qsa",
+                sum(phase_ms.values()),
+                ",".join(f"{name}:{value:.3f}" for name, value in phase_ms.items()),
+            )
+        return h
 
 
 class Qwen4ExpTextModel(nn.Module):
@@ -814,21 +1132,32 @@ class Qwen4ExpTextModel(nn.Module):
         cache=None,
         inputs_embeds=None,
         position_ids=None,
+        return_expanded: bool = False,
+        n_confirmed: int = 0,
         **_kwargs,
     ):
         h = inputs_embeds if inputs_embeds is not None else self.embed_tokens(inputs)
         h = mx.tile(h, (1, 1, self.args.hc_count))
+        profile = _layer_profile_enabled(inputs)
+        if profile:
+            logger.info("QWEN4_LAYER_PROFILE begin seq_len=1")
         if cache is None:
             cache = [None] * len(self.layers)
-        for layer, c in zip(self.layers, cache):
+        for layer_index, (layer, c) in enumerate(zip(self.layers, cache)):
             h = layer(
                 h,
                 mask=None,
                 cache=c,
                 input_ids=inputs,
                 position_ids=position_ids,
+                profile_layer=layer_index if profile else None,
+                n_confirmed=n_confirmed,
             )
-        return self.hyper_connection_mixer(h)
+        mixed = self.hyper_connection_mixer(h)
+        if profile:
+            mixer_ms = _profile_eval(mixed)
+            logger.info("QWEN4_LAYER_PROFILE final_mixer_ms=%.3f", mixer_ms)
+        return (mixed, h) if return_expanded else mixed
 
 
 class MTPModule(nn.Module):
@@ -836,8 +1165,12 @@ class MTPModule(nn.Module):
 
     def __init__(self, args: Qwen4ExpTextArgs):
         super().__init__()
-        self.pre_fc_norm_embedding = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
-        self.pre_fc_norm_hidden = nn.RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.pre_fc_norm_embedding = ZeroCenteredRMSNorm(
+            args.hidden_size, eps=args.rms_norm_eps
+        )
+        self.pre_fc_norm_hidden = ZeroCenteredRMSNorm(
+            args.hc_count * args.hidden_size, eps=args.rms_norm_eps
+        )
         self.fc_embedding = nn.Linear(args.hidden_size, args.hidden_size, bias=False)
         self.fc_hidden = nn.Linear(args.hidden_size, args.hidden_size, bias=False)
         mtp_args = replace(
@@ -851,11 +1184,28 @@ class MTPModule(nn.Module):
         ]
         self.hyper_connection_mixer = GatedResidual(args, use_combine=False)
 
-    def __call__(self, hidden_states, next_token_ids, embed_tokens, cache=None):
-        embedded = self.pre_fc_norm_embedding(embed_tokens(next_token_ids))
+    def fuse_inputs(self, hidden_states, token_embeddings):
+        """Preserve all four trained mHC branches through MTP input fusion."""
+        embedded = self.fc_embedding(self.pre_fc_norm_embedding(token_embeddings))
         hidden = self.pre_fc_norm_hidden(hidden_states)
-        fused = self.fc_embedding(embedded) + self.fc_hidden(hidden)
-        fused = mx.tile(fused, (1, 1, self.hyper_connection_mixer.hc_count))
+        original_shape = hidden.shape
+        hidden = hidden.reshape(
+            *hidden.shape[:-1],
+            self.hyper_connection_mixer.hc_count,
+            self.hyper_connection_mixer.hidden_size,
+        )
+        hidden = self.fc_hidden(hidden)
+        return (embedded[..., None, :] + hidden).reshape(original_shape)
+
+    def __call__(
+        self,
+        hidden_states,
+        next_token_ids,
+        embed_tokens,
+        cache=None,
+        return_expanded: bool = False,
+    ):
+        fused = self.fuse_inputs(hidden_states, embed_tokens(next_token_ids))
         if cache is None:
             cache = [None] * len(self.layers)
         for layer, layer_cache in zip(self.layers, cache):
@@ -865,7 +1215,8 @@ class MTPModule(nn.Module):
                 cache=layer_cache,
                 input_ids=next_token_ids,
             )
-        return self.hyper_connection_mixer(fused)
+        mixed = self.hyper_connection_mixer(fused)
+        return (mixed, fused) if return_expanded else mixed
 
 
 class LanguageModel(nn.Module):
@@ -934,20 +1285,22 @@ class LanguageModel(nn.Module):
                         position_ids, (batch_size, seq_length)
                     )
 
-        hidden = self.model(
+        hidden, expanded_hidden = self.model(
             inputs,
             cache=cache,
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,
+            return_expanded=True,
+            n_confirmed=int(kwargs.get("n_confirmed", 0) or 0),
         )
         if not return_logits:
-            return hidden
+            return (hidden, expanded_hidden) if return_hidden else hidden
         if self.args.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(hidden)
         else:
             logits = self.lm_head(hidden)
         if return_hidden:
-            return logits, hidden
+            return logits, expanded_hidden
         return LanguageModelOutput(logits=logits)
 
     get_rope_index = _Qwen35VlmLanguageModel.get_rope_index
@@ -965,17 +1318,18 @@ class LanguageModel(nn.Module):
     def mtp_forward(
         self, hidden_states, next_token_ids, mtp_cache, return_hidden=False
     ):
-        mtp_hidden = self.mtp(
+        mtp_hidden, expanded_hidden = self.mtp(
             hidden_states,
             next_token_ids,
             self.model.embed_tokens,
             mtp_cache,
+            return_expanded=True,
         )
         if self.args.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(mtp_hidden)
         else:
             logits = self.lm_head(mtp_hidden)
-        return (logits, mtp_hidden) if return_hidden else logits
+        return (logits, expanded_hidden) if return_hidden else logits
 
     def make_mtp_cache(self):
         if not hasattr(self, "mtp"):

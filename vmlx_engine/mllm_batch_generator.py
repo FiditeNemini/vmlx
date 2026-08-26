@@ -4268,6 +4268,8 @@ def _native_mtp_rollback_to_confirmed(
             continue
         rollback = getattr(layer, "rollback_state", None)
         rollback_to = getattr(layer, "rollback_to", None)
+        rollback_aux = getattr(layer, "rollback_aux_state", None)
+        rollback_aux_to = getattr(layer, "rollback_aux_to", None)
         if rollback is not None or rollback_to is not None:
             if accepted_drafts > 0:
                 if rollback_to is None:
@@ -4294,9 +4296,23 @@ def _native_mtp_rollback_to_confirmed(
                 layer[1] = ssm_state
             except (TypeError, IndexError, AttributeError):
                 return False
+            if rollback_aux is not None or rollback_aux_to is not None:
+                try:
+                    aux_state = (
+                        rollback_aux_to(accepted_drafts)
+                        if accepted_drafts > 0
+                        else rollback_aux
+                    )
+                    layer[2], layer[3] = aux_state
+                except (TypeError, ValueError, IndexError, AttributeError):
+                    return False
             layer.rollback_state = None
             if rollback_to is not None:
                 layer.rollback_to = None
+            if rollback_aux is not None:
+                layer.rollback_aux_state = None
+            if rollback_aux_to is not None:
+                layer.rollback_aux_to = None
             continue
         if hasattr(layer, "is_trimmable") and layer.is_trimmable():
             layer.trim(reject_tokens)
@@ -4849,6 +4865,10 @@ def _native_mtp_clear_rollback(cache: List[Any]) -> None:
             layer.rollback_state = None
         if getattr(layer, "rollback_to", None) is not None:
             layer.rollback_to = None
+        if getattr(layer, "rollback_aux_state", None) is not None:
+            layer.rollback_aux_state = None
+        if getattr(layer, "rollback_aux_to", None) is not None:
+            layer.rollback_aux_to = None
 
 
 def _native_mtp_snapshot_value(value: Any) -> Any:

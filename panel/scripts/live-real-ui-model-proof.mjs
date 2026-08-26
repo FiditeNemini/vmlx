@@ -509,6 +509,19 @@ const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
 // L1+L2 family looked healthy — was never exercised through the UI at all.
 // Default OFF so existing rows are byte-unchanged.
 const forceSsdOnlyLane = envBool('VMLINUX_REAL_UI_FORCE_SSD_ONLY_LANE', false)
+const blockDiskCacheMaxPercentOverride = envNumber(
+  'VMLINUX_REAL_UI_BLOCK_DISK_CACHE_MAX_PERCENT',
+)
+if (
+  blockDiskCacheMaxPercentOverride != null
+  && (
+    !Number.isInteger(blockDiskCacheMaxPercentOverride)
+    || blockDiskCacheMaxPercentOverride < 0
+    || blockDiskCacheMaxPercentOverride > 90
+  )
+) {
+  throw new Error('Real UI SSD cache percent must be an integer from 0 through 90')
+}
 // Whether the paged expectation was stated at all. Paged cache is DEFAULT ON
 // for every autodetected family except M3/openpangu_v2, so a hardcoded
 // default-false expectation asserts the operator's memory rather than the
@@ -5031,6 +5044,7 @@ export function validateServerCacheEvidence(result) {
   const argv = Array.isArray(evidence.argv) ? evidence.argv.map(String) : []
   const visible = evidence.initialCacheControls || {}
   const nativeCache = health?.native_cache || {}
+  const requestedBlockDiskPercent = result?.requestedBlockDiskCacheMaxPercent
   const expectedDsv4PoolQuant = result?.expectedDsv4PoolQuant
   if (evidence.runningSessionDrawer !== true) failures.push('cache controls were not inspected on the running session')
   if (evidence.controlScope !== 'running-session-toolbar') {
@@ -5054,6 +5068,39 @@ export function validateServerCacheEvidence(result) {
   if (config.enableBlockDiskCache !== true) failures.push('persisted session config did not enable block disk cache')
   if (!argv.includes('--enable-block-disk-cache')) failures.push('engine argv omitted --enable-block-disk-cache')
   if (health?.native_cache?.block_disk_l2 !== true) failures.push('/health did not report native_cache.block_disk_l2=true')
+  if (requestedBlockDiskPercent != null) {
+    if (!approximatelyEqual(
+      Number(visible.blockDiskCacheMaxPercent),
+      Number(requestedBlockDiskPercent),
+    )) {
+      failures.push('visible SSD cache percentage does not match the requested aggregate budget')
+    }
+    if (!approximatelyEqual(
+      Number(config.blockDiskCacheMaxPercent),
+      Number(requestedBlockDiskPercent),
+    )) {
+      failures.push('persisted SSD cache percentage does not match the requested aggregate budget')
+    }
+    const percentFlagIndex = argv.indexOf('--block-disk-cache-max-percent')
+    if (
+      percentFlagIndex < 0
+      || !approximatelyEqual(
+        Number(argv[percentFlagIndex + 1]),
+        Number(requestedBlockDiskPercent),
+      )
+    ) {
+      failures.push('engine argv omitted or changed the requested aggregate SSD cache percentage')
+    }
+    if (argv.includes('--block-disk-cache-max-gb')) {
+      failures.push('engine argv emitted a flat GB cap that overrides the requested SSD percentage')
+    }
+    const blockDiskStats = health?.cache?.block_disk_cache
+      || health?.block_disk_cache
+      || {}
+    if (!(Number(blockDiskStats.max_size_gb) > 0) && Number(requestedBlockDiskPercent) > 0) {
+      failures.push('/health cache telemetry omitted the finite resolved SSD cache budget')
+    }
+  }
   if (typeof config.enablePrefixCache !== 'boolean') {
     failures.push('persisted session config omitted enablePrefixCache')
   } else {
@@ -9532,7 +9579,10 @@ async function main() {
           // Optional lane selection, before Start so the session is CREATED in
           // the SSD-only configuration rather than toggled afterwards.
           let ssdOnlyLaneSelection = null;
-          if (${JSON.stringify(forceSsdOnlyLane)}) {
+          if (
+            ${JSON.stringify(forceSsdOnlyLane)}
+            || ${JSON.stringify(blockDiskCacheMaxPercentOverride)} != null
+          ) {
             const preDrawer = document.querySelector(
               '[data-vmlx-surface="server-settings"]'
             );
@@ -9553,20 +9603,47 @@ async function main() {
             const preInputFor = (text) => preLabelFor(text)?.querySelector('input[type="checkbox"]');
             const pagedPre = preInputFor('In-Memory Paged Cache (RAM)');
             const blockPre = preInputFor('Block Disk Cache (SSD / L2)');
+            const percentSetting = () => preDrawer?.querySelector(
+              '[data-setting-label="SSD Cache Size (% of disk)"]'
+            );
+            const percentRange = () => percentSetting()?.querySelector(
+              'input[type="range"]'
+            );
             const before = {
               usePagedCache: !!pagedPre?.checked,
               enableBlockDiskCache: !!blockPre?.checked,
               pagedDisabled: !!pagedPre?.disabled,
+              blockDiskCacheMaxPercent: percentSetting()
+                ? Number(percentSetting().getAttribute('data-setting-value'))
+                : null,
             };
-            if (blockPre && !blockPre.checked && !blockPre.disabled) {
+            if (${JSON.stringify(forceSsdOnlyLane)} && blockPre && !blockPre.checked && !blockPre.disabled) {
               blockPre.scrollIntoView({ block: 'center' });
               blockPre.click();
               await new Promise((r) => setTimeout(r, 150));
             }
-            if (pagedPre && pagedPre.checked && !pagedPre.disabled) {
+            if (${JSON.stringify(forceSsdOnlyLane)} && pagedPre && pagedPre.checked && !pagedPre.disabled) {
               pagedPre.scrollIntoView({ block: 'center' });
               pagedPre.click();
               await new Promise((r) => setTimeout(r, 150));
+            }
+            const requestedPercent = ${JSON.stringify(blockDiskCacheMaxPercentOverride)};
+            if (requestedPercent != null) {
+              const input = percentRange();
+              if (!(input instanceof HTMLInputElement) || input.disabled) {
+                throw new Error('Visible SSD cache percentage control was not editable');
+              }
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                'value',
+              )?.set;
+              setter?.call(input, String(requestedPercent));
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              await waitFor(
+                () => Number(percentSetting()?.getAttribute('data-setting-value')) === requestedPercent,
+                'visible SSD cache percentage to update',
+              );
             }
             // The session record already exists at this point, and the drawer
             // says as much ("Session is running. Save changes and use Save &
@@ -9605,6 +9682,9 @@ async function main() {
                 usePagedCache: !!preInputFor('In-Memory Paged Cache (RAM)')?.checked,
                 enableBlockDiskCache: !!preInputFor('Block Disk Cache (SSD / L2)')?.checked,
                 pagedDisabled: !!preInputFor('In-Memory Paged Cache (RAM)')?.disabled,
+                blockDiskCacheMaxPercent: percentSetting()
+                  ? Number(percentSetting().getAttribute('data-setting-value'))
+                  : null,
               },
               savedVia,
               saveCandidateCount: saveCandidates.length,
@@ -9613,6 +9693,9 @@ async function main() {
                 : null,
               persistedBlockDiskAfterSave: persistedAfterSave
                 ? persistedAfterSave.enableBlockDiskCache
+                : null,
+              persistedBlockDiskCacheMaxPercentAfterSave: persistedAfterSave
+                ? persistedAfterSave.blockDiskCacheMaxPercent
                 : null,
             };
           }
@@ -11013,6 +11096,7 @@ async function main() {
         requestedEnableThinking: enableThinkingOverride,
         reasoningExpectation,
         requestedServerCacheControls: checkServerCacheControls,
+        requestedBlockDiskCacheMaxPercent: blockDiskCacheMaxPercentOverride,
         requestedMedia: checkMedia,
         requestedVideo: checkVideo,
         requestedAudio: checkAudio,
@@ -11245,6 +11329,14 @@ async function main() {
             enableBlockDiskCache: !!blockDiskInput?.checked,
             usePagedCacheDisabled: !!pagedInput?.disabled,
             blockDiskCachePresent: !!blockDiskInput,
+            blockDiskCacheMaxPercent: (() => {
+              const setting = drawer?.querySelector(
+                '[data-setting-label="SSD Cache Size (% of disk)"]'
+              );
+              return setting
+                ? Number(setting.getAttribute('data-setting-value'))
+                : null;
+            })(),
           };
           const bodyText = drawer?.innerText || '';
           const labels = [
@@ -11974,6 +12066,7 @@ async function main() {
       requestedEnableThinking: enableThinkingOverride,
       reasoningExpectation,
       requestedServerCacheControls: checkServerCacheControls,
+      requestedBlockDiskCacheMaxPercent: blockDiskCacheMaxPercentOverride,
       expectedDsv4PoolQuant: expectDsv4PoolQuant,
       requestedMedia: checkMedia,
       requestedVideo: checkVideo,

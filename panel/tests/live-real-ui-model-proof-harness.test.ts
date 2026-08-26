@@ -3691,6 +3691,26 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("binds the visible aggregate SSD percentage to config, argv, and health", () => {
+    const result = structuredClone(goodResult());
+    result.requestedBlockDiskCacheMaxPercent = 5;
+    result.serverCacheControls.initialCacheControls.blockDiskCacheMaxPercent = 5;
+    result.session.effective_config.blockDiskCacheMaxPercent = 5;
+    result.serverCacheControls.argv = [
+      "--use-paged-cache",
+      "--enable-block-disk-cache",
+      "--block-disk-cache-max-percent",
+      "5",
+    ];
+    result.server.health.block_disk_cache = { max_size_gb: 92.5 };
+    expect(validateServerCacheEvidence(result)).toEqual([]);
+
+    result.serverCacheControls.argv.push("--block-disk-cache-max-gb", "10");
+    expect(validateServerCacheEvidence(result).join("\n")).toMatch(
+      /flat GB cap that overrides the requested SSD percentage/,
+    );
+  });
+
   it("accepts DSV4 only with visible SSD-only native cache and observed pool quant", () => {
     expect(validateServerCacheEvidence(dsv4EnabledResult())).toEqual([]);
   });

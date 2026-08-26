@@ -87,6 +87,9 @@ def test_restart_gate_launches_ssd_only_with_percent_budget_and_private_contract
         command[command.index("--private-cache-attestation-token-file") + 1]
         == "/tmp/private.token"
     )
+    assert Path(
+        command[command.index("--private-cache-attestation-token-file") + 1]
+    ).is_absolute()
 
 
 def test_restart_gate_selects_production_off_boundary_prompt(monkeypatch):

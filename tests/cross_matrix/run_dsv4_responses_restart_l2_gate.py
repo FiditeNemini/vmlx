@@ -421,9 +421,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     out = Path(args.out)
     run_id = f"dsv4-restart-l2-{int(time.time() * 1000)}-{os.getpid()}"
-    base_dir = out.parent / "dsv4-restart-l2"
-    cache_dir = Path(args.cache_dir) if args.cache_dir else base_dir / run_id / "block-cache"
-    log_dir = out.parent / "dsv4-restart-l2-logs"
+    base_dir = (out.parent / "dsv4-restart-l2").resolve()
+    cache_dir = (
+        Path(args.cache_dir).expanduser().resolve()
+        if args.cache_dir
+        else base_dir / run_id / "block-cache"
+    )
+    log_dir = (out.parent / "dsv4-restart-l2-logs").resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
     if cache_dir.exists() and not args.keep_existing_cache_dir:
         shutil.rmtree(cache_dir)
@@ -432,6 +436,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     proof_dir.mkdir(parents=True, exist_ok=True)
     proof_token = secrets.token_urlsafe(48)
     proof_token_file = proof_dir / "private-cache-attestation.token"
+    if not proof_token_file.is_absolute():
+        raise RuntimeError("private cache attestation token path must be absolute")
     proof_token_file.write_text(proof_token + "\n")
     proof_token_file.chmod(0o600)
 

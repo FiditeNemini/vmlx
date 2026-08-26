@@ -4067,6 +4067,18 @@ def _native_mtp_depth_for_request(request: Any) -> int:
     return 1
 
 
+def _native_mtp_depth_ceiling_for_request(request: Any) -> int:
+    """Return the immutable adaptive-depth ceiling for one request.
+
+    Tool-bearing requests start at D1 because deeper speculative chains can
+    cross a tool-call boundary before the verifier has committed it.  That is
+    a request capability constraint, not merely an initial-depth choice, so
+    the adaptive controller must never promote the request above D1 later.
+    """
+
+    return 1 if _native_mtp_request_has_tools(request) else 3
+
+
 def _native_mtp_logprobs(logits_2d: mx.array) -> mx.array:
     return logits_2d - mx.logsumexp(logits_2d, axis=-1, keepdims=True)
 
@@ -14164,6 +14176,7 @@ class MLLMBatchGenerator:
             draft_lps=draft_lps,
             draft_ids=draft_ids,
             depth=depth,
+            depth_ceiling=_native_mtp_depth_ceiling_for_request(request),
             head_chain_pairs=max(0, len(drafts) - 1),
             ar_step_ms=_seed_ar_ms,
             cycle_span_start=time.perf_counter(),

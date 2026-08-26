@@ -217,6 +217,31 @@ class TestRestoredPrefixGates:
 
 
 class TestRollingValueIntegration:
+    def test_tool_request_ceiling_blocks_wall_value_promotion(self, monkeypatch):
+        from vmlx_engine.native_mtp_adaptive import add_depth_cycle_sample
+
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_VALUE", "1")
+        state = gen.MLLMNativeMTPState(depth=1, depth_ceiling=1)
+        state.stats.cycles = 12
+        state.stats.drafted_by_depth = [12, 0, 0]
+        state.stats.accepted_by_depth = [12, 0, 0]
+        for cycle in range(5, 13):
+            add_depth_cycle_sample(
+                state.adaptive_value,
+                depth=1,
+                accepted_drafts=1,
+                elapsed_ms=6.0,
+                cycle=cycle,
+                window=16,
+            )
+
+        gen._native_mtp_maybe_adapt_depth("tool-value-row", state)
+
+        assert state.depth == 1
+        assert state.stats.drafted_by_depth[1:] == [0, 0]
+        assert state.adaptive_value.active_probe_origin == 0
+        assert state.adaptive_value.active_probe_target == 0
+
     def test_generator_policy_uses_wall_value_and_publishes_telemetry(
         self, monkeypatch
     ):

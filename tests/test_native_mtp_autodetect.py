@@ -3359,6 +3359,25 @@ class TestNativeMtpAutodetect:
 
         assert _native_mtp_depth_for_request(req) == 3
 
+    def test_native_mtp_tool_request_keeps_immutable_d1_adaptive_ceiling(self):
+        from vmlx_engine.mllm_batch_generator import (
+            _native_mtp_depth_ceiling_for_request,
+        )
+
+        tool_req = SimpleNamespace(
+            request_id="tool-depth-ceiling",
+            extra_kwargs={
+                "tools": [{"type": "function", "function": {"name": "echo_code"}}],
+            },
+        )
+        plain_req = SimpleNamespace(
+            request_id="plain-depth-ceiling",
+            extra_kwargs={},
+        )
+
+        assert _native_mtp_depth_ceiling_for_request(tool_req) == 1
+        assert _native_mtp_depth_ceiling_for_request(plain_req) == 3
+
     def test_mllm_native_mtp_active_row_does_not_extend_standard_batch(self):
         import mlx.core as mx
 

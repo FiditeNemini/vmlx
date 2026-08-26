@@ -39,9 +39,9 @@ dependencies = [
                        # model registry that vMLX patches with bailing_hybrid for
                        # Ling. The release app separately pins a compatible
                        # MLX-Audio build in panel/scripts/bundle-python.sh.
-    # Native-MTP target verification uses dflash-mlx's Apache-2.0 four-row
-    # affine q4 Metal kernel on M5/G17. All other shapes and hardware retain
-    # stock MLX QuantizedLinear dispatch.
+    # Native-MTP target verification can opt into dflash-mlx's Apache-2.0
+    # four-row affine q4 Metal kernel on M5/G17 with DFLASH_VERIFY_QMM=1.
+    # Stock MLX remains the default; all other shapes/hardware retain it too.
     "dflash-mlx==0.1.8",
     # The matched-DFlash2 draft path (`--speculative-model` with a
     # DFlash2DraftModel checkpoint) loads `dflash.model_mlx`. The public 0.1.0

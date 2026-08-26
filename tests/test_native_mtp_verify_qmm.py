@@ -27,9 +27,22 @@ def _reset_dispatcher():
     )
 
 
-def test_supported_runtime_enables_dependency_kernel_by_default(monkeypatch):
+def test_supported_runtime_keeps_dependency_kernel_off_by_default(monkeypatch):
     monkeypatch.setattr(verify_qmm, "_runtime_supported", lambda: (True, "supported"))
     monkeypatch.delenv("DFLASH_VERIFY_QMM", raising=False)
+
+    status = verify_qmm.install_native_mtp_verify_qmm()
+
+    assert status["installed"] is False
+    assert status["kernel_enabled"] is False
+    assert status["reason"] == "disabled_by_default"
+    assert verify_qmm.native_mtp_verify_qmm_active() is False
+    assert "DFLASH_VERIFY_QMM" not in verify_qmm.os.environ
+
+
+def test_supported_runtime_honors_explicit_kernel_enable(monkeypatch):
+    monkeypatch.setattr(verify_qmm, "_runtime_supported", lambda: (True, "supported"))
+    monkeypatch.setenv("DFLASH_VERIFY_QMM", "1")
 
     status = verify_qmm.install_native_mtp_verify_qmm()
 
@@ -37,7 +50,6 @@ def test_supported_runtime_enables_dependency_kernel_by_default(monkeypatch):
     assert status["kernel_enabled"] is True
     assert status["reason"] == "active"
     assert verify_qmm.native_mtp_verify_qmm_active() is True
-    assert verify_qmm.os.environ["DFLASH_VERIFY_QMM"] == "1"
 
 
 def test_explicit_dependency_kernel_opt_out_is_honored(monkeypatch):

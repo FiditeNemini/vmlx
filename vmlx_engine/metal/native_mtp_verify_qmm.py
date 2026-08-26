@@ -2,8 +2,10 @@
 
 Only the four-row target verification forward is eligible. Decode, prefill,
 replay, MTP-head, and ordinary batched QuantizedLinear calls retain MLX's
-stock implementation. The external kernel is enabled only on the M5/G17
-runtime and MLX 0.32.1+, where it passed the real Qwen3.8-27B JANG_4D gate.
+stock implementation. The external kernel is available only on the M5/G17
+runtime and MLX 0.32.1+, and requires ``DFLASH_VERIFY_QMM=1``. Stock MLX is
+the default because the isolated projection win did not survive the complete
+lazy Qwen3.8-27B JANG_4D graph.
 
 The kernel implementation is provided by dflash-mlx (Apache-2.0). Keeping the
 dependency separate avoids maintaining a private fork of its Metal source.
@@ -74,16 +76,18 @@ def install_native_mtp_verify_qmm() -> dict[str, object]:
     if not supported:
         return native_mtp_verify_qmm_status()
 
-    # dflash-mlx ships the verifier behind an environment gate.  vMLX already
-    # guards this dispatcher by hardware, OS, MLX version, q4 affine shape and
-    # the native-MTP verify scope, so an unset dependency flag must mean enabled
-    # here.  Previously the dispatcher reported itself active while
-    # verify_matmul silently fell back to stock MLX on every call.
+    # dflash-mlx ships the verifier behind an environment gate.  Do not install
+    # the dispatcher unless that gate is explicitly enabled: on the complete
+    # Qwen graph its Metal path regressed fixed-workload decode even though the
+    # isolated four-row projection microbenchmark won.  Previously vMLX still
+    # reported itself active while an unset dependency flag made every call
+    # silently fall back to stock MLX.
     verify_flag = os.environ.get("DFLASH_VERIFY_QMM", "").strip()
-    if verify_flag and verify_flag != "1":
-        _PATCH["reason"] = "disabled_by_env"
+    if verify_flag != "1":
+        _PATCH["reason"] = (
+            "disabled_by_env" if verify_flag else "disabled_by_default"
+        )
         return native_mtp_verify_qmm_status()
-    os.environ["DFLASH_VERIFY_QMM"] = "1"
 
     try:
         from dflash_mlx.verify_qmm import is_enabled, verify_matmul

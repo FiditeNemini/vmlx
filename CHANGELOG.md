@@ -8,6 +8,32 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.41] - 2026-08-26
+
+### Performance
+
+- Supported M5 runtimes now use the native Qwen MTP verification kernel while
+  retaining stock MLX as the default verifier elsewhere and preserving shared
+  request-policy mutual exclusion.
+- DSV4 process-restart cache publication now waits for the exact SSD durability
+  fence before shutdown, avoiding a needless cold prefill when the prior turn's
+  native composite blocks were still being serialized.
+
+### Fixed
+
+- Mixed-SWA changed-tail requests now reconstruct the bounded rotating and
+  full-attention cache state from SSD across process restarts instead of
+  rejecting a valid off-boundary partial prefix.
+- Multimodal tool-intent checks now read normalized Pydantic content parts from
+  the current user turn, preventing an older text-only tool instruction from
+  being reused when the latest image or video turn says not to call a tool.
+- Explicit stream-interval settings survive session creation and engine launch
+  instead of being overwritten by the panel default.
+- New chats ignore dead tool directories rather than advertising unavailable
+  coding tools to the model.
+
+---
+
 ## [1.6.40] - 2026-08-25
 
 ### Performance

@@ -14961,7 +14961,7 @@ def test_release_regression_manifest_production_provenance_gates_manifest(
         },
     )
     provenance = {
-        "version": "1.6.40",
+        "version": "1.6.41",
         "source": {"commit": "a" * 40},
         "jang": {"commit": "b" * 40, "version": "2.5.46"},
     }
@@ -14976,7 +14976,7 @@ def test_release_regression_manifest_production_provenance_gates_manifest(
         scope="r20_production",
         require_prepackage_ready=True,
         require_production_provenance=True,
-        expected_version="1.6.40",
+        expected_version="1.6.41",
         jang_source=tmp_path / "jang-tools",
     )
 
@@ -15008,14 +15008,14 @@ def test_release_regression_manifest_production_provenance_rejects_missing_scope
     monkeypatch.setattr(
         runner,
         "collect_production_provenance",
-        lambda *_args, **_kwargs: ({"version": "1.6.40"}, []),
+        lambda *_args, **_kwargs: ({"version": "1.6.41"}, []),
     )
 
     artifact = runner.build_manifest_artifact(
         tmp_path,
         require_prepackage_ready=True,
         require_production_provenance=True,
-        expected_version="1.6.40",
+        expected_version="1.6.41",
         jang_source=tmp_path / "jang-tools",
     )
 

@@ -860,6 +860,72 @@ def test_qwen4_exp_vlm_config_builds_text_image_and_video_contracts():
     assert model_has_native_mtp_runtime(wrapper) is True
 
 
+def test_qwen4_exp_video_pixels_reach_vision_tower_under_named_contract():
+    from types import SimpleNamespace
+
+    from vmlx_engine.mllm_batch_generator import _video_pixel_values_kwarg_name
+    from vmlx_engine.models.qwen4_exp.qwen4_exp import Model
+
+    class Qwen4ExpContract:
+        get_input_embeddings = Model.get_input_embeddings
+
+    assert _video_pixel_values_kwarg_name(Qwen4ExpContract()) == (
+        "pixel_values_videos"
+    )
+
+    video_pixels = mx.array([[3.0, 5.0]], dtype=mx.float32)
+    video_features = mx.array([[[7.0, 11.0]]], dtype=mx.float32)
+    video_grid = mx.array([[1, 1, 1]], dtype=mx.int32)
+    calls = []
+
+    class VisionTower:
+        patch_embed = SimpleNamespace(
+            proj=SimpleNamespace(weight=mx.zeros((1,), dtype=mx.float32))
+        )
+
+        def __call__(self, pixels, grid_thw):
+            calls.append((pixels, grid_thw))
+            return video_features, None
+
+    class LanguageModelStub:
+        _position_ids = None
+        _rope_deltas = None
+        model = SimpleNamespace(
+            embed_tokens=lambda input_ids: mx.zeros((1, 1, 2), dtype=mx.float32)
+        )
+
+        def get_rope_index(
+            self, input_ids, image_grid_thw, video_grid_thw, mask
+        ):
+            assert image_grid_thw is None
+            assert video_grid_thw is video_grid
+            return mx.array([[0]], dtype=mx.int32), mx.array([0], dtype=mx.int32)
+
+    wrapper = SimpleNamespace(
+        config=SimpleNamespace(image_token_index=901, video_token_index=902),
+        vision_tower=VisionTower(),
+        language_model=LanguageModelStub(),
+        merge_input_ids_with_image_features=(
+            lambda features, inputs_embeds, input_ids, image_token_index,
+            video_token_index: (features, None)
+        ),
+    )
+    result = Model.get_input_embeddings(
+        wrapper,
+        input_ids=mx.array([[902]], dtype=mx.int32),
+        pixel_values_videos=video_pixels,
+        video_grid_thw=video_grid,
+    )
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(np.asarray(calls[0][0]), np.asarray(video_pixels))
+    assert calls[0][0].dtype == video_pixels.dtype
+    assert calls[0][1] is video_grid
+    np.testing.assert_array_equal(
+        np.asarray(result.inputs_embeds), np.asarray(video_features)
+    )
+
+
 def test_qwen4_exp_reasoning_and_tools_preserve_native_bundle_contract():
     from vmlx_engine.model_config_registry import ModelConfigRegistry
     from vmlx_engine.model_configs import register_all

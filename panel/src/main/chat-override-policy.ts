@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs'
 import {
   TOP_K_MAX,
   sanitizeMinPOverride,
@@ -84,6 +85,15 @@ const CHAT_OVERRIDE_REASONING_EFFORTS = new Set<string>(REASONING_EFFORT_LEVELS)
 
 export const CHAT_TOP_K_HARD_MAX = TOP_K_MAX
 
+function isUsableInheritedWorkingDirectory(value: unknown): value is string {
+  if (typeof value !== 'string' || !value.trim()) return false
+  try {
+    return statSync(value).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 export function buildNewChatInheritedOverrides<T extends ChatOverridePolicyInput>(
   existing: T,
   previous?: Partial<ChatOverridePolicyInput> | null,
@@ -93,6 +103,14 @@ export function buildNewChatInheritedOverrides<T extends ChatOverridePolicyInput
   const merged: ChatOverridePolicyInput = { ...existing }
   for (const key of NEW_CHAT_TOOL_INHERIT_KEYS) {
     const value = previous[key]
+    // A working directory is a live filesystem capability, not just a saved
+    // preference. Temporary project folders can disappear between chats. Do
+    // not seed a clean chat with a dead path and wait for its first file tool
+    // to fail; leave the field unset so the settings surface names the missing
+    // requirement before the model can spend a tool iteration on it.
+    if (key === 'workingDirectory' && !isUsableInheritedWorkingDirectory(value)) {
+      continue
+    }
     if (value !== undefined) {
       ;(merged as any)[key] = value
     }

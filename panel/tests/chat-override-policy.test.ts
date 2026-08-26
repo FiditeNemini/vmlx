@@ -22,6 +22,7 @@ const baseExisting: ChatOverridePolicyInput = {
 
 describe('new-chat override inheritance policy', () => {
   it('inherits coding/tool settings from the previous chat without making sampling, reasoning, or prompt text sticky', () => {
+    const workingDirectory = process.cwd()
     const inherited = buildNewChatInheritedOverrides(baseExisting, {
       chatId: 'old-chat',
       temperature: 1.0,
@@ -43,7 +44,7 @@ describe('new-chat override inheritance policy', () => {
       gitEnabled: false,
       utilityToolsEnabled: true,
       maxToolIterations: 6,
-      workingDirectory: '/Users/example/project',
+      workingDirectory,
       hideToolStatus: true,
       toolResultMaxChars: 16000,
       systemPrompt: 'sticky prompt text that should stay chat-scoped',
@@ -69,7 +70,7 @@ describe('new-chat override inheritance policy', () => {
       gitEnabled: false,
       utilityToolsEnabled: true,
       maxToolIterations: 6,
-      workingDirectory: '/Users/example/project',
+      workingDirectory,
       hideToolStatus: true,
       toolResultMaxChars: 16000,
     })
@@ -81,6 +82,7 @@ describe('new-chat override inheritance policy', () => {
   })
 
   it('treats auto-applied default profiles as tool presets, not hidden sampler or reasoning presets', () => {
+    const workingDirectory = process.cwd()
     const inherited = buildNewChatInheritedOverrides(baseExisting, {
       chatId: 'profile-default',
       temperature: 2.0,
@@ -97,7 +99,7 @@ describe('new-chat override inheritance policy', () => {
       builtinToolsEnabled: true,
       shellEnabled: true,
       fileToolsEnabled: true,
-      workingDirectory: '/Users/example/code',
+      workingDirectory,
     })
 
     expect(inherited).toMatchObject({
@@ -111,7 +113,7 @@ describe('new-chat override inheritance policy', () => {
       builtinToolsEnabled: true,
       shellEnabled: true,
       fileToolsEnabled: true,
-      workingDirectory: '/Users/example/code',
+      workingDirectory,
     })
     expect(inherited.systemPrompt).toBeUndefined()
     expect(inherited.stopSequences).toBeUndefined()
@@ -121,6 +123,7 @@ describe('new-chat override inheritance policy', () => {
   })
 
   it('default profiles cannot make maxTokens sticky on clean new chats', () => {
+    const workingDirectory = process.cwd()
     const inherited = buildNewChatInheritedOverrides({ chatId: 'new-chat' }, {
       chatId: 'profile-default',
       maxTokens: 32768,
@@ -130,14 +133,14 @@ describe('new-chat override inheritance policy', () => {
       systemPrompt: 'sticky prompt text that should stay chat-scoped',
       builtinToolsEnabled: true,
       shellEnabled: true,
-      workingDirectory: '/Users/example/code',
+      workingDirectory,
     })
 
     expect(inherited).toMatchObject({
       chatId: 'new-chat',
       builtinToolsEnabled: true,
       shellEnabled: true,
-      workingDirectory: '/Users/example/code',
+      workingDirectory,
     })
     expect(inherited.maxTokens).toBeUndefined()
     expect(inherited.maxThinkingTokens).toBeUndefined()
@@ -146,7 +149,21 @@ describe('new-chat override inheritance policy', () => {
     expect(inherited.systemPrompt).toBeUndefined()
   })
 
+  it('does not carry a deleted working directory into a clean chat', () => {
+    const inherited = buildNewChatInheritedOverrides(baseExisting, {
+      chatId: 'old-chat',
+      builtinToolsEnabled: true,
+      fileToolsEnabled: true,
+      workingDirectory: path.join(process.cwd(), '.definitely-missing-vmlx-workdir'),
+    })
+
+    expect(inherited.builtinToolsEnabled).toBe(true)
+    expect(inherited.fileToolsEnabled).toBe(true)
+    expect(inherited.workingDirectory).toBeUndefined()
+  })
+
   it('new chats preserve model-owned maxTokens while refusing inherited output caps', () => {
+    const workingDirectory = process.cwd()
     const inherited = buildNewChatInheritedOverrides({
       chatId: 'new-chat',
       maxTokens: 4096,
@@ -159,7 +176,7 @@ describe('new-chat override inheritance policy', () => {
       systemPrompt: 'sticky prompt text that should stay chat-scoped',
       builtinToolsEnabled: true,
       shellEnabled: true,
-      workingDirectory: '/Users/example/code',
+      workingDirectory,
     })
 
     expect(inherited).toMatchObject({
@@ -168,7 +185,7 @@ describe('new-chat override inheritance policy', () => {
       temperature: 0.9,
       builtinToolsEnabled: true,
       shellEnabled: true,
-      workingDirectory: '/Users/example/code',
+      workingDirectory,
     })
     expect(inherited.maxTokens).not.toBe(32768)
     expect(inherited.repeatPenalty).toBeUndefined()

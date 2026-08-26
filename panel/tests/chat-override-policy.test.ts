@@ -364,6 +364,8 @@ describe('new-chat override inheritance policy', () => {
 
     expect(columns).toContain('max_tokens')
     expect(columns).toContain('max_thinking_tokens')
+    expect(columns).toContain('frequency_penalty')
+    expect(columns).toContain('presence_penalty')
     expect(columns).toContain('tool_result_max_chars')
     expect(columns).toContain('git_enabled')
     expect(columns).toContain('utility_tools_enabled')
@@ -371,6 +373,8 @@ describe('new-chat override inheritance policy', () => {
     expect(runValues).toHaveLength(columns.length)
     expect(runValues).toContain('overrides.maxTokens')
     expect(runValues).toContain('overrides.maxThinkingTokens')
+    expect(runValues).toContain('overrides.frequencyPenalty')
+    expect(runValues).toContain('overrides.presencePenalty')
     expect(runValues).toContain('overrides.toolResultMaxChars || null')
     expect(runValues).toContain('overrides.gitEnabled === false ? 0 : 1')
     expect(runValues).toContain('overrides.utilityToolsEnabled === false ? 0 : 1')
@@ -711,6 +715,24 @@ describe('new-chat override inheritance policy', () => {
     expect(source).toContain('sanitizeTopPOverride(v)')
     expect(source).toContain('sanitizeRepetitionPenaltyOverride(v)')
     expect(source).not.toContain('min={0} max={1} step={0.05}')
+  })
+
+  it('validates and renders OpenAI frequency and presence penalties without making them model defaults', () => {
+    expect(sanitizeChatOverrides({ chatId: 'chat', frequencyPenalty: -2 }).frequencyPenalty).toBe(-2)
+    expect(sanitizeChatOverrides({ chatId: 'chat', frequencyPenalty: 0 }).frequencyPenalty).toBe(0)
+    expect(sanitizeChatOverrides({ chatId: 'chat', frequencyPenalty: 2 }).frequencyPenalty).toBe(2)
+    expect(sanitizeChatOverrides({ chatId: 'chat', frequencyPenalty: 2.01 }).frequencyPenalty).toBeUndefined()
+    expect(sanitizeChatOverrides({ chatId: 'chat', presencePenalty: -2.01 }).presencePenalty).toBeUndefined()
+    expect(sanitizeChatOverrides({ chatId: 'chat', presencePenalty: Number.NaN }).presencePenalty).toBeUndefined()
+
+    const source = fs.readFileSync(
+      path.resolve(__dirname, '../src/renderer/src/components/chat/ChatSettings.tsx'),
+      'utf8',
+    )
+    expect(source).toContain("update('frequencyPenalty', sanitized)")
+    expect(source).toContain("update('presencePenalty', sanitized)")
+    expect(source).toContain("t('chat.settings.frequencyPenalty')")
+    expect(source).toContain("t('chat.settings.presencePenalty')")
   })
 
   it('wires starred default profiles through the tool-only new-chat inheritance policy', () => {

@@ -9,6 +9,8 @@ export const TOP_K_MAX = Number.MAX_SAFE_INTEGER
 export const MIN_P_MIN = 0
 export const MIN_P_MAX = 1
 export const REPETITION_PENALTY_LOWER_EXCLUSIVE = 0
+export const OPENAI_TOKEN_PENALTY_MIN = -2
+export const OPENAI_TOKEN_PENALTY_MAX = 2
 export const DSV4_RECOMMENDED_TOP_P = 0.95
 
 function finiteNumber(value: unknown): number | undefined {
@@ -50,6 +52,10 @@ export function sanitizeRepetitionPenaltyOverride(value: unknown): number | unde
   return number != null && number > REPETITION_PENALTY_LOWER_EXCLUSIVE
     ? number
     : undefined
+}
+
+export function sanitizeOpenAiTokenPenaltyOverride(value: unknown): number | undefined {
+  return finiteInClosedRange(value, OPENAI_TOKEN_PENALTY_MIN, OPENAI_TOKEN_PENALTY_MAX)
 }
 
 export function shouldWarnDsv4TopP(family: unknown, topP: unknown): boolean {

@@ -16,9 +16,12 @@ import {
 } from '../../../../shared/reasoningParserAliases'
 import {
   TOP_K_MAX,
+  OPENAI_TOKEN_PENALTY_MAX,
+  OPENAI_TOKEN_PENALTY_MIN,
   TOP_P_MAX,
   TOP_P_UI_MIN,
   sanitizeMinPOverride,
+  sanitizeOpenAiTokenPenaltyOverride,
   sanitizeRepetitionPenaltyOverride,
   sanitizeTemperatureOverride,
   sanitizeTopKOverride,
@@ -46,6 +49,8 @@ interface ChatOverrides {
   maxTokens?: number
   maxThinkingTokens?: number
   repeatPenalty?: number
+  frequencyPenalty?: number
+  presencePenalty?: number
   systemPrompt?: string
   stopSequences?: string
   wireApi?: 'completions' | 'responses'
@@ -852,6 +857,28 @@ function statusToneClass(status: string): string {
                 help={t('chat.settings.repetitionPenaltyHelp')}
               />
             )}
+            <SliderField
+              label={t('chat.settings.frequencyPenalty')}
+              value={displayedOverrides.frequencyPenalty ?? 0}
+              onChange={v => {
+                const sanitized = sanitizeOpenAiTokenPenaltyOverride(v)
+                if (sanitized != null) update('frequencyPenalty', sanitized)
+              }}
+              min={OPENAI_TOKEN_PENALTY_MIN} max={OPENAI_TOKEN_PENALTY_MAX} step={0.1}
+              exactInput={{ min: OPENAI_TOKEN_PENALTY_MIN, max: OPENAI_TOKEN_PENALTY_MAX }}
+              help={t('chat.settings.frequencyPenaltyHelp')}
+            />
+            <SliderField
+              label={t('chat.settings.presencePenalty')}
+              value={displayedOverrides.presencePenalty ?? 0}
+              onChange={v => {
+                const sanitized = sanitizeOpenAiTokenPenaltyOverride(v)
+                if (sanitized != null) update('presencePenalty', sanitized)
+              }}
+              min={OPENAI_TOKEN_PENALTY_MIN} max={OPENAI_TOKEN_PENALTY_MAX} step={0.1}
+              exactInput={{ min: OPENAI_TOKEN_PENALTY_MIN, max: OPENAI_TOKEN_PENALTY_MAX }}
+              help={t('chat.settings.presencePenaltyHelp')}
+            />
           </div>
         </div>
 

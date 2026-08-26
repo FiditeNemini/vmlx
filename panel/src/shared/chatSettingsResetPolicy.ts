@@ -6,6 +6,8 @@ export interface ChatSettingsResetOverrides {
   maxTokens?: number
   maxThinkingTokens?: number
   repeatPenalty?: number
+  frequencyPenalty?: number
+  presencePenalty?: number
   systemPrompt?: string
   stopSequences?: string
   wireApi?: 'completions' | 'responses' | string

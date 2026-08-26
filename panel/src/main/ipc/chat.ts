@@ -2167,6 +2167,10 @@ export function registerChatHandlers(
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)
               obj.repetition_penalty = overrides.repeatPenalty;
+            if (overrides?.frequencyPenalty != null)
+              obj.frequency_penalty = overrides.frequencyPenalty;
+            if (overrides?.presencePenalty != null)
+              obj.presence_penalty = overrides.presencePenalty;
             // An explicit current-turn no-tool directive is stronger than the
             // chat's persistent built-in-tools toggle. Omitting the schemas is
             // API-equivalent to tool_choice="none", avoids paying for an
@@ -2238,6 +2242,10 @@ export function registerChatHandlers(
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)
               obj.repetition_penalty = overrides.repeatPenalty;
+            if (overrides?.frequencyPenalty != null)
+              obj.frequency_penalty = overrides.frequencyPenalty;
+            if (overrides?.presencePenalty != null)
+              obj.presence_penalty = overrides.presencePenalty;
             if (attachBuiltinToolsForCurrentTurn) {
               // Chat Completions API: tools must be in OpenAI format with "function" wrapper
               // e.g. {"type": "function", "function": {"name": ..., "parameters": ...}}

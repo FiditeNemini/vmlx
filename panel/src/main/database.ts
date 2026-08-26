@@ -147,6 +147,8 @@ export interface ChatOverrides {
   maxTokens?: number;
   maxThinkingTokens?: number;
   repeatPenalty?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
   systemPrompt?: string;
   stopSequences?: string;
   wireApi?: string;
@@ -251,6 +253,8 @@ class DatabaseManager {
         max_tokens INTEGER,
         max_thinking_tokens INTEGER,
         repeat_penalty REAL,
+        frequency_penalty REAL,
+        presence_penalty REAL,
         system_prompt TEXT,
         stop_sequences TEXT,
         FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE
@@ -482,6 +486,16 @@ class DatabaseManager {
       if (!overrideColumns.find((c) => c.name === "utility_tools_enabled")) {
         this.db.exec(
           "ALTER TABLE chat_overrides ADD COLUMN utility_tools_enabled INTEGER DEFAULT 1",
+        );
+      }
+      if (!overrideColumns.find((c) => c.name === "frequency_penalty")) {
+        this.db.exec(
+          "ALTER TABLE chat_overrides ADD COLUMN frequency_penalty REAL",
+        );
+      }
+      if (!overrideColumns.find((c) => c.name === "presence_penalty")) {
+        this.db.exec(
+          "ALTER TABLE chat_overrides ADD COLUMN presence_penalty REAL",
         );
       }
 
@@ -1621,13 +1635,14 @@ class DatabaseManager {
       const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO chat_overrides
       (chat_id, temperature, top_p, top_k, min_p, max_tokens, max_thinking_tokens, repeat_penalty,
+       frequency_penalty, presence_penalty,
        system_prompt, stop_sequences, wire_api, max_tool_iterations,
        builtin_tools_enabled, working_directory, enable_thinking, reasoning_effort,
        hide_tool_status,
        web_search_enabled, brave_search_enabled, fetch_url_enabled, file_tools_enabled,
        search_tools_enabled, shell_enabled, tool_result_max_chars,
        git_enabled, utility_tools_enabled)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
       // enable_thinking tri-state: undefined/null → NULL (Auto), true → 1, false → 0
       const enableThinkingVal =
@@ -1645,6 +1660,8 @@ class DatabaseManager {
         overrides.maxTokens,
         overrides.maxThinkingTokens,
         overrides.repeatPenalty,
+        overrides.frequencyPenalty,
+        overrides.presencePenalty,
         overrides.systemPrompt,
         overrides.stopSequences,
         overrides.wireApi,
@@ -1691,6 +1708,8 @@ class DatabaseManager {
       maxTokens: row.max_tokens,
       maxThinkingTokens: row.max_thinking_tokens,
       repeatPenalty: row.repeat_penalty,
+      frequencyPenalty: row.frequency_penalty,
+      presencePenalty: row.presence_penalty,
       systemPrompt: row.system_prompt,
       stopSequences: row.stop_sequences,
       wireApi: row.wire_api,

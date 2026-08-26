@@ -23,6 +23,8 @@ interface ChatOverrides {
     maxTokens?: number
     maxThinkingTokens?: number
     repeatPenalty?: number
+    frequencyPenalty?: number
+    presencePenalty?: number
     systemPrompt?: string
     stopSequences?: string
     wireApi?: 'completions' | 'responses'
@@ -110,6 +112,8 @@ function buildRequestBody(
         if (effectiveTopK != null) obj.top_k = effectiveTopK
         if (overrides?.minP != null) obj.min_p = overrides.minP
         if (overrides?.repeatPenalty != null) obj.repetition_penalty = overrides.repeatPenalty
+        if (overrides?.frequencyPenalty != null) obj.frequency_penalty = overrides.frequencyPenalty
+        if (overrides?.presencePenalty != null) obj.presence_penalty = overrides.presencePenalty
         if (tools) {
             obj.tools = tools.map(t => ({
                 type: 'function',
@@ -143,6 +147,8 @@ function buildRequestBody(
         if (effectiveTopK != null) obj.top_k = effectiveTopK
         if (overrides?.minP != null) obj.min_p = overrides.minP
         if (overrides?.repeatPenalty != null) obj.repetition_penalty = overrides.repeatPenalty
+        if (overrides?.frequencyPenalty != null) obj.frequency_penalty = overrides.frequencyPenalty
+        if (overrides?.presencePenalty != null) obj.presence_penalty = overrides.presencePenalty
         if (tools) {
             obj.tools = tools
         }
@@ -250,6 +256,24 @@ describe('buildRequestBody — Chat Completions API', () => {
     it('forwards repetition_penalty when explicitly set to neutral 1.0', () => {
         const body = buildRequestBody('completions', 'gpt-4', messages, { repeatPenalty: 1.0 }, false, false)
         expect(body.repetition_penalty).toBe(1.0)
+    })
+
+    it.each(['completions', 'responses'] as const)('forwards explicit OpenAI token penalties for %s', wireApi => {
+        const body = buildRequestBody(wireApi, 'gpt-4', messages, { frequencyPenalty: 1.25, presencePenalty: -0.75 }, false, false)
+        expect(body.frequency_penalty).toBe(1.25)
+        expect(body.presence_penalty).toBe(-0.75)
+    })
+
+    it.each(['completions', 'responses'] as const)('preserves explicit neutral token penalties for %s', wireApi => {
+        const body = buildRequestBody(wireApi, 'gpt-4', messages, { frequencyPenalty: 0, presencePenalty: 0 }, false, false)
+        expect(body.frequency_penalty).toBe(0)
+        expect(body.presence_penalty).toBe(0)
+    })
+
+    it.each(['completions', 'responses'] as const)('omits inherited token penalties for %s', wireApi => {
+        const body = buildRequestBody(wireApi, 'gpt-4', messages, {}, false, false)
+        expect(body.frequency_penalty).toBeUndefined()
+        expect(body.presence_penalty).toBeUndefined()
     })
 
     it('includes stop sequences when provided', () => {

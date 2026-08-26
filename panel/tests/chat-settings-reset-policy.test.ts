@@ -14,6 +14,8 @@ describe('chat settings reset policy', () => {
         topK: 1,
         minP: 0.5,
         repeatPenalty: 1.3,
+        frequencyPenalty: 1.25,
+        presencePenalty: -0.75,
         maxTokens: 128,
         maxThinkingTokens: 4096,
         stopSequences: '<bad>',
@@ -69,6 +71,8 @@ describe('chat settings reset policy', () => {
     expect(result.topK).toBeUndefined()
     expect(result.minP).toBeUndefined()
     expect(result.repeatPenalty).toBeUndefined()
+    expect(result.frequencyPenalty).toBeUndefined()
+    expect(result.presencePenalty).toBeUndefined()
     expect(result.maxTokens).toBeUndefined()
     expect(result.maxThinkingTokens).toBeUndefined()
   })

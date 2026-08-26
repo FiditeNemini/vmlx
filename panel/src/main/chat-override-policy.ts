@@ -1,6 +1,7 @@
 import {
   TOP_K_MAX,
   sanitizeMinPOverride,
+  sanitizeOpenAiTokenPenaltyOverride,
   sanitizeRepetitionPenaltyOverride,
   sanitizeTemperatureOverride,
   sanitizeTopKOverride,
@@ -17,6 +18,8 @@ export interface ChatOverridePolicyInput {
   maxTokens?: number
   maxThinkingTokens?: number
   repeatPenalty?: number
+  frequencyPenalty?: number
+  presencePenalty?: number
   systemPrompt?: string
   stopSequences?: string
   wireApi?: string
@@ -131,6 +134,8 @@ export function sanitizeChatOverrides<T extends ChatOverridePolicyInput>(overrid
   assignNumber('maxTokens', value => sanitizePositiveInteger(value, 1000000))
   assignNumber('maxThinkingTokens', value => sanitizePositiveInteger(value, 1000000))
   assignNumber('repeatPenalty', sanitizeRepetitionPenaltyOverride)
+  assignNumber('frequencyPenalty', sanitizeOpenAiTokenPenaltyOverride)
+  assignNumber('presencePenalty', sanitizeOpenAiTokenPenaltyOverride)
   assignNumber('maxToolIterations', value => sanitizeFiniteNumber(value, 1, 100))
   assignNumber('toolResultMaxChars', value => sanitizeFiniteNumber(value, 100, 500000))
 

@@ -10,6 +10,8 @@ import {
 import { DownloadTab } from './DownloadTab'
 import { DirectoryManager } from './DirectoryManager'
 import { useTranslation } from '../../i18n'
+import { useSessionsContext } from '../../contexts/SessionsContext'
+import { formatModelBytes, formatResidentLoad } from './loadProgressFormat'
 import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
@@ -32,6 +34,7 @@ interface CreateSessionProps {
 
 export function CreateSession({ initialModelPath, onBack, onCreated, filterType: filterTypeProp }: CreateSessionProps) {
   const { t } = useTranslation()
+  const { loadProgress } = useSessionsContext()
   const [sessionType, setSessionType] = useState<'local' | 'remote' | 'download'>('local')
   const [step, setStep] = useState<1 | 2>(initialModelPath ? 2 : 1)
   const [models, setModels] = useState<ModelInfo[]>([])
@@ -783,6 +786,9 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
 
   // Launching state
   if (launching) {
+    const launchSessionId = launchSessionIdRef.current
+    const progress = launchSessionId ? loadProgress.get(launchSessionId) : undefined
+    const residentLoad = formatResidentLoad(progress)
     return (
       <div className="p-6 overflow-auto h-full">
         <div className="max-w-3xl mx-auto">
@@ -790,6 +796,36 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           <p className="text-muted-foreground text-sm mb-4">
             {selectedModel.split('/').pop()}
           </p>
+
+          {progress && (
+            <div className="mb-4" data-vmlx-create-load-session-id={launchSessionId || ''}>
+              <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-warning rounded-full transition-all duration-500 ease-out"
+                  style={{ width: `${progress.progress}%` }}
+                  role="progressbar"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={progress.progress}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                {progress.labelKey
+                  ? t(progress.labelKey, { defaultValue: progress.label, ...(progress.labelParams || {}) })
+                  : progress.label} ({progress.progress}%)
+              </p>
+              {formatModelBytes(progress.modelBytes) && (
+                <p className="text-xs text-muted-foreground/80 mt-0.5">
+                  {t('sessions.card.modelFiles')} {formatModelBytes(progress.modelBytes)}
+                </p>
+              )}
+              {residentLoad && (
+                <p className="text-xs text-muted-foreground/80 mt-0.5">
+                  {t('sessions.card.residentRam')} {residentLoad}
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="bg-background/80 text-primary font-mono text-xs p-4 rounded-lg max-h-[60vh] overflow-auto border border-border">
             {logs.map((line, i) => (

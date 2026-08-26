@@ -39,9 +39,10 @@ describe('load progress honesty', () => {
     expect(source).toContain('...(next.get(data.sessionId) || {})')
   })
 
-  it('shows model file size separately from phase percent in both session cards', () => {
+  it('shows model file size separately from phase percent on every load surface', () => {
     const card = read('src/renderer/src/components/sessions/SessionCard.tsx')
     const view = read('src/renderer/src/components/sessions/SessionView.tsx')
+    const create = read('src/renderer/src/components/sessions/CreateSession.tsx')
 
     // The label moved behind t() in the i18n pass. The invariant is unchanged —
     // both surfaces must render the model-files line — so pin the key in both
@@ -49,6 +50,7 @@ describe('load progress honesty', () => {
     const en = read('src/renderer/src/i18n/locales/en.json')
     expect(card).toContain("t('sessions.card.modelFiles')")
     expect(view).toContain("t('sessions.card.modelFiles')")
+    expect(create).toContain("t('sessions.card.modelFiles')")
     expect(en).toContain('"modelFiles": "Model files:"')
   })
 
@@ -57,6 +59,7 @@ describe('load progress honesty', () => {
     const context = read('src/renderer/src/contexts/SessionsContext.tsx')
     const card = read('src/renderer/src/components/sessions/SessionCard.tsx')
     const view = read('src/renderer/src/components/sessions/SessionView.tsx')
+    const create = read('src/renderer/src/components/sessions/CreateSession.tsx')
 
     expect(source).toContain('readProcessGroupResidentBytes')
     expect(source).toContain("execFileSync('ps', ['-o', 'rss=', '-g'")
@@ -66,7 +69,18 @@ describe('load progress honesty', () => {
     const en = read('src/renderer/src/i18n/locales/en.json')
     expect(card).toContain("t('sessions.card.residentRam')")
     expect(view).toContain("t('sessions.card.residentRam')")
+    expect(create).toContain("t('sessions.card.residentRam')")
     expect(en).toContain('"residentRam": "Resident RAM:"')
+  })
+
+  it('the blocking create-session loader consumes the shared live progress entry', () => {
+    const create = read('src/renderer/src/components/sessions/CreateSession.tsx')
+
+    expect(create).toContain('const { loadProgress } = useSessionsContext()')
+    expect(create).toContain('loadProgress.get(launchSessionId)')
+    expect(create).toContain('role="progressbar"')
+    expect(create).toContain('aria-valuenow={progress.progress}')
+    expect(create).toContain('data-vmlx-create-load-session-id={launchSessionId')
   })
 })
 

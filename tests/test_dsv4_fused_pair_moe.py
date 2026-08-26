@@ -7,7 +7,6 @@ against the stock gather_qmm op chain.
 
 import mlx.core as mx
 import mlx.nn as nn
-import pytest
 
 from vmlx_engine.metal import fused_pair_moe_decode as fpm
 
@@ -137,6 +136,28 @@ def test_prefill_shape_takes_stock_path(monkeypatch):
     got = moe_cls._weighted_routed_experts(model.mlp, x, inds, scores)
     mx.eval(ref, got)
     assert bool((ref == got).all())  # exact: same code path
+
+
+def test_fused_accumulate_matches_stock_sum(monkeypatch):
+    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.setenv("VMLX_DSV4_FUSED_MOE_ACCUMULATE", "1")
+    moe_cls, model_cls = _make_moe_cls()
+    stock = moe_cls._weighted_routed_experts
+    model = model_cls()
+    assert fpm.install_dsv4_fused_pair_moe(model) == 1
+    status = fpm.dsv4_fused_pair_moe_status()
+    assert status["fused_accumulate"] is True
+
+    x, inds, scores = _decode_inputs()
+    ref_routes = stock(model.mlp, x, inds, scores)
+    got_routes = moe_cls._weighted_routed_experts(model.mlp, x, inds, scores)
+    ref = ref_routes.astype(mx.float32).sum(axis=-2)
+    got = got_routes.astype(mx.float32).sum(axis=-2)
+    mx.eval(ref, got)
+    rel = float(mx.abs(got - ref).max()) / max(float(mx.abs(ref).max()), 1e-9)
+    assert got_routes.shape == (1, 1, 1, D)
+    assert got.shape == ref.shape == (1, 1, D)
+    assert rel < 5e-3
 
 
 def test_env_off_disables(monkeypatch):

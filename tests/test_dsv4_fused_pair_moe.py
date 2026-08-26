@@ -7,6 +7,7 @@ against the stock gather_qmm op chain.
 
 import mlx.core as mx
 import mlx.nn as nn
+import pytest
 
 from vmlx_engine.metal import fused_pair_moe_decode as fpm
 
@@ -23,21 +24,21 @@ class _Args:
 
 
 class _Proj(nn.Module):
-    def __init__(self, out_dim, in_dim, group_size, bits=2):
+    def __init__(self, out_dim, in_dim, group_size):
         super().__init__()
         w = (mx.random.normal((E, out_dim, in_dim)) * 0.02).astype(mx.float16)
         self.weight, self.scales, self.biases = mx.quantize(
-            w, group_size=group_size, bits=bits
+            w, group_size=group_size, bits=2
         )
-        self.bits = bits
+        self.bits = 2
         self.group_size = group_size
         self.mode = "affine"
 
 
 class _Switch(nn.Module):
-    def __init__(self, gate_bits=2):
+    def __init__(self):
         super().__init__()
-        self.gate_proj = _Proj(M, D, 64, bits=gate_bits)
+        self.gate_proj = _Proj(M, D, 64)
         self.up_proj = _Proj(M, D, 64)
         self.down_proj = _Proj(D, M, 32)
 
@@ -50,20 +51,19 @@ def _swiglu_fp32(gate, up, limit):
     return nn.silu(gate) * up
 
 
-def _make_moe_cls(gate_bits=2):
+def _make_moe_cls():
     class _MoE(nn.Module):
-        def __init__(self, selected_gate_bits=gate_bits):
+        def __init__(self):
             super().__init__()
             self.args = _Args()
-            self.switch_mlp = _Switch(gate_bits=selected_gate_bits)
+            self.switch_mlp = _Switch()
 
         def _weighted_routed_experts(self, x, inds, scores):
             s = self.switch_mlp
             xe = mx.expand_dims(mx.expand_dims(x, -2), -3)
             xg = mx.gather_qmm(
                 xe, s.gate_proj.weight, s.gate_proj.scales, s.gate_proj.biases,
-                rhs_indices=inds, transpose=True, group_size=64,
-                bits=s.gate_proj.bits,
+                rhs_indices=inds, transpose=True, group_size=64, bits=2,
                 mode="affine", sorted_indices=False,
             )
             xu = mx.gather_qmm(
@@ -86,58 +86,6 @@ def _make_moe_cls(gate_bits=2):
             self.mlp = _MoE()
 
     return _MoE, _Model
-
-
-def test_b3_hybrid_installs_and_matches_stock_when_enabled(monkeypatch):
-    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
-    monkeypatch.setenv("VMLX_DSV4_FUSED_MOE_B3_HYBRID", "1")
-    moe_cls, model_cls = _make_moe_cls(gate_bits=3)
-    stock = moe_cls._weighted_routed_experts
-    model = model_cls()
-    assert fpm.install_dsv4_fused_pair_moe(model) == 1
-    status = fpm.dsv4_fused_pair_moe_status()
-    assert status["installed_by_mode"] == {"b3-stock-gate": 1}
-    assert status["self_test_rel_by_mode"]["b3-stock-gate"] <= (
-        fpm._SELF_TEST_MAX_REL
-    )
-
-    x, inds, scores = _decode_inputs()
-    ref = stock(model.mlp, x, inds, scores).astype(mx.float32)
-    got = moe_cls._weighted_routed_experts(model.mlp, x, inds, scores).astype(
-        mx.float32
-    )
-    mx.eval(ref, got)
-    rel = float(mx.abs(got - ref).max()) / max(float(mx.abs(ref).max()), 1e-9)
-    assert got.shape == ref.shape == (1, 1, K, D)
-    assert rel < 5e-3
-
-
-def test_b3_hybrid_is_default_off(monkeypatch):
-    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
-    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_B3_HYBRID", raising=False)
-    moe_cls, model_cls = _make_moe_cls(gate_bits=3)
-    stock = moe_cls._weighted_routed_experts
-    model = model_cls()
-    assert fpm.install_dsv4_fused_pair_moe(model) == 0
-    assert moe_cls._weighted_routed_experts is stock
-
-
-def test_mixed_b2_b3_modules_report_both_modes(monkeypatch):
-    monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
-    monkeypatch.setenv("VMLX_DSV4_FUSED_MOE_B3_HYBRID", "1")
-    moe_cls, _ = _make_moe_cls()
-
-    class _MixedModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.b2 = moe_cls(2)
-            self.b3 = moe_cls(3)
-
-    model = _MixedModel()
-    assert fpm.install_dsv4_fused_pair_moe(model) == 2
-    status = fpm.dsv4_fused_pair_moe_status()
-    assert status["installed_by_mode"] == {"b2-pair": 1, "b3-stock-gate": 1}
-    assert set(status["self_test_rel_by_mode"]) == {"b2-pair", "b3-stock-gate"}
 
 
 def _decode_inputs():

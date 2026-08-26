@@ -1253,6 +1253,38 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
     assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
 
 
+def test_qwen4_exp_grouped_rms_norm_preserves_low_precision_residual_dtype():
+    from vmlx_engine.models.qwen4_exp.language import (
+        GroupedRMSNorm,
+        _decode_quantized_linears_fused,
+    )
+
+    module = GroupedRMSNorm(128, 64)
+    module.weight = (mx.arange(128, dtype=mx.float32) / 256.0) + 0.75
+    residual = (mx.arange(128, dtype=mx.float16) / 127.0).reshape(1, 1, 128)
+
+    actual = module(residual)
+    expected = mx.fast.rms_norm(
+        residual.reshape(1, 1, 2, 64), None, module.eps
+    ).reshape(residual.shape) * module.weight.astype(residual.dtype)
+    mx.eval(actual, expected)
+
+    assert actual.dtype == mx.float16
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+    linears = tuple(
+        nn.Linear(128, 128, bias=False).to_quantized(group_size=64, bits=4)
+        for _ in range(4)
+    )
+    for linear in linears:
+        linear.scales = linear.scales.astype(mx.float16)
+        linear.biases = linear.biases.astype(mx.float16)
+    fused = _decode_quantized_linears_fused(linears, actual)
+    assert fused is not None
+    mx.eval(*fused)
+    assert all(output.dtype == mx.float16 for output in fused)
+
+
 def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
     from vmlx_engine.models.qwen4_exp.language import ShardedNGramEmbedding
     from vmlx_engine.models.qwen4_exp.table_reader import _AffineShard

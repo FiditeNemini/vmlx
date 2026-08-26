@@ -289,7 +289,7 @@ class GroupedRMSNorm(nn.Module):
         shape = x.shape
         x = x.reshape(*shape[:-1], -1, self.group_size)
         x = mx.fast.rms_norm(x, None, self.eps)
-        return x.reshape(shape) * self.weight
+        return x.reshape(shape) * self.weight.astype(x.dtype)
 
 
 class ZeroCenteredRMSNorm(nn.Module):

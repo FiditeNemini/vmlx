@@ -9430,6 +9430,21 @@ async function main() {
               sessionId: created.session.id,
             },
           }));
+          // The session/panel event stages the exact target, but a Sessions
+          // context refresh can restore Chat mode before React commits it. Use
+          // the same visible top-bar Server button a user clicks, then wait for
+          // the session-bound settings control. The previous event-only path
+          // timed out on the Chat quick-start screen without ever loading the
+          // model, even though the session itself had been created correctly.
+          const serverModeButton = await waitFor(() => {
+            return [...document.querySelectorAll('button')].find((button) => (
+              button instanceof HTMLButtonElement
+              && isVisible(button)
+              && (button.textContent || '').replace(/\\s+/g, ' ').trim() === 'Server'
+            )) || null;
+          }, 'visible top-bar Server mode control');
+          serverModeButton.scrollIntoView({ block: 'center' });
+          serverModeButton.click();
           let sessionBeforeStart = await window.api.sessions.get(created.session.id);
           let sessionConfigBeforeProof = {};
           try {
@@ -10956,6 +10971,11 @@ async function main() {
             effectiveSessionConfig,
             sessionLogs,
             preStartStopControl,
+            serverModeControl: {
+              label: (serverModeButton.textContent || '').replace(/\\s+/g, ' ').trim(),
+              visible: true,
+              clicked: true,
+            },
             uiStartControl,
             gatewaySingleModelMode,
             ssdOnlyLaneSelection,

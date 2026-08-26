@@ -185,6 +185,40 @@ def register_all(registry=None):
         )
     )
 
+    _register(
+        ModelConfig(
+            family_name="qwen4_exp",
+            model_types=["qwen4_exp", "qwen4_exp_text"],
+            cache_type="hybrid",
+            cache_subtype="qsa_gdn_ple_v1",
+            eos_tokens=["<|im_end|>"],
+            tool_parser="qwen",
+            reasoning_parser="qwen3",
+            think_in_template=True,
+            supports_thinking=True,
+            supports_native_tools=True,
+            is_mllm=True,
+            architecture_hints={
+                "native_cache_state": [
+                    "gdn_conv",
+                    "gdn_delta",
+                    "ple_token_context",
+                    "ple_dilated_conv",
+                    "qsa_kv",
+                    "qsa_indexer_keys",
+                ],
+                "cache_precision": "full",
+                "paged_ram_default": False,
+                "ple_storage": "ssd_row_addressed",
+                "modalities": ["text", "image", "video"],
+                "audio_input": False,
+                "native_mtp": True,
+                "default_enable_thinking": None,
+            },
+            priority=3,
+        )
+    )
+
     # Nanbeige 4.2 — text-only looped transformer.
     #
     # The 22 shared decoder blocks execute twice, so model.make_cache() must

@@ -71,6 +71,12 @@ def _register_local_mlx_vlm_runtime_if_needed(model_path: str | Path) -> None:
         _register_step3p7_mlx_vlm_runtime()
     if model_type == "mimo_v2":
         _register_mimo_v2_mlx_vlm_runtime()
+    if model_type == "qwen4_exp" or str(
+        (cfg.get("text_config") or {}).get("model_type") or ""
+    ).lower() == "qwen4_exp_text":
+        from .qwen4_exp.register import register_qwen4_exp_runtime
+
+        register_qwen4_exp_runtime()
 
 
 def _register_step3p7_mlx_vlm_runtime() -> None:
@@ -4510,11 +4516,27 @@ class MLXMultimodalLM:
         except Exception as _mtp_e:
             logger.debug(f"Native MTP pre-load apply skipped: {_mtp_e}")
 
+        # Qwen3.8 Flash Next owns a 51B PLE/n-gram table. Its loader must run
+        # before DFlash2, generic mlx-vlm, and generic JANG: all three assemble
+        # ordinary model weights and can materialize the PLE table instead of
+        # preserving row-addressable SSD shards.
+        from .qwen4_exp.loader import (
+            is_qwen4_exp_bundle,
+            load_qwen4_exp_vlm_model,
+        )
+        if is_qwen4_exp_bundle(resolved_name):
+            from mlx_vlm.utils import load_config
+
+            logger.info("Loading Qwen3.8 Flash Next through SSD-backed PLE runtime")
+            self.model, self.processor = load_qwen4_exp_vlm_model(resolved_name)
+            self.config = load_config(resolved_name)
+            _finalize_loaded_model()
+            logger.info("Qwen3.8 Flash Next source runtime loaded")
+            return
+
         # DFlash2's measured Qwen3.8 path is the current upstream mlx-vlm
-        # runtime.  Do not send it through the JANG VLM loader below: that
-        # path is required for ordinary mixed-precision sessions, but its
-        # model construction adds substantial verifier overhead here even
-        # when it ultimately resolves the same upstream Qwen classes.
+        # runtime for ordinary families. Do not let it bypass the qwen4_exp PLE
+        # boundary above.
         try:
             from ..speculative import is_dflash2_enabled
 

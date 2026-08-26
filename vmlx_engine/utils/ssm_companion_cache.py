@@ -1167,6 +1167,8 @@ def is_hybrid_ssm_config(config: dict) -> bool:
     if "hybrid_override_pattern" in config:
         return True
     model_type = str(config.get("model_type") or "").lower()
+    if model_type in {"qwen4_exp", "qwen4_exp_text"}:
+        return True
     if model_type in _HYBRID_MODEL_TYPES:
         return True
     if _declares_hybrid_ssm_layer_types(config):

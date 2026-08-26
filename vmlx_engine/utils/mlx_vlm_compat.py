@@ -61,6 +61,15 @@ def apply() -> None:
             "Ornith / JANG-affine Qwen 3.5 MoE bundles may crash on decode",
             _exc,
         )
+    try:
+        from ..models.qwen4_exp.register import register_qwen4_exp_runtime
+
+        register_qwen4_exp_runtime()
+    except Exception as _exc:
+        _logger.warning(
+            "mlx_vlm_compat: qwen4_exp runtime registration failed (%s)",
+            _exc,
+        )
     _patch_qwen3_vl_grid_thw()
     _patch_qwen35_patch_embed_layout()
     _patch_lfm2_vl_input_embeddings()

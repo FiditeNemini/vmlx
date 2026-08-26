@@ -1069,7 +1069,7 @@ def _validate_live_single_cache(layer_cache: Any, *, layer_idx: int) -> Tuple[bo
             return False, (
                 f"layer {layer_idx}: MiniMaxM3 cache lanes lack sequence axis"
             ), total_bytes
-        if not (key_len == value_len == idx_len):
+        if key_len != value_len:
             return False, (
                 f"layer {layer_idx}: MiniMaxM3 lane length mismatch "
                 f"keys={key_len} values={value_len} idx_keys={idx_len}"
@@ -1088,11 +1088,29 @@ def _validate_live_single_cache(layer_cache: Any, *, layer_idx: int) -> Tuple[bo
             )
             if not ok:
                 return False, reason, total_bytes
-            if parsed_offset != key_len:
+            # mlx-lm KVCache grows K/V in `step`-sized backing buffers while
+            # `offset` remains the logical token count. MiniMax-M3/QSA index
+            # keys are append-only at their logical extent. Comparing the raw
+            # physical K/V width to idx_keys therefore rejects every healthy
+            # off-boundary live cache (for example 13 logical tokens in a
+            # 256-token K/V allocation). Persisted states are usually sliced,
+            # but live validation must honor the same logical boundary.
+            if parsed_offset > key_len or parsed_offset > value_len:
                 return False, (
                     f"layer {layer_idx}: MiniMaxM3 offset {parsed_offset} "
-                    f"!= lane length {key_len}"
+                    f"exceeds K/V backing lengths {key_len}/{value_len}"
                 ), total_bytes
+            if parsed_offset != idx_len:
+                return False, (
+                    f"layer {layer_idx}: MiniMaxM3 logical offset "
+                    f"{parsed_offset} != idx_keys length {idx_len}"
+                ), total_bytes
+        elif key_len != idx_len:
+            return False, (
+                f"layer {layer_idx}: MiniMaxM3 lane length mismatch without "
+                f"logical offset keys={key_len} values={value_len} "
+                f"idx_keys={idx_len}"
+            ), total_bytes
         return True, "", total_bytes
 
     def _check_int_attr(attr: str, lo: int, hi: int) -> Tuple[bool, str]:

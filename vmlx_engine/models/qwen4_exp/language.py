@@ -521,6 +521,70 @@ class PLELayer(nn.Module):
 # --------------------------------------------------------------------------- #
 # GDN — qwen3_5 GatedDeltaNet with sigmoid output gate
 # --------------------------------------------------------------------------- #
+def _decode_quantized_linears_fused(
+    linears: tuple[nn.Module, ...], x: mx.array
+) -> tuple[mx.array, ...] | None:
+    """Run same-input affine projections as one bit-identical decode QMM.
+
+    Affine quantization packs every output row independently. Concatenating
+    compatible projections along that row axis therefore preserves every
+    output bit while removing one Metal launch per additional projection.
+    Qwen3.8 GDN has four such projections in each of its 36 linear-attention
+    layers, so the unfused path paid 108 unnecessary launches per token.
+    """
+    if (
+        x.ndim != 3
+        or x.shape[1] != 1
+        or not linears
+        or not all(isinstance(linear, nn.QuantizedLinear) for linear in linears)
+    ):
+        return None
+
+    first = linears[0]
+    if not all(
+        linear.bits == first.bits
+        and linear.group_size == first.group_size
+        and linear.mode == first.mode
+        and linear.biases is not None
+        and linear.scales.dtype == x.dtype
+        and linear.biases.dtype == x.dtype
+        and "bias" not in linear
+        for linear in linears
+    ):
+        return None
+
+    cache_key = tuple(
+        (id(linear.weight), id(linear.scales), id(linear.biases))
+        for linear in linears
+    )
+    cached = getattr(first, "_qwen4_fused_decode_linears", None)
+    if cached is None or cached[0] != cache_key:
+        weights = mx.concatenate([linear.weight for linear in linears], axis=0)
+        scales = mx.concatenate([linear.scales for linear in linears], axis=0)
+        biases = mx.concatenate([linear.biases for linear in linears], axis=0)
+        split_indices = []
+        offset = 0
+        for linear in linears[:-1]:
+            offset += linear.weight.shape[0]
+            split_indices.append(offset)
+        mx.eval(weights, scales, biases)
+        cached = (cache_key, weights, scales, biases, split_indices)
+        first._qwen4_fused_decode_linears = cached
+
+    _, weights, scales, biases, split_indices = cached
+    output = mx.quantized_matmul(
+        x,
+        weights,
+        scales=scales,
+        biases=biases,
+        transpose=True,
+        group_size=first.group_size,
+        bits=first.bits,
+        mode=first.mode,
+    )
+    return tuple(mx.split(output, split_indices, axis=-1))
+
+
 class GatedDeltaNet(_Qwen35GatedDeltaNet):
     def __init__(self, args: Qwen4ExpTextArgs):
         shim = _Qwen35TextArgs(
@@ -605,12 +669,19 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
                 )
             return super().__call__(inputs, mask=mask, cache=cache)
 
-        qkv = self.in_proj_qkv(inputs)
-        z = self.in_proj_z(inputs).reshape(
+        projections = (
+            self.in_proj_qkv,
+            self.in_proj_z,
+            self.in_proj_b,
+            self.in_proj_a,
+        )
+        fused = _decode_quantized_linears_fused(projections, inputs)
+        qkv, z, b, a = fused or tuple(
+            projection(inputs) for projection in projections
+        )
+        z = z.reshape(
             batch_size, seq_len, self.num_v_heads, self.head_v_dim
         )
-        b = self.in_proj_b(inputs)
-        a = self.in_proj_a(inputs)
         conv_state = cache[0] if cache is not None else None
         if conv_state is None or conv_state.shape[0] != batch_size:
             conv_state = mx.zeros(

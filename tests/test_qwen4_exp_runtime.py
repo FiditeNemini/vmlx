@@ -1,4 +1,5 @@
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 import pytest
 
@@ -902,6 +903,42 @@ def test_qwen4_exp_exact_gate_up_projection_is_bit_identical_without_model_weigh
     mx.eval(reference, candidate)
 
     np.testing.assert_array_equal(np.asarray(candidate), np.asarray(reference))
+
+
+def test_qwen4_exp_gdn_decode_projection_fusion_is_bit_identical():
+    from vmlx_engine.models.qwen4_exp.language import (
+        _decode_quantized_linears_fused,
+    )
+
+    shapes = (96, 64, 16, 16)
+    dense = tuple(nn.Linear(64, output, bias=False) for output in shapes)
+    for linear in dense:
+        linear.weight = linear.weight.astype(mx.bfloat16)
+    linears = tuple(
+        linear.to_quantized(group_size=64, bits=4) for linear in dense
+    )
+    x = (mx.arange(64, dtype=mx.bfloat16) / 127.0).reshape(1, 1, 64)
+    reference = tuple(linear(x) for linear in linears)
+    candidate = _decode_quantized_linears_fused(linears, x)
+    assert candidate is not None
+    mx.eval(*reference, *candidate)
+    for expected, actual in zip(reference, candidate):
+        np.testing.assert_array_equal(
+            np.asarray(actual.astype(mx.float32)),
+            np.asarray(expected.astype(mx.float32)),
+        )
+
+
+def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
+    from vmlx_engine.models.qwen4_exp.language import (
+        _decode_quantized_linears_fused,
+    )
+
+    linears = tuple(
+        nn.Linear(64, 64, bias=False).to_quantized(group_size=64, bits=4)
+        for _ in range(4)
+    )
+    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
 
 
 def test_qwen4_exp_ple_manifest_aliases_are_deterministic_and_fail_closed():

@@ -12,6 +12,29 @@ function handlerBlock(source: string, handler: string, nextHandler: string): str
 }
 
 describe('session settings restart parity', () => {
+  it('preserves explicit stream interval 1 from UI preview through launcher argv', () => {
+    const launcher = read('src/main/sessions.ts')
+    const settings = read('src/renderer/src/components/sessions/SessionSettings.tsx')
+    const form = read('src/renderer/src/components/sessions/SessionConfigForm.tsx')
+    const database = read('src/main/database.ts')
+
+    const launchStart = launcher.indexOf('// Performance')
+    const launchEnd = launcher.indexOf('// maxTokens:', launchStart)
+    const launchBlock = launcher.slice(launchStart, launchEnd)
+    const previewStart = settings.indexOf('function buildCommandPreview')
+    const previewEnd = settings.indexOf('const SettingsSection', previewStart)
+    const previewBlock = settings.slice(previewStart, previewEnd)
+
+    expect(form).toContain('streamInterval: 8,')
+    expect(previewBlock).toContain('finitePositiveInteger(config.streamInterval)')
+    expect(launchBlock).toContain('finitePositiveInteger(config.streamInterval)')
+    expect(launchBlock).toContain("args.push('--stream-interval', streamInterval.toString())")
+    expect(launchBlock).not.toMatch(/streamInterval\w*\s*===\s*1/)
+    expect(launcher).not.toContain('liftLegacyStreamInterval(')
+    expect(database).toContain('migration_lift_legacy_stream_interval_default_1')
+    expect(database).toContain('migrateLegacyStreamIntervalDefault(parsed)')
+  })
+
   it('notifies session consumers after an ordinary config save', () => {
     const source = read('src/main/sessions.ts')
     const start = source.indexOf('async updateSessionConfig')

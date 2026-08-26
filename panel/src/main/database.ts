@@ -2,7 +2,10 @@ import Database from "better-sqlite3";
 import { app } from "electron";
 import { join } from "path";
 import { existsSync, unlinkSync, renameSync } from "fs";
-import { migrateLegacySessionStartupConfig } from "../shared/sessionConfigMigrations";
+import {
+  migrateLegacySessionStartupConfig,
+  migrateLegacyStreamIntervalDefault,
+} from "../shared/sessionConfigMigrations";
 import {
   staleSessionCountSql,
   staleSessionResetSql,
@@ -836,6 +839,48 @@ class DatabaseManager {
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
           )
           .run(legacySessionMaxOutputKey, String(Date.now()));
+      }
+
+      // Old releases seeded streamInterval=1. Lift those already-persisted
+      // rows once because per-token renderer updates create growing-markdown
+      // backpressure on long chats. This migration marker is the provenance
+      // boundary: after it is written, a user may deliberately save 1 and the
+      // create/save/preview/launch path must preserve that explicit choice.
+      const legacyStreamIntervalKey =
+        "migration_lift_legacy_stream_interval_default_1";
+      const legacyStreamIntervalDone = this.db
+        .prepare("SELECT value FROM settings WHERE key = ?")
+        .get(legacyStreamIntervalKey) as { value: string } | undefined;
+      if (!legacyStreamIntervalDone) {
+        const sessions = this.db
+          .prepare("SELECT id, config FROM sessions")
+          .all() as { id: string; config: string }[];
+        const updateSession = this.db.prepare(
+          "UPDATE sessions SET config = ?, updated_at = ? WHERE id = ?",
+        );
+        let migratedSessionCount = 0;
+        for (const session of sessions) {
+          try {
+            const parsed = JSON.parse(session.config || "{}");
+            if (!parsed || typeof parsed !== "object") continue;
+            if (migrateLegacyStreamIntervalDefault(parsed)) {
+              updateSession.run(JSON.stringify(parsed), Date.now(), session.id);
+              migratedSessionCount += 1;
+            }
+          } catch {
+            // Preserve malformed config for the normal defensive load path.
+          }
+        }
+        if (migratedSessionCount > 0) {
+          console.log(
+            `[DB] lifted legacy stream interval in ${migratedSessionCount} session config(s)`,
+          );
+        }
+        this.db
+          .prepare(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+          )
+          .run(legacyStreamIntervalKey, String(Date.now()));
       }
 
       // v1.5.37 stale sampling recovery:

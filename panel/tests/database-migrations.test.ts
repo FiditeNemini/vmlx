@@ -1,11 +1,24 @@
 import { describe, expect, it } from 'vitest'
 import {
   migrateLegacySessionStartupConfig,
+  migrateLegacyStreamIntervalDefault,
   migrateModelParserDefaults,
   MODEL_PARSER_DEFAULTS_VERSION,
 } from '../src/shared/sessionConfigMigrations'
 
 describe('database startup migrations', () => {
+  it('lifts only the historical stream interval default', () => {
+    const legacy = { streamInterval: 1 }
+    expect(migrateLegacyStreamIntervalDefault(legacy)).toBe(true)
+    expect(legacy.streamInterval).toBe(8)
+
+    for (const streamInterval of [2, 8, 100, undefined]) {
+      const current = { streamInterval }
+      expect(migrateLegacyStreamIntervalDefault(current)).toBe(false)
+      expect(current.streamInterval).toBe(streamInterval)
+    }
+  })
+
   it('migrates the stale auto-derived Laguna qwen tool parser exactly once', () => {
     const config: Record<string, any> = { toolCallParser: 'qwen' }
 

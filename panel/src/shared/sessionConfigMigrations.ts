@@ -4,6 +4,18 @@ export const GENERATION_STARTUP_DEFAULTS_VERSION = 4
 export const MODEL_PARSER_DEFAULTS_VERSION = 2
 export const LEGACY_GENERIC_MAX_OUTPUT_TOKENS = new Set([4096, 12000, 12068, 32768])
 
+/**
+ * Lift the historical per-token streaming default exactly once during the
+ * database migration that owns old persisted rows. Current UI saves must not
+ * call this helper: after migration, streamInterval=1 is an explicit supported
+ * user choice and the launcher must preserve it verbatim.
+ */
+export function migrateLegacyStreamIntervalDefault(config: Record<string, any>): boolean {
+  if (Number(config.streamInterval) !== 1) return false
+  config.streamInterval = 8
+  return true
+}
+
 export function migrateModelParserDefaults(
   config: Record<string, any>,
   detectedFamily?: string,

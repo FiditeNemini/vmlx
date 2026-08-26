@@ -160,7 +160,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
 
   blockDiskCacheMaxPercent: DEFAULT_BLOCK_DISK_CACHE_PERCENT,
   blockDiskCacheDir: '',
-  streamInterval: 1,
+  streamInterval: 8,
   maxTokens: 0,
   mcpConfig: '',
   mcpEnabledServers: '',

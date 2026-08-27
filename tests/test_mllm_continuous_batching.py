@@ -546,6 +546,24 @@ def test_gemma4_partial_media_tail_requires_pure_text_hit_and_live_capabilities(
     ), "family label alone must not override the live callable contract"
 
 
+def test_qwen4_exp_media_prefix_cache_defaults_on_but_retains_kill_switch(
+    monkeypatch,
+):
+    from vmlx_engine.mllm_batch_generator import (
+        _mllm_media_prefix_cache_family_enabled,
+    )
+
+    monkeypatch.delenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", raising=False)
+    monkeypatch.delenv(
+        "VMLINUX_MLLM_MEDIA_PREFIX_CACHE_UNSAFE_ACK", raising=False
+    )
+
+    assert _mllm_media_prefix_cache_family_enabled("qwen4_exp")
+
+    monkeypatch.setenv("VMLINUX_MLLM_MEDIA_PREFIX_CACHE", "off")
+    assert not _mllm_media_prefix_cache_family_enabled("qwen4_exp")
+
+
 def test_muse_timestamped_video_runs_group_to_one_causal_media_item():
     from vmlx_engine.mllm_batch_generator import (
         _media_placeholder_runs,

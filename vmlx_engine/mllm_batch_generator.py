@@ -275,6 +275,7 @@ _MLLM_MEDIA_PREFIX_CACHE_DEFAULT_FAMILIES = frozenset(
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_vl",
+        "qwen4_exp",
         "muse_glimmer",
         "gemma4",
         "gemma4_unified",
@@ -8475,17 +8476,17 @@ class MLLMBatchGenerator:
     ) -> bool:
         """Return True when media prompts may use media-keyed KV+SSM cache.
 
-        Qwen3.5/3.6 VL, Muse Glimmer, Gemma 4, Step 3.7, and dots3 own a clean
-        media-conditioned N-1 prefill path and are enabled by default. Gemma,
-        Step, and Muse captured boundaries include native rotating-SWA state
-        plus their compatible full-attention slots. Muse's exact runtime is 39
-        RotatingKVCache + 13 KVCache, and the per-placeholder
-        side keys bind the stored KV to the image/video bytes. Muse's live K/V
-        tensors are FP32 (with I32 rotating metadata); SSD preserves that exact
-        native representation without applying a storage codec. Other families
-        retain the old double opt-in until their cache topology has equivalent
-        source and live proof. An explicit false value remains a kill switch
-        for every default-enabled family.
+        Qwen3.5/3.6 VL, Qwen4Exp, Muse Glimmer, Gemma 4, Step 3.7, and dots3
+        own a clean media-conditioned N-1 prefill path and are enabled by
+        default. Gemma, Step, and Muse captured boundaries include native
+        rotating-SWA state plus their compatible full-attention slots. Muse's
+        exact runtime is 39 RotatingKVCache + 13 KVCache, and the
+        per-placeholder side keys bind the stored KV to the image/video bytes.
+        Muse's live K/V tensors are FP32 (with I32 rotating metadata); SSD
+        preserves that exact native representation without applying a storage
+        codec. Other families retain the old double opt-in until their cache
+        topology has equivalent source and live proof. An explicit false value
+        remains a kill switch for every default-enabled family.
         """
         model_type = str(getattr(self, "_model_type", "") or "").lower()
         if not _mllm_media_prefix_cache_family_enabled(model_type):

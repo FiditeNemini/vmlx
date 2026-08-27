@@ -1331,13 +1331,13 @@ class MLLMScheduler:
     ) -> bool:
         """Return True when a media prompt may use media-keyed prefix cache.
 
-        Qwen3.5/3.6 VL, Muse Glimmer, Gemma 4, Step 3.7, and dots3 have a clean
-        media-conditioned N-1 cache producer and are enabled by default. Gemma,
-        Step, and Muse store captured native rotating-SWA plus compatible
-        full-attention boundaries under per-placeholder media side keys. Other
-        families retain the historical double opt-in until they have equivalent
-        typed-cache proof. ZAYA CCA remains excluded because its current clean
-        store path is text-only.
+        Qwen3.5/3.6 VL, Qwen4Exp, Muse Glimmer, Gemma 4, Step 3.7, and dots3
+        have a clean media-conditioned N-1 cache producer and are enabled by
+        default. Gemma, Step, and Muse store captured native rotating-SWA plus
+        compatible full-attention boundaries under per-placeholder media side
+        keys. Other families retain the historical double opt-in until they
+        have equivalent typed-cache proof. ZAYA CCA remains excluded because
+        its current clean store path is text-only.
         """
         if request is None or getattr(request, "_bypass_prefix_cache", False):
             return False

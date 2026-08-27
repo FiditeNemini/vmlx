@@ -41,6 +41,7 @@ _PLE_BUFFER_RE = re.compile(
 _PLE_REQUIRED_SHARD_SUFFIXES = ("weight", "scales", "biases")
 _HYPER_UP_SUFFIX = ".input_mix_weight_up.weight"
 _LOW_PRECISION_FLOAT_DTYPES = {mx.float16, mx.bfloat16}
+_MLX_AFFINE_BITS = {2, 3, 4, 5, 6, 8}
 
 
 def is_qwen4_exp_bundle(model_path: str | Path) -> bool:
@@ -578,11 +579,102 @@ def _quantize_model(
         return
     model_predicate = getattr(model, "quant_predicate", None)
 
+    def checkpoint_spec(path, module, aliases, declared):
+        stems = [alias for alias in aliases if f"{alias}.scales" in weights]
+        stems = list(dict.fromkeys(stems))
+        if not stems:
+            return None
+        complete = [
+            stem
+            for stem in stems
+            if f"{stem}.weight" in weights and f"{stem}.scales" in weights
+        ]
+        if len(complete) != 1:
+            raise ValueError(
+                "qwen4_exp quantized checkpoint aliases are incomplete or "
+                f"ambiguous for {path}: {', '.join(stems)}"
+            )
+        stem = complete[0]
+        packed = weights[f"{stem}.weight"]
+        scales = weights[f"{stem}.scales"]
+        logical = getattr(module, "weight", None)
+        if logical is None or not hasattr(logical, "shape"):
+            raise ValueError(
+                f"qwen4_exp quantized checkpoint module {path} has no logical weight"
+            )
+        logical_shape = tuple(int(dim) for dim in logical.shape)
+        packed_shape = tuple(int(dim) for dim in packed.shape)
+        scales_shape = tuple(int(dim) for dim in scales.shape)
+        if packed.dtype != mx.uint32:
+            raise ValueError(
+                f"qwen4_exp quantized checkpoint weight {stem}.weight must be U32"
+            )
+        if (
+            len(logical_shape) < 2
+            or len(packed_shape) != len(logical_shape)
+            or len(scales_shape) != len(logical_shape)
+            or packed_shape[:-1] != logical_shape[:-1]
+            or scales_shape[:-1] != logical_shape[:-1]
+        ):
+            raise ValueError(
+                "qwen4_exp quantized checkpoint leading shapes disagree for "
+                f"{path}: logical={logical_shape}, packed={packed_shape}, "
+                f"scales={scales_shape}"
+            )
+        input_dims = logical_shape[-1]
+        if input_dims <= 0 or scales_shape[-1] <= 0:
+            raise ValueError(
+                f"qwen4_exp quantized checkpoint dimensions must be positive for {path}"
+            )
+        packed_bits = 32 * packed_shape[-1]
+        if packed_bits % input_dims:
+            raise ValueError(
+                "qwen4_exp packed width does not encode an integral bit width "
+                f"for {path}: packed_cols={packed_shape[-1]}, "
+                f"input_dims={input_dims}"
+            )
+        bits = packed_bits // input_dims
+        if bits not in _MLX_AFFINE_BITS:
+            raise ValueError(
+                "qwen4_exp checkpoint-derived bit width is unsupported for "
+                f"{path}: {bits}"
+            )
+        if input_dims % scales_shape[-1]:
+            raise ValueError(
+                "qwen4_exp scale width does not encode an integral group size "
+                f"for {path}: scale_cols={scales_shape[-1]}, "
+                f"input_dims={input_dims}"
+            )
+        group_size = input_dims // scales_shape[-1]
+        if packed_shape[-1] != input_dims * bits // 32:
+            raise ValueError(
+                f"qwen4_exp checkpoint packed shape mismatch for {path}"
+            )
+        mode = str(
+            (declared or {}).get("mode", quantization.get("mode", "affine"))
+        )
+        biases = weights.get(f"{stem}.biases")
+        if mode == "affine" and biases is None:
+            raise ValueError(
+                f"qwen4_exp affine checkpoint module {path} is missing biases"
+            )
+        if (
+            biases is not None
+            and tuple(int(dim) for dim in biases.shape) != scales_shape
+        ):
+            raise ValueError(
+                "qwen4_exp checkpoint scales/biases shapes disagree for "
+                f"{path}: {scales_shape} != "
+                f"{tuple(int(dim) for dim in biases.shape)}"
+            )
+        return {"bits": bits, "group_size": group_size, "mode": mode}
+
     def predicate(path, module):
         aliases = (
             path,
             path.replace("language_model.model", "language_model", 1),
             path.replace("language_model.mtp", "mtp", 1),
+            path.replace("language_model.lm_head", "lm_head", 1),
         )
         checkpoint_quantized = any(
             f"{alias}.scales" in weights for alias in aliases
@@ -606,6 +698,9 @@ def _quantize_model(
             if bit_map is not None
             else quantization.get(path)
         )
+        derived = checkpoint_spec(path, module, aliases, override)
+        if derived is not None:
+            return derived
         if isinstance(override, dict):
             if checkpoint_quantized:
                 return override

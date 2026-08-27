@@ -607,34 +607,55 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
         captured.update(kwargs)
 
     monkeypatch.setattr(loader.nn, "quantize", fake_quantize)
+    linear = nn.Linear(64, 8, bias=False)
     loader._quantize_model(
         object(),
         {"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}},
         {
-            "language_model.layers.3.mlp.switch_mlp.down_proj.scales": mx.ones(1),
-            "mtp.layers.0.self_attn.q_proj.scales": mx.ones(1),
-            "language_model.lm_head.scales": mx.ones(1),
-            "language_model.model.layers.3.mlp.gate.scales": mx.ones(1),
+            "language_model.layers.3.mlp.switch_mlp.down_proj.weight": mx.zeros(
+                (8, 8), dtype=mx.uint32
+            ),
+            "language_model.layers.3.mlp.switch_mlp.down_proj.scales": mx.ones(
+                (8, 1)
+            ),
+            "language_model.layers.3.mlp.switch_mlp.down_proj.biases": mx.zeros(
+                (8, 1)
+            ),
+            "mtp.layers.0.self_attn.q_proj.weight": mx.zeros(
+                (8, 8), dtype=mx.uint32
+            ),
+            "mtp.layers.0.self_attn.q_proj.scales": mx.ones((8, 1)),
+            "mtp.layers.0.self_attn.q_proj.biases": mx.zeros((8, 1)),
+            "language_model.lm_head.weight": mx.zeros(
+                (8, 16), dtype=mx.uint32
+            ),
+            "language_model.lm_head.scales": mx.ones((8, 2)),
+            "language_model.lm_head.biases": mx.zeros((8, 2)),
+            "language_model.model.layers.3.mlp.gate.weight": mx.zeros(
+                (8, 16), dtype=mx.uint32
+            ),
+            "language_model.model.layers.3.mlp.gate.scales": mx.ones((8, 1)),
+            "language_model.model.layers.3.mlp.gate.biases": mx.zeros((8, 1)),
         },
         bit_map,
     )
 
     predicate = captured["class_predicate"]
     assert predicate(
-        "language_model.model.layers.3.mlp.switch_mlp.down_proj", object()
+        "language_model.model.layers.3.mlp.switch_mlp.down_proj", linear
     ) == {"bits": 4, "group_size": 64, "mode": "affine"}
-    assert predicate("language_model.mtp.layers.0.self_attn.q_proj", object()) == {
+    assert predicate("language_model.mtp.layers.0.self_attn.q_proj", linear) == {
         "bits": 4,
         "group_size": 64,
         "mode": "affine",
     }
-    assert predicate("language_model.lm_head", object()) == {
-        "bits": 6,
-        "group_size": 64,
+    assert predicate("language_model.lm_head", linear) == {
+        "bits": 8,
+        "group_size": 32,
         "mode": "affine",
     }
     assert (
-        predicate("language_model.model.layers.4.self_attn.q_proj", object())
+        predicate("language_model.model.layers.4.self_attn.q_proj", linear)
         is False
     )
 
@@ -647,12 +668,50 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
     loader._quantize_model(
         RouterAwareModel(),
         {"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}},
-        {"language_model.model.layers.3.mlp.gate.scales": mx.ones(1)},
+        {
+            "language_model.model.layers.3.mlp.gate.weight": mx.zeros(
+                (8, 16), dtype=mx.uint32
+            ),
+            "language_model.model.layers.3.mlp.gate.scales": mx.ones((8, 1)),
+            "language_model.model.layers.3.mlp.gate.biases": mx.zeros((8, 1)),
+        },
         bit_map,
     )
     assert captured["class_predicate"](
-        "language_model.model.layers.3.mlp.gate", object()
+        "language_model.model.layers.3.mlp.gate", linear
     ) == {"bits": 8, "group_size": 64, "mode": "affine"}
+
+
+def test_qwen4_exp_checkpoint_shapes_own_per_module_quantization(monkeypatch):
+    from vmlx_engine.models.qwen4_exp import loader
+
+    captured = {}
+    monkeypatch.setattr(
+        loader.nn,
+        "quantize",
+        lambda _model, **kwargs: captured.update(kwargs),
+    )
+    loader._quantize_model(
+        object(),
+        {"quantization": {"bits": 4, "group_size": 64, "mode": "affine"}},
+        {
+            "language_model.model.embed_tokens.weight": mx.zeros(
+                (16, 16), dtype=mx.uint32
+            ),
+            "language_model.model.embed_tokens.scales": mx.ones((16, 2)),
+            "language_model.model.embed_tokens.biases": mx.zeros((16, 2)),
+        },
+        {"default": {"bits": 4, "group_size": 64}},
+    )
+    embedding = nn.Embedding(16, 64)
+    assert captured["class_predicate"](
+        "language_model.model.embed_tokens", embedding
+    ) == {"bits": 8, "group_size": 32, "mode": "affine"}
+
+    malformed = captured["class_predicate"]
+    embedding.weight = mx.zeros((16, 96))
+    with pytest.raises(ValueError, match="integral bit width"):
+        malformed("language_model.model.embed_tokens", embedding)
 
 
 def test_qwen4_exp_ple_layout_resolution_is_complete_and_unambiguous():

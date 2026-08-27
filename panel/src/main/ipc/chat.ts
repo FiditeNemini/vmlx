@@ -3018,13 +3018,6 @@ export function registerChatHandlers(
                     arguments: finalArguments,
                   },
                 });
-                emitToolStatus(
-                  "calling",
-                  item.name,
-                  finalArguments,
-                  toolIteration,
-                  toolCallId,
-                );
               }
 
               // Real-time usage from the explicitly negotiated local vMLX
@@ -3381,9 +3374,6 @@ export function registerChatHandlers(
                     console.log(
                       `[CHAT] Tool call detected: ${fn.name}(${(fn.arguments || "").slice(0, 100)})`,
                     );
-                    // Don't emit arguments here — during incremental streaming,
-                    // arguments may be empty/partial. Final args shown after execution.
-                    emitToolStatus("calling", fn.name, "", toolIteration, toolCall.id);
                   } else if (fn?.arguments && idx >= 0) {
                     // Incremental argument chunk: accumulate arguments for existing tool call
                     if (receivedToolCalls[idx]) {
@@ -3693,6 +3683,13 @@ export function registerChatHandlers(
               lastReplaySafeToolResultKey = null;
               resultText = `Duplicate ${tc.function.name} call was not executed because the user requested it exactly once.`;
               emitToolStatus(
+                "calling",
+                tc.function.name,
+                tc.function.arguments,
+                toolIteration,
+                tc.id,
+              );
+              emitToolStatus(
                 "error",
                 tc.function.name,
                 resultText,
@@ -3714,6 +3711,18 @@ export function registerChatHandlers(
               );
               continue;
             }
+            // A parsed stream item is still speculative until the complete
+            // pass reaches loop control. Emit the concrete card only when this
+            // call is actually handed to execution/validation. That lets a
+            // replay-only exactly-once pass be discarded without leaving an
+            // orphaned "interrupted" card in the live UI or persisted history.
+            emitToolStatus(
+              "calling",
+              tc.function.name,
+              tc.function.arguments,
+              toolIteration,
+              tc.id,
+            );
             try {
               let toolArgs: Record<string, any>;
               try {

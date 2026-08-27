@@ -2865,17 +2865,44 @@ class TestNativeMtpAutodetect:
         assert logprobs == [None, None, None]
         assert token_ids == [1, 0, 2]
 
+    def test_mllm_native_mtp_enables_sampled_requests_with_stochastic_verify(
+        self, monkeypatch
+    ):
+        import vmlx_engine.mllm_batch_generator as mbg
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator, MLLMBatchRequest
+
+        class _LanguageModel:
+            mtp = object()
+
+            def make_mtp_cache(self):
+                return []
+
+            def mtp_forward(self, *_args, **_kwargs):
+                raise AssertionError("runtime activation check should not draft")
+
+        generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        generator.language_model = _LanguageModel()
+        monkeypatch.setattr(mbg, "_NATIVE_MTP_STOCHASTIC_ACCEPT", True)
+        req = MLLMBatchRequest(
+            uid=0,
+            request_id="sampled-mtp",
+            prompt="",
+            max_tokens=8,
+            temperature=0.6,
+        )
+
+        assert generator._native_mtp_enabled_for_request(req) is True
+
     @pytest.mark.parametrize(
-        ("temperature", "repetition_penalty"),
+        ("overrides", "reason_fragment"),
         [
-            (0.6, 1.0),
-            (0.0, 1.1),
+            ({"repetition_penalty": 1.1}, "repetition_penalty=1.1"),
+            ({"frequency_penalty": 0.5}, "frequency_penalty=0.5"),
+            ({"presence_penalty": -0.5}, "presence_penalty=-0.5"),
         ],
     )
-    def test_mllm_native_mtp_only_enables_for_proven_deterministic_sampling(
-        self,
-        temperature,
-        repetition_penalty,
+    def test_mllm_native_mtp_falls_back_for_history_dependent_penalties(
+        self, overrides, reason_fragment
     ):
         from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator, MLLMBatchRequest
 
@@ -2892,14 +2919,39 @@ class TestNativeMtpAutodetect:
         generator.language_model = _LanguageModel()
         req = MLLMBatchRequest(
             uid=0,
-            request_id="unsafe-sampling-mtp",
+            request_id="history-penalty-mtp",
             prompt="",
             max_tokens=8,
-            temperature=temperature,
-            repetition_penalty=repetition_penalty,
+            temperature=0.0,
+            **overrides,
         )
 
         assert generator._native_mtp_enabled_for_request(req) is False
+        assert reason_fragment in req._native_mtp_gate_logged
+
+    def test_mllm_native_mtp_rejects_sampled_request_when_stochastic_verify_off(
+        self, monkeypatch
+    ):
+        import vmlx_engine.mllm_batch_generator as mbg
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator, MLLMBatchRequest
+
+        generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        generator.language_model = SimpleNamespace(
+            mtp=object(),
+            make_mtp_cache=lambda: [],
+            mtp_forward=lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(mbg, "_NATIVE_MTP_STOCHASTIC_ACCEPT", False)
+        req = MLLMBatchRequest(
+            uid=0,
+            request_id="sampled-mtp-kill-switch",
+            prompt="",
+            max_tokens=8,
+            temperature=0.6,
+        )
+
+        assert generator._native_mtp_enabled_for_request(req) is False
+        assert "temperature=0.6" in req._native_mtp_gate_logged
 
     def test_native_mtp_stats_log_includes_phase_timings(self, caplog):
         import logging
@@ -3345,7 +3397,7 @@ class TestNativeMtpAutodetect:
 
         assert _native_mtp_depth() == 3
 
-    def test_native_mtp_tool_request_caps_depth_to_one(self, monkeypatch, caplog):
+    def test_native_mtp_tool_request_keeps_configured_depth(self, monkeypatch):
         from vmlx_engine.mllm_batch_generator import _native_mtp_depth_for_request
 
         monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
@@ -3359,12 +3411,9 @@ class TestNativeMtpAutodetect:
             },
         )
 
-        with caplog.at_level("INFO"):
-            assert _native_mtp_depth_for_request(req) == 1
+        assert _native_mtp_depth_for_request(req) == 3
 
-        assert "MLLM native MTP depth capped to D1 for request=tool-depth-cap" in caplog.text
-
-    def test_native_mtp_tool_present_metadata_caps_depth_to_one(self, monkeypatch):
+    def test_native_mtp_tool_present_metadata_keeps_configured_depth(self, monkeypatch):
         from vmlx_engine.mllm_batch_generator import _native_mtp_depth_for_request
 
         monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
@@ -3375,9 +3424,9 @@ class TestNativeMtpAutodetect:
             extra_kwargs={"_vmlx_tools_present": True},
         )
 
-        assert _native_mtp_depth_for_request(req) == 1
+        assert _native_mtp_depth_for_request(req) == 3
 
-    def test_native_mtp_rendered_tool_prompt_caps_depth_to_one(self, monkeypatch):
+    def test_native_mtp_rendered_tool_prompt_keeps_configured_depth(self, monkeypatch):
         from vmlx_engine.mllm_batch_generator import _native_mtp_depth_for_request
 
         monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
@@ -3389,7 +3438,7 @@ class TestNativeMtpAutodetect:
             extra_kwargs={},
         )
 
-        assert _native_mtp_depth_for_request(req) == 1
+        assert _native_mtp_depth_for_request(req) == 3
 
     def test_native_mtp_non_tool_request_keeps_configured_depth(self, monkeypatch):
         from vmlx_engine.mllm_batch_generator import _native_mtp_depth_for_request
@@ -3401,7 +3450,7 @@ class TestNativeMtpAutodetect:
 
         assert _native_mtp_depth_for_request(req) == 3
 
-    def test_native_mtp_tool_request_keeps_immutable_d1_adaptive_ceiling(self):
+    def test_native_mtp_tool_request_keeps_full_adaptive_ceiling(self):
         from vmlx_engine.mllm_batch_generator import (
             _native_mtp_depth_ceiling_for_request,
         )
@@ -3417,8 +3466,67 @@ class TestNativeMtpAutodetect:
             extra_kwargs={},
         )
 
-        assert _native_mtp_depth_ceiling_for_request(tool_req) == 1
+        assert _native_mtp_depth_ceiling_for_request(tool_req) == 3
         assert _native_mtp_depth_ceiling_for_request(plain_req) == 3
+
+    def test_native_mtp_terminal_boundary_rewinds_unemitted_drafts(self):
+        import mlx.core as mx
+
+        from vmlx_engine.mllm_batch_generator import (
+            MLLMBatchGenerator,
+            MLLMBatchRequest,
+            MLLMNativeMTPState,
+            _native_mtp_snapshot_replay_cache,
+        )
+
+        class _Cache:
+            def __init__(self, tokens):
+                self.tokens = list(tokens)
+
+            def is_trimmable(self):
+                return True
+
+            def trim(self, count):
+                if count:
+                    self.tokens = self.tokens[:-count]
+
+        class _LanguageModel:
+            def __call__(self, input_ids, cache=None, return_hidden=False, **_kwargs):
+                tokens = [int(token) for token in input_ids.reshape(-1).tolist()]
+                cache[0].tokens.extend(tokens)
+                hidden = mx.ones((1, len(tokens), 2), dtype=mx.float32)
+                logits = mx.zeros((1, len(tokens), 8), dtype=mx.float32)
+                return (logits, hidden) if return_hidden else logits
+
+        cache = [_Cache([10])]
+        snapshot = _native_mtp_snapshot_replay_cache(cache, advance_len=4)
+        cache[0].tokens.extend([2, 3, 4, 5])
+        state = MLLMNativeMTPState(
+            terminal_snapshot=snapshot,
+            terminal_n_inputs=4,
+            terminal_base_token=mx.array([2], dtype=mx.uint32),
+            terminal_emitted=[(3, "draft")],
+        )
+        state.queue.extend(
+            [
+                (4, None, "draft"),
+                (5, None, "bonus"),
+            ]
+        )
+        request = MLLMBatchRequest(
+            uid=0,
+            request_id="terminal-boundary",
+            prompt="",
+            max_tokens=8,
+        )
+        generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        generator.language_model = _LanguageModel()
+
+        generator._rewind_native_mtp_terminal_boundary(request, cache, state)
+
+        assert cache[0].tokens == [10, 2, 3]
+        assert list(state.queue) == []
+        assert state.stats.replay_main_forwards == 1
 
     def test_mllm_native_mtp_active_row_does_not_extend_standard_batch(self):
         import mlx.core as mx

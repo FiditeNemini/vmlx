@@ -3970,6 +3970,13 @@ class MLLMNativeMTPState:
     head_chain_pairs: int = 0
     # In-flight prefetched verify: {snapshot, logits, hidden, n_inputs} or None.
     pending_verify: Optional[Dict[str, Any]] = None
+    # Snapshot and emission ledger for the verify cycle currently being
+    # drained. If max_tokens or a stop token lands before all accepted drafts
+    # are emitted, the main cache must rewind to the exact visible boundary.
+    terminal_snapshot: Optional[List[Optional["_NativeMTPCacheObjectSnapshot"]]] = None
+    terminal_n_inputs: int = 0
+    terminal_base_token: Optional[Any] = None
+    terminal_emitted: List[Tuple[int, str]] = field(default_factory=list)
     # Runtime cost telemetry (wall-clock, trace-free): the seed forward is a
     # true AR step, and the span since the first verify cycle divided by
     # emitted tokens is the real MTP cost per token.
@@ -3996,88 +4003,21 @@ def _native_mtp_depth() -> int:
     return depth
 
 
-def _native_mtp_tool_choice_requires_tools(tool_choice: Any) -> bool:
-    if isinstance(tool_choice, dict):
-        return True
-    if isinstance(tool_choice, str):
-        return tool_choice in {"required", "auto"}
-    return False
-
-
-def _native_mtp_request_has_tools(request: Any) -> bool:
-    if request is None:
-        return False
-
-    prompt = getattr(request, "prompt", None)
-    if isinstance(prompt, str) and any(
-        marker in prompt
-        for marker in (
-            "<tools>",
-            "<tool_call>",
-            '"type": "function"',
-            "'type': 'function'",
-            "You have access to the following tools",
-            "[Calling tool:",
-        )
-    ):
-        return True
-
-    for attr in ("tools", "_vmlx_effective_tools"):
-        if getattr(request, attr, None):
-            return True
-    if _native_mtp_tool_choice_requires_tools(getattr(request, "tool_choice", None)):
-        return True
-
-    extra = getattr(request, "extra_kwargs", None)
-    if not isinstance(extra, dict):
-        return False
-    if extra.get("_vmlx_tools_present"):
-        return True
-    if extra.get("tools") or extra.get("_vmlx_effective_tools"):
-        return True
-    if _native_mtp_tool_choice_requires_tools(extra.get("tool_choice")):
-        return True
-
-    template_kwargs = extra.get("chat_template_kwargs")
-    if isinstance(template_kwargs, dict):
-        if template_kwargs.get("tools"):
-            return True
-        if _native_mtp_tool_choice_requires_tools(template_kwargs.get("tool_choice")):
-            return True
-
-    return False
-
-
 def _native_mtp_depth_for_request(request: Any) -> int:
-    depth = _native_mtp_depth()
-    if depth <= 1 or not _native_mtp_request_has_tools(request):
-        return depth
+    """Return the configured starting depth for every request surface.
 
-    request_id = getattr(request, "request_id", "<unknown>")
-    logged_depth = getattr(request, "_native_mtp_tool_depth_cap_logged", None)
-    if logged_depth != depth:
-        logger.info(
-            "MLLM native MTP depth capped to D1 for request=%s because tools are present (configured D%d)",
-            request_id,
-            depth,
-        )
-        try:
-            setattr(request, "_native_mtp_tool_depth_cap_logged", depth)
-        except Exception:
-            pass
-    return 1
+    Tool metadata is not a decode boundary. The prior blanket D1 cap slowed
+    every tool-enabled app turn, including ordinary reasoning and prose before
+    a tool call. Exact terminal-boundary rewind now owns the real hazard.
+    """
+
+    return _native_mtp_depth()
 
 
 def _native_mtp_depth_ceiling_for_request(request: Any) -> int:
-    """Return the immutable adaptive-depth ceiling for one request.
+    """Return the verifier-supported adaptive-depth ceiling."""
 
-    Tool-bearing requests start at D1 because deeper speculative chains can
-    cross a tool-call boundary before the verifier has committed it.  That is
-    a request capability constraint, not merely an initial-depth choice, so
-    the adaptive controller must never promote the request above D1 later.
-    """
-
-    return 1 if _native_mtp_request_has_tools(request) else 3
+    return 3
 
 
 def _native_mtp_logprobs(logits_2d: mx.array) -> mx.array:
@@ -13985,6 +13925,10 @@ class MLLMBatchGenerator:
             return f"temperature={getattr(request, 'temperature', None)!r} is not deterministic"
         if float(getattr(request, "repetition_penalty", 1.0) or 1.0) != 1.0:
             return f"repetition_penalty={getattr(request, 'repetition_penalty', None)!r} is not 1.0"
+        if float(getattr(request, "frequency_penalty", 0.0) or 0.0) != 0.0:
+            return f"frequency_penalty={getattr(request, 'frequency_penalty', None)!r} is not 0.0"
+        if float(getattr(request, "presence_penalty", 0.0) or 0.0) != 0.0:
+            return f"presence_penalty={getattr(request, 'presence_penalty', None)!r} is not 0.0"
         if request is None:
             return "request missing"
         return None
@@ -14317,6 +14261,51 @@ class MLLMBatchGenerator:
                 "unverified draft positions"
             )
 
+    def _rewind_native_mtp_terminal_boundary(
+        self,
+        request: MLLMBatchRequest,
+        cache: List[Any],
+        state: Optional["MLLMNativeMTPState"],
+    ) -> None:
+        """Rewind verified-but-unemitted drafts before terminal cache capture.
+
+        A depth-2/3 verify may commit several accepted draft positions before
+        the host emits them. If EOS or max_tokens lands in the middle of that
+        queue, persisting the cache as-is stores tokens the client never saw.
+        Restore the pre-verify native state and replay only the visible prefix.
+        This owns the actual boundary hazard for tool and non-tool requests.
+        """
+        if state is None:
+            return
+        self._abandon_pending_native_mtp_verify(state, cache)
+        residual_drafts = sum(
+            1 for _token, _logprobs, source in state.queue if source == "draft"
+        )
+        if residual_drafts <= 0:
+            return
+        snapshot = state.terminal_snapshot
+        base_token = state.terminal_base_token
+        n_inputs = int(state.terminal_n_inputs or 0)
+        if snapshot is None or base_token is None or n_inputs <= 0:
+            raise RuntimeError(
+                "native MTP terminal boundary lacks a restorable verify snapshot"
+            )
+        if not _native_mtp_restore_replay_cache(cache, snapshot, n_inputs):
+            raise RuntimeError("native MTP terminal boundary cache rejected rollback")
+        visible_drafts = [
+            mx.array([int(token)], dtype=mx.uint32)
+            for token, source in state.terminal_emitted
+            if source == "draft"
+        ]
+        confirmed_tokens = [base_token] + visible_drafts
+        state.stats.replay_main_forwards += 1
+        self._replay_native_mtp_confirmed_tokens(
+            request,
+            cache,
+            confirmed_tokens,
+        )
+        state.queue.clear()
+
     def _run_native_mtp_verify_cycle(
         self,
         request: MLLMBatchRequest,
@@ -14334,6 +14323,10 @@ class MLLMBatchGenerator:
         replay_snapshot = pending["snapshot"]
         logits = pending["logits"]
         hidden = pending["hidden"]
+        state.terminal_snapshot = replay_snapshot
+        state.terminal_n_inputs = int(pending["n_inputs"])
+        state.terminal_base_token = state.next_main
+        state.terminal_emitted = []
         trace_t0 = _native_mtp_trace_start()
         _native_mtp_trace_eval(logits, hidden)
         _native_mtp_trace_stop(state.stats, "verify_ms", trace_t0)
@@ -14635,6 +14628,8 @@ class MLLMBatchGenerator:
         if not state.queue:
             raise RuntimeError("native MTP verify produced no emit token")
         token, logprobs, source = state.queue.popleft()
+        if state.terminal_snapshot is not None:
+            state.terminal_emitted.append((int(token), str(source)))
         _native_mtp_bump_emit(state, source)
         if _native_mtp_debug_enabled():
             logger.info(
@@ -15046,8 +15041,8 @@ class MLLMBatchGenerator:
             if finish_reason is not None:
                 mtp_state_for_finish = getattr(req, "_native_mtp_state", None)
                 if mtp_state_for_finish is not None:
-                    self._abandon_pending_native_mtp_verify(
-                        mtp_state_for_finish, batch.cache
+                    self._rewind_native_mtp_terminal_boundary(
+                        req, batch.cache, mtp_state_for_finish
                     )
                     _native_mtp_log_stats(
                         request_id,

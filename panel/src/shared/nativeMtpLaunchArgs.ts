@@ -36,6 +36,6 @@ export function buildNativeMtpLaunchArgs(
     '--native-mtp-depth-policy',
     input.depthOverride === true ? 'fixed' : 'adaptive',
     '--native-mtp-sampling-policy',
-    'greedy-only',
+    input.mode === 'deterministic' ? 'greedy-only' : 'compatible-only',
   ]
 }

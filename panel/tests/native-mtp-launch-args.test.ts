@@ -13,7 +13,7 @@ describe('native MTP launch args', () => {
       '--native-mtp-depth-policy',
       'adaptive',
       '--native-mtp-sampling-policy',
-      'greedy-only',
+      'compatible-only',
     ])
   })
 
@@ -41,7 +41,7 @@ describe('native MTP launch args', () => {
     ])
   })
 
-  it('enforces greedy sampling in every app MTP-on mode', () => {
+  it('preserves sampled requests in Auto and makes greedy an explicit mode', () => {
     expect(buildNativeMtpLaunchArgs({
       supported: true,
       detectedDepth: 1,
@@ -51,7 +51,7 @@ describe('native MTP launch args', () => {
       supported: true,
       detectedDepth: 1,
       mode: 'auto',
-    })).toContain('greedy-only')
+    })).toContain('compatible-only')
   })
 
   it('disables native MTP when an external drafter owns the decode step', () => {

@@ -1802,12 +1802,12 @@ describe('Native MTP', () => {
         },
     }
 
-    it('defaults native-MTP bundles to adaptive greedy Auto mode', () => {
+    it('defaults native-MTP bundles to adaptive sampler-compatible Auto mode', () => {
         const out = preview({}, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('2')
         expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('greedy-only')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)

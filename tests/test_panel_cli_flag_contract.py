@@ -719,13 +719,8 @@ def test_mm3_and_gemma_live_stress_harnesses_gate_actual_launch_argv() -> None:
     assert "cfg.usePagedCache === false" in gemma
     assert "cfg.kvCacheQuantization === 'auto'" in gemma
 
-def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
-    """The app's MTP-on policy must be greedy in UI, argv, and engine resolution.
-
-    Sampled rejection acceptance remains a direct-CLI capability, but the
-    matched Qwen3.8 receipt measured greedy MTP faster. The app therefore emits
-    greedy-only for Auto and Deterministic; Off restores bundle sampling.
-    """
+def test_native_mtp_auto_preserves_sampling_and_deterministic_is_explicit() -> None:
+    """Auto must not silently rewrite API/chat sampling to greedy."""
 
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
         encoding="utf-8"
@@ -736,9 +731,9 @@ def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
 
     assert "buildNativeMtpLaunchArgs" in sessions
     assert "--native-mtp-sampling-policy" in shared
-    # Auto and Deterministic share the measured greedy policy.
-    assert "mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only'" not in sessions
+    assert "input.mode === 'deterministic' ? 'greedy-only' : 'compatible-only'" in shared
     assert "'greedy-only'" in shared
+    assert "'compatible-only'" in shared
     # off must still disable the runtime outright
     assert "return ['--disable-native-mtp']" in shared
 

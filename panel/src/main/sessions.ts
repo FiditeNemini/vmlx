@@ -4747,11 +4747,10 @@ export class SessionManager extends EventEmitter {
     }
 
     // Native in-model MTP. This is separate from external speculative decoding:
-    // Qwen preserved-MTP bundles carry their own draft head. Sampled rejection
-    // acceptance remains available to direct CLI users through compatible-only,
-    // but the app's MTP-on contract is the measured fast path: greedy sampling.
-    // Auto detects the head and keeps depth adaptive; Deterministic is the same
-    // greedy sampler with an explicit mode label. Off restores bundle sampling.
+    // Qwen preserved-MTP bundles carry their own draft head. Auto preserves the
+    // request/bundle sampler and uses rejection-sampling verification for
+    // stochastic requests. Deterministic is the explicit greedy fast path.
+    // Off restores ordinary AR with the same request/bundle sampler.
     const nativeMtp = (detected as any).nativeMtp
     if (!dsv4Active && nativeMtp?.supported) {
       const mode = (config as any).nativeMtpMode || 'auto'
@@ -4778,8 +4777,7 @@ export class SessionManager extends EventEmitter {
         mode,
         externalSpeculativeActive: compatibleExternalSpeculative,
       }))
-      // Both app MTP-on modes emit `greedy-only`, which enforces temperature 0
-      // at the engine boundary even for API clients that send sampled values.
+      // Auto emits `compatible-only`; Deterministic emits `greedy-only`.
       // Depth remains independently adaptive unless the user selects Fixed.
     }
 

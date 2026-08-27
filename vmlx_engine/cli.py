@@ -4223,7 +4223,8 @@ Examples:
              "as VMLINUX_NATIVE_MTP_DEPTH, which is checked first); omit it to "
              "use the bundle's own tuned best_depth. Note this is only the "
              "STARTING depth -- the runtime adapts it per request from measured "
-             "acceptance, and caps it to 1 when the request carries tools.",
+             "acceptance. Tool metadata does not change the selected depth; "
+             "terminal-boundary rewind protects cache correctness.",
     )
     serve_parser.add_argument(
         "--native-mtp-depth-policy",
@@ -4231,8 +4232,7 @@ Examples:
         default=None,
         help="Depth policy for native MTP. adaptive treats --native-mtp-depth as "
              "the starting depth and may promote/demote it per request; fixed "
-             "keeps the exact selected depth for non-tool requests. Tool-bearing "
-             "requests remain capped to depth 1. If omitted, the existing "
+             "keeps the exact selected depth for every request. If omitted, the existing "
              "environment/default adaptive policy is preserved.",
     )
     serve_parser.add_argument(
@@ -4244,8 +4244,8 @@ Examples:
              "sampling acceptance when that runtime gate is enabled. deterministic-defaults fills omitted "
              "temperature/top-p/top-k/min-p with greedy values. greedy-only enforces "
              "temperature=0, top_p=1, top_k=0, min_p=0, and repetition_penalty=1 "
-             "even when a request supplies incompatible values; the app sends greedy-only for both Auto and Deterministic "
-             "MTP modes. Off preserves bundle sampling and disables native MTP.",
+             "even when a request supplies incompatible values. The app uses compatible-only for Auto, greedy-only for "
+             "Deterministic, and disables native MTP for Off.",
     )
     serve_parser.add_argument(
         "--disable-native-mtp",

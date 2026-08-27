@@ -1092,6 +1092,64 @@ def _is_minimax_m3_cache_class(class_name: str) -> bool:
     return (class_name or "") == "MiniMaxM3SparseCache"
 
 
+def _model_is_minimax_m3(model: Any) -> bool:
+    """Identify the M3 architecture, not merely its reusable cache container.
+
+    Qwen4Exp QSA deliberately reuses ``MiniMaxM3SparseCache`` for its positional
+    K/V/index payload.  That makes the payload serializer compatible, but it
+    does *not* make Qwen's blocks subject to MiniMax-M3's prefill-matrix shape
+    discriminator.  Classifying by the cache object alone salted a Qwen clean
+    media boundary produced at 5,440 tokens differently from the 5,445-token
+    warm request that was supposed to consume it, forcing a block-zero miss.
+    """
+    seen: set[int] = set()
+    pending = [model]
+    while pending:
+        candidate = pending.pop()
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        config = getattr(candidate, "config", None)
+        if isinstance(config, dict):
+            model_type = config.get("model_type") or ""
+            text_config = config.get("text_config")
+            if not model_type and isinstance(text_config, dict):
+                model_type = text_config.get("model_type") or ""
+        else:
+            model_type = getattr(config, "model_type", "") if config else ""
+            text_config = getattr(config, "text_config", None) if config else None
+            if not model_type and text_config is not None:
+                model_type = (
+                    text_config.get("model_type", "")
+                    if isinstance(text_config, dict)
+                    else getattr(text_config, "model_type", "")
+                )
+        normalized = str(model_type or "").lower().replace("-", "_")
+        if "minimax_m3" in normalized or "minimaxm3" in normalized:
+            return True
+        # An explicit non-M3 model type is authoritative. This is what keeps
+        # qwen4_exp from inheriting M3 policy even when a wrapper, test module,
+        # or reusable cache class happens to contain MiniMax naming.
+        if normalized:
+            pending.extend(
+                getattr(candidate, attr, None)
+                for attr in ("_model", "model", "language_model")
+            )
+            continue
+
+        identity = (
+            f"{type(candidate).__module__}.{type(candidate).__name__}"
+        ).lower()
+        if "minimax_m3" in identity or "minimaxm3" in identity:
+            return True
+
+        pending.extend(
+            getattr(candidate, attr, None)
+            for attr in ("_model", "model", "language_model")
+        )
+    return False
+
+
 def _cache_data_has_minimax_m3(cache_data) -> bool:
     """Return whether extracted states contain MiniMax-M3 sparse cache data."""
     return any(
@@ -2672,34 +2730,19 @@ class BlockAwarePrefixCache:
         # Used by reconstruct_cache to hard-reject blocks whose layer count
         # diverges (canonical "wrong-model L2 entry" signal).
         self._expected_num_layers: Optional[int] = None
-        self._uses_minimax_m3_cache = False
+        # Payload compatibility and prompt-shape identity are separate axes.
+        # Qwen4Exp QSA uses MiniMaxM3SparseCache as a three-tensor container,
+        # but only an actual MiniMax-M3 architecture needs M3's matrix-shape
+        # discriminator.  The store serializer still detects the payload class
+        # independently through _cache_data_has_minimax_m3().
+        self._uses_minimax_m3_cache = _model_is_minimax_m3(model)
         if model is not None and hasattr(model, "make_cache"):
             try:
                 _cache = model.make_cache() or []
                 if len(_cache) > 0:
                     self._expected_num_layers = len(_cache)
-                    self._uses_minimax_m3_cache = any(
-                        _is_minimax_m3_cache_class(type(layer).__name__)
-                        for layer in _cache
-                    )
             except Exception:
                 self._expected_num_layers = None
-        if not self._uses_minimax_m3_cache:
-            for _candidate in (
-                model,
-                getattr(model, "_model", None),
-                getattr(model, "model", None),
-                getattr(model, "language_model", None),
-            ):
-                if _candidate is None:
-                    continue
-                _identity = (
-                    f"{type(_candidate).__module__}."
-                    f"{type(_candidate).__name__}"
-                ).lower()
-                if "minimax_m3" in _identity or "minimaxm3" in _identity:
-                    self._uses_minimax_m3_cache = True
-                    break
         for _attr in ("args", "config"):
             if self._expected_num_layers is not None:
                 break

@@ -51,6 +51,8 @@ def test_m3_block_cache_keys_are_scoped_by_prefill_shape():
     from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
 
     class _M3Model:
+        config = SimpleNamespace(model_type="minimax_m3_vl")
+
         def make_cache(self):
             return [MiniMaxM3SparseCache()]
 
@@ -97,6 +99,8 @@ def test_m3_prefill_shape_scope_preserves_request_discriminators():
     from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
 
     class _M3Model:
+        config = SimpleNamespace(model_type="minimax_m3_vl")
+
         def make_cache(self):
             return [MiniMaxM3SparseCache()]
 
@@ -121,6 +125,41 @@ def test_m3_prefill_shape_scope_preserves_request_discriminators():
         "schema": "minimax_m3_prefill_shape_v1",
         "cache_key_tokens": 3,
     }
+
+
+def test_qwen4_exp_reused_sparse_container_does_not_inherit_m3_shape_key():
+    """Qwen QSA payload compatibility must not partition clean media lookup."""
+    from vmlx_engine.paged_cache import PagedCacheManager
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+
+    class _Qwen4ExpModel:
+        config = SimpleNamespace(model_type="qwen4_exp")
+
+        def make_cache(self):
+            return [MiniMaxM3SparseCache()]
+
+    cache = BlockAwarePrefixCache(
+        _Qwen4ExpModel(),
+        PagedCacheManager(block_size=64, max_blocks=8),
+    )
+    request_extra = {
+        "generation_prompt": "assistant-suffix",
+        "mllm_media_0000": "blue-image",
+    }
+
+    warm_request = cache._shape_scoped_cache_extra_keys(
+        list(range(5445)), request_extra
+    )
+    clean_boundary = cache._shape_scoped_cache_extra_keys(
+        list(range(5440)),
+        request_extra,
+        stored_prompt_boundary=True,
+    )
+
+    assert warm_request is request_extra
+    assert clean_boundary is request_extra
+    assert "__vmlx_native_cache_shape__" not in warm_request
 
 
 def test_paged_gen_prompt_strip_truncates_all_minimax_m3_cache_lanes():

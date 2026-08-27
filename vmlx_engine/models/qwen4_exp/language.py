@@ -328,6 +328,34 @@ class RMSNormGatedSigmoid(nn.Module):
 # --------------------------------------------------------------------------- #
 # mHC GatedResidual
 # --------------------------------------------------------------------------- #
+_FLOATING_PROJECTION_DTYPES = {mx.float16, mx.bfloat16, mx.float32}
+
+
+def _projection_compute_dtype(module: nn.Module, fallback) -> object:
+    """Return the floating dtype that owns a projection's arithmetic.
+
+    Affine-quantized projections store packed integer weights, so their scales
+    define the compute dtype. Dense projections use their floating weight
+    dtype. Falling back to the activation dtype keeps unknown projection types
+    unchanged instead of imposing a family-wide precision policy.
+    """
+
+    scales = getattr(module, "scales", None)
+    if scales is not None and scales.dtype in _FLOATING_PROJECTION_DTYPES:
+        return scales.dtype
+    weight = getattr(module, "weight", None)
+    if weight is not None and weight.dtype in _FLOATING_PROJECTION_DTYPES:
+        return weight.dtype
+    return fallback
+
+
+def _project_native_dtype(module: nn.Module, x: mx.array) -> mx.array:
+    compute_dtype = _projection_compute_dtype(module, x.dtype)
+    if x.dtype != compute_dtype:
+        x = x.astype(compute_dtype)
+    return module(x)
+
+
 class GatedResidual(nn.Module):
     def __init__(self, args: Qwen4ExpTextArgs, use_combine: bool = True):
         super().__init__()
@@ -360,19 +388,22 @@ class GatedResidual(nn.Module):
         normed = self.hc_norm(hyper_input)
         input_inject_weight = getattr(self, "input_inject_weight", None)
         if input_inject_weight is None:
-            mix = self.input_mix_weight_down(normed)
+            mix = _project_native_dtype(self.input_mix_weight_down, normed)
             block_injection = (
-                self.block_inject_weight(normed) if self.use_combine else None
+                _project_native_dtype(self.block_inject_weight, normed)
+                if self.use_combine
+                else None
             )
         else:
-            combined = input_inject_weight(normed)
+            combined = _project_native_dtype(input_inject_weight, normed)
             mix_indices, injection_indices = _hyper_split_indices(
                 self.hc_lowrank, self.hc_count
             )
             mix = mx.take(combined, mix_indices, axis=-1)
             block_injection = mx.take(combined, injection_indices, axis=-1)
         mix = nn.silu(mix / self.hc_count)
-        mix = mx.sigmoid(self.input_mix_weight_up(mix))
+        mix = mx.sigmoid(_project_native_dtype(self.input_mix_weight_up, mix))
+        mix = mix.astype(normed.dtype)
         mix = mix.reshape(*mix.shape[:-1], self.hc_count, self.hidden_size)
         mixed = (
             mix * normed.reshape(*normed.shape[:-1], self.hc_count, self.hidden_size)

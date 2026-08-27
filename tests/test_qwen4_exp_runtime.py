@@ -1426,6 +1426,40 @@ def test_qwen4_exp_hyper_connection_preserves_mixed_jang_residual_dtype():
     assert combined.dtype == mx.float16
 
 
+@pytest.mark.parametrize(
+    ("weight_dtype", "scale_dtype", "input_dtype", "expected_dtype"),
+    [
+        (mx.bfloat16, None, mx.float16, mx.bfloat16),
+        (mx.float16, None, mx.bfloat16, mx.float16),
+        (mx.uint32, mx.float16, mx.bfloat16, mx.float16),
+        (mx.uint32, mx.bfloat16, mx.float16, mx.bfloat16),
+    ],
+)
+def test_qwen4_exp_projection_uses_dynamic_native_compute_dtype(
+    weight_dtype, scale_dtype, input_dtype, expected_dtype
+):
+    from vmlx_engine.models.qwen4_exp.language import _project_native_dtype
+
+    class RecordingProjection:
+        def __init__(self):
+            self.weight = mx.zeros((64, 64), dtype=weight_dtype)
+            if scale_dtype is not None:
+                self.scales = mx.ones((64, 1), dtype=scale_dtype)
+            self.seen_dtype = None
+
+        def __call__(self, value):
+            self.seen_dtype = value.dtype
+            return value
+
+    projection = RecordingProjection()
+    residual = mx.ones((1, 1, 64), dtype=input_dtype)
+    projected = _project_native_dtype(projection, residual)
+    mx.eval(projected)
+
+    assert projection.seen_dtype == expected_dtype
+    assert projected.dtype == expected_dtype
+
+
 def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
     from vmlx_engine.models.qwen4_exp.language import (
         GatedResidual,

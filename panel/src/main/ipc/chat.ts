@@ -47,6 +47,7 @@ import {
   requestedExactFinalToolNames,
   requestedOnceToolNames,
   requestedScopedToolNames,
+  repeatsOnlyCompletedExactlyOnceTools,
   replaySafeToolCallKey,
   requestsExactTextOnlyWithoutToolUse,
   requestsNoToolCalls,
@@ -4079,6 +4080,28 @@ export function registerChatHandlers(
           // that for...of silently skips. Filter to only real entries.
           if (receivedToolCalls.length > 0) {
             receivedToolCalls = receivedToolCalls.filter(Boolean);
+          }
+          if (
+            repeatsOnlyCompletedExactlyOnceTools(
+              receivedToolCalls.map((tc) => tc.function.name),
+              exactlyOnceToolNames,
+              completedExactlyOnceTools,
+            )
+          ) {
+            // The prior pass already executed the user's exactly-once contract.
+            // Treat a replay-only model pass as a failed answer pass, not as
+            // progress through another tool iteration. Counting it as progress
+            // resets autoContinueCount and lets a stubborn model repeat the
+            // same rejected call until MAX_TOOL_ITERATIONS. Drop the replayed
+            // control output and enter the existing one-shot answer-only
+            // recovery below; the real tool result is already in history.
+            console.warn(
+              "[CHAT] Completed exactly-once tool was replayed; using bounded answer-only recovery",
+            );
+            receivedToolCalls = [];
+            fullContent = "";
+            rawAccumulated = "";
+            lastFinishReason = "stop";
           }
           if (receivedToolCalls.length > 0) {
             // ── Model made tool calls: execute and send follow-up ──

@@ -176,6 +176,19 @@ export function shouldAutoContinueAfterToolUse({
   return finishReason === 'length' && iterationTokenCount < thresholdTokens
 }
 
+export function repeatsOnlyCompletedExactlyOnceTools(
+  toolNames: string[],
+  exactlyOnceToolNames: string[],
+  completedExactlyOnceTools: ReadonlySet<string>,
+): boolean {
+  if (toolNames.length === 0 || exactlyOnceToolNames.length === 0) return false
+  const requested = new Set(exactlyOnceToolNames.map(name => name.toLowerCase()))
+  return toolNames.every(name => {
+    const normalized = name.toLowerCase()
+    return requested.has(normalized) && completedExactlyOnceTools.has(normalized)
+  })
+}
+
 export function shouldFinishZayaAppleScriptToolRound(
   isAppleScriptToolBundle: boolean,
   toolNames: string[],

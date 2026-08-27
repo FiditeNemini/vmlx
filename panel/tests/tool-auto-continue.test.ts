@@ -9,6 +9,7 @@ import {
   requestedExactFinalToolNames,
   requestedOnceToolNames,
   requestedScopedToolNames,
+  repeatsOnlyCompletedExactlyOnceTools,
   replaySafeToolCallKey,
   requestsBoundedFinalAnswerAfterToolResult,
   requestsExactTextOnlyWithoutToolUse,
@@ -111,6 +112,31 @@ describe('tool auto-continue policy', () => {
         finishReason: 'stop',
         thresholdTokens: 100,
       }),
+    ).toBe(false)
+  })
+
+  it('routes a replay-only exactly-once pass to bounded answer recovery', () => {
+    const completed = new Set(['get_current_datetime'])
+    expect(
+      repeatsOnlyCompletedExactlyOnceTools(
+        ['GET_CURRENT_DATETIME'],
+        ['get_current_datetime'],
+        completed,
+      ),
+    ).toBe(true)
+    expect(
+      repeatsOnlyCompletedExactlyOnceTools(
+        ['get_current_datetime', 'file_info'],
+        ['get_current_datetime'],
+        completed,
+      ),
+    ).toBe(false)
+    expect(
+      repeatsOnlyCompletedExactlyOnceTools(
+        ['file_info'],
+        ['get_current_datetime'],
+        completed,
+      ),
     ).toBe(false)
   })
 

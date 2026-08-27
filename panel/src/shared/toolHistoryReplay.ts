@@ -7,6 +7,18 @@ export interface PersistedAssistantToolHistory {
   toolResultsOaiJson?: unknown
 }
 
+export interface AssistantHistoryReplayOptions {
+  /**
+   * Private reasoning from an older turn is not user-visible conversation
+   * state.  A current explicit no-tool directive must not inherit an older
+   * assistant's internal debate about tool requirements, because small native
+   * reasoning models can mistake that stale text for current authority.
+   * Calls, results, visible answers, and assistant boundaries are still
+   * replayed when this is false.
+   */
+  includeReasoning?: boolean
+}
+
 interface OaiToolCall {
   id: string
   type: 'function'
@@ -83,11 +95,13 @@ function reasoningItem(text: string): any {
 export function replayPersistedAssistantHistory(
   message: PersistedAssistantToolHistory,
   useResponsesApi: boolean,
+  options: AssistantHistoryReplayOptions = {},
 ): any[] {
   const calls = validCalls(message.toolCallsOaiJson)
   const results = validResults(message.toolResultsOaiJson)
   const content = typeof message.content === 'string' ? message.content : ''
-  const segments = persistedReasoningSegments(message)
+  const persistedSegments = persistedReasoningSegments(message)
+  const segments = options.includeReasoning === false ? [] : persistedSegments
 
   const callIterations = new Map<string, number>()
   for (const status of parseArray(message.toolCallsJson)) {
@@ -108,7 +122,7 @@ export function replayPersistedAssistantHistory(
       // Responses reasoning item makes the next request treat stale private
       // thoughts as live assistant context. Preserve only the assistant turn
       // boundary; tool-loop rows above still replay their ordered reasoning.
-      if (!content.trim() && segments[0]?.trim()) {
+      if (!content.trim() && persistedSegments[0]?.trim()) {
         return [{ type: 'message', role: 'assistant', content: '' }]
       }
       const items: any[] = []

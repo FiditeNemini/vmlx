@@ -130,4 +130,34 @@ describe('persisted assistant tool-history replay', () => {
       },
     ])
   })
+
+  it('omits stale private reasoning for an explicit no-tool turn while preserving real history', () => {
+    expect(
+      replayPersistedAssistantHistory(row, true, { includeReasoning: false }),
+    ).toEqual([
+      {
+        type: 'function_call',
+        call_id: 'call_1',
+        name: 'file_info',
+        arguments: '{"path":"panel/package.json"}',
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: 'Size: 5.2 KB',
+      },
+      { type: 'output_text', text: 'D4-CURRENT-TO1-DONE' },
+    ])
+
+    expect(
+      replayPersistedAssistantHistory(
+        {
+          content: '',
+          reasoningContent: 'stale requirement to call a tool',
+        },
+        true,
+        { includeReasoning: false },
+      ),
+    ).toEqual([{ type: 'message', role: 'assistant', content: '' }])
+  })
 })

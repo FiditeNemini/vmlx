@@ -1790,6 +1790,14 @@ export function registerChatHandlers(
           const replay = replayPersistedAssistantHistory(
             { ...(m as any), content: msgContent },
             useResponsesApi,
+            {
+              // A current explicit no-tool instruction owns authorization for
+              // this turn. Preserve visible history and real call/result
+              // records, but do not feed the model older private reasoning
+              // that may discuss a now-forbidden tool contract as if it were
+              // still current system authority.
+              includeReasoning: !currentPromptAlreadyForbidsTools,
+            },
           );
           if (replay.length > 0) {
             requestMessages.push(...replay);

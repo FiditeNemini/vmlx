@@ -503,8 +503,8 @@ function buildCommandPreview(
     }
   }
 
-  // Native in-model MTP mirrors sessions.ts. Auto pins omitted request
-  // sampling to greedy defaults so the preserved MTP head actually runs.
+  // Native in-model MTP mirrors sessions.ts. Auto preserves bundle sampling;
+  // Deterministic alone pins omitted request sampling to greedy defaults.
   const nativeMtp = detected?.nativeMtp
   if (!dsv4Active && nativeMtp?.supported) {
     const mode = (config as any).nativeMtpMode || 'auto'

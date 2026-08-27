@@ -1798,16 +1798,16 @@ describe('Native MTP', () => {
             depth: 2,
             depthSource: 'vmlx_mtp_tuning.json:native_mtp.best_depth',
             runtimeScope: 'text+vl',
-            requiresDeterministicSampling: true,
+            requiresDeterministicSampling: false,
         },
     }
 
-    it('defaults native-MTP bundles to deterministic sampling so MTP actually runs', () => {
+    it('defaults native-MTP bundles to sampled-compatible Auto mode', () => {
         const out = preview({}, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('2')
         expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('deterministic-defaults')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)

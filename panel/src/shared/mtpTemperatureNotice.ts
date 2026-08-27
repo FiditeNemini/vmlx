@@ -6,19 +6,17 @@
  * PROPERLY LETS THEM KNOW IN THE CHAT SETTINGS IN THE TEMP BOX AREA AND THAT IT
  * IS DUE TO MTP BEING ON".
  *
- * The trap this closes: native MTP only runs on GREEDY requests. In `auto` mode
- * the session preserves the bundle's own sampling defaults, and several MTP
- * bundles (dots3-note, the Qwen MTP builds) ship `temperature: 1.0`. So the
- * headline feature silently never engages, the user sees ordinary decode
- * speed, and nothing anywhere says why. A capability that quietly declines is
- * indistinguishable from one that is broken.
+ * Sampled native MTP now uses rejection-sampling acceptance. Auto therefore
+ * preserves the bundle's sampling defaults; Deterministic is the explicit
+ * opt-in that replaces omitted sampling values with greedy defaults.
  *
  * Three states worth surfacing, all keyed on the model ACTUALLY having MTP:
  *  - `pinned`   deterministic mode: sampling was replaced with greedy, and the
  *               0 in the box is a consequence of MTP, not a user choice.
- *  - `active`   auto mode at temperature 0: MTP will run.
- *  - `inactive` auto mode above 0: MTP will NOT run, and this is the case that
- *               previously failed silently.
+ *  - `active`   auto mode at any temperature, or an explicit sampled override:
+ *               MTP uses rejection-sampling acceptance.
+ *  - `inactive` retained for callers that may later carry an explicit runtime
+ *               gate result; the current resolver does not infer it from temp.
  */
 
 export type MtpTemperatureNoticeKind = 'pinned' | 'active' | 'inactive'
@@ -69,12 +67,8 @@ export function resolveMtpTemperatureNotice(
   // Explicitly disabled by the user: their choice, not a surprise.
   if (mode === 'off') return null
 
-  // With MTP on (auto or deterministic) the session pins greedy sampling, so a
-  // 0 in the box is a CONSEQUENCE of MTP and must say so. A non-zero value can
-  // now only come from the user overriding it by hand — in which case MTP will
-  // not run, and that is the case worth warning about.
   const temperature = input.temperature
   if (temperature == null) return null
-  if (temperature > 0) return { kind: 'inactive', temperature }
-  return { kind: 'pinned' }
+  if (mode === 'deterministic' && temperature === 0) return { kind: 'pinned' }
+  return { kind: 'active', temperature }
 }

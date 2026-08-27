@@ -132,7 +132,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       depth: 1,
       depthSource: 'config.text_config.mtp_num_hidden_layers',
       runtimeScope: 'text+vl',
-      requiresDeterministicSampling: true,
+      requiresDeterministicSampling: false,
     })
 
     const textDir = makeModelDir({
@@ -293,7 +293,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       runtimeScope: 'text+vl',
       // Matches the engine's reported native_cache schema for this bundle.
       nativeCacheType: 'hybrid_ssm_v1',
-      requiresDeterministicSampling: true,
+      requiresDeterministicSampling: false,
     })
   })
 
@@ -342,7 +342,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       depth: 1,
       depthSource: 'jang_config.runtime.mtp_layers',
       runtimeScope: 'text+vl',
-      requiresDeterministicSampling: true,
+      requiresDeterministicSampling: false,
     })
   })
 

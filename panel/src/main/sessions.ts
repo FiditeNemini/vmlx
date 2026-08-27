@@ -4741,11 +4741,13 @@ export class SessionManager extends EventEmitter {
     }
 
     // Native in-model MTP. This is separate from external speculative decoding:
-    // Qwen3.6 preserved-MTP bundles carry their own draft head and the current
-    // verified path is deterministic. Fresh sessions default to Auto so model
-    // generation_config/jang_config sampling remains authoritative. Users may
-    // explicitly select Deterministic to replace omitted request sampling with
-    // greedy values and force compatible native-MTP requests.
+    // Qwen preserved-MTP bundles carry their own draft head and support both
+    // greedy identity verification and sampled rejection acceptance. Fresh
+    // sessions default to Auto so model
+    // generation_config/jang_config sampling remains authoritative. Native MTP
+    // now uses rejection-sampling acceptance for sampled requests, so Auto must
+    // preserve those model defaults. Users may explicitly select Deterministic
+    // to replace omitted request sampling with greedy values.
     const nativeMtp = (detected as any).nativeMtp
     if (!dsv4Active && nativeMtp?.supported) {
       const mode = (config as any).nativeMtpMode || 'auto'
@@ -4772,20 +4774,9 @@ export class SessionManager extends EventEmitter {
         mode,
         externalSpeculativeActive: compatibleExternalSpeculative,
       }))
-      if (mode !== 'off' && !compatibleExternalSpeculative) {
-        // 2026-08-17 — `auto` used to map to `compatible-only`, which runs MTP
-        // ONLY on requests that are already greedy. Bundles carrying MTP heads
-        // ship temperature 1.0, so on default settings the engine logged
-        //   "native MTP skipped for request=...: temperature=1.0 is not deterministic"
-        // on EVERY turn and nobody ever got MTP. Measured in the app: Qwen3.8
-        // 4D decoding at 19.5 t/s with `Native MTP: READY D3` in the same log.
-        //
-        // A bundle with MTP heads now gets greedy defaults from the engine, so
-        // the feature actually runs, and the temperature 0 that Chat Settings
-        // shows is the temperature the engine really uses. Previously the panel
-        // displayed 0 while the request went out at 1.0 — a UI/API parity lie.
-        // `off` is handled above and remains the way to keep bundle sampling.
-      }
+      // Auto now emits `compatible-only`: bundle sampling stays authoritative
+      // and sampled requests use the runtime's rejection-sampling acceptance.
+      // Deterministic is the only mode that emits `deterministic-defaults`.
     }
 
     // Generation defaults are intentionally not passed as --default-* from the

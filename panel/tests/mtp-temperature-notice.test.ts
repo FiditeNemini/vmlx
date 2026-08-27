@@ -7,15 +7,8 @@ import {
 } from '../src/shared/mtpTemperatureNotice'
 
 /**
- * 2026-08-17. Native MTP only runs on GREEDY requests. In `auto` mode a session
- * preserves the bundle's own sampling, and MTP bundles (dots3-note, the Qwen
- * MTP builds) ship temperature 1.0 — so the headline speed feature silently
- * never engaged and NOTHING in the UI said why. Observed live: dots3-note
- * decoding at 21.9 t/s with Native MTP Mode showing "Auto".
- *
- * Eric: "IF MTP IS TURNED ON IT SHOULD SHOW IN CHAT SETTINGS THE TEMP SET TO 0
- * AND TELL USERS WHY" / "IF SET TO AUTO AND MODEL HAS MTP IT PROPERLY LETS THEM
- * KNOW IN THE CHAT SETTINGS IN THE TEMP BOX AREA".
+ * Sampled native MTP uses rejection-sampling acceptance. Auto preserves bundle
+ * sampling; Deterministic is the explicit greedy-default override.
  */
 describe('MTP temperature disclosure', () => {
   it('says nothing when the bundle has no MTP heads', () => {
@@ -33,22 +26,19 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'pinned' })
   })
 
-  it('THE REGRESSION: a hand-raised temperature must warn MTP is not running', () => {
-    // Auto now pins greedy for MTP bundles, so a non-zero value can only come
-    // from a manual override -- which silently disables MTP.
+  it('reports sampled MTP active in auto mode at nonzero temperature', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 1 }),
-    ).toEqual({ kind: 'inactive', temperature: 1 })
-    // even a small non-zero temperature disables MTP
+    ).toEqual({ kind: 'active', temperature: 1 })
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0.01 }),
-    ).toEqual({ kind: 'inactive', temperature: 0.01 })
+    ).toEqual({ kind: 'active', temperature: 0.01 })
   })
 
-  it('explains the pinned 0 on auto too, not just deterministic', () => {
+  it('does not call auto temperature 0 a deterministic pin', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0 }),
-    ).toEqual({ kind: 'pinned' })
+    ).toEqual({ kind: 'active', temperature: 0 })
   })
 
   it('stays silent when the user explicitly turned MTP off', () => {
@@ -91,12 +81,8 @@ describe('MTP temperature disclosure', () => {
     const settings = en.chat.settings
     expect(settings.mtpTempPinned).toMatch(/MTP/)
     expect(settings.mtpTempPinned).toMatch(/greedy/i)
-    // Auto also pins greedy now, so Off is the ONLY mode that restores sampling
-    expect(settings.mtpTempPinned).toMatch(/to Off/)
-    expect(settings.mtpTempPinned).not.toMatch(/Auto or Off/)
-    // the warning must tell the user what to DO about it
-    expect(settings.mtpTempInactive).toMatch(/MTP/)
-    expect(settings.mtpTempInactive).toMatch(/temperature to 0|Deterministic/i)
-    expect(settings.mtpTempInactive).toContain('{{temperature}}')
+    expect(settings.mtpTempPinned).toMatch(/Auto/)
+    expect(settings.mtpTempActive).toMatch(/rejection-sampling/i)
+    expect(settings.mtpTempActive).toContain('{{temperature}}')
   })
 })

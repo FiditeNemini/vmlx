@@ -746,12 +746,8 @@ function statusToneClass(status: string): string {
                 help={t('chat.settings.temperatureHelp')}
               />
             )}
-            {/*
-              Native MTP only runs on greedy requests, and several MTP bundles
-              ship temperature 1.0, so in Auto mode the feature silently never
-              engages. Explain the 0 when it is pinned, and say so out loud when
-              MTP is present but not running.
-            */}
+            {/* Auto preserves sampled bundle defaults and uses rejection-
+                sampling MTP. Explain only the explicit deterministic pin. */}
             {mtpTemperatureNotice && (
               <p
                 data-testid="mtp-temperature-notice"
@@ -764,7 +760,9 @@ function statusToneClass(status: string): string {
                 {mtpTemperatureNotice.kind === 'pinned'
                   ? t('chat.settings.mtpTempPinned')
                   : mtpTemperatureNotice.kind === 'active'
-                    ? t('chat.settings.mtpTempActive')
+                    ? t('chat.settings.mtpTempActive', {
+                        temperature: mtpTemperatureNotice.temperature ?? 0,
+                      })
                     : t('chat.settings.mtpTempInactive', {
                         // only the `inactive` branch carries a temperature, but
                         // the field is optional on the union, so narrow it here

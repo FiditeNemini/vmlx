@@ -1261,7 +1261,7 @@ function detectNativeMtpCapability(
       // qwen3.6 hybrid SSM+attention bundle reports hybrid_ssm_v1 (NOT
       // hybrid_ssm_attention_kv_v1, which matched nothing the engine emits).
       nativeCacheType: hy3 ? 'plain_kv_v1' : 'hybrid_ssm_v1',
-      requiresDeterministicSampling: true,
+      requiresDeterministicSampling: false,
     }
   } catch {
     return undefined

@@ -13,7 +13,7 @@ describe('native MTP launch args', () => {
       '--native-mtp-depth-policy',
       'adaptive',
       '--native-mtp-sampling-policy',
-      'deterministic-defaults',
+      'compatible-only',
     ])
   })
 
@@ -39,6 +39,14 @@ describe('native MTP launch args', () => {
       '--native-mtp-sampling-policy',
       'deterministic-defaults',
     ])
+  })
+
+  it('uses greedy omitted-request defaults only in deterministic mode', () => {
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      detectedDepth: 1,
+      mode: 'deterministic',
+    })).toContain('deterministic-defaults')
   })
 
   it('disables native MTP when an external drafter owns the decode step', () => {

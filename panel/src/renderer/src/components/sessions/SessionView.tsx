@@ -34,6 +34,7 @@ interface Session {
   remoteUrl?: string
   remoteModel?: string
   latencyMs?: number
+  standbyDepth?: 'soft' | 'deep' | null
 }
 
 interface SessionViewProps {
@@ -133,6 +134,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         setSession(prev => prev ? {
           ...prev,
           status: 'running',
+          standbyDepth: null,
           ...(data.modelName ? { modelName: data.modelName } : {}),
           ...(data.port ? { port: data.port } : {}),
           ...(data.latencyMs != null ? { latencyMs: data.latencyMs } : {})
@@ -141,7 +143,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
     }
     const handleStarting = (data: any) => {
       if (data.sessionId === sessionId) {
-        setSession(prev => prev ? { ...prev, status: 'loading' } : prev)
+        setSession(prev => prev ? { ...prev, status: 'loading', standbyDepth: null } : prev)
       }
     }
     const handleReady = (data: any) => {
@@ -149,6 +151,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         setSession(prev => prev ? {
           ...prev,
           status: 'running',
+          standbyDepth: null,
           ...(data.pid ? { pid: data.pid } : {}),
           ...(data.port ? { port: data.port } : {})
         } : prev)
@@ -156,7 +159,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
     }
     const handleStopped = (data: any) => {
       if (data.sessionId === sessionId) {
-        setSession(prev => prev ? { ...prev, status: 'stopped', pid: undefined, latencyMs: undefined } : prev)
+        setSession(prev => prev ? { ...prev, status: 'stopped', pid: undefined, latencyMs: undefined, standbyDepth: null } : prev)
       }
     }
     const handleError = (data: any) => {
@@ -172,7 +175,11 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
     const unsubError = window.api.sessions.onError(handleError)
     const unsubStandby = window.api.sessions.onStandby?.((data: any) => {
       if (data.sessionId === sessionId) {
-        setSession(prev => prev ? { ...prev, status: 'standby' as const } : prev)
+        setSession(prev => prev ? {
+          ...prev,
+          status: 'standby' as const,
+          standbyDepth: data.depth === 'deep' ? 'deep' : 'soft',
+        } : prev)
       }
     })
 
@@ -386,7 +393,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
           {session.status === 'standby' && (
             <>
               <span className="text-xs text-blue-400 font-medium px-1">
-                {(session as any).standbyDepth === 'deep' ? t('sessions.view.deepSleep') : t('sessions.view.lightSleep')}
+                {session.standbyDepth === 'deep' ? t('sessions.view.deepSleep') : t('sessions.view.lightSleep')}
               </span>
               <button
                 onClick={async () => {

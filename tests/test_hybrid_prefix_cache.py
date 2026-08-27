@@ -888,6 +888,6 @@ class TestCompanionExemptPositionalLatents:
         key = cache._key([1, 2, 3], 3)
         old_recipe = hashlib.sha256(
             b"m" + b"\x00" + json.dumps([1, 2, 3], separators=(",", ":")).encode()
-            + cache._extra_key_bytes(None)
+            + cache._extra_key_bytes(None, 3)
         ).hexdigest()
         assert key != old_recipe

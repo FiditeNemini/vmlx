@@ -8,6 +8,40 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.42] - 2026-08-27
+
+### Added
+
+- Qwen3.8 Flash Next now has an owned MLX runtime for its hybrid QSA/Gated
+  DeltaNet architecture, SSD-backed PLE bigram/trigram tables, image and video
+  inputs, native reasoning tiers, and its preserved in-model MTP head.
+- The Electron server settings expose detected Qwen3.8 native MTP mode and
+  adaptive or fixed D1-D3 depth policy with persisted launch-argument parity.
+
+### Performance
+
+- Qwen3.8 decode fuses its Gated DeltaNet projections and hyper-connection
+  path while retaining the exact mixed-precision JANG contract.
+- Native MTP uses request-local rollback/commit state and rolling confirmed
+  tokens per wall second to probe adjacent depths without target replay.
+- PLE rows remain file-backed and row-addressed on SSD instead of materializing
+  the checkpoint's full n-gram table in unified memory.
+
+### Fixed
+
+- Qwen3.8 full-precision SSD prefix blocks preserve all QSA K/V/indexer state
+  together with typed Gated DeltaNet and PLE companion state across divergent
+  suffixes and process restarts, with retained paged-cache RAM disabled.
+- Mixed image/video histories preserve modality order, processor scaling,
+  embeddings, media cache keys, and request-local MTP state.
+- App-managed native MTP enforces a complete greedy sampler contract, including
+  neutral repetition penalty, while the explicitly enabled sampled path uses
+  stochastic speculative acceptance instead of silently disabling MTP.
+- Tool-bearing requests remain capped at D1 so adaptive probing cannot cross an
+  uncommitted tool-call boundary.
+
+---
+
 ## [1.6.41] - 2026-08-26
 
 ### Performance

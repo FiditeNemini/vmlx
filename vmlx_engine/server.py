@@ -549,6 +549,7 @@ _cli_args: dict = {}  # Saved CLI args for model reload on wake
 _wake_lock: asyncio.Lock | None = (
     None  # Lazy-init mutex for JIT wake (prevents double load_model)
 )
+_wake_in_progress: bool = False
 _model_name: str | None = None
 _model_path: str | None = None  # Full local path for config.json lookups
 _served_model_name: str | None = None  # Custom name for API (--served-model-name)
@@ -6053,7 +6054,10 @@ async def track_request_time(request: Request, call_next):
                 try:
                     from starlette.responses import JSONResponse
 
-                    wake_result = await admin_wake()
+                    # The middleware already owns _wake_lock. Call the shared
+                    # lock-held implementation so a simultaneous direct
+                    # /admin/wake cannot start a second model reload.
+                    wake_result = await _wake_with_lock_held()
                     if isinstance(wake_result, dict) and wake_result.get("error"):
                         return JSONResponse(
                             status_code=503,
@@ -12522,6 +12526,7 @@ async def health():
             else:
                 _companion_block.pop("last_prefix_lookup", None)
         result["health_gauges_cached"] = True
+        result["wake_in_progress"] = _wake_in_progress
         return result
 
     mcp_info = None
@@ -12780,6 +12785,7 @@ async def health():
     result["cache_storage_runtime_telemetry"] = (
         _cache_storage_runtime_telemetry()
     )
+    result["wake_in_progress"] = _wake_in_progress
 
     model_loaded = bool(result.get("model_loaded"))
     model_bundle_provenance = _bundle_configuration_attestation(
@@ -13064,9 +13070,8 @@ async def admin_deep_sleep():
             return {"error": str(e)}
 
 
-@app.post("/admin/wake", dependencies=[Depends(verify_api_key)])
-async def admin_wake():
-    """Wake from sleep: reload model. Triggered by JIT or manual wake."""
+async def _admin_wake_impl():
+    """Reload from standby while the caller owns ``_wake_lock``."""
     global _engine, _standby_state, _pre_sleep_cache_limit, _model_load_error
 
     if _standby_state is None:
@@ -13197,6 +13202,36 @@ async def admin_wake():
         _standby_state = None
         _model_load_error = f"Wake failed: {e}"
         return {"error": str(e)}
+
+
+async def _wake_with_lock_held():
+    """Run one wake under the already-held shared transition lock.
+
+    Both the JIT middleware and the public admin endpoint converge here.  The
+    second waiter re-checks standby after acquiring the lock and therefore
+    observes ``already_active`` instead of allocating a second model copy.
+    """
+    global _wake_in_progress
+
+    if _standby_state is None:
+        return {"status": "already_active"}
+
+    _wake_in_progress = True
+    try:
+        return await _admin_wake_impl()
+    finally:
+        _wake_in_progress = False
+
+
+@app.post("/admin/wake", dependencies=[Depends(verify_api_key)])
+async def admin_wake():
+    """Wake from sleep through the same mutex used by JIT/API wake."""
+    global _wake_lock
+
+    if _wake_lock is None:
+        _wake_lock = asyncio.Lock()
+    async with _wake_lock:
+        return await _wake_with_lock_held()
 
 
 @app.get("/v1/cache/stats", dependencies=[Depends(verify_api_key)])

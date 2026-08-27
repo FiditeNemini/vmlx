@@ -8,6 +8,24 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.43] - 2026-08-27
+
+### Fixed
+
+- DeepSeek V4 Flash 0731 bundles that omit the auxiliary tokenizer encoder now
+  use the packaged canonical 0731 encoder after strict bundle fingerprinting;
+  unknown revisions still fail closed.
+- Deep Sleep detaches generic compiled model graphs before engine teardown so
+  repeated dense-model wake cycles do not retain another compiled model
+  closure in process memory.
+- Auto-sleep honors the earliest configured light or deep deadline, and active
+  sessions keep the backend-reported light/deep state instead of displaying a
+  stale sleep depth.
+- Exactly-once tool replays use one bounded answer-only recovery, and tool cards
+  are emitted only when a complete call reaches validation or execution.
+
+---
+
 ## [1.6.42] - 2026-08-27
 
 ### Added

@@ -610,13 +610,14 @@ class TestMtpTelemetryEdgeCases:
         assert _bundle_index_mtp_layer_count(str(tmp_path)) == 3
 
 
-def test_mllm_native_mtp_skip_reaches_health_snapshot():
+def test_mllm_native_mtp_skip_reaches_health_snapshot(monkeypatch):
     """The MLLM gate must publish WHY MTP was skipped, like the text lane.
 
     PerformancePanel reads batch_generator.last_native_mtp_skip; without this
     key an MLLM session that only ever ran sampled requests showed a null MTP
     tile with no way to tell "skipped by policy" from "broken".
     """
+    from vmlx_engine import mllm_batch_generator as mllm_gen
     from vmlx_engine.mllm_batch_generator import (
         MLLMBatchGenerator,
         MLLMBatchStats,
@@ -627,9 +628,19 @@ def test_mllm_native_mtp_skip_reaches_health_snapshot():
         temperature = 0.7
         repetition_penalty = 1.0
 
+    class _ModelWithHead:
+        mtp = object()
+
+        def mtp_forward(self):
+            pass
+
+        def make_mtp_cache(self):
+            return []
+
+    monkeypatch.setattr(mllm_gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", False)
     gen = object.__new__(MLLMBatchGenerator)
     gen._stats = MLLMBatchStats()
-    gen.language_model = object()  # no MTP head — irrelevant; temp gate first
+    gen.language_model = _ModelWithHead()
 
     assert gen._native_mtp_enabled_for_request(_Req()) is False
 
@@ -640,6 +651,38 @@ def test_mllm_native_mtp_skip_reaches_health_snapshot():
     assert skip["reason"]
     # Engagement snapshots stay independent of skip snapshots (text-lane parity).
     assert snapshot["last_native_mtp"] is None
+
+
+def test_mllm_sampled_request_uses_shared_stochastic_acceptance(monkeypatch):
+    """A nonzero-temperature MLLM request stays on MTP when rejection
+    sampling is enabled; the environment kill switch alone restores the old
+    deterministic-only gate.
+    """
+    from vmlx_engine import mllm_batch_generator as mllm_gen
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator, MLLMBatchStats
+
+    class _Req:
+        request_id = "sampled-mtp-row"
+        temperature = 1.0
+        repetition_penalty = 1.0
+
+    class _ModelWithHead:
+        mtp = object()
+
+        def mtp_forward(self):
+            pass
+
+        def make_mtp_cache(self):
+            return []
+
+    monkeypatch.setattr(mllm_gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", True)
+    gen = object.__new__(MLLMBatchGenerator)
+    gen._stats = MLLMBatchStats()
+    gen.language_model = _ModelWithHead()
+
+    assert gen._native_mtp_disabled_reason_for_request(_Req()) is None
+    assert gen._native_mtp_enabled_for_request(_Req()) is True
+    assert gen._stats.to_dict()["last_native_mtp_skip"] is None
 
 
 def test_both_native_mtp_env_spellings_reach_every_reader(monkeypatch):

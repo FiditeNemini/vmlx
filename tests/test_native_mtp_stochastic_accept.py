@@ -182,3 +182,17 @@ class TestBothSchedulersShareOneRule:
 
         row = mx.array([-1.0, -2.0, -3.0])
         assert accept_lp_for(None, row) is row
+
+    def test_health_gate_reports_imported_mllm_runtime_flag(self, monkeypatch):
+        from vmlx_engine import mllm_batch_generator as gen
+        from vmlx_engine import server
+
+        monkeypatch.setattr(gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", True)
+        enabled, gate = server._mllm_native_mtp_request_gate_status()
+        assert enabled is True
+        assert gate.endswith("stochastic=rejection-sampling-acceptance")
+
+        monkeypatch.setattr(gen, "_NATIVE_MTP_STOCHASTIC_ACCEPT", False)
+        enabled, gate = server._mllm_native_mtp_request_gate_status()
+        assert enabled is False
+        assert gate.endswith("stochastic=skipped-by-policy")

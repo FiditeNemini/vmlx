@@ -9681,6 +9681,28 @@ def _model_mtp_status(bundle_path: str | None) -> dict:
     }
 
 
+def _mllm_native_mtp_request_gate_status() -> tuple[bool, str]:
+    """Return the live MLLM sampled-request gate and its health description.
+
+    Keep this tied to the generator's imported flag rather than re-reading the
+    environment: the process-level value is frozen when the runtime module is
+    imported, and health must describe the code path the loaded process will
+    actually execute.
+    """
+    try:
+        from .mllm_batch_generator import _NATIVE_MTP_STOCHASTIC_ACCEPT
+
+        stochastic_enabled = bool(_NATIVE_MTP_STOCHASTIC_ACCEPT)
+    except Exception:
+        stochastic_enabled = False
+    gate = "greedy=identity-verify; stochastic=" + (
+        "rejection-sampling-acceptance"
+        if stochastic_enabled
+        else "skipped-by-policy"
+    )
+    return stochastic_enabled, gate
+
+
 def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
     """MTP artifact status plus the currently loaded runtime activation bit."""
     status = dict(_model_mtp_status(bundle_path))
@@ -9712,14 +9734,13 @@ def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
     status["depth_policy"] = (
         "fixed" if _depth_policy_raw in {"0", "false", "no", "off"} else "adaptive"
     )
-    # Greedy requests take the identity-verify path; stochastic requests
-    # take rejection-sampling acceptance (min(1, p_target/p_draft)) which
-    # preserves the target distribution. The old "temperature=0 required"
-    # string predated stochastic verify (2026-07-10 audit High-4: the
-    # advertised gate did not match runtime behavior).
-    status["request_gate"] = (
-        "greedy=identity-verify; stochastic=rejection-sampling-acceptance"
-    )
+    # Greedy requests take identity verify. Sampled MLLM requests use the
+    # shared rejection-sampling rule when enabled; the kill switch restores
+    # the old deterministic-only gate. Publish the imported runtime value so
+    # health cannot claim stochastic support while the generator skips it.
+    stochastic_enabled, request_gate = _mllm_native_mtp_request_gate_status()
+    status["stochastic_acceptance_enabled"] = stochastic_enabled
+    status["request_gate"] = request_gate
     try:
         from .native_mtp import model_has_native_mtp_runtime
 

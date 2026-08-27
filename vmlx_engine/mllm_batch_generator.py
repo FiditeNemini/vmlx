@@ -4249,10 +4249,13 @@ def _native_mtp_decision_bundle(
 # temp 0.6 vs 88.3% at temp 0 on Qwen3.5-27B 4-bit, which is why upstream never
 # needs to pin temperature.
 #
-# Default OFF.  This changes the sampled distribution, so it stays gated until
-# an A/B proves output quality parity against the greedy arm.
+# Default ON.  Both the text scheduler and this MLLM scheduler now use the
+# shared speculative rejection-sampling rule, so a sampled request preserves
+# the target sampler distribution instead of silently dropping to AR.  Keep an
+# environment kill switch for exact rollback if a model-specific live gate
+# exposes a defect.
 _NATIVE_MTP_STOCHASTIC_ACCEPT = os.environ.get(
-    "VMLX_MTP_STOCHASTIC_ACCEPT", "0"
+    "VMLX_MTP_STOCHASTIC_ACCEPT", "1"
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 # Fold the draft-id materialization into the verify sample's eval so a cycle
@@ -13975,7 +13978,10 @@ class MLLMBatchGenerator:
             return "disabled by VMLX_NATIVE_MTP=0/--disable-native-mtp"
         if not _native_mtp_model_has_head(self.language_model):
             return "loaded language model has no native MTP head"
-        if float(getattr(request, "temperature", 0.0) or 0.0) != 0.0:
+        if (
+            float(getattr(request, "temperature", 0.0) or 0.0) != 0.0
+            and not _NATIVE_MTP_STOCHASTIC_ACCEPT
+        ):
             return f"temperature={getattr(request, 'temperature', None)!r} is not deterministic"
         if float(getattr(request, "repetition_penalty", 1.0) or 1.0) != 1.0:
             return f"repetition_penalty={getattr(request, 'repetition_penalty', None)!r} is not 1.0"

@@ -1,19 +1,19 @@
 {
-  "version": "1.6.42",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.42/vMLX-1.6.42-tahoe-arm64.dmg",
-  "sha256": "c4ce542b8096efead736305d45fb804c5a947626fe95030ad150ad90a79714a1",
-  "sha512": "iWZ6ozXc+FQ6uHNaQTHySukwayGzlo/TbYNG/G/sGibs3au6S9ZxOdDMAsShqqAD0uDZ147TT4da/I5GJSqVPg==",
+  "version": "1.6.43",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.43/vMLX-1.6.43-tahoe-arm64.dmg",
+  "sha256": "160b74f95ec5eb970fe99c2a8543a7b37d99eeb34e95db9bb1ed7a13e17ec7c4",
+  "sha512": "9rTb5vyjDg/TAqWOfBWTTwzE/jnWxEB4QOA7sqfwOfAfq3nyTYF4Rb33Pt+qjGRdZ7RjLJefAT9gHoVYaDnNBQ==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.42/vMLX-1.6.42-sequoia-arm64.dmg",
-      "sha256": "d41c4409ec133953149302d357bb1247541858422371aaf419b30afb7bfa3bfc",
-      "sha512": "V8jDEIZNvBfmuGlDTkiyd8hg5eUNPmkowA5GNKrb308tyAu0dM0HywcjeDoI4lNdGTqadDMR8HDFYHxtiZE2UQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.43/vMLX-1.6.43-sequoia-arm64.dmg",
+      "sha256": "a49ca0abfbabd8643f0f69d9b550093d8b53d0e9c5e7b51ca7dea94fc67b4772",
+      "sha512": "70H/wmGmHkEzJF5KaPL6O7hEPttNykqUEPswazbPxXDoDwvSfymGHVGg0Z3bYRbQ8CmL84mXgxI71HP4/f6HqQ=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.42/vMLX-1.6.42-tahoe-arm64.dmg",
-      "sha256": "c4ce542b8096efead736305d45fb804c5a947626fe95030ad150ad90a79714a1",
-      "sha512": "iWZ6ozXc+FQ6uHNaQTHySukwayGzlo/TbYNG/G/sGibs3au6S9ZxOdDMAsShqqAD0uDZ147TT4da/I5GJSqVPg=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.43/vMLX-1.6.43-tahoe-arm64.dmg",
+      "sha256": "160b74f95ec5eb970fe99c2a8543a7b37d99eeb34e95db9bb1ed7a13e17ec7c4",
+      "sha512": "9rTb5vyjDg/TAqWOfBWTTwzE/jnWxEB4QOA7sqfwOfAfq3nyTYF4Rb33Pt+qjGRdZ7RjLJefAT9gHoVYaDnNBQ=="
     }
   },
-  "notes": "vMLX 1.6.42 \u2014 adds the owned Qwen3.8 Flash Next hybrid runtime with image/video input, full-precision native SSD cache state, file-backed PLE bigram/trigram rows, and adaptive or fixed native MTP D1-D3. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.42, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, mounted-artifact verified, and installed-app smoke-tested without loading a model."
+  "notes": "vMLX 1.6.43 \u2014 fixes encoder-less DeepSeek V4 Flash 0731 bundle loading, detaches compiled graphs during deep sleep to prevent repeated wake retention, honors the earliest auto-sleep deadline, reports backend sleep state truthfully, and bounds exactly-once tool replay. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.43, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, and mounted-artifact verified."
 }

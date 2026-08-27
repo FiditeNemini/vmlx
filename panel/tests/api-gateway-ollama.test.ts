@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { isExpectedProcessStdioDisconnectError } from "../src/main/childProcessStreamGuards";
 
 const source = readFileSync(
   resolve(process.cwd(), "src/main/api-gateway.ts"),
@@ -256,6 +257,26 @@ describe("Ollama gateway parity contracts", () => {
         "function isExpectedChildProcessStreamDisconnectError(",
       );
     }
+  });
+
+  it("swallows orphaned Electron process-pipe EIO without hiding filesystem EIO", () => {
+    const pipeError = Object.assign(new Error("write EIO"), { code: "EIO" });
+    const fileError = Object.assign(
+      new Error("EIO: i/o error, write '/Volumes/EricsLLMDrive/model.safetensors'"),
+      { code: "EIO" },
+    );
+    expect(isExpectedProcessStdioDisconnectError(pipeError)).toBe(true);
+    expect(isExpectedProcessStdioDisconnectError(fileError)).toBe(false);
+
+    const mainSource = readFileSync(
+      resolve(process.cwd(), "src/main/index.ts"),
+      "utf8",
+    );
+    expect(mainSource).toContain(
+      "for (const stream of [process.stdout, process.stderr])",
+    );
+    expect(mainSource).toContain("attachProcessStdioErrorGuard(stream");
+    expect(mainSource).not.toContain("code === 'EIO' ||");
   });
 
   it("guards live proof script child stdio EPIPE while collecting e2e evidence", () => {

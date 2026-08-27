@@ -25,6 +25,7 @@ import { db } from './database'
 import { checkEngineVersion, installEngineStreaming } from './engine-manager'
 import { checkForUpdates } from './update-checker'
 import { ProcessManager } from './process-manager'
+import { attachProcessStdioErrorGuard } from './childProcessStreamGuards'
 import { createTray, destroyTray, hasTray } from './tray'
 import { startMemoryEnforcer, stopMemoryEnforcer } from './memory-enforcer'
 import { registerModelSettingsHandlers } from './db/model-settings'
@@ -110,6 +111,15 @@ function isExpectedClientDisconnectError(error: unknown): boolean {
     wrappedDisconnects.some((nested) => isExpectedClientDisconnectError(nested)) ||
     nestedErrors.some((nested) => isExpectedClientDisconnectError(nested))
   )
+}
+
+// The app can outlive a dev/proof harness that owns its stdout/stderr pipes.
+// Guard only those process streams against macOS `write EIO`; do not add EIO
+// to the global disconnect matcher, because a filesystem EIO is a real fault.
+for (const stream of [process.stdout, process.stderr]) {
+  attachProcessStdioErrorGuard(stream, (error) => {
+    process.nextTick(() => { throw error })
+  })
 }
 
 // Global crash handlers — prevent unhandled errors from silently crashing the app

@@ -41,6 +41,29 @@ export function isExpectedChildProcessStreamDisconnectError(err: unknown): boole
 }
 
 /**
+ * A dev/proof Electron process is often itself attached to a parent harness by
+ * stdout/stderr pipes. On macOS, writing after that parent exits can surface
+ * as `write EIO` rather than `EPIPE`. Scope that exception to the Electron
+ * process stdio streams: a filesystem EIO must still reach the crash handler.
+ */
+export function isExpectedProcessStdioDisconnectError(err: unknown): boolean {
+  if (isExpectedChildProcessStreamDisconnectError(err)) return true
+  const code = String((err as NodeJS.ErrnoException)?.code || '')
+  const message = String((err as Error)?.message || '').trim()
+  return code === 'EIO' && /^(?:read|write) EIO$/i.test(message)
+}
+
+export function attachProcessStdioErrorGuard(
+  stream: NodeJS.ReadableStream | NodeJS.WritableStream | null | undefined,
+  onUnexpected: (err: Error) => void,
+): void {
+  stream?.on('error', (err: Error) => {
+    if (isExpectedProcessStdioDisconnectError(err)) return
+    onUnexpected(err)
+  })
+}
+
+/**
  * Attach an `error` listener that reports only unexpected failures.
  *
  * An unhandled `error` on a child stream takes the whole main process down, so

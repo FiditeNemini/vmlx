@@ -1,18 +1,17 @@
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { describe, expect, it } from "vitest"
-import { storedKvQuantMustBeExact } from "../src/shared/storedKvQuantPolicy"
+import {
+  allowedStoredKvQuantOptions,
+  storedKvQuantMustBeExact,
+} from "../src/shared/storedKvQuantPolicy"
 
 /**
- * The display layer alone is not enough.
+ * Production Electron sessions preserve architecture-native cache state.
  *
- * Withholding q8/q4 from the SELECTOR only helps new sessions. A session that
- * saved q8 before that guard existed still carried it, and both arg builders
- * pushed `--kv-cache-quantization q8`, which the engine honours as an explicit
- * override. The UI then showed "only exact storage is offered" while q8 was on
- * the wire — strictly worse than showing q8 honestly.
- *
- * These pin the rule at the two places that actually decide what launches.
+ * A model may own full KV, sparse-index state, recurrent companions, rotating
+ * metadata, or a native compressed representation. The UI must not add q4/q8
+ * to any of them, and a stale saved value must not reach either argv builder.
  */
 const MAIN = "src/main/sessions.ts"
 const RENDERER = "src/renderer/src/components/sessions/SessionSettings.tsx"
@@ -20,45 +19,61 @@ const FORM = "src/renderer/src/components/sessions/SessionConfigForm.tsx"
 
 const read = (rel: string) => readFileSync(resolve(__dirname, "..", rel), "utf8")
 
-describe("a saved lossy stored codec cannot reach a mixed-SWA launch", () => {
-  it("the main process consults the shared policy", () => {
+describe("production stored cache stays architecture-native", () => {
+  it("normalizes every persisted value to canonical auto", () => {
     const main = read(MAIN)
-    expect(main).toContain("shared/storedKvQuantPolicy")
-    expect(main).toContain("storedKvQuantMustBeExact(")
+    const start = main.indexOf("function normalizeCacheStackMutualExclusion")
+    const block = main.slice(start, start + 1500)
+    expect(block).toContain("config.kvCacheQuantization !== 'auto'")
+    expect(block).toContain("config.kvCacheQuantization = 'auto'")
   })
 
-  it("the main process rewrites a saved q8/q4 rather than only hiding it", () => {
+  it("the main launch builder never emits a generic stored codec", () => {
     const main = read(MAIN)
-    expect(main).toContain("config.kvCacheQuantization = 'auto'")
-    // 'auto' and NOT 'none': both now preserve native state, but Auto is the
-    // canonical app value and omits a redundant CLI flag.
-    const idx = main.indexOf("storedKvQuantMustBeExact(")
-    const window = main.slice(idx, idx + 1400)
-    expect(window).toContain("'auto'")
-    expect(window).not.toContain("config.kvCacheQuantization = 'none'")
+    expect(main).not.toContain("args.push('--kv-cache-quantization'")
+    expect(main).not.toContain('args.push("--kv-cache-quantization"')
   })
 
-  it("the renderer preview suppresses the same flag", () => {
-    const r = read(RENDERER)
-    expect(r).toContain("shared/storedKvQuantPolicy")
-    expect(r).toContain("lossyStoredCodecSuppressed")
-    expect(r).toContain("!lossyStoredCodecSuppressed")
+  it("the renderer command preview never emits a generic stored codec", () => {
+    const renderer = read(RENDERER)
+    expect(renderer).not.toContain("parts.push('--kv-cache-quantization'")
+    expect(renderer).not.toContain('parts.push("--kv-cache-quantization"')
   })
 
-  it("the selector is driven by the policy's option list, not a re-inlined gate", () => {
+  it("the visible setting is a disabled single native option", () => {
     const form = read(FORM)
-    expect(form).toContain("allowedStoredKvQuantOptions(")
-    expect(form).toContain("storedKvQuantOptions.includes('q8')")
-    expect(form).toContain("storedKvQuantOptions.includes('q4')")
+    const start = form.indexOf("{/* Stored prefix representation. Auto adds no codec. */}")
+    const block = form.slice(start, start + 800)
+    expect(block).toContain('<select value={effectiveStoredCacheQuantization} className="cfg-input" disabled>')
+    expect(block).toContain('<option value="auto">')
+    expect(block).not.toContain('<option value="none">')
+    expect(block).not.toContain('value="q8"')
+    expect(block).not.toContain('value="q4"')
   })
 
-  it("all three consumers agree with the policy for a mixed-SWA bundle", () => {
-    expect(storedKvQuantMustBeExact({ cacheSubtype: "mixed_swa_kv" })).toBe(true)
-    expect(
-      storedKvQuantMustBeExact({ cacheSubtype: "step3p7_full_sliding_kv" }),
-    ).toBe(true)
-    expect(storedKvQuantMustBeExact({ cacheType: "rotating_kv" })).toBe(true)
-    // and leaves everyone else alone
-    expect(storedKvQuantMustBeExact({ cacheType: "kv" })).toBe(false)
+  it("the shared policy rejects added codecs for every topology", () => {
+    for (const input of [
+      { cacheType: "kv" },
+      { cacheType: "hybrid" },
+      { cacheType: "rotating_kv" },
+      { cacheSubtype: "mixed_swa_kv" },
+      { cacheSubtype: "step3p7_full_sliding_kv" },
+      { architectureHints: { cacheSchema: "hybrid_ssm_v1" } },
+    ]) {
+      expect(storedKvQuantMustBeExact(input)).toBe(true)
+      expect(allowedStoredKvQuantOptions(input)).toEqual(["auto"])
+    }
+  })
+
+  it("all reset surfaces use the same canonical value", () => {
+    for (const rel of [
+      RENDERER,
+      "src/renderer/src/components/sessions/ServerSettingsDrawer.tsx",
+      "src/renderer/src/components/sessions/CreateSession.tsx",
+    ]) {
+      const source = read(rel)
+      expect(source).not.toContain("base.kvCacheQuantization = 'none'")
+      expect(source).toContain("base.kvCacheQuantization = 'auto'")
+    }
   })
 })

@@ -29,7 +29,6 @@ import {
   cacheTypeRequiresPaged,
 } from '../../../../shared/cacheTypeCapabilities'
 import { computeEffectiveJit } from '../../../../shared/jitPolicy'
-import { storedKvQuantMustBeExact } from '../../../../shared/storedKvQuantPolicy'
 import {
   filterAdditionalArgs,
   finitePositiveInteger,
@@ -423,33 +422,10 @@ function buildCommandPreview(
     blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
     blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
   })
-  const cacheLaunchPolicy = cacheLaunch.policy
-  const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
   parts.push(...cacheLaunch.args)
 
-  // KV cache quantization — requires prefix cache ON (works for both LLM and VLM)
-  // Hybrid/Mamba models allowed — Python scheduler only quantizes KVCache layers
-  // Mixed sliding/full attention bundles must not receive a lossy stored
-  // codec: it changes their answers on a cache HIT. The main process rewrites
-  // a saved q8/q4 to 'auto' for these bundles; mirror that here so the command
-  // preview shows what will actually be launched.
-  const storedKvMustBeExact = storedKvQuantMustBeExact({
-    cacheType: detected?.cacheType,
-    cacheSubtype: detected?.cacheSubtype,
-    architectureHints: detected?.architectureHints,
-  })
-  const lossyStoredCodecSuppressed =
-    storedKvMustBeExact &&
-    !!config.kvCacheQuantization &&
-    config.kvCacheQuantization !== 'auto' &&
-    config.kvCacheQuantization !== 'none'
-  if (!prefixCacheOff && !dsv4Active && !m3Active && !openPanguExactTypedCache && !lossyStoredCodecSuppressed && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
-    parts.push('--kv-cache-quantization', config.kvCacheQuantization)
-    const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
-    if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
-      parts.push('--kv-cache-group-size', kvCacheGroupSize.toString())
-    }
-  }
+  // Production Electron sessions keep architecture-native cache state exactly;
+  // the command preview therefore never advertises a generic stored codec.
 
   // Performance
   const streamInterval = finitePositiveInteger(config.streamInterval)
@@ -776,7 +752,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.enableDiskCache = true
             base.enableBlockDiskCache = false
             base.noMemoryAwareCache = false
-            base.kvCacheQuantization = 'none'
+            base.kvCacheQuantization = 'auto'
           } else {
             base.usePagedCache = false
             base.enableDiskCache = false

@@ -1,11 +1,10 @@
 /**
- * Canonical policy for which bundles may use a LOSSY stored prefix cache.
+ * Canonical production policy for stored prefix-cache representation.
  *
- * Mixed sliding/full attention bundles (Laguna, Gemma 4, Step-3.7) keep
- * RotatingKVCache window metadata, and a quantized STORED prefix changes their
- * answers on reuse: the cold prefill computes full-precision KV while the warm
- * turn reads back the quantized copy. Asking the same question twice then gives
- * two different answers, and the second one is the degraded one.
+ * Prefix reuse is answer-preserving only when the SSD record keeps the exact
+ * architecture-native state. That may be full KV, rotating/SWA metadata,
+ * recurrent SSM/GDN companions, sparse-index state, or a bundle-owned native
+ * compressed representation. The Electron product must never add q4/q8 on top.
  *
  * Live-proven on Laguna-S-2.1-JANG_4M-CRACK 2026-08-12 at temperature 0, same
  * prompt sent cold and then on a confirmed cache hit (sha of generated text):
@@ -13,9 +12,9 @@
  *     stored q8       cold bb040715 -> hit 633c133d   DIVERGED
  *     stored exact    cold bb040715 -> hit bb040715   EXACT
  *
- * The engine already refuses this by default (`b6522591f`, mixed-SWA bundles
- * auto-select exact stored KV). This module is the UI half: the selector must
- * not offer a setting that silently changes answers.
+ * Mixed-SWA supplied the first live proof that the old q4/q8 selector was not
+ * answer preserving. The policy is intentionally global now: one native value
+ * in persisted settings, one launch path, and no family-specific exception.
  *
  * Keep every consumer on these functions. The JIT rule in this codebase was
  * hand-copied into four places and two of them spelled a condition differently
@@ -58,21 +57,16 @@ export function isMixedSwaBundle(input: StoredKvQuantPolicyInput): boolean {
 
 /**
  * True when a lossy stored prefix codec (q8/q4) must not be offered.
- *
- * Distinct from "the runtime owns the codec" (DSV4/M3/openPangu): those have a
- * native typed cache, whereas this is about answer stability on reuse.
  */
 export function storedKvQuantMustBeExact(
-  input: StoredKvQuantPolicyInput,
+  _input: StoredKvQuantPolicyInput,
 ): boolean {
-  return isMixedSwaBundle(input)
+  return true
 }
 
 /** Stored-codec options the selector may offer for this bundle. */
 export function allowedStoredKvQuantOptions(
-  input: StoredKvQuantPolicyInput,
+  _input: StoredKvQuantPolicyInput,
 ): string[] {
-  return storedKvQuantMustBeExact(input)
-    ? ['auto', 'none']
-    : ['auto', 'none', 'q8', 'q4']
+  return ['auto']
 }

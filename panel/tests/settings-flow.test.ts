@@ -471,17 +471,7 @@ function buildCommandPreview(
         blockDiskCacheMaxGb: config.blockDiskCacheMaxGb,
         blockDiskCacheMaxPercent: config.blockDiskCacheMaxPercent,
     })
-    const cacheLaunchPolicy = cacheLaunch.policy
-    const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff
     parts.push(...cacheLaunch.args)
-
-    if (!prefixCacheOff && !dsv4Active && !m3Active && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
-        parts.push('--kv-cache-quantization', config.kvCacheQuantization)
-        const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
-        if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
-            parts.push('--kv-cache-group-size', kvCacheGroupSize.toString())
-        }
-    }
 
     const streamInterval = finitePositiveInteger(config.streamInterval)
     if (streamInterval != null) parts.push('--stream-interval', streamInterval.toString())
@@ -920,14 +910,14 @@ describe('Paged KV Cache', () => {
 })
 
 describe('KV Cache Quantization', () => {
-    it('sets q8 quantization', () => {
+    it('suppresses stale q8 quantization', () => {
         const out = preview({ enablePrefixCache: true, kvCacheQuantization: 'q8' })
-        expect(getFlagValue(out, '--kv-cache-quantization')).toBe('q8')
+        expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
     })
 
-    it('sets q4 quantization', () => {
+    it('suppresses stale q4 quantization', () => {
         const out = preview({ enablePrefixCache: true, kvCacheQuantization: 'q4' })
-        expect(getFlagValue(out, '--kv-cache-quantization')).toBe('q4')
+        expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
     })
 
     it('omits quantization in auto mode', () => {
@@ -935,9 +925,9 @@ describe('KV Cache Quantization', () => {
         expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
     })
 
-    it('passes explicit none to disable auto quantization', () => {
+    it('suppresses stale explicit none', () => {
         const out = preview({ enablePrefixCache: true, kvCacheQuantization: 'none' })
-        expect(getFlagValue(out, '--kv-cache-quantization')).toBe('none')
+        expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
     })
 
     it('panel copy does not claim TurboQuant is always on', () => {
@@ -956,7 +946,7 @@ describe('KV Cache Quantization', () => {
         expect(source).not.toContain('TurboQuant only')
     })
 
-    it('describes mixed-SWA and explicit stored-codec state truthfully', () => {
+    it('describes mixed-SWA and native stored-cache state truthfully', () => {
         const fs = require('fs')
         const source = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -969,11 +959,10 @@ describe('KV Cache Quantization', () => {
         expect(enLocale).toContain('Native full/sliding KV + rotating metadata')
         expect(enLocale).toContain("preserves the model's native cache-slot and rotating-window metadata")
         expect(enLocale).toContain('Generic TurboQuant is not added')
-        expect(source).toContain("t('sessions.config.codecTqOffAll')")
-        expect(enLocale).toContain('Live TurboQuant and stored quantization disabled')
-        expect(source).toContain("t('sessions.config.codecTqOffStored', { codec: effectiveStoredCacheQuantization })")
-        expect(enLocale).toContain('Live TurboQuant disabled; stored cache {codec}')
         expect(source).toContain("'NATIVE · GENERIC TQ OFF'")
+        expect(source).toContain("const effectiveStoredCacheQuantization = 'auto'")
+        expect(source).not.toContain('value="q8"')
+        expect(source).not.toContain('value="q4"')
         expect(source).not.toContain("'TQ8 AUTO'")
     })
 
@@ -1162,7 +1151,7 @@ describe('KV Cache Quantization', () => {
 
     it('sets custom group size', () => {
         const out = preview({ enablePrefixCache: true, kvCacheQuantization: 'q8', kvCacheGroupSize: 32 })
-        expect(getFlagValue(out, '--kv-cache-group-size')).toBe('32')
+        expect(hasFlag(out, '--kv-cache-group-size')).toBe(false)
     })
 
     it('omits default group size 64', () => {
@@ -2517,7 +2506,7 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(out, '--no-paged-cache')).toBe(true)
         expect(hasFlag(out, '--enable-disk-cache')).toBe(false)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
-        expect(getFlagValue(out, '--kv-cache-quantization')).toBe('q4')
+        expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
         expect(getFlagValue(out, '--tool-call-parser')).toBe('step3p5')
         expect(getFlagValue(out, '--reasoning-parser')).toBe('qwen3')
         expect(hasFlag(out, '--cache-memory-percent')).toBe(false)
@@ -2605,8 +2594,8 @@ describe('No Hardcoded Values', () => {
         expect(hasFlag(nonDsv4, '--use-paged-cache')).toBe(false)
         expect(hasFlag(nonDsv4, '--no-paged-cache')).toBe(true)
         expect(hasFlag(nonDsv4, '--enable-block-disk-cache')).toBe(true)
-        expect(getFlagValue(nonDsv4, '--kv-cache-quantization')).toBe('q8')
-        expect(getFlagValue(nonDsv4, '--kv-cache-group-size')).toBe('32')
+        expect(hasFlag(nonDsv4, '--kv-cache-quantization')).toBe(false)
+        expect(hasFlag(nonDsv4, '--kv-cache-group-size')).toBe(false)
 
         const dsv4 = preview(staleDsv4Config, {
             family: 'deepseek-v4',
@@ -2935,7 +2924,7 @@ describe('Default IP and New Settings', () => {
         expect(familyBlock).toContain('config.enableDiskCache = true')
         expect(familyBlock).toContain('config.enableBlockDiskCache = false')
         expect(familyBlock).toContain('config.noMemoryAwareCache = false')
-        expect(familyBlock).toContain("config.kvCacheQuantization = 'none'")
+        expect(familyBlock).toContain("config.kvCacheQuantization = 'auto'")
         expect(launchBlock).toContain('openPanguExactTypedCache ? false')
         expect(launchBlock).toContain('enableDiskCache: !!config.enableDiskCache')
 
@@ -2953,7 +2942,7 @@ describe('Default IP and New Settings', () => {
             expect(block, file).toContain('enableDiskCache = true')
             expect(block, file).toContain('enableBlockDiskCache = false')
             expect(block, file).toContain('noMemoryAwareCache = false')
-            expect(block, file).toContain("kvCacheQuantization = 'none'")
+            expect(block, file).toContain("kvCacheQuantization = 'auto'")
         }
 
         const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
@@ -3015,7 +3004,7 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain("setConfigValue(mutable, 'usePagedCache', openPanguExactTypedCache ? false : defaultUsePagedCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache)")
-        expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto')")
+        expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', 'auto')")
         // In-RAM paged cache is OFF for EVERY family, DSV4 included; SSD
         // block-disk L2 is the only cache tier. A fresh session must not seed a
         // saved `true` that disagrees with the launch (which always emits
@@ -3516,7 +3505,7 @@ describe('JIT Toggle', () => {
                 },
             )
 
-            expect(getFlagValue(out, '--kv-cache-quantization')).toBe(mode)
+            expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
             expect(out).not.toContain(`${DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV}=1`)
             expect(hasFlag(out, '--enable-jit')).toBe(true)
         },
@@ -3828,7 +3817,7 @@ describe('JIT Toggle', () => {
         expect(settings).toContain('detectedCacheSubtype={detectedConfig?.cacheSubtype}')
         expect(settings).toContain('buildCacheLaunchArgs')
         expect(sessions).toContain('buildCacheLaunchArgs')
-        expect(sessions).toContain('freshConfig.cacheSubtype')
+        expect(sessions).not.toContain("args.push('--kv-cache-quantization'")
         expect(createSession).toContain('setDetectedCacheSubtype(detected?.cacheSubtype)')
         expect(createSession).toContain('detectedCacheSubtype={detectedCacheSubtype}')
         expect(settingsDrawer).toContain('setDetectedCacheSubtype(det?.cacheSubtype)')
@@ -3920,7 +3909,7 @@ describe('JIT Toggle', () => {
         expect(form).toContain("e.preventDefault()")
         expect(form).toContain('className="relative inline-flex ml-1"\n      onClick={handleClick}')
         expect(form).not.toContain('disabled={dsv4CompositeRequiresPaged}')
-        expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
+        expect(form).toContain('<select value={effectiveStoredCacheQuantization} className="cfg-input" disabled>')
         expect(form).toContain("t('sessions.config.storedQuantNativeTyped')")
         expect(enLocale).toContain('Native typed codec (bundle-derived)')
         expect(form).not.toContain('DSV4 Native Cache')
@@ -3990,18 +3979,16 @@ describe('JIT Toggle', () => {
             'utf-8',
         )
 
-        expect(form).toContain("const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache")
-        expect(form).toContain("const effectiveStoredCacheQuantization = openPanguExactTypedCache")
-        expect(form).toContain("? 'none'")
+        expect(form).toContain("const effectiveStoredCacheQuantization = 'auto'")
         expect(form).toContain("? t('sessions.config.codecOpenPangu')")
         expect(form).toContain("? t('sessions.config.codecM3')")
-        expect(form).toContain("explicitStoredCacheCodec && effectiveStoredCacheQuantization !== 'none'")
+        expect(form).toContain("const liveCacheCodecBadge = 'NATIVE · GENERIC TQ OFF'")
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(enLocale).toContain('openPangu typed composite cache')
         expect(enLocale).toContain('MiniMax-M3 native MSA cache')
         expect(enLocale).toContain('MiniMax-M3 keeps generic KV q4/q8 disabled')
         expect(enLocale).toContain('native MSA snapshots with keys, values, idx_keys, and absolute offsets')
-        expect(form).toContain('disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}')
+        expect(form).toContain('<select value={effectiveStoredCacheQuantization} className="cfg-input" disabled>')
     })
 
     it('settings form exposes MiniMax-M3 typed SSD cache while keeping its native codec', () => {
@@ -4124,7 +4111,7 @@ describe('Feature Interaction', () => {
         // saved toggle is ignored and the launch is SSD block-disk only.
         expect(hasFlag(out, '--use-paged-cache')).toBe(false)
         expect(hasFlag(out, '--no-paged-cache')).toBe(true)
-        expect(hasFlag(out, '--kv-cache-quantization')).toBe(true)
+        expect(hasFlag(out, '--kv-cache-quantization')).toBe(false)
         expect(hasFlag(out, '--enable-block-disk-cache')).toBe(true)
     })
 

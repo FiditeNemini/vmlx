@@ -104,7 +104,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         usePagedCache: false,
         enableDiskCache: detected?.family === 'openpangu_v2',
         enableBlockDiskCache: detected?.family !== 'openpangu_v2',
-        kvCacheQuantization: detected?.family === 'openpangu_v2' ? 'none' : detected?.family === 'deepseek-v4' ? 'auto' : prev.kvCacheQuantization,
+        kvCacheQuantization: 'auto',
         pagedCacheBlockSize: detected?.family === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : prev.pagedCacheBlockSize,
         maxCacheBlocks: detected?.family === 'deepseek-v4' ? DSV4_MAX_CACHE_BLOCKS : prev.maxCacheBlocks,
         // Mirror the main-process family timeout bump (sessions.ts normalizer)
@@ -245,7 +245,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.enableDiskCache = true
             base.enableBlockDiskCache = false
             base.noMemoryAwareCache = false
-            base.kvCacheQuantization = 'none'
+            base.kvCacheQuantization = 'auto'
           } else {
             base.usePagedCache = false
             base.enableDiskCache = false

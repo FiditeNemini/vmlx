@@ -278,7 +278,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.enableDiskCache = true
             base.enableBlockDiskCache = false
             base.noMemoryAwareCache = false
-            base.kvCacheQuantization = 'none'
+            base.kvCacheQuantization = 'auto'
           } else {
             base.usePagedCache = false
             base.enableDiskCache = false

@@ -82,7 +82,6 @@ import {
 } from './engine-manager'
 import { app as electronApp } from 'electron'
 import { computeEffectiveJit } from '../shared/jitPolicy'
-import { storedKvQuantMustBeExact } from '../shared/storedKvQuantPolicy'
 import {
   GENERIC_DEFAULT_TIMEOUT_SECONDS,
   SLOW_FAMILY_TIMEOUTS,
@@ -432,8 +431,8 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.noMemoryAwareCache = false
         changed = true
       }
-      if (config.kvCacheQuantization !== 'none') {
-        config.kvCacheQuantization = 'none'
+      if (config.kvCacheQuantization !== 'auto') {
+        config.kvCacheQuantization = 'auto'
         changed = true
       }
       if (config.enableJit !== false) {
@@ -797,6 +796,15 @@ function normalizeCacheStackMutualExclusion(config: Partial<ServerConfig>): bool
     config.enableDiskCache = false
     changed = true
   }
+  // Production cache reuse is exact and architecture-native for every family.
+  // Migrate old q4/q8/none values at every constructor/start/save choke point,
+  // including sessions already stamped with the current defaults version.
+  // `auto` omits the generic CLI codec flag; the engine keeps the model's own
+  // QSA/GDN/SSM/sparse/rotating/composite cache objects unchanged.
+  if (config.kvCacheQuantization !== 'auto') {
+    config.kvCacheQuantization = 'auto'
+    changed = true
+  }
   return changed
 }
 
@@ -869,7 +877,7 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   // 0 in particular means UNLIMITED to the engine, not "unset". Leaving the
   // field absent is what lets blockDiskCacheMaxPercent actually govern.
   if (mutable.blockDiskCacheMaxPercent === undefined) changed = setConfigValue(mutable, 'blockDiskCacheMaxPercent', DEFAULT_BLOCK_DISK_CACHE_PERCENT) || changed
-  if (mutable.kvCacheQuantization === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'kvCacheQuantization', openPanguExactTypedCache ? 'none' : 'auto') || changed
+  if (mutable.kvCacheQuantization === undefined) changed = setConfigValue(mutable, 'kvCacheQuantization', 'auto') || changed
 
   return changed
 }
@@ -2457,46 +2465,27 @@ export class SessionManager extends EventEmitter {
               config.enableDiskCache !== true ||
               config.enableBlockDiskCache !== false ||
               config.noMemoryAwareCache !== false ||
-              config.kvCacheQuantization !== 'none' ||
+              config.kvCacheQuantization !== 'auto' ||
               config.enableJit === true
             config.enablePrefixCache = true
             config.usePagedCache = false
             config.enableDiskCache = true
             config.enableBlockDiskCache = false
             config.noMemoryAwareCache = false
-            config.kvCacheQuantization = 'none'
+            config.kvCacheQuantization = 'auto'
             config.enableJit = false
             if (panguChanged) {
               this.pushLog(sessionId, '[INFO] openPangu detected; exact full-precision typed prefix + prompt-L2 cache enabled, generic paged/block/TurboQuant KV codecs disabled')
             }
           }
-          // A saved q8/q4 stored codec makes a mixed sliding/full attention
-          // bundle answer a cache HIT differently from a cold prefill
-          // (Laguna-S at temp 0: cold bb040715 vs hit 633c133d). The engine's
-          // auto mode already picks exact storage for these bundles, but an
-          // explicit flag overrides that by design — and the session may still
-          // be carrying q8 from before that default existed. Rewrite it here,
-          // in the main process, because THIS is what builds the launch args.
-          //
-          // Rewrite to 'auto', NOT 'none': an explicit none sets
-          // VMLX_DISABLE_TQ_KV=1 in the engine and would also disable the
-          // calibrated LIVE TurboQuant cache, whereas auto now yields exact
-          // stored KV anyway.
-          if (
-            storedKvQuantMustBeExact({
-              cacheType: freshConfig.cacheType,
-              cacheSubtype: freshConfig.cacheSubtype,
-              architectureHints: freshConfig.architectureHints,
-            }) &&
-            config.kvCacheQuantization &&
-            config.kvCacheQuantization !== 'auto' &&
-            config.kvCacheQuantization !== 'none'
-          ) {
+          // Repeat the all-family production normalization after detection so
+          // an adopted stale session cannot put q4/q8 on the launch argv.
+          if (config.kvCacheQuantization !== 'auto') {
             const priorStoredCodec = config.kvCacheQuantization
             config.kvCacheQuantization = 'auto'
             this.pushLog(
               sessionId,
-              `[INFO] Mixed sliding/full attention detected; saved stored-cache quantization=${priorStoredCodec} reset to auto (exact stored KV) because a quantized stored prefix changes this model's answers when the cache is reused`,
+              `[INFO] Saved stored-cache quantization=${priorStoredCodec} reset to auto; production prefix reuse preserves architecture-native cache state with no added codec`,
             )
           }
           // Refresh multimodal detection from disk. A detected VLM must win
@@ -3471,7 +3460,7 @@ export class SessionManager extends EventEmitter {
           // else. This used to hardcode 10 AND stamp the defaults version
           // current, so the GB->percent migration could never reach it.
           blockDiskCacheMaxPercent: DEFAULT_BLOCK_DISK_CACHE_PERCENT,
-          kvCacheQuantization: detectedFamily === 'openpangu_v2' ? 'none' : 'auto',
+          kvCacheQuantization: 'auto',
           cacheStackStartupDefaultsVersion: CACHE_STACK_STARTUP_DEFAULTS_VERSION,
           modelParserDefaultsVersion: MODEL_PARSER_DEFAULTS_VERSION,
           streamInterval: 8,
@@ -4609,26 +4598,8 @@ export class SessionManager extends EventEmitter {
       console.log(`[SESSION] DSV4-Flash native cache policy: prefix=${prefixCacheOff ? 'off' : 'on'}, paged_ram=${usePagedCache ? 'on' : 'off'}, block_disk_l2=${cacheLaunchPolicy.enableBlockDiskCache ? 'on' : 'off'}, block_size=${DSV4_PAGED_CACHE_BLOCK_SIZE}, generic_turboquant=off, pool_codec=bundle-derived`)
     }
 
-    // KV cache quantization for stored prefix cache entries
-    // Compatible plain-KV families may use TurboQuant for live generation;
-    // typed/path-dependent families own their complete cache state instead.
-    // q8/q4 here is additional compression only where the generic codec is valid.
-    if (!prefixCacheOff && dsv4Active && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
-      console.log(`[SESSION] DSV4-Flash detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; native SWA+CSA/HCA cache policy owns compression`)
-    }
-    if (!prefixCacheOff && effectiveFamily === 'minimax_m3' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
-      console.log(`[SESSION] MiniMax-M3 detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; native MSA cache stores keys/values/idx_keys without generic KV codecs`)
-    }
-    if (!prefixCacheOff && effectiveFamily === 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
-      console.log(`[SESSION] openPangu detected: ignoring generic kvCacheQuantization=${config.kvCacheQuantization}; exact typed cache owns MLA KV, DSA indexer, SWA metadata, and causal-conv state`)
-    }
-    if (!prefixCacheOff && effectiveFamily !== 'deepseek-v4' && effectiveFamily !== 'minimax_m3' && effectiveFamily !== 'openpangu_v2' && config.kvCacheQuantization && config.kvCacheQuantization !== 'auto') {
-      args.push('--kv-cache-quantization', config.kvCacheQuantization)
-      const kvCacheGroupSize = finitePositiveInteger(config.kvCacheGroupSize)
-      if (config.kvCacheQuantization !== 'none' && kvCacheGroupSize != null && kvCacheGroupSize !== 64) {
-        args.push('--kv-cache-group-size', kvCacheGroupSize.toString())
-      }
-    }
+    // Production Electron sessions never add a generic stored-cache codec.
+    // The engine persists each architecture's native cache representation.
 
     // Performance
     // Historical rows were lifted once by the owning database migration.

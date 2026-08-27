@@ -22,7 +22,7 @@ import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
 import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
 import { computeEffectiveJit, isJitSuppressedByRuntime } from '../../../../shared/jitPolicy'
-import { allowedStoredKvQuantOptions, isMixedSwaBundle, storedKvQuantMustBeExact } from '../../../../shared/storedKvQuantPolicy'
+import { isMixedSwaBundle } from '../../../../shared/storedKvQuantPolicy'
 export interface SessionConfig {
   host: string
   port: number
@@ -439,21 +439,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     cacheSubtype: detectedCacheSubtype,
     architectureHints: detectedArchitectureHints,
   })
-  // A quantized STORED prefix changes this family's answers on a cache HIT
-  // (Laguna-S, temp 0: cold bb040715 -> hit 633c133d). The engine already
-  // refuses it by default; the selector must not offer it either.
-  // Drive the selector from the policy's own option list rather than
-  // re-inlining the gate, so the module cannot go stale against the form.
-  const storedKvQuantOptions = allowedStoredKvQuantOptions({
-    cacheType: detectedCacheType,
-    cacheSubtype: detectedCacheSubtype,
-    architectureHints: detectedArchitectureHints,
-  })
-  const storedKvMustBeExact = storedKvQuantMustBeExact({
-    cacheType: detectedCacheType,
-    cacheSubtype: detectedCacheSubtype,
-    architectureHints: detectedArchitectureHints,
-  })
   const isMambaCache =
     detectedCacheType === 'mamba' ||
     detectedCacheType === 'hybrid' ||
@@ -532,29 +517,17 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     tokens: pagedCapacity.capacityTokens.toLocaleString(),
   })
   const pagedCacheSectionTitle = t('sessions.config.pagedKVCache')
-  const nativeTypedCacheOwnsStoredCodec = dsv4Active || m3Active || openPanguExactTypedCache
-  // openPangu's typed snapshot explicitly opts out of generic live/stored KV
-  // codecs. Auto is architecture-native for every other family too; family
-  // labels below describe native topology, never permission to add TQ.
-  const effectiveStoredCacheQuantization = openPanguExactTypedCache
-    ? 'none'
-    : nativeTypedCacheOwnsStoredCodec
-      ? 'auto'
-      : storedKvMustBeExact && config.kvCacheQuantization !== 'auto'
-        ? 'none'
-        : config.kvCacheQuantization
-  const explicitStoredCacheCodec = effectiveStoredCacheQuantization !== 'auto'
+  // One production representation: preserve the loaded architecture's native
+  // cache state and add no generic stored codec. Persisted stale values are
+  // migrated by the main process; the renderer never echoes them as effective.
+  const effectiveStoredCacheQuantization = 'auto'
   const liveCacheCodecLabel = openPanguExactTypedCache
     ? t('sessions.config.codecOpenPangu')
     : dsv4Active
       ? t('sessions.config.codecDsv4')
       : m3Active
         ? t('sessions.config.codecM3')
-        : explicitStoredCacheCodec
-          ? effectiveStoredCacheQuantization === 'none'
-            ? t('sessions.config.codecTqOffAll')
-            : t('sessions.config.codecTqOffStored', { codec: effectiveStoredCacheQuantization })
-          : hy3Active
+        : hy3Active
             ? t('sessions.config.codecHy3')
             : mixedSwaCacheActive
               ? t('sessions.config.codecMixedSwa')
@@ -565,10 +538,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   ? t('sessions.config.codecBonsaiHybrid')
                   : t('sessions.config.codecQwenHybrid')
               : t('sessions.config.codecEngineNative')
-  const liveCacheCodecBadge =
-    explicitStoredCacheCodec && effectiveStoredCacheQuantization !== 'none'
-      ? `STORED ${effectiveStoredCacheQuantization.toUpperCase()} · GENERIC TQ OFF`
-      : 'NATIVE · GENERIC TQ OFF'
+  const liveCacheCodecBadge = 'NATIVE · GENERIC TQ OFF'
   const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
   const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
   const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
@@ -1254,7 +1224,6 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       <Section title={t('sessions.config.kvCacheQuantization')} expanded={expandedSections.kvCacheQuant} onToggle={() => toggleSection('kvCacheQuant')} hidden={isImage}>
         {batchingOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresBatching')} />}
         {!batchingOff && prefixOff && <IncompatWarning text={t('sessions.config.kvQuantRequiresPrefix')} />}
-        {!effectivelyNoBatching && !prefixOff && storedKvMustBeExact && <IncompatWarning text={t('sessions.config.storedKvExactRequired')} />}
         {!effectivelyNoBatching && !prefixOff && mixedSwaCacheActive && <PerformanceHint text={t('sessions.config.mixedSwaAutoHint')} />}
         {!effectivelyNoBatching && !prefixOff && hy3Active && <PerformanceHint text={t('sessions.config.hy3AutoHint')} />}
         {!effectivelyNoBatching && !prefixOff && qwenHybridTqActive && !mixedSwaCacheActive && <PerformanceHint text={bonsaiActive ? t('sessions.config.bonsaiHybridHint') : t('sessions.config.qwenHybridHint')} />}
@@ -1310,25 +1279,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             {t('sessions.config.storedCacheQuantization')}
             <Tooltip text={t('sessions.config.storedCacheQuantTooltip')} />
           </span>
-          <select value={effectiveStoredCacheQuantization} onChange={e => onChange('kvCacheQuantization', e.target.value)} className="cfg-input" disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}>
+          <select value={effectiveStoredCacheQuantization} className="cfg-input" disabled>
             <option value="auto">{dsv4Active ? t('sessions.config.storedQuantNativeTyped') : t('sessions.config.storedQuantAuto')}</option>
-            <option value="none">{t('sessions.config.kvQuantNone')}</option>
-            {storedKvQuantOptions.includes('q8') && <option value="q8">{t('sessions.config.storedQuantQ8')}</option>}
-            {storedKvQuantOptions.includes('q4') && <option value="q4">{t('sessions.config.storedQuantQ4')}</option>}
           </select>
         </div>
-        {effectiveStoredCacheQuantization !== 'auto' && effectiveStoredCacheQuantization !== 'none' && (
-          <SliderField
-            label={t('convert.groupSize')}
-            tooltip={t('sessions.config.groupSizeTooltip')}
-            value={config.kvCacheGroupSize}
-            onChange={v => onChange('kvCacheGroupSize', v)}
-            min={32}
-            max={128}
-            step={32}
-            defaultValue={DEFAULT_CONFIG.kvCacheGroupSize}
-          />
-        )}
       </Section>
 
       {/* Disk Cache (L2 Persistent) */}

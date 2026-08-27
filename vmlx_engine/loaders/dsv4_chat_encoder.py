@@ -91,6 +91,84 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+_DSV4_0731_BOS = "<｜begin▁of▁sentence｜>"
+_DSV4_0731_EOS = "<｜end▁of▁sentence｜>"
+
+
+def _read_json_object(path: Path) -> Dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _is_builtin_0731_encoder_compatible(model_path: Optional[Path]) -> bool:
+    """Recognize the exact public DSV4-Flash-0731 prompt contract.
+
+    Some published CRACK conversions intentionally contain only model and
+    tokenizer artifacts, while their byte-identical non-CRACK counterpart
+    carries ``encoding/encoding_dsv4.py``. Requiring that conversion-time
+    source file made a valid downloaded model impossible to start in the
+    packaged app. The built-in fallback is deliberately gated on the full
+    architecture and chat grammar below; another DeepSeek-V4 revision must
+    continue to provide its own encoder instead of silently inheriting 0731.
+    """
+    if model_path is None:
+        return False
+    root = Path(model_path)
+    config = _read_json_object(root / "config.json")
+    jang = _read_json_object(root / "jang_config.json")
+    tokenizer = _read_json_object(root / "tokenizer_config.json")
+    chat = jang.get("chat") if isinstance(jang.get("chat"), dict) else {}
+    reasoning = (
+        chat.get("reasoning")
+        if isinstance(chat.get("reasoning"), dict)
+        else {}
+    )
+    tools = (
+        chat.get("tool_calling")
+        if isinstance(chat.get("tool_calling"), dict)
+        else {}
+    )
+    rope = (
+        config.get("rope_scaling")
+        if isinstance(config.get("rope_scaling"), dict)
+        else {}
+    )
+
+    def token_content(value: Any) -> Any:
+        return value.get("content") if isinstance(value, dict) else value
+
+    return bool(
+        config.get("model_type") == "deepseek_v4"
+        and config.get("architectures") == ["DeepseekV4ForCausalLM"]
+        and int(config.get("hidden_size") or 0) == 4096
+        and int(config.get("num_hidden_layers") or 0) == 43
+        and int(config.get("head_dim") or 0) == 512
+        and int(config.get("qk_rope_head_dim") or 0) == 64
+        and int(config.get("compress_rope_theta") or 0) == 160000
+        and int(config.get("max_position_embeddings") or 0) == 1_048_576
+        and rope.get("type") == "yarn"
+        and int(rope.get("factor") or 0) == 16
+        and int(rope.get("original_max_position_embeddings") or 0) == 65_536
+        and chat.get("encoder") == "encoding_dsv4"
+        and chat.get("encoder_fn") == "encode_messages"
+        and chat.get("chat_template_source") == "official_python_encoder"
+        and chat.get("has_tokenizer_chat_template") is False
+        and chat.get("bos_token") == _DSV4_0731_BOS
+        and chat.get("eos_token") == _DSV4_0731_EOS
+        and reasoning.get("thinking_start") == "<think>"
+        and reasoning.get("thinking_end") == "</think>"
+        and reasoning.get("reasoning_effort_levels") == ["low", "high", "max"]
+        and tools.get("parser") == "dsml"
+        and tools.get("dsml_token") == "｜DSML｜"
+        and tokenizer.get("chat_template") is None
+        and token_content(tokenizer.get("bos_token")) == _DSV4_0731_BOS
+        and token_content(tokenizer.get("eos_token")) == _DSV4_0731_EOS
+    )
+
+
 def request_explicitly_requests_tool(request_text: str, tool_name: str) -> bool:
     """Return whether the current user positively directs use of ``tool_name``.
 
@@ -233,7 +311,8 @@ def _load_encoding_dsv4_module(
       3. ``{model_path}/encoding/`` subdir — the standard bundle layout
          as shipped in DeepSeek-V4-Flash-JANGTQ / JANG_2L. This path is
          auto-discovered so no env plumbing is required.
-      4. Bundled fallback at ``jang_tools.dsv4.encoding_adapter``.
+      4. Fingerprinted packaged 0731 fallback.
+      5. Legacy shallow source-tree discovery for other revisions.
     """
     candidates: List[Path] = []
     if encoding_dir is not None:
@@ -245,7 +324,6 @@ def _load_encoding_dsv4_module(
         mp = Path(model_path)
         candidates.append(mp / "encoding")
         candidates.append(mp)
-    candidates.extend(_default_encoding_dirs())
 
     for d in candidates:
         f = d / "encoding_dsv4.py"
@@ -259,18 +337,40 @@ def _load_encoding_dsv4_module(
             logger.info("DSV4 encoding loaded from %s", f)
             return mod
 
-    # Fall back to the jang_tools adapter which will raise a clear
-    # FileNotFoundError if neither an explicit path nor DSV4_ENCODING_DIR is set.
-    try:
-        from jang_tools.dsv4.encoding_adapter import _load_encoding_module
-    except ImportError as e:
-        raise RuntimeError(
-            "DSV4 chat encoder unavailable: jang_tools.dsv4 not installed "
-            "AND no encoding_dsv4.py found via DSV4_ENCODING_DIR or "
-            "{model_path}/encoding/. Bring over a DSV4 bundle or set "
-            "DSV4_ENCODING_DIR."
-        ) from e
-    return _load_encoding_module(encoding_dir)
+    if _is_builtin_0731_encoder_compatible(model_path):
+        from . import encoding_dsv4_0731
+
+        logger.info(
+            "DSV4 encoding loaded from packaged 0731 fallback for encoder-less bundle %s",
+            model_path,
+        )
+        return encoding_dsv4_0731
+
+    # Legacy source-tree discovery is deliberately later than the fingerprinted
+    # built-in. Otherwise an encoder-less 0731 artifact can silently borrow an
+    # unrelated DSV4 revision merely because another model exists somewhere on
+    # the same mounted volume.
+    for d in _default_encoding_dirs():
+        f = d / "encoding_dsv4.py"
+        if f.exists():
+            spec = importlib.util.spec_from_file_location("encoding_dsv4", str(f))
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules["encoding_dsv4"] = mod
+            spec.loader.exec_module(mod)
+            logger.info("DSV4 encoding loaded from legacy source fallback %s", f)
+            return mod
+
+    # jang_tools.encoding_adapter repeats a global source-tree scan and can
+    # therefore select a different model revision after the checks above have
+    # deliberately rejected it. Fail here with the exact selected bundle in
+    # the message instead of performing a second, less-specific lookup.
+    raise RuntimeError(
+        "DSV4 encoding_dsv4.py module path not set for the selected bundle. "
+        "Pass encoding_dir=Path('<source>/encoding'), set DSV4_ENCODING_DIR, "
+        "or use a bundle matching a packaged canonical encoder."
+    )
 
 
 # Per-model-path cache — different bundles may ship different encoder

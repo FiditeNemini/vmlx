@@ -55,6 +55,104 @@ def test_dsv4_missing_encoder_fails_before_request_render(monkeypatch, tmp_path)
     assert "DSV4_ENCODING_DIR" in str(caught.value)
 
 
+def _write_0731_encoderless_contract(bundle: Path) -> None:
+    bundle.mkdir()
+    (bundle / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "deepseek_v4",
+                "architectures": ["DeepseekV4ForCausalLM"],
+                "hidden_size": 4096,
+                "num_hidden_layers": 43,
+                "head_dim": 512,
+                "qk_rope_head_dim": 64,
+                "compress_rope_theta": 160000,
+                "max_position_embeddings": 1048576,
+                "rope_scaling": {
+                    "type": "yarn",
+                    "factor": 16,
+                    "original_max_position_embeddings": 65536,
+                },
+            }
+        )
+    )
+    (bundle / "jang_config.json").write_text(
+        json.dumps(
+            {
+                "chat": {
+                    "encoder": "encoding_dsv4",
+                    "encoder_fn": "encode_messages",
+                    "chat_template_source": "official_python_encoder",
+                    "has_tokenizer_chat_template": False,
+                    "bos_token": "<｜begin▁of▁sentence｜>",
+                    "eos_token": "<｜end▁of▁sentence｜>",
+                    "reasoning": {
+                        "thinking_start": "<think>",
+                        "thinking_end": "</think>",
+                        "reasoning_effort_levels": ["low", "high", "max"],
+                    },
+                    "tool_calling": {
+                        "parser": "dsml",
+                        "dsml_token": "｜DSML｜",
+                    },
+                }
+            }
+        )
+    )
+    (bundle / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "chat_template": None,
+                "bos_token": {"content": "<｜begin▁of▁sentence｜>"},
+                "eos_token": {"content": "<｜end▁of▁sentence｜>"},
+            }
+        )
+    )
+
+
+def test_encoderless_0731_crack_bundle_uses_packaged_canonical_encoder(
+    monkeypatch, tmp_path
+):
+    """The public CRACK artifact must load without conversion-source files."""
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    bundle = tmp_path / "DeepSeek-V4-Flash-0731-JANG-CRACK"
+    _write_0731_encoderless_contract(bundle)
+    monkeypatch.delenv("DSV4_ENCODING_DIR", raising=False)
+    monkeypatch.setattr(dsv4_chat_encoder, "_default_encoding_dirs", lambda: [])
+    dsv4_chat_encoder._encoding_cache.clear()
+
+    dsv4_chat_encoder.ensure_dsv4_encoding_available(bundle)
+    encoder = dsv4_chat_encoder._get_encoding(model_path=bundle)
+    assert encoder.__name__.endswith("encoding_dsv4_0731")
+    prompt = dsv4_chat_encoder.apply_chat_template(
+        [{"role": "user", "content": "Reply with OK."}],
+        enable_thinking=False,
+        model_path=str(bundle),
+    )
+    assert prompt == (
+        "<｜begin▁of▁sentence｜><｜User｜>Reply with OK."
+        "<｜Assistant｜></think>"
+    )
+
+
+def test_builtin_0731_encoder_rejects_unknown_dsv4_revision(monkeypatch, tmp_path):
+    """A future DSV4 bundle must not silently inherit the 0731 grammar."""
+    from vmlx_engine.loaders import dsv4_chat_encoder
+
+    bundle = tmp_path / "DeepSeek-V4-Future-JANG-CRACK"
+    _write_0731_encoderless_contract(bundle)
+    monkeypatch.delenv("DSV4_ENCODING_DIR", raising=False)
+    monkeypatch.setattr(dsv4_chat_encoder, "_default_encoding_dirs", lambda: [])
+    config = json.loads((bundle / "config.json").read_text())
+    config["num_hidden_layers"] = 44
+    (bundle / "config.json").write_text(json.dumps(config))
+    dsv4_chat_encoder._encoding_cache.clear()
+
+    with pytest.raises(RuntimeError, match="DSV4 model cannot start"):
+        dsv4_chat_encoder.ensure_dsv4_encoding_available(bundle)
+
+
 def _engine_python_files() -> list[Path]:
     return [p for p in ENGINE_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 

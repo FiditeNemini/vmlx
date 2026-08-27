@@ -278,6 +278,59 @@ def test_qwen4_exp_qsa_bypasses_selection_while_all_blocks_fit_budget(monkeypatc
     assert cache.idx_keys.shape[2] == length
 
 
+def test_qwen4_exp_qsa_selects_complete_blocks_and_keeps_off_boundary_tail():
+    """Past the budget, select whole blocks and retain the live tail token."""
+    args = _tiny_args()
+    model = LanguageModel(args)
+    _randomize(model)
+    mx.eval(model.parameters())
+
+    qsa_index = args.layer_types.index("full_attention")
+    indexer = model.layers[qsa_index].self_attn.indexer
+    cache = model.make_cache()[qsa_index]
+    prefix_length = args.indexer_budget + args.indexer_compress_ratio
+
+    prefix_hidden = mx.arange(
+        prefix_length * args.hidden_size, dtype=mx.float32
+    ).reshape(1, prefix_length, args.hidden_size)
+    cache.update_and_fetch(
+        mx.zeros(
+            (1, args.num_key_value_heads, prefix_length, args.head_dim),
+            dtype=mx.float32,
+        ),
+        mx.zeros(
+            (1, args.num_key_value_heads, prefix_length, args.head_dim),
+            dtype=mx.float32,
+        ),
+    )
+    indexer(prefix_hidden, cache, offset=0)
+
+    cache.update_and_fetch(
+        mx.zeros(
+            (1, args.num_key_value_heads, 1, args.head_dim), dtype=mx.float32
+        ),
+        mx.zeros(
+            (1, args.num_key_value_heads, 1, args.head_dim), dtype=mx.float32
+        ),
+    )
+    mask = indexer(
+        mx.ones((1, 1, args.hidden_size), dtype=mx.float32),
+        cache,
+        offset=prefix_length,
+    )
+    mx.eval(mask)
+
+    assert mask is not None
+    assert mask.shape == (1, 1, 1, prefix_length + 1)
+    visible = np.isfinite(np.asarray(mask)[0, 0, 0])
+    complete = visible[:prefix_length].reshape(
+        -1, args.indexer_compress_ratio
+    )
+    assert np.all(complete == complete[:, :1])
+    assert complete[:, 0].sum() == args.indexer_budget // args.indexer_compress_ratio
+    assert visible[-1]
+
+
 def test_qwen4_exp_qsa_and_ple_support_synchronous_batch_chunking():
     args = _tiny_args()
     model = LanguageModel(args)

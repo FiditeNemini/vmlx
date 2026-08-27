@@ -3406,13 +3406,16 @@ def _resolve_repetition_penalty(
     *,
     enable_thinking: bool | None = None,
 ) -> float | None:
-    """Resolve repetition penalty: request > explicit CLI/session > bundle > None.
+    """Resolve repetition penalty: MTP policy > request > CLI > bundle > None.
 
     Returns None when nothing matches, which means "don't pass
     repetition_penalty at all to the engine" — mlx-lm then applies its
     implicit 1.0 (no penalty). When a value is returned, the caller should
     include it in chat_kwargs.
     """
+    if _native_mtp_sampling_policy == "greedy-only":
+        return 1.0
+
     _bundle_path = _model_path or model_name
 
     if request_value is not None:

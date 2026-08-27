@@ -2391,7 +2391,10 @@ def serve_command(args):
                       "stochastic=rejection-sampling acceptance")
             elif sampling_policy in {"deterministic-defaults", "greedy-only"} and mtp_status.get("runtime_available"):
                 label = "Enforced sampling" if sampling_policy == "greedy-only" else "Startup defaults"
-                print(f"    {label}: temperature=0, top_p=1, top_k=0, min_p=0")
+                print(
+                    f"    {label}: temperature=0, top_p=1, top_k=0, "
+                    "min_p=0, repetition_penalty=1"
+                )
     except Exception:
         pass
     if getattr(args, 'chat_template', None):
@@ -4240,8 +4243,8 @@ Examples:
              "greedy requests use identity verification and sampled requests use rejection-"
              "sampling acceptance when that runtime gate is enabled. deterministic-defaults fills omitted "
              "temperature/top-p/top-k/min-p with greedy values. greedy-only enforces "
-             "temperature=0, top_p=1, top_k=0, and min_p=0 even when a request supplies "
-             "sampled values; the app sends greedy-only for both Auto and Deterministic "
+             "temperature=0, top_p=1, top_k=0, min_p=0, and repetition_penalty=1 "
+             "even when a request supplies incompatible values; the app sends greedy-only for both Auto and Deterministic "
              "MTP modes. Off preserves bundle sampling and disables native MTP.",
     )
     serve_parser.add_argument(

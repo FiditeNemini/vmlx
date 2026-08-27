@@ -1314,6 +1314,21 @@ class TestServerSamplingResolution:
         result = _resolve_top_p(None)
         assert isinstance(result, float)
 
+    def test_greedy_only_mtp_overrides_every_incompatible_sampling_field(
+        self, monkeypatch
+    ):
+        """App-managed MTP must not be bypassed by an adapter sampling kwarg."""
+        from vmlx_engine import server
+
+        monkeypatch.setattr(server, "_native_mtp_sampling_policy", "greedy-only")
+        monkeypatch.setattr(server, "_default_repetition_penalty", 1.15)
+
+        assert server._resolve_temperature(1.0) == 0.0
+        assert server._resolve_top_p(0.8) == 1.0
+        assert server._resolve_top_k(7) == 0
+        assert server._resolve_min_p(0.2) == 0.0
+        assert server._resolve_repetition_penalty(1.2) == 1.0
+
     def test_api_routes_pass_model_to_sampling_resolvers(self):
         """API handlers must resolve omitted sampling params against the request model.
 

@@ -1460,6 +1460,64 @@ def test_qwen4_exp_projection_uses_dynamic_native_compute_dtype(
     assert projected.dtype == expected_dtype
 
 
+def test_qwen4_exp_jang_hyper_fold_dtype_leak_is_normalized_before_load():
+    from vmlx_engine.models.qwen4_exp.loader import (
+        _normalize_jang_hyper_fold_dtypes,
+    )
+
+    base = "language_model.model.layers.0.attn_hyper_connection"
+    intentional = "language_model.model.layers.1.attn_hyper_connection"
+    packed = "language_model.model.layers.2.attn_hyper_connection"
+    weights = {
+        f"{base}.hc_norm.weight": mx.arange(256, dtype=mx.float32) / 257.0,
+        f"{base}.input_mix_weight_down.weight": mx.arange(
+            32 * 256, dtype=mx.float32
+        ).reshape(32, 256) / 8193.0,
+        f"{base}.input_mix_weight_up.weight": mx.ones(
+            (256, 32), dtype=mx.bfloat16
+        ),
+        f"{base}.block_inject_weight.weight": mx.arange(
+            4 * 256, dtype=mx.float32
+        ).reshape(4, 256) / 1025.0,
+        f"{intentional}.hc_norm.weight": mx.ones((256,), dtype=mx.float32),
+        f"{intentional}.input_mix_weight_down.weight": mx.ones(
+            (32, 256), dtype=mx.float32
+        ),
+        f"{intentional}.input_mix_weight_up.weight": mx.ones(
+            (256, 32), dtype=mx.float32
+        ),
+        f"{packed}.hc_norm.weight": mx.ones((256,), dtype=mx.float32),
+        f"{packed}.input_mix_weight_down.weight": mx.ones(
+            (32, 4), dtype=mx.uint32
+        ),
+        f"{packed}.input_mix_weight_up.weight": mx.ones(
+            (256, 32), dtype=mx.float16
+        ),
+    }
+
+    expected = {
+        name: value.astype(mx.bfloat16)
+        for name, value in weights.items()
+        if name.startswith(base) and value.dtype == mx.float32
+    }
+    matrices, norms = _normalize_jang_hyper_fold_dtypes(weights)
+    mx.eval(*weights.values(), *expected.values())
+
+    assert (matrices, norms) == (2, 1)
+    assert weights[f"{base}.hc_norm.weight"].dtype == mx.bfloat16
+    assert weights[f"{base}.input_mix_weight_down.weight"].dtype == mx.bfloat16
+    assert weights[f"{base}.input_mix_weight_up.weight"].dtype == mx.bfloat16
+    assert weights[f"{base}.block_inject_weight.weight"].dtype == mx.bfloat16
+    for name, value in expected.items():
+        np.testing.assert_array_equal(
+            np.asarray(weights[name].astype(mx.float32)),
+            np.asarray(value.astype(mx.float32)),
+        )
+    assert weights[f"{intentional}.hc_norm.weight"].dtype == mx.float32
+    assert weights[f"{intentional}.input_mix_weight_down.weight"].dtype == mx.float32
+    assert weights[f"{packed}.input_mix_weight_down.weight"].dtype == mx.uint32
+
+
 def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
     from vmlx_engine.models.qwen4_exp.language import (
         GatedResidual,

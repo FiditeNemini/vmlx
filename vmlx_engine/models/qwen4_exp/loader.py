@@ -39,6 +39,8 @@ _PLE_BUFFER_RE = re.compile(
     r"ngram_heads_offsets)$"
 )
 _PLE_REQUIRED_SHARD_SUFFIXES = ("weight", "scales", "biases")
+_HYPER_UP_SUFFIX = ".input_mix_weight_up.weight"
+_LOW_PRECISION_FLOAT_DTYPES = {mx.float16, mx.bfloat16}
 
 
 def is_qwen4_exp_bundle(model_path: str | Path) -> bool:
@@ -102,6 +104,51 @@ def _load_runtime_config(
         quantization.setdefault(key, default_spec[key])
     runtime_config["quantization"] = quantization
     return runtime_config, affine1_modules, bit_map, True
+
+
+def _normalize_jang_hyper_fold_dtypes(
+    weights: dict[str, mx.array],
+) -> tuple[int, int]:
+    """Undo the Qwen4Exp AWQ-fold dtype leak without another value transform.
+
+    The converter's stream fold historically multiplied retained BF16
+    mix-down, injection, and grouped-norm tensors by F32 scales without casting
+    back. The unaffected mix-up sibling retains the original floating dtype and
+    is therefore authoritative. Require the complete F32 norm+down signature
+    before changing anything so intentional F32 modules and packed projections
+    remain untouched.
+    """
+
+    changed_matrices = 0
+    changed_norms = 0
+    for up_name, up_weight in tuple(weights.items()):
+        if not up_name.endswith(_HYPER_UP_SUFFIX):
+            continue
+        target_dtype = up_weight.dtype
+        if target_dtype not in _LOW_PRECISION_FLOAT_DTYPES:
+            continue
+        base = up_name[: -len(_HYPER_UP_SUFFIX)]
+        norm_name = base + ".hc_norm.weight"
+        down_name = base + ".input_mix_weight_down.weight"
+        norm = weights.get(norm_name)
+        down = weights.get(down_name)
+        if (
+            norm is None
+            or down is None
+            or norm.dtype != mx.float32
+            or down.dtype != mx.float32
+        ):
+            continue
+        weights[norm_name] = norm.astype(target_dtype)
+        weights[down_name] = down.astype(target_dtype)
+        changed_norms += 1
+        changed_matrices += 1
+        injection_name = base + ".block_inject_weight.weight"
+        injection = weights.get(injection_name)
+        if injection is not None and injection.dtype == mx.float32:
+            weights[injection_name] = injection.astype(target_dtype)
+            changed_matrices += 1
+    return changed_matrices, changed_norms
 
 
 def _classify_ple_tensor(key: str) -> tuple[str, str] | None:
@@ -481,6 +528,9 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     if not (is_mlx_format or jang_runtime_sanitized):
         weights = model.sanitize(weights)
     weights = _normalize_runtime_weight_names(weights)
+    normalized_hyper = (0, 0)
+    if jang_runtime_sanitized:
+        normalized_hyper = _normalize_jang_hyper_fold_dtypes(weights)
     _quantize_model(model, config, weights, bit_map)
     # The PLE table and its three hash buffers were intentionally removed from
     # the ordinary parameter tree above.  Everything else, including MTP and
@@ -538,10 +588,12 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         processor.image_processor = image_processor
     logger.info(
         "Loaded qwen4_exp with SSD-backed PLE (%s shards, MTP=%s, "
-        "hyper_fused=%s, hyper_compiled=%s)",
+        "hyper_fused=%s, hyper_compiled=%s, hyper_dtype_normalized=%s/%s)",
         model_config.text_config.split_ngram_parts,
         model_config.text_config.mtp_num_hidden_layers,
         fused_hyper,
         compiled_hyper,
+        normalized_hyper[0],
+        normalized_hyper[1],
     )
     return model, processor

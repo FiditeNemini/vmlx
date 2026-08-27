@@ -108,15 +108,18 @@ def _load_runtime_config(
 
 def _normalize_jang_hyper_fold_dtypes(
     weights: dict[str, mx.array],
+    *,
+    target_dtype=None,
 ) -> tuple[int, int]:
     """Undo the Qwen4Exp AWQ-fold dtype leak without another value transform.
 
     The converter's stream fold historically multiplied retained BF16
     mix-down, injection, and grouped-norm tensors by F32 scales without casting
-    back. The unaffected mix-up sibling retains the original floating dtype and
-    is therefore authoritative. Require the complete F32 norm+down signature
-    before changing anything so intentional F32 modules and packed projections
-    remain untouched.
+    back. When the runtime has resolved one uniform packed-affine compute dtype,
+    it is authoritative; otherwise the unaffected mix-up sibling retains the
+    original floating dtype. Require the complete F32 norm+down signature before
+    changing anything so intentional F32 modules and packed projections remain
+    untouched.
     """
 
     changed_matrices = 0
@@ -124,8 +127,10 @@ def _normalize_jang_hyper_fold_dtypes(
     for up_name, up_weight in tuple(weights.items()):
         if not up_name.endswith(_HYPER_UP_SUFFIX):
             continue
-        target_dtype = up_weight.dtype
-        if target_dtype not in _LOW_PRECISION_FLOAT_DTYPES:
+        if up_weight.dtype not in _LOW_PRECISION_FLOAT_DTYPES:
+            continue
+        resolved_dtype = target_dtype or up_weight.dtype
+        if resolved_dtype not in _LOW_PRECISION_FLOAT_DTYPES:
             continue
         base = up_name[: -len(_HYPER_UP_SUFFIX)]
         norm_name = base + ".hc_norm.weight"
@@ -139,16 +144,116 @@ def _normalize_jang_hyper_fold_dtypes(
             or down.dtype != mx.float32
         ):
             continue
-        weights[norm_name] = norm.astype(target_dtype)
-        weights[down_name] = down.astype(target_dtype)
+        weights[norm_name] = norm.astype(resolved_dtype)
+        weights[down_name] = down.astype(resolved_dtype)
         changed_norms += 1
         changed_matrices += 1
         injection_name = base + ".block_inject_weight.weight"
         injection = weights.get(injection_name)
         if injection is not None and injection.dtype == mx.float32:
-            weights[injection_name] = injection.astype(target_dtype)
+            weights[injection_name] = injection.astype(resolved_dtype)
             changed_matrices += 1
     return changed_matrices, changed_norms
+
+
+def _resolve_jang_runtime_compute_dtype(weights: dict[str, mx.array]):
+    """Resolve compute dtype from packed affine metadata, not config intent.
+
+    A converted JANG bundle may retain the upstream BF16 declaration while its
+    packed affine scales/biases and SSD-backed PLE rows are F16. Rewriting those
+    tensors to the declared dtype after load changes MLX kernel dispatch. A
+    single metadata dtype is therefore the concrete runtime contract. Mixed
+    metadata dtypes fail closed instead of silently choosing one.
+    """
+
+    packed_dtypes = set()
+    for name, value in weights.items():
+        stem, separator, leaf = name.rpartition(".")
+        if not separator or leaf not in {"scales", "biases"}:
+            continue
+        packed_weight = weights.get(f"{stem}.weight")
+        if packed_weight is None or packed_weight.dtype != mx.uint32:
+            continue
+        if value.dtype in _LOW_PRECISION_FLOAT_DTYPES:
+            packed_dtypes.add(value.dtype)
+    if not packed_dtypes:
+        raise ValueError("qwen4_exp JANG bundle has no packed affine metadata dtype")
+    if len(packed_dtypes) != 1:
+        rendered = ", ".join(sorted(str(dtype) for dtype in packed_dtypes))
+        raise ValueError(
+            "qwen4_exp JANG packed affine metadata has mixed compute dtypes: "
+            f"{rendered}"
+        )
+    return next(iter(packed_dtypes))
+
+
+def _normalize_jang_runtime_compute_dtypes(
+    weights: dict[str, mx.array],
+    model: nn.Module,
+    target_dtype,
+) -> dict[str, int]:
+    """Normalize cast-eligible Qwen4Exp tensors to one compute dtype.
+
+    The model's cast predicate preserves deliberately F32 recurrent state
+    coefficients. All other floating compute tensors, including routers,
+    norms, dense projections, and packed affine metadata, are aligned with the
+    dtype carried by the bundle's packed scales/biases.
+    """
+
+    if target_dtype not in _LOW_PRECISION_FLOAT_DTYPES:
+        raise ValueError(
+            "qwen4_exp JANG runtime compute dtype must be float16 or "
+            f"bfloat16, got {target_dtype}"
+        )
+    cast_predicate = getattr(model, "cast_predicate", lambda _path: True)
+    summary = {"f16": 0, "bf16": 0, "f32": 0, "cast": 0, "preserved": 0}
+    source_keys = {
+        mx.float16: "f16",
+        mx.bfloat16: "bf16",
+        mx.float32: "f32",
+    }
+    for name, value in tuple(weights.items()):
+        source_key = source_keys.get(value.dtype)
+        if source_key is None:
+            continue
+        summary[source_key] += 1
+        if not cast_predicate(name):
+            summary["preserved"] += 1
+            continue
+        if value.dtype != target_dtype:
+            weights[name] = value.astype(target_dtype)
+            summary["cast"] += 1
+    return summary
+
+
+def _warn_runtime_dtype_mismatches(model: nn.Module, target_dtype) -> int:
+    """Warn about floating parameters outside the loader-owned compute dtype."""
+
+    try:
+        from mlx.utils import tree_flatten
+
+        mismatches = [
+            (name, str(value.dtype))
+            for name, value in tree_flatten(model.parameters())
+            if value.dtype in {mx.float16, mx.bfloat16, mx.float32}
+            and value.dtype != target_dtype
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not audit qwen4_exp runtime dtypes: %s", exc)
+        return -1
+    if mismatches:
+        preview = ", ".join(
+            f"{name}={dtype}" for name, dtype in mismatches[:16]
+        )
+        logger.warning(
+            "qwen4_exp loader-owned compute dtype %s has %d floating "
+            "parameter mismatch(es): %s%s",
+            target_dtype,
+            len(mismatches),
+            preview,
+            " ..." if len(mismatches) > 16 else "",
+        )
+    return len(mismatches)
 
 
 def _classify_ple_tensor(key: str) -> tuple[str, str] | None:
@@ -529,8 +634,19 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         weights = model.sanitize(weights)
     weights = _normalize_runtime_weight_names(weights)
     normalized_hyper = (0, 0)
+    runtime_dtype = None
+    runtime_dtype_summary = None
     if jang_runtime_sanitized:
-        normalized_hyper = _normalize_jang_hyper_fold_dtypes(weights)
+        runtime_dtype = _resolve_jang_runtime_compute_dtype(weights)
+        normalized_hyper = _normalize_jang_hyper_fold_dtypes(
+            weights,
+            target_dtype=runtime_dtype,
+        )
+        runtime_dtype_summary = _normalize_jang_runtime_compute_dtypes(
+            weights,
+            model,
+            runtime_dtype,
+        )
     _quantize_model(model, config, weights, bit_map)
     # The PLE table and its three hash buffers were intentionally removed from
     # the ordinary parameter tree above.  Everything else, including MTP and
@@ -540,11 +656,13 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
 
     from mlx_vlm.models.qwen4_exp.language import (
         compile_hyper_connections,
+        fold_zero_centered_norm_offsets,
         fuse_hyper_connection_projections,
     )
 
     fused_hyper = fuse_hyper_connection_projections(model)
     compiled_hyper = compile_hyper_connections(model)
+    folded_zero_norms = fold_zero_centered_norm_offsets(model)
 
     from vmlx_engine.metal.qwen4_affine_moe_decode import install_qwen4_affine_moe
 
@@ -573,7 +691,16 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         expected_head_dim=ple_head_dim,
         bit_map=bit_map,
     )
-    model.language_model.model.layers[1].ple.ngram_embedding.set_file_backed(table)
+    model.language_model.model.layers[1].ple.ngram_embedding.set_file_backed(
+        table,
+        output_dtype=runtime_dtype,
+    )
+    model.language_model.model.layers[1].ple.prepare_runtime()
+    runtime_dtype_mismatches = (
+        _warn_runtime_dtype_mismatches(model, runtime_dtype)
+        if runtime_dtype is not None
+        else 0
+    )
 
     if not lazy:
         mx.eval(model.parameters())
@@ -588,12 +715,21 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         processor.image_processor = image_processor
     logger.info(
         "Loaded qwen4_exp with SSD-backed PLE (%s shards, MTP=%s, "
-        "hyper_fused=%s, hyper_compiled=%s, hyper_dtype_normalized=%s/%s)",
+        "hyper_fused=%s, hyper_compiled=%s, hyper_dtype_normalized=%s/%s, "
+        "zero_norms_folded=%s, runtime_compute_dtype=%s, runtime_dtype_casts=%s, "
+        "runtime_dtype_mismatches=%s, ple_storage_dtype=%s, "
+        "ple_output_dtype=%s)",
         model_config.text_config.split_ngram_parts,
         model_config.text_config.mtp_num_hidden_layers,
         fused_hyper,
         compiled_hyper,
         normalized_hyper[0],
         normalized_hyper[1],
+        folded_zero_norms,
+        str(runtime_dtype) if runtime_dtype is not None else "checkpoint",
+        (runtime_dtype_summary or {}).get("cast", 0),
+        runtime_dtype_mismatches,
+        table.output_dtype,
+        runtime_dtype if runtime_dtype is not None else table.output_dtype,
     )
     return model, processor

@@ -289,7 +289,7 @@ class GroupedRMSNorm(nn.Module):
         shape = x.shape
         x = x.reshape(*shape[:-1], -1, self.group_size)
         x = mx.fast.rms_norm(x, None, self.eps)
-        return x.reshape(shape) * self.weight.astype(x.dtype)
+        return x.reshape(shape) * self.weight
 
 
 class ZeroCenteredRMSNorm(nn.Module):
@@ -306,7 +306,12 @@ class ZeroCenteredRMSNorm(nn.Module):
         self.eps = eps
 
     def __call__(self, x: mx.array) -> mx.array:
-        return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
+        weight = (
+            self.weight
+            if getattr(self, "_offset_folded", False)
+            else 1.0 + self.weight
+        )
+        return mx.fast.rms_norm(x, weight, self.eps)
 
 
 class RMSNormGatedSigmoid(nn.Module):
@@ -328,34 +333,6 @@ class RMSNormGatedSigmoid(nn.Module):
 # --------------------------------------------------------------------------- #
 # mHC GatedResidual
 # --------------------------------------------------------------------------- #
-_FLOATING_PROJECTION_DTYPES = {mx.float16, mx.bfloat16, mx.float32}
-
-
-def _projection_compute_dtype(module: nn.Module, fallback) -> object:
-    """Return the floating dtype that owns a projection's arithmetic.
-
-    Affine-quantized projections store packed integer weights, so their scales
-    define the compute dtype. Dense projections use their floating weight
-    dtype. Falling back to the activation dtype keeps unknown projection types
-    unchanged instead of imposing a family-wide precision policy.
-    """
-
-    scales = getattr(module, "scales", None)
-    if scales is not None and scales.dtype in _FLOATING_PROJECTION_DTYPES:
-        return scales.dtype
-    weight = getattr(module, "weight", None)
-    if weight is not None and weight.dtype in _FLOATING_PROJECTION_DTYPES:
-        return weight.dtype
-    return fallback
-
-
-def _project_native_dtype(module: nn.Module, x: mx.array) -> mx.array:
-    compute_dtype = _projection_compute_dtype(module, x.dtype)
-    if x.dtype != compute_dtype:
-        x = x.astype(compute_dtype)
-    return module(x)
-
-
 class GatedResidual(nn.Module):
     def __init__(self, args: Qwen4ExpTextArgs, use_combine: bool = True):
         super().__init__()
@@ -388,21 +365,21 @@ class GatedResidual(nn.Module):
         normed = self.hc_norm(hyper_input)
         input_inject_weight = getattr(self, "input_inject_weight", None)
         if input_inject_weight is None:
-            mix = _project_native_dtype(self.input_mix_weight_down, normed)
+            mix = self.input_mix_weight_down(normed)
             block_injection = (
-                _project_native_dtype(self.block_inject_weight, normed)
+                self.block_inject_weight(normed)
                 if self.use_combine
                 else None
             )
         else:
-            combined = _project_native_dtype(input_inject_weight, normed)
+            combined = input_inject_weight(normed)
             mix_indices, injection_indices = _hyper_split_indices(
                 self.hc_lowrank, self.hc_count
             )
             mix = mx.take(combined, mix_indices, axis=-1)
             block_injection = mx.take(combined, injection_indices, axis=-1)
         mix = nn.silu(mix / self.hc_count)
-        mix = mx.sigmoid(_project_native_dtype(self.input_mix_weight_up, mix))
+        mix = mx.sigmoid(self.input_mix_weight_up(mix))
         mix = mix.astype(normed.dtype)
         mix = mix.reshape(*mix.shape[:-1], self.hc_count, self.hidden_size)
         mixed = (
@@ -505,6 +482,28 @@ def compile_hyper_connections(model: nn.Module) -> int:
         module._compiled_forward = mx.compile(module._forward)
         compiled += 1
     return compiled
+
+
+def fold_zero_centered_norm_offsets(model: nn.Module) -> int:
+    """Fold trained ``1 + delta`` MTP norm weights once at load."""
+
+    modules = [model]
+    modules.extend(module for _, module in model.named_modules() if module is not model)
+    targets = []
+    seen = set()
+    for module in modules:
+        if id(module) in seen:
+            continue
+        seen.add(id(module))
+        if isinstance(module, ZeroCenteredRMSNorm) and not getattr(
+            module, "_offset_folded", False
+        ):
+            module.weight = 1.0 + module.weight
+            module._offset_folded = True
+            targets.append(module.weight)
+    if targets:
+        mx.eval(*targets)
+    return len(targets)
 
 
 # --------------------------------------------------------------------------- #
@@ -644,10 +643,24 @@ class PLELayer(nn.Module):
             cache[3] = mx.contiguous(full[:, -self.short_conv_state_len :, :])
         # taps: y[t] = sum_j w[:, j] * full[t + j*dilation], j = 0..K-1 (t in padded coords)
         taps = []
-        for j in range(self.conv_kernel_size):
+        conv_taps = getattr(self, "_conv_taps", None)
+        if conv_taps is None:
+            conv_taps = tuple(
+                self.conv1d_weight[:, j] for j in range(self.conv_kernel_size)
+            )
+        for j, weight in enumerate(conv_taps):
             start = j * self.conv_dilation
-            taps.append(full[:, start : start + S, :] * self.conv1d_weight[:, j])
-        return nn.silu(sum(taps)).astype(x.dtype)
+            taps.append(full[:, start : start + S, :] * weight)
+        return nn.silu(sum(taps))
+
+    def prepare_runtime(self) -> None:
+        """Materialize contiguous depthwise-convolution taps once at load."""
+
+        self._conv_taps = tuple(
+            mx.contiguous(self.conv1d_weight[:, j])
+            for j in range(self.conv_kernel_size)
+        )
+        mx.eval(*self._conv_taps)
 
     def __call__(self, hidden_states: mx.array, input_ids: mx.array, cache) -> mx.array:
         emb = self._embed(input_ids, cache)
@@ -1147,19 +1160,24 @@ class QSAAttention(nn.Module):
             position_ids=position_ids,
         )
 
-        # causal additive mask
-        q_pos = mx.arange(offset, offset + S)[:, None]
-        k_pos = mx.arange(T)[None, :]
-        causal = mx.where(k_pos <= q_pos, 0.0, -np.inf).astype(mx.float32)[None, None]
-        full_mask = causal if index_mask is None else causal + index_mask
+        # At single-token decode the cache contains no future keys, so the
+        # causal mask is identically zero. Avoid allocating that F32 tensor.
+        if S == 1:
+            full_mask = index_mask
+        else:
+            q_pos = mx.arange(offset, offset + S)[:, None]
+            k_pos = mx.arange(T)[None, :]
+            causal = mx.where(k_pos <= q_pos, 0.0, -np.inf).astype(queries.dtype)
+            causal = causal[None, None]
+            full_mask = causal if index_mask is None else causal + index_mask
 
         out = mx.fast.scaled_dot_product_attention(
-            queries.astype(mx.float32),
-            keys.astype(mx.float32),
-            values.astype(mx.float32),
+            queries,
+            keys,
+            values,
             scale=self.scale,
             mask=full_mask,
-        ).astype(x.dtype)
+        )
         out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
         return self.o_proj(out * mx.sigmoid(gate))
 

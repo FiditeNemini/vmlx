@@ -1253,20 +1253,20 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
     assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
 
 
-def test_qwen4_exp_grouped_rms_norm_preserves_low_precision_residual_dtype():
+def test_qwen4_exp_grouped_rms_norm_uses_loader_homogeneous_dtype():
     from vmlx_engine.models.qwen4_exp.language import (
         GroupedRMSNorm,
         _decode_quantized_linears_fused,
     )
 
     module = GroupedRMSNorm(128, 64)
-    module.weight = (mx.arange(128, dtype=mx.float32) / 256.0) + 0.75
+    module.weight = (mx.arange(128, dtype=mx.float16) / 256.0) + 0.75
     residual = (mx.arange(128, dtype=mx.float16) / 127.0).reshape(1, 1, 128)
 
     actual = module(residual)
     expected = mx.fast.rms_norm(
         residual.reshape(1, 1, 2, 64), None, module.eps
-    ).reshape(residual.shape) * module.weight.astype(residual.dtype)
+    ).reshape(residual.shape) * module.weight
     mx.eval(actual, expected)
 
     assert actual.dtype == mx.float16
@@ -1336,41 +1336,68 @@ def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
     assert ple.dtype == mx.bfloat16
     assert residual.dtype == mx.bfloat16
 
+    embedding.set_file_backed(FileBackedTable(), output_dtype=mx.float16)
+    overridden = embedding(np.array([[[0], [2]]], dtype=np.int64))
+    mx.eval(overridden)
+    assert overridden.dtype == mx.float16
 
-@pytest.mark.parametrize(
-    ("residual_dtype", "kernel_dtype"),
-    [
-        (mx.float16, mx.bfloat16),
-        (mx.bfloat16, mx.float16),
-    ],
-)
-def test_qwen4_exp_ple_short_conv_preserves_dynamic_residual_dtype(
-    residual_dtype, kernel_dtype
-):
+
+@pytest.mark.parametrize("runtime_dtype", [mx.float16, mx.bfloat16])
+def test_qwen4_exp_ple_short_conv_uses_prepared_runtime_dtype(runtime_dtype):
     from vmlx_engine.models.qwen4_exp.language import (
         PLELayer,
         _decode_quantized_linears_fused,
     )
 
     ple = PLELayer(_tiny_args(), 0)
-    ple.conv1d_weight = ple.conv1d_weight.astype(kernel_dtype)
-    residual = mx.ones((1, 1, 256), dtype=residual_dtype)
+    ple.conv1d_weight = ple.conv1d_weight.astype(runtime_dtype)
+    ple.prepare_runtime()
+    assert len(ple._conv_taps) == ple.conv_kernel_size
+    assert all(tap.dtype == runtime_dtype for tap in ple._conv_taps)
+    residual = mx.ones((1, 1, 256), dtype=runtime_dtype)
     convolved = ple._short_conv(residual, cache=None)
     mx.eval(convolved)
 
-    assert convolved.dtype == residual_dtype
+    assert convolved.dtype == runtime_dtype
 
     linears = tuple(
         nn.Linear(256, 256, bias=False).to_quantized(group_size=64, bits=4)
         for _ in range(4)
     )
     for linear in linears:
-        linear.scales = linear.scales.astype(residual_dtype)
-        linear.biases = linear.biases.astype(residual_dtype)
+        linear.scales = linear.scales.astype(runtime_dtype)
+        linear.biases = linear.biases.astype(runtime_dtype)
     fused = _decode_quantized_linears_fused(linears, convolved)
     assert fused is not None
     mx.eval(*fused)
-    assert all(output.dtype == residual_dtype for output in fused)
+    assert all(output.dtype == runtime_dtype for output in fused)
+
+
+def test_qwen4_exp_zero_centered_norm_offset_is_folded_once():
+    from vmlx_engine.models.qwen4_exp.language import (
+        ZeroCenteredRMSNorm,
+        fold_zero_centered_norm_offsets,
+    )
+
+    class Holder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.norm = ZeroCenteredRMSNorm(8)
+
+    holder = Holder()
+    holder.norm.weight = mx.arange(8, dtype=mx.bfloat16) / 32.0
+    x = mx.arange(8, dtype=mx.bfloat16).reshape(1, 1, 8) / 7.0
+    before = holder.norm(x)
+    assert fold_zero_centered_norm_offsets(holder) == 1
+    after = holder.norm(x)
+    assert fold_zero_centered_norm_offsets(holder) == 0
+    mx.eval(before, after)
+    np.testing.assert_allclose(
+        np.asarray(before.astype(mx.float32)),
+        np.asarray(after.astype(mx.float32)),
+        rtol=0,
+        atol=0,
+    )
 
 
 def test_qwen4_exp_hyper_projection_fusion_is_bit_identical():
@@ -1426,40 +1453,6 @@ def test_qwen4_exp_hyper_connection_preserves_mixed_jang_residual_dtype():
     assert combined.dtype == mx.float16
 
 
-@pytest.mark.parametrize(
-    ("weight_dtype", "scale_dtype", "input_dtype", "expected_dtype"),
-    [
-        (mx.bfloat16, None, mx.float16, mx.bfloat16),
-        (mx.float16, None, mx.bfloat16, mx.float16),
-        (mx.uint32, mx.float16, mx.bfloat16, mx.float16),
-        (mx.uint32, mx.bfloat16, mx.float16, mx.bfloat16),
-    ],
-)
-def test_qwen4_exp_projection_uses_dynamic_native_compute_dtype(
-    weight_dtype, scale_dtype, input_dtype, expected_dtype
-):
-    from vmlx_engine.models.qwen4_exp.language import _project_native_dtype
-
-    class RecordingProjection:
-        def __init__(self):
-            self.weight = mx.zeros((64, 64), dtype=weight_dtype)
-            if scale_dtype is not None:
-                self.scales = mx.ones((64, 1), dtype=scale_dtype)
-            self.seen_dtype = None
-
-        def __call__(self, value):
-            self.seen_dtype = value.dtype
-            return value
-
-    projection = RecordingProjection()
-    residual = mx.ones((1, 1, 64), dtype=input_dtype)
-    projected = _project_native_dtype(projection, residual)
-    mx.eval(projected)
-
-    assert projection.seen_dtype == expected_dtype
-    assert projected.dtype == expected_dtype
-
-
 def test_qwen4_exp_jang_hyper_fold_dtype_leak_is_normalized_before_load():
     from vmlx_engine.models.qwen4_exp.loader import (
         _normalize_jang_hyper_fold_dtypes,
@@ -1496,18 +1489,21 @@ def test_qwen4_exp_jang_hyper_fold_dtype_leak_is_normalized_before_load():
     }
 
     expected = {
-        name: value.astype(mx.bfloat16)
+        name: value.astype(mx.float16)
         for name, value in weights.items()
         if name.startswith(base) and value.dtype == mx.float32
     }
-    matrices, norms = _normalize_jang_hyper_fold_dtypes(weights)
+    matrices, norms = _normalize_jang_hyper_fold_dtypes(
+        weights,
+        target_dtype=mx.float16,
+    )
     mx.eval(*weights.values(), *expected.values())
 
     assert (matrices, norms) == (2, 1)
-    assert weights[f"{base}.hc_norm.weight"].dtype == mx.bfloat16
-    assert weights[f"{base}.input_mix_weight_down.weight"].dtype == mx.bfloat16
+    assert weights[f"{base}.hc_norm.weight"].dtype == mx.float16
+    assert weights[f"{base}.input_mix_weight_down.weight"].dtype == mx.float16
     assert weights[f"{base}.input_mix_weight_up.weight"].dtype == mx.bfloat16
-    assert weights[f"{base}.block_inject_weight.weight"].dtype == mx.bfloat16
+    assert weights[f"{base}.block_inject_weight.weight"].dtype == mx.float16
     for name, value in expected.items():
         np.testing.assert_array_equal(
             np.asarray(weights[name].astype(mx.float32)),
@@ -1516,6 +1512,162 @@ def test_qwen4_exp_jang_hyper_fold_dtype_leak_is_normalized_before_load():
     assert weights[f"{intentional}.hc_norm.weight"].dtype == mx.float32
     assert weights[f"{intentional}.input_mix_weight_down.weight"].dtype == mx.float32
     assert weights[f"{packed}.input_mix_weight_down.weight"].dtype == mx.uint32
+
+
+def test_qwen4_exp_jang_runtime_compute_dtype_follows_packed_metadata():
+    from vmlx_engine.models.qwen4_exp.loader import (
+        _normalize_jang_runtime_compute_dtypes,
+        _resolve_jang_runtime_compute_dtype,
+    )
+
+    class RuntimeModel:
+        @staticmethod
+        def cast_predicate(path):
+            return not path.endswith(("A_log", "dt_bias"))
+
+    weights = {
+        "language_model.model.layers.0.self_attn.q_proj.weight": mx.zeros(
+            (16, 2), dtype=mx.uint32
+        ),
+        "language_model.model.layers.0.self_attn.q_proj.scales": mx.ones(
+            (16, 1), dtype=mx.float16
+        ),
+        "language_model.model.layers.0.self_attn.q_proj.biases": mx.zeros(
+            (16, 1), dtype=mx.float16
+        ),
+        "language_model.model.embed_tokens.weight": mx.ones(
+            (16, 16), dtype=mx.bfloat16
+        ),
+        "language_model.model.layers.0.mlp.gate.weight": mx.ones(
+            (16, 16), dtype=mx.float32
+        ),
+        "language_model.model.layers.0.mlp.shared_expert_gate.weight": mx.ones(
+            (1, 16), dtype=mx.float32
+        ),
+        "language_model.model.layers.0.linear_attn.A_log": mx.ones(
+            (16,), dtype=mx.float32
+        ),
+    }
+
+    dtype = _resolve_jang_runtime_compute_dtype(weights)
+    summary = _normalize_jang_runtime_compute_dtypes(
+        weights,
+        RuntimeModel(),
+        dtype,
+    )
+    mx.eval(*weights.values())
+
+    assert dtype == mx.float16
+    assert summary == {
+        "f16": 2,
+        "bf16": 1,
+        "f32": 3,
+        "cast": 3,
+        "preserved": 1,
+    }
+    assert weights["language_model.model.embed_tokens.weight"].dtype == mx.float16
+    assert weights["language_model.model.layers.0.mlp.gate.weight"].dtype == mx.float16
+    assert (
+        weights["language_model.model.layers.0.mlp.shared_expert_gate.weight"].dtype
+        == mx.float16
+    )
+    assert (
+        weights["language_model.model.layers.0.linear_attn.A_log"].dtype
+        == mx.float32
+    )
+
+
+def test_qwen4_exp_jang_runtime_compute_dtype_can_be_bfloat16():
+    from vmlx_engine.models.qwen4_exp.loader import (
+        _normalize_jang_runtime_compute_dtypes,
+        _resolve_jang_runtime_compute_dtype,
+    )
+
+    class RuntimeModel:
+        @staticmethod
+        def cast_predicate(path):
+            return not path.endswith(("A_log", "dt_bias"))
+
+    weights = {
+        "language_model.model.layers.0.self_attn.q_proj.weight": mx.zeros(
+            (16, 2), dtype=mx.uint32
+        ),
+        "language_model.model.layers.0.self_attn.q_proj.scales": mx.ones(
+            (16, 1), dtype=mx.bfloat16
+        ),
+        "language_model.model.layers.0.self_attn.q_proj.biases": mx.zeros(
+            (16, 1), dtype=mx.bfloat16
+        ),
+        "language_model.model.embed_tokens.weight": mx.ones(
+            (16, 16), dtype=mx.float16
+        ),
+        "language_model.model.layers.0.mlp.gate.weight": mx.ones(
+            (16, 16), dtype=mx.float32
+        ),
+        "language_model.model.layers.0.mlp.shared_expert_gate.weight": mx.ones(
+            (1, 16), dtype=mx.float32
+        ),
+        "language_model.model.layers.0.linear_attn.dt_bias": mx.ones(
+            (16,), dtype=mx.float32
+        ),
+    }
+
+    dtype = _resolve_jang_runtime_compute_dtype(weights)
+    summary = _normalize_jang_runtime_compute_dtypes(
+        weights,
+        RuntimeModel(),
+        dtype,
+    )
+    mx.eval(*weights.values())
+
+    assert dtype == mx.bfloat16
+    assert summary == {
+        "f16": 1,
+        "bf16": 2,
+        "f32": 3,
+        "cast": 3,
+        "preserved": 1,
+    }
+    assert weights["language_model.model.embed_tokens.weight"].dtype == mx.bfloat16
+    assert weights["language_model.model.layers.0.mlp.gate.weight"].dtype == mx.bfloat16
+    assert (
+        weights["language_model.model.layers.0.mlp.shared_expert_gate.weight"].dtype
+        == mx.bfloat16
+    )
+    assert (
+        weights["language_model.model.layers.0.linear_attn.dt_bias"].dtype
+        == mx.float32
+    )
+
+
+def test_qwen4_exp_jang_mixed_packed_metadata_dtypes_fail_closed():
+    from vmlx_engine.models.qwen4_exp.loader import (
+        _resolve_jang_runtime_compute_dtype,
+    )
+
+    weights = {
+        "language_model.model.layers.0.self_attn.q_proj.weight": mx.zeros(
+            (16, 2), dtype=mx.uint32
+        ),
+        "language_model.model.layers.0.self_attn.q_proj.scales": mx.ones(
+            (16, 1), dtype=mx.float16
+        ),
+        "language_model.model.layers.0.self_attn.q_proj.biases": mx.zeros(
+            (16, 1), dtype=mx.bfloat16
+        ),
+    }
+
+    with pytest.raises(ValueError, match="mixed compute dtypes"):
+        _resolve_jang_runtime_compute_dtype(weights)
+
+
+def test_qwen4_exp_jang_runtime_compute_dtype_rejects_float32_target():
+    from vmlx_engine.models.qwen4_exp.loader import (
+        _normalize_jang_runtime_compute_dtypes,
+    )
+
+    with pytest.raises(ValueError, match="must be float16 or bfloat16"):
+        _normalize_jang_runtime_compute_dtypes({}, object(), mx.float32)
 
 
 def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():

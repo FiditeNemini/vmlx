@@ -4088,16 +4088,20 @@ export class SessionManager extends EventEmitter {
       // Skip if timeouts are 0 (disabled)
       if (softMs <= 0 && hardMs <= 0) continue
 
-      if (session.status === 'running' && softMs > 0 && idleMs >= softMs) {
+      // Deep sleep is the stronger transition and may be configured earlier
+      // than light sleep.  Check its deadline first: otherwise a valid
+      // soft=10min / hard=1min configuration remains fully loaded until the
+      // later soft deadline, then deep-sleeps only on a subsequent monitor
+      // tick.
+      if (session.status === 'running' && hardMs > 0 && idleMs >= hardMs) {
+        console.log(`[SLEEP] Session ${session.id.slice(0, 8)} idle ${Math.round(idleMs / 1000)}s >= hard ${Math.round(hardMs / 1000)}s → deep sleep`)
+        this.pushLog(session.id, `[Sleep] Idle for ${Math.round(idleMs / 60000)}min — entering deep sleep (timeout: ${Math.round(hardMs / 60000)}min)`)
+        await this.deepSleep(session.id)
+      } else if (session.status === 'running' && softMs > 0 && idleMs >= softMs) {
         // Running and idle past soft timeout → soft sleep
         console.log(`[SLEEP] Session ${session.id.slice(0, 8)} idle ${Math.round(idleMs / 1000)}s >= soft ${Math.round(softMs / 1000)}s → soft sleep`)
         this.pushLog(session.id, `[Sleep] Idle for ${Math.round(idleMs / 60000)}min — entering soft sleep (timeout: ${Math.round(softMs / 60000)}min)`)
         await this.softSleep(session.id)
-      } else if (session.status === 'running' && softMs <= 0 && hardMs > 0 && idleMs >= hardMs) {
-        // Soft sleep disabled but hard sleep enabled → skip soft, go straight to deep
-        console.log(`[SLEEP] Session ${session.id.slice(0, 8)} idle ${Math.round(idleMs / 1000)}s >= hard ${Math.round(hardMs / 1000)}s → deep sleep (soft disabled)`)
-        this.pushLog(session.id, `[Sleep] Idle for ${Math.round(idleMs / 60000)}min — entering deep sleep (timeout: ${Math.round(hardMs / 60000)}min, soft sleep disabled)`)
-        await this.deepSleep(session.id)
       } else if (session.status === 'standby' && session.standbyDepth === 'soft' && hardMs > 0 && idleMs >= hardMs) {
         // In soft sleep and idle past hard timeout → deep sleep
         console.log(`[SLEEP] Session ${session.id.slice(0, 8)} idle ${Math.round(idleMs / 1000)}s >= hard ${Math.round(hardMs / 1000)}s → deep sleep`)

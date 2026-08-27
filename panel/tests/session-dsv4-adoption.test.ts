@@ -473,4 +473,28 @@ describe('DSV4 existing-engine adoption policy', () => {
       adoptedPid: live.pid,
     })
   })
+
+  it('deep-sleeps at the hard deadline when it is earlier than light sleep', async () => {
+    const modelPath = modelBundle('muse_glimmer')
+    const session = localSession('muse-sleep-order', modelPath, {
+      cacheStackStartupDefaultsVersion: CURRENT_CACHE_DEFAULTS_VERSION,
+      autoSleepEnabled: true,
+      idleTimeoutSoftMin: 10,
+      idleTimeoutHardMin: 1,
+    })
+    session.status = 'running'
+    session.lastRequestAt = Date.now() - 61_000
+    session.lastStartedAt = session.lastRequestAt
+    state.sessions = [session]
+
+    const manager = new SessionManager()
+    const deepSleep = vi.spyOn(manager, 'deepSleep').mockResolvedValue({ success: true })
+    const softSleep = vi.spyOn(manager, 'softSleep').mockResolvedValue({ success: true })
+
+    await (manager as any).checkIdleSessions()
+
+    expect(deepSleep).toHaveBeenCalledOnce()
+    expect(deepSleep).toHaveBeenCalledWith(session.id)
+    expect(softSleep).not.toHaveBeenCalled()
+  })
 })

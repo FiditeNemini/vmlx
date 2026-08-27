@@ -28,36 +28,69 @@ class Model(Qwen3VLModel):
         pixel_values_videos: Optional[mx.array] = None,
         **kwargs,
     ):
-        if pixel_values is None:
-            pixel_values = pixel_values_videos
         image_grid_thw = kwargs.get("image_grid_thw")
         video_grid_thw = kwargs.get("video_grid_thw")
         mask = kwargs.get("mask")
-        grid_thw = image_grid_thw if image_grid_thw is not None else video_grid_thw
         inputs_embeds = self.language_model.model.embed_tokens(input_ids)
 
-        if pixel_values is None:
+        if pixel_values is None and pixel_values_videos is None:
             self.language_model._position_ids = None
             self.language_model._rope_deltas = None
             return InputEmbeddingsFeatures(inputs_embeds=inputs_embeds)
 
         dtype = self.vision_tower.patch_embed.proj.weight.dtype
-        hidden_states = kwargs.get("cached_image_features")
-        if hidden_states is None:
-            hidden_states, _ = self.vision_tower(pixel_values.astype(dtype), grid_thw)
-        inputs_embeds, _ = self.merge_input_ids_with_image_features(
-            hidden_states,
-            inputs_embeds,
-            input_ids,
-            self.config.image_token_index,
-            self.config.video_token_index,
-        )
+        if pixel_values is not None:
+            image_features = (
+                kwargs.get("cached_image_features")
+                if pixel_values_videos is None
+                else None
+            )
+            if image_features is None:
+                image_features, _ = self.vision_tower(
+                    pixel_values.astype(dtype), image_grid_thw
+                )
+            inputs_embeds = self._scatter_media_features(
+                image_features,
+                inputs_embeds,
+                input_ids,
+                self.config.image_token_index,
+                "image",
+            )
+        if pixel_values_videos is not None:
+            video_features, _ = self.vision_tower(
+                pixel_values_videos.astype(dtype), video_grid_thw
+            )
+            inputs_embeds = self._scatter_media_features(
+                video_features,
+                inputs_embeds,
+                input_ids,
+                self.config.video_token_index,
+                "video",
+            )
         position_ids, rope_deltas = self.language_model.get_rope_index(
             input_ids, image_grid_thw, video_grid_thw, mask
         )
         self.language_model._position_ids = position_ids
         self.language_model._rope_deltas = rope_deltas
         return InputEmbeddingsFeatures(inputs_embeds=inputs_embeds)
+
+    @staticmethod
+    def _scatter_media_features(
+        media_features,
+        inputs_embeds,
+        input_ids,
+        token_index,
+        modality,
+    ):
+        special_mask = input_ids == token_index
+        n_tokens = special_mask.sum()
+        expanded = mx.broadcast_to(special_mask[..., None], inputs_embeds.shape)
+        if expanded.sum() != media_features.size:
+            raise ValueError(
+                f"{modality.capitalize()} features and {modality} tokens do not match: "
+                f"tokens={n_tokens}, features={media_features.shape[0]}"
+            )
+        return masked_scatter(inputs_embeds, expanded, media_features)
 
     @staticmethod
     def merge_input_ids_with_image_features(

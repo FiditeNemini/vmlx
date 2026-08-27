@@ -1302,6 +1302,7 @@ def test_qwen4_exp_video_pixels_reach_vision_tower_under_named_contract():
         config=SimpleNamespace(image_token_index=901, video_token_index=902),
         vision_tower=VisionTower(),
         language_model=LanguageModelStub(),
+        _scatter_media_features=Model._scatter_media_features,
         merge_input_ids_with_image_features=(
             lambda features, inputs_embeds, input_ids, image_token_index,
             video_token_index: (features, None)
@@ -1320,6 +1321,76 @@ def test_qwen4_exp_video_pixels_reach_vision_tower_under_named_contract():
     assert calls[0][1] is video_grid
     np.testing.assert_array_equal(
         np.asarray(result.inputs_embeds), np.asarray(video_features)
+    )
+
+
+def test_qwen4_exp_connected_image_video_history_encodes_both_modalities():
+    from types import SimpleNamespace
+
+    from vmlx_engine.models.qwen4_exp.qwen4_exp import Model
+
+    image_pixels = mx.array([[1.0, 2.0]], dtype=mx.float16)
+    video_pixels = mx.array([[3.0, 4.0]], dtype=mx.float16)
+    image_features = mx.array([[11.0, 12.0]], dtype=mx.float16)
+    video_features = mx.array([[21.0, 22.0]], dtype=mx.float16)
+    image_grid = mx.array([[1, 2, 2]], dtype=mx.int32)
+    video_grid = mx.array([[1, 2, 2]], dtype=mx.int32)
+    calls = []
+
+    class VisionTower:
+        patch_embed = SimpleNamespace(
+            proj=SimpleNamespace(weight=mx.zeros((1,), dtype=mx.float16))
+        )
+
+        def __call__(self, pixels, grid_thw):
+            calls.append((pixels, grid_thw))
+            if grid_thw is image_grid:
+                return image_features, None
+            if grid_thw is video_grid:
+                return video_features, None
+            raise AssertionError("media grid lost its modality owner")
+
+    class LanguageModelStub:
+        _position_ids = None
+        _rope_deltas = None
+        model = SimpleNamespace(
+            embed_tokens=lambda input_ids: mx.zeros(
+                (1, input_ids.shape[-1], 2), dtype=mx.float16
+            )
+        )
+
+        def get_rope_index(
+            self, input_ids, image_grid_thw, video_grid_thw, mask
+        ):
+            assert image_grid_thw is image_grid
+            assert video_grid_thw is video_grid
+            return mx.zeros((3, 1, 3), dtype=mx.int32), mx.zeros(
+                (1, 1), dtype=mx.int32
+            )
+
+    wrapper = SimpleNamespace(
+        config=SimpleNamespace(image_token_index=901, video_token_index=902),
+        vision_tower=VisionTower(),
+        language_model=LanguageModelStub(),
+        _scatter_media_features=Model._scatter_media_features,
+    )
+    result = Model.get_input_embeddings(
+        wrapper,
+        input_ids=mx.array([[901, 17, 902]], dtype=mx.int32),
+        pixel_values=image_pixels,
+        pixel_values_videos=video_pixels,
+        image_grid_thw=image_grid,
+        video_grid_thw=video_grid,
+        cached_image_features=mx.full((1, 2), 99.0, dtype=mx.float16),
+    )
+    mx.eval(result.inputs_embeds)
+
+    assert len(calls) == 2
+    np.testing.assert_array_equal(np.asarray(calls[0][0]), np.asarray(image_pixels))
+    np.testing.assert_array_equal(np.asarray(calls[1][0]), np.asarray(video_pixels))
+    np.testing.assert_array_equal(
+        np.asarray(result.inputs_embeds),
+        np.asarray([[[11.0, 12.0], [0.0, 0.0], [21.0, 22.0]]], dtype=np.float16),
     )
 
 

@@ -6862,6 +6862,16 @@ class Scheduler:
         Returns:
             True if request was found and aborted, False otherwise
         """
+        # PLD owns two request-keyed token-history structures.  Normal
+        # completion and cache-error rescheduling already drop them, but the
+        # abort path (client disconnect, cancellation, or engine error) used
+        # to return without doing so.  In a long-lived server every aborted
+        # long-context request therefore retained its complete n-gram index.
+        # Purge before the idempotence check so a repeated cleanup can also
+        # repair state left by an older/incomplete abort.
+        self._pld_pending.pop(request_id, None)
+        self._pld_ngram_indices.pop(request_id, None)
+
         request = self.requests.pop(request_id, None)
         if request is None:
             return False

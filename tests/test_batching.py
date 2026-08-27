@@ -25,6 +25,7 @@ from vmlx_engine.scheduler import (
     SchedulingPolicy,
 )
 from vmlx_engine.paged_cache import BlockTable
+from vmlx_engine.prompt_lookup import NgramIndex
 
 
 class TestRequest:
@@ -830,6 +831,31 @@ class TestSchedulerBasic:
         assert result is True
         assert scheduler.get_num_waiting() == 0
         assert "test-1" in scheduler.finished_req_ids
+
+    def test_abort_releases_request_scoped_pld_history(
+        self, mock_model, mock_tokenizer
+    ):
+        """Disconnect/cancel must not retain a long request's n-gram history."""
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        request = Request(
+            request_id="pld-abort",
+            prompt="Hello",
+            sampling_params=SamplingParams(),
+        )
+        scheduler.add_request(request)
+        scheduler._pld_pending[request.request_id] = ([1, 2, 3], 0, 0)
+        scheduler._pld_ngram_indices[request.request_id] = NgramIndex()
+
+        assert scheduler.abort_request(request.request_id) is True
+        assert request.request_id not in scheduler._pld_pending
+        assert request.request_id not in scheduler._pld_ngram_indices
+
+        # Idempotent abort also scrubs stale state left by an older process.
+        scheduler._pld_pending[request.request_id] = ([4, 5, 6], 0, 0)
+        scheduler._pld_ngram_indices[request.request_id] = NgramIndex()
+        assert scheduler.abort_request(request.request_id) is False
+        assert request.request_id not in scheduler._pld_pending
+        assert request.request_id not in scheduler._pld_ngram_indices
 
     def test_abort_nonexistent_request(self, mock_model, mock_tokenizer):
         """Test aborting non-existent request."""

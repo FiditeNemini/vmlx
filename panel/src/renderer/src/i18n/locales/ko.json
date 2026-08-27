@@ -983,7 +983,7 @@
       "nativeMtpDeterministicNote": "명시적 결정론 모드는 모든 API/채팅 요청에 greedy 샘플링을 강제합니다. 깊이는 아래에서 별도로 제어됩니다. 요청별 샘플링 값을 유지하려면 Off를 선택하세요.",
       "nativeMtpMode": "네이티브 MTP 모드",
       "nativeMtpModeTooltip": "MTP 헤드가 있는 번들에서는 Auto와 Deterministic 모두 greedy 샘플링(온도 0)을 고정합니다. 깊이 정책은 아래에서 별도로 제어됩니다. Off는 MTP를 비활성화합니다.",
-      "mtpAutoBundleDefaults": "자동 (번들 기본값)",
+      "mtpAutoBundleDefaults": "자동 (감지된 MTP)",
       "mtpDeterministicOverride": "결정론적 재정의",
       "nativeMtpDepth": "네이티브 MTP 깊이",
       "nativeMtpDepthTooltip": "MTP 검증 주기당 드래프트 토큰 수입니다. 적응형은 측정 깊이에서 시작하고 고정형은 도구 없는 요청에서 선택한 깊이를 유지합니다.",

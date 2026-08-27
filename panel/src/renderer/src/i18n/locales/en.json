@@ -983,7 +983,7 @@
       "nativeMtpDeterministicNote": "Explicit deterministic mode enforces greedy sampling for every API/chat request. Depth is controlled separately below. Choose Off if per-request sampled values must remain authoritative.",
       "nativeMtpMode": "Native MTP Mode",
       "nativeMtpModeTooltip": "Auto and Deterministic both pin greedy sampling (temperature 0) for bundles that carry MTP heads, because MTP only runs on greedy requests. Depth policy is controlled separately below. Off disables the in-model MTP runtime and restores the bundle's own sampling defaults.",
-      "mtpAutoBundleDefaults": "Auto (bundle defaults)",
+      "mtpAutoBundleDefaults": "Auto (detected MTP)",
       "mtpDeterministicOverride": "Deterministic override",
       "nativeMtpDepth": "Native MTP Depth",
       "nativeMtpDepthTooltip": "Number of tokens drafted per native-MTP verification cycle. Adaptive starts from the model-local measured depth; Fixed keeps the exact selected depth for non-tool requests.",

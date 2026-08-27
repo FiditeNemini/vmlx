@@ -983,7 +983,7 @@
       "nativeMtpDeterministicNote": "El modo determinista explícito impone muestreo greedy para cada solicitud API/chat. La profundidad se controla por separado. Elige Off para conservar valores de muestreo por solicitud.",
       "nativeMtpMode": "Modo MTP nativo",
       "nativeMtpModeTooltip": "Auto y Deterministic fijan el muestreo greedy (temperatura 0) para bundles con cabezas MTP. La política de profundidad se controla por separado. Off desactiva el runtime MTP y restaura el muestreo propio del bundle.",
-      "mtpAutoBundleDefaults": "Auto (predeterminados del bundle)",
+      "mtpAutoBundleDefaults": "Auto (MTP detectado)",
       "mtpDeterministicOverride": "Override determinista",
       "nativeMtpDepth": "Profundidad MTP nativa",
       "nativeMtpDepthTooltip": "Número de tokens borrador por ciclo de verificación MTP. Adaptativa comienza con la profundidad medida; Fija mantiene la profundidad exacta en solicitudes sin herramientas.",

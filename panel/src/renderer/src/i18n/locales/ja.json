@@ -983,7 +983,7 @@
       "nativeMtpDeterministicNote": "明示的な決定論モードはすべての API/チャット要求で greedy サンプリングを強制します。深度は下で個別に制御されます。要求ごとのサンプリング値を使う場合は Off を選択してください。",
       "nativeMtpMode": "ネイティブ MTP モード",
       "nativeMtpModeTooltip": "MTP ヘッドを持つバンドルでは Auto と Deterministic のどちらも greedy サンプリング（温度 0）に固定します。深度ポリシーは下で個別に制御します。Off は MTP を無効にします。",
-      "mtpAutoBundleDefaults": "自動 (バンドル既定)",
+      "mtpAutoBundleDefaults": "自動 (検出された MTP)",
       "mtpDeterministicOverride": "決定論的オーバーライド",
       "nativeMtpDepth": "ネイティブ MTP 深度",
       "nativeMtpDepthTooltip": "MTP 検証サイクルごとのドラフトトークン数。適応は測定済み深度から開始し、固定はツールなしリクエストで選択深度を維持します。",

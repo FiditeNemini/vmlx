@@ -983,7 +983,7 @@
       "nativeMtpDeterministicNote": "显式确定性模式会为每个 API/聊天请求强制 greedy 采样。深度在下方单独控制。如需保留每请求的采样值，请选择 Off。",
       "nativeMtpMode": "原生 MTP 模式",
       "nativeMtpModeTooltip": "对于带有 MTP 头的 bundle，Auto 与 Deterministic 都会固定 greedy 采样（温度 0）。深度策略在下方单独控制。Off 会禁用 MTP。",
-      "mtpAutoBundleDefaults": "自动 (bundle 默认)",
+      "mtpAutoBundleDefaults": "自动 (检测到的 MTP)",
       "mtpDeterministicOverride": "确定性覆盖",
       "nativeMtpDepth": "原生 MTP 深度",
       "nativeMtpDepthTooltip": "每个 MTP 验证周期起草的 token 数。自适应从模型实测深度开始；固定在无工具请求中保持所选精确深度。",

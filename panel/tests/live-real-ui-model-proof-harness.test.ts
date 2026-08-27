@@ -6049,7 +6049,7 @@ describe("native MTP surface / engine parity", () => {
       nativeMtpControl: {
         labelVisible: true,
         labelText:
-          "Native MTP Mode ? Auto (bundle defaults) Deterministic override Off",
+          "Native MTP Mode ? Auto (detected MTP) Deterministic override Off",
         modeSelectPresent: true,
         selectedMode: "auto",
         modeOptions: ["auto", "deterministic", "off"],

@@ -146,6 +146,51 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     })
   })
 
+  it('uses embedded Qwen4Exp JANG metadata and hides MTP when the head is absent', () => {
+    const dir = makeModelDir({
+      model_type: 'qwen4_exp',
+      text_config: {
+        model_type: 'qwen4_exp_text',
+        max_position_embeddings: 262144,
+        mtp_num_hidden_layers: 1,
+      },
+      vision_config: { model_type: 'qwen4_exp' },
+      jang_config: {
+        format: 'jang_v2',
+        mtp: { mtp_mode: 'none' },
+        capabilities: {
+          tool_parser: 'hermes',
+          reasoning_parser: 'qwen3',
+          supports_thinking: true,
+          has_vision: true,
+          has_video: true,
+          has_audio: false,
+        },
+        reasoning: {
+          default: 'on',
+          default_reasoning_effort: 'xhigh',
+        },
+      },
+    })
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model-00001-of-00019.safetensors',
+        'vision_tower.patch_embed.proj.weight': 'model-00019-of-00019.safetensors',
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected).toMatchObject({
+      family: 'qwen4-exp',
+      toolParser: 'hermes',
+      reasoningParser: 'qwen3',
+      supportsThinking: true,
+      isMultimodal: true,
+    })
+    expect(detected.nativeMtp).toBeUndefined()
+  })
+
   it('detects Nemotron Omni media from its sidecar and matching component tensors', () => {
     const dir = makeModelDir(
       {

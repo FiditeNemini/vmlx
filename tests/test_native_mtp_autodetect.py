@@ -66,6 +66,42 @@ def _write_qwen36_jang_mtp_bundle(path):
     )
 
 
+def test_qwen4_exp_embedded_no_mtp_stamp_overrides_nested_architecture_hint(tmp_path):
+    from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "text_config": {
+                    "model_type": "qwen4_exp_text",
+                    "mtp_num_hidden_layers": 1,
+                },
+                "jang_config": {
+                    "mtp": {"mtp_mode": "none"},
+                    "capabilities": {"family": "qwen4_exp"},
+                },
+            }
+        )
+    )
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"model.embed_tokens.weight": "model.safetensors"}}
+        )
+    )
+
+    status = inspect_native_mtp_bundle(tmp_path)
+
+    assert status["status"] == "dropped"
+    assert status["runtime_available"] is False
+    assert status["runtime_active"] is False
+    assert status["runtime_bundle_has_mtp"] is False
+    assert status["runtime_mtp_mode"] == "none"
+    assert status["index_has_mtp_tensors"] is False
+    assert status["runtime_reason"] == "jang_config.mtp.mtp_mode=none"
+    assert status["issues"] == []
+
+
 def _write_minimax_m3_eagle3_bundle(path):
     (path / "config.json").write_text(
         json.dumps(

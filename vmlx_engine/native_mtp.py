@@ -63,7 +63,18 @@ def _read_json(bundle_path: str | Path | None, name: str) -> dict[str, Any]:
     try:
         path = Path(bundle_path) / name
         if not path.is_file():
-            return {}
+            if name != "jang_config.json":
+                return {}
+            config_path = Path(bundle_path) / "config.json"
+            if not config_path.is_file():
+                return {}
+            config = json.loads(config_path.read_text())
+            if not isinstance(config, dict):
+                return {}
+            embedded = config.get("jang_config")
+            if embedded is None:
+                embedded = config.get("jang")
+            return embedded if isinstance(embedded, dict) else {}
         data = json.loads(path.read_text())
         return data if isinstance(data, dict) else {}
     except Exception:
@@ -734,17 +745,28 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         )
 
     mtp_sidecar = jang_cfg.get("mtp") if isinstance(jang_cfg.get("mtp"), dict) else {}
+    stamped_mtp_mode = str(mtp_sidecar.get("mtp_mode") or "").strip().lower()
+    stamped_mtp_absent = stamped_mtp_mode in {"none", "absent", "disabled", "off"}
     if mtp_sidecar.get("enabled") is False or mtp_sidecar.get("kept") is False:
+        drop_mtp = True
+    if stamped_mtp_absent:
         drop_mtp = True
     runtime_sidecar = (
         jang_cfg.get("runtime") if isinstance(jang_cfg.get("runtime"), dict) else {}
     )
     runtime_bundle_has_mtp = runtime_sidecar.get("bundle_has_mtp")
-    runtime_mtp_mode = runtime_sidecar.get("mtp_mode")
+    if runtime_bundle_has_mtp is None and stamped_mtp_absent:
+        runtime_bundle_has_mtp = False
+    runtime_mtp_mode = runtime_sidecar.get("mtp_mode") or (
+        stamped_mtp_mode if stamped_mtp_mode else None
+    )
     runtime_declares_dropped_mtp = (
         runtime_bundle_has_mtp is False
         and isinstance(runtime_mtp_mode, str)
-        and "drop" in runtime_mtp_mode.lower()
+        and (
+            "drop" in runtime_mtp_mode.lower()
+            or runtime_mtp_mode.lower() in {"none", "absent", "disabled", "off"}
+        )
     )
     openpangu_included_mtp_runtime_unwired = (
         _normalize_family(family) == "openpangu_v2"
@@ -873,7 +895,9 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     elif drop_mtp is True:
         status = "dropped"
         runtime_reason = (
-            "jang_config.runtime.bundle_has_mtp=false"
+            "jang_config.mtp.mtp_mode=" + stamped_mtp_mode
+            if stamped_mtp_absent
+            else "jang_config.runtime.bundle_has_mtp=false"
             if runtime_declares_dropped_mtp
             else "jang_config.drop_mtp=true"
         )

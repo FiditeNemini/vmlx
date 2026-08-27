@@ -758,6 +758,43 @@ def test_jang_chat_sampling_overrides_generation_config_do_sample_false(
     assert server._resolve_top_k(None) == 64
 
 
+def test_embedded_jang_chat_sampling_overrides_are_used(tmp_path, monkeypatch):
+    """Qwen4Exp embeds its complete JANG contract in config.json."""
+    import json
+    from vmlx_engine import server
+
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "qwen4_exp",
+        "jang_config": {
+            "chat": {
+                "sampling_defaults": {
+                    "temperature": 1.0,
+                    "top_p": 0.95,
+                    "top_k": 20,
+                }
+            }
+        },
+    }))
+    (tmp_path / "generation_config.json").write_text(json.dumps({
+        "do_sample": True,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 40,
+    }))
+
+    monkeypatch.setattr(server, "_model_path", str(tmp_path))
+    monkeypatch.setattr(server, "_model_name", "qwen4-exp")
+    monkeypatch.setattr(server, "_default_temperature", None)
+    monkeypatch.setattr(server, "_default_top_p", None)
+    monkeypatch.setattr(server, "_default_top_k", None)
+    server._jang_sampling_defaults_cache.clear()
+    server._generation_defaults_cache.clear()
+
+    assert server._resolve_temperature(None) == 1.0
+    assert server._resolve_top_p(None) == 0.95
+    assert server._resolve_top_k(None) == 20
+
+
 @pytest.mark.parametrize("model_type", ["bailing_hybrid", "bailing_moe_v2_5"])
 def test_ling_suppresses_reasoning_parser_and_stale_think_in_template(
     tmp_path, monkeypatch, model_type

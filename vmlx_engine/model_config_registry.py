@@ -526,23 +526,17 @@ class ModelConfigRegistry:
         Qwen3.6 VLM wrapper stamped "family": "qwen3_5_moe" from the outside
         even though inner text_config.model_type = "qwen3_5_moe_text").
 
-        Returns None if there's no jang_config.json or no capabilities block.
+        Returns None if neither a sidecar nor embedded JANG metadata contains a
+        capabilities block.
         """
         try:
             from pathlib import Path
             import json
-            jcfg_path = Path(model_name) / "jang_config.json"
-            if not jcfg_path.is_file():
-                return None
-            try:
-                jcfg = json.loads(jcfg_path.read_text())
-            except Exception as exc:
-                raise RuntimeError(
-                    f"invalid authoritative JANG stamp {jcfg_path}: {exc}"
-                ) from exc
+            model_path = Path(model_name)
+            jcfg_path = model_path / "jang_config.json"
+            cfg_path = model_path / "config.json"
             local_model_config: dict[str, Any] = {}
             try:
-                cfg_path = Path(model_name) / "config.json"
                 if cfg_path.is_file():
                     loaded_cfg = json.loads(cfg_path.read_text())
                     if isinstance(loaded_cfg, dict):
@@ -550,6 +544,21 @@ class ModelConfigRegistry:
             except Exception as exc:
                 raise RuntimeError(
                     f"could not read config.json beside JANG stamp {jcfg_path}: {exc}"
+                ) from exc
+            try:
+                if jcfg_path.is_file():
+                    jcfg = json.loads(jcfg_path.read_text())
+                else:
+                    jcfg = local_model_config.get("jang_config")
+                    if jcfg is None:
+                        jcfg = local_model_config.get("jang")
+                    if jcfg is None:
+                        return None
+                if not isinstance(jcfg, dict):
+                    raise TypeError("JANG metadata must be an object")
+            except Exception as exc:
+                raise RuntimeError(
+                    f"invalid authoritative JANG stamp {jcfg_path}: {exc}"
                 ) from exc
             caps = jcfg.get("capabilities")
             if not isinstance(caps, dict):
@@ -609,13 +618,23 @@ class ModelConfigRegistry:
                     family = family_value.strip()
                     break
             if not family:
-                logger.warning(
-                    "JANG capabilities stamp %s has no family; ignoring the "
-                    "incomplete capabilities block and falling back to "
-                    "config.json architecture detection",
-                    jcfg_path,
-                )
-                return None
+                config_types = [
+                    str(local_model_config.get("model_type") or "").lower(),
+                    str((local_model_config.get("text_config") or {}).get("model_type") or "").lower(),
+                ]
+                for candidate in self._configs:
+                    aliases = {str(value).lower() for value in candidate.model_types}
+                    if any(value and value in aliases for value in config_types):
+                        family = candidate.family_name
+                        break
+                if not family:
+                    logger.warning(
+                        "JANG capabilities stamp %s has no family and config.json "
+                        "does not map to a registered family; ignoring the "
+                        "incomplete capabilities block",
+                        jcfg_path,
+                    )
+                    return None
 
             # Start from an existing family config if the stamp's family name
             # matches one we know OR if the stamped family is actually a

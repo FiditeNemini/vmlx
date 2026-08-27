@@ -86,6 +86,26 @@ def _load_runtime_config(
     runtime_config, affine1_modules = prepare_affine1_runtime_config(
         config, jang_config
     )
+    mtp = jang_config.get("mtp") if isinstance(jang_config.get("mtp"), dict) else {}
+    mtp_mode = str(mtp.get("mtp_mode") or "").strip().lower()
+    if mtp_mode in {"none", "absent", "disabled", "off"}:
+        # Upstream Qwen4Exp configs describe the architecture that was trained,
+        # so ``text_config.mtp_num_hidden_layers`` may remain non-zero after a
+        # converter intentionally omits the optional head.  The emitted bundle
+        # contract is authoritative for construction.  Keep strict=True below:
+        # if a bundle stamps no MTP but still contains mtp.* tensors, loading
+        # must fail on those unexpected weights instead of silently discarding
+        # them.
+        runtime_config = copy.deepcopy(runtime_config)
+        for container in (
+            runtime_config,
+            runtime_config.get("text_config"),
+        ):
+            if not isinstance(container, dict):
+                continue
+            for key in ("mtp_num_hidden_layers", "num_nextn_predict_layers"):
+                if key in container:
+                    container[key] = 0
     raw_bit_map = jang_config.get("bit_map")
     if raw_bit_map is None:
         return runtime_config, affine1_modules, None, True

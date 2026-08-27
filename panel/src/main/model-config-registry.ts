@@ -1167,7 +1167,13 @@ function detectNativeMtpCapability(
   modelPath: string,
 ): DetectedConfig['nativeMtp'] | undefined {
   if (!parsedConfig || typeof parsedConfig !== 'object') return undefined
-  if (jangCfg?.drop_mtp === true || jangCfg?.mtp?.enabled === false || jangCfg?.mtp?.kept === false) {
+  const stampedMtpMode = String(jangCfg?.mtp?.mtp_mode ?? '').trim().toLowerCase()
+  if (
+    jangCfg?.drop_mtp === true ||
+    jangCfg?.mtp?.enabled === false ||
+    jangCfg?.mtp?.kept === false ||
+    ['none', 'absent', 'disabled', 'off'].includes(stampedMtpMode)
+  ) {
     return undefined
   }
   // Adding a family here is what makes the Native MTP control EXIST for it.
@@ -1839,7 +1845,10 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
             if (configMarksTurboQuant(parsed)) {
               detected.isTurboQuant = true
             }
-            // JANG model detection: read jang_config.json for VLM
+            // JANG model detection: prefer the sidecar, then the exact
+            // embedded stamp. Qwen4Exp JANG bundles intentionally embed their
+            // full contract in config.json so copying the 51B PLE table never
+            // depends on a separately drifting metadata file.
             const jangConfigPath = join(modelPath, 'jang_config.json')
             let parsedJangConfig: any
             if (existsSync(jangConfigPath)) {
@@ -1873,6 +1882,14 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
                 detected.isMultimodal = true
               }
             }
+          } else if (parsed?.jang_config && typeof parsed.jang_config === 'object') {
+            parsedJangConfig = parsed.jang_config
+            detected = applyJangCapabilities(detected, parsedJangConfig)
+            detected.isMultimodal = resolveJangMultimodal(parsedJangConfig, parsed, modelPath)
+          } else if (parsed?.jang && typeof parsed.jang === 'object') {
+            parsedJangConfig = parsed.jang
+            detected = applyJangCapabilities(detected, parsedJangConfig)
+            detected.isMultimodal = resolveJangMultimodal(parsedJangConfig, parsed, modelPath)
           } else if (configDeclaresMedia(parsed)) {
             detected.isMultimodal = true
           }

@@ -44,10 +44,9 @@ def test_out_of_set_high_coerces_to_nearest_stamped_tier(stamped, caplog):
     chat, ct = {}, {"reasoning_effort": "high"}
     with caplog.at_level(logging.WARNING):
         server._apply_stamped_effort_policy(chat, ct, model_key="/tmp/bundle")
-    # "high" sits between medium and xhigh on the ladder; nearest stamped
-    # tier at equal distance resolves to the lower one (min is stable), and
-    # either way the substitution is LOGGED — never silent.
-    assert ct["reasoning_effort"] in {"medium", "xhigh"}
+    # "high" sits between medium and xhigh on the ladder. At equal distance,
+    # the high-tier API intent resolves upward to Qwen4Exp's xhigh spelling.
+    assert ct["reasoning_effort"] == "xhigh"
     assert chat["reasoning_effort"] == ct["reasoning_effort"]
     assert any(
         "not in this bundle's stamped set" in rec.message for rec in caplog.records
@@ -107,6 +106,29 @@ def test_unstamped_bundle_is_untouched(monkeypatch):
     assert "reasoning_effort" not in chat
 
 
+def test_embedded_qwen38_effort_stamp_is_authoritative(tmp_path):
+    import json
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "jang_config": {
+                    "reasoning": {
+                        "supported_reasoning_efforts": ["low", "medium", "xhigh"],
+                        "default_reasoning_effort": "xhigh",
+                    }
+                },
+            }
+        )
+    )
+
+    assert server._stamped_reasoning_effort_contract(str(tmp_path)) == (
+        ("low", "medium", "xhigh"),
+        "xhigh",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Responses-route surface (#175): the non-stream door serializes through
 # pydantic, so the additive records must survive model validation. The
@@ -144,7 +166,7 @@ def test_responses_object_carries_effort_substitution_additively():
 
     record = {
         "requested_effort": "high",
-        "effective_effort": "medium",
+        "effective_effort": "xhigh",
         "stamped_levels": ["low", "medium", "xhigh"],
     }
     obj = ResponsesObject(model="m", effort_substitution=record)
@@ -169,11 +191,11 @@ def test_policy_with_request_id_feeds_responses_finalize_pop(monkeypatch):
     server._apply_stamped_effort_policy(
         chat, ct, model_key="/tmp/bundle", request_id="resp_deadbeef0001"
     )
-    assert ct["reasoning_effort"] == "medium"
+    assert ct["reasoning_effort"] == "xhigh"
     record = pop_effort_substitution("resp_deadbeef0001")
     assert record == {
         "requested_effort": "high",
-        "effective_effort": "medium",
+        "effective_effort": "xhigh",
         "stamped_levels": ["low", "medium", "xhigh"],
     }
     # pop cleared it — the finalize surface consumes exactly once

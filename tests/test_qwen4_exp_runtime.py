@@ -503,6 +503,46 @@ def test_qwen4_exp_embedded_jang_bit_map_becomes_runtime_quantization(tmp_path):
     ) == {"bits": 4, "group_size": 64, "mode": "affine"}
 
 
+def test_qwen4_exp_embedded_no_mtp_stamp_disables_architecture_placeholder(tmp_path):
+    import json
+
+    from vmlx_engine.models.qwen4_exp.loader import _load_runtime_config
+
+    embedded = {
+        "format": "jang_v2",
+        "norm_convention": "runtime_plus1_applied",
+        "mtp": {"mtp_mode": "none"},
+        "bit_map": {
+            "default": {"bits": 4, "group_size": 64},
+            "mtp.": {"bits": 4, "group_size": 64},
+        },
+    }
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "mtp_num_hidden_layers": 1,
+                "num_nextn_predict_layers": 1,
+                "text_config": {
+                    "model_type": "qwen4_exp_text",
+                    "mtp_num_hidden_layers": 1,
+                    "num_nextn_predict_layers": 1,
+                },
+                "jang_config": embedded,
+            }
+        )
+    )
+
+    runtime, _affine1, bit_map, sanitized = _load_runtime_config(tmp_path)
+
+    assert sanitized is True
+    assert bit_map == embedded["bit_map"]
+    assert runtime["mtp_num_hidden_layers"] == 0
+    assert runtime["num_nextn_predict_layers"] == 0
+    assert runtime["text_config"]["mtp_num_hidden_layers"] == 0
+    assert runtime["text_config"]["num_nextn_predict_layers"] == 0
+
+
 def test_qwen4_exp_jang_metadata_and_bit_map_conflicts_fail_closed(tmp_path):
     import json
 

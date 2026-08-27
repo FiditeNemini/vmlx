@@ -2185,16 +2185,10 @@ def _jang_chat_sampling_default(model_name: str, key: str) -> float | None:
     cache = _jang_sampling_defaults_cache
     if model_name not in cache:
         try:
-            from pathlib import Path as _P
-            import json as _json
-            _p = _P(model_name) / "jang_config.json"
-            if _p.is_file():
-                _doc = _json.loads(_p.read_text())
-                _chat = _doc.get("chat") or {}
-                _sd = _chat.get("sampling_defaults") or {}
-                cache[model_name] = _sd if isinstance(_sd, dict) else {}
-            else:
-                cache[model_name] = {}
+            _doc = _read_bundle_json(model_name, "jang_config.json")
+            _chat = _doc.get("chat") or {}
+            _sd = _chat.get("sampling_defaults") or {}
+            cache[model_name] = _sd if isinstance(_sd, dict) else {}
         except Exception:
             cache[model_name] = {}
     val = cache[model_name].get(key)
@@ -2263,12 +2257,7 @@ def _jang_chat_default_mode(bundle_path: str) -> str | None:
     if not bundle_path:
         return None
     try:
-        from pathlib import Path as _P
-        _p = _P(bundle_path) / "jang_config.json"
-        if not _p.exists():
-            return None
-        import json as _json
-        d = _json.loads(_p.read_text())
+        d = _read_bundle_json(bundle_path, "jang_config.json")
         m = d.get("chat", {}).get("reasoning", {}).get("default_mode")
         return m if isinstance(m, str) else None
     except Exception:
@@ -2932,7 +2921,14 @@ def _apply_stamped_effort_policy(
             if level in _EFFORT_LADDER
         )
         if ranked_levels:
-            coerced = min(ranked_levels, key=lambda t: abs(t[0] - rank))[1]
+            # Equal-distance aliases resolve upward. A generic API `high` sent
+            # to Qwen4Exp's low/medium/xhigh contract means the high tier, not
+            # an accidental downgrade to medium merely because stable sort
+            # encountered it first.
+            coerced = min(
+                ranked_levels,
+                key=lambda t: (abs(t[0] - rank), -t[0]),
+            )[1]
     if coerced is None:
         coerced = stamped_default or levels[-1]
     logger.warning(
@@ -9047,6 +9043,17 @@ def _read_bundle_json(bundle_path: str | None, filename: str) -> dict:
 
         path = Path(bundle_path) / filename
         if not path.is_file():
+            if filename == "jang_config.json":
+                config_path = Path(bundle_path) / "config.json"
+                if not config_path.is_file():
+                    return {}
+                config = json.loads(config_path.read_text())
+                if not isinstance(config, dict):
+                    return {}
+                embedded = config.get("jang_config")
+                if embedded is None:
+                    embedded = config.get("jang")
+                return embedded if isinstance(embedded, dict) else {}
             return {}
         data = json.loads(path.read_text())
         return data if isinstance(data, dict) else {}

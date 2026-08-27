@@ -2375,6 +2375,44 @@ class TestModelConfigComprehensiveChecks:
             "reasoning."
         )
 
+    def test_qwen4_exp_embedded_stamp_controls_bundle_parsers(self, registry, tmp_path):
+        import json
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen4_exp",
+                    "text_config": {"model_type": "qwen4_exp_text"},
+                    "vision_config": {"model_type": "qwen4_exp"},
+                    "jang_config": {
+                        "format": "jang_v2",
+                        "mtp": {"mtp_mode": "none"},
+                        "capabilities": {
+                            "tool_parser": "hermes",
+                            "reasoning_parser": "qwen3",
+                            "supports_thinking": True,
+                            "has_vision": True,
+                            "has_video": True,
+                            "has_audio": False,
+                        },
+                        "reasoning": {
+                            "default": "on",
+                            "default_reasoning_effort": "xhigh",
+                        },
+                    },
+                }
+            )
+        )
+
+        registry.clear_cache()
+        config = registry.lookup(str(tmp_path))
+
+        assert config.family_name == "qwen4_exp"
+        assert config.tool_parser == "hermes"
+        assert config.reasoning_parser == "qwen3"
+        assert config.supports_thinking is True
+        assert config.is_mllm is True
+
     def test_mimo_v2_jang_stamp_rejects_stale_non_xml_tool_parser_claim(self, registry, tmp_path):
         import json
 

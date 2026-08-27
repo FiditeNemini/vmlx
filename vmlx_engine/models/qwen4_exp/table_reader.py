@@ -52,6 +52,7 @@ def resolve_jang_bit_map_spec(
         str(module_path),
         str(module_path).replace("language_model.model", "language_model", 1),
         str(module_path).replace("language_model.mtp", "mtp", 1),
+        str(module_path).replace("language_model.lm_head", "lm_head", 1),
     ]
     aliases.extend(f"{alias}.weight" for alias in tuple(aliases))
     aliases = list(dict.fromkeys(aliases))

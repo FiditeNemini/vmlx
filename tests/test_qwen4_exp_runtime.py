@@ -474,6 +474,7 @@ def test_qwen4_exp_embedded_jang_bit_map_becomes_runtime_quantization(tmp_path):
                 "group_size": 32,
             },
             "mtp.": {"bits": 4, "group_size": 64},
+            "lm_head": {"bits": 6, "group_size": 64},
         },
         "quantization": {"calibrated": True},
     }
@@ -501,6 +502,9 @@ def test_qwen4_exp_embedded_jang_bit_map_becomes_runtime_quantization(tmp_path):
     assert resolve_jang_bit_map_spec(
         "language_model.mtp.layers.0.self_attn.q_proj", bit_map
     ) == {"bits": 4, "group_size": 64, "mode": "affine"}
+    assert resolve_jang_bit_map_spec(
+        "language_model.lm_head", bit_map
+    ) == {"bits": 6, "group_size": 64, "mode": "affine"}
 
 
 def test_qwen4_exp_embedded_no_mtp_stamp_disables_architecture_placeholder(tmp_path):
@@ -595,6 +599,7 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
             "group_size": 64,
         },
         "mtp.": {"bits": 4, "group_size": 64},
+        "lm_head": {"bits": 6, "group_size": 64},
     }
     captured = {}
 
@@ -608,6 +613,7 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
         {
             "language_model.layers.3.mlp.switch_mlp.down_proj.scales": mx.ones(1),
             "mtp.layers.0.self_attn.q_proj.scales": mx.ones(1),
+            "language_model.lm_head.scales": mx.ones(1),
             "language_model.model.layers.3.mlp.gate.scales": mx.ones(1),
         },
         bit_map,
@@ -619,6 +625,11 @@ def test_qwen4_exp_embedded_bit_map_drives_model_quantizer(monkeypatch):
     ) == {"bits": 4, "group_size": 64, "mode": "affine"}
     assert predicate("language_model.mtp.layers.0.self_attn.q_proj", object()) == {
         "bits": 4,
+        "group_size": 64,
+        "mode": "affine",
+    }
+    assert predicate("language_model.lm_head", object()) == {
+        "bits": 6,
         "group_size": 64,
         "mode": "affine",
     }

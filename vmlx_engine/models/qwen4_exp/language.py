@@ -1159,6 +1159,12 @@ class QSAAttention(nn.Module):
             offset=offset,
             position_ids=position_ids,
         )
+        if index_mask is not None and index_mask.dtype != queries.dtype:
+            # The indexer scores/selects in F32 for numerical stability, but
+            # MLX requires an additive SDPA mask that promotes to the Q/K/V
+            # output dtype. Keep the persisted sparse state in F32 and cast
+            # only the completed mask at the attention boundary.
+            index_mask = index_mask.astype(queries.dtype)
 
         # At single-token decode the cache contains no future keys, so the
         # causal mask is identically zero. Avoid allocating that F32 tensor.

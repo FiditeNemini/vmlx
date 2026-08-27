@@ -331,6 +331,33 @@ def test_qwen4_exp_qsa_selects_complete_blocks_and_keeps_off_boundary_tail():
     assert visible[-1]
 
 
+def test_qwen4_exp_qsa_sparse_masks_follow_float16_attention_dtype():
+    from mlx.utils import tree_map
+
+    args = _tiny_args()
+    model = LanguageModel(args)
+    _randomize(model)
+
+    def to_float16(parameter):
+        if parameter.dtype in (mx.int32, mx.int64, mx.uint32):
+            return parameter
+        return parameter.astype(mx.float16)
+
+    model.update(tree_map(to_float16, model.parameters()))
+    mx.eval(model.parameters())
+
+    ids = mx.array(np.arange(14, dtype=np.int32)[None, :] % args.vocab_size)
+    cache = model.make_cache()
+    prefill = model(ids[:, :13], cache=cache).logits
+    decode = model(ids[:, 13:], cache=cache).logits
+    mx.eval(prefill, decode)
+
+    assert prefill.dtype == mx.float16
+    assert decode.dtype == mx.float16
+    assert not np.isnan(np.asarray(prefill)).any()
+    assert not np.isnan(np.asarray(decode)).any()
+
+
 def test_qwen4_exp_qsa_and_ple_support_synchronous_batch_chunking():
     args = _tiny_args()
     model = LanguageModel(args)

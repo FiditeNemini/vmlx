@@ -1670,6 +1670,31 @@ def test_qwen4_exp_jang_runtime_compute_dtype_rejects_float32_target():
         _normalize_jang_runtime_compute_dtypes({}, object(), mx.float32)
 
 
+def test_qwen4_exp_runtime_dtype_audit_ignores_preserved_recurrent_state(caplog):
+    from vmlx_engine.models.qwen4_exp.loader import (
+        _warn_runtime_dtype_mismatches,
+    )
+
+    class RuntimeModel:
+        @staticmethod
+        def cast_predicate(path):
+            return not path.endswith(("A_log", "dt_bias"))
+
+        @staticmethod
+        def parameters():
+            return {
+                "projection": mx.ones((8, 8), dtype=mx.bfloat16),
+                "A_log": mx.ones((8,), dtype=mx.bfloat16),
+                "dt_bias": mx.ones((8,), dtype=mx.bfloat16),
+            }
+
+    caplog.set_level("WARNING", logger="vmlx_engine")
+    assert _warn_runtime_dtype_mismatches(RuntimeModel(), mx.float16) == 1
+    assert "projection=mlx.core.bfloat16" in caplog.text
+    assert "A_log" not in caplog.text
+    assert "dt_bias" not in caplog.text
+
+
 def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
     from vmlx_engine.models.qwen4_exp.language import (
         GatedResidual,

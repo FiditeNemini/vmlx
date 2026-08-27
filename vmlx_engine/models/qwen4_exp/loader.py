@@ -227,15 +227,17 @@ def _normalize_jang_runtime_compute_dtypes(
 
 
 def _warn_runtime_dtype_mismatches(model: nn.Module, target_dtype) -> int:
-    """Warn about floating parameters outside the loader-owned compute dtype."""
+    """Warn about cast-eligible parameters outside the runtime compute dtype."""
 
     try:
         from mlx.utils import tree_flatten
 
+        cast_predicate = getattr(model, "cast_predicate", lambda _path: True)
         mismatches = [
             (name, str(value.dtype))
             for name, value in tree_flatten(model.parameters())
             if value.dtype in {mx.float16, mx.bfloat16, mx.float32}
+            and cast_predicate(name)
             and value.dtype != target_dtype
         ]
     except Exception as exc:  # noqa: BLE001

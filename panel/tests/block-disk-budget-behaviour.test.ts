@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { finiteNonNegativeNumber } from '../src/shared/launchArgValues'
 import { DEFAULT_BLOCK_DISK_CACHE_PERCENT } from '../src/shared/cacheDefaults'
+import { buildCacheLaunchArgs } from '../src/shared/cacheLaunchArgs'
 
 /**
  * The SSD budget, tested as BEHAVIOUR rather than as source text.
@@ -95,7 +96,25 @@ describe('the launcher and the stored config agree', () => {
   }
 
   it('buildArgs guards the GB flag on > 0, not on != null', () => {
-    expect(sessions).toContain('blockDiskCacheMaxGb != null && blockDiskCacheMaxGb > 0')
+    const zero = buildCacheLaunchArgs({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      enableBlockDiskCache: true,
+      blockDiskCacheMaxGb: 0,
+      blockDiskCacheMaxPercent: 10,
+    }).args
+    const positive = buildCacheLaunchArgs({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      enableBlockDiskCache: true,
+      blockDiskCacheMaxGb: 40,
+      blockDiskCacheMaxPercent: 10,
+    }).args
+
+    expect(zero).not.toContain('--block-disk-cache-max-gb')
+    expect(positive).toContain('--block-disk-cache-max-gb')
+    expect(positive[positive.indexOf('--block-disk-cache-max-gb') + 1]).toBe('40')
+    expect(sessions).toContain('args.push(...cacheLaunch.args)')
   })
 
   it('no code path seeds a GB value nobody chose', () => {

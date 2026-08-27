@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'fs'
+import { buildCacheLaunchArgs } from '../src/shared/cacheLaunchArgs'
 
 /**
  * The SSD budget slider must reach the engine.
@@ -21,17 +22,31 @@ describe('block-disk budget percent reaches the engine argv', () => {
   const sessions = readFileSync('src/main/sessions.ts', 'utf-8')
 
   it('buildArgs emits --block-disk-cache-max-percent', () => {
-    expect(sessions).toContain("args.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())")
+    const { args } = buildCacheLaunchArgs({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      enableBlockDiskCache: true,
+      blockDiskCacheMaxPercent: 10,
+    })
+    expect(args).toContain('--block-disk-cache-max-percent')
+    expect(args[args.indexOf('--block-disk-cache-max-percent') + 1]).toBe('10')
+    expect(sessions).toContain('args.push(...cacheLaunch.args)')
   })
 
   it('emits the percent alongside the GB flag, not as an either/or', () => {
-    const gbIdx = sessions.indexOf("args.push('--block-disk-cache-max-gb', blockDiskCacheMaxGb.toString())")
-    const pctIdx = sessions.indexOf("args.push('--block-disk-cache-max-percent', blockDiskCacheMaxPercent.toString())")
+    const { args } = buildCacheLaunchArgs({
+      continuousBatching: true,
+      enablePrefixCache: true,
+      enableBlockDiskCache: true,
+      blockDiskCacheMaxGb: 40,
+      blockDiskCacheMaxPercent: 10,
+    })
+    const gbIdx = args.indexOf('--block-disk-cache-max-gb')
+    const pctIdx = args.indexOf('--block-disk-cache-max-percent')
     expect(gbIdx).toBeGreaterThan(-1)
     expect(pctIdx).toBeGreaterThan(gbIdx)
-    // Between them there must be no `else` — an else would mean a session
-    // carrying any GB value silently suppresses the percent.
-    expect(sessions.slice(gbIdx, pctIdx)).not.toMatch(/\belse\b/)
+    expect(args[gbIdx + 1]).toBe('40')
+    expect(args[pctIdx + 1]).toBe('10')
   })
 
   it('fresh configs seed NO GB value at all, so the percent owns the budget', () => {
@@ -91,14 +106,13 @@ describe('the v17 SSD-first default runs as a post-pass', () => {
     )
   })
 
-  it('exempts the families whose runtime policy contradicts SSD-only', () => {
+  it('retires paged RAM for every family while preserving openPangu disk format', () => {
     const fn = sessions.slice(
       sessions.indexOf('function applySsdFirstCacheDefaults('),
       sessions.indexOf('function applyCacheStackStartupDefaultMigration('),
     )
-    // Persisting a value the launcher overrules shows the checkbox Off while
-    // the engine runs the RAM tier.
-    expect(fn).toContain('isZayaCacheStackMigrationTarget')
+    expect(fn).toContain('config.usePagedCache = false')
+    expect(fn).not.toContain('isZayaCacheStackMigrationTarget')
     expect(fn).toContain("'openpangu_v2'")
   })
 })

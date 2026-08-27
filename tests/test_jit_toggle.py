@@ -8,6 +8,7 @@ and skip when model is not callable.
 
 import platform
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import mlx.core as mx
@@ -178,9 +179,72 @@ class TestJitToggle:
              patch.object(mx, "compile", return_value=compiled_fn):
             server._apply_jit_compilation()
 
-        # The compiled function should now be on model_wrapper.model.
+        # The compiled function is installed behind an explicit proxy so deep
+        # sleep can detach the captured graph before dropping the engine.
         # If vmlx#83 rollback had fired, this would instead be inner_model.
-        assert model_wrapper.model is compiled_fn
+        assert isinstance(model_wrapper.model, server._CompiledModuleProxy)
+        assert model_wrapper.model._original is inner_model
+        assert model_wrapper.model._compiled is compiled_fn
+
+    def test_jit_teardown_restores_original_llm_module(self):
+        """Deep sleep must detach the compiled closure before model reload."""
+        from vmlx_engine import server
+
+        class InnerModel:
+            def __call__(self, *args, **kwargs):
+                return args[0]
+
+        class ModelWrapper:
+            def __init__(self, inner):
+                self.model = inner
+
+            def __call__(self, *args, **kwargs):
+                return self.model(*args, **kwargs)
+
+        original = InnerModel()
+        compiled = MagicMock(side_effect=lambda *args, **kwargs: args[0])
+        wrapper = ModelWrapper(server._CompiledModuleProxy(original, compiled))
+        engine = MagicMock()
+        engine._model = wrapper
+
+        with patch.object(server, "_engine", engine), \
+             patch.object(server, "clear_mlx_memory_cache") as clear_memory, \
+             patch.object(mx, "synchronize"):
+            assert server._remove_jit_compilation() is True
+
+        assert wrapper.model is original
+        clear_memory.assert_called_once()
+
+    def test_model_owner_executor_finds_batched_engine_direct_owner(self):
+        """Wake-time JIT/draft work must not fall onto asyncio's default pool."""
+        from vmlx_engine import server
+
+        executor = object()
+        engine = SimpleNamespace(
+            _model_executor=None,
+            _mllm_scheduler=None,
+            _step_executor=executor,
+        )
+
+        with patch.object(server, "_engine", engine):
+            assert server._get_model_owner_executor() is executor
+
+    def test_jit_teardown_failure_is_fail_closed(self):
+        """A failed graph detach must abort deep teardown rather than duplicate."""
+        from vmlx_engine import server
+
+        original = MagicMock()
+        proxy = server._CompiledModuleProxy(original, MagicMock())
+        wrapper = SimpleNamespace(model=proxy)
+        engine = SimpleNamespace(_model=wrapper)
+
+        with (
+            patch.object(server, "_engine", engine),
+            patch.object(mx, "synchronize", side_effect=RuntimeError("sync failed")),
+            patch.object(server, "clear_mlx_memory_cache"),
+            pytest.raises(RuntimeError, match="failed to detach JIT graph"),
+        ):
+            server._remove_jit_compilation()
 
     def test_jit_vlm_compiled_proxy_preserves_language_layers(self):
         """VLM JIT must not replace the inner transformer with a bare gc_func.

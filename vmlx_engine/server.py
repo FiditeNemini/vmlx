@@ -5934,12 +5934,16 @@ async def lifespan(app: FastAPI):
     # Apply Flash MoE for BatchedEngine (model just loaded via start() above).
     # SimpleEngine Flash MoE is applied in load_model() where it starts synchronously.
     if _flash_moe_enabled and _engine is not None:
-        _apply_flash_moe_patching()
+        await _run_on_model_executor(_apply_flash_moe_patching)
 
     # Apply JIT compilation for BatchedEngine (which just started above).
     # SimpleEngine JIT is applied in load_model() where it starts synchronously.
     if _enable_jit and _engine is not None:
-        _apply_jit_compilation()
+        await _run_on_model_executor(_apply_jit_compilation)
+
+    if _engine is not None:
+        _record_metal_ws_model_baseline("lifespan_post_acceleration")
+        _refresh_loaded_max_prompt_tokens("lifespan_post_acceleration")
 
     # Initialize MCP from explicit env/CLI config or the standard mcp.json/yaml
     # discovery paths. Failure should not crash model serving.
@@ -6424,17 +6428,25 @@ def _apply_jit_compilation():
                 )
                 return
 
+            # Keep the original module reachable through an explicit proxy.
+            # Installing a bare gc_func loses the only teardown handle to the
+            # captured Python model graph. Deep sleep must be able to unwrap
+            # the compiled closure before dropping the engine; otherwise a
+            # later in-process wake can materialize a second model while the
+            # first compiled graph remains resident in MLX/Metal.
+            compiled_proxy = _CompiledModuleProxy(inner, compiled)
+
             # Replace in-place on the wrapper and verify
             replaced = False
             if hasattr(model_obj, "model") and model_obj.model is inner:
-                model_obj.model = compiled
-                replaced = model_obj.model is compiled
+                model_obj.model = compiled_proxy
+                replaced = model_obj.model is compiled_proxy
             elif hasattr(_engine, "_model"):
-                _engine._model = compiled
-                replaced = _engine._model is compiled
+                _engine._model = compiled_proxy
+                replaced = _engine._model is compiled_proxy
             elif hasattr(_engine, "model"):
-                _engine.model = compiled
-                replaced = _engine.model is compiled
+                _engine.model = compiled_proxy
+                replaced = _engine.model is compiled_proxy
 
         if replaced:
             logger.info("JIT: mx.compile applied successfully — running warmup pass")
@@ -6506,6 +6518,74 @@ def _apply_jit_compilation():
             )
     except Exception as e:
         logger.warning(f"JIT: mx.compile failed, running without JIT: {e}")
+
+
+def _remove_jit_compilation() -> bool:
+    """Detach generic mx.compile closures before model teardown.
+
+    ``mx.compile`` captures the callable it wraps. Clearing the engine first
+    leaves no way to detach that closure deliberately, and allocator-cache
+    cleanup cannot collect a still-referenced model graph. Restore the
+    original module while the engine and its model-owner thread still exist.
+    Family-local compiled kernels remain owned by their model objects and die
+    with those objects; this helper owns only the generic server JIT wrapper.
+    """
+    engine = _engine
+    if engine is None:
+        return False
+
+    model_obj = getattr(engine, "_model", None)
+    if model_obj is None:
+        model_obj = getattr(engine, "model", None)
+    if model_obj is None:
+        return False
+
+    detached = False
+
+    def _unwrap(owner, attribute: str) -> bool:
+        current = getattr(owner, attribute, None)
+        if not isinstance(current, _CompiledModuleProxy):
+            return False
+        setattr(owner, attribute, current._original)
+        return True
+
+    try:
+        if isinstance(model_obj, _CompiledModuleProxy):
+            original = model_obj._original
+            if getattr(engine, "_model", None) is model_obj:
+                engine._model = original
+                model_obj = original
+                detached = True
+            elif getattr(engine, "model", None) is model_obj:
+                engine.model = original
+                model_obj = original
+                detached = True
+
+        detached = _unwrap(model_obj, "model") or detached
+
+        vlm_model = (
+            model_obj
+            if hasattr(model_obj, "language_model")
+            else getattr(model_obj, "model", None)
+        )
+        language_model = getattr(vlm_model, "language_model", None)
+        if language_model is not None:
+            detached = _unwrap(language_model, "model") or detached
+
+        if detached:
+            import gc as _gc
+            import mlx.core as mx
+
+            sync = getattr(mx, "synchronize", None)
+            if callable(sync):
+                sync()
+            _gc.collect()
+            clear_mlx_memory_cache(log=logger)
+            logger.info("JIT: detached compiled model graph before teardown")
+    except Exception as exc:
+        logger.warning("JIT: failed to detach compiled graph before teardown: %s", exc)
+        raise RuntimeError("failed to detach JIT graph before deep sleep") from exc
+    return detached
 
 
 async def check_rate_limit(request: Request):
@@ -8782,7 +8862,7 @@ def load_model(
     # Apply Flash MoE for SimpleEngine (model already loaded above).
     # BatchedEngine defers model loading to lifespan() — Flash MoE applied there.
     if flash_moe and _engine is not None and hasattr(_engine, "_loaded") and _engine._loaded:
-        _apply_flash_moe_patching()
+        _run_on_model_executor_blocking(_apply_flash_moe_patching)
 
     # Apply JIT compilation if enabled — only for SimpleEngine (already started above).
     # BatchedEngine starts in lifespan(), so JIT is applied there instead.
@@ -8792,7 +8872,11 @@ def load_model(
         and hasattr(_engine, "_loaded")
         and _engine._loaded
     ):
-        _apply_jit_compilation()
+        _run_on_model_executor_blocking(_apply_jit_compilation)
+
+    if _engine is not None and getattr(_engine, "_loaded", False):
+        _record_metal_ws_model_baseline("simple_engine_post_acceleration")
+        _refresh_loaded_max_prompt_tokens("simple_engine_post_acceleration")
 
     # Apply chat template override from model config registry (e.g. Harmony for GPT-OSS)
     try:
@@ -12903,6 +12987,13 @@ async def admin_deep_sleep():
                 if _set_cache:
                     _pre_sleep_cache_limit = _set_cache(512 * 1024 * 1024)
 
+            # Generic mx.compile closures capture the model callable. Detach
+            # them on the MLX-owning worker before clearing scheduler/engine
+            # references, otherwise an in-process wake can retain the old JIT
+            # graph while loading a second copy of the model.
+            if _engine is not None:
+                await _run_on_model_executor(_remove_jit_compilation)
+
             scheduler = _get_scheduler()
             if scheduler is not None:
                 if hasattr(scheduler, "deep_reset"):
@@ -13067,11 +13158,11 @@ async def admin_wake():
                 # Re-apply Flash MoE after wake (load_model skipped it because
                 # _engine._loaded was False when called inside event loop)
                 if _flash_moe_enabled and _engine is not None:
-                    _apply_flash_moe_patching()
+                    await _run_on_model_executor(_apply_flash_moe_patching)
                 # Re-apply JIT compilation after deep wake (load_model skips it
                 # because _engine._loaded is False at check time inside event loop)
                 if _enable_jit and _engine is not None:
-                    _apply_jit_compilation()
+                    await _run_on_model_executor(_apply_jit_compilation)
                 # Reload speculative draft model if configured
                 _spec_model = _cli_args.get("speculative_model")
                 if _spec_model:
@@ -13091,6 +13182,7 @@ async def admin_wake():
                 # Measure after the optional speculative draft is resident so
                 # deep-wake prompt limits use the same total memory ownership
                 # as initial startup.
+                _record_metal_ws_model_baseline("admin_wake_post_acceleration")
                 _refresh_loaded_max_prompt_tokens("admin_wake_engine_start")
                 _standby_state = None
                 logger.info(f"Woke from deep sleep — model {_model_name} reloaded")
@@ -13337,6 +13429,12 @@ def _get_model_owner_executor():
     ex = getattr(getattr(eng, "_mllm_scheduler", None), "_step_executor", None)
     if ex is not None:
         return ex
+    # BatchedEngine owns the loader/step executor directly for both its LLM
+    # and MLLM construction paths. Missing this attribute sent wake-time JIT
+    # and speculative-draft work to asyncio's arbitrary default pool.
+    ex = getattr(eng, "_step_executor", None)
+    if ex is not None:
+        return ex
     # BatchedEngine (LLM) — EngineCore.scheduler._step_executor
     for _attr in ("_engine_core", "engine_core", "_core", "scheduler", "_scheduler"):
         obj = getattr(eng, _attr, None)
@@ -13363,6 +13461,21 @@ async def _run_on_model_executor(fn, /, *args, **kwargs):
         call = functools.partial(fn, *args, **kwargs)
         return await loop.run_in_executor(ex, call)
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+def _run_on_model_executor_blocking(fn, /, *args, **kwargs):
+    """Run startup-time MLX mutation on the engine's owning worker.
+
+    ``load_model`` is synchronous during CLI startup, so it cannot await the
+    async helper. Its caller is the server/main thread, never the single model
+    executor itself; submitting here keeps JIT/Flash model mutation on the same
+    thread that loaded and evaluates the model.
+    """
+    ex = _get_model_owner_executor()
+    call = functools.partial(fn, *args, **kwargs)
+    if ex is not None:
+        return ex.submit(call).result()
+    return call()
 
 
 @app.post("/v1/cache/warm", dependencies=[Depends(verify_api_key)])

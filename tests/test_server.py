@@ -414,6 +414,7 @@ class TestHelperFunctions:
 
     def test_admin_wake_refreshes_prompt_limit_after_speculative_draft_reload(self):
         import inspect
+
         from vmlx_engine import server
 
         source = inspect.getsource(server.admin_wake)
@@ -423,6 +424,32 @@ class TestHelperFunctions:
         ) < source.index(
             '_refresh_loaded_max_prompt_tokens("admin_wake_engine_start")'
         )
+        assert source.index(
+            "await _run_on_model_executor(_apply_jit_compilation)"
+        ) < source.index(
+            '_record_metal_ws_model_baseline("admin_wake_post_acceleration")'
+        )
+        assert source.index(
+            "await _run_on_model_executor(load_draft_model, _spec_cfg)"
+        ) < source.index(
+            '_record_metal_ws_model_baseline("admin_wake_post_acceleration")'
+        )
+
+    def test_simple_engine_baseline_is_after_optional_acceleration(self):
+        import inspect
+
+        from vmlx_engine import server
+
+        source = inspect.getsource(server.load_model)
+        baseline = source.index(
+            '_record_metal_ws_model_baseline("simple_engine_post_acceleration")'
+        )
+        assert source.index(
+            "_run_on_model_executor_blocking(_apply_flash_moe_patching)"
+        ) < baseline
+        assert source.index(
+            "_run_on_model_executor_blocking(_apply_jit_compilation)"
+        ) < baseline
 
     def test_effective_max_prompt_tokens_request_can_only_lower_session_cap(self, monkeypatch):
         from types import SimpleNamespace

@@ -1,6 +1,6 @@
-from types import SimpleNamespace
 import ast
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def test_clear_mlx_memory_cache_prefers_top_level_api():
@@ -134,6 +134,10 @@ def test_deep_sleep_yields_before_post_teardown_mlx_cleanup():
         '_post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_deferred")'
         in deep_source
     )
+    assert "await _run_on_model_executor(_remove_jit_compilation)" in deep_source
+    assert deep_source.index(
+        "await _run_on_model_executor(_remove_jit_compilation)"
+    ) < deep_source.index("await _engine.stop()")
     health_source = source[
         source.index("async def health"):
         source.index("@app.get(\"/health.mtp\")")

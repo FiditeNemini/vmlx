@@ -1222,6 +1222,24 @@ export function registerChatHandlers(
       // Detect remote session and compute base URL + auth headers
       const resolvedSession = resolved.session;
       const isRemote = resolvedSession?.type === "remote";
+
+      // A sleeping local engine answers /health immediately, so the generic
+      // health check below previously declared it ready and let Python perform
+      // a hidden JIT wake inside the inference request.  Electron remained
+      // labelled Deep Sleep for the whole reload and could not show resident
+      // progress.  Wake through SessionManager first: it owns the visible
+      // loading state, progress monitor, failure rollback, and idle clock.
+      if (!isRemote && resolvedSession?.status === "standby") {
+        console.log(`[CHAT] Waking standby session ${resolvedSession.id} before inference`);
+        const wake = await sessionManager.wakeSession(resolvedSession.id);
+        if (!wake.success) {
+          const currentStatus = db.getSession(resolvedSession.id)?.status;
+          if (currentStatus !== "loading" && currentStatus !== "running") {
+            throw new Error(wake.error || "Failed to wake sleeping model");
+          }
+        }
+      }
+
       const rawBaseUrl =
         isRemote && resolvedSession?.remoteUrl
           ? resolvedSession.remoteUrl.replace(/\/+$/, "")

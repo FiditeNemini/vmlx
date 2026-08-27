@@ -4020,6 +4020,51 @@ export class SessionManager extends EventEmitter {
       return { success: false, error: 'Cannot wake remote sessions' }
     }
 
+    const standbyDepth = session.standbyDepth === 'soft' ? 'soft' : 'deep'
+    this.loadProgressState.delete(sessionId)
+    this.loadProgressMeta.delete(sessionId)
+    this.stopLoadResidentMonitor(sessionId)
+    const modelFileBytes = estimateModelFileBytes(session.modelPath)
+    const wakeProfile = launchResidentProfileForModel(session.modelPath)
+    const meta = modelFileBytes > 0
+      ? {
+          modelBytes: modelFileBytes,
+          expectedResidentBytes: Math.round(modelFileBytes * wakeProfile.ratio),
+          lazyResident: wakeProfile.streamsWeights,
+        }
+      : {}
+
+    // admin/wake performs the reload synchronously.  Publishing "loading"
+    // only after fetch() returned left the app visibly stuck at Deep Sleep for
+    // the entire 30-90 second reload and started the RSS progress monitor after
+    // there was nothing left to observe.  Enter loading before the request so
+    // message-triggered and button-triggered wakes share the real progress UI.
+    db.updateSession(sessionId, { status: 'loading', standbyDepth: null })
+    if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
+    this.loadProgressState.set(sessionId, 1)
+    this.emit('session:loadProgress', {
+      sessionId,
+      label: 'Waking from sleep...',
+      labelKey: 'main.loadProgress.wakingFromSleep',
+      progress: 1,
+      ...meta,
+    })
+    if (session.pid && modelFileBytes > 0) {
+      this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)
+    }
+    this.emit('session:starting', { sessionId })
+    this.pushLog(sessionId, '[Wake] Waking from sleep — reloading model...')
+
+    const restoreStandby = (error: string) => {
+      this.stopLoadResidentMonitor(sessionId)
+      this.loadProgressState.delete(sessionId)
+      this.loadProgressMeta.delete(sessionId)
+      db.updateSession(sessionId, { status: 'standby', standbyDepth })
+      this.emit('session:standby', { sessionId, depth: standbyDepth })
+      this.pushLog(sessionId, `[Wake] Reload failed — returned to ${standbyDepth} sleep: ${error}`)
+      return { success: false, error }
+    }
+
     try {
       const host = connectHost(session.host)
       const headers = this._adminHeaders(session)
@@ -4030,32 +4075,13 @@ export class SessionManager extends EventEmitter {
         signal: AbortSignal.timeout(120000)
       })
       if (res.ok) {
-        db.updateSession(sessionId, { status: 'loading', standbyDepth: null })
-        this.loadProgressState.delete(sessionId)  // Reset progress for fresh wake
-        this.loadProgressMeta.delete(sessionId)
-        const modelFileBytes = estimateModelFileBytes(session.modelPath)
-        const wakeProfile = launchResidentProfileForModel(session.modelPath)
-        const meta = modelFileBytes > 0
-          ? {
-              modelBytes: modelFileBytes,
-              expectedResidentBytes: Math.round(modelFileBytes * wakeProfile.ratio),
-              lazyResident: wakeProfile.streamsWeights,
-            }
-          : {}
-        if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
-        this.emit('session:loadProgress', { sessionId, label: 'Waking from sleep...', labelKey: 'main.loadProgress.wakingFromSleep', progress: 50, ...meta })
-        if (session.pid && modelFileBytes > 0) {
-          this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)
-        }
-        this.emit('session:starting', { sessionId })
-        this.pushLog(sessionId, '[Wake] Waking from sleep — reloading model...')
         // The global monitor will pick up the 'loading' status and wait for /health
         this.touchSession(sessionId)
         return { success: true }
       }
-      return { success: false, error: `Server returned ${res.status}` }
+      return restoreStandby(`Server returned ${res.status}`)
     } catch (e) {
-      return { success: false, error: (e as Error).message }
+      return restoreStandby((e as Error).message)
     }
   }
 

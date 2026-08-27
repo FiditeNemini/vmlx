@@ -1551,6 +1551,11 @@ export class SessionManager extends EventEmitter {
     lastStartupProgressAt?: number;
   }>()
   private loadResidentTimers = new Map<string, ReturnType<typeof setInterval>>()
+  // admin/wake is synchronous, while the global health monitor continues to
+  // poll.  During a legitimate deep reload Python still reports
+  // `standby_deep`; keep explicit ownership so that transient state cannot be
+  // mistaken for a failed wake and overwrite the visible loading state.
+  private wakePending = new Set<string>()
 
   private stopLoadResidentMonitor(sessionId: string): void {
     const timer = this.loadResidentTimers.get(sessionId)
@@ -3711,7 +3716,15 @@ export class SessionManager extends EventEmitter {
             // Only count as truly healthy if the model is loaded (status: "healthy")
             // The server returns "no_model" while still loading in lifespan()
             const modelReady = data.status === 'healthy'
-            if (isStandby && session.status === 'loading') {
+            if (
+              isStandby &&
+              session.status === 'loading' &&
+              this.wakePending.has(session.id)
+            ) {
+              // The synchronous admin wake has not returned yet. RSS progress
+              // remains authoritative; preserve Loading and its percentage.
+              this.failCounts.delete(session.id)
+            } else if (isStandby && session.status === 'loading') {
               // Wake failed — server reverted to standby but DB says loading.
               // Sync DB back to standby so the user can retry.
               //
@@ -4021,6 +4034,7 @@ export class SessionManager extends EventEmitter {
     }
 
     const standbyDepth = session.standbyDepth === 'soft' ? 'soft' : 'deep'
+    this.wakePending.add(sessionId)
     this.loadProgressState.delete(sessionId)
     this.loadProgressMeta.delete(sessionId)
     this.stopLoadResidentMonitor(sessionId)
@@ -4056,6 +4070,7 @@ export class SessionManager extends EventEmitter {
     this.pushLog(sessionId, '[Wake] Waking from sleep — reloading model...')
 
     const restoreStandby = (error: string) => {
+      this.wakePending.delete(sessionId)
       this.stopLoadResidentMonitor(sessionId)
       this.loadProgressState.delete(sessionId)
       this.loadProgressMeta.delete(sessionId)
@@ -4075,6 +4090,7 @@ export class SessionManager extends EventEmitter {
         signal: AbortSignal.timeout(120000)
       })
       if (res.ok) {
+        this.wakePending.delete(sessionId)
         // The global monitor will pick up the 'loading' status and wait for /health
         this.touchSession(sessionId)
         return { success: true }

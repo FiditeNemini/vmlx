@@ -32,4 +32,11 @@ describe('message-triggered deep wake visibility', () => {
     expect(sessions).toContain("db.updateSession(sessionId, { status: 'standby', standbyDepth })")
     expect(sessions).toContain("this.emit('session:standby', { sessionId, depth: standbyDepth })")
   })
+
+  it('does not let the health monitor erase loading while admin wake is in flight', () => {
+    expect(sessions).toContain('private wakePending = new Set<string>()')
+    expect(sessions).toContain('this.wakePending.add(sessionId)')
+    expect(sessions).toContain('this.wakePending.has(session.id)')
+    expect(sessions).toContain('this.wakePending.delete(sessionId)')
+  })
 })

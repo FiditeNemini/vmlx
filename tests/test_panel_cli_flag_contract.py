@@ -720,23 +720,11 @@ def test_mm3_and_gemma_live_stress_harnesses_gate_actual_launch_argv() -> None:
     assert "cfg.kvCacheQuantization === 'auto'" in gemma
 
 def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
-    """2026-08-17: `auto` mapped to `compatible-only`, so MTP never ran.
+    """The app's MTP-on policy must be greedy in UI, argv, and engine resolution.
 
-    compatible-only activates MTP only for requests that are ALREADY greedy.
-    Bundles carrying MTP heads ship temperature 1.0, so on default settings the
-    engine logged, every single turn:
-
-        MLLM native MTP skipped for request=...: temperature=1.0 is not
-        deterministic
-
-    while the same log said "Native MTP: READY D3". Measured live in the dev
-    app: Qwen3.8-27B-JANG_4D-CRACK decoding at 19.5 t/s with MTP skipped on
-    every request. Chat Settings displayed temperature 0 while the request went
-    out at 1.0 -- a UI/API parity lie.
-
-    A bundle with MTP heads must get greedy defaults from the engine so the
-    feature runs and the displayed 0 is the real one. `off` stays the way to
-    keep the bundle's own sampling.
+    Sampled rejection acceptance remains a direct-CLI capability, but the
+    matched Qwen3.8 receipt measured greedy MTP faster. The app therefore emits
+    greedy-only for Auto and Deterministic; Off restores bundle sampling.
     """
 
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
@@ -748,9 +736,9 @@ def test_native_mtp_auto_gets_greedy_defaults_so_mtp_actually_runs() -> None:
 
     assert "buildNativeMtpLaunchArgs" in sessions
     assert "--native-mtp-sampling-policy" in shared
-    # the conditional that made auto a no-op is gone
+    # Auto and Deterministic share the measured greedy policy.
     assert "mode === 'deterministic' ? 'deterministic-defaults' : 'compatible-only'" not in sessions
-    assert "'deterministic-defaults'" in shared
+    assert "'greedy-only'" in shared
     # off must still disable the runtime outright
     assert "return ['--disable-native-mtp']" in shared
 

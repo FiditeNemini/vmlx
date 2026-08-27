@@ -7,8 +7,8 @@ import {
 } from '../src/shared/mtpTemperatureNotice'
 
 /**
- * Sampled native MTP uses rejection-sampling acceptance. Auto preserves bundle
- * sampling; Deterministic is the explicit greedy-default override.
+ * The app's MTP-on contract enforces its measured greedy fast path. Off is the
+ * explicit route back to bundle sampling.
  */
 describe('MTP temperature disclosure', () => {
   it('says nothing when the bundle has no MTP heads', () => {
@@ -26,19 +26,19 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'pinned' })
   })
 
-  it('reports sampled MTP active in auto mode at nonzero temperature', () => {
+  it('flags a stale nonzero temperature as contradicting MTP-on policy', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 1 }),
-    ).toEqual({ kind: 'active', temperature: 1 })
+    ).toEqual({ kind: 'inactive', temperature: 1 })
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0.01 }),
-    ).toEqual({ kind: 'active', temperature: 0.01 })
+    ).toEqual({ kind: 'inactive', temperature: 0.01 })
   })
 
-  it('does not call auto temperature 0 a deterministic pin', () => {
+  it('explains that Auto temperature 0 is pinned by MTP', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0 }),
-    ).toEqual({ kind: 'active', temperature: 0 })
+    ).toEqual({ kind: 'pinned' })
   })
 
   it('stays silent when the user explicitly turned MTP off', () => {
@@ -62,6 +62,12 @@ describe('MTP temperature disclosure', () => {
     )
     expect(source).toContain('resolveMtpTemperatureNotice(')
     expect(source).toContain('data-testid="mtp-temperature-notice"')
+    expect(source).toContain("const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode !== 'off'")
+    expect(source).toContain('disabled={mtpGreedyEnforced}')
+    expect(source).toContain('const displayedTemperature = mtpGreedyEnforced')
+    expect(source).toContain('const displayedTopP = mtpGreedyEnforced')
+    expect(source).toContain('const displayedTopKValue = mtpGreedyEnforced')
+    expect(source).toContain('const displayedMinP = mtpGreedyEnforced')
     // all three states have copy wired
     expect(source).toContain('chat.settings.mtpTempPinned')
         expect(source).toContain('chat.settings.mtpTempInactive')
@@ -81,8 +87,7 @@ describe('MTP temperature disclosure', () => {
     const settings = en.chat.settings
     expect(settings.mtpTempPinned).toMatch(/MTP/)
     expect(settings.mtpTempPinned).toMatch(/greedy/i)
-    expect(settings.mtpTempPinned).toMatch(/Auto/)
-    expect(settings.mtpTempActive).toMatch(/rejection-sampling/i)
-    expect(settings.mtpTempActive).toContain('{{temperature}}')
+    expect(settings.mtpTempPinned).toMatch(/Off/)
+    expect(settings.mtpTempActive).toMatch(/temperature 0/i)
   })
 })

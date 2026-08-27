@@ -1613,7 +1613,7 @@ def serve_command(args):
     if getattr(args, "native_mtp_sampling_policy", None):
         os.environ["VMLINUX_NATIVE_MTP_SAMPLING_POLICY"] = args.native_mtp_sampling_policy
         server._native_mtp_sampling_policy = args.native_mtp_sampling_policy
-        if args.native_mtp_sampling_policy == "deterministic-defaults":
+        if args.native_mtp_sampling_policy in {"deterministic-defaults", "greedy-only"}:
             if server._default_temperature is None:
                 server._default_temperature = 0.0
             if server._default_top_p is None:
@@ -2389,8 +2389,9 @@ def serve_command(args):
             if sampling_policy == "compatible-only" and mtp_status.get("runtime_available"):
                 print("    Request gate: greedy=identity-verify; "
                       "stochastic=rejection-sampling acceptance")
-            elif sampling_policy == "deterministic-defaults" and mtp_status.get("runtime_available"):
-                print("    Startup defaults: temperature=0, top_p=1, top_k=0, min_p=0")
+            elif sampling_policy in {"deterministic-defaults", "greedy-only"} and mtp_status.get("runtime_available"):
+                label = "Enforced sampling" if sampling_policy == "greedy-only" else "Startup defaults"
+                print(f"    {label}: temperature=0, top_p=1, top_k=0, min_p=0")
     except Exception:
         pass
     if getattr(args, 'chat_template', None):
@@ -4233,16 +4234,15 @@ Examples:
     )
     serve_parser.add_argument(
         "--native-mtp-sampling-policy",
-        choices=["compatible-only", "deterministic-defaults"],
+        choices=["compatible-only", "deterministic-defaults", "greedy-only"],
         default="compatible-only",
         help="Native MTP request policy. compatible-only leaves sampling defaults alone, so "
-             "MTP accelerates deterministic requests only and a sampled one (temperature != 0) "
-             "decodes autoregressively -- the skip reason is reported on /health and in the "
-             "app's Performance panel. deterministic-defaults instead fills omitted "
-             "temperature/top-p/top-k/min-p with greedy values, without applying "
-             "repetition-penalty guards; the app sends it for both Auto and Deterministic "
-             "MTP modes so MTP-head bundles do not silently stay on sampled autoregressive "
-             "decode. Off preserves the bundle's own sampling and disables native MTP.",
+             "greedy requests use identity verification and sampled requests use rejection-"
+             "sampling acceptance when that runtime gate is enabled. deterministic-defaults fills omitted "
+             "temperature/top-p/top-k/min-p with greedy values. greedy-only enforces "
+             "temperature=0, top_p=1, top_k=0, and min_p=0 even when a request supplies "
+             "sampled values; the app sends greedy-only for both Auto and Deterministic "
+             "MTP modes. Off preserves bundle sampling and disables native MTP.",
     )
     serve_parser.add_argument(
         "--disable-native-mtp",

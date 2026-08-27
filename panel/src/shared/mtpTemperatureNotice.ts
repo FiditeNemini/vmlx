@@ -6,17 +6,15 @@
  * PROPERLY LETS THEM KNOW IN THE CHAT SETTINGS IN THE TEMP BOX AREA AND THAT IT
  * IS DUE TO MTP BEING ON".
  *
- * Sampled native MTP now uses rejection-sampling acceptance. Auto therefore
- * preserves the bundle's sampling defaults; Deterministic is the explicit
- * opt-in that replaces omitted sampling values with greedy defaults.
+ * The measured app policy is greedy native MTP. Auto detects an MTP-capable
+ * bundle and pins its effective sampling to greedy; Deterministic does the
+ * same explicitly. Off is the only mode that restores bundle sampling.
  *
  * Three states worth surfacing, all keyed on the model ACTUALLY having MTP:
- *  - `pinned`   deterministic mode: sampling was replaced with greedy, and the
- *               0 in the box is a consequence of MTP, not a user choice.
- *  - `active`   auto mode at any temperature, or an explicit sampled override:
- *               MTP uses rejection-sampling acceptance.
- *  - `inactive` retained for callers that may later carry an explicit runtime
- *               gate result; the current resolver does not infer it from temp.
+ *  - `pinned`   MTP is on: sampling is forced greedy, and the 0 in the box is a
+ *               consequence of MTP, not a user choice.
+ *  - `active`   reserved for a future sampled-MTP UI mode.
+ *  - `inactive` a stale/nonzero UI value would contradict the MTP-on contract.
  */
 
 export type MtpTemperatureNoticeKind = 'pinned' | 'active' | 'inactive'
@@ -69,6 +67,6 @@ export function resolveMtpTemperatureNotice(
 
   const temperature = input.temperature
   if (temperature == null) return null
-  if (mode === 'deterministic' && temperature === 0) return { kind: 'pinned' }
-  return { kind: 'active', temperature }
+  if (temperature > 0) return { kind: 'inactive', temperature }
+  return { kind: 'pinned' }
 }

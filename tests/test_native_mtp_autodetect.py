@@ -1651,7 +1651,7 @@ class TestNativeMtpAutodetect:
         assert model_has_native_mtp_runtime(_NonCallableForward()) is False
 
     def test_server_mtp_status_marks_loaded_runtime_active(self, monkeypatch, tmp_path):
-        from vmlx_engine import server
+        from vmlx_engine import mllm_batch_generator, server
 
         _write_qwen36_mxfp4_mtp_bundle(tmp_path)
 
@@ -1668,6 +1668,8 @@ class TestNativeMtpAutodetect:
             _model = type("_Wrapper", (), {"language_model": _Language()})()
 
         monkeypatch.setattr(server, "_engine", _Engine())
+        monkeypatch.setattr(mllm_batch_generator, "_NATIVE_MTP_STOCHASTIC_ACCEPT", True)
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_SAMPLING_POLICY", "greedy-only")
 
         status = server._model_mtp_status_with_loaded_runtime(str(tmp_path))
 
@@ -1676,6 +1678,10 @@ class TestNativeMtpAutodetect:
         assert status["runtime_reason"] == "native MTP runtime is active for text+vl"
         assert status["effective_depth"] == 3
         assert status["effective_depth_source"] == "default"
+        assert status["request_policy"] == "greedy-only"
+        assert status["stochastic_acceptance_enabled"] is True
+        assert status["stochastic_requests_allowed"] is False
+        assert status["request_gate"] == "greedy=enforced; stochastic=blocked-by-server-policy"
 
     def test_native_mtp_depth_defaults_to_three(self, monkeypatch):
         from vmlx_engine.native_mtp import native_mtp_effective_depth

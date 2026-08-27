@@ -689,6 +689,46 @@ def test_missing_bundle_sampling_defaults_do_not_force_sampler(tmp_path, monkeyp
     assert server._resolve_top_k(40) == 40
 
 
+def test_native_mtp_greedy_only_enforces_sampler_even_for_explicit_requests(
+    tmp_path, monkeypatch
+):
+    """MTP-on is a server policy; Off is the route back to sampled requests."""
+    import json
+    from vmlx_engine import server
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen4_exp"}))
+    (tmp_path / "generation_config.json").write_text(json.dumps({
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.05,
+    }))
+    monkeypatch.setattr(server, "_model_path", str(tmp_path))
+    monkeypatch.setattr(server, "_model_name", "qwen38-next")
+    monkeypatch.setattr(server, "_default_temperature", None)
+    monkeypatch.setattr(server, "_default_top_p", None)
+    monkeypatch.setattr(server, "_default_top_k", None)
+    monkeypatch.setattr(server, "_default_min_p", None)
+    monkeypatch.setattr(server, "_native_mtp_sampling_policy", "greedy-only")
+    server._jang_sampling_defaults_cache.clear()
+    server._generation_defaults_cache.clear()
+
+    assert server._resolve_temperature(None) == 0.0
+    assert server._resolve_temperature(1.0) == 0.0
+    assert server._resolve_top_p(None) == 1.0
+    assert server._resolve_top_p(0.8) == 1.0
+    assert server._resolve_top_k(None) == 0
+    assert server._resolve_top_k(20) == 0
+    assert server._resolve_min_p(None) == 0.0
+    assert server._resolve_min_p(0.1) == 0.0
+
+    monkeypatch.setattr(server, "_native_mtp_sampling_policy", "compatible-only")
+    assert server._resolve_temperature(1.0) == 1.0
+    assert server._resolve_top_p(0.8) == 0.8
+    assert server._resolve_top_k(20) == 20
+    assert server._resolve_min_p(0.1) == 0.1
+
+
 def test_generation_config_do_sample_false_resolves_greedy_when_request_omits_sampling(
     tmp_path, monkeypatch
 ):

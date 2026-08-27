@@ -163,6 +163,6 @@ export interface DetectedProcess {
   modelPath: string
   healthy: boolean
   modelName?: string
-  nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults'
+  nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only'
   standbyDepth?: 'soft' | 'deep' | null  // null = running, 'soft'/'deep' = in standby
 }

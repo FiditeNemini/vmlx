@@ -2480,6 +2480,8 @@ def _model_family_for_defaults(model_name: str = "") -> str:
 
 def _resolve_temperature(request_value: float | None, model_name: str = "") -> float:
     """Resolve temperature: request > explicit CLI/session > bundle > fallback."""
+    if _native_mtp_sampling_policy == "greedy-only":
+        return 0.0
     if request_value is not None:
         return request_value
     if _default_temperature is not None:
@@ -2503,6 +2505,8 @@ def _resolve_temperature(request_value: float | None, model_name: str = "") -> f
 
 def _resolve_top_p(request_value: float | None, model_name: str = "") -> float:
     """Resolve top_p: request > explicit CLI/session > bundle > fallback."""
+    if _native_mtp_sampling_policy == "greedy-only":
+        return 1.0
     if request_value is not None:
         return request_value
     if _default_top_p is not None:
@@ -2526,6 +2530,8 @@ def _resolve_top_p(request_value: float | None, model_name: str = "") -> float:
 
 def _resolve_top_k(request_value: int | None, model_name: str = "") -> int:
     """Resolve top_k: request > explicit CLI/session > bundle > disabled."""
+    if _native_mtp_sampling_policy == "greedy-only":
+        return 0
     if request_value is not None:
         return max(0, int(request_value))
     if _default_top_k is not None:
@@ -2588,6 +2594,8 @@ def _normalize_deterministic_sampling_filters(
 
 def _resolve_min_p(request_value: float | None, model_name: str = "") -> float:
     """Resolve min_p: request > explicit CLI/session > bundle > disabled."""
+    if _native_mtp_sampling_policy == "greedy-only":
+        return 0.0
     if request_value is not None:
         return max(0.0, float(request_value))
     if _default_min_p is not None:
@@ -9740,7 +9748,14 @@ def _model_mtp_status_with_loaded_runtime(bundle_path: str | None) -> dict:
     # health cannot claim stochastic support while the generator skips it.
     stochastic_enabled, request_gate = _mllm_native_mtp_request_gate_status()
     status["stochastic_acceptance_enabled"] = stochastic_enabled
-    status["request_gate"] = request_gate
+    status["stochastic_requests_allowed"] = bool(
+        stochastic_enabled and status["request_policy"] not in {"disabled", "greedy-only"}
+    )
+    status["request_gate"] = (
+        "greedy=enforced; stochastic=blocked-by-server-policy"
+        if status["request_policy"] == "greedy-only"
+        else request_gate
+    )
     try:
         from .native_mtp import model_has_native_mtp_runtime
 
@@ -28205,7 +28220,7 @@ Examples:
     )
     parser.add_argument(
         "--native-mtp-sampling-policy",
-        choices=["compatible-only", "deterministic-defaults"],
+        choices=["compatible-only", "deterministic-defaults", "greedy-only"],
         default="compatible-only",
         help="Native MTP request policy for startup diagnostics and app defaults.",
     )
@@ -28313,7 +28328,7 @@ Examples:
         )
     _native_mtp_sampling_policy = getattr(args, "native_mtp_sampling_policy", "compatible-only")
     os.environ["VMLINUX_NATIVE_MTP_SAMPLING_POLICY"] = _native_mtp_sampling_policy
-    if _native_mtp_sampling_policy == "deterministic-defaults":
+    if _native_mtp_sampling_policy in {"deterministic-defaults", "greedy-only"}:
         if _default_temperature is None:
             _default_temperature = 0.0
         if _default_top_p is None:

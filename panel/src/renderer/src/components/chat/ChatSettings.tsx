@@ -162,21 +162,31 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   // Only families whose template reads the kwarg get the Auto/On control.
   const enableThinkingHonored = detectedHonorsEnableThinking !== false
   const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined
-  const displayedTemperature = displayedOverrides.temperature ?? displayedModelDefaults.temperature
+  const nativeMtpMode = parseSessionNativeMtpMode(session.config)
+  const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode !== 'off'
+  const displayedTemperature = mtpGreedyEnforced
+    ? 0
+    : displayedOverrides.temperature ?? displayedModelDefaults.temperature
   // MTP is a property of the BUNDLE; whether it actually runs is decided by the
   // session's nativeMtpMode plus the effective temperature. Both are needed, so
   // neither a capable bundle nor a deterministic session alone is enough.
   const mtpTemperatureNotice = resolveMtpTemperatureNotice({
     nativeMtpSupported: detectedNativeMtpSupported === true,
-    mode: parseSessionNativeMtpMode(session.config),
+    mode: nativeMtpMode,
     temperature: displayedTemperature,
   })
-  const displayedTopP = displayedOverrides.topP ?? displayedModelDefaults.topP
-  const displayedTopKValue = displayedOverrides.topK ?? displayedModelDefaults.topK
+  const displayedTopP = mtpGreedyEnforced
+    ? 1
+    : displayedOverrides.topP ?? displayedModelDefaults.topP
+  const displayedTopKValue = mtpGreedyEnforced
+    ? 0
+    : displayedOverrides.topK ?? displayedModelDefaults.topK
   const displayedTopK = displayedTopKValue == null
     ? undefined
     : Math.max(0, Math.round(displayedTopKValue))
-  const displayedMinP = displayedOverrides.minP ?? displayedModelDefaults.minP
+  const displayedMinP = mtpGreedyEnforced
+    ? 0
+    : displayedOverrides.minP ?? displayedModelDefaults.minP
   const displayedRepeatPenalty = displayedOverrides.repeatPenalty ?? displayedModelDefaults.repeatPenalty
   const dsv4TopPMismatch = hydrationCurrent && shouldWarnDsv4TopP(
     detectedFamily,
@@ -743,11 +753,13 @@ function statusToneClass(status: string): string {
                 }}
                 min={0} max={2} step="any"
                 exactInput={{ min: 0, max: 2 }}
+                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.temperatureHelp')}
               />
             )}
-            {/* Auto preserves sampled bundle defaults and uses rejection-
-                sampling MTP. Explain only the explicit deterministic pin. */}
+            {/* MTP-on uses the measured greedy fast path. The four sampler
+                controls render the enforced values and remain disabled; Off
+                restores the saved/bundle sampling controls. */}
             {mtpTemperatureNotice && (
               <p
                 data-testid="mtp-temperature-notice"
@@ -780,6 +792,7 @@ function statusToneClass(status: string): string {
                 }}
                 min={topPSliderMin} max={TOP_P_MAX} step="any"
                 exactInput={{ min: Number.MIN_VALUE, max: TOP_P_MAX }}
+                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.topPHelp')}
               />
             )}
@@ -819,6 +832,7 @@ function statusToneClass(status: string): string {
                 }}
                 min={0} max={topKSliderMax} step={1}
                 exactInput={{ min: 0, max: TOP_K_MAX }}
+                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.topKHelp')}
                 format={value => Math.round(value) <= 0
                   ? t('chat.settings.topKOff')
@@ -837,6 +851,7 @@ function statusToneClass(status: string): string {
                 }}
                 min={0} max={1} step="any"
                 exactInput={{ min: 0, max: 1 }}
+                disabled={mtpGreedyEnforced}
                 help={t('chat.settings.minPHelp')}
               />
             )}
@@ -1104,11 +1119,12 @@ function statusToneClass(status: string): string {
 
 // ─── Helper Components ────────────────────────────────────────────────────────
 
-function SliderField({ label, value, onChange, min, max, step, help, format, exactInput }: {
+function SliderField({ label, value, onChange, min, max, step, help, format, exactInput, disabled = false }: {
   label: string; value: number; onChange: (v: number) => void
   min: number; max: number; step: number | 'any'; help: string
   format?: (v: number) => string
   exactInput?: { min?: number; max?: number }
+  disabled?: boolean
 }) {
   const { t } = useTranslation()
   return (
@@ -1127,11 +1143,12 @@ function SliderField({ label, value, onChange, min, max, step, help, format, exa
             min={exactInput.min}
             max={exactInput.max}
             step="any"
+            disabled={disabled}
             onChange={event => {
               const next = Number(event.target.value)
               if (Number.isFinite(next)) onChange(next)
             }}
-            className="w-24 rounded border border-input bg-background px-1.5 py-0.5 text-right font-mono text-xs text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+            className="w-24 rounded border border-input bg-background px-1.5 py-0.5 text-right font-mono text-xs text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
           />
         ) : (
           <span className="text-muted-foreground font-mono text-xs">{value.toFixed(2)}</span>
@@ -1143,7 +1160,8 @@ function SliderField({ label, value, onChange, min, max, step, help, format, exa
         value={value}
         onChange={e => onChange(parseFloat(e.target.value))}
         min={min} max={max} step={step}
-        className="w-full h-1.5 accent-primary"
+        disabled={disabled}
+        className="w-full h-1.5 accent-primary disabled:cursor-not-allowed disabled:opacity-50"
       />
       <p className="text-xs text-muted-foreground mt-0.5">{help}</p>
     </div>

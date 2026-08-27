@@ -444,7 +444,11 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
             {health.mtp?.request_policy && health.mtp.runtime_available && (
               <InfoCard
                 label={t('sessions.performance.mtpPolicy')}
-                value={health.mtp.request_policy === 'deterministic-defaults' ? t('sessions.performance.deterministicDefaults') : health.mtp.request_policy}
+                value={health.mtp.request_policy === 'greedy-only'
+                  ? t('sessions.performance.greedyOnly')
+                  : health.mtp.request_policy === 'deterministic-defaults'
+                    ? t('sessions.performance.deterministicDefaults')
+                    : health.mtp.request_policy}
               />
             )}
             {health.mtp?.request_gate && health.mtp.runtime_available && (

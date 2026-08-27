@@ -1802,12 +1802,12 @@ describe('Native MTP', () => {
         },
     }
 
-    it('defaults native-MTP bundles to sampled-compatible Auto mode', () => {
+    it('defaults native-MTP bundles to adaptive greedy Auto mode', () => {
         const out = preview({}, qwenMtpDetected)
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('2')
         expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('greedy-only')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)
@@ -1848,7 +1848,7 @@ describe('Native MTP', () => {
         expect(sessionsSource).toContain('--disable-native-mtp')
         expect(sessionsSource).toContain('data?.mtp?.request_policy')
         expect(sessionsSource).toContain("proc.nativeMtpSamplingPolicy === 'deterministic-defaults'")
-        expect(serverTypesSource).toContain("nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults'")
+        expect(serverTypesSource).toContain("nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only'")
         expect(formSource).toContain('Native MTP')
         expect(formSource).toContain('nativeMtpMode')
         expect(formSource).toContain('nativeMtpDepth')

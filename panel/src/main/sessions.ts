@@ -1782,7 +1782,8 @@ export class SessionManager extends EventEmitter {
             const healthMtpPolicy = data?.mtp?.request_policy
             if (
               healthMtpPolicy === 'compatible-only' ||
-              healthMtpPolicy === 'deterministic-defaults'
+              healthMtpPolicy === 'deterministic-defaults' ||
+              healthMtpPolicy === 'greedy-only'
             ) {
               nativeMtpSamplingPolicy = healthMtpPolicy
             }
@@ -1811,7 +1812,7 @@ export class SessionManager extends EventEmitter {
     pid: number
     port: number
     modelPath: string
-    nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults'
+    nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only'
   } | null {
     try {
       const parts = line.trim().split(/\s+/)
@@ -1845,11 +1846,12 @@ export class SessionManager extends EventEmitter {
       if (portMatch) port = parseInt(portMatch[1])
 
       const mtpPolicyMatch = cmdStart.match(
-        /--native-mtp-sampling-policy\s+(compatible-only|deterministic-defaults)/,
+        /--native-mtp-sampling-policy\s+(compatible-only|deterministic-defaults|greedy-only)/,
       )
       const nativeMtpSamplingPolicy = mtpPolicyMatch?.[1] as
         | 'compatible-only'
         | 'deterministic-defaults'
+        | 'greedy-only'
         | undefined
 
       return { pid, port, modelPath, nativeMtpSamplingPolicy }
@@ -4741,13 +4743,11 @@ export class SessionManager extends EventEmitter {
     }
 
     // Native in-model MTP. This is separate from external speculative decoding:
-    // Qwen preserved-MTP bundles carry their own draft head and support both
-    // greedy identity verification and sampled rejection acceptance. Fresh
-    // sessions default to Auto so model
-    // generation_config/jang_config sampling remains authoritative. Native MTP
-    // now uses rejection-sampling acceptance for sampled requests, so Auto must
-    // preserve those model defaults. Users may explicitly select Deterministic
-    // to replace omitted request sampling with greedy values.
+    // Qwen preserved-MTP bundles carry their own draft head. Sampled rejection
+    // acceptance remains available to direct CLI users through compatible-only,
+    // but the app's MTP-on contract is the measured fast path: greedy sampling.
+    // Auto detects the head and keeps depth adaptive; Deterministic is the same
+    // greedy sampler with an explicit mode label. Off restores bundle sampling.
     const nativeMtp = (detected as any).nativeMtp
     if (!dsv4Active && nativeMtp?.supported) {
       const mode = (config as any).nativeMtpMode || 'auto'
@@ -4774,9 +4774,9 @@ export class SessionManager extends EventEmitter {
         mode,
         externalSpeculativeActive: compatibleExternalSpeculative,
       }))
-      // Auto now emits `compatible-only`: bundle sampling stays authoritative
-      // and sampled requests use the runtime's rejection-sampling acceptance.
-      // Deterministic is the only mode that emits `deterministic-defaults`.
+      // Both app MTP-on modes emit `greedy-only`, which enforces temperature 0
+      // at the engine boundary even for API clients that send sampled values.
+      // Depth remains independently adaptive unless the user selects Fixed.
     }
 
     // Generation defaults are intentionally not passed as --default-* from the

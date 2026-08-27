@@ -143,10 +143,15 @@ export function getMetricsItems(
   });
 
   if (metrics.ppSpeed) {
+    const isUncachedTail = Number.isFinite(metrics.cachedTokens) && (metrics.cachedTokens ?? 0) > 0;
     items.push({
-      label: `${metrics.ppSpeed} pp/s`,
+      label: isUncachedTail
+        ? t('chat.metrics.ppsTailLabel', { speed: metrics.ppSpeed })
+        : `${metrics.ppSpeed} pp/s`,
       value: metrics.ppSpeed,
-      title: t('chat.metrics.ppsTitle'),
+      title: isUncachedTail
+        ? t('chat.metrics.ppsTailTitle')
+        : t('chat.metrics.ppsTitle'),
     });
   }
 

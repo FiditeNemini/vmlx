@@ -379,7 +379,23 @@ describe('Metrics Display Items', () => {
 
   it('includes pp/s when available', () => {
     const items = getMetricsItems({ ...baseMetrics, ppSpeed: '120.0' }, false, t)
-    expect(items.find(i => i.label.includes('pp/s'))).toBeDefined()
+    const ppItem = items.find(i => i.label.includes('pp/s'))
+    expect(ppItem?.label).toBe('120.0 pp/s')
+    expect(ppItem?.title).toBe('Prompt processing speed')
+  })
+
+  it('labels cache-hit pp/s as uncached-tail speed', () => {
+    const items = getMetricsItems({
+      ...baseMetrics,
+      promptTokens: 7753,
+      cachedTokens: 7744,
+      ppSpeed: '11.1',
+    }, false, t)
+    const ppItem = items.find(i => i.label.includes('pp/s'))
+    expect(ppItem?.label).toBe('11.1 tail pp/s')
+    expect(ppItem?.title).toBe(
+      'Prompt processing speed for the uncached tail only; cached tokens were restored separately',
+    )
   })
 
   it('includes prompt tokens when available', () => {

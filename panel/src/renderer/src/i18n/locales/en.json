@@ -607,6 +607,8 @@
       "tokensTitleDone": "Completion tokens",
       "tpsTitle": "Decode speed after first token; includes reasoning and tool-loop completion tokens",
       "ppsTitle": "Prompt processing speed",
+      "ppsTailLabel": "{speed} tail pp/s",
+      "ppsTailTitle": "Prompt processing speed for the uncached tail only; cached tokens were restored separately",
       "promptLabel": "{n} prompt",
       "cachedSuffix": " ({cached} cached)",
       "promptTitleCache": "Prompt tokens — cache: {detail}",

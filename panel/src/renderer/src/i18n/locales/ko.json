@@ -607,6 +607,8 @@
       "tokensTitleDone": "완성 토큰",
       "tpsTitle": "첫 토큰 이후의 디코드 속도이며, 추론 및 도구 루프 완성 토큰을 포함합니다",
       "ppsTitle": "프롬프트 처리 속도",
+      "ppsTailLabel": "{speed} 미캐시 테일 pp/s",
+      "ppsTailTitle": "캐시되지 않은 테일만의 프롬프트 처리 속도입니다. 캐시된 토큰은 별도로 복원되었습니다",
       "promptLabel": "프롬프트 {n}",
       "cachedSuffix": " ({cached} 캐시됨)",
       "promptTitleCache": "프롬프트 토큰 — 캐시: {detail}",

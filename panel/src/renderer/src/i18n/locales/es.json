@@ -607,6 +607,8 @@
       "tokensTitleDone": "Tokens de la respuesta",
       "tpsTitle": "Velocidad de decodificación tras el primer token; incluye tokens de razonamiento y del bucle de herramientas",
       "ppsTitle": "Velocidad de procesamiento del prompt",
+      "ppsTailLabel": "{speed} pp/s del tramo no cacheado",
+      "ppsTailTitle": "Velocidad de procesamiento solo del tramo no cacheado; los tokens en caché se restauraron por separado",
       "promptLabel": "{n} de prompt",
       "cachedSuffix": " ({cached} en caché)",
       "promptTitleCache": "Tokens del prompt — caché: {detail}",

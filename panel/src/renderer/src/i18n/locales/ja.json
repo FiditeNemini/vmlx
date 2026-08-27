@@ -607,6 +607,8 @@
       "tokensTitleDone": "補完トークン",
       "tpsTitle": "最初のトークン以降のデコード速度。推論およびツールループの補完トークンを含みます",
       "ppsTitle": "プロンプト処理速度",
+      "ppsTailLabel": "{speed} 未キャッシュ末尾 pp/s",
+      "ppsTailTitle": "未キャッシュの末尾だけのプロンプト処理速度。キャッシュ済みトークンは別途復元されました",
       "promptLabel": "プロンプト {n}",
       "cachedSuffix": "（{cached} キャッシュ済み）",
       "promptTitleCache": "プロンプトトークン — キャッシュ: {detail}",

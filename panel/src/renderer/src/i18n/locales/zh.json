@@ -607,6 +607,8 @@
       "tokensTitleDone": "补全 token",
       "tpsTitle": "首个 token 之后的解码速度；包含推理和工具循环的补全 token",
       "ppsTitle": "提示词处理速度",
+      "ppsTailLabel": "{speed} 未缓存尾部 pp/s",
+      "ppsTailTitle": "仅未缓存尾部的提示词处理速度；已缓存 token 已单独恢复",
       "promptLabel": "提示词 {n}",
       "cachedSuffix": "（{cached} 已缓存）",
       "promptTitleCache": "提示词 token — 缓存：{detail}",

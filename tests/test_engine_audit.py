@@ -18458,3 +18458,66 @@ def test_length_terminated_stream_still_emits_terminal_usage_and_done():
             "length-terminated stream must still terminate the SSE stream "
             "with [DONE]"
         )
+
+
+class TestAutoToolsNoCallObservability:
+    """vmlx#263 ask 2: a caller who offered tools deserves a server-side trace
+    when none came back. Log-only -- never alters the response; auto prose is
+    protocol-valid. Gating: fires only for auto (None/"auto") with tools
+    present; explicit "none" opt-out and required-mode (own fail-closed 400)
+    stay silent."""
+
+    def _request(self, tools=True, tool_choice=None):
+        from vmlx_engine.api.models import ChatCompletionRequest
+
+        kwargs = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        if tools:
+            kwargs["tools"] = [{"type": "function", "function": {
+                "name": "t", "parameters": {"type": "object"}}}]
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
+        return ChatCompletionRequest(**kwargs)
+
+    def test_auto_with_tools_logs_warning(self, caplog):
+        import logging
+
+        from vmlx_engine.server import _log_auto_tools_returned_no_calls
+
+        with caplog.at_level(logging.WARNING, logger="vmlx_engine.server"):
+            assert _log_auto_tools_returned_no_calls(self._request(), 42873)
+        assert any("no structured tool_calls" in r.getMessage()
+                   for r in caplog.records)
+        assert any("42873" in r.getMessage() for r in caplog.records)
+
+    def test_no_tools_stays_silent(self):
+        from vmlx_engine.server import _log_auto_tools_returned_no_calls
+
+        assert not _log_auto_tools_returned_no_calls(self._request(tools=False))
+        assert not _log_auto_tools_returned_no_calls(None)
+
+    def test_explicit_none_opt_out_stays_silent(self):
+        from vmlx_engine.server import _log_auto_tools_returned_no_calls
+
+        assert not _log_auto_tools_returned_no_calls(
+            self._request(tool_choice="none"))
+
+    def test_required_stays_silent_it_has_its_own_fail_closed_400(self):
+        from vmlx_engine.server import _log_auto_tools_returned_no_calls
+
+        assert not _log_auto_tools_returned_no_calls(
+            self._request(tool_choice="required"))
+        assert not _log_auto_tools_returned_no_calls(
+            self._request(tool_choice={"type": "function",
+                                       "function": {"name": "t"}}))
+
+    def test_all_four_finalization_sites_call_the_helper(self):
+        import inspect
+
+        from vmlx_engine import server
+
+        source = inspect.getsource(server)
+        assert source.count("_log_auto_tools_returned_no_calls(") >= 5, (
+            "helper definition plus the four finalization call sites "
+            "(chat non-stream, chat stream, responses non-stream, "
+            "responses stream)"
+        )

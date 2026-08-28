@@ -4982,6 +4982,32 @@ def _is_pending_required_tool_choice(request: Any) -> bool:
     )
 
 
+def _log_auto_tools_returned_no_calls(request: Any, prompt_tokens: Any = None) -> bool:
+    """Factual observability for vmlx#263's silent-degradation report.
+
+    Under auto tool choice a no-tool prose answer is protocol-valid, so this
+    must never alter the response -- but a caller who offered tools deserves a
+    server-side trace when none came back, because at long context this
+    family measurably stops emitting tool markup (0/5 structured calls above
+    ~41K vs clean calls at short context, 2026-08-28 receipts) and the only
+    other signal is the client noticing finish_reason != "tool_calls".
+    tool_choice="none" is an explicit opt-out and stays silent; "required"
+    has its own fail-closed 400 and never reaches here.
+    """
+    if request is None or not getattr(request, "tools", None):
+        return False
+    tool_choice = getattr(request, "tool_choice", None)
+    if tool_choice == "none" or _is_required_tool_choice(tool_choice):
+        return False
+    logger.warning(
+        "tools offered (auto tool choice) but the response contained no "
+        "structured tool_calls%s -- protocol-valid, surfaced for vmlx#263 "
+        "observability",
+        f" (prompt_tokens={prompt_tokens})" if prompt_tokens else "",
+    )
+    return True
+
+
 def _describe_required_tool_choice(tool_choice: Any) -> str:
     """Render the caller's own tool_choice for an error message.
 
@@ -19721,6 +19747,8 @@ async def create_chat_completion(
                 "raw_preview": tool_required_preview,
             },
         )
+    if not tool_calls:
+        _log_auto_tools_returned_no_calls(request, getattr(output, "prompt_tokens", None))
 
     # Determine finish reason
     finish_reason = (
@@ -23043,6 +23071,8 @@ async def create_response(
                 "raw_preview": tool_required_preview,
             },
         )
+    if not tool_calls:
+        _log_auto_tools_returned_no_calls(request, getattr(output, "prompt_tokens", None))
 
     _response_finish = (
         _ns_visible_answer_finish_reason
@@ -25792,6 +25822,8 @@ async def stream_chat_completion(
             },
         }
         yield f"data: {json.dumps(error_data)}\n\n"
+    if not tool_calls_emitted:
+        _log_auto_tools_returned_no_calls(request)
 
     # H4: Validate response_format at end of stream.
     # Streaming can't reject mid-stream, so validate the accumulated output and
@@ -27978,6 +28010,8 @@ async def stream_responses_api(
                 "code": _required_tool_error["code"],
             },
         )
+    if not tool_calls:
+        _log_auto_tools_returned_no_calls(request)
 
     # Emit the terminal event that matches the final response status. OpenAI's
     # Responses stream uses response.incomplete when max_output_tokens is hit;

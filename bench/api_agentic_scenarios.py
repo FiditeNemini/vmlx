@@ -475,8 +475,16 @@ def run_scenario(
                     record.errors.append(f"tool arguments not valid JSON: {error}")
                 if not record.errors:
                     wire.commit_assistant(content, calls)
+                    called_city = "Paris"
+                    try:
+                        called_city = json.loads(call.get("arguments") or "{}").get("city") or called_city
+                    except json.JSONDecodeError:
+                        pass
+                    # The fixture result must echo the CITY THE MODEL CALLED —
+                    # a hardcoded city made the grader fail the model for
+                    # correctly repeating the tool's own output.
                     wire.commit_tool_result(
-                        call, json.dumps({"city": "Paris", "temp_c": 21, "sky": "sunny"})
+                        call, json.dumps({"city": called_city, "temp_c": 21, "sky": "sunny"})
                     )
                     continuation = wire.run_turn(
                         stream=stream, tools=True,

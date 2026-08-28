@@ -1,19 +1,19 @@
 {
-  "version": "1.6.43",
-  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.43/vMLX-1.6.43-tahoe-arm64.dmg",
-  "sha256": "160b74f95ec5eb970fe99c2a8543a7b37d99eeb34e95db9bb1ed7a13e17ec7c4",
-  "sha512": "9rTb5vyjDg/TAqWOfBWTTwzE/jnWxEB4QOA7sqfwOfAfq3nyTYF4Rb33Pt+qjGRdZ7RjLJefAT9gHoVYaDnNBQ==",
+  "version": "1.6.44",
+  "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.44/vMLX-1.6.44-tahoe-arm64.dmg",
+  "sha256": "e710629d6952cda170a597ea848d1808b65dea16f90ba417be35cb1ec4a3673d",
+  "sha512": "70hZrd5YQVLztEUZ+VmtSRVIGKUEAfpkesGkdkQbZrk//tR/1AS6Gh/tZR50HCmiWjfEbnpxuLXmLLPCiUumgQ==",
   "downloads": {
     "sequoia": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.43/vMLX-1.6.43-sequoia-arm64.dmg",
-      "sha256": "a49ca0abfbabd8643f0f69d9b550093d8b53d0e9c5e7b51ca7dea94fc67b4772",
-      "sha512": "70H/wmGmHkEzJF5KaPL6O7hEPttNykqUEPswazbPxXDoDwvSfymGHVGg0Z3bYRbQ8CmL84mXgxI71HP4/f6HqQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.44/vMLX-1.6.44-sequoia-arm64.dmg",
+      "sha256": "69ef9a129a60bcb7c990235f30e3618535ba9714ff39144ef87ffc9d36745ca6",
+      "sha512": "Im/meBtB93QrgIVLS4r2WawDXUCPNjCKxeHL0xsduHykJL00t8NyBo90qqz0OQrysikGKLoupBS45/6N96abvw=="
     },
     "tahoe": {
-      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.43/vMLX-1.6.43-tahoe-arm64.dmg",
-      "sha256": "160b74f95ec5eb970fe99c2a8543a7b37d99eeb34e95db9bb1ed7a13e17ec7c4",
-      "sha512": "9rTb5vyjDg/TAqWOfBWTTwzE/jnWxEB4QOA7sqfwOfAfq3nyTYF4Rb33Pt+qjGRdZ7RjLJefAT9gHoVYaDnNBQ=="
+      "url": "https://github.com/jjang-ai/mlxstudio/releases/download/v1.6.44/vMLX-1.6.44-tahoe-arm64.dmg",
+      "sha256": "e710629d6952cda170a597ea848d1808b65dea16f90ba417be35cb1ec4a3673d",
+      "sha512": "70hZrd5YQVLztEUZ+VmtSRVIGKUEAfpkesGkdkQbZrk//tR/1AS6Gh/tZR50HCmiWjfEbnpxuLXmLLPCiUumgQ=="
     }
   },
-  "notes": "vMLX 1.6.43 \u2014 fixes encoder-less DeepSeek V4 Flash 0731 bundle loading, detaches compiled graphs during deep sleep to prevent repeated wake retention, honors the earliest auto-sleep deadline, reports backend sleep state truthfully, and bounds exactly-once tool replay. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.43, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, and mounted-artifact verified."
+  "notes": "vMLX 1.6.44 \u2014 makes an explicit session Stop cancel any queued start so no untracked engine can spawn after stopping, reports deep-sleep JIT wake time in Ollama latency fields, repairs the vendored Qwen 3.5 runtime overlay against upstream-first imports, hardens family detection against partial JANG sidecars, speeds Qwen4 PLE SSD reads with page-aligned lookups, keeps long DeepSeek V4 prefills alive past Electron inactivity timeouts, and patches six production npm dependencies. Tahoe/macOS 26 is the default; Sequoia remains available as compatibility. Both DMGs contain vMLX 1.6.44, MLX 0.32.2, and pinned JANG 2.5.46, are Developer ID signed, independently notarized, stapled, Gatekeeper verified, and mounted-artifact verified."
 }

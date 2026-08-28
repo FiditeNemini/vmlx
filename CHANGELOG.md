@@ -8,14 +8,35 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.44] - 2026-08-27
+## [1.6.44] - 2026-08-28
 
 ### Performance
 
 - Qwen3.8 Flash Next PLE row lookup now performs contiguous, page-aligned reads
   from its SSD-backed table instead of issuing one random read per candidate.
 
+### Security
+
+- Patched production npm dependencies: DOMPurify, js-yaml, PostCSS, uuid,
+  nanoid, and picomatch. The Electron/extract-zip advisories require an
+  Electron major upgrade and are deferred to the next release.
+
 ### Fixed
+
+- An explicit session Stop now cancels any queued or in-flight start, so a
+  Stop landing inside a Save & Restart can no longer leave an untracked
+  engine running while the session reads Stopped.
+- Ollama `/api/chat` and `/api/generate` report a deep-sleep JIT wake as
+  `load_duration` and include it in `total_duration`; prefill/decode splits
+  stay wake-independent.
+- The vendored Qwen 3.5 / Qwen 3.5 MoE runtime overlay purges stale upstream
+  submodules before installing, so importing Qwen4 code first can no longer
+  produce a half-vendored runtime missing the router-gate quantization fix.
+- A sidecar JANG capabilities stamp that names no model family no longer
+  selects cache or parser behavior; detection falls back to structural
+  config.json architecture detection and logs the fallback.
+- Session Settings cache labels are translated in Spanish, Japanese, Korean,
+  and Chinese instead of falling back to English.
 
 - Electron tolerates orphaned terminal `read EIO` and `write EIO` events while
   continuing to surface unrelated stream and filesystem failures.

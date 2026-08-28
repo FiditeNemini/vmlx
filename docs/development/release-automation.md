@@ -26,10 +26,11 @@ labels:
 self-hosted, macOS, ARM64, vmlx-release
 ```
 
-The runner needs `/opt/homebrew/bin/node`, `npm`, and `npx`, current Xcode
-command-line tools, Python 3.11 or newer, enough disk for both app bundles, and
-the private evidence root used by the production gate. Keep the private
-evidence root outside the Git checkout. The workflow defaults to:
+The runner needs Node 22.12 or newer at `/opt/homebrew/bin/node`, matching
+`npm` and `npx`, a current full Xcode selected with `xcode-select`, Python 3.11
+or newer, enough disk for both app bundles, and the private evidence root used
+by the production gate. Keep the private evidence root outside the Git
+checkout. The workflow defaults to:
 
 ```text
 /Users/eric/vmlx-private-evidence
@@ -41,8 +42,11 @@ key, then removes both in an `always()` cleanup step.
 
 ### Protected environments
 
-Create all four environments with Eric as a required reviewer. Prevent
-self-review where the GitHub plan supports it.
+Create all four environments with Eric as a required reviewer. While Eric is
+the only reviewer, allow self-review so a run he manually dispatches can reach
+the explicit approval gate. Enable GitHub's prevent-self-review option only
+after adding a second independent release reviewer; otherwise every release is
+permanently deadlocked.
 
 #### `apple-release-signing`
 

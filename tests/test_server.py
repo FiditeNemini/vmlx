@@ -5580,6 +5580,136 @@ class TestOpenAILogprobsFormatting:
         assert "tools" in engine.calls[0]["kwargs"]
 
     @pytest.mark.asyncio
+    async def test_streaming_responses_qwen4_exp_reasoning_only_stays_one_pass(
+        self, monkeypatch
+    ):
+        """qwen4_exp's answer-pass enrollment (f58c9c196) was corrected
+        2026-08-28: it hard-split the first pass, then silently reran a
+        SECOND thinking-off generation with tools popped and a FABRICATED
+        reasoning_content history item spliced ahead of it -- forced
+        behavior forbidden by AGENTS.md:54. A default qwen4_exp request that
+        never emits </think> must now: run generation exactly once, keep the
+        caller's full output budget (no hard split), keep tools, never force
+        enable_thinking=False, never emit the vmlx-answer-pass-start SSE
+        marker (structurally impossible without a second call), and surface
+        the honest reasoning_only_no_content incomplete signal instead of a
+        synthesized answer."""
+        from types import SimpleNamespace
+
+        import vmlx_engine.model_config_registry as registry
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ResponsesRequest
+        from vmlx_engine.engine.base import GenerationOutput
+        from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
+
+        config = SimpleNamespace(
+            family_name="qwen4_exp",
+            think_in_template=True,
+            reasoning_parser="qwen3",
+            tool_parser="hermes",
+            supports_thinking=True,
+        )
+
+        class _Engine:
+            is_mllm = True
+            preserve_native_tool_format = False
+            tokenizer = SimpleNamespace(has_thinking=True)
+
+            def __init__(self):
+                self.calls = []
+
+            async def stream_chat(self, *, messages, **kwargs):
+                self.calls.append({"messages": messages, "kwargs": dict(kwargs)})
+                # Answers INSIDE the open think block and EOSes -- never
+                # generates </think> -- the live-measured qwen4_exp disease
+                # this whole campaign root-causes.
+                deltas = ["I should check the weather data for this city."]
+                text = ""
+                for i, delta in enumerate(deltas, start=1):
+                    text += delta
+                    yield GenerationOutput(
+                        text=text, new_text=delta, tokens=[i],
+                        prompt_tokens=8, completion_tokens=i,
+                        finished=i == len(deltas),
+                        finish_reason="stop" if i == len(deltas) else None,
+                    )
+
+        engine = _Engine()
+        monkeypatch.setattr(server, "_engine", engine)
+        monkeypatch.setattr(server, "_default_timeout", 5.0)
+        monkeypatch.setattr(server, "_model_name", "qwen4-exp-reasononly-test")
+        monkeypatch.setattr(server, "_model_path", None)
+        monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+        monkeypatch.setattr(server, "_tool_call_parser", "hermes")
+        monkeypatch.setattr(server, "_tool_call_parser_disabled_explicitly", False)
+        monkeypatch.setattr(
+            server, "_engine_prompt_starts_in_reasoning", lambda *args, **kwargs: True
+        )
+        monkeypatch.setattr(
+            registry,
+            "get_model_config_registry",
+            lambda *args, **kwargs: SimpleNamespace(lookup=lambda *a, **k: config),
+        )
+
+        tools = [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        ]
+        request = ResponsesRequest(
+            model="qwen4-exp-reasononly-test",
+            input="What is the weather in Berlin?",
+            stream=True,
+            max_output_tokens=128,
+            enable_thinking=True,
+            tools=tools,
+        )
+
+        raw_chunks = []
+        events = []
+        async for chunk in server.stream_responses_api(
+            engine,
+            [{"role": "user", "content": request.input}],
+            request,
+            fastapi_request=None,
+            tools=tools,
+            enable_thinking=True,
+            max_tokens=128,
+        ):
+            raw_chunks.append(chunk)
+            for line in chunk.splitlines():
+                if line.startswith("data: "):
+                    events.append(json.loads(line.removeprefix("data: ")))
+
+        incomplete = next(
+            event["response"] for event in events
+            if event.get("type") == "response.incomplete"
+        )
+
+        # Exactly one generation, no hidden retry.
+        assert len(engine.calls) == 1
+        # Full output budget preserved -- not hard-split to reserve room for
+        # a second pass.
+        assert engine.calls[0]["kwargs"].get("max_tokens") == 128
+        # Tools preserved, never popped for a retry that doesn't exist.
+        assert "tools" in engine.calls[0]["kwargs"]
+        assert engine.calls[0]["kwargs"]["tools"]
+        # enable_thinking never forced off.
+        assert engine.calls[0]["kwargs"].get("enable_thinking") is not False
+        # The answer-pass SSE marker never appears -- structurally impossible
+        # without a second call, checked directly against the raw stream too.
+        assert "vmlx-answer-pass-start" not in "".join(raw_chunks)
+        # Honest incomplete signal, not a synthesized answer.
+        assert incomplete["output_text"] == ""
+        assert incomplete["incomplete_details"] == {"reason": "reasoning_only_no_content"}
+
+    @pytest.mark.asyncio
     async def test_streaming_chat_step_invalid_auto_tool_stays_fail_closed(
         self, monkeypatch
     ):

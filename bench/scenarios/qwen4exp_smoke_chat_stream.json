@@ -3,12 +3,39 @@
   "wire": "chat",
   "stream": true,
   "turns": [
-    {"kind": "grow", "grow_to_tokens": 2048, "min_prompt_tokens": 1200},
-    {"kind": "tool_round", "city": "Paris"},
-    {"kind": "grow", "grow_to_tokens": 4096, "min_prompt_tokens": 2600, "expect_reuse": true},
-    {"kind": "probe", "prompt": "Reply with exactly: EFFORT-LOW-OK", "expect": "EFFORT-LOW-OK", "reasoning_effort": "low", "expect_reuse": false},
-    {"kind": "deep_sleep"},
-    {"kind": "probe", "prompt": "Reply with exactly: WAKE-OK", "expect": "WAKE-OK"},
-    {"kind": "tool_round", "city": "Tokyo"}
+    {
+      "kind": "grow",
+      "grow_to_tokens": 2048,
+      "growth_tolerance": 768
+    },
+    {
+      "kind": "tool_round",
+      "city": "Paris"
+    },
+    {
+      "kind": "grow",
+      "grow_to_tokens": 4096,
+      "expect_reuse": true,
+      "growth_tolerance": 768
+    },
+    {
+      "kind": "probe",
+      "prompt": "Reply with exactly: EFFORT-LOW-OK",
+      "expect": "EFFORT-LOW-OK",
+      "reasoning_effort": "low",
+      "expect_reuse": false
+    },
+    {
+      "kind": "deep_sleep"
+    },
+    {
+      "kind": "probe",
+      "prompt": "Reply with exactly: WAKE-OK",
+      "expect": "WAKE-OK"
+    },
+    {
+      "kind": "tool_round",
+      "city": "Tokyo"
+    }
   ]
 }

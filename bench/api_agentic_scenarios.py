@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -153,7 +154,10 @@ class ChatWire:
         if max_tokens:
             payload["max_tokens"] = max_tokens
         status, raw, latency = _post(self.url, payload, self.api_key, self.timeout)
-        out: dict[str, Any] = {"status": status, "latency_s": latency, "errors": []}
+        out: dict[str, Any] = {
+            "status": status, "latency_s": latency, "errors": [],
+            "raw": raw, "request_payload": payload,
+        }
         if status != 200:
             out["errors"].append(f"HTTP {status}: {raw[:200]}")
             return out
@@ -162,6 +166,7 @@ class ChatWire:
             if done != 1:
                 out["errors"].append(f"expected exactly one [DONE], observed {done}")
             content, reasoning, calls, finishes, usage, stream_errors = self._assemble(events)
+            out["response_id"] = next((e.get("id") for e in events if e.get("id")), None)
             out["errors"].extend(stream_errors)
         else:
             body = json.loads(raw)
@@ -179,6 +184,7 @@ class ChatWire:
             ]
             finishes = [choice.get("finish_reason")] if choice.get("finish_reason") else []
             usage = body.get("usage") or {}
+            out["response_id"] = body.get("id")
         if len(finishes) != 1:
             out["errors"].append(f"expected exactly one terminal finish reason, observed {finishes}")
         out.update(
@@ -239,7 +245,7 @@ class ChatWire:
         ]
         return "".join(content), "".join(reasoning), calls, finishes, usage, errors
 
-    def commit_assistant(self, content: str, tool_calls: list[dict[str, Any]]) -> None:
+    def commit_assistant(self, content: str, tool_calls: list[dict[str, Any]], reasoning_items=None) -> None:
         message: dict[str, Any] = {"role": "assistant", "content": content or None}
         if tool_calls:
             message["tool_calls"] = [
@@ -287,7 +293,10 @@ class ResponsesWire:
         if max_tokens:
             payload["max_output_tokens"] = max_tokens
         status, raw, latency = _post(self.url, payload, self.api_key, self.timeout)
-        out: dict[str, Any] = {"status": status, "latency_s": latency, "errors": []}
+        out: dict[str, Any] = {
+            "status": status, "latency_s": latency, "errors": [],
+            "raw": raw, "request_payload": payload,
+        }
         if status != 200:
             out["errors"].append(f"HTTP {status}: {raw[:200]}")
             return out
@@ -332,6 +341,8 @@ class ResponsesWire:
                     }
                 )
         usage = response.get("usage") or {}
+        out["response_id"] = response.get("id")
+        out["reasoning_items"] = [item for item in output if item.get("type") == "reasoning"]
         content = "".join(texts)
         out.update(
             content=content,
@@ -349,7 +360,11 @@ class ResponsesWire:
         out["errors"].extend(_leak_errors(content))
         return out
 
-    def commit_assistant(self, content: str, tool_calls: list[dict[str, Any]]) -> None:
+    def commit_assistant(self, content: str, tool_calls: list[dict[str, Any]], reasoning_items=None) -> None:
+        # Realistic Responses replay: OpenAI clients replay reasoning items
+        # ahead of the function_call items they justified.
+        for item in reasoning_items or []:
+            self.items.append(item)
         for call in tool_calls:
             self.items.append(
                 {
@@ -368,30 +383,183 @@ class ResponsesWire:
         )
 
 
-def _admin_deep_sleep(base: str, api_key: str | None, timeout: float) -> None:
+def confirm_deep_sleep(
+    base: str,
+    api_key: str | None,
+    *,
+    poll=None,
+    timeout_s: float = 45.0,
+    interval_s: float = 0.5,
+) -> list[str]:
+    """Enter deep sleep and CONFIRM it from lifecycle health.
+
+    Never a fixed arbitrary delay: the arm passes only when /health reports
+    status standby_deep with model_loaded false within the timeout. `poll`
+    is injectable for regression tests.
+    """
+    if poll is None:
+        def poll():
+            _s, body, _l = request_json("GET", f"{base}/health", api_key=api_key, timeout=10.0)
+            return body or {}
     request = urllib.request.Request(
         base + "/admin/deep-sleep", data=b"", method="POST", headers=_headers(api_key)
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=20.0) as response:
         body = json.loads(response.read().decode())
     if body.get("status") != "deep_sleep":
-        raise ScenarioFailure(f"deep-sleep arm did not enter deep sleep: {body}")
-    time.sleep(3.0)
+        return [f"deep-sleep endpoint did not enter deep sleep: {body}"]
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        health = poll()
+        progress = health.get("load_progress") or {}
+        if str(health.get("status", "")).startswith("standby_deep") and not progress.get("model_loaded", True):
+            return []
+        time.sleep(interval_s)
+    return [f"health never confirmed standby_deep/model_loaded=false within {timeout_s}s"]
 
 
-def _health_memory(base: str, api_key: str | None) -> dict[str, Any]:
-    try:
-        _status, body, _latency = request_json(
-            "GET", f"{base}/health", api_key=api_key, timeout=15.0
-        )
-        memory = (body or {}).get("memory") or {}
+class ContinuousSampler:
+    """Samples /health memory gauges plus engine PID count and port owner
+    CONTINUOUSLY while a turn runs — a single post-turn sample misses
+    transient peaks (the 128%/140 GB class)."""
+
+    def __init__(self, base: str, api_key: str | None, port: int, interval_s: float = 0.5):
+        import threading
+
+        self.base = base
+        self.api_key = api_key
+        self.port = port
+        self.interval_s = interval_s
+        self.samples: list[dict[str, Any]] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _engine_pids(self) -> list[int]:
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "vmlx_engine.cli serve"], capture_output=True, text=True, timeout=3
+            ).stdout
+            return [int(x) for x in out.split()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            sample: dict[str, Any] = {"t": time.time(), "engine_pids": self._engine_pids()}
+            try:
+                _s, body, _l = request_json(
+                    "GET", f"{self.base}/health", api_key=self.api_key, timeout=5.0
+                )
+                memory = (body or {}).get("memory") or {}
+                sample.update(
+                    active_mb=memory.get("active_mb"),
+                    peak_mb=memory.get("peak_mb"),
+                    cache_mb=memory.get("cache_mb"),
+                    status=(body or {}).get("status"),
+                )
+            except Exception:  # noqa: BLE001
+                sample["health_error"] = True
+            self.samples.append(sample)
+            self._stop.wait(self.interval_s)
+
+    def __enter__(self) -> "ContinuousSampler":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self._stop.set()
+        self._thread.join(timeout=3.0)
+
+    def summary(self) -> dict[str, Any]:
+        actives = [s["active_mb"] for s in self.samples if isinstance(s.get("active_mb"), (int, float))]
+        pid_sets = {tuple(s.get("engine_pids") or []) for s in self.samples}
         return {
-            "active_mb": memory.get("active_mb"),
-            "peak_mb": memory.get("peak_mb"),
-            "cache_mb": memory.get("cache_mb"),
+            "samples": len(self.samples),
+            "active_mb_min": min(actives) if actives else None,
+            "active_mb_max": max(actives) if actives else None,
+            "engine_pid_sets": [list(p) for p in pid_sets],
+            "single_engine_throughout": all(len(s.get("engine_pids") or []) <= 1 for s in self.samples),
         }
-    except Exception:  # noqa: BLE001 — sampling must never fail a turn itself
-        return {}
+
+
+def grade_tool_call(calls: list[dict[str, Any]], expected_city: str) -> tuple[dict[str, Any] | None, list[str]]:
+    """Strict round-1 tool grading: exact name, normalized args, the
+    MANIFEST city (never blessing whichever city the model picked), one
+    call, stable id. Pure — regression-tested offline."""
+    errors: list[str] = []
+    if len(calls) != 1:
+        return None, [f"expected exactly one tool call, observed {len(calls)}"]
+    call = calls[0]
+    if call.get("name") != "get_weather":
+        errors.append(f"wrong tool name {call.get('name')!r}")
+    if not call.get("id"):
+        errors.append("tool call carries no id")
+    try:
+        arguments = json.loads(call.get("arguments") or "")
+    except (TypeError, json.JSONDecodeError) as error:
+        return None, errors + [f"tool arguments not valid JSON: {error}"]
+    called_city = str(arguments.get("city", "")).strip()
+    if called_city.lower() != expected_city.strip().lower():
+        errors.append(
+            f"model called city {called_city!r} but the manifest requested {expected_city!r}"
+        )
+    return (call if not errors else None), errors
+
+
+def expected_block_reuse(previous_tokens: list[int], current_tokens: list[int], block_tokens: int) -> int:
+    """Expected complete-block restore from the tokenized longest common
+    prefix — the grading oracle, instead of comparing against the previous
+    turn's cached count."""
+    limit = min(len(previous_tokens), len(current_tokens))
+    lcp = 0
+    while lcp < limit and previous_tokens[lcp] == current_tokens[lcp]:
+        lcp += 1
+    return (lcp // block_tokens) * block_tokens
+
+
+def fit_filler_to_target(
+    count_tokens,
+    render_overhead_tokens: int,
+    current_tokens: int,
+    target_tokens: int,
+    seed: int,
+    tolerance: int,
+) -> str:
+    """Tokenizer-exact growth: size the filler so the RENDERED prompt lands
+    within tolerance of the milestone (the 8192-target turn that actually
+    rendered 19,712 tokens is the failure this replaces)."""
+    needed = max(32, target_tokens - current_tokens - render_overhead_tokens)
+    words = max(16, needed // 2)
+    filler = _filler(words, seed)
+    for _ in range(6):
+        measured = count_tokens(filler)
+        if abs(measured - needed) <= max(16, tolerance // 4):
+            break
+        words = max(16, int(words * needed / max(1, measured)))
+        filler = _filler(words, seed)
+    return filler
+
+
+def _chat_projection(wire) -> list[dict[str, Any]]:
+    """Chat-shaped view of the connected history for client-side token
+    counting (recorded as an approximation for the Responses wire)."""
+    if isinstance(wire, ChatWire):
+        return list(wire.messages)
+    projected: list[dict[str, Any]] = []
+    for item in wire.items:
+        if item.get("type") == "function_call":
+            projected.append({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": item.get("call_id"), "type": "function",
+                                 "function": {"name": item.get("name"), "arguments": item.get("arguments")}}],
+            })
+        elif item.get("type") == "function_call_output":
+            projected.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": item.get("output")})
+        elif item.get("type") == "reasoning":
+            continue
+        else:
+            projected.append({"role": item.get("role", "user"), "content": item.get("content", "")})
+    return projected
 
 
 def run_scenario(
@@ -403,39 +571,66 @@ def run_scenario(
     tokenizer: Any,
     timeout: float,
     max_active_gb: float | None,
+    block_tokens: int,
 ) -> tuple[list[TurnRecord], list[str]]:
     wire_name = manifest.get("wire", "chat")
-    stream = bool(manifest.get("stream", True))
+    default_stream = bool(manifest.get("stream", True))
     wire = (ChatWire if wire_name == "chat" else ResponsesWire)(base, model, api_key, timeout)
+    port = int(base.rsplit(":", 1)[-1])
     records: list[TurnRecord] = []
     scenario_errors: list[str] = []
     reuse_watch_from = 3  # project rule: judge reuse from turn 3 on
-    prev_cached = 0
+    previous_render_tokens: list[int] = []
+
+    def render_tokens() -> list[int]:
+        try:
+            return list(
+                tokenizer.apply_chat_template(
+                    _chat_projection(wire), add_generation_prompt=True, tokenize=True
+                )
+            )
+        except Exception:  # noqa: BLE001
+            return []
+
+    def count_tokens(text: str) -> int:
+        try:
+            return len(tokenizer.encode(text, add_special_tokens=False))
+        except TypeError:
+            return len(tokenizer.encode(text))
 
     for index, turn in enumerate(manifest.get("turns") or [], start=1):
         kind = turn.get("kind")
+        stream = bool(turn.get("stream", default_stream))
         record = TurnRecord(index=index, kind=str(kind), wire=wire_name, stream=stream)
         records.append(record)
 
         if kind == "deep_sleep":
-            _admin_deep_sleep(base, api_key, timeout)
-            record.notes["deep_sleep"] = True
+            record.errors.extend(confirm_deep_sleep(base, api_key))
+            record.notes["deep_sleep_confirmed"] = not record.errors
+            scenario_errors.extend(f"turn {index} (deep_sleep): {e}" for e in record.errors)
             continue
 
+        expect = None
+        expected_city = None
         if kind == "grow":
             target = int(turn["grow_to_tokens"])
+            tolerance = int(turn.get("growth_tolerance", 512))
             seed = int(turn.get("seed", 1000 + index))
-            filler = _filler(max(64, target // 6), seed)
-            wire.add_user(
-                f"[turn {index}] Context installment (respond with exactly OK-{index}): {filler}"
+            current = len(render_tokens())
+            preamble = f"[turn {index}] Context installment (respond with exactly OK-{index}): "
+            filler = fit_filler_to_target(
+                count_tokens, count_tokens(preamble) + 32, current, target, seed, tolerance
             )
+            wire.add_user(preamble + filler)
             expect = f"OK-{index}"
+            record.notes["growth_target"] = target
+            record.notes["growth_tolerance"] = tolerance
         elif kind == "tool_round":
+            expected_city = str(turn.get("city", "Paris"))
             wire.add_user(
-                f"[turn {index}] What is the weather in {turn.get('city', 'Paris')} right now? "
+                f"[turn {index}] What is the weather in {expected_city} right now? "
                 "Use the get_weather tool."
             )
-            expect = None
         elif kind == "probe":
             wire.add_user(str(turn["prompt"]))
             expect = turn.get("expect")
@@ -443,94 +638,115 @@ def run_scenario(
             scenario_errors.append(f"turn {index}: unknown kind {kind!r}")
             continue
 
-        result = wire.run_turn(
-            stream=stream,
-            tools=(kind == "tool_round"),
-            reasoning_effort=turn.get("reasoning_effort"),
-            max_tokens=turn.get("max_tokens"),
-        )
+        request_render = render_tokens()
+        expected_reuse = expected_block_reuse(previous_render_tokens, request_render, block_tokens)
+        record.notes["client_render_tokens"] = len(request_render)
+        record.notes["expected_block_reuse_approx"] = expected_reuse
+        record.notes["render_is_approximation"] = wire_name != "chat"
+
+        with ContinuousSampler(base, api_key, port) as sampler:
+            result = wire.run_turn(
+                stream=stream,
+                tools=(kind == "tool_round"),
+                reasoning_effort=turn.get("reasoning_effort"),
+                max_tokens=turn.get("max_tokens"),
+            )
+        record.notes["memory"] = sampler.summary()
+        if not record.notes["memory"]["single_engine_throughout"]:
+            record.errors.append("more than one engine PID observed during the turn")
         record.errors.extend(result.get("errors") or [])
         record.prompt_tokens = int(result.get("prompt_tokens") or 0)
         record.cached_tokens = int(result.get("cached_tokens") or 0)
         record.completion_tokens = int(result.get("completion_tokens") or 0)
         record.latency_s = float(result.get("latency_s") or 0.0)
+        record.notes["raw"] = {
+            "request_payload": result.get("request_payload"),
+            "response_raw": result.get("raw"),
+            "response_id": result.get("response_id"),
+        }
 
         content = str(result.get("content") or "")
         calls = result.get("tool_calls") or []
 
+        if kind == "grow":
+            target = int(turn["grow_to_tokens"])
+            tolerance = int(turn.get("growth_tolerance", 512))
+            if record.prompt_tokens and abs(record.prompt_tokens - target) > tolerance:
+                record.errors.append(
+                    f"growth milestone missed: server prompt_tokens={record.prompt_tokens} "
+                    f"not within {tolerance} of target {target}"
+                )
+
         if kind == "tool_round":
-            if len(calls) != 1:
-                record.errors.append(f"expected exactly one tool call, observed {len(calls)}")
-            else:
-                call = calls[0]
-                if call.get("name") != "get_weather":
-                    record.errors.append(f"wrong tool name {call.get('name')!r}")
-                if not call.get("id"):
-                    record.errors.append("tool call carries no id")
-                try:
-                    arguments = json.loads(call.get("arguments") or "")
-                    if "city" not in arguments:
-                        record.errors.append(f"tool arguments missing city: {arguments}")
-                except (TypeError, json.JSONDecodeError) as error:
-                    record.errors.append(f"tool arguments not valid JSON: {error}")
-                if not record.errors:
-                    wire.commit_assistant(content, calls)
-                    called_city = "Paris"
-                    try:
-                        called_city = json.loads(call.get("arguments") or "{}").get("city") or called_city
-                    except json.JSONDecodeError:
-                        pass
-                    # The fixture result must echo the CITY THE MODEL CALLED —
-                    # a hardcoded city made the grader fail the model for
-                    # correctly repeating the tool's own output.
-                    wire.commit_tool_result(
-                        call, json.dumps({"city": called_city, "temp_c": 21, "sky": "sunny"})
-                    )
+            call, tool_errors = grade_tool_call(calls, expected_city or "")
+            record.errors.extend(tool_errors)
+            if call is not None:
+                wire.commit_assistant(content, calls, reasoning_items=result.get("reasoning_items"))
+                wire.commit_tool_result(
+                    call, json.dumps({"city": expected_city, "temp_c": 21, "sky": "sunny"})
+                )
+                continuation_render = render_tokens()
+                continuation_expected = expected_block_reuse(
+                    request_render, continuation_render, block_tokens
+                )
+                with ContinuousSampler(base, api_key, port) as cont_sampler:
                     continuation = wire.run_turn(
                         stream=stream, tools=True,
-                        reasoning_effort=turn.get("reasoning_effort"), max_tokens=turn.get("max_tokens"),
+                        reasoning_effort=turn.get("reasoning_effort"),
+                        max_tokens=turn.get("max_tokens"),
                     )
-                    record.notes["continuation_latency_s"] = continuation.get("latency_s")
-                    record.errors.extend(continuation.get("errors") or [])
-                    continuation_content = str(continuation.get("content") or "")
-                    continuation_calls = continuation.get("tool_calls") or []
-                    if continuation_calls:
-                        record.notes["continuation_repeat_call"] = True
-                    elif "21" not in continuation_content:
-                        record.errors.append(
-                            f"continuation answer missing tool result: {continuation_content[:80]!r}"
-                        )
-                    wire.commit_assistant(continuation_content, continuation_calls)
+                cont_record: dict[str, Any] = {
+                    "prompt_tokens": int(continuation.get("prompt_tokens") or 0),
+                    "cached_tokens": int(continuation.get("cached_tokens") or 0),
+                    "completion_tokens": int(continuation.get("completion_tokens") or 0),
+                    "latency_s": float(continuation.get("latency_s") or 0.0),
+                    "errors": list(continuation.get("errors") or []),
+                    "memory": cont_sampler.summary(),
+                    "expected_block_reuse_approx": continuation_expected,
+                    "raw": {
+                        "request_payload": continuation.get("request_payload"),
+                        "response_raw": continuation.get("raw"),
+                        "response_id": continuation.get("response_id"),
+                    },
+                }
+                record.notes["continuation"] = cont_record
+                record.errors.extend(cont_record["errors"])
+                continuation_content = str(continuation.get("content") or "")
+                continuation_calls = continuation.get("tool_calls") or []
+                if continuation_calls:
+                    record.errors.append(
+                        f"continuation unexpectedly called tools again: "
+                        f"{[c.get('name') for c in continuation_calls]}"
+                    )
+                elif "21" not in continuation_content:
+                    record.errors.append(
+                        f"continuation answer missing tool result: {continuation_content[:80]!r}"
+                    )
+                wire.commit_assistant(continuation_content, continuation_calls,
+                                       reasoning_items=continuation.get("reasoning_items"))
+                previous_render_tokens = render_tokens()
         else:
             if not content.strip():
                 record.errors.append("turn produced no visible content")
             if expect and expect not in content:
                 record.errors.append(f"expected {expect!r} in answer, got {content[:80]!r}")
-            wire.commit_assistant(content, [])
+            wire.commit_assistant(content, [], reasoning_items=result.get("reasoning_items"))
+            previous_render_tokens = render_tokens()
 
-        if turn.get("min_prompt_tokens") and record.prompt_tokens < int(turn["min_prompt_tokens"]):
+        if index >= reuse_watch_from and turn.get("expect_reuse"):
+            slack = 2 * block_tokens
+            if record.cached_tokens + slack < expected_reuse:
+                record.errors.append(
+                    f"reuse below block-aligned expectation: cached={record.cached_tokens}, "
+                    f"expected≈{expected_reuse} (client-render approximation)"
+                )
+
+        memory_max = record.notes["memory"].get("active_mb_max")
+        if max_active_gb and isinstance(memory_max, (int, float)) and memory_max > max_active_gb * 1024:
             record.errors.append(
-                f"connected growth milestone missed: prompt_tokens={record.prompt_tokens} "
-                f"< {turn['min_prompt_tokens']}"
+                f"MLX active memory {memory_max / 1024:.1f} GB exceeded the manifest bound {max_active_gb} GB"
             )
-        if (
-            index >= reuse_watch_from
-            and turn.get("expect_reuse")
-            and record.cached_tokens <= prev_cached // 2
-        ):
-            record.errors.append(
-                f"prefix reuse collapsed: cached_tokens={record.cached_tokens} "
-                f"(previous turn {prev_cached})"
-            )
-        record.notes["memory"] = _health_memory(base, api_key)
-        active_mb = record.notes["memory"].get("active_mb")
-        if max_active_gb and isinstance(active_mb, (int, float)) and active_mb > max_active_gb * 1024:
-            record.errors.append(
-                f"MLX active memory {active_mb / 1024:.1f} GB exceeded the manifest bound "
-                f"{max_active_gb} GB"
-            )
-        prev_cached = record.cached_tokens
-        scenario_errors.extend(f"turn {index} ({kind}): {error}" for error in record.errors)
+        scenario_errors.extend(f"turn {index} ({kind}): {e}" for e in record.errors)
 
     return records, scenario_errors
 
@@ -546,6 +762,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-s", type=float, default=1800.0)
     parser.add_argument("--max-active-gb", type=float, default=None,
                         help="fail the scenario if /health MLX active memory exceeds this bound")
+    parser.add_argument("--block-tokens", type=int, default=64,
+                        help="cache block size for the expected complete-block reuse oracle")
     parser.add_argument("--skip-provenance", action="store_true",
                         help="diagnostics only; artifacts are stamped UNPROVEN")
     parser.add_argument("--out", required=True, type=Path)
@@ -557,6 +775,27 @@ def main() -> int:
     base = args.base_url.rstrip("/")
     bundle = args.bundle.expanduser().resolve(strict=True)
     manifest = json.loads(args.manifest.read_text())
+    def _sha256_file(path: Path) -> str:
+        import hashlib
+
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _engine_processes() -> list[dict[str, Any]]:
+        try:
+            out = subprocess.run(
+                ["pgrep", "-fl", "vmlx_engine.cli serve"], capture_output=True, text=True, timeout=5
+            ).stdout
+            processes = []
+            for line in out.splitlines():
+                pid, _, argv = line.partition(" ")
+                full = subprocess.run(
+                    ["ps", "-o", "command=", "-p", pid], capture_output=True, text=True, timeout=5
+                ).stdout.strip()
+                processes.append({"pid": int(pid), "argv": full or argv})
+            return processes
+        except Exception:  # noqa: BLE001
+            return []
+
     artifact: dict[str, Any] = {
         "schema": SCENARIO_SCHEMA,
         "status": "INVALID",
@@ -564,6 +803,14 @@ def main() -> int:
         "scenario": manifest.get("scenario"),
         "wire": manifest.get("wire", "chat"),
         "stream": bool(manifest.get("stream", True)),
+        "git_head": subprocess.run(
+            ["git", "-C", str(args.source_root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip(),
+        "harness_sha256": _sha256_file(Path(__file__).resolve()),
+        "manifest_sha256": _sha256_file(args.manifest.resolve()),
+        "python_executable": sys.executable,
+        "engine_processes": _engine_processes(),
     }
     try:
         _hs, health, _hl = request_json("GET", f"{base}/health", api_key=args.api_key, timeout=30.0)
@@ -583,6 +830,13 @@ def main() -> int:
             if provenance_errors:
                 raise ScenarioFailure("; ".join(provenance_errors))
             artifact["provenance"] = "VERIFIED"
+        try:
+            import importlib.util
+
+            spec = importlib.util.find_spec("vmlx_engine")
+            artifact["imported_engine_path"] = getattr(spec, "origin", None)
+        except Exception:  # noqa: BLE001
+            artifact["imported_engine_path"] = None
         artifact["cache_contract_errors"] = verify_cache_contract(health or {})
         tokenizer = load_tokenizer(bundle)
         records, errors = run_scenario(
@@ -593,6 +847,7 @@ def main() -> int:
             tokenizer=tokenizer,
             timeout=args.timeout_s,
             max_active_gb=args.max_active_gb,
+            block_tokens=args.block_tokens,
         )
         artifact["turns"] = [record.__dict__ for record in records]
         artifact["errors"] = errors

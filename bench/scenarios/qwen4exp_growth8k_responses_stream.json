@@ -3,10 +3,31 @@
   "wire": "responses",
   "stream": true,
   "turns": [
-    {"kind": "grow", "grow_to_tokens": 2048},
-    {"kind": "grow", "grow_to_tokens": 4096, "min_prompt_tokens": 2600},
-    {"kind": "tool_round", "city": "Berlin"},
-    {"kind": "grow", "grow_to_tokens": 8192, "min_prompt_tokens": 5200, "expect_reuse": true},
-    {"kind": "probe", "prompt": "In one short sentence, what city did the tool report weather for earlier?", "expect": "Berlin", "expect_reuse": true}
+    {
+      "kind": "grow",
+      "grow_to_tokens": 2048,
+      "growth_tolerance": 768
+    },
+    {
+      "kind": "grow",
+      "grow_to_tokens": 4096,
+      "growth_tolerance": 768
+    },
+    {
+      "kind": "tool_round",
+      "city": "Berlin"
+    },
+    {
+      "kind": "grow",
+      "grow_to_tokens": 8192,
+      "expect_reuse": true,
+      "growth_tolerance": 768
+    },
+    {
+      "kind": "probe",
+      "prompt": "In one short sentence, what city did the tool report weather for earlier?",
+      "expect": "Berlin",
+      "expect_reuse": true
+    }
   ]
 }

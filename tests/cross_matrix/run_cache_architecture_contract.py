@@ -106,7 +106,7 @@ REQUIRED_CACHE_TEST_MARKERS = (
     # generic TQ live-cache paths to SSM state.
     "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint",
     "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state",
-    "test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4",
+    "test_hybrid_ssm_auto_mode_disables_live_tq_and_stores_full_precision",
     "test_mimo_v2_jang_loader_skips_generic_turboquant_kv_auto_mode",
     "test_accepts_scheduler_owned_ssm_l2_store",
     "test_scheduler_creates_matching_ssm_companion_l2_for_block_disk",
@@ -177,7 +177,7 @@ REQUIRED_PANEL_CACHE_MARKERS = (
     "DSV4 native cache settings stay family-scoped and suppress only generic TurboQuant",
     "deepseek-v4 SSD-only settings use fixed native composite blocks",
     "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend",
-    "detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false",
+    "detected Mamba cache never re-enables paged RAM even when Block L2 is absent",
     "continuous batching off is a real master switch for LLM cache flags",
     "continuous batching off is a real master switch for VLM cache flags",
     "disabling prefix cache disables all dependent features",
@@ -185,7 +185,7 @@ REQUIRED_PANEL_CACHE_MARKERS = (
     "cacheMemoryPercent default 15 emits 0.15 when legacy memory cache is active",
     "explains that MB/percent set the paged L1 RAM ceiling and only TTL is ignored",
     "derives disabled/ignored control state from effective paged cache state",
-    "mutual exclusion: disk cache NOT emitted when paged cache is active",
+    "mutual exclusion: legacy disk cache NOT emitted while block-disk L2 owns the lane (stale paged toggle ignored)",
     "block disk cache is emitted with paged RAM either active or disabled",
     "prefix cache disabled suppresses all cache sub-flags",
 )
@@ -271,7 +271,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
         "markers": (
             "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint",
             "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state",
-            "test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4",
+            "test_hybrid_ssm_auto_mode_disables_live_tq_and_stores_full_precision",
             "test_accepts_scheduler_owned_ssm_l2_store",
             "test_scheduler_creates_matching_ssm_companion_l2_for_block_disk",
             "test_native_cache_status_reports_nemotron_h_registered_hybrid_subtype",
@@ -283,7 +283,7 @@ REQUIRED_CACHE_FAMILY_MATRIX: dict[str, dict[str, tuple[str, ...]]] = {
         ),
         "api_command_markers": ("generic_turboquant_patcher_skips_hybrid_ssm",),
         "panel_markers": (
-            "detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false",
+            "detected Mamba cache never re-enables paged RAM even when Block L2 is absent",
         ),
     },
     "ling_bailing_hybrid_registry": {
@@ -638,7 +638,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             not failed
             and "no_generic_tq_on_hybrid_ssm" not in missing_api_checks
             and "generic_turboquant_patcher_skips_hybrid_ssm" not in missing_api_command_markers
-            and "test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4" not in missing_markers
+            and "test_hybrid_ssm_auto_mode_disables_live_tq_and_stores_full_precision" not in missing_markers
         ),
         "turboquant_kv_runtime_contract": (
             not failed

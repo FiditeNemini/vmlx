@@ -78,7 +78,7 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     assert "test_memory_pressure_partially_reuses_hybrid_ssm_with_aligned_checkpoint" in required_pytest
     assert "test_prompt_tq_disk_l2_hit_skips_synchronous_plain_paged_backfill" in required_pytest
     assert "test_hybrid_ssm_checkpoint_alignment_falls_back_to_exact_aligned_state" in required_pytest
-    assert "test_hybrid_ssm_auto_mode_disables_live_tq_but_keeps_stored_kv_q4" in required_pytest
+    assert "test_hybrid_ssm_auto_mode_disables_live_tq_and_stores_full_precision" in required_pytest
     assert "test_mimo_v2_jang_loader_skips_generic_turboquant_kv_auto_mode" in required_pytest
     assert "test_accepts_scheduler_owned_ssm_l2_store" in required_pytest
     assert "test_scheduler_creates_matching_ssm_companion_l2_for_block_disk" in required_pytest
@@ -108,7 +108,7 @@ def test_cache_architecture_contract_pins_named_cache_edges():
     assert "deepseek-v4 SSD-only settings use fixed native composite blocks" in required_panel
     assert "derives disabled/ignored control state from effective paged cache state" in required_panel
     assert "detected Qwen3.6 hybrid cache honors paged Off when block SSD L2 owns the prefix backend" in required_panel
-    assert "detected Mamba cache forces paged cache when Block L2 is absent while regular KV respects saved false" in required_panel
+    assert "detected Mamba cache never re-enables paged RAM even when Block L2 is absent" in required_panel
     assert "disabling prefix cache disables all dependent features" in required_panel
 
     command = gate.COMMANDS["cache_family_pytest"].cmd

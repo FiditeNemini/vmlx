@@ -64,7 +64,7 @@ REQUIRED_NATIVE_MTP_TEST_MARKERS = (
     "test_native_mtp_depth_defaults_to_three",
     "test_native_mtp_depth_uses_validated_model_tuning_sidecar_by_default",
     "test_mllm_generator_runs_depth3_native_mtp_verify_cycle",
-    "test_mllm_native_mtp_only_enables_for_proven_deterministic_sampling",
+    "test_mllm_native_mtp_enables_sampled_requests_with_stochastic_verify",
     "test_qwen36_vlm_mtp_gdn_sink_does_not_leak_to_upstream_originals",
     "test_native_mtp_adaptive_depth_lowers_d3_after_poor_third_position",
     # Telemetry and metadata edge cases.
@@ -72,7 +72,7 @@ REQUIRED_NATIVE_MTP_TEST_MARKERS = (
     "test_partial_indexed_layers_flagged",
     # Panel launch controls. These are display/CLI-wiring contracts, not hidden
     # generation defaults.
-    "defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating",
+    "defaults native-MTP bundles to adaptive sampler-compatible Auto mode",
     "lets users disable native MTP without leaving deterministic sampling overrides behind",
     "keeps non-MTP models on bundle-owned generation defaults",
     "DSV4 additional args cannot reenable native MTP or deterministic sampling policy",
@@ -170,7 +170,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
             not failed
             and "test_native_mtp_depth_defaults_to_three" not in missing_markers
             and "test_mllm_generator_runs_depth3_native_mtp_verify_cycle" not in missing_markers
-            and "defaults native-MTP bundles to bundle-owned sampling with compatible-only MTP gating"
+            and "defaults native-MTP bundles to adaptive sampler-compatible Auto mode"
             not in missing_markers
         ),
         "model_tuning_depth_policy": (
@@ -199,7 +199,7 @@ def build_artifact(root: Path) -> dict[str, Any]:
         ),
         "mllm_native_mtp_decode_loop": (
             not failed
-            and "test_mllm_native_mtp_only_enables_for_proven_deterministic_sampling" not in missing_markers
+            and "test_mllm_native_mtp_enables_sampled_requests_with_stochastic_verify" not in missing_markers
         ),
         "native_mtp_telemetry_edge_cases": (
             not failed

@@ -546,7 +546,8 @@ class ModelConfigRegistry:
                     f"could not read config.json beside JANG stamp {jcfg_path}: {exc}"
                 ) from exc
             try:
-                if jcfg_path.is_file():
+                stamp_from_sidecar = jcfg_path.is_file()
+                if stamp_from_sidecar:
                     jcfg = json.loads(jcfg_path.read_text())
                 else:
                     jcfg = local_model_config.get("jang_config")
@@ -603,6 +604,7 @@ class ModelConfigRegistry:
             # automatic parsers) for an unknown architecture. Malformed JSON
             # and unreadable config.json still fail closed above.
             family = ""
+            stamp_named_family = False
             for family_path, family_value in (
                 ("capabilities.family", caps.get("family")),
                 ("model_family", jcfg.get("model_family")),
@@ -616,6 +618,7 @@ class ModelConfigRegistry:
                     )
                 if family_value.strip():
                     family = family_value.strip()
+                    stamp_named_family = True
                     break
             if not family:
                 config_types = [
@@ -665,6 +668,24 @@ class ModelConfigRegistry:
                     cache_type=caps.get("cache_type", "kv") or "kv",
                     priority=0,
                 )
+
+            if not stamp_named_family and stamp_from_sidecar:
+                # A SIDECAR stamp with no family identity: the family above
+                # came from structural config.json model_type mapping. Per the
+                # contract documented above, such a partial capabilities block
+                # is not authoritative enough to select cache/parser behavior —
+                # honoring its cache_type/parsers here once routed an lfm2_moe
+                # hybrid bundle into the plain-KV lane. A stamp EMBEDDED in
+                # config.json is different: the same converter wrote model_type
+                # and jang_config into one file, so its parser fields stay
+                # authoritative even without a family field.
+                logger.warning(
+                    "JANG capabilities stamp %s has no family; ignoring its "
+                    "cache/parser fields and falling back to config.json "
+                    "architecture detection",
+                    jcfg_path,
+                )
+                return _with_hybrid_override_pattern_hint(base, local_model_config)
 
             # Override with stamped values. For most families, the converter
             # stamp wins because it describes the emitted artifact. Keep

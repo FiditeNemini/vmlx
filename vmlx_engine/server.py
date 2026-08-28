@@ -2799,21 +2799,23 @@ def _is_loaded_mimo_v2_model(model: str = "") -> bool:
     return False
 
 
-# Raw /v1/completions has no chat turns to carry a caller's reasoning intent,
-# so this is the historical default when the request specifies neither
-# reasoning_effort nor enable_thinking explicitly (see task #35: those two
-# fields used to be silently dropped by CompletionRequest with no way for a
-# caller to opt in; they are now threaded through from request to
-# gen_kwargs and honored here instead of being unconditionally overwritten).
-_completion_rail_no_reasoning_intent_default = False
+def _completion_gen_kwargs_to_chat_kwargs(gen_kwargs: dict, bundle_path: str = "") -> dict:
+    """Convert legacy completions kwargs to chat kwargs for chat-template-only families.
 
-
-def _completion_gen_kwargs_to_chat_kwargs(gen_kwargs: dict) -> dict:
-    """Convert legacy completions kwargs to chat kwargs for chat-template-only families."""
+    An explicit reasoning_effort/enable_thinking from the request always wins.
+    When the caller expressed no reasoning intent at all, the thinking rail
+    resolves through the bundle's own stamped chat contract
+    (``jang_config.chat.reasoning.default_mode``) exactly as the DSV4
+    completions rail already does via ``_resolve_dsv4_thinking_policy`` --
+    never an engine-invented default. Bundles with no stamped default keep
+    the historical raw-completions behavior (no thinking rail).
+    """
     chat_kwargs = dict(gen_kwargs)
     chat_kwargs.pop("prompt", None)
     if "enable_thinking" not in chat_kwargs and "reasoning_effort" not in chat_kwargs:
-        chat_kwargs["enable_thinking"] = _completion_rail_no_reasoning_intent_default
+        chat_kwargs["enable_thinking"] = (
+            _jang_chat_default_mode(bundle_path) == "thinking"
+        )
     return chat_kwargs
 
 
@@ -18375,7 +18377,10 @@ async def create_completion(request: CompletionRequest):
                 # Wrap the completion string as one user message so the
                 # engine's native chat template builds valid input, exactly
                 # as the DSV4 and MiMo-V2 completion rails already do.
-                chat_kwargs = _completion_gen_kwargs_to_chat_kwargs(gen_kwargs)
+                chat_kwargs = _completion_gen_kwargs_to_chat_kwargs(
+                    gen_kwargs,
+                    bundle_path=_model_path or _model_name or request.model or "",
+                )
                 output = await asyncio.wait_for(
                     engine.chat(
                         messages=[{"role": "user", "content": prompt}],
@@ -23307,7 +23312,10 @@ async def stream_completions_multi(
                 # the native chat template -> malformed MLLM prefill). Route
                 # through engine.chat() and emit one aggregate completion
                 # chunk, matching the existing MiMo-V2 completion behavior.
-                chat_kwargs = _completion_gen_kwargs_to_chat_kwargs(gen_kwargs)
+                chat_kwargs = _completion_gen_kwargs_to_chat_kwargs(
+                    gen_kwargs,
+                    bundle_path=_model_path or _model_name or request.model or "",
+                )
                 output = await asyncio.wait_for(
                     engine.chat(
                         messages=[{"role": "user", "content": prompt}],

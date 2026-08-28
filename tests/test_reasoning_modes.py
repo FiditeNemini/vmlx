@@ -1934,3 +1934,39 @@ def test_completion_gen_kwargs_to_chat_kwargs_defaults_off_but_honors_explicit_r
     )
     assert "enable_thinking" not in explicit_effort
     assert explicit_effort["reasoning_effort"] == "xhigh"
+
+
+def test_completion_omitted_reasoning_resolves_through_bundle_default_mode(monkeypatch):
+    """Sonnet-window audit repair (10b1b0675): when the caller expresses no
+    reasoning intent, the completions-to-chat rail must resolve through the
+    bundle's stamped chat contract (jang_config.chat.reasoning.default_mode)
+    -- the same source the DSV4 completions rail already uses -- never an
+    engine-invented hardcoded default. Unstamped bundles keep the historical
+    no-thinking behavior; an explicit request field always beats the stamp."""
+    from vmlx_engine import server
+
+    stamped = {"/bundles/thinking-default": "thinking", "/bundles/chat-default": "chat"}
+    monkeypatch.setattr(
+        server, "_jang_chat_default_mode", lambda path: stamped.get(path)
+    )
+
+    thinking_bundle = server._completion_gen_kwargs_to_chat_kwargs(
+        {"prompt": "hi", "max_tokens": 8}, bundle_path="/bundles/thinking-default"
+    )
+    assert thinking_bundle["enable_thinking"] is True
+
+    chat_bundle = server._completion_gen_kwargs_to_chat_kwargs(
+        {"prompt": "hi", "max_tokens": 8}, bundle_path="/bundles/chat-default"
+    )
+    assert chat_bundle["enable_thinking"] is False
+
+    unstamped = server._completion_gen_kwargs_to_chat_kwargs(
+        {"prompt": "hi", "max_tokens": 8}, bundle_path="/bundles/unknown"
+    )
+    assert unstamped["enable_thinking"] is False
+
+    explicit_beats_stamp = server._completion_gen_kwargs_to_chat_kwargs(
+        {"prompt": "hi", "max_tokens": 8, "enable_thinking": False},
+        bundle_path="/bundles/thinking-default",
+    )
+    assert explicit_beats_stamp["enable_thinking"] is False

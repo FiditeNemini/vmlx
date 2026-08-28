@@ -10847,6 +10847,15 @@ def _dsv4_model_config(model: Any) -> Any | None:
     return matching_configs[0] if matching_configs else None
 
 
+_DSV4_NATIVE_CACHE_COMPONENTS = [
+    "swa_local",
+    "csa_compressed_pool",
+    "csa_indexer_pool",
+    "hca_compressed_pool",
+    "incomplete_tail_state",
+]
+
+
 def _dsv4_memory_estimate_payload(estimate: Any) -> dict[str, Any]:
     component_bytes = {
         "swa_local": int(estimate.local_swa_bytes),
@@ -10891,13 +10900,7 @@ def _dsv4_native_state_memory_status(
     config = _dsv4_model_config(model)
     result: dict[str, Any] = {
         "basis": "architecture_estimate_not_allocator_measurement",
-        "includes": [
-            "swa_local",
-            "csa_compressed_pool",
-            "csa_indexer_pool",
-            "hca_compressed_pool",
-            "incomplete_tail_state",
-        ],
+        "includes": list(_DSV4_NATIVE_CACHE_COMPONENTS),
         "excludes": ["model_weights", "prefix_cache_l1", "block_disk_l2"],
         "retained_l1_reported_separately": True,
         "pool_quant_observed": pool_quant_observed,
@@ -11276,12 +11279,7 @@ def _native_cache_status(
             "family": "deepseek_v4",
             "schema": "deepseek_v4_v10_delta",
             "cache_type": "native_composite",
-            "components": [
-                "swa_local",
-                "csa_compressed_pool",
-                "hca_compressed_pool",
-                "incomplete_tail_state",
-            ],
+            "components": list(_DSV4_NATIVE_CACHE_COMPONENTS),
             "generic_turboquant_kv": {
                 "enabled": False,
                 "reason": "native_dsv4_composite",

@@ -7747,6 +7747,42 @@ def _latest_request_user_text(
     return latest_user_text
 
 
+def _request_tool_intent_already_fulfilled(
+    request: ChatCompletionRequest | ResponsesRequest | None,
+) -> bool:
+    """True when the conversation's final item is a completed tool result.
+
+    "Use the get_weather tool" in the latest user turn reads as explicit
+    intent, but on the CONTINUATION request — assistant tool_call plus a
+    tool/function_call_output result appended — that intent has been
+    fulfilled. Suppressing the tools-free recovery pass there left the exact
+    reporter shape broken: a reasoning-only continuation had no answer pass
+    to arm and finalized as a 502 (chat) or a silently empty message
+    (Responses). Live-measured on Qwen3.8-Flash-Next JANG_1L, 2026-08-28.
+    """
+    if request is None:
+        return False
+    last_kind: str | None = None
+    raw_input = getattr(request, "input", None)
+    if isinstance(raw_input, list) and raw_input:
+        for item in raw_input:
+            if isinstance(item, dict):
+                kind = item.get("type") or item.get("role")
+            else:
+                kind = getattr(item, "type", None) or getattr(item, "role", None)
+            if kind:
+                last_kind = str(kind)
+    for message in getattr(request, "messages", None) or []:
+        role = (
+            message.get("role")
+            if isinstance(message, dict)
+            else getattr(message, "role", None)
+        )
+        if role:
+            last_kind = str(role)
+    return last_kind in ("tool", "function_call_output")
+
+
 def _request_explicitly_requests_tool_use(
     request: ChatCompletionRequest | ResponsesRequest | None,
 ) -> bool:
@@ -7761,6 +7797,12 @@ def _request_explicitly_requests_tool_use(
     """
     if request is None or _is_pending_required_tool_choice(request):
         return request is not None
+
+    # A fulfilled tool round (final item is the tool's result) is no longer
+    # an outstanding tool request — the correct next output is a visible
+    # answer, and the recovery pass must stay eligible.
+    if _request_tool_intent_already_fulfilled(request):
+        return False
 
     latest_user_text = _latest_request_user_text(request)
     if not latest_user_text:

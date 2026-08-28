@@ -5253,6 +5253,93 @@ class TestOpenAILogprobsFormatting:
             effective_thinking=True,
         )
 
+    def test_fulfilled_tool_round_clears_explicit_intent(self):
+        """The continuation request — tool_call + tool result appended — has
+        FULFILLED the "use the tool" instruction. Suppressing the tools-free
+        recovery there left reasoning-only continuations with no answer pass
+        (chat 502 / silently empty Responses message), live-measured on
+        Qwen3.8-Flash-Next JANG_1L 2026-08-28."""
+        import vmlx_engine.server as server
+        from vmlx_engine.api.models import ChatCompletionRequest, ResponsesRequest
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        chat_continuation = ChatCompletionRequest(
+            model="qwen-test",
+            messages=[
+                {"role": "user", "content": "Use the get_weather tool for Paris."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{\"city\": \"Paris\"}",
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "{\"temp_c\": 21}"},
+            ],
+            tools=tools,
+        )
+        assert not server._request_explicitly_requests_tool_use(chat_continuation)
+        assert server._request_tool_intent_already_fulfilled(chat_continuation)
+
+        responses_continuation = ResponsesRequest(
+            model="qwen-test",
+            input=[
+                {"role": "user", "content": "Use the get_weather tool for Paris."},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": "{\"city\": \"Paris\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "{\"temp_c\": 21}",
+                },
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+        )
+        assert not server._request_explicitly_requests_tool_use(responses_continuation)
+        assert server._request_tool_intent_already_fulfilled(responses_continuation)
+
+        # A PENDING explicit request (no tool result yet) keeps its intent.
+        pending = ChatCompletionRequest(
+            model="qwen-test",
+            messages=[{"role": "user", "content": "Use the get_weather tool for Paris."}],
+            tools=tools,
+        )
+        assert server._request_explicitly_requests_tool_use(pending)
+        assert not server._request_tool_intent_already_fulfilled(pending)
+
     def test_multimodal_latest_user_text_does_not_reuse_prior_tool_intent(self):
         """Pydantic ContentPart text owns intent on the current media turn."""
         import vmlx_engine.server as server

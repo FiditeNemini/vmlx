@@ -575,6 +575,24 @@ def expected_block_reuse(previous_tokens: list[int], current_tokens: list[int], 
     return classify_cache_candidate(previous_tokens, current_tokens, block_tokens)["safe_expected"]
 
 
+def render_confidence_for(wire_name: str, has_tool_history: bool) -> str:
+    """No wire is trusted as ground truth. This harness has NO mechanism
+    today that confirms a client-side chat-template render matches what the
+    engine actually rendered server-side -- "wire_name == chat therefore
+    trust it" was an unverified heuristic, not a proof, and Codex's audit
+    named it explicitly (2026-08-28): "Never label Chat 'server-verified'
+    from wire type." Every render is approximate-unverified until a real
+    server-exact confirmation mechanism exists (e.g. the engine echoing its
+    own rendered token count/hash back on the response, or a dry-render
+    endpoint that accepts full multi-turn history+tools, neither of which
+    exists today -- /v1/cache/warm only accepts a single string prompt).
+    wire_name and has_tool_history are kept as parameters (unused in the
+    body) so call sites don't need to change if a real confirmation
+    mechanism is added later and starts returning "server-verified" for a
+    genuinely verified subset."""
+    return "approximate-unverified"
+
+
 def _grade_cache_match(
     observed_cached: int,
     match: dict[str, Any],
@@ -694,19 +712,38 @@ def run_scenario(
     # re-audit, 2026-08-28).
     render_history: list[list[int]] = []
     # Chat-wire client reconstruction was validated against server telemetry
-    # (matches within the growth tolerance across many live probes). The
-    # Responses wire's client reconstruction was PROVEN wrong repeatedly
-    # this campaign (never matched the server's actual continuation prompt
-    # size regardless of tools/no-tools/thinking permutation) -- grade it as
-    # informational only, never as a pass/fail oracle.
-    render_confidence = "server-verified" if wire_name == "chat" else "approximate-unverified"
-    hybrid_companion_family = bool(manifest.get("hybrid_companion_family", False))
+    # for plain-text turns (matches within the growth tolerance across many
+    # live probes). It is NOT validated once a tool exchange has entered the
+    # conversation: this campaign's 2026-08-28 minimal-reproduction probes
+    # proved the SERVER's own tool-schema rendering collapses to a flat
+    # stub once a tool_call+tool_result pair exists in history, on BOTH
+    # Chat and Responses -- no offline reconstruction (full schema or none)
+    # ever matched it. A live rerun of this exact harness caught the
+    # downstream damage directly: post-tool-round growth-filler sizing
+    # overshot its target by 2161 tokens because the client `current`
+    # estimate silently assumed full-schema rendering. Once a tool round
+    # has occurred, client render confidence is UNVERIFIED regardless of
+    # wire -- this is not a Responses-specific exemption.
+    has_tool_history = False
 
-    def render_tokens() -> list[int]:
+    def _render_confidence() -> str:
+        return render_confidence_for(wire_name, has_tool_history)
+
+    hybrid_companion_family = bool(manifest.get("hybrid_companion_family", False))
+    last_server_prompt_tokens = 0
+
+    def render_tokens(tools_active: bool = False) -> list[int]:
+        # Tools must be part of the render whenever the actual API request
+        # for this turn sends them -- omitting them made every client-side
+        # cache-match candidate tools-blind even during a tool_round turn,
+        # silently discarding the one variable most likely to explain a
+        # divergence (Codex re-audit, 2026-08-28).
         try:
+            kwargs = {"tools": [WEATHER_TOOL_CHAT]} if tools_active else {}
             return list(
                 tokenizer.apply_chat_template(
-                    _chat_projection(wire), add_generation_prompt=True, tokenize=True
+                    _chat_projection(wire), add_generation_prompt=True, tokenize=True,
+                    **kwargs,
                 )
             )
         except Exception:  # noqa: BLE001
@@ -744,7 +781,12 @@ def run_scenario(
             target = int(turn["grow_to_tokens"])
             tolerance = int(turn.get("growth_tolerance", 512))
             seed = int(turn.get("seed", 1000 + index))
-            current = len(render_tokens())
+            # Prefer the last REAL server-reported prompt length over a fresh
+            # client render as the growth baseline once tool history exists
+            # -- the client render is proven unreliable there (see
+            # has_tool_history), and using it silently overshot a live
+            # rerun's target by 2161 tokens (2026-08-28).
+            current = last_server_prompt_tokens if last_server_prompt_tokens else len(render_tokens())
             preamble = f"[turn {index}] Context installment (respond with exactly OK-{index}): "
             filler = fit_filler_to_target(
                 count_tokens, count_tokens(preamble) + 32, current, target, seed, tolerance
@@ -766,8 +808,9 @@ def run_scenario(
             scenario_errors.append(f"turn {index}: unknown kind {kind!r}")
             continue
 
-        request_render = render_tokens()
+        request_render = render_tokens(tools_active=(kind == "tool_round"))
         best_match = best_cache_match(render_history, request_render, block_tokens)
+        render_confidence = _render_confidence()
         record.notes["client_render_tokens"] = len(request_render)
         record.notes["cache_match"] = best_match
         record.notes["render_confidence"] = render_confidence
@@ -793,6 +836,8 @@ def run_scenario(
             "response_raw": result.get("raw"),
             "response_id": result.get("response_id"),
         }
+        if record.prompt_tokens:
+            last_server_prompt_tokens = record.prompt_tokens
 
         content = str(result.get("content") or "")
         calls = result.get("tool_calls") or []
@@ -819,8 +864,10 @@ def run_scenario(
                 # (the tool round-1 selection prompt) alongside every earlier
                 # turn -- never only the immediate predecessor.
                 render_history.append(request_render)
-                continuation_render = render_tokens()
+                has_tool_history = True
+                continuation_render = render_tokens(tools_active=True)
                 continuation_match = best_cache_match(render_history, continuation_render, block_tokens)
+                continuation_confidence = _render_confidence()
                 with ContinuousSampler(base, api_key, port) as cont_sampler:
                     continuation = wire.run_turn(
                         stream=stream, tools=True,
@@ -835,7 +882,7 @@ def run_scenario(
                     "errors": list(continuation.get("errors") or []),
                     "memory": cont_sampler.summary(),
                     "cache_match": continuation_match,
-                    "render_confidence": render_confidence,
+                    "render_confidence": continuation_confidence,
                     "raw": {
                         "request_payload": continuation.get("request_payload"),
                         "response_raw": continuation.get("raw"),
@@ -844,6 +891,8 @@ def run_scenario(
                 }
                 record.notes["continuation"] = cont_record
                 record.errors.extend(cont_record["errors"])
+                if cont_record["prompt_tokens"]:
+                    last_server_prompt_tokens = cont_record["prompt_tokens"]
                 continuation_content = str(continuation.get("content") or "")
                 continuation_calls = continuation.get("tool_calls") or []
                 if continuation_calls:
@@ -860,7 +909,7 @@ def run_scenario(
                 if index >= reuse_watch_from and turn.get("expect_reuse"):
                     cache_errors = _grade_cache_match(
                         cont_record["cached_tokens"], continuation_match,
-                        render_confidence, hybrid_companion_family,
+                        continuation_confidence, hybrid_companion_family,
                     )
                     cont_record["errors"].extend(cache_errors)
                     record.errors.extend(cache_errors)

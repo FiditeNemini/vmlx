@@ -247,3 +247,25 @@ class TestCacheMatchKindsAndBestMatch:
         assert len(errors) == 1
         assert errors[0].startswith("UNVERIFIED")
         assert "UNDER-restore" not in errors[0] and "OVER-restore" not in errors[0]
+
+
+class TestRenderConfidenceNeverTrustsWireType:
+    """Codex re-audit, 2026-08-28: 'Never label Chat "server-verified" from
+    wire type.' No wire is trusted by default -- confirmed server-exact
+    rendering is the only thing that can ever upgrade this."""
+
+    def test_chat_wire_no_tool_history_is_still_unverified(self):
+        from api_agentic_scenarios import render_confidence_for
+
+        assert render_confidence_for("chat", False) == "approximate-unverified"
+
+    def test_chat_wire_with_tool_history_is_unverified(self):
+        from api_agentic_scenarios import render_confidence_for
+
+        assert render_confidence_for("chat", True) == "approximate-unverified"
+
+    def test_responses_wire_is_unverified_both_states(self):
+        from api_agentic_scenarios import render_confidence_for
+
+        assert render_confidence_for("responses", False) == "approximate-unverified"
+        assert render_confidence_for("responses", True) == "approximate-unverified"

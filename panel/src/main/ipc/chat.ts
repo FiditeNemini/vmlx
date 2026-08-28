@@ -1178,6 +1178,16 @@ export function registerChatHandlers(
       // every received byte re-arms this timer below. A single wall-clock
       // timer discarded valid near-context work at exactly 900s even though
       // the engine was still sending keep-alives and processing prompt chunks.
+      //
+      // The engine's SSE contract emits a keep-alive every 15 seconds. A saved
+      // timeout can be as low as 10 seconds, so using it directly here races
+      // the first keep-alive and aborts a healthy prefill before the server can
+      // report liveness. Give local SSE two keep-alive intervals; the engine
+      // still enforces the configured progress-aware timeout itself. Remote
+      // endpoints retain their configured client-side inactivity budget.
+      const fetchInactivitySeconds = isRemote
+        ? timeoutSeconds
+        : Math.max(timeoutSeconds, 30);
       let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
       const armFetchInactivityTimeout = () => {
         if (fetchTimeout) clearTimeout(fetchTimeout);
@@ -1193,13 +1203,13 @@ export function registerChatHandlers(
         fetchTimeout = setTimeout(() => {
           timedOut = true;
           abortController.abort();
-        }, timeoutSeconds * 1000);
+        }, fetchInactivitySeconds * 1000);
       };
       armFetchInactivityTimeout();
       activeRequests.set(chatId, {
         controller: abortController,
         startedAt: Date.now(),
-        timeoutMs: timeoutSeconds * 1000,
+        timeoutMs: fetchInactivitySeconds * 1000,
         endpoint: undefined,
         responseId: undefined,
       });
@@ -5066,7 +5076,7 @@ export function registerChatHandlers(
         // which would be misclassified as "server connection lost".
         if (timedOut) {
           throw new Error(
-            `Request timed out after ${timeoutSeconds}s. Increase the Timeout setting in Server Settings, or the model may be overloaded.`,
+            `No response bytes received for ${fetchInactivitySeconds}s. The local engine may be stalled or the remote endpoint may be unavailable.`,
           );
         }
         if (wasAborted) {

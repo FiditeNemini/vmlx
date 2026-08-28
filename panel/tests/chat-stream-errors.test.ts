@@ -52,9 +52,14 @@ describe('chat timeout liveness', () => {
   const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
 
   it('treats the saved session timeout as inactivity rather than total wall time', () => {
+    expect(source).toContain('const fetchInactivitySeconds = isRemote')
+    expect(source).toContain(': Math.max(timeoutSeconds, 30)')
     expect(source).toContain('const armFetchInactivityTimeout = () =>')
     expect(source).toContain('if (value && value.byteLength > 0) armFetchInactivityTimeout()')
     expect(source).toContain('active.startedAt = Date.now()')
+    expect(source).toContain('}, fetchInactivitySeconds * 1000)')
+    expect(source).toContain('timeoutMs: fetchInactivitySeconds * 1000')
+    expect(source).not.toContain('timeoutMs: timeoutSeconds * 1000')
   })
 
   it('does not turn the saved timeout into an explicit hard engine deadline', () => {

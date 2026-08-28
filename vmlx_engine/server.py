@@ -2685,12 +2685,20 @@ def _register_reasoning_eos_guard(reason: str) -> None:
         if tokenizer is None or not _loaded_model_is_reasoning_capable():
             clear_reasoning_eos_guard()
             return
-        eos_ids: list[int] = []
+        # eos_token_ids is a SET on mlx-lm's TokenizerWrapper but a scalar
+        # int on plain HF tokenizers — iterating the scalar raised and the
+        # guard silently never armed on the exact family it was built for.
         raw_eos = getattr(tokenizer, "eos_token_ids", None)
-        if raw_eos:
-            eos_ids = [int(t) for t in raw_eos]
-        elif getattr(tokenizer, "eos_token_id", None) is not None:
-            eos_ids = [int(tokenizer.eos_token_id)]
+        if raw_eos is None:
+            raw_eos = getattr(tokenizer, "eos_token_id", None)
+        eos_ids: list[int] = []
+        if isinstance(raw_eos, int):
+            eos_ids = [raw_eos]
+        elif raw_eos is not None:
+            try:
+                eos_ids = [int(t) for t in raw_eos]
+            except TypeError:
+                eos_ids = [int(raw_eos)]
         if not eos_ids:
             clear_reasoning_eos_guard()
             return

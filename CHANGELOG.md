@@ -8,6 +8,28 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.44] - 2026-08-27
+
+### Performance
+
+- Qwen3.8 Flash Next PLE row lookup now performs contiguous, page-aligned reads
+  from its SSD-backed table instead of issuing one random read per candidate.
+
+### Fixed
+
+- Electron tolerates orphaned terminal `read EIO` and `write EIO` events while
+  continuing to surface unrelated stream and filesystem failures.
+- Native MTP preserves sampled-acceptance and tool-boundary semantics, releases
+  aborted PLD history, and prevents stale tool reasoning from leaking into a
+  later no-tool turn.
+- Message-triggered wake keeps model progress visible and serializes competing
+  deep-sleep wake paths so one model instance owns the transition.
+- Long local DeepSeek V4 prefills use backend-progress-aware inactivity
+  timeouts, including a keepalive-safe client floor, instead of aborting at a
+  short wall-clock deadline.
+
+---
+
 ## [1.6.43] - 2026-08-27
 
 ### Fixed

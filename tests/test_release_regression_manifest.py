@@ -15822,21 +15822,29 @@ def test_release_regression_manifest_gemma4_installed_wheel_claim_matches_instal
     rows = {row["id"]: row for row in manifest["rows"]}
     row = rows["gemma4-crack-live-language-visible-quality"]
     joined = " ".join(row["proves"] + row["commands"] + row["artifacts"])
-    site_packages = Path(
-        "/Applications/vMLX.app/Contents/Resources/bundled-python/python/lib/python3.12/site-packages"
+    # Discover the installed app's actual python/mlx rather than hardcoding a
+    # historical python3.12 + mlx-0.31.2 layout: the pinned paths went stale
+    # the moment 1.6.43 shipped python3.13 + mlx 0.32.2 and this gate started
+    # failing on FileNotFoundError instead of checking its real invariants —
+    # the mlx and mlx_metal wheels agree with each other and the manifest text
+    # names the platform lane the installed app actually uses.
+    lib_dir = Path(
+        "/Applications/vMLX.app/Contents/Resources/bundled-python/python/lib"
     )
-    mlx_wheel = (site_packages / "mlx-0.31.2.dist-info/WHEEL").read_text(
-        encoding="utf-8"
-    )
+    site_packages = next(iter(sorted(lib_dir.glob("python3.*/site-packages"))))
+    cp_tag = "cp" + site_packages.parent.name.removeprefix("python").replace(".", "")
+    mlx_dist = next(iter(sorted(site_packages.glob("mlx-*.dist-info"))))
+    mlx_version = mlx_dist.name[len("mlx-"):-len(".dist-info")]
+    mlx_wheel = (mlx_dist / "WHEEL").read_text(encoding="utf-8")
     mlx_metal_wheel = (
-        site_packages / "mlx_metal-0.31.2.dist-info/WHEEL"
+        site_packages / f"mlx_metal-{mlx_version}.dist-info/WHEEL"
     ).read_text(encoding="utf-8")
 
-    if "Tag: cp312-cp312-macosx_26_0_arm64" in mlx_wheel:
+    if f"Tag: {cp_tag}-{cp_tag}-macosx_26_0_arm64" in mlx_wheel:
         assert "Tag: py3-none-macosx_26_0_arm64" in mlx_metal_wheel
         assert "installed Tahoe-native app now uses macosx_26_0_arm64" in joined
     else:
-        assert "Tag: cp312-cp312-macosx_14_0_arm64" in mlx_wheel
+        assert f"Tag: {cp_tag}-{cp_tag}-macosx_14_0_arm64" in mlx_wheel
         assert "Tag: py3-none-macosx_14_0_arm64" in mlx_metal_wheel
         assert "installed Sequoia-compatible app now uses macosx_14_0_arm64" in joined
     assert "installed app currently uses macosx_14_0_arm64" not in joined

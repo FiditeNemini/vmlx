@@ -2661,6 +2661,61 @@ def _resolve_max_tokens(request_value: int | None, model_name: str = "") -> int:
     )
 
 
+_REASONING_THINK_MARKER_PAIRS = (
+    ("<think>", "</think>"),
+    ("<mm:think>", "</mm:think>"),
+    ("[THINK]", "[/THINK]"),
+)
+
+
+def _register_reasoning_eos_guard(reason: str) -> None:
+    """Arm the sampler-level EOS-inside-think guard for the loaded model.
+
+    Measured live (Qwen3.8-Flash-Next, template-default xhigh effort,
+    temp 1.0/top_k 20): ~25% of tool-result continuations sampled EOS inside
+    the open <think> block and finalized reasoning-only — chat surfaced a 502
+    reasoning_only_no_content, /v1/responses silently returned an empty
+    message. Single-token think markers let the sampler ban EOS until the
+    block closes; families without single-token markers are left unguarded.
+    """
+    from .sampling import clear_reasoning_eos_guard, set_reasoning_eos_guard
+
+    try:
+        tokenizer = getattr(_engine, "tokenizer", None)
+        if tokenizer is None or not _loaded_model_is_reasoning_capable():
+            clear_reasoning_eos_guard()
+            return
+        eos_ids: list[int] = []
+        raw_eos = getattr(tokenizer, "eos_token_ids", None)
+        if raw_eos:
+            eos_ids = [int(t) for t in raw_eos]
+        elif getattr(tokenizer, "eos_token_id", None) is not None:
+            eos_ids = [int(tokenizer.eos_token_id)]
+        if not eos_ids:
+            clear_reasoning_eos_guard()
+            return
+        for open_marker, close_marker in _REASONING_THINK_MARKER_PAIRS:
+            try:
+                open_ids = tokenizer.encode(open_marker, add_special_tokens=False)
+                close_ids = tokenizer.encode(close_marker, add_special_tokens=False)
+            except TypeError:
+                open_ids = tokenizer.encode(open_marker)
+                close_ids = tokenizer.encode(close_marker)
+            if len(open_ids) == 1 and len(close_ids) == 1:
+                set_reasoning_eos_guard(int(open_ids[0]), int(close_ids[0]), eos_ids)
+                logger.info(
+                    "Reasoning EOS guard armed (%s): think_open=%d think_close=%d eos=%s",
+                    reason,
+                    int(open_ids[0]),
+                    int(close_ids[0]),
+                    eos_ids,
+                )
+                return
+        clear_reasoning_eos_guard()
+    except Exception as exc:
+        logger.debug("Reasoning EOS guard not armed (%s): %s", reason, exc)
+
+
 def _loaded_model_is_reasoning_capable() -> bool:
     """True when the loaded model will emit reasoning tokens that share the
     output budget with the visible answer.
@@ -5954,6 +6009,7 @@ async def lifespan(app: FastAPI):
     if _engine is not None:
         _record_metal_ws_model_baseline("lifespan_post_acceleration")
         _refresh_loaded_max_prompt_tokens("lifespan_post_acceleration")
+        _register_reasoning_eos_guard("lifespan")
 
     # Initialize MCP from explicit env/CLI config or the standard mcp.json/yaml
     # discovery paths. Failure should not crash model serving.
@@ -8931,6 +8987,8 @@ def load_model(
         logger.info(
             f"Applied custom chat template from --chat-template ({len(_custom_chat_template)} chars)"
         )
+
+    _register_reasoning_eos_guard("load_model")
 
     # Compute max safe prompt token limit based on available GPU memory
     global _max_prompt_tokens
@@ -13232,6 +13290,7 @@ async def _admin_wake_impl():
                 # as initial startup.
                 _record_metal_ws_model_baseline("admin_wake_post_acceleration")
                 _refresh_loaded_max_prompt_tokens("admin_wake_engine_start")
+                _register_reasoning_eos_guard("admin_wake")
                 _standby_state = None
                 logger.info(f"Woke from deep sleep — model {_model_name} reloaded")
                 return {"status": "active"}

@@ -2799,11 +2799,21 @@ def _is_loaded_mimo_v2_model(model: str = "") -> bool:
     return False
 
 
+# Raw /v1/completions has no chat turns to carry a caller's reasoning intent,
+# so this is the historical default when the request specifies neither
+# reasoning_effort nor enable_thinking explicitly (see task #35: those two
+# fields used to be silently dropped by CompletionRequest with no way for a
+# caller to opt in; they are now threaded through from request to
+# gen_kwargs and honored here instead of being unconditionally overwritten).
+_completion_rail_no_reasoning_intent_default = False
+
+
 def _completion_gen_kwargs_to_chat_kwargs(gen_kwargs: dict) -> dict:
     """Convert legacy completions kwargs to chat kwargs for chat-template-only families."""
     chat_kwargs = dict(gen_kwargs)
     chat_kwargs.pop("prompt", None)
-    chat_kwargs["enable_thinking"] = False
+    if "enable_thinking" not in chat_kwargs and "reasoning_effort" not in chat_kwargs:
+        chat_kwargs["enable_thinking"] = _completion_rail_no_reasoning_intent_default
     return chat_kwargs
 
 
@@ -18313,6 +18323,10 @@ async def create_completion(request: CompletionRequest):
             if request.logprobs is not None:
                 gen_kwargs["logprobs"] = True
                 gen_kwargs["top_logprobs"] = request.logprobs
+            if request.reasoning_effort is not None:
+                gen_kwargs["reasoning_effort"] = request.reasoning_effort
+            if request.enable_thinking is not None:
+                gen_kwargs["enable_thinking"] = request.enable_thinking
             if _is_loaded_dsv4_model(request.model):
                 chat_prompt = _dsv4_completion_prompt_for_chat_rail(prompt, request)
                 chat_kwargs = {
@@ -23218,6 +23232,10 @@ async def stream_completions_multi(
             if request.logprobs is not None:
                 gen_kwargs["logprobs"] = True
                 gen_kwargs["top_logprobs"] = request.logprobs
+            if request.reasoning_effort is not None:
+                gen_kwargs["reasoning_effort"] = request.reasoning_effort
+            if request.enable_thinking is not None:
+                gen_kwargs["enable_thinking"] = request.enable_thinking
             if _is_loaded_dsv4_model(request.model):
                 # DSV4 on the streaming /v1/completions rail: the generic path
                 # below streams raw `<think>RC</think>content` deltas. The

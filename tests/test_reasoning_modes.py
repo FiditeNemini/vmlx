@@ -1894,3 +1894,43 @@ def test_gemma4_reasoning_streaming_splits_plain_media_thinking_process_one_shot
     assert delta.reasoning is not None
     assert "Inspect the attached image" in delta.reasoning
     assert delta.content == "GEMMA_MIX_IMAGE_RED"
+
+
+def test_completion_request_accepts_reasoning_fields_instead_of_dropping_them():
+    """Task #35: CompletionRequest used to have no reasoning_effort/
+    enable_thinking fields at all, so pydantic silently dropped either one
+    with zero error if a caller sent it to /v1/completions."""
+    from vmlx_engine.api.models import CompletionRequest
+
+    req = CompletionRequest(
+        model="m", prompt="hi", reasoning_effort="xhigh", enable_thinking=True
+    )
+    assert req.reasoning_effort == "xhigh"
+    assert req.enable_thinking is True
+
+    default_req = CompletionRequest(model="m", prompt="hi")
+    assert default_req.reasoning_effort is None
+    assert default_req.enable_thinking is None
+
+
+def test_completion_gen_kwargs_to_chat_kwargs_defaults_off_but_honors_explicit_request():
+    """Task #35: the is_mllm completions-to-chat rail used to unconditionally
+    force enable_thinking=False, discarding whatever the caller actually
+    asked for. Absent request-derived intent, the historical default
+    (disabled) is preserved; an explicit request is now honored instead."""
+    from vmlx_engine.server import _completion_gen_kwargs_to_chat_kwargs
+
+    unset = _completion_gen_kwargs_to_chat_kwargs({"prompt": "hi", "max_tokens": 8})
+    assert unset["enable_thinking"] is False
+    assert "prompt" not in unset
+
+    explicit_thinking = _completion_gen_kwargs_to_chat_kwargs(
+        {"prompt": "hi", "max_tokens": 8, "enable_thinking": True}
+    )
+    assert explicit_thinking["enable_thinking"] is True
+
+    explicit_effort = _completion_gen_kwargs_to_chat_kwargs(
+        {"prompt": "hi", "max_tokens": 8, "reasoning_effort": "xhigh"}
+    )
+    assert "enable_thinking" not in explicit_effort
+    assert explicit_effort["reasoning_effort"] == "xhigh"

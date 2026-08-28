@@ -605,6 +605,13 @@ class CompletionRequest(BaseModel):
     # Cache bypass (see ChatCompletionRequest.cache_salt for semantics).
     cache_salt: str | None = None
     skip_prefix_cache: bool | None = None
+    # Raw completions on a chat-template-only family (any is_mllm engine) are
+    # wrapped through the chat rail with enable_thinking forced off by
+    # default -- these let a caller explicitly opt into reasoning instead of
+    # having it silently dropped with no error. None preserves the existing
+    # forced-off default; only an explicit value changes behavior.
+    reasoning_effort: str | None = None
+    enable_thinking: bool | None = None
 
     @model_validator(mode="after")
     def _normalize_prompt_context_alias(self):

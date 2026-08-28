@@ -1185,6 +1185,10 @@ export function registerChatHandlers(
       // report liveness. Give local SSE two keep-alive intervals; the engine
       // still enforces the configured progress-aware timeout itself. Remote
       // endpoints retain their configured client-side inactivity budget.
+      // chatSession is the same known session later returned by endpoint
+      // resolution (non-local renderer endpoints are rejected unless they
+      // match it), so establish this before the watchdog is armed.
+      const isRemote = chatSession?.type === "remote";
       const fetchInactivitySeconds = isRemote
         ? timeoutSeconds
         : Math.max(timeoutSeconds, 30);
@@ -1250,7 +1254,6 @@ export function registerChatHandlers(
 
       // Detect remote session and compute base URL + auth headers
       const resolvedSession = resolved.session;
-      const isRemote = resolvedSession?.type === "remote";
 
       // A sleeping local engine answers /health immediately, so the generic
       // health check below previously declared it ready and let Python perform

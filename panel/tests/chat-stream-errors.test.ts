@@ -54,6 +54,9 @@ describe('chat timeout liveness', () => {
   it('treats the saved session timeout as inactivity rather than total wall time', () => {
     expect(source).toContain('const fetchInactivitySeconds = isRemote')
     expect(source).toContain(': Math.max(timeoutSeconds, 30)')
+    expect(source.indexOf('const isRemote = chatSession?.type === "remote"')).toBeLessThan(
+      source.indexOf('const fetchInactivitySeconds = isRemote'),
+    )
     expect(source).toContain('const armFetchInactivityTimeout = () =>')
     expect(source).toContain('if (value && value.byteLength > 0) armFetchInactivityTimeout()')
     expect(source).toContain('active.startedAt = Date.now()')

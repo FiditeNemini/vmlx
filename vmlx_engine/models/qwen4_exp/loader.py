@@ -366,7 +366,19 @@ def _load_non_table_weight_files(
     weights: dict[str, mx.array] = {}
     ple_buffers: dict[str, mx.array] = {}
     is_mlx_format = False
+
+    def _report_shards(completed: int) -> None:
+        # Lifecycle-progress contract: completed counts only shards whose
+        # tensors have actually been read (never raises, never a guess).
+        try:
+            from ...load_progress import report_shard
+
+            report_shard(completed, len(weight_files))
+        except Exception:
+            pass
+
     for file_index, weight_file in enumerate(weight_files):
+        _report_shards(file_index)
         with safe_open_fn(str(weight_file), framework="mlx") as handle:
             if file_index == 0:
                 is_mlx_format = (handle.metadata() or {}).get("format") == "mlx"
@@ -408,6 +420,8 @@ def _load_non_table_weight_files(
                 shard, frozenset(affine_aliases)
             )
         weights.update(shard)
+    if weight_files:
+        _report_shards(len(weight_files))
     return weights, is_mlx_format, ple_buffers
 
 

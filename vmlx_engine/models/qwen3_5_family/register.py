@@ -55,6 +55,20 @@ def _install_vendored_submodule(pkg_name: str, subdir_name: str) -> bool:
     if spec is None or spec.loader is None:
         return False
 
+    # Purge stale UPSTREAM submodules first. If upstream qwen3_5 was imported
+    # before registration (qwen4_exp's language.py imports
+    # mlx_vlm.models.qwen3_5.language for GatedDeltaNet), entries like
+    # mlx_vlm.models.qwen3_5.language stay cached in sys.modules, and the
+    # vendored __init__'s `from .language import ...` below would silently
+    # bind the UPSTREAM classes — a half-vendored runtime with the gate-quant
+    # fix absent. Live signature: chunked-prefill bitwise equivalence broke
+    # ("layer N keys differ") whenever anything imported qwen4_exp first.
+    for stale in [
+        key for key in sys.modules
+        if key == pkg_name or key.startswith(pkg_name + ".")
+    ]:
+        sys.modules.pop(stale, None)
+
     module = importlib.util.module_from_spec(spec)
     # Register BEFORE exec so intra-package `from .language import ...` in the
     # vendored __init__.py resolves via sys.modules.

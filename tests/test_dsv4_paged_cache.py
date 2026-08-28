@@ -499,28 +499,22 @@ def test_panel_suppresses_generic_kv_quantization_controls_for_dsv4():
     settings = Path("panel/src/renderer/src/components/sessions/SessionSettings.tsx").read_text()
     sessions = Path("panel/src/main/sessions.ts").read_text()
 
-    assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
-    assert "nativeTypedCacheOwnsStoredCodec" in form
-    assert "? 'auto'" in form, (
-        "the native-typed-cache arm must still resolve the stored codec to "
-        "auto; pin the behaviour, not one formatting of the ternary"
+    assert "const effectiveStoredCacheQuantization = 'auto'" in form
+    assert '<select value={effectiveStoredCacheQuantization} className="cfg-input" disabled>' in form, (
+        "the stored-codec selector must stay visibly disabled at auto for "
+        "every family; a re-enabled selector would reintroduce lossy stored "
+        "prefixes"
     )
-    assert "disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}" in form
-    _kv_push_idx = settings.find("parts.push('--kv-cache-quantization'")
-    assert _kv_push_idx > 0, "SessionSettings no longer pushes --kv-cache-quantization"
-    _kv_guard = settings[max(0, _kv_push_idx - 900) : _kv_push_idx]
-    for _guard in ("!dsv4Active", "!m3Active", "!openPanguExactTypedCache"):
-        assert _guard in _kv_guard, (
-            f"{_guard} must still gate the --kv-cache-quantization push "
-            "(order-independent: the condition may gain further arms)"
-        )
-    # The launch-arg guard moved from detectedFamily to effectiveFamily, which
-    # is strictly stronger: an explicit family override now suppresses generic
-    # KV quantization too, not just autodetection. Confirmed live on DSV4 --
-    # the running engine's argv carries no --kv-cache-quantization at all and
-    # the engine logs "DSV4-Flash native SWA+CSA/HCA cache owns cache
-    # compression; forcing generic --kv-cache-quantization...".
-    assert "effectiveFamily !== 'deepseek-v4' && effectiveFamily !== 'minimax_m3' && effectiveFamily !== 'openpangu_v2' && config.kvCacheQuantization" in sessions
+    assert 'className="cfg-input" disabled' in form
+    # Generic KV quantization emission was retired entirely: NO family gets a
+    # panel-pushed --kv-cache-quantization anymore (the stored/live cache is
+    # exact and architecture-native everywhere), which strictly covers the
+    # original DSV4/M3/openPangu suppression this test pinned. The flag only
+    # survives in the additional-args blocklists so a hand-typed value cannot
+    # sneak back in through that door either.
+    assert "parts.push('--kv-cache-quantization'" not in settings
+    assert "push('--kv-cache-quantization'" not in sessions
+    assert "'--kv-cache-quantization',\n" in settings  # blocklisted for additional args
     # The engine->registry family alias used to be a byte-identical private copy
     # in all three of these files, spanning the main AND renderer processes. It
     # now lives once in src/shared/detectedFamilyNames.ts. Asserting the body in
@@ -674,7 +668,6 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
             "      : config.continuousBatching !== false"
         ) in source
         assert "buildCacheLaunchArgs" in source
-        assert "const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff" in source
         assert "const prefixCacheOff = dsv4Active ? false" not in source
         assert "const effectiveSmelt = !!(config as any).smelt && !dsv4Active" in source
         assert "const isVLM = dsv4Active || effectiveSmelt" in source
@@ -695,6 +688,10 @@ def test_dsv4_launch_filters_stale_saved_and_additional_args():
         assert "--tool-call-parser" in source
         assert "--reasoning-parser" in source
         assert "dsv4PrefixCacheOptIn" not in source
+    # The renderer preview pushes buildCacheLaunchArgs output directly and no
+    # longer destructures prefixCacheOff; only the main-process launcher needs
+    # the policy field for its DSV4 log line and gating.
+    assert "const prefixCacheOff = cacheLaunchPolicy.prefixCacheOff" in sessions
     assert "const usePagedCache = cacheLaunchPolicy.effectiveUsePagedCache" in sessions
     assert "resolveCacheLaunchPolicy" in cache_helper
     assert "architectureRequiresPagedCache" in cache_policy
@@ -728,12 +725,12 @@ def test_dsv4_cache_ui_uses_shared_cache_owner_without_duplicate_labels():
     assert "!dsv4Active && (\n          <CheckField label={t('sessions.config.enablePrefixCache')}" not in form
     assert "<CheckField label={t('sessions.config.pagedKVCache')}" in form
     assert '"pagedKVCache": "In-Memory Paged Cache (RAM) — Locked Off"' in en_catalog
-    assert 'disabled={effectivelyNoBatching || prefixOff || nativeTypedCacheOwnsStoredCodec}' in form
-    assert "const effectiveStoredCacheQuantization = openPanguExactTypedCache" in form
-    assert "nativeTypedCacheOwnsStoredCodec" in form
-    assert "? 'auto'" in form, (
-        "the native-typed-cache arm must still resolve the stored codec to "
-        "auto; pin the behaviour, not one formatting of the ternary"
+    assert 'className="cfg-input" disabled' in form
+    assert "const effectiveStoredCacheQuantization = 'auto'" in form
+    assert '<select value={effectiveStoredCacheQuantization} className="cfg-input" disabled>' in form, (
+        "the stored-codec selector must stay visibly disabled at auto for "
+        "every family; a re-enabled selector would reintroduce lossy stored "
+        "prefixes"
     )
 
     # A stale label would reach users through a catalog entry now, so check

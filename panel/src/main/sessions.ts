@@ -1424,6 +1424,15 @@ export class SessionManager extends EventEmitter {
   private failCounts = new Map<string, number>()
   /** Refcounted user-requested stops that are actively terminating a backend. */
   private intentionalStops = new Map<string, number>()
+  // Per-session lifecycle epoch: every EXPLICIT stop advances it immediately
+  // (before taking the session lock), and any queued start that captured an
+  // older epoch aborts instead of spawning. The session lock serializes
+  // start/stop but serialization is not cancellation: Save & Restart issues
+  // update -> stop -> start as separate IPC calls, and a user Stop landing
+  // between them was executed BEFORE the queued start, which then spawned a
+  // ~100GB engine the UI no longer tracked (installed 1.6.44 smoke, PID
+  // 98861: UI=Stopped, port down, engine alive). Stop must win.
+  private lifecycleEpochs = new Map<string, number>()
   /** Per-session operation lock to prevent concurrent start/stop races */
   private operationLocks = new Map<string, Promise<void>>()
   /** Global creation lock to prevent port assignment races between concurrent createSession calls */
@@ -2123,6 +2132,11 @@ export class SessionManager extends EventEmitter {
   }
 
   async startSession(sessionId: string): Promise<void> {
+    // Captured at request entry: if an explicit Stop advances the epoch while
+    // this start waits (gateway transition queue, session lock), the start is
+    // superseded and must not spawn. Stop wins.
+    const entryEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
+
     // Remote sessions connect instead of starting a local process
     const session = db.getSession(sessionId)
     if (session?.type === 'remote') {
@@ -2165,7 +2179,17 @@ export class SessionManager extends EventEmitter {
       }
 
       // Serialize start/stop operations per session to prevent races.
-      await this.withSessionLock(sessionId, () => this._startSessionInner(sessionId))
+      await this.withSessionLock(sessionId, () => {
+        const currentEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
+        if (currentEpoch !== entryEpoch) {
+          console.log(
+            `[SESSIONS] start of ${sessionId} superseded by an explicit stop ` +
+            `(epoch ${entryEpoch} -> ${currentEpoch}); not spawning`
+          )
+          throw new Error('Start canceled: the session was stopped after this start was requested')
+        }
+        return this._startSessionInner(sessionId)
+      })
     }
 
     if (!isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) {
@@ -3098,6 +3122,14 @@ export class SessionManager extends EventEmitter {
     this.intentionalStops.set(
       sessionId,
       (this.intentionalStops.get(sessionId) || 0) + 1,
+    )
+
+    // Advance the lifecycle epoch BEFORE queueing on the session lock so an
+    // already-queued start (e.g. the second half of Save & Restart) observes
+    // the stop and aborts instead of spawning after this stop completes.
+    this.lifecycleEpochs.set(
+      sessionId,
+      (this.lifecycleEpochs.get(sessionId) ?? 0) + 1,
     )
 
     // Serialize start/stop operations per session to prevent races

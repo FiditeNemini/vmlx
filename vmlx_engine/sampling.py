@@ -3,123 +3,11 @@
 
 from __future__ import annotations
 
-import os
 from functools import partial
 from typing import Callable
 
 import mlx.core as mx
 from mlx_lm.sample_utils import make_sampler as _mlx_make_sampler
-
-# ─── Reasoning EOS guard ────────────────────────────────────────────────
-#
-# Some reasoning bundles (measured live: Qwen3.8-Flash-Next at its template
-# default xhigh effort, temp 1.0 / top_k 20) intermittently sample EOS
-# INSIDE an unclosed <think> block — ~25% of tool-result continuations
-# ended reasoning-only with no visible answer and no tool call, surfacing
-# as a chat 502 reasoning_only_no_content or a silently empty /v1/responses
-# message. The think markers are single tokens for these families, so the
-# structural fix lives at the sampler: while a think block is open, EOS is
-# banned; the model must close the block before it may stop. The state
-# machine is built from pure MLX ops on the sampler's own outputs — no
-# host synchronization is added to the decode hot path.
-#
-# Registered per loaded model by the server (single-token markers only).
-# Guarded requests are single-sequence; batched logits rows pass through
-# unguarded because closure state cannot track continuous-batching row
-# reassignment. VMLX_REASONING_EOS_GUARD=0 disables (diagnostics only —
-# the guard removes a failure mode, it never blocks output).
-
-_reasoning_eos_guard: dict | None = None
-
-
-def set_reasoning_eos_guard(
-    think_open_id: int, think_close_id: int, eos_ids: list[int]
-) -> None:
-    global _reasoning_eos_guard
-    if not eos_ids:
-        _reasoning_eos_guard = None
-        return
-    _reasoning_eos_guard = {
-        "open": int(think_open_id),
-        "close": int(think_close_id),
-        "eos": [int(t) for t in eos_ids],
-    }
-
-
-def clear_reasoning_eos_guard() -> None:
-    global _reasoning_eos_guard
-    _reasoning_eos_guard = None
-
-
-def reasoning_eos_guard_active() -> bool:
-    return _reasoning_eos_guard is not None and (
-        os.environ.get("VMLX_REASONING_EOS_GUARD", "1") != "0"
-    )
-
-
-class _ReasoningEosGuardedSampler:
-    """Per-request stateful wrapper banning EOS inside an open think block.
-
-    Delegates every attribute to the wrapped sampler so decode-path
-    introspection (``_vmlx_accepts_logits``, ``_vmlx_categorical``,
-    ``min_tokens_to_keep`` …) keeps working. All state transitions are pure
-    MLX ops on the sampler's own outputs — no ``.item()`` on the hot path.
-    """
-
-    def __init__(self, sampler: Callable[[mx.array], mx.array], guard: dict):
-        self._sampler = sampler
-        self._open_id = guard["open"]
-        self._close_id = guard["close"]
-        self._eos_ids = guard["eos"]
-        self._in_think = mx.array(False)
-        # True from the moment a think block closes until at least one
-        # visible (non-marker, non-EOS) token has been emitted: the second
-        # measured failure shape is "</think>" followed immediately by EOS,
-        # which still finalizes reasoning-only.
-        self._awaiting_visible = mx.array(False)
-        self._ban_vectors: dict[tuple[int, str], mx.array] = {}
-
-    def _ban_vector(self, vocab: int, dtype: mx.Dtype) -> mx.array:
-        key = (vocab, str(dtype))
-        vec = self._ban_vectors.get(key)
-        if vec is None:
-            eos = mx.array([t for t in self._eos_ids if 0 <= t < vocab])
-            positions = mx.arange(vocab)
-            mask = mx.any(positions[:, None] == eos[None, :], axis=-1)
-            vec = mx.where(mask, mx.array(-float("inf")), mx.array(0.0)).astype(dtype)
-            self._ban_vectors[key] = vec
-        return vec
-
-    def __call__(self, logits: mx.array) -> mx.array:
-        single = logits.shape[0] == 1 if logits.ndim >= 2 else True
-        if single:
-            ban_active = mx.logical_or(self._in_think, self._awaiting_visible)
-            ban = self._ban_vector(logits.shape[-1], logits.dtype)
-            logits = logits + mx.where(ban_active, ban, mx.zeros_like(ban))
-        tokens = self._sampler(logits)
-        if single:
-            flat = tokens.reshape(-1)
-            saw_open = mx.any(flat == self._open_id)
-            saw_close = mx.any(flat == self._close_id)
-            saw_eos = mx.array(False)
-            for eos in self._eos_ids:
-                saw_eos = mx.logical_or(saw_eos, mx.any(flat == eos))
-            is_marker = mx.logical_or(flat == self._open_id, flat == self._close_id)
-            for eos in self._eos_ids:
-                is_marker = mx.logical_or(is_marker, flat == eos)
-            saw_visible = mx.any(mx.logical_not(is_marker))
-            self._in_think = mx.logical_and(
-                mx.logical_or(self._in_think, saw_open),
-                mx.logical_not(mx.logical_or(saw_close, saw_eos)),
-            )
-            self._awaiting_visible = mx.logical_and(
-                mx.logical_or(self._awaiting_visible, saw_close),
-                mx.logical_not(mx.logical_or(saw_visible, saw_eos)),
-            )
-        return tokens
-
-    def __getattr__(self, name):
-        return getattr(self._sampler, name)
 
 
 class _SamplerWrapper:
@@ -143,31 +31,6 @@ class _SamplerWrapper:
         return getattr(self._sampler, name)
 
 
-
-
-def prime_reasoning_guard(sampler, prompt_token_ids) -> None:
-    """Initialize a guarded sampler's think-state from the PROMPT tail.
-
-    Templates that pre-open the think block put <think> in the PROMPT — the
-    sampler never sees it as one of its own outputs, so without priming the
-    guard never engages (measured live: qwen4_exp appends "<think>\n" to the
-    generation prompt). Only the tail matters: a pre-opened block sits at the
-    very end of the prompt.
-    """
-    if not isinstance(sampler, _ReasoningEosGuardedSampler):
-        return
-    if not prompt_token_ids:
-        return
-    tail = list(prompt_token_ids)[-64:]
-    for token in reversed(tail):
-        t = int(token)
-        if t == sampler._close_id:
-            return
-        if t == sampler._open_id:
-            sampler._in_think = mx.array(True)
-            return
-
-
 def make_sampler(
     *,
     temp: float = 0.0,
@@ -185,26 +48,7 @@ def make_sampler(
     the compact top-k logits and sample there, then map the sampled local index
     back to the original token id.
     """
-    base = _make_base_sampler(
-        temp=temp, top_p=top_p, min_p=min_p, top_k=top_k, seed=seed
-    )
-    # Greedy decoding is deterministic and was never observed to EOS inside
-    # a think block; leaving it unwrapped keeps the argmax fast path intact.
-    if getattr(base, "_vmlx_is_greedy", False):
-        return base
-    if reasoning_eos_guard_active():
-        return _ReasoningEosGuardedSampler(base, _reasoning_eos_guard)
-    return base
 
-
-def _make_base_sampler(
-    *,
-    temp: float = 0.0,
-    top_p: float = 0.0,
-    min_p: float = 0.0,
-    top_k: int = 0,
-    seed: int | None = None,
-) -> Callable[[mx.array], mx.array]:
     if float(temp or 0.0) == 0.0:
         return _SamplerWrapper(
             lambda x: mx.argmax(x, axis=-1),

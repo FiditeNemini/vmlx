@@ -21,6 +21,7 @@ ROOT_DIR="$(cd -P "$PANEL_DIR/.." && pwd -P)"
 REQUESTED_RELEASE_SCOPE="${VMLX_RELEASE_SCOPE:-${VMLINUX_RELEASE_SCOPE:-}}"
 RELEASE_SCOPE="$REQUESTED_RELEASE_SCOPE"
 REQUESTED_FLAVOR="${1:-all}"
+DEV_UNSIGNED="${VMLX_DEV_UNSIGNED:-0}"
 AUTHORITATIVE_PYTHON="$ROOT_DIR/.venv/bin/python"
 PYTHON_ACTION_HELPER="$PANEL_DIR/scripts/release-python-action.cjs"
 
@@ -98,6 +99,18 @@ if [[ "$REQUESTED_RELEASE_SCOPE" == "production" ]]; then
     echo "ERROR: public production packaging requires a release version like 1.2.3, got $VERSION" >&2
     exit 1
   fi
+fi
+
+if [[ "$DEV_UNSIGNED" != "0" && "$DEV_UNSIGNED" != "1" ]]; then
+  echo "ERROR: VMLX_DEV_UNSIGNED must be 0 or 1" >&2
+  exit 1
+fi
+if [[ "$DEV_UNSIGNED" == "1" && "$RELEASE_SCOPE" != "codex_ui_only" ]]; then
+  echo "ERROR: unsigned DMGs are allowed only with VMLX_RELEASE_SCOPE=codex_ui_only" >&2
+  exit 1
+fi
+if [[ "$DEV_UNSIGNED" == "1" ]]; then
+  export CSC_IDENTITY_AUTO_DISCOVERY=false
 fi
 
 if [[ "$RELEASE_SCOPE" == "r20_production" ]]; then
@@ -1573,6 +1586,11 @@ build_one() {
   local staged_output="$DIST_DIR/${flavor}-app"
   local app_path
   local dmg_path="$DIST_DIR/vMLX-${VERSION}-${flavor}-arm64.dmg"
+  local identity_args=()
+
+  if [[ "$DEV_UNSIGNED" == "1" ]]; then
+    identity_args=(--config.mac.identity=null)
+  fi
 
   case "$flavor" in
     sequoia)
@@ -1608,23 +1626,31 @@ build_one() {
   write_r20_build_plan "$flavor" "stage" "$staged_output"
   run_electron_builder_action --mac --dir \
     --config.directories.output="$staged_output" \
-    --config.mac.minimumSystemVersion="$minimum_system_version"
+    --config.mac.minimumSystemVersion="$minimum_system_version" \
+    "${identity_args[@]}"
   assert_r20_source_identity "after ${flavor} app staging"
   app_path="$(find_staged_app "$staged_output")"
-  finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"
-  verify_staged_app_parity "$flavor" "$staged_output"
+  if [[ "$DEV_UNSIGNED" == "1" ]]; then
+    echo "==> Unsigned development build: skipping Developer ID finalization"
+  else
+    finalize_release_app_signature "$app_path" "$RELEASE_CODESIGN_IDENTITY"
+    verify_staged_app_parity "$flavor" "$staged_output"
+  fi
   assert_r20_source_identity "after ${flavor} staged app parity"
   write_r20_build_plan "$flavor" "dmg" "$dmg_path"
   run_electron_builder_action --mac dmg \
     --prepackaged "$app_path" \
     --config.directories.output="$DIST_DIR" \
     --config.mac.minimumSystemVersion="$minimum_system_version" \
-    --config.mac.artifactName="vMLX-\${version}-${flavor}-\${arch}.\${ext}"
+    --config.mac.artifactName="vMLX-\${version}-${flavor}-\${arch}.\${ext}" \
+    "${identity_args[@]}"
   if [[ ! -s "$dmg_path" ]]; then
     echo "ERROR: missing expected ${flavor} release DMG: $dmg_path" >&2
     exit 1
   fi
-  verify_release_signature_identity "$dmg_path"
+  if [[ "$DEV_UNSIGNED" != "1" ]]; then
+    verify_release_signature_identity "$dmg_path"
+  fi
   assert_r20_source_identity "after ${flavor} DMG"
 }
 

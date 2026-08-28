@@ -215,9 +215,11 @@ describe("release packaging", () => {
 
     expect(stage).toBeGreaterThan(0);
     expect(finalSign).toBeGreaterThan(stage);
-    expect(source).not.toContain(
-      "CSC_IDENTITY_AUTO_DISCOVERY=false",
+    expect(source).toContain(
+      '"$DEV_UNSIGNED" == "1" && "$RELEASE_SCOPE" != "codex_ui_only"',
     );
+    expect(source).toContain("export CSC_IDENTITY_AUTO_DISCOVERY=false");
+    expect(source).toContain("--config.mac.identity=null");
     expect(source).toContain("inside-out Developer-ID signing");
   });
 

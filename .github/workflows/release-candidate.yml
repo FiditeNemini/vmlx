@@ -1,0 +1,221 @@
+name: Signed release candidate
+run-name: Candidate v${{ inputs.version }} @ ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact source version, without the v prefix
+        required: true
+      source_sha:
+        description: Exact 40-character vMLX origin/main SHA
+        required: true
+      jang_sha:
+        description: Exact 40-character jjang-ai/jangq origin/main SHA
+        required: true
+      private_evidence_root:
+        description: Absolute private evidence root on the release runner
+        required: true
+        default: /Users/eric/vmlx-private-evidence
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vmlx-signed-release-candidate
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    name: Build, sign, notarize, and attest both DMGs
+    runs-on: [self-hosted, macOS, ARM64, vmlx-release]
+    environment: apple-release-signing
+    timeout-minutes: 360
+
+    steps:
+      - name: Validate immutable inputs
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          JANG_SHA_INPUT: ${{ inputs.jang_sha }}
+          PRIVATE_EVIDENCE_ROOT: ${{ inputs.private_evidence_root }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$JANG_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PRIVATE_EVIDENCE_ROOT" == /* ]]
+          test -d "$PRIVATE_EVIDENCE_ROOT"
+          case "$PRIVATE_EVIDENCE_ROOT" in
+            "$GITHUB_WORKSPACE"|"$GITHUB_WORKSPACE"/*)
+              echo "Private evidence root must be outside the Git workspace" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check out exact vMLX source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          path: vmlx
+          persist-credentials: false
+
+      - name: Check out exact JANGQ source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: jjang-ai/jangq
+          ref: ${{ inputs.jang_sha }}
+          fetch-depth: 0
+          path: jangq
+          persist-credentials: false
+
+      - name: Bind both checkouts to public origin/main
+        working-directory: vmlx
+        env:
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          JANG_SHA_INPUT: ${{ inputs.jang_sha }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          vmlx_main="$(git ls-remote origin refs/heads/main | /usr/bin/awk '{print $1}')"
+          jang_main="$(git -C ../jangq ls-remote origin refs/heads/main | /usr/bin/awk '{print $1}')"
+          test "$vmlx_main" = "$SOURCE_SHA_INPUT"
+          test "$jang_main" = "$JANG_SHA_INPUT"
+          git checkout -B main "$SOURCE_SHA_INPUT"
+          git branch --set-upstream-to=origin/main main
+          git -C ../jangq checkout -B main "$JANG_SHA_INPUT"
+          git -C ../jangq branch --set-upstream-to=origin/main main
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test -z "$(git -C ../jangq status --porcelain --untracked-files=all)"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          source_version="$(/usr/bin/python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+          import tomllib
+
+          versions = {
+              tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'],
+              json.loads(pathlib.Path('panel/package.json').read_text())['version'],
+              json.loads(pathlib.Path('panel/package-lock.json').read_text())['version'],
+              re.search(r'__version__\s*=\s*["\x27]([^"\x27]+)', pathlib.Path('vmlx_engine/__init__.py').read_text()).group(1),
+          }
+          if len(versions) != 1:
+              raise SystemExit(f'version stamps disagree: {sorted(versions)}')
+          print(versions.pop())
+          PY
+          )"
+          test "$source_version" = "$VERSION_INPUT"
+          {
+            echo "SOURCE_SHA=$SOURCE_SHA_INPUT"
+            echo "SOURCE_TREE=$source_tree"
+            echo "JANG_SHA=$JANG_SHA_INPUT"
+            echo "VERSION=$source_version"
+          } >> "$GITHUB_ENV"
+
+      - name: Install Apple signing identity and notary profile
+        id: apple
+        working-directory: vmlx
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: .github/scripts/setup_apple_signing.sh install
+
+      - name: Install isolated release dependencies
+        working-directory: vmlx
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip build twine
+          .venv/bin/python -m pip install -e '.[dev]'
+          cd panel
+          /opt/homebrew/bin/npm ci
+
+      - name: Build both production DMGs
+        working-directory: vmlx
+        env:
+          VMLX_RELEASE_SCOPE: production
+          VMLX_R20_PRIVATE_EVIDENCE_ROOT: ${{ inputs.private_evidence_root }}
+          VMLX_R20_EXPECTED_VERSION: ${{ inputs.version }}
+          VMLX_JANG_TOOLS_SOURCE: ${{ github.workspace }}/jangq/jang-tools
+          VMLX_NOTARY_KEYCHAIN_PROFILE: ${{ steps.apple.outputs.profile }}
+          VMLX_NOTARY_KEYCHAIN: ${{ steps.apple.outputs.keychain }}
+          CSC_KEYCHAIN: ${{ steps.apple.outputs.keychain }}
+        run: |
+          set -euo pipefail
+          handoff="$VMLX_R20_PRIVATE_EVIDENCE_ROOT/artifact-handoffs"
+          mkdir -p "$handoff"
+          pre="$handoff/vMLX-${VERSION}-${SOURCE_SHA:0:12}-gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-pre-notary.json"
+          final="$handoff/vMLX-${VERSION}-${SOURCE_SHA:0:12}-gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-post-notary.json"
+          test ! -e "$pre"
+          test ! -e "$final"
+          export VMLX_R20_PRE_NOTARY_MANIFEST_OUT="$pre"
+          export VMLX_R20_FINAL_NOTARY_MANIFEST="$final"
+          panel/scripts/build-release-dmgs.sh all
+          pre_sha="$(/usr/bin/shasum -a 256 "$pre" | /usr/bin/awk '{print $1}')"
+          export VMLX_R20_PRE_NOTARY_MANIFEST="$pre"
+          export VMLX_R20_PRE_NOTARY_MANIFEST_SHA256="$pre_sha"
+          panel/scripts/notarize-release-dmgs.sh
+          final_sha="$(/usr/bin/shasum -a 256 "$final" | /usr/bin/awk '{print $1}')"
+          {
+            echo "FINAL_NOTARY_MANIFEST=$final"
+            echo "FINAL_NOTARY_MANIFEST_SHA256=$final_sha"
+          } >> "$GITHUB_ENV"
+
+      - name: Build Python package
+        working-directory: vmlx
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m build
+          .venv/bin/python -m twine check dist/*
+
+      - name: Create sanitized candidate handoff
+        working-directory: vmlx
+        env:
+          CANDIDATE_DIR: ${{ runner.temp }}/vmlx-candidate-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$CANDIDATE_DIR/dmgs" "$CANDIDATE_DIR/python-dist"
+          for flavor in sequoia tahoe; do
+            cp "panel/release/vMLX-${VERSION}-${flavor}-arm64.dmg" "$CANDIDATE_DIR/dmgs/"
+            cp "panel/release/vMLX-${VERSION}-${flavor}-arm64.dmg.blockmap" "$CANDIDATE_DIR/dmgs/"
+          done
+          cp "dist/vmlx-${VERSION}-py3-none-any.whl" "$CANDIDATE_DIR/python-dist/"
+          cp "dist/vmlx-${VERSION}.tar.gz" "$CANDIDATE_DIR/python-dist/"
+          .github/scripts/release_metadata.py create \
+            --root . \
+            --dist "$CANDIDATE_DIR/dmgs" \
+            --python-dist "$CANDIDATE_DIR/python-dist" \
+            --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --source-tree "$SOURCE_TREE" \
+            --jang-sha "$JANG_SHA" \
+            --jang-tools ../jangq/jang-tools \
+            --final-notary-manifest-sha256 "$FINAL_NOTARY_MANIFEST_SHA256" \
+            --output "$CANDIDATE_DIR/release-info.json" \
+            --notes-output "$CANDIDATE_DIR/release-notes.md"
+          .github/scripts/release_metadata.py verify \
+            --metadata "$CANDIDATE_DIR/release-info.json" \
+            --dist "$CANDIDATE_DIR/dmgs" \
+            --python-dist "$CANDIDATE_DIR/python-dist" \
+            --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" \
+            --jang-sha "$JANG_SHA"
+
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vmlx-release-candidate-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/vmlx-candidate-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Remove ephemeral Apple credentials
+        if: always()
+        working-directory: vmlx
+        run: .github/scripts/setup_apple_signing.sh cleanup

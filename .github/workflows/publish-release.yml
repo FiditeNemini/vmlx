@@ -1,0 +1,426 @@
+name: Publish exact release candidate
+run-name: Publish v${{ inputs.version }} from candidate run ${{ inputs.candidate_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_run_id:
+        description: Successful Signed release candidate workflow run ID
+        required: true
+      version:
+        description: Exact version, without the v prefix
+        required: true
+      source_sha:
+        description: Exact 40-character vMLX candidate SHA
+        required: true
+      jang_sha:
+        description: Exact 40-character JANGQ candidate SHA
+        required: true
+      publish_jangq:
+        description: Dispatch JANGQ's own tagged PyPI publisher and wait for it
+        required: true
+        type: boolean
+        default: false
+      jangq_tag:
+        description: Existing JANGQ tag, required when publish_jangq is true
+        required: false
+      deploy_website:
+        description: Update mlx.studio and verify both public domains
+        required: true
+        type: boolean
+        default: true
+      confirm:
+        description: Type PUBLISH vX.Y.Z EXACT CANDIDATE
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: vmlx-production-publication
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable candidate and public heads
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      jang_version: ${{ steps.metadata.outputs.jang_version }}
+
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vmlx-release-candidate-${{ inputs.source_sha }}
+          path: candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validate confirmation, metadata, and public branches
+        id: metadata
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          JANG_SHA_INPUT: ${{ inputs.jang_sha }}
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+          PUBLISH_JANGQ: ${{ inputs.publish_jangq }}
+          JANGQ_TAG: ${{ inputs.jangq_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION_INPUT" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$SOURCE_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$JANG_SHA_INPUT" =~ ^[0-9a-f]{40}$ ]]
+          test "$CONFIRM_INPUT" = "PUBLISH v${VERSION_INPUT} EXACT CANDIDATE"
+          source_main="$(git ls-remote https://github.com/jjang-ai/vmlx.git refs/heads/main | awk '{print $1}')"
+          jang_main="$(git ls-remote https://github.com/jjang-ai/jangq.git refs/heads/main | awk '{print $1}')"
+          test "$source_main" = "$SOURCE_SHA_INPUT"
+          test "$jang_main" = "$JANG_SHA_INPUT"
+          .github/scripts/release_metadata.py verify \
+            --metadata candidate/release-info.json \
+            --dist candidate/dmgs \
+            --python-dist candidate/python-dist \
+            --version "$VERSION_INPUT" \
+            --source-sha "$SOURCE_SHA_INPUT" \
+            --jang-sha "$JANG_SHA_INPUT"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          metadata = json.load(open('candidate/release-info.json'))
+          print(f"jang_version={metadata['jangq']['version']}")
+          PY
+          if [[ "$PUBLISH_JANGQ" == "true" ]]; then
+            expected_jang_tag="v$(python -c 'import json; print(json.load(open("candidate/release-info.json"))["jangq"]["version"])')"
+            test "$JANGQ_TAG" = "$expected_jang_tag"
+            tag_sha="$(git ls-remote https://github.com/jjang-ai/jangq.git "refs/tags/${JANGQ_TAG}^{}" | awk '{print $1}')"
+            if [[ -z "$tag_sha" ]]; then
+              tag_sha="$(git ls-remote https://github.com/jjang-ai/jangq.git "refs/tags/${JANGQ_TAG}" | awk '{print $1}')"
+            fi
+            test "$tag_sha" = "$JANG_SHA_INPUT"
+          fi
+
+      - name: Reject already-public release state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo jjang-ai/vmlx >/dev/null 2>&1; then
+            echo "vMLX release already exists: $TAG" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code https://github.com/jjang-ai/vmlx.git "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "vMLX tag already exists: $TAG" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code https://github.com/jjang-ai/mlxstudio.git "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "MLX Studio tag already exists: $TAG" >&2
+            exit 1
+          fi
+
+  publish-github:
+    name: Publish both GitHub repositories
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production-release
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Create narrowly scoped release-app token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: jjang-ai
+          repositories: |
+            vmlx
+            mlxstudio
+
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vmlx-release-candidate-${{ inputs.source_sha }}
+          path: candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Stage and publish identical releases
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: v${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          test ! "$(gh release view "$TAG" -R jjang-ai/vmlx 2>/dev/null || true)"
+          test ! "$(gh release view "$TAG" -R jjang-ai/mlxstudio 2>/dev/null || true)"
+          gh release create "$TAG" \
+            --repo jjang-ai/vmlx \
+            --target "$SOURCE_SHA" \
+            --title "vMLX ${{ inputs.version }}" \
+            --notes-file candidate/release-notes.md \
+            --draft \
+            candidate/dmgs/* \
+            candidate/python-dist/* \
+            candidate/release-info.json
+          gh release create "$TAG" \
+            --repo jjang-ai/mlxstudio \
+            --title "vMLX ${{ inputs.version }}" \
+            --notes-file candidate/release-notes.md \
+            --draft \
+            candidate/dmgs/* \
+            candidate/release-info.json
+          gh release edit "$TAG" --repo jjang-ai/mlxstudio --draft=false
+          gh release edit "$TAG" --repo jjang-ai/vmlx --draft=false
+
+  publish-pypi:
+    name: Publish vmlx to PyPI with Trusted Publishing
+    needs: [validate, publish-github]
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vmlx-release-candidate-${{ inputs.source_sha }}
+          path: candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish without a stored PyPI token
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: candidate/python-dist/
+          verbose: true
+
+  update-manifests:
+    name: Update byte-identical updater manifests
+    needs: [validate, publish-github, publish-pypi]
+    runs-on: ubuntu-latest
+    environment: production-release
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Create narrowly scoped release-app token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: jjang-ai
+          repositories: |
+            vmlx
+            mlxstudio
+
+      - name: Check out both public repositories
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: jjang-ai/vmlx
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          path: repo-vmlx
+          fetch-depth: 0
+
+      - name: Check out MLX Studio release repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: jjang-ai/mlxstudio
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          path: repo-mlxstudio
+          fetch-depth: 0
+
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vmlx-release-candidate-${{ inputs.source_sha }}
+          path: candidate
+          run-id: ${{ inputs.candidate_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Generate and push the same Tahoe-first manifest
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          repo-vmlx/.github/scripts/release_metadata.py write-updater \
+            --metadata candidate/release-info.json \
+            --notes candidate/release-notes.md \
+            --output "$RUNNER_TEMP/latest.json"
+          cp "$RUNNER_TEMP/latest.json" repo-vmlx/latest.json
+          cp "$RUNNER_TEMP/latest.json" repo-mlxstudio/latest.json
+          cmp repo-vmlx/latest.json repo-mlxstudio/latest.json
+          for repo in repo-vmlx repo-mlxstudio; do
+            git -C "$repo" config user.name "Jinho Jang"
+            git -C "$repo" config user.email "eric@jangq.ai"
+            if ! git -C "$repo" diff --quiet -- latest.json; then
+              printf 'Publish vMLX %s updater manifest\n' "$VERSION" > "$RUNNER_TEMP/manifest-commit.txt"
+              git -C "$repo" add latest.json
+              git -C "$repo" commit -F "$RUNNER_TEMP/manifest-commit.txt"
+              git -C "$repo" push origin HEAD:main
+            fi
+          done
+          cp "$RUNNER_TEMP/latest.json" published-latest.json
+
+      - name: Upload the canonical public manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vmlx-public-manifest-${{ inputs.version }}
+          path: published-latest.json
+          if-no-files-found: error
+          retention-days: 90
+
+  publish-jangq:
+    name: Dispatch JANGQ's exact tagged publisher
+    if: ${{ inputs.publish_jangq }}
+    needs: [validate, update-manifests]
+    runs-on: ubuntu-latest
+    environment: production-release
+    timeout-minutes: 30
+
+    steps:
+      - name: Create narrowly scoped release-app token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: jjang-ai
+          repositories: jangq
+
+      - name: Dispatch and wait for JANGQ Trusted Publishing
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          JANGQ_TAG: ${{ inputs.jangq_tag }}
+        run: |
+          set -euo pipefail
+          before="$(gh run list -R jjang-ai/jangq --workflow publish-pypi.yml --limit 30 --json databaseId --jq '.[].databaseId')"
+          gh workflow run publish-pypi.yml -R jjang-ai/jangq --ref main -f ref="$JANGQ_TAG"
+          run_id=""
+          for _ in $(seq 1 30); do
+            candidate="$(gh run list -R jjang-ai/jangq --workflow publish-pypi.yml --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [[ -n "$candidate" ]] && ! grep -qx "$candidate" <<< "$before"; then
+              run_id="$candidate"
+              break
+            fi
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" -R jjang-ai/jangq --exit-status
+
+  deploy-website:
+    name: Deploy and verify website updater surfaces
+    if: ${{ inputs.deploy_website }}
+    needs: [validate, update-manifests]
+    runs-on: ubuntu-latest
+    environment: website-release
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Check out release helper
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Download canonical public manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: vmlx-public-manifest-${{ inputs.version }}
+          path: website
+
+      - name: Install ephemeral website SSH identity
+        env:
+          WEBSITE_SSH_PRIVATE_KEY: ${{ secrets.WEBSITE_SSH_PRIVATE_KEY }}
+          WEBSITE_SSH_HOST_KEY: ${{ vars.WEBSITE_SSH_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$WEBSITE_SSH_PRIVATE_KEY"
+          test -n "$WEBSITE_SSH_HOST_KEY"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$WEBSITE_SSH_PRIVATE_KEY" > "$HOME/.ssh/release_key"
+          printf '%s\n' "$WEBSITE_SSH_HOST_KEY" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/release_key" "$HOME/.ssh/known_hosts"
+
+      - name: Atomically deploy updater and download page
+        env:
+          WEBSITE_SSH_HOST: ${{ vars.WEBSITE_SSH_HOST }}
+          WEBSITE_SSH_USER: ${{ vars.WEBSITE_SSH_USER }}
+        run: |
+          set -euo pipefail
+          [[ "$WEBSITE_SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$WEBSITE_SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          remote="${WEBSITE_SSH_USER}@${WEBSITE_SSH_HOST}"
+          opts=(-i "$HOME/.ssh/release_key" -o BatchMode=yes -o StrictHostKeyChecking=yes)
+          remote_dir="/tmp/vmlx-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Values are validated above and intentionally expand on the client.
+          # shellcheck disable=SC2029
+          ssh "${opts[@]}" "$remote" "mkdir -m 700 '$remote_dir'"
+          scp "${opts[@]}" website/published-latest.json .github/scripts/deploy_website_release.py "$remote:$remote_dir/"
+          # shellcheck disable=SC2029
+          ssh "${opts[@]}" "$remote" \
+            "python3 '$remote_dir/deploy_website_release.py' --site-root /var/www/mlx.studio --updater '$remote_dir/published-latest.json' --backup-root /var/backups/vmlx-releases"
+          # shellcheck disable=SC2029
+          ssh "${opts[@]}" "$remote" "rm -rf '$remote_dir'"
+
+      - name: Purge both Cloudflare zones
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          MLX_STUDIO_ZONE_ID: ${{ vars.CLOUDFLARE_MLX_STUDIO_ZONE_ID }}
+          VMLX_NET_ZONE_ID: ${{ vars.CLOUDFLARE_VMLX_NET_ZONE_ID }}
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN"
+          purge() {
+            local zone="$1"
+            shift
+            payload="$(python -c 'import json,sys; print(json.dumps({"files": sys.argv[1:]}))' "$@")"
+            response="$(curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/${zone}/purge_cache" \
+              -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              --data "$payload")"
+            python -c 'import json,sys; assert json.loads(sys.argv[1]).get("success") is True' "$response"
+          }
+          purge "$MLX_STUDIO_ZONE_ID" https://mlx.studio/update/latest.json https://mlx.studio/download/
+          purge "$VMLX_NET_ZONE_ID" https://vmlx.net/update/latest.json https://vmlx.net/download/
+
+      - name: Verify all public updater and download surfaces
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          for url in \
+            https://raw.githubusercontent.com/jjang-ai/vmlx/main/latest.json \
+            https://raw.githubusercontent.com/jjang-ai/mlxstudio/main/latest.json \
+            https://mlx.studio/update/latest.json \
+            https://vmlx.net/update/latest.json; do
+            curl -fsSL --retry 6 --retry-delay 5 "$url" -o fetched.json
+            cmp website/published-latest.json fetched.json
+          done
+          curl -fsSL --retry 6 --retry-delay 5 https://mlx.studio/download/ -o download.html
+          grep -Fq "vMLX-${VERSION}-tahoe-arm64.dmg" download.html
+          grep -Fq "vMLX-${VERSION}-sequoia-arm64.dmg" download.html
+          grep -Fq "\"softwareVersion\": \"${VERSION}\"" download.html

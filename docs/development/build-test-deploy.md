@@ -2,6 +2,11 @@
 
 Complete guide for building the vMLX desktop app, running the test suite, and deploying to `/Applications`.
 
+For the protected GitHub Actions development, signed-candidate, notarization,
+and exact-byte publication pipeline, see
+[`release-automation.md`](release-automation.md). The commands below remain
+local developer commands and are not a substitute for that release contract.
+
 ## Prerequisites
 
 - **macOS** on Apple Silicon (M1/M2/M3/M4)

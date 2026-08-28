@@ -1,0 +1,142 @@
+name: Dev DMG build
+run-name: Dev DMG ${{ inputs.source_ref }} (${{ inputs.flavor }})
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: vMLX branch, tag, or full SHA to build
+        required: true
+        default: main
+      jang_ref:
+        description: Exact jjang-ai/jangq branch, tag, or SHA to bundle
+        required: true
+        default: main
+      flavor:
+        description: macOS artifact flavor
+        required: true
+        type: choice
+        options:
+          - all
+          - tahoe
+          - sequoia
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vmlx-dev-dmg-${{ inputs.source_ref }}-${{ inputs.flavor }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned development DMG
+    runs-on: [self-hosted, macOS, ARM64, vmlx-release]
+    timeout-minutes: 240
+
+    steps:
+      - name: Check out vMLX source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          path: vmlx
+          persist-credentials: false
+
+      - name: Check out JANGQ runtime
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: jjang-ai/jangq
+          ref: ${{ inputs.jang_ref }}
+          fetch-depth: 0
+          path: jangq
+          persist-credentials: false
+
+      - name: Capture source provenance
+        id: provenance
+        working-directory: vmlx
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=all)"
+          source_sha="$(git rev-parse HEAD)"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          jang_sha="$(git -C ../jangq rev-parse HEAD)"
+          version="$(/usr/bin/python3 - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as handle:
+              print(tomllib.load(handle)['project']['version'])
+          PY
+          )"
+          {
+            echo "SOURCE_SHA=$source_sha"
+            echo "SOURCE_TREE=$source_tree"
+            echo "JANG_SHA=$jang_sha"
+            echo "VERSION=$version"
+          } >> "$GITHUB_ENV"
+          {
+            echo "source_sha=$source_sha"
+            echo "jang_sha=$jang_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install isolated build dependencies
+        working-directory: vmlx
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip build twine
+          .venv/bin/python -m pip install -e '.[dev]'
+          cd panel
+          /opt/homebrew/bin/npm ci
+
+      - name: Build development DMG
+        working-directory: vmlx
+        env:
+          VMLX_RELEASE_SCOPE: codex_ui_only
+          VMLX_DEV_UNSIGNED: "1"
+          VMLX_RELEASE_OUTPUT_DIR: ${{ runner.temp }}/vmlx-dev-${{ github.run_id }}
+          VMLX_JANG_TOOLS_SOURCE: ${{ github.workspace }}/jangq/jang-tools
+          VMLX_JANG_TOOLS_RELEASE_PIN: ${{ steps.provenance.outputs.jang_sha }}
+        run: |
+          set -euo pipefail
+          panel/scripts/build-release-dmgs.sh '${{ inputs.flavor }}'
+
+      - name: Write development provenance
+        env:
+          OUTPUT_DIR: ${{ runner.temp }}/vmlx-dev-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 - "$OUTPUT_DIR" <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          artifacts = {}
+          for path in sorted(root.glob('vMLX-*.dmg*')):
+              if path.is_file():
+                  artifacts[path.name] = {
+                      'bytes': path.stat().st_size,
+                      'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                  }
+          payload = {
+              'kind': 'unsigned_development_build',
+              'version': os.environ['VERSION'],
+              'source_commit': os.environ['SOURCE_SHA'],
+              'source_tree': os.environ['SOURCE_TREE'],
+              'jang_commit': os.environ['JANG_SHA'],
+              'artifacts': artifacts,
+          }
+          (root / 'dev-build-info.json').write_text(json.dumps(payload, indent=2) + '\n')
+          PY
+
+      - name: Upload development artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: vmlx-dev-${{ steps.provenance.outputs.version }}-${{ steps.provenance.outputs.source_sha }}
+          path: ${{ runner.temp }}/vmlx-dev-${{ github.run_id }}
+          if-no-files-found: error
+          retention-days: 14

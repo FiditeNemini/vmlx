@@ -420,6 +420,24 @@ if [ -z "$EXPECTED_JANG_COMMIT" ]; then
   echo "    WARNING: no origin/main in $JANG_TOOLS_SOURCE_ROOT — falling back to local HEAD" >&2
   EXPECTED_JANG_COMMIT="$("$GIT_BIN" -C "$JANG_TOOLS_SOURCE_ROOT" rev-parse HEAD 2>/dev/null || true)"
 fi
+# A pinned release bundle records jang.release_pin in its provenance (written
+# by bundle-python.sh under VMLX_JANG_TOOLS_RELEASE_PIN). Such a bundle
+# deliberately ships one exact commit while origin/main has moved on — the
+# mismatch this check must catch is bundle != pin, not pin != upstream. The
+# pin is only honored when it matches the bundled commit itself, so a stale
+# or tampered provenance cannot use it to bless an arbitrary bundle.
+PROVENANCE_JANG_PIN="$(
+  run_bundled_python - "$PROVENANCE_FILE" <<'PYEOF'
+import json
+import sys
+
+print(json.load(open(sys.argv[1], encoding="utf-8"))["jang"].get("release_pin", ""))
+PYEOF
+)"
+if [ -n "$PROVENANCE_JANG_PIN" ]; then
+  echo "  ok   bundle declares jang release pin $PROVENANCE_JANG_PIN — verifying against the pin"
+  EXPECTED_JANG_COMMIT="$PROVENANCE_JANG_PIN"
+fi
 PROVENANCE_JANG_COMMIT="$(
   run_bundled_python - "$PROVENANCE_FILE" <<'PYEOF'
 import json

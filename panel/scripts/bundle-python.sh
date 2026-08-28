@@ -217,6 +217,7 @@ PY
   BUNDLE_VMLX_VERSION="$("$PYTHON" -c 'import vmlx_engine; print(vmlx_engine.__version__)')" \
   BUNDLE_JANG_COMMIT="${JANG_SOURCE_COMMIT:-UNVERSIONED}" \
   BUNDLE_JANG_VERSION="$installed_jang_version" \
+  BUNDLE_JANG_RELEASE_PIN="${VMLX_JANG_TOOLS_RELEASE_PIN:-}" \
   BUNDLE_MLX_WHEEL_PLATFORM="$MLX_WHEEL_PLATFORM" \
   "$PYTHON" - <<'PY'
 import json
@@ -235,6 +236,12 @@ payload = {
     },
     "mlx_wheel_platform": os.environ["BUNDLE_MLX_WHEEL_PLATFORM"],
 }
+# A pinned release deliberately bundles one exact jang commit even though
+# origin/main has moved on. Record the pin so the verifier can check the
+# bundle against the INTENDED commit instead of a moving upstream ref.
+release_pin = os.environ.get("BUNDLE_JANG_RELEASE_PIN", "")
+if release_pin:
+    payload["jang"]["release_pin"] = release_pin
 Path(os.environ["BUNDLE_PROVENANCE_PATH"]).write_text(
     json.dumps(payload, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",

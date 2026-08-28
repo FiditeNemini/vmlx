@@ -2248,6 +2248,35 @@ class DSV4BatchGenerator:
                 out[r.uid] = (r.cache, r.prompt_tokens + r.out_tokens)
         return out
 
+    def request_progress(self, uid: int) -> Optional[int]:
+        """Return monotonic native-cache progress for one live DSV4 request.
+
+        DSV4 prefill is chunked through one composite cache. Every completed
+        chunk advances the logical ``offset`` shared by its SWA/CSA/HCA state,
+        so that offset is the authoritative progress signal while no output
+        tokens exist yet. ``fed_tokens`` continues the same unit through
+        decode. Reading integers here is intentionally side-effect free: the
+        server liveness probe may call this from outside the model-owner thread.
+        """
+        for request in self._requests:
+            if request.uid != uid:
+                continue
+            progress = max(
+                0,
+                int(getattr(request, "fed_tokens", 0) or 0),
+                len(getattr(request, "out_tokens", []) or []),
+            )
+            for layer_cache in getattr(request, "cache", None) or ():
+                try:
+                    progress = max(
+                        progress,
+                        int(getattr(layer_cache, "offset", 0) or 0),
+                    )
+                except (TypeError, ValueError):
+                    continue
+            return progress
+        return None
+
     def next(self) -> Tuple[List[_Response], List[_Response]]:
         """Run one step. Returns (prompt_responses, generation_responses).
 

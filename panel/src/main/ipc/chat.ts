@@ -1173,10 +1173,29 @@ export function registerChatHandlers(
           } catch (_) {}
         }
       }
-      const fetchTimeout = setTimeout(() => {
-        timedOut = true;
-        abortController.abort();
-      }, timeoutSeconds * 1000);
+      // Session timeout is an INACTIVITY guard for the app. The local engine
+      // sends SSE keep-alive comments while a long prefill is advancing, so
+      // every received byte re-arms this timer below. A single wall-clock
+      // timer discarded valid near-context work at exactly 900s even though
+      // the engine was still sending keep-alives and processing prompt chunks.
+      let fetchTimeout: ReturnType<typeof setTimeout> | undefined;
+      const armFetchInactivityTimeout = () => {
+        if (fetchTimeout) clearTimeout(fetchTimeout);
+        if (abortController.signal.aborted) return;
+        // The concurrency guard uses startedAt to decide whether an existing
+        // lock is abandoned. Keep that liveness clock on the same definition
+        // as the fetch watchdog, or a second send can abort a healthy request
+        // merely because its total wall time exceeded the stale-lock cap.
+        const active = activeRequests.get(chatId);
+        if (active && active.controller === abortController) {
+          active.startedAt = Date.now();
+        }
+        fetchTimeout = setTimeout(() => {
+          timedOut = true;
+          abortController.abort();
+        }, timeoutSeconds * 1000);
+      };
+      armFetchInactivityTimeout();
       activeRequests.set(chatId, {
         controller: abortController,
         startedAt: Date.now(),
@@ -2240,9 +2259,11 @@ export function registerChatHandlers(
               obj.video_fps = sessionVideoFps;
             if (!isRemote && sessionVideoMaxFrames !== undefined)
               obj.video_max_frames = sessionVideoMaxFrames;
-            // Send timeout to server so streaming timeout matches client-side timeout
-            if (!isRemote && timeoutSeconds !== 300)
-              obj.timeout = timeoutSeconds;
+            // Do not serialize the session timeout as the API's explicit
+            // per-request `timeout`. The engine deliberately defines an
+            // explicit request timeout as a hard wall-clock budget, while its
+            // server default is progress-aware. The app owns the saved value
+            // as the inactivity watchdog armed above.
             return finalizeRequestBody(obj);
           } else {
             const obj: Record<string, any> = {
@@ -2313,9 +2334,9 @@ export function registerChatHandlers(
               obj.video_fps = sessionVideoFps;
             if (!isRemote && sessionVideoMaxFrames !== undefined)
               obj.video_max_frames = sessionVideoMaxFrames;
-            // Send timeout to server so streaming timeout matches client-side timeout
-            if (!isRemote && timeoutSeconds !== 300)
-              obj.timeout = timeoutSeconds;
+            // Keep the local engine on its progress-aware server default. An
+            // API caller that explicitly sends `timeout` still gets the
+            // documented hard wall-clock behavior.
             return finalizeRequestBody(obj);
           }
         };
@@ -3487,6 +3508,10 @@ export function registerChatHandlers(
             if (abortController.signal.aborted) break;
             const { value, done } = await readNext();
             if (done) break;
+            // Includes SSE comments (`: keep-alive`) emitted during prefill.
+            // Receipt of bytes proves that the request path is alive even
+            // before the model can produce its first token.
+            if (value && value.byteLength > 0) armFetchInactivityTimeout();
             buf += dec.decode(value, { stream: true });
             const lines = buf.split("\n");
             buf = lines.pop() || "";
@@ -5089,7 +5114,7 @@ export function registerChatHandlers(
       }
 
       } finally {
-        clearTimeout(fetchTimeout);
+        if (fetchTimeout) clearTimeout(fetchTimeout);
         // Only delete our own entry — after an abort or stale-lock recovery,
         // a newer request may have already registered a replacement.
         const current = activeRequests.get(chatId);

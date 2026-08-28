@@ -14,7 +14,8 @@ from vmlx_engine import server
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    # Python 3.13 no longer creates a main-thread event loop implicitly.
+    return asyncio.run(coro)
 
 
 def _scheduler(num_running=0, num_waiting=0):

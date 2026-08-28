@@ -48,6 +48,20 @@ describe('chat SSE error propagation', () => {
   })
 })
 
+describe('chat timeout liveness', () => {
+  const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
+
+  it('treats the saved session timeout as inactivity rather than total wall time', () => {
+    expect(source).toContain('const armFetchInactivityTimeout = () =>')
+    expect(source).toContain('if (value && value.byteLength > 0) armFetchInactivityTimeout()')
+    expect(source).toContain('active.startedAt = Date.now()')
+  })
+
+  it('does not turn the saved timeout into an explicit hard engine deadline', () => {
+    expect(source).not.toMatch(/obj\.timeout\s*=\s*timeoutSeconds/)
+  })
+})
+
 describe('detail keeps the machine code (ledger row 152)', () => {
   it('appends [code] when the message lacks it', () => {
     expect(

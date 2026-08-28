@@ -34,8 +34,9 @@ class _FakeScheduler:
     unit test instead of an integration one.
     """
 
-    def __init__(self, requests):
+    def __init__(self, requests, batch_generator=None):
         self.requests = requests
+        self.batch_generator = batch_generator
 
     request_progress = Scheduler.request_progress
 
@@ -70,6 +71,60 @@ def test_prefill_reports_zero_not_the_prompt_length():
     # registered request that is prefilling healthily reports 0, not None.
     req = _request(prompt_len=4096)
     assert _FakeScheduler({"r1": req}).request_progress("r1") == 0
+
+
+def test_dsv4_native_prefill_offsets_advance_text_progress():
+    """DSV4's bounded native prefill must not consume blind grace windows."""
+
+    class _NativeGenerator:
+        def __init__(self):
+            self.progress = 0
+
+        def request_progress(self, uid):
+            assert uid == 7
+            return self.progress
+
+    req = _request(prompt_len=744_013)
+    req.batch_uid = 7
+    generator = _NativeGenerator()
+    sched = _FakeScheduler({"r1": req}, generator)
+
+    readings = []
+    for chunk_end in (2048, 4096, 65_536, 743_936, 744_013):
+        generator.progress = chunk_end
+        readings.append(sched.request_progress("r1"))
+    assert readings == [2048, 4096, 65_536, 743_936, 744_013]
+
+
+def test_dsv4_generator_reads_composite_cache_offsets_directly():
+    from vmlx_engine.utils.dsv4_batch_generator import DSV4BatchGenerator
+
+    generator = DSV4BatchGenerator.__new__(DSV4BatchGenerator)
+    generator._requests = [
+        SimpleNamespace(
+            uid=7,
+            cache=[SimpleNamespace(offset=2048), SimpleNamespace(offset=4096)],
+            fed_tokens=0,
+            out_tokens=[],
+        )
+    ]
+    assert generator.request_progress(7) == 4096
+
+    generator._requests[0].cache[0].offset = 8192
+    assert generator.request_progress(7) == 8192
+    assert generator.request_progress(999) is None
+
+
+def test_dsv4_progress_falls_back_to_lifetime_output_on_probe_error():
+    class _BrokenGenerator:
+        def request_progress(self, uid):
+            raise RuntimeError("telemetry race")
+
+    req = _request()
+    req.batch_uid = 9
+    for tok in range(11):
+        req.append_output_token(tok)
+    assert _FakeScheduler({"r1": req}, _BrokenGenerator()).request_progress("r1") == 11
 
 
 def test_survives_a_recovery_restart_without_going_backwards():

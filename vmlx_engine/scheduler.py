@@ -6790,7 +6790,7 @@ class Scheduler:
         )
 
     def request_progress(self, request_id: str) -> Optional[int]:
-        """Monotonic count of tokens generated so far, or None if unknown.
+        """Monotonic count of processed tokens, or None if unknown.
 
         This used to return ``num_computed_tokens + total_output_tokens`` and
         describe itself as "prefilled tokens plus generated tokens". It was
@@ -6815,9 +6815,11 @@ class Scheduler:
         branch — so it could be killed as wedged while generating normally.
         A recovery restart is precisely when that must not happen.
 
-        ``total_output_tokens`` alone is accurate, is never reset, and keeps
-        the prefill-reports-0 contract the streaming grace logic is written
-        against.
+        ``total_output_tokens`` alone is accurate and never resets for generic
+        text generators. DSV4 is the exception: its native generator exposes
+        the logical composite-cache offset after every bounded prefill chunk,
+        so the timeout can observe real SWA/CSA/HCA progress instead of treating
+        a near-context prefill as an unreadable zero for several blind windows.
 
         ``MLLMScheduler.request_progress`` deliberately returns something
         different — ``num_prompt_tokens + total_output_tokens`` — because
@@ -6835,7 +6837,20 @@ class Scheduler:
         request = self.requests.get(request_id)
         if request is None:
             return None
-        return int(getattr(request, "total_output_tokens", 0) or 0)
+        lifetime_output = int(getattr(request, "total_output_tokens", 0) or 0)
+        generator = getattr(self, "batch_generator", None)
+        batch_uid = getattr(request, "batch_uid", None)
+        generator_probe = getattr(generator, "request_progress", None)
+        if batch_uid is not None and callable(generator_probe):
+            try:
+                native_progress = generator_probe(batch_uid)
+                if native_progress is not None:
+                    return max(lifetime_output, int(native_progress))
+            except Exception:
+                # Liveness telemetry must never break generation. The stable
+                # lifetime output count remains a safe fallback.
+                pass
+        return lifetime_output
 
     def abort_request(self, request_id: str) -> bool:
         """

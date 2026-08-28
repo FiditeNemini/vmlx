@@ -7,10 +7,13 @@ import zh from '../src/renderer/src/i18n/locales/zh.json'
 
 /**
  * Every user sees this notice at the top of Session Settings, in their own
- * language. It exists for people who do not know what a KV cache is: the
- * in-memory cache trades RAM for a small speed gain, and turning it off costs
- * about 2%. A missing translation silently falls back to English, and this is
- * exactly the audience that would be left behind.
+ * language. The product policy moved from "RAM cache is a 2% trade-off you
+ * may toggle" to the SSD-only tier: In-Memory Paged Cache and Media
+ * Preprocess RAM Cache are locked OFF for every model, prompts persist on
+ * SSD, and payloads restore transiently. The notice must describe THAT
+ * policy — the old 2% claim would misdescribe the shipping behavior. A
+ * missing translation silently falls back to English, and this is exactly
+ * the audience that would be left behind.
  */
 const LOCALES: Record<string, any> = { en, es, ja, ko, zh }
 
@@ -28,8 +31,10 @@ describe('RAM cache trade-off notice', () => {
     expect(/SSD/.test(s)).toBe(true)
   })
 
-  it.each(Object.keys(LOCALES))('%s quantifies the cost rather than hand-waving', (name) => {
-    expect(LOCALES[name].sessions.config.ramCacheTradeoffNotice).toMatch(/2\s*%/)
+  it.each(Object.keys(LOCALES))('%s no longer carries the superseded 2%% trade-off claim', (name) => {
+    // The SSD-only tier locked paged RAM off for every model; a "costs about
+    // 2%" toggle description would misdescribe the shipping product.
+    expect(LOCALES[name].sessions.config.ramCacheTradeoffNotice).not.toMatch(/2\s*%/)
   })
 
   it('never claims the app changed anything on the user behalf', () => {

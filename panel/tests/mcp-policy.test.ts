@@ -179,7 +179,11 @@ describe('MCP policy shared helpers', () => {
       'const remainingExactBuiltinTools = exactFinalBuiltinToolNames.filter(',
     )
     expect(chatSource).toContain('obj.tool_choice = requestToolChoice;')
-    expect(chatSource).toContain('obj.tool_choice = "none";')
+    // An explicit no-tool turn now omits the schemas entirely (API-equivalent
+    // to tool_choice="none", cheaper, and keeps the rendered prefix stable
+    // across Responses history replay).
+    expect(chatSource).toContain('if (attachBuiltinToolsForCurrentTurn) {')
+    expect(chatSource).toContain('API-equivalent to tool_choice="none"')
     expect(builtinBranch).toBeGreaterThan(-1)
     expect(remoteMcpBranch).toBeGreaterThan(builtinBranch)
     expect(mcpExecuteBranch).toBeGreaterThan(remoteMcpBranch)

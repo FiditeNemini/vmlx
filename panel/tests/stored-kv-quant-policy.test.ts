@@ -44,37 +44,36 @@ describe("mixed-SWA detection", () => {
 })
 
 describe("stored KV quantization policy", () => {
-  it("requires exact storage for mixed-SWA and allows lossy elsewhere", () => {
+  // The policy went global after the mixed-SWA proof (Laguna-S, temp 0:
+  // stored q8 cold bb040715 -> hit 633c133d DIVERGED). Stored prefix state
+  // is exact for EVERY family now — one native value, one launch path, no
+  // family-specific exception — and disk bytes confirmed full-precision
+  // records with zero scale/bias tensors across families.
+  it("requires exact storage for every family", () => {
     expect(storedKvQuantMustBeExact({ cacheSubtype: "mixed_swa_kv" })).toBe(true)
-    expect(storedKvQuantMustBeExact({ cacheSubtype: "kv" })).toBe(false)
+    expect(storedKvQuantMustBeExact({ cacheSubtype: "kv" })).toBe(true)
   })
 
-  it("offers no lossy option to a mixed-SWA bundle", () => {
-    // q8 changed the answer on a cache HIT (Laguna-S, temp 0:
-    // cold bb040715 -> hit 633c133d), so it must not be selectable.
-    const opts = allowedStoredKvQuantOptions({ cacheSubtype: "mixed_swa_kv" })
-    expect(opts).toEqual(["auto", "none"])
-    expect(opts).not.toContain("q8")
-    expect(opts).not.toContain("q4")
-  })
-
-  it("leaves other families their full choice", () => {
-    expect(allowedStoredKvQuantOptions({ cacheSubtype: "kv" })).toEqual([
-      "auto",
-      "none",
-      "q8",
-      "q4",
-    ])
+  it("offers no lossy option to any bundle", () => {
+    for (const cacheSubtype of ["mixed_swa_kv", "kv", "hybrid_ssm_v1"]) {
+      const opts = allowedStoredKvQuantOptions({ cacheSubtype })
+      expect(opts).toEqual(["auto"])
+      expect(opts).not.toContain("q8")
+      expect(opts).not.toContain("q4")
+    }
   })
 })
 
 describe("the form delegates instead of re-inlining", () => {
   const form = readFileSync(resolve(__dirname, "..", FORM), "utf8")
 
-  it("imports and calls the shared policy", () => {
+  it("imports the shared policy module for mixed-SWA detection", () => {
+    // Once the stored-codec policy went globally exact there was no
+    // per-family branch left to call — the form only needs the mixed-SWA
+    // detector. If storedKvQuantMustBeExact/allowedStoredKvQuantOptions
+    // reappear in the form, that is fine; a re-inlined boolean is not.
     expect(form).toContain("shared/storedKvQuantPolicy")
     expect(form).toContain("isMixedSwaBundle(")
-    expect(form).toContain("storedKvQuantMustBeExact(")
   })
 
   it("no longer hand-copies the three-condition mixed-SWA chain", () => {
@@ -85,16 +84,12 @@ describe("the form delegates instead of re-inlining", () => {
     expect(inlined.test(form)).toBe(false)
   })
 
-  it("gates the lossy stored-codec options via the policy's option list", () => {
-    // Driven by allowedStoredKvQuantOptions rather than a re-inlined boolean,
-    // so the module cannot go stale against the form it governs.
-    expect(form).toContain("allowedStoredKvQuantOptions(")
-    expect(form).toContain("storedKvQuantOptions.includes('q8')")
-    expect(form).toContain("storedKvQuantOptions.includes('q4')")
-  })
-
-  it("warns the user why the choice is unavailable", () => {
-    expect(form).toContain("sessions.config.storedKvExactRequired")
+  it("never re-offers a lossy stored-prefix codec", () => {
+    // The stored prefix record is exact for every family. A q8/q4 stored
+    // codec selector coming back to the form would reintroduce the
+    // answer-changing bug the policy exists to prevent.
+    expect(/storedKvQuant[a-zA-Z]*\s*[:=][^\n]*['"]q8['"]/.test(form)).toBe(false)
+    expect(/storedKvQuant[a-zA-Z]*\s*[:=][^\n]*['"]q4['"]/.test(form)).toBe(false)
   })
 })
 

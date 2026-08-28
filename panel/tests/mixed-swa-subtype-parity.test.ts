@@ -53,12 +53,16 @@ describe('mixed-SWA subtype membership lives in one policy', () => {
     expect(inlined.test(form)).toBe(false)
   })
 
-  it('subtypeRequiresPagedCache still lists both subtypes itself', () => {
-    const start = form.indexOf('const subtypeRequiresPagedCache =')
-    expect(start, 'subtypeRequiresPagedCache not found').toBeGreaterThan(-1)
-    const block = form.slice(start, form.indexOf('\n  const ', start + 10))
-    expect(block).toContain("'step3p7_full_sliding_kv'")
-    expect(block).toContain("'mixed_swa_kv'")
+  it('the retired RAM tier can no longer be forced back on by any subtype', () => {
+    // subtypeRequiresPagedCache was retired with the RAM tier itself: no
+    // detected family may force the paged cache back on. The membership list
+    // both consumers share now lives in shared/storedKvQuantPolicy.ts.
+    expect(form.indexOf('const subtypeRequiresPagedCache =')).toBe(-1)
+    expect(form).toContain('const architectureRequiresPagedCache = false')
+    const policy = readFileSync(
+      resolve(__dirname, '..', 'src/shared/storedKvQuantPolicy.ts'), 'utf-8')
+    expect(policy).toContain("'step3p7_full_sliding_kv'")
+    expect(policy).toContain("'mixed_swa_kv'")
   })
 })
 

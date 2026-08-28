@@ -460,8 +460,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const qwenHybridTqActive = isMambaCache && (normalizedDetectedFamily || '').startsWith('qwen')
   const qwenFullTqActive = !isMambaCache && (normalizedDetectedFamily || '').startsWith('qwen')
   // step3p7_full_sliding_kv belongs here too. It is already listed as
-  // mixed-SWA in mixedSwaBlockDiskOnlySupported above and in
-  // subtypeRequiresPagedCache below, and the ENGINE classifies it as mixed-SWA
+  // mixed-SWA in mixedSwaBlockDiskOnlySupported above and in the shared
+  // storedKvQuantPolicy subtype set, and the ENGINE classifies it as mixed-SWA
   // (mllm_scheduler's detector returns true for it alongside mixed_swa_kv).
   // Omitting it here alone made the cache codec badge read a generic "AUTO"
   // with the engine-native description, for a family the rest of the app —

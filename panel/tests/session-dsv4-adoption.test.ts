@@ -210,12 +210,14 @@ describe('DSV4 existing-engine adoption policy', () => {
     expect(preserved.enableBlockDiskCache).toBe(true)
   })
 
-  it('leaves a session already stamped at the current version completely alone', () => {
-    // The version stamp is what makes every migration run exactly once. A
-    // session already at the current version must not be touched by ANY pass,
-    // including the v17 SSD-first post-pass -- otherwise a user who turned the
-    // RAM cache back on after upgrading would silently lose that choice on the
-    // next launch.
+  it('a stamped session keeps everything except the locked-off RAM tier', () => {
+    // The version stamp makes every MIGRATION run exactly once, but the
+    // In-Memory Paged Cache is no longer a migration default — it is a
+    // hard-off policy (normalizeCacheStackMutualExclusion) persisted at every
+    // choke point so SQLite, the disabled checkbox, and the actual
+    // --no-paged-cache argv can never disagree. A stale usePagedCache:true is
+    // therefore normalized even on a stamped session; every other field stays
+    // untouched.
     const modelPath = modelBundle('deepseek_v4')
     const original = {
       ...untouchedV11Dsv4CacheConfig(),
@@ -227,7 +229,7 @@ describe('DSV4 existing-engine adoption policy', () => {
     new SessionManager()
 
     const preserved = JSON.parse(state.sessions[0].config)
-    expect(preserved.usePagedCache).toBe(true)
+    expect(preserved.usePagedCache).toBe(false)
     expect(preserved.enableBlockDiskCache).toBe(original.enableBlockDiskCache)
     expect(preserved.cacheStackStartupDefaultsVersion).toBe(CURRENT_CACHE_DEFAULTS_VERSION)
   })

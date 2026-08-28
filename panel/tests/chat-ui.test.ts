@@ -1285,7 +1285,7 @@ describe('Media attachment product path', () => {
     expect(source).toContain('[CHAT_DIAG] request_shape=')
     expect(source).toContain('[CHAT_DIAG] request_error=')
     expect(source).toContain('summarizeAttachmentsForLog(attachments)')
-    expect(source).toContain('summarizeRequestForLog(requestBody, useResponsesApi)')
+    expect(source).toContain('summarizeRequestForLog(bodyJson, useResponsesApi)')
     expect(source).toContain('url: "<redacted>"')
     expect(source).toContain('data_url_chars')
     expect(source).toContain('sessionManager.pushLog(sessionId, data)')

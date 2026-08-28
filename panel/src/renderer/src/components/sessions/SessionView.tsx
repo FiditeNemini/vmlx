@@ -128,13 +128,16 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
     }
     loadSession()
 
-    // Listen for session health updates
+    // Listen for session health updates. A health event only promotes the
+    // local status to running when the monitor says the model is actually
+    // running — an unconditional promotion here used to flip a LOADING
+    // session to running on the next health tick, unmounting the progress
+    // bar and letting messages be sent (and time out) mid-load.
     const handleHealth = (data: any) => {
       if (data.sessionId === sessionId) {
         setSession(prev => prev ? {
           ...prev,
-          status: 'running',
-          standbyDepth: null,
+          ...(data.running === true ? { status: 'running' as const, standbyDepth: null } : {}),
           ...(data.modelName ? { modelName: data.modelName } : {}),
           ...(data.port ? { port: data.port } : {}),
           ...(data.latencyMs != null ? { latencyMs: data.latencyMs } : {})
@@ -448,8 +451,12 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
         </div>
       </div>
 
-      {/* Loading Progress Bar */}
-      {session.status === 'loading' && <SessionViewLoadBar sessionId={session.id} />}
+      {/* Loading Progress Bar — also shown while running until the weights
+          are actually resident in RAM (settle phase; the bar hides itself
+          once the main process sends the terminal 100%). */}
+      {(session.status === 'loading' || session.status === 'running') && (
+        <SessionViewLoadBar sessionId={session.id} sessionStatus={session.status} />
+      )}
 
       {/* Bundle-specific missing chat-template notice */}
       {missingChatTemplate && !missingTemplateNoticeDismissed && (
@@ -517,7 +524,7 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
             <ChatInterface
               chatId={currentChatId}
               onNewChat={handleNewChat}
-              sessionEndpoint={(session.status === 'running' || session.status === 'standby') ? { host: session.host, port: session.port } : undefined}
+              sessionEndpoint={(session.status === 'running' || session.status === 'standby' || session.status === 'loading') ? { host: session.host, port: session.port } : undefined}
               sessionId={session.id}
               sessionStatus={session.status}
               overridesVersion={overridesVersion}
@@ -629,17 +636,21 @@ export function SessionView({ sessionId, onBack }: SessionViewProps) {
 /** Extracted component so useSessionsContext() is called from a proper hook scope */
 
 
-function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
+function SessionViewLoadBar({ sessionId, sessionStatus }: { sessionId: string; sessionStatus?: string }) {
   const { t } = useTranslation()
   const { loadProgress } = useSessionsContext()
   const progress = loadProgress.get(sessionId)
   const residentLoad = formatResidentLoad(progress)
+  // While running, the bar exists only for the settle phase — weights still
+  // copying into RAM. Once the terminal 100% arrives (or there was never a
+  // settle entry) the header stays clean.
+  if (sessionStatus === 'running' && (!progress || progress.progress >= 100)) return null
   return (
     <div className="px-4 py-1.5 border-b border-border bg-card/30 flex-shrink-0">
       <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
         <div
-          className="h-full bg-warning rounded-full transition-all duration-500 ease-out"
-          style={{ width: `${progress?.progress ?? 2}%` }}
+          className={`h-full bg-warning rounded-full transition-all duration-500 ease-out ${progress?.indeterminate !== false ? 'animate-pulse' : ''}`}
+          style={{ width: progress?.indeterminate === false ? `${progress.progress}%` : '100%' }}
         />
       </div>
       <p className="text-[10px] text-muted-foreground mt-1">
@@ -647,7 +658,7 @@ function SessionViewLoadBar({ sessionId }: { sessionId: string }) {
           ? (progress.labelKey
               ? t(progress.labelKey, { defaultValue: progress.label, ...(progress.labelParams || {}) })
               : progress.label)
-          : t('sessions.view.loadProgressFallback')} {progress ? `(${progress.progress}%)` : ''}
+          : t('sessions.view.loadProgressFallback')} {progress && progress.indeterminate === false ? `(${progress.progress}%)` : ''}
       </p>
       {formatModelBytes(progress?.modelBytes) && (
         <p className="text-[10px] text-muted-foreground/80 mt-0.5">

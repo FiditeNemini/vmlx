@@ -23,6 +23,7 @@ import {
   WORKING_DIR_INDEPENDENT_TOOLS,
 } from "../tools/executor";
 import { detectModelConfigFromDir } from "../model-config-registry";
+import { localEngineReadyFromHealthBody } from "../engineReadiness";
 import { getAuthHeaders } from "./utils";
 import {
   appendOutputTruncationWarning,
@@ -755,7 +756,14 @@ async function resolveServerEndpoint(
     const session = sessionManager.getSessionByModelPath(
       modelPath.replace(/\/+$/, ""),
     );
-    if (session && session.status === "running") {
+    // loading/standby resolve too: a message sent mid-load queues against
+    // this session (exactly once, Stop cancels) and a sleeping one wakes it.
+    if (
+      session &&
+      (session.status === "running" ||
+        session.status === "loading" ||
+        session.status === "standby")
+    ) {
       return { host: session.host, port: session.port, session };
     }
   }
@@ -1209,7 +1217,10 @@ export function registerChatHandlers(
           abortController.abort();
         }, fetchInactivitySeconds * 1000);
       };
-      armFetchInactivityTimeout();
+      // Deliberately NOT armed here: the watchdog is an INFERENCE inactivity
+      // guard. Arming it at entry made load/wake queue waiting consume the
+      // generation timeout — exactly the premature timeout the user hit. It
+      // is armed immediately before the inference fetch below.
       activeRequests.set(chatId, {
         controller: abortController,
         startedAt: Date.now(),
@@ -1255,6 +1266,16 @@ export function registerChatHandlers(
       // Detect remote session and compute base URL + auth headers
       const resolvedSession = resolved.session;
 
+      // Register the endpoint BEFORE the wake/queue waits below: Stop cancels
+      // chats via abortByEndpoint(), which can only match entries whose
+      // endpoint is populated. Without this, a queued message survived Stop.
+      {
+        const queuedEntry = activeRequests.get(chatId);
+        if (queuedEntry) {
+          queuedEntry.endpoint = { host: resolved.host, port: resolved.port };
+        }
+      }
+
       // A sleeping local engine answers /health immediately, so the generic
       // health check below previously declared it ready and let Python perform
       // a hidden JIT wake inside the inference request.  Electron remained
@@ -1268,6 +1289,41 @@ export function registerChatHandlers(
           const currentStatus = db.getSession(resolvedSession.id)?.status;
           if (currentStatus !== "loading" && currentStatus !== "running") {
             throw new Error(wake.error || "Failed to wake sleeping model");
+          }
+        }
+      }
+
+      // A message sent while the model is LOADING (cold start, Save & Restart,
+      // or the wake above still finishing) queues exactly once until the
+      // lifecycle settles. The blind 30s health poll below used to fail these
+      // messages while a legitimate multi-minute load was in progress; the
+      // user watches live load progress instead, and Stop/cancel aborts the
+      // queued message immediately.
+      if (!isRemote && resolvedSession?.id) {
+        const liveStatus = db.getSession(resolvedSession.id)?.status;
+        if (liveStatus === "loading") {
+          const configuredTimeoutSeconds = (() => {
+            try {
+              return Number(JSON.parse(resolvedSession.config || "{}").timeout) || 300;
+            } catch {
+              return 300;
+            }
+          })();
+          const settleTimeoutMs =
+            Math.max(configuredTimeoutSeconds * 1000, 120_000) + 60_000;
+          console.log(
+            `[CHAT] Session ${resolvedSession.id.slice(0, 8)} is loading — queueing message until ready (up to ${Math.round(settleTimeoutMs / 1000)}s)`,
+          );
+          const settled = await sessionManager.waitForSessionLifecycleSettled(
+            resolvedSession.id,
+            { timeoutMs: settleTimeoutMs, signal: abortController.signal },
+          );
+          if (settled !== "running") {
+            throw new Error(
+              settled === "loading"
+                ? "Model is still loading — try again once the status indicator turns green"
+                : `Model did not become ready (status: ${settled})`,
+            );
           }
         }
       }
@@ -1330,11 +1386,31 @@ export function registerChatHandlers(
               signal: AbortSignal.timeout(isRemote ? 3000 : 5000),
             });
             if (healthRes.ok) {
-              healthOk = true;
+              // Local /health answers 200 in EVERY state (no_model, standby,
+              // waking). HTTP 200 alone is not inference readiness — the
+              // body must say healthy + model_loaded + contract-ready.
+              let bodyReady = isRemote;
+              if (!isRemote) {
+                try {
+                  bodyReady = localEngineReadyFromHealthBody(await healthRes.json());
+                } catch {
+                  bodyReady = false;
+                }
+              }
+              if (bodyReady) {
+                healthOk = true;
+                console.log(
+                  `[CHAT] Health check passed on attempt ${attempt + 1}`,
+                );
+                break;
+              }
               console.log(
-                `[CHAT] Health check passed on attempt ${attempt + 1}`,
+                `[CHAT] Server up but not inference-ready (attempt ${attempt + 1}/${maxHealthRetries})`,
               );
-              break;
+              if (attempt < maxHealthRetries - 1) {
+                await new Promise((r) => setTimeout(r, healthRetryDelay));
+              }
+              continue;
             }
             if (attempt < maxHealthRetries - 1) {
               console.log(
@@ -2393,6 +2469,9 @@ export function registerChatHandlers(
           useResponsesApi && !isRemote
             ? { "X-vMLX-Stream-Usage": "incremental" }
             : {};
+        // Inference begins HERE — arm the inactivity watchdog now, not at
+        // entry, so queued load/wake waiting never counts against it.
+        armFetchInactivityTimeout();
         const response = useNodeStreamingFetch
           ? await streamingFetch(apiUrl, {
               method: "POST",

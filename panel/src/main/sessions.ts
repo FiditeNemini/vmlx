@@ -64,6 +64,12 @@ import {
   modelLaunchReserveWarning,
 } from './modelLaunchMemory'
 import {
+  LifecycleSnapshot,
+  lifecycleDisplay,
+  lifecyclePhaseLabel,
+  parseLifecycleSnapshot,
+} from './lifecycleProgress'
+import {
   BACKEND_STDERR_DISCONNECT_NORMALIZED_LINE,
   normalizeBackendStderrChunk,
 } from './backend-stderr'
@@ -1560,6 +1566,23 @@ export class SessionManager extends EventEmitter {
     lastStartupProgressAt?: number;
   }>()
   private loadResidentTimers = new Map<string, ReturnType<typeof setInterval>>()
+  // Engine-owned lifecycle progress (LOADPROGRESS stdout lines / /health
+  // load_progress). Generation guards discard stale events after a
+  // stop/restart/PID replacement; contractSessions marks engines that speak
+  // the contract so the legacy log-pattern heuristics stay off for them.
+  private lifecycleGenerations = new Map<string, number>()
+  private contractSessions = new Set<string>()
+  // Last emitted progress event per session — the hydration source for a
+  // renderer that navigates into a page mid-load (events sent before the
+  // page opened are gone; this snapshot is not).
+  private lastLoadProgressEvents = new Map<string, Record<string, unknown>>()
+  // 1s /health pollers driving wake progress for engines with no piped
+  // stdout (adopted processes).
+  private wakeHealthPollers = new Map<string, ReturnType<typeof setInterval>>()
+  // Externally-triggered JIT wakes (API request or chat message) detected via
+  // /health `wake_in_progress`. Distinct from wakePending, which marks wakes
+  // this process initiated through /admin/wake.
+  private externalWakes = new Set<string>()
   // admin/wake is synchronous, while the global health monitor continues to
   // poll.  During a legitimate deep reload Python still reports
   // `standby_deep`; keep explicit ownership so that transient state cannot be
@@ -1571,6 +1594,14 @@ export class SessionManager extends EventEmitter {
     if (timer) {
       clearInterval(timer)
       this.loadResidentTimers.delete(sessionId)
+    }
+  }
+
+  private stopWakeHealthPoller(sessionId: string): void {
+    const poller = this.wakeHealthPollers.get(sessionId)
+    if (poller) {
+      clearInterval(poller)
+      this.wakeHealthPollers.delete(sessionId)
     }
   }
 
@@ -1615,6 +1646,13 @@ export class SessionManager extends EventEmitter {
       : modelBytes
     const streamsWeights = storedMeta?.lazyResident === true
 
+    // RSS is a DIAGNOSTIC readout, never the percentage oracle: the display
+    // percentage comes exclusively from the engine's lifecycle-progress
+    // contract (phases + shard units + ready). This monitor only refreshes
+    // the resident-RAM line rendered under the bar, by re-emitting the last
+    // authoritative progress event with fresh residency numbers.
+    // mmap/SSD-streaming families never make every bundle byte resident,
+    // which is exactly why residency cannot drive the bar.
     const tick = () => {
       const session = db.getSession(sessionId)
       if (!session || session.status !== 'loading') {
@@ -1625,9 +1663,6 @@ export class SessionManager extends EventEmitter {
       if (residentBytes <= 0) return
 
       const residentPercent = Math.min(100, Math.max(0, (residentBytes / expectedResidentBytes) * 100))
-      const residentProgress = Math.min(90, Math.max(5, Math.round(25 + residentPercent * 0.60)))
-      const current = this.loadProgressState.get(sessionId) ?? 0
-      const progress = Math.max(current, residentProgress)
       const previousMeta = this.loadProgressMeta.get(sessionId) || {}
       const previousHighWater = previousMeta.residentHighWaterBytes || 0
       const residentAdvanced = residentBytes >= previousHighWater + 1048576
@@ -1635,6 +1670,7 @@ export class SessionManager extends EventEmitter {
         ...previousMeta,
         modelBytes,
         expectedResidentBytes,
+        lazyResident: streamsWeights,
         residentMb: Math.round((residentBytes / 1048576) * 10) / 10,
         residentPercent: Math.round(residentPercent * 10) / 10,
         residentHighWaterBytes: Math.max(previousHighWater, residentBytes),
@@ -1643,31 +1679,229 @@ export class SessionManager extends EventEmitter {
           : previousMeta.lastStartupProgressAt,
       }
       this.loadProgressMeta.set(sessionId, meta)
-      this.loadProgressState.set(sessionId, progress)
-      this.emit('session:loadProgress', {
-        sessionId,
-        label: streamsWeights
-          ? `Resident RAM ${formatGb(residentBytes)} GB (weights stream from SSD; bundle ${formatGb(modelBytes)} GB)`
-          : `Loading weights into RAM ${formatGb(residentBytes)} / ~${formatGb(expectedResidentBytes)} GB`,
-        // Numbers stay OUT of the catalog string — the renderer interpolates
-        // them, so the phrasing around them can be translated per locale.
-        labelKey: streamsWeights
-          ? 'main.loadProgress.residentRamStreaming'
-          : 'main.loadProgress.loadingWeightsIntoRam',
-        labelParams: streamsWeights
-          ? { resident: formatGb(residentBytes), bundle: formatGb(modelBytes) }
-          : { resident: formatGb(residentBytes), expected: formatGb(expectedResidentBytes) },
-        progress,
-        ...meta,
-      })
+      const last = this.lastLoadProgressEvents.get(sessionId)
+      if (last) {
+        this.emitLoadProgress({ ...last, ...meta, sessionId })
+      }
     }
 
     tick()
     this.loadResidentTimers.set(sessionId, setInterval(tick, 1000))
   }
 
+  /** Store-and-emit so a page opened mid-load can hydrate the current state. */
+  private emitLoadProgress(payload: { sessionId: string } & Record<string, unknown>): void {
+    this.lastLoadProgressEvents.set(payload.sessionId, payload)
+    this.emit('session:loadProgress', payload)
+  }
+
+  /** Hydration source for renderers that navigate into a page mid-load. */
+  getLoadProgressSnapshot(): Record<string, Record<string, unknown>> {
+    return Object.fromEntries(this.lastLoadProgressEvents)
+  }
+
+  /**
+   * Terminal 100% for paths where the engine's own ready event cannot reach
+   * us (adopted engines with no piped stdout, remote sessions). Spawned
+   * engines normally deliver ready=true themselves through the contract.
+   */
+  private emitTerminalLoadProgress(sessionId: string): void {
+    this.stopLoadResidentMonitor(sessionId)
+    this.stopWakeHealthPoller(sessionId)
+    const meta = this.loadProgressMeta.get(sessionId) || {}
+    this.loadProgressState.set(sessionId, 100)
+    this.emitLoadProgress({
+      sessionId,
+      label: 'Model ready',
+      labelKey: 'main.loadProgress.modelReady',
+      progress: 100,
+      indeterminate: false,
+      ...meta,
+    })
+  }
+
+  /**
+   * Apply one engine lifecycle snapshot (from a LOADPROGRESS stdout line or
+   * /health `load_progress`). Generation-guarded: events from an older
+   * load/wake attempt are discarded, so nothing stale can repaint the bar
+   * after a Stop, restart, or PID replacement.
+   */
+  private applyLifecycleSnapshot(sessionId: string, snap: LifecycleSnapshot): void {
+    const lastGeneration = this.lifecycleGenerations.get(sessionId) ?? -1
+    if (snap.generation < lastGeneration) return
+    if (snap.generation > lastGeneration) {
+      this.lifecycleGenerations.set(sessionId, snap.generation)
+      // New attempt: the monotonic display guard restarts with it.
+      this.loadProgressState.set(sessionId, 0)
+    }
+    this.contractSessions.add(sessionId)
+    if (snap.phase === 'idle' && !snap.ready) {
+      // Sleep transition or failed attempt — standby/error events own the UI.
+      return
+    }
+    // Determinate percentages exist only for measured units; phases without
+    // a denominator render indeterminate. The monotonic guard applies to the
+    // measured values so a shard count can never appear to run backwards.
+    const display = lifecycleDisplay(snap)
+    let progress = this.loadProgressState.get(sessionId) ?? 0
+    if (!display.indeterminate) {
+      progress = Math.max(progress, display.percent)
+      this.loadProgressState.set(sessionId, progress)
+    }
+    const { label, labelKey, labelParams } = lifecyclePhaseLabel(snap)
+    this.emitLoadProgress({
+      sessionId,
+      label,
+      labelKey,
+      ...(labelParams ? { labelParams } : {}),
+      progress,
+      indeterminate: display.indeterminate,
+      progressGeneration: snap.generation,
+      phase: snap.phase,
+      ...(this.loadProgressMeta.get(sessionId) || {}),
+    })
+    if (snap.ready) {
+      this.stopLoadResidentMonitor(sessionId)
+      this.stopWakeHealthPoller(sessionId)
+    }
+  }
+
+  /** Parse engine LOADPROGRESS lines out of a stdout chunk. */
+  private checkLifecycleProgress(sessionId: string, text: string): boolean {
+    if (!text.includes('LOADPROGRESS ')) return false
+    let matched = false
+    const re = /LOADPROGRESS (\{[^\n\r]*\})/g
+    let match: RegExpExecArray | null
+    while ((match = re.exec(text)) !== null) {
+      const snap = parseLifecycleSnapshot(match[1])
+      if (snap) {
+        this.applyLifecycleSnapshot(sessionId, snap)
+        matched = true
+      }
+    }
+    return matched
+  }
+
+  /**
+   * Shared presentation for EVERY wake path — the panel's /admin/wake button,
+   * an externally-detected JIT wake (API request or chat message), and the
+   * woke-externally race where ready arrives before we ever saw the wake.
+   * Resets progress, publishes the waking event with the family's expected
+   * resident bytes, and starts the RSS monitor so the bar tracks the reload
+   * into RAM. With `settling` the session is already serving (status
+   * 'running') and only the residual copy into RAM remains.
+   */
+  private beginWakeProgress(session: Session, logLine: string): void {
+    const sessionId = session.id
+    const modelFileBytes = estimateModelFileBytes(session.modelPath)
+    const wakeProfile = launchResidentProfileForModel(session.modelPath)
+    this.loadProgressState.delete(sessionId)
+    this.loadProgressMeta.delete(sessionId)
+    this.stopLoadResidentMonitor(sessionId)
+    this.stopWakeHealthPoller(sessionId)
+    const meta = modelFileBytes > 0
+      ? {
+          modelBytes: modelFileBytes,
+          expectedResidentBytes: Math.round(modelFileBytes * wakeProfile.ratio),
+          lazyResident: wakeProfile.streamsWeights,
+        }
+      : {}
+    if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
+    this.loadProgressState.set(sessionId, 0)
+    this.emitLoadProgress({
+      sessionId,
+      label: 'Waking from sleep...',
+      labelKey: 'main.loadProgress.wakingFromSleep',
+      progress: 0,
+      indeterminate: true,
+      ...meta,
+    })
+    this.pushLog(sessionId, logLine)
+    if (session.pid && modelFileBytes > 0) {
+      this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)
+    }
+    // Spawned engines deliver contract events over their piped stdout. An
+    // adopted engine has no pipe — poll its /health snapshot instead so the
+    // wake still moves the bar with engine-owned phases.
+    const hasStdout = Boolean(this.processes.get(sessionId)?.process)
+    if (!hasStdout) {
+      const host = connectHost(session.host)
+      const poller = setInterval(async () => {
+        const current = db.getSession(sessionId)
+        if (!current || current.status !== 'loading') {
+          this.stopWakeHealthPoller(sessionId)
+          return
+        }
+        try {
+          const res = await fetch(`http://${host}:${session.port}/health`, {
+            signal: AbortSignal.timeout(1500),
+          })
+          if (!res.ok) return
+          const data = await res.json()
+          if (data && typeof data.load_progress === 'object' && data.load_progress) {
+            const snap = parseLifecycleSnapshot(JSON.stringify(data.load_progress))
+            if (snap) this.applyLifecycleSnapshot(sessionId, snap)
+          }
+        } catch {
+          // Server busy reloading — keep polling.
+        }
+      }, 1000)
+      this.wakeHealthPollers.set(sessionId, poller)
+    }
+  }
+
+  /**
+   * Wait until a session leaves the 'loading' state (ready, failed, stopped,
+   * or reverted to standby). Used to queue a chat message submitted while
+   * the model is still loading — the blind fixed-retry health poll used to
+   * give up after 30 s and fail the message while a multi-minute cold load
+   * was legitimately in progress. The caller's AbortSignal wins immediately
+   * (explicit Stop/cancel must clear the queued message).
+   */
+  async waitForSessionLifecycleSettled(
+    sessionId: string,
+    opts: { timeoutMs: number; signal?: AbortSignal },
+  ): Promise<string> {
+    const started = Date.now()
+    // Bind to the process this wait began against: a PID swap mid-wait means
+    // the attempt we queued behind is gone (Stop + new Start, crash restart),
+    // and the queued message must not silently ride the replacement.
+    let boundPid: number | null = db.getSession(sessionId)?.pid ?? null
+    while (Date.now() - started < opts.timeoutMs) {
+      if (opts.signal?.aborted) throw new Error('Request canceled')
+      const session = db.getSession(sessionId)
+      if (!session) return 'stopped'
+      const pid = session.pid ?? null
+      if (boundPid == null && pid != null) boundPid = pid
+      else if (boundPid != null && pid != null && pid !== boundPid) return 'replaced'
+      if (session.status === 'running') {
+        // Engine-authoritative readiness: a contract-speaking engine must
+        // have delivered ready (terminal 100) — the DB flip alone is not the
+        // readiness barrier. Non-contract engines fall back to the health
+        // monitor's healthy-gated flip.
+        const entry = this.lastLoadProgressEvents.get(sessionId) as
+          | { progress?: number }
+          | undefined
+        const engineReady =
+          !this.contractSessions.has(sessionId) ||
+          !entry ||
+          (entry.progress ?? 0) >= 100
+        if (engineReady) return 'running'
+      } else if (session.status !== 'loading') {
+        return session.status
+      }
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+    return 'loading'
+  }
+
   /** Check a log line for loading progress and emit event if phase advanced */
   private checkLoadProgress(sessionId: string, text: string): void {
+    // The engine's own lifecycle contract is authoritative. Once a session's
+    // engine has spoken it, the legacy log-pattern heuristics below stay off
+    // — two oracles disagreeing is how bars jump backwards.
+    if (this.checkLifecycleProgress(sessionId, text)) return
+    if (this.contractSessions.has(sessionId)) return
     for (const { pattern, label, labelKey, progress } of SessionManager.LOAD_PROGRESS_PATTERNS) {
       if (pattern.test(text)) {
         const current = this.loadProgressState.get(sessionId) ?? 0
@@ -1678,7 +1912,7 @@ export class SessionManager extends EventEmitter {
             lastStartupProgressAt: Date.now(),
           }
           this.loadProgressMeta.set(sessionId, meta)
-          this.emit('session:loadProgress', {
+          this.emitLoadProgress({
             sessionId,
             label,
             labelKey,
@@ -2346,6 +2580,7 @@ export class SessionManager extends EventEmitter {
       standbyDepth: proc.standbyDepth || null,
     })
     this.processes.set(session.id, { process: null, adoptedPid: proc.pid })
+    this.emitTerminalLoadProgress(session.id)
     this.emit('session:ready', { sessionId: session.id, port: proc.port, pid: proc.pid })
     return true
   }
@@ -2723,6 +2958,13 @@ export class SessionManager extends EventEmitter {
     this.loadProgressState.delete(sessionId) // Reset loading progress for fresh start
     this.loadProgressMeta.delete(sessionId)
     this.stopLoadResidentMonitor(sessionId)
+    this.stopWakeHealthPoller(sessionId)
+    this.externalWakes.delete(sessionId)
+    // A replacement engine process restarts its generation counter at 1; a
+    // stale high-water mark here would discard EVERY event it ever sends.
+    this.lifecycleGenerations.delete(sessionId)
+    this.contractSessions.delete(sessionId)
+    this.lastLoadProgressEvents.delete(sessionId)
     if (modelFileBytes > 0) {
       const residentProfile = launchResidentProfileForModel(config.modelPath)
       const meta = {
@@ -2731,12 +2973,13 @@ export class SessionManager extends EventEmitter {
         lazyResident: residentProfile.streamsWeights,
       }
       this.loadProgressMeta.set(sessionId, meta)
-      this.loadProgressState.set(sessionId, 2)
-      this.emit('session:loadProgress', {
+      this.loadProgressState.set(sessionId, 0)
+      this.emitLoadProgress({
         sessionId,
         label: 'Scanning model files...',
         labelKey: 'main.loadProgress.scanningModelFiles',
-        progress: 2,
+        progress: 0,
+        indeterminate: true,
         ...meta,
       })
     }
@@ -3081,7 +3324,10 @@ export class SessionManager extends EventEmitter {
     const startupTimeoutMs = Math.max((config.timeout || 300) * 1000, 120000)
     try {
       await this.waitForReady(session.host, session.port, startupTimeoutMs, sessionId)
-      this.stopLoadResidentMonitor(sessionId)
+      // Ready means serving, not resident: the settle phase keeps the bar
+      // progressing until the weights are actually in RAM (display only —
+      // the session is running and usable from this line on).
+      this.emitTerminalLoadProgress(sessionId)
       db.updateSession(sessionId, { status: 'running' })
       this.touchSession(sessionId)  // Start idle timer from model-ready time
       this.emit('session:ready', {
@@ -3126,6 +3372,11 @@ export class SessionManager extends EventEmitter {
         console.log(`[SESSION] Remote connected: ${url} (attempt ${attempt})`)
         db.updateSession(session.id, { status: 'running' })
         this.lastHealthyAt.set(session.id, Date.now())
+        // Terminal progress comes from the main process on every path now —
+        // the renderer no longer fabricates 100% on session:ready (that
+        // fabrication is what used to end the bar before RAM was full).
+        this.loadProgressState.set(session.id, 100)
+        this.emitLoadProgress({ sessionId: session.id, label: 'Connected', labelKey: 'main.loadProgress.connected', progress: 100 })
         this.emit('session:ready', { sessionId: session.id, port: session.port })
         return
       } catch (err) {
@@ -3209,6 +3460,12 @@ export class SessionManager extends EventEmitter {
       // it here made every server death unexplainable after the fact. The
       // buffer is reset at the next start, and deleteSession still drops it.
       this.lastRequestAt.delete(sessionId)
+      this.externalWakes.delete(sessionId)
+      this.stopLoadResidentMonitor(sessionId)
+      this.stopWakeHealthPoller(sessionId)
+      this.lifecycleGenerations.delete(sessionId)
+      this.contractSessions.delete(sessionId)
+      this.lastLoadProgressEvents.delete(sessionId)
       this.pushLog(sessionId, '[INFO] Session stopped — log retained for postmortem until next start')
       this.emit('session:stopped', { sessionId })
     }).finally(() => {
@@ -3678,7 +3935,8 @@ export class SessionManager extends EventEmitter {
               this.pushLog(session.id, '[Sleep] Process died during standby')
               continue
             }
-            // Check if model was woken externally (e.g., external curl triggered JIT wake)
+            // Check if model was woken externally (e.g., an API request or a
+            // chat message triggered the engine's JIT wake)
             try {
               const res = await fetch(
                 `http://${connectHost(session.host)}:${session.port}/health`,
@@ -3687,8 +3945,12 @@ export class SessionManager extends EventEmitter {
               if (res.ok) {
                 const data = await res.json()
                 if (data.status === 'healthy') {
-                  // Model woke externally — sync DB to running
+                  // Model woke externally and finished serving-ready between
+                  // monitor ticks — sync DB to running and let the settle
+                  // phase carry the bar until the weights are in RAM.
+                  this.externalWakes.delete(session.id)
                   db.updateSession(session.id, { status: 'running', standbyDepth: null })
+                  this.emitTerminalLoadProgress(session.id)
                   this.touchSession(session.id)
                   this.emit('session:ready', {
                     sessionId: session.id,
@@ -3696,6 +3958,14 @@ export class SessionManager extends EventEmitter {
                     ...(session.pid ? { pid: session.pid } : {})
                   })
                   this.pushLog(session.id, '[Wake] Model woke externally — synced to running')
+                } else if (data.wake_in_progress === true && !this.externalWakes.has(session.id)) {
+                  // A JIT wake is reloading the model right now. Surface the
+                  // same loading UI a button-triggered wake gets: status
+                  // 'loading' plus the RSS resident monitor, on every surface.
+                  this.externalWakes.add(session.id)
+                  db.updateSession(session.id, { status: 'loading', standbyDepth: null })
+                  this.beginWakeProgress(session, '[Wake] External wake detected — tracking model reload')
+                  this.emit('session:starting', { sessionId: session.id })
                 }
               }
             } catch {
@@ -3735,7 +4005,7 @@ export class SessionManager extends EventEmitter {
               this.lastHealthyAt.set(session.id, Date.now())
               if (session.status === 'loading') {
                 this.loadProgressState.set(session.id, 100)
-                this.emit('session:loadProgress', { sessionId: session.id, label: 'Connected', labelKey: 'main.loadProgress.connected', progress: 100 })
+                this.emitLoadProgress({ sessionId: session.id, label: 'Connected', labelKey: 'main.loadProgress.connected', progress: 100 })
                 db.updateSession(session.id, { status: 'running' })
                 this.emit('session:ready', { sessionId: session.id, port: session.port })
               }
@@ -3790,10 +4060,12 @@ export class SessionManager extends EventEmitter {
             if (
               isStandby &&
               session.status === 'loading' &&
-              this.wakePending.has(session.id)
+              (this.wakePending.has(session.id) || data.wake_in_progress === true)
             ) {
-              // The synchronous admin wake has not returned yet. RSS progress
-              // remains authoritative; preserve Loading and its percentage.
+              // A wake is still reloading the model — ours (admin/wake has
+              // not returned) or an external JIT wake (health reports
+              // wake_in_progress). RSS progress remains authoritative;
+              // preserve Loading and its percentage.
               this.failCounts.delete(session.id)
             } else if (isStandby && session.status === 'loading') {
               // Wake failed — server reverted to standby but DB says loading.
@@ -3808,6 +4080,10 @@ export class SessionManager extends EventEmitter {
               // fail counter — so nothing could ever time the session out.
               const depth = data.status === 'standby_deep' ? 'deep' : 'soft'
               this.failCounts.delete(session.id)
+              this.externalWakes.delete(session.id)
+              this.stopLoadResidentMonitor(session.id)
+              this.stopWakeHealthPoller(session.id)
+              this.lastLoadProgressEvents.delete(session.id)
               db.updateSession(session.id, { status: 'standby', standbyDepth: depth })
               this.emit('session:standby', { sessionId: session.id, depth })
               this.pushLog(session.id, `[Wake] Model reload failed — reverted to ${depth} sleep`)
@@ -3822,9 +4098,11 @@ export class SessionManager extends EventEmitter {
                 db.updateSession(session.id, { modelName: data.model_name })
               }
               if (session.status === 'loading') {
-                // Emit 100% progress so bar completes before disappearing
-                this.loadProgressState.set(session.id, 100)
-                this.emit('session:loadProgress', { sessionId: session.id, label: 'Model ready', labelKey: 'main.loadProgress.modelReady', progress: 100 })
+                // Server ready — keep the bar progressing through the settle
+                // phase until the weights are actually resident in RAM
+                // (immediate 100% when nothing is measurable).
+                this.externalWakes.delete(session.id)
+                this.emitTerminalLoadProgress(session.id)
                 db.updateSession(session.id, { status: 'running', standbyDepth: null })
                 this.touchSession(session.id)
                 this.emit('session:ready', {
@@ -3854,9 +4132,11 @@ export class SessionManager extends EventEmitter {
               // Server is up but model not loaded yet — update progress bar
               // to show we're past server startup, now waiting for model
               const current = this.loadProgressState.get(session.id) ?? 0
-              if (current < 95) {
+              if (current < 95 && !this.contractSessions.has(session.id)) {
+                // Legacy nudge only: a contract-speaking engine owns its own
+                // percentage and a hard-coded 95 would jump the bar ahead.
                 this.loadProgressState.set(session.id, 95)
-                this.emit('session:loadProgress', {
+                this.emitLoadProgress({
                   sessionId: session.id,
                   label: 'Model runtime still loading...',
                   labelKey: 'main.loadProgress.modelRuntimeStillLoading',
@@ -4106,18 +4386,6 @@ export class SessionManager extends EventEmitter {
 
     const standbyDepth = session.standbyDepth === 'soft' ? 'soft' : 'deep'
     this.wakePending.add(sessionId)
-    this.loadProgressState.delete(sessionId)
-    this.loadProgressMeta.delete(sessionId)
-    this.stopLoadResidentMonitor(sessionId)
-    const modelFileBytes = estimateModelFileBytes(session.modelPath)
-    const wakeProfile = launchResidentProfileForModel(session.modelPath)
-    const meta = modelFileBytes > 0
-      ? {
-          modelBytes: modelFileBytes,
-          expectedResidentBytes: Math.round(modelFileBytes * wakeProfile.ratio),
-          lazyResident: wakeProfile.streamsWeights,
-        }
-      : {}
 
     // admin/wake performs the reload synchronously.  Publishing "loading"
     // only after fetch() returned left the app visibly stuck at Deep Sleep for
@@ -4125,26 +4393,16 @@ export class SessionManager extends EventEmitter {
     // there was nothing left to observe.  Enter loading before the request so
     // message-triggered and button-triggered wakes share the real progress UI.
     db.updateSession(sessionId, { status: 'loading', standbyDepth: null })
-    if (modelFileBytes > 0) this.loadProgressMeta.set(sessionId, meta)
-    this.loadProgressState.set(sessionId, 1)
-    this.emit('session:loadProgress', {
-      sessionId,
-      label: 'Waking from sleep...',
-      labelKey: 'main.loadProgress.wakingFromSleep',
-      progress: 1,
-      ...meta,
-    })
-    if (session.pid && modelFileBytes > 0) {
-      this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)
-    }
+    this.beginWakeProgress(session, '[Wake] Waking from sleep — reloading model...')
     this.emit('session:starting', { sessionId })
-    this.pushLog(sessionId, '[Wake] Waking from sleep — reloading model...')
 
     const restoreStandby = (error: string) => {
       this.wakePending.delete(sessionId)
       this.stopLoadResidentMonitor(sessionId)
+      this.stopWakeHealthPoller(sessionId)
       this.loadProgressState.delete(sessionId)
       this.loadProgressMeta.delete(sessionId)
+      this.lastLoadProgressEvents.delete(sessionId)
       db.updateSession(sessionId, { status: 'standby', standbyDepth })
       this.emit('session:standby', { sessionId, depth: standbyDepth })
       this.pushLog(sessionId, `[Wake] Reload failed — returned to ${standbyDepth} sleep: ${error}`)
@@ -4265,6 +4523,7 @@ export class SessionManager extends EventEmitter {
     if (status === 'standby') {
       this.emit('session:standby', { sessionId: session.id, depth: proc.standbyDepth })
     } else {
+      this.emitTerminalLoadProgress(session.id)
       this.emit('session:ready', { sessionId: session.id, port: proc.port, pid: proc.pid })
     }
     return true

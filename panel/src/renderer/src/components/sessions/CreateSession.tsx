@@ -801,8 +801,8 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             <div className="mb-4" data-vmlx-create-load-session-id={launchSessionId || ''}>
               <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-warning rounded-full transition-all duration-500 ease-out"
-                  style={{ width: `${progress.progress}%` }}
+                  className={`h-full bg-warning rounded-full transition-all duration-500 ease-out ${progress.indeterminate !== false ? 'animate-pulse' : ''}`}
+                  style={{ width: progress.indeterminate === false ? `${progress.progress}%` : '100%' }}
                   role="progressbar"
                   aria-valuemin={0}
                   aria-valuemax={100}
@@ -812,7 +812,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
               <p className="text-xs text-muted-foreground mt-1">
                 {progress.labelKey
                   ? t(progress.labelKey, { defaultValue: progress.label, ...(progress.labelParams || {}) })
-                  : progress.label} ({progress.progress}%)
+                  : progress.label} {progress.indeterminate === false ? `(${progress.progress}%)` : ''}
               </p>
               {formatModelBytes(progress.modelBytes) && (
                 <p className="text-xs text-muted-foreground/80 mt-0.5">

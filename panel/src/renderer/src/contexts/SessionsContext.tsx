@@ -34,6 +34,11 @@ export interface LoadProgress {
    */
   labelParams?: Record<string, string | number>
   progress: number
+  /** Engine lifecycle generation — stale-event guard across load/wake attempts. */
+  progressGeneration?: number
+  /** True while the current phase has no measured denominator — render an
+   *  animated bar with no numeric percentage instead of an invented one. */
+  indeterminate?: boolean
   modelBytes?: number
   expectedResidentBytes?: number
   lazyResident?: boolean
@@ -75,6 +80,22 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     refreshSessions()
 
+    // Hydrate the current load/wake progress from the main process: a
+    // renderer (re)mounted mid-load never saw the events emitted before it
+    // opened, and a bar that depends only on those events starts blank.
+    window.api.sessions.getLoadProgress?.().then((snapshot: Record<string, any>) => {
+      if (!snapshot || typeof snapshot !== 'object') return
+      setLoadProgress(prev => {
+        const next = new Map(prev)
+        for (const [sessionId, entry] of Object.entries(snapshot)) {
+          if (!next.has(sessionId) && entry && typeof entry === 'object') {
+            next.set(sessionId, entry as LoadProgress)
+          }
+        }
+        return next
+      })
+    }).catch(() => {})
+
     const unsubs = [
       window.api.sessions.onCreated(() => refreshSessions()),
       window.api.sessions.onDeleted(() => refreshSessions()),
@@ -95,7 +116,9 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
           if (session) next.delete(session.modelPath)
           return next
         })
-        setLoadProgress(prev => { const next = new Map(prev); next.set(data.sessionId, { label: 'Ready', labelKey: 'main.loadProgress.ready', progress: 100 }); return next })
+        // Deliberately NOT forcing progress to 100 here: the main process
+        // owns the terminal 100% (engine-authoritative ready) on every path;
+        // fabricating it here ended the bar before the model was ready.
       }),
       window.api.sessions.onStopped((data: any) => {
         setSessions(prev => prev.map(s => s.id === data.sessionId ? { ...s, status: 'stopped' as const, pid: undefined } : s))
@@ -114,9 +137,22 @@ export function SessionsProvider({ children }: { children: React.ReactNode }) {
       // Loading progress — real-time phase tracking from engine log parsing
       ...(window.api.sessions.onLoadProgress ? [window.api.sessions.onLoadProgress((data: any) => {
         setLoadProgress(prev => {
+          // Lifecycle generation guard: an event from an older load/wake
+          // attempt (stale after Stop/restart/PID replacement) must never
+          // repaint the bar over the current attempt's state.
+          const existing = prev.get(data.sessionId) as any
+          if (
+            data.progressGeneration != null &&
+            existing?.progressGeneration != null &&
+            data.progressGeneration < existing.progressGeneration
+          ) {
+            return prev
+          }
           const next = new Map(prev)
           next.set(data.sessionId, {
             ...(next.get(data.sessionId) || {}),
+            ...(data.progressGeneration != null ? { progressGeneration: data.progressGeneration } : {}),
+            indeterminate: data.indeterminate === true,
             label: data.label,
             // Assigned unconditionally, not spread in only when present: the
             // previous entry is spread above, so a conditional copy would leave

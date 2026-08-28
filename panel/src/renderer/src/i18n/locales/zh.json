@@ -1987,7 +1987,12 @@
       "connected": "已连接",
       "modelReady": "模型就绪",
       "wakingFromSleep": "从休眠唤醒中...",
-      "ready": "就绪"
+      "ready": "就绪",
+      "modelInRam": "模型已加载到 RAM — {resident} GB",
+      "loadingWeightShards": "正在加载权重 — 分片 {completed} / {total}",
+      "initializingEngine": "正在初始化引擎...",
+      "restoringAcceleration": "正在恢复加速...",
+      "preparing": "准备中..."
     }
   },
   "tools": {

@@ -145,6 +145,7 @@ from .logprobs import (
     format_completion_logprobs as _format_completion_logprobs,
 )
 from .mlx_memory import clear_mlx_memory_cache
+from . import load_progress as _lifecycle_progress
 from .reasoning import get_parser as _get_reasoning_parser_class
 from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
@@ -5916,6 +5917,9 @@ async def lifespan(app: FastAPI):
     # Startup: Start engine if loaded (needed for BatchedEngine in uvicorn's event loop)
     if _engine is not None and hasattr(_engine, "_loaded") and not _engine._loaded:
         await _engine.start()
+        _lifecycle_progress.report(
+            phase=_lifecycle_progress.PHASE_INITIALIZING_ENGINE, model_loaded=True
+        )
         _record_metal_ws_model_baseline("lifespan_engine_start")
         _refresh_loaded_max_prompt_tokens("lifespan_engine_start")
 
@@ -5931,6 +5935,11 @@ async def lifespan(app: FastAPI):
                 )
         except Exception as e:
             logger.warning(f"Failed to apply custom chat template (batched): {e}")
+
+    if _engine is not None:
+        _lifecycle_progress.report(
+            phase=_lifecycle_progress.PHASE_RESTORING_ACCELERATION
+        )
 
     # Apply Flash MoE for BatchedEngine (model just loaded via start() above).
     # SimpleEngine Flash MoE is applied in load_model() where it starts synchronously.
@@ -5956,6 +5965,11 @@ async def lifespan(app: FastAPI):
         logger.error(
             f"Failed to initialize MCP — continuing without tool support: {e}"
         )
+
+    # The readiness barrier: uvicorn starts serving only after this yield, so
+    # ready=true is reported exactly when requests can actually be answered.
+    if _engine is not None or (_image_gen is not None and _image_gen.is_loaded):
+        _lifecycle_progress.report(model_loaded=True, ready=True)
 
     yield
 
@@ -8841,6 +8855,7 @@ def load_model(
             _distributed_enabled = False
             # Fall through to normal loading below
 
+    _lifecycle_progress.report(phase=_lifecycle_progress.PHASE_LOADING_WEIGHTS)
     if use_batching:
         logger.info(f"Loading model with BatchedEngine: {model_name}")
         _engine = BatchedEngine(
@@ -8869,6 +8884,16 @@ def load_model(
             _record_metal_ws_model_baseline("simple_engine_start")
         model_type = "MLLM" if _engine.is_mllm else "LLM"
         logger.info(f"{model_type} model loaded (simple mode): {model_name}")
+
+    # SimpleEngine has its weights at this point; BatchedEngine defers the
+    # load to lifespan()/wake, which report these phases themselves.
+    if _engine is not None and getattr(_engine, "_loaded", False):
+        _lifecycle_progress.report(
+            phase=_lifecycle_progress.PHASE_INITIALIZING_ENGINE, model_loaded=True
+        )
+        _lifecycle_progress.report(
+            phase=_lifecycle_progress.PHASE_RESTORING_ACCELERATION
+        )
 
     # Apply Flash MoE for SimpleEngine (model already loaded above).
     # BatchedEngine defers model loading to lifespan() — Flash MoE applied there.
@@ -12534,6 +12559,7 @@ async def health():
                 _companion_block.pop("last_prefix_lookup", None)
         result["health_gauges_cached"] = True
         result["wake_in_progress"] = _wake_in_progress
+        result["load_progress"] = _lifecycle_progress.snapshot()
         return result
 
     mcp_info = None
@@ -12793,6 +12819,7 @@ async def health():
         _cache_storage_runtime_telemetry()
     )
     result["wake_in_progress"] = _wake_in_progress
+    result["load_progress"] = _lifecycle_progress.snapshot()
 
     model_loaded = bool(result.get("model_loaded"))
     model_bundle_provenance = _bundle_configuration_attestation(
@@ -12960,6 +12987,7 @@ async def admin_soft_sleep():
             clear_mlx_memory_cache(log=logger)
 
             _standby_state = "soft"
+            _lifecycle_progress.report_standby("soft")
             logger.info("Entered soft sleep — caches cleared, model loaded")
             return {"status": "soft_sleep"}
 
@@ -13063,6 +13091,7 @@ async def admin_deep_sleep():
             clear_mlx_memory_cache(log=logger)
 
             _standby_state = "deep"
+            _lifecycle_progress.report_standby("deep")
             try:
                 asyncio.create_task(
                     _post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_deferred")
@@ -13130,6 +13159,9 @@ async def _admin_wake_impl():
                 return {"status": "active"}
             elif _model_path or _model_name:
                 await _post_async_engine_teardown_mlx_cleanup("admin_wake_before_deep_reload")
+                _lifecycle_progress.report(
+                    phase=_lifecycle_progress.PHASE_LOADING_WEIGHTS
+                )
                 # Reload text model — run in thread to avoid blocking event loop
                 # (loading large models takes 10-60s; _wake_lock prevents concurrent
                 # access to the globals that load_model modifies)
@@ -13167,6 +13199,10 @@ async def _admin_wake_impl():
                     await _engine.start()
                     if hasattr(_engine, "_needs_async_start"):
                         _engine._needs_async_start = False
+                _lifecycle_progress.report(
+                    phase=_lifecycle_progress.PHASE_RESTORING_ACCELERATION,
+                    model_loaded=True,
+                )
                 # Re-apply Flash MoE after wake (load_model skipped it because
                 # _engine._loaded was False when called inside event loop)
                 if _flash_moe_enabled and _engine is not None:
@@ -13224,8 +13260,14 @@ async def _wake_with_lock_held():
         return {"status": "already_active"}
 
     _wake_in_progress = True
+    _lifecycle_progress.begin_attempt(_lifecycle_progress.PHASE_STARTING)
     try:
-        return await _admin_wake_impl()
+        result = await _admin_wake_impl()
+        if isinstance(result, dict) and result.get("status") in ("active", "already_active"):
+            _lifecycle_progress.report(model_loaded=True, ready=True)
+        else:
+            _lifecycle_progress.report(phase=_lifecycle_progress.PHASE_IDLE, ready=False)
+        return result
     finally:
         _wake_in_progress = False
 

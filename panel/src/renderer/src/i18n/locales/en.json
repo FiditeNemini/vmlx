@@ -1987,7 +1987,12 @@
       "connected": "Connected",
       "modelReady": "Model ready",
       "wakingFromSleep": "Waking from sleep...",
-      "ready": "Ready"
+      "ready": "Ready",
+      "modelInRam": "Model in RAM — {resident} GB",
+      "loadingWeightShards": "Loading weights — shard {completed} of {total}",
+      "initializingEngine": "Initializing engine...",
+      "restoringAcceleration": "Restoring acceleration...",
+      "preparing": "Preparing..."
     }
   },
   "tools": {

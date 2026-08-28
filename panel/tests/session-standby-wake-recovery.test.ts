@@ -37,7 +37,7 @@ describe('standby wake recovery', () => {
 
   it('still reverts the session to standby so the user can retry', () => {
     const start = src.indexOf("isStandby && session.status === 'loading'")
-    const body = src.slice(start, start + 1200)
+    const body = src.slice(start, start + 2000)
     expect(body).toContain("status: 'standby'")
     expect(body).toContain('session:standby')
   })

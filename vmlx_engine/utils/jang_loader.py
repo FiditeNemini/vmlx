@@ -31,6 +31,31 @@ from .memory_limits import get_effective_metal_working_set_bytes
 
 logger = logging.getLogger(__name__)
 
+
+def _report_shard_progress(completed: int, total: int) -> None:
+    """Unit progress for the lifecycle-progress contract (never raises)."""
+    try:
+        from ..load_progress import report_shard
+
+        report_shard(completed, total)
+    except Exception:
+        pass
+
+
+def _iter_shards_with_progress(weight_files):
+    """Yield weight shards while reporting COMPLETED counts honestly.
+
+    Before yielding shard i, exactly i shards have finished loading — so the
+    contract never claims a shard that mx.load has not materialized yet. The
+    final total/total report fires only after the loop consumed every shard.
+    """
+    total = len(weight_files)
+    for index, shard_file in enumerate(weight_files):
+        _report_shard_progress(index, total)
+        yield shard_file
+    if total:
+        _report_shard_progress(total, total)
+
 # Support current "jang_config.json" and legacy names
 JANG_CONFIG_FILENAMES = [
     "jang_config.json",
@@ -3304,7 +3329,7 @@ def _load_jang_v2(
             )
 
     _affine1_expanded_count = 0
-    for sf in weight_files:
+    for sf in _iter_shards_with_progress(weight_files):
         weights = mx.load(str(sf))
 
         if _affine1_storage_modules:
@@ -4411,7 +4436,7 @@ def _load_jang_v2_vlm(
     }
     _gemma_ple_pending: dict[str, dict[str, mx.array]] = {}
     _affine1_expanded_count = 0
-    for sf in weight_files:
+    for sf in _iter_shards_with_progress(weight_files):
         shard_weights = mx.load(str(sf))
         if _affine1_storage_modules:
             from .jang_affine_storage import expand_affine1_shard_mlx

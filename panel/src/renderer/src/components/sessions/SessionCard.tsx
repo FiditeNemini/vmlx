@@ -220,13 +220,17 @@ export function SessionCard({
         </div>
       )}
 
-      {/* Loading progress bar */}
-      {session.status === "loading" && (
+      {/* Loading progress bar. Also rendered while the session is already
+          running but the weights are still settling into RAM (the main
+          process keeps emitting resident progress until the model is
+          actually resident and then sends the terminal 100%). */}
+      {(session.status === "loading" ||
+        (session.status === "running" && progress && progress.progress < 100)) && (
         <div className="mb-3">
           <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">
             <div
-              className="h-full bg-yellow-500 rounded-full transition-all duration-500 ease-out"
-              style={{ width: `${progress?.progress ?? 2}%` }}
+              className={`h-full bg-yellow-500 rounded-full transition-all duration-500 ease-out ${progress?.indeterminate !== false ? 'animate-pulse' : ''}`}
+              style={{ width: progress?.indeterminate === false ? `${progress.progress}%` : '100%' }}
             />
           </div>
           {progress && (
@@ -241,7 +245,7 @@ export function SessionCard({
                       ...(progress.labelParams || {}),
                     })
                   : progress.label}{' '}
-                ({progress.progress}%)
+                {progress.indeterminate === false ? `(${progress.progress}%)` : ''}
               </p>
               {formatModelBytes(progress.modelBytes) && (
                 <p className="text-[10px] text-muted-foreground/80">

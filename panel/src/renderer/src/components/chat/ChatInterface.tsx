@@ -4,6 +4,8 @@ import { MessageList } from './MessageList'
 import { InputBox, MediaAttachment } from './InputBox'
 import { useToast } from '../Toast'
 import { useTranslation } from '../../i18n'
+import { useSessionsContext } from '../../contexts/SessionsContext'
+import { formatResidentLoad } from '../sessions/loadProgressFormat'
 import { extractResponsesWarnings } from '../../lib/responsesWarnings'
 
 interface MessageMetrics {
@@ -162,6 +164,12 @@ interface ChatInterfaceProps {
 export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, sessionStatus, overridesVersion }: ChatInterfaceProps) {
   const { showToast } = useToast()
   const { t } = useTranslation()
+  // Live model-load/wake progress for the bound session: a sleeping model
+  // woken by a chat message (JIT wake) surfaces here as status 'loading'
+  // with resident-RAM progress, and stays visible until the weights are
+  // actually in RAM (the settle phase after the server is already serving).
+  const { loadProgress } = useSessionsContext()
+  const sessionLoadProgress = sessionId ? loadProgress.get(sessionId) : undefined
   const [messages, setMessages] = useState<Message[]>([])
   // Track current chatId via ref so async handleSend can detect stale closures
   const chatIdRef = useRef(chatId)
@@ -748,11 +756,41 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
           <span className="text-xs text-blue-400">{t('chat.interface.standbyBanner')}</span>
         </div>
       )}
-      {/* Model loading banner */}
-      {!sessionEndpoint && sessionId && sessionStatus === 'loading' && (
-        <div className="flex items-center justify-center gap-2 px-4 py-2 border-t border-border bg-yellow-500/5">
-          <Loader2 className="h-3.5 w-3.5 text-yellow-500 animate-spin" />
-          <span className="text-xs text-muted-foreground">{t('chat.interface.loadingBanner')}</span>
+      {/* Model loading / waking progress banner. Covers the cold start, a
+          wake triggered by this chat's message or an API request (status
+          'loading'), and the settle phase where the server already answers
+          but the weights are still being copied into RAM (status 'running'
+          with progress < 100). Hidden once the main process sends the
+          terminal 100%. */}
+      {sessionId && (
+        sessionStatus === 'loading' ||
+        (sessionStatus === 'running' && sessionLoadProgress && sessionLoadProgress.progress < 100)
+      ) && (
+        <div className="px-4 py-2 border-t border-border bg-yellow-500/5">
+          <div className="flex items-center gap-2">
+            <Loader2 className="h-3.5 w-3.5 text-yellow-500 animate-spin flex-shrink-0" />
+            <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className={`h-full bg-yellow-500 rounded-full transition-all duration-500 ease-out ${sessionLoadProgress?.indeterminate !== false ? 'animate-pulse' : ''}`}
+                style={{ width: sessionLoadProgress?.indeterminate === false ? `${sessionLoadProgress.progress}%` : '100%' }}
+              />
+            </div>
+            <span className="text-[10px] text-muted-foreground flex-shrink-0">
+              {sessionLoadProgress
+                ? `${sessionLoadProgress.labelKey
+                    ? t(sessionLoadProgress.labelKey, {
+                        defaultValue: sessionLoadProgress.label,
+                        ...(sessionLoadProgress.labelParams || {}),
+                      })
+                    : sessionLoadProgress.label}${sessionLoadProgress.indeterminate === false ? ` (${sessionLoadProgress.progress}%)` : ''}`
+                : t('chat.interface.loadingBanner')}
+            </span>
+          </div>
+          {formatResidentLoad(sessionLoadProgress) && (
+            <p className="text-[10px] text-muted-foreground/80 mt-1 text-center">
+              {t('sessions.card.residentRam')} {formatResidentLoad(sessionLoadProgress)}
+            </p>
+          )}
         </div>
       )}
       {/* TTFT / Waking up banner */}

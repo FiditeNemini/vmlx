@@ -87,8 +87,11 @@ function App() {
   const activeSession = (pinnedSession && !sessionUsable(pinnedSession))
     ? sessions.find(s => sessionMatchesModelPath(s.modelPath, pinnedSession.modelPath) && sessionUsable(s)) || pinnedSession
     : pinnedSession
-  // Standby sessions still have a live process on their port — JIT middleware auto-wakes
-  const sessionEndpoint = (activeSession?.status === 'running' || activeSession?.status === 'standby')
+  // Standby sessions still have a live process on their port — JIT middleware
+  // auto-wakes. Loading sessions expose their endpoint too: a message sent
+  // mid-load queues exactly once in the main process (visible load progress,
+  // Stop cancels) instead of being rejected at the input box.
+  const sessionEndpoint = (activeSession?.status === 'running' || activeSession?.status === 'standby' || activeSession?.status === 'loading')
     ? { host: activeSession.host, port: activeSession.port }
     : undefined
 

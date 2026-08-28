@@ -13,7 +13,10 @@ describe('load progress honesty', () => {
     const source = read('src/main/sessions.ts')
 
     expect(source).not.toContain('Loading model into GPU')
-    expect(source).toContain('Resident RAM')
+    // Residency is a DIAGNOSTIC readout under the bar; the percentage comes
+    // from the engine's lifecycle contract, never from RSS.
+    expect(source).toContain('never the percentage oracle')
+    expect(source).toContain('residentMb')
     expect(source).toContain('modelBytes')
   })
 

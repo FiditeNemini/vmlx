@@ -1125,6 +1125,13 @@ def serve_command(args):
 
     logger = logging.getLogger(__name__)
 
+    # Engine-owned lifecycle progress: one generation per serve attempt. The
+    # panel reads the mirrored LOADPROGRESS stdout lines during cold start
+    # (uvicorn serves nothing until lifespan completes) and the /health
+    # snapshot afterwards.
+    from . import load_progress as _lifecycle_progress
+    _lifecycle_progress.begin_attempt(_lifecycle_progress.PHASE_STARTING)
+
     server._raise_nofile_soft_limit()
 
     # --text-only: set the server-global sentinel BEFORE any model-load routing so

@@ -1987,7 +1987,12 @@
       "connected": "연결됨",
       "modelReady": "모델 준비 완료",
       "wakingFromSleep": "휴면에서 깨어나는 중...",
-      "ready": "준비 완료"
+      "ready": "준비 완료",
+      "modelInRam": "모델이 RAM에 상주 — {resident} GB",
+      "loadingWeightShards": "가중치 로드 중 — 샤드 {completed} / {total}",
+      "initializingEngine": "엔진 초기화 중...",
+      "restoringAcceleration": "가속 복원 중...",
+      "preparing": "준비 중..."
     }
   },
   "tools": {

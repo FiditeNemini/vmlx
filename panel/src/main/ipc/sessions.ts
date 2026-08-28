@@ -166,6 +166,16 @@ export function registerSessionHandlers(getWindow: () => BrowserWindow | null): 
       }
     })
 
+    ipcMain.handle('sessions:getLoadProgress', async () => {
+      // Hydration for renderers navigating into a page mid-load: the events
+      // emitted before the page opened are gone; this snapshot is not.
+      try {
+        return sessionManager.getLoadProgressSnapshot()
+      } catch {
+        return {}
+      }
+    })
+
     ipcMain.handle('sessions:restart', async (_, sessionId: string) => {
       try {
         // Abort any active chat requests before the restart kills the server

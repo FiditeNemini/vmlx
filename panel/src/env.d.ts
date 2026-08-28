@@ -618,6 +618,7 @@ declare global {
         restart: (
           sessionId: string,
         ) => Promise<{ success: boolean; error?: string }>;
+        getLoadProgress: () => Promise<Record<string, any>>;
         delete: (
           sessionId: string,
         ) => Promise<{ success: boolean; error?: string }>;

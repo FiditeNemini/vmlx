@@ -1987,7 +1987,12 @@
       "connected": "Conectado",
       "modelReady": "Modelo listo",
       "wakingFromSleep": "Despertando del sueño...",
-      "ready": "Listo"
+      "ready": "Listo",
+      "modelInRam": "Modelo en RAM — {resident} GB",
+      "loadingWeightShards": "Cargando pesos — fragmento {completed} de {total}",
+      "initializingEngine": "Inicializando el motor...",
+      "restoringAcceleration": "Restaurando la aceleración...",
+      "preparing": "Preparando..."
     }
   },
   "tools": {

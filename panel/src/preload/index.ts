@@ -368,6 +368,7 @@ const api = {
     start: (sessionId: string) => ipcRenderer.invoke('sessions:start', sessionId),
     stop: (sessionId: string) => ipcRenderer.invoke('sessions:stop', sessionId),
     restart: (sessionId: string) => ipcRenderer.invoke('sessions:restart', sessionId),
+    getLoadProgress: () => ipcRenderer.invoke('sessions:getLoadProgress'),
     delete: (sessionId: string) => ipcRenderer.invoke('sessions:delete', sessionId),
     repointModelPath: (sessionId: string) => ipcRenderer.invoke('sessions:repointModelPath', sessionId),
     detect: () => ipcRenderer.invoke('sessions:detect'),

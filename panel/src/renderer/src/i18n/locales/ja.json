@@ -1987,7 +1987,12 @@
       "connected": "接続済み",
       "modelReady": "モデル準備完了",
       "wakingFromSleep": "スリープから復帰中...",
-      "ready": "準備完了"
+      "ready": "準備完了",
+      "modelInRam": "モデルが RAM に常駐 — {resident} GB",
+      "loadingWeightShards": "ウェイトを読み込み中 — シャード {completed} / {total}",
+      "initializingEngine": "エンジンを初期化中...",
+      "restoringAcceleration": "アクセラレーションを復元中...",
+      "preparing": "準備中..."
     }
   },
   "tools": {

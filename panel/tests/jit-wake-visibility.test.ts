@@ -9,14 +9,24 @@ describe('message-triggered deep wake visibility', () => {
     const wakeStart = sessions.indexOf('async wakeSession(sessionId: string)')
     const wakeEnd = sessions.indexOf('/** Check idle sessions', wakeStart)
     const body = sessions.slice(wakeStart, wakeEnd)
+    // wakeSession delegates the presentation to the SHARED beginWakeProgress
+    // helper (one implementation for panel-initiated, external-JIT, and
+    // adopted-engine wakes) — but the ordering contract is unchanged:
+    // loading is published and progress starts BEFORE the synchronous
+    // admin/wake request.
     const loading = body.indexOf("db.updateSession(sessionId, { status: 'loading', standbyDepth: null })")
-    const monitor = body.indexOf('this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)')
+    const presentation = body.indexOf('this.beginWakeProgress(session,')
     const request = body.indexOf("fetch(`http://${host}:${session.port}/admin/wake`")
 
     expect(loading).toBeGreaterThan(0)
-    expect(monitor).toBeGreaterThan(loading)
-    expect(request).toBeGreaterThan(monitor)
-    expect(body).toContain("progress: 1")
+    expect(presentation).toBeGreaterThan(loading)
+    expect(request).toBeGreaterThan(presentation)
+    const helperStart = sessions.indexOf('private beginWakeProgress(session: Session')
+    const helperBody = sessions.slice(helperStart, sessions.indexOf('/** Check a log line', helperStart))
+    expect(helperBody).toContain('this.startLoadResidentMonitor(sessionId, session.pid, modelFileBytes)')
+    // The wake start has no measured denominator — indeterminate, never an
+    // invented number.
+    expect(helperBody).toContain('indeterminate: true')
   })
 
   it('routes a sleeping in-app chat through SessionManager before health probing', () => {

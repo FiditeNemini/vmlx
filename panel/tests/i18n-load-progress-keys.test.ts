@@ -52,7 +52,10 @@ function emittedLabelKeys(): string[] {
 function loadProgressEmitBodies(): { line: number; body: string }[] {
   const src = readFileSync(join(ROOT, 'src/main/sessions.ts'), 'utf-8')
   const out: { line: number; body: string }[] = []
-  const re = /\.emit\(\s*'session:loadProgress'\s*,\s*\{/g
+  // Both the raw emit and the store-and-emit wrapper originate events;
+  // spread-forwarding re-emits ({ ...last, ... }) carry the ORIGINAL
+  // event's labelKey and are not origins.
+  const re = /(?:\.emit\(\s*'session:loadProgress'\s*,\s*\{|\.emitLoadProgress\(\s*\{)/g
   let m: RegExpExecArray | null
   while ((m = re.exec(src))) {
     let depth = 0
@@ -65,7 +68,10 @@ function loadProgressEmitBodies(): { line: number; body: string }[] {
         if (depth === 0) break
       }
     }
-    out.push({ line: src.slice(0, m.index).split('\n').length, body: src.slice(start, j + 1) })
+    const body = src.slice(start, j + 1)
+    if (!/^\{\s*\.\.\./.test(body)) {
+      out.push({ line: src.slice(0, m.index).split('\n').length, body })
+    }
   }
   return out
 }

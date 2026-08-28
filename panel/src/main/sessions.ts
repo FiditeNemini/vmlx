@@ -2131,11 +2131,27 @@ export class SessionManager extends EventEmitter {
     return isImageSession
   }
 
-  async startSession(sessionId: string): Promise<void> {
+  async startSession(sessionId: string, options?: { restartGeneration?: number }): Promise<void> {
     // Captured at request entry: if an explicit Stop advances the epoch while
     // this start waits (gateway transition queue, session lock), the start is
     // superseded and must not spawn. Stop wins.
-    const entryEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
+    //
+    // A restart passes the generation it captured when the restart BEGAN
+    // (before its own stop advanced the epoch). Capturing at our own entry
+    // would be too late for that path: the restart's start is requested after
+    // the user's Stop, so it would observe the post-Stop epoch and pass.
+    const entryEpoch = options?.restartGeneration ?? (this.lifecycleEpochs.get(sessionId) ?? 0)
+
+    const assertNotSuperseded = () => {
+      const currentEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
+      if (currentEpoch !== entryEpoch) {
+        console.log(
+          `[SESSIONS] start of ${sessionId} superseded by an explicit stop ` +
+          `(epoch ${entryEpoch} -> ${currentEpoch}); not spawning`
+        )
+        throw new Error('Start canceled: the session was stopped after this start was requested')
+      }
+    }
 
     // Remote sessions connect instead of starting a local process
     const session = db.getSession(sessionId)
@@ -2149,6 +2165,10 @@ export class SessionManager extends EventEmitter {
     }
 
     const startLocalSession = async () => {
+      // Before ANY side effect: single-model detection stops other engines and
+      // adoption can mark this session running and return without ever
+      // reaching the in-lock check. A superseded start must do nothing at all.
+      assertNotSuperseded()
       if (isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) {
         // Validate before unloading the current model. Without this ordering a
         // stale/malformed target can strand the user with zero loaded models.
@@ -2160,6 +2180,9 @@ export class SessionManager extends EventEmitter {
         // before launching the replacement, otherwise the UI can show one
         // running model while two engines are resident.
         await this.stopDetectedLocalEnginesForSingleModel(sessionId)
+        // Detection awaited above — an explicit Stop may have landed while it
+        // ran, and adoption below would mark this session running despite it.
+        assertNotSuperseded()
         if (await this.adoptDetectedTargetProcessForStart(sessionId)) {
           return
         }
@@ -2180,14 +2203,7 @@ export class SessionManager extends EventEmitter {
 
       // Serialize start/stop operations per session to prevent races.
       await this.withSessionLock(sessionId, () => {
-        const currentEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
-        if (currentEpoch !== entryEpoch) {
-          console.log(
-            `[SESSIONS] start of ${sessionId} superseded by an explicit stop ` +
-            `(epoch ${entryEpoch} -> ${currentEpoch}); not spawning`
-          )
-          throw new Error('Start canceled: the session was stopped after this start was requested')
-        }
+        assertNotSuperseded()
         return this._startSessionInner(sessionId)
       })
     }
@@ -2210,6 +2226,29 @@ export class SessionManager extends EventEmitter {
     } finally {
       release()
     }
+  }
+
+  /**
+   * Save & Restart as ONE main-process lifecycle operation. The renderer used
+   * to orchestrate update -> stop -> start over separate IPC calls; an
+   * explicit user Stop landing between that pair advanced the epoch BEFORE
+   * the restart's start was requested, so the start captured the post-Stop
+   * epoch at entry and spawned an engine the UI no longer tracked.
+   *
+   * The generation is derived from the epoch read when the restart begins:
+   * the restart-owned stop advances it exactly once for local sessions, so
+   * any other advance — an explicit Stop landing before, during, or after
+   * ours — makes this restart stale and its start must not run.
+   */
+  async restartSession(sessionId: string): Promise<void> {
+    const session = db.getSession(sessionId)
+    if (!session) throw new Error(`Session ${sessionId} not found`)
+    const preStopEpoch = this.lifecycleEpochs.get(sessionId) ?? 0
+    await this.stopSession(sessionId)
+    // Remote stop paths do not advance the epoch (no process to spawn), so
+    // their generation is the unchanged pre-stop value.
+    const restartGeneration = session.type === 'remote' ? preStopEpoch : preStopEpoch + 1
+    await this.startSession(sessionId, { restartGeneration })
   }
 
   async enforceSingleModelLocalProcessContract(

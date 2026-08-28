@@ -6,6 +6,9 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Save & Restart is now one atomic main-process lifecycle operation.** The renderer previously orchestrated update → stop → start over separate IPC calls; an explicit user Stop landing between the pair could not cancel the restart's start (the start captured the post-Stop lifecycle epoch at entry and passed), leaving an untracked engine running while the UI said Stopped. `restartSession` carries the generation captured when the restart begins — after its own stop, it starts only if no later explicit Stop advanced the generation. The cancellation check also now runs before single-model detection/adoption side effects, closing an early-return adoption path that never consulted the epoch.
+
 ---
 
 ## [1.6.44] - 2026-08-28

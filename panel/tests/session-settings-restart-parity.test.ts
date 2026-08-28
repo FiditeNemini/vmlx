@@ -54,15 +54,19 @@ describe('session settings restart parity', () => {
   it.each([
     ['src/renderer/src/components/sessions/ServerSettingsDrawer.tsx', 'handleReset'],
     ['src/renderer/src/components/sessions/SessionSettings.tsx', 'handleReset'],
-  ])('restarts %s in save-stop-start order without renderer sleeps', (path, nextHandler) => {
+  ])('restarts %s via ONE atomic restart IPC without renderer sleeps', (path, nextHandler) => {
     const block = handlerBlock(read(path), 'handleSaveAndRestart', nextHandler)
     const save = block.indexOf('window.api.sessions.update(')
-    const stop = block.indexOf('window.api.sessions.stop(')
-    const start = block.indexOf('window.api.sessions.start(')
+    const restart = block.indexOf('window.api.sessions.restart(')
 
     expect(save).toBeGreaterThanOrEqual(0)
-    expect(stop).toBeGreaterThan(save)
-    expect(start).toBeGreaterThan(stop)
+    expect(restart).toBeGreaterThan(save)
+    // A renderer-orchestrated stop/start pair reintroduces the window where
+    // an explicit user Stop lands between the two IPCs and the queued start
+    // spawns an engine the UI no longer tracks. Restart must stay atomic in
+    // the main process (SessionManager.restartSession).
+    expect(block).not.toContain('window.api.sessions.stop(')
+    expect(block).not.toContain('window.api.sessions.start(')
     expect(block).not.toContain('setTimeout')
     expect(block).not.toContain('onStopped')
   })

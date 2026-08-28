@@ -686,23 +686,16 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
       }
       setDirty(false)
 
-      // Stop and wait for the process to actually exit
+      // ONE atomic main-process operation. Orchestrating stop + start as two
+      // IPC calls let an explicit user Stop land between them; the queued
+      // start then captured the post-Stop epoch and spawned an engine the UI
+      // no longer tracked. restartSession carries the restart generation so a
+      // later Stop always wins.
       setRestarting(true)
       setMessage({ type: 'success', text: t('sessions.settings.stopping') })
-      const stopResult = await window.api.sessions.stop(sessionId)
-      if (!stopResult.success) {
-        setMessage({ type: 'error', text: t('sessions.settings.stopFailed', { error: stopResult.error ?? '' }) })
-        setRestarting(false)
-        setSaving(false)
-        return
-      }
-
-      // sessions.stop resolves only after stopSession has completed, so the
-      // new process can start immediately without an arbitrary renderer delay.
-      setMessage({ type: 'success', text: t('sessions.settings.starting') })
-      const startResult = await window.api.sessions.start(sessionId)
-      if (!startResult.success) {
-        setMessage({ type: 'error', text: t('sessions.settings.startFailed', { error: startResult.error ?? '' }) })
+      const restartResult = await window.api.sessions.restart(sessionId)
+      if (!restartResult.success) {
+        setMessage({ type: 'error', text: t('sessions.settings.restartFailed', { error: restartResult.error ?? '' }) })
         setRestarting(false)
       }
       // Success/failure will be handled by event listeners above

@@ -219,21 +219,14 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
       setRestarting(true)
       setMessage({ type: 'success', text: t('sessions.drawer.stopping') })
 
-      const stopResult = await window.api.sessions.stop(session.id)
-      if (!stopResult.success) {
-        setMessage({ type: 'error', text: t('sessions.settings.stopFailed', { error: stopResult.error ?? '' }) })
-        setRestarting(false)
-        setSaving(false)
-        return
-      }
-
-      // sessions.stop resolves only after stopSession has killed the process,
-      // cleared its durable PID, and emitted session:stopped. Subscribing after
-      // that await misses the event and adds a guaranteed timeout delay.
-      setMessage({ type: 'success', text: t('sessions.drawer.startingWithNewSettings') })
-      const startResult = await window.api.sessions.start(session.id)
-      if (!startResult.success) {
-        setMessage({ type: 'error', text: t('sessions.settings.startFailed', { error: startResult.error ?? '' }) })
+      // ONE atomic main-process operation. Orchestrating stop + start as two
+      // IPC calls let an explicit user Stop land between them; the queued
+      // start then captured the post-Stop epoch and spawned an engine the UI
+      // no longer tracked. restartSession carries the restart generation so a
+      // later Stop always wins.
+      const restartResult = await window.api.sessions.restart(session.id)
+      if (!restartResult.success) {
+        setMessage({ type: 'error', text: t('sessions.settings.restartFailed', { error: restartResult.error ?? '' }) })
         setRestarting(false)
       }
       onSessionUpdate?.()

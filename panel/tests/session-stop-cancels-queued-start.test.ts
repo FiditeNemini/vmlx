@@ -118,6 +118,109 @@ describe('explicit Stop cancels a queued start', () => {
     expect(state.sessions[0].status).toBe('stopped')
   })
 
+  /**
+   * The entry-epoch capture alone only cancels starts REQUESTED before the
+   * Stop. Save & Restart dispatches its start after its own stop resolves, so
+   * a user Stop landing between the pair advanced the epoch BEFORE the
+   * restart's start was requested — the start captured the post-Stop epoch
+   * and passed. restartSession carries the generation captured when the
+   * restart began; after its own stop, it may start only if no later
+   * explicit Stop advanced the generation.
+   *
+   * Exact ordering: restart begins -> restart-owned stop completes ->
+   * explicit user Stop completes -> stale restart attempts start -> zero
+   * spawn, and zero pre-lock side effects (single-model detection/adoption).
+   */
+  it('an explicit Stop after the restart-owned stop cancels the restart start', async () => {
+    const manager = new SessionManager()
+    const sessionId = 'stop-beats-stale-restart-start'
+    state.sessions = [
+      {
+        id: sessionId,
+        type: 'local',
+        modelPath: modelBundle(),
+        status: 'stopped',
+        config: JSON.stringify({}),
+      },
+    ]
+    // Single-model mode ON so the pre-lock side effects exist to be skipped.
+    state.settings.set('gateway_single_model_mode', 'true')
+
+    const inner = vi
+      .spyOn(manager as any, '_startSessionInner')
+      .mockResolvedValue(undefined)
+    const detection = vi
+      .spyOn(manager as any, 'stopDetectedLocalEnginesForSingleModel')
+      .mockResolvedValue(undefined)
+    const adoption = vi
+      .spyOn(manager as any, 'adoptDetectedTargetProcessForStart')
+      .mockResolvedValue(false)
+
+    // Pause the restart BETWEEN its own stop and its start attempt so the
+    // explicit user Stop can complete in that exact window.
+    let restartStopDone: () => void = () => {}
+    const restartStopCompleted = new Promise<void>(resolve => {
+      restartStopDone = resolve
+    })
+    let releaseRestart: () => void = () => {}
+    const restartGate = new Promise<void>(resolve => {
+      releaseRestart = resolve
+    })
+    const realStop = SessionManager.prototype.stopSession.bind(manager)
+    const stopSpy = vi
+      .spyOn(manager, 'stopSession')
+      .mockImplementation(async (id: string) => {
+        stopSpy.mockRestore()
+        await realStop(id)
+        restartStopDone()
+        await restartGate
+      })
+
+    // 1. Restart begins; its restart-owned stop completes.
+    const restart = manager.restartSession(sessionId)
+    const restartOutcome = restart.then(
+      () => ({ rejected: false as const }),
+      (error: Error) => ({ rejected: true as const, message: error.message }),
+    )
+    await restartStopCompleted
+    // 2. The explicit user Stop completes (spy restored: this is a real stop).
+    await manager.stopSession(sessionId)
+    // 3. The stale restart attempts its start.
+    releaseRestart()
+
+    const outcome = await restartOutcome
+    expect(outcome.rejected).toBe(true)
+    expect(outcome).toMatchObject({
+      message: expect.stringContaining('stopped after this start was requested'),
+    })
+    // 4. Zero spawn AND zero pre-lock side effects.
+    expect(inner).not.toHaveBeenCalled()
+    expect(detection).not.toHaveBeenCalled()
+    expect(adoption).not.toHaveBeenCalled()
+    expect(state.sessions[0].status).toBe('stopped')
+  })
+
+  it('an uninterrupted restartSession still starts', async () => {
+    const manager = new SessionManager()
+    const sessionId = 'restart-uninterrupted-starts'
+    state.sessions = [
+      {
+        id: sessionId,
+        type: 'local',
+        modelPath: modelBundle(),
+        status: 'stopped',
+        config: JSON.stringify({}),
+      },
+    ]
+
+    const inner = vi
+      .spyOn(manager as any, '_startSessionInner')
+      .mockResolvedValue(undefined)
+
+    await expect(manager.restartSession(sessionId)).resolves.toBeUndefined()
+    expect(inner).toHaveBeenCalledTimes(1)
+  })
+
   it('the renderer restart ordering (stop, then start) still starts', async () => {
     const manager = new SessionManager()
     const sessionId = 'restart-ordering-still-works'

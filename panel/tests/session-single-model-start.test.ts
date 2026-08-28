@@ -29,7 +29,7 @@ describe('manual session single-model enforcement', () => {
 
   it('serializes UI starts and unloads every other local engine before launch', () => {
     const source = readFileSync('src/main/sessions.ts', 'utf8')
-    const start = source.indexOf('async startSession(sessionId: string)')
+    const start = source.indexOf('async startSession(sessionId: string')
     const end = source.indexOf('private async _startSessionInner', start)
     const block = source.slice(start, end)
 

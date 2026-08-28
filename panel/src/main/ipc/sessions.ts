@@ -166,6 +166,21 @@ export function registerSessionHandlers(getWindow: () => BrowserWindow | null): 
       }
     })
 
+    ipcMain.handle('sessions:restart', async (_, sessionId: string) => {
+      try {
+        // Abort any active chat requests before the restart kills the server
+        const session = sessionManager.getSession(sessionId)
+        if (session) {
+          const aborted = abortByEndpoint(session.host, session.port)
+          if (aborted > 0) console.log(`[SESSION] Aborted ${aborted} active chat(s) for session ${sessionId}`)
+        }
+        await sessionManager.restartSession(sessionId)
+        return { success: true }
+      } catch (error) {
+        return { success: false, error: formatSessionLifecycleError(error) }
+      }
+    })
+
     ipcMain.handle('sessions:delete', async (_, sessionId: string) => {
       try {
         await sessionManager.deleteSession(sessionId)

@@ -615,6 +615,9 @@ declare global {
         stop: (
           sessionId: string,
         ) => Promise<{ success: boolean; error?: string }>;
+        restart: (
+          sessionId: string,
+        ) => Promise<{ success: boolean; error?: string }>;
         delete: (
           sessionId: string,
         ) => Promise<{ success: boolean; error?: string }>;

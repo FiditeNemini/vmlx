@@ -72,6 +72,11 @@ class _ReasoningEosGuardedSampler:
         self._close_id = guard["close"]
         self._eos_ids = guard["eos"]
         self._in_think = mx.array(False)
+        # True from the moment a think block closes until at least one
+        # visible (non-marker, non-EOS) token has been emitted: the second
+        # measured failure shape is "</think>" followed immediately by EOS,
+        # which still finalizes reasoning-only.
+        self._awaiting_visible = mx.array(False)
         self._ban_vectors: dict[tuple[int, str], mx.array] = {}
 
     def _ban_vector(self, vocab: int, dtype: mx.Dtype) -> mx.array:
@@ -88,21 +93,28 @@ class _ReasoningEosGuardedSampler:
     def __call__(self, logits: mx.array) -> mx.array:
         single = logits.shape[0] == 1 if logits.ndim >= 2 else True
         if single:
+            ban_active = mx.logical_or(self._in_think, self._awaiting_visible)
             ban = self._ban_vector(logits.shape[-1], logits.dtype)
-            logits = logits + mx.where(
-                self._in_think, ban, mx.zeros_like(ban)
-            )
+            logits = logits + mx.where(ban_active, ban, mx.zeros_like(ban))
         tokens = self._sampler(logits)
         if single:
             flat = tokens.reshape(-1)
             saw_open = mx.any(flat == self._open_id)
             saw_close = mx.any(flat == self._close_id)
-            saw_stop = saw_close
+            saw_eos = mx.array(False)
             for eos in self._eos_ids:
-                saw_stop = mx.logical_or(saw_stop, mx.any(flat == eos))
+                saw_eos = mx.logical_or(saw_eos, mx.any(flat == eos))
+            is_marker = mx.logical_or(flat == self._open_id, flat == self._close_id)
+            for eos in self._eos_ids:
+                is_marker = mx.logical_or(is_marker, flat == eos)
+            saw_visible = mx.any(mx.logical_not(is_marker))
             self._in_think = mx.logical_and(
                 mx.logical_or(self._in_think, saw_open),
-                mx.logical_not(saw_stop),
+                mx.logical_not(mx.logical_or(saw_close, saw_eos)),
+            )
+            self._awaiting_visible = mx.logical_and(
+                mx.logical_or(self._awaiting_visible, saw_close),
+                mx.logical_not(mx.logical_or(saw_visible, saw_eos)),
             )
         return tokens
 
@@ -129,6 +141,31 @@ class _SamplerWrapper:
 
     def __getattr__(self, name):
         return getattr(self._sampler, name)
+
+
+
+
+def prime_reasoning_guard(sampler, prompt_token_ids) -> None:
+    """Initialize a guarded sampler's think-state from the PROMPT tail.
+
+    Templates that pre-open the think block put <think> in the PROMPT — the
+    sampler never sees it as one of its own outputs, so without priming the
+    guard never engages (measured live: qwen4_exp appends "<think>\n" to the
+    generation prompt). Only the tail matters: a pre-opened block sits at the
+    very end of the prompt.
+    """
+    if not isinstance(sampler, _ReasoningEosGuardedSampler):
+        return
+    if not prompt_token_ids:
+        return
+    tail = list(prompt_token_ids)[-64:]
+    for token in reversed(tail):
+        t = int(token)
+        if t == sampler._close_id:
+            return
+        if t == sampler._open_id:
+            sampler._in_think = mx.array(True)
+            return
 
 
 def make_sampler(

@@ -3792,6 +3792,9 @@ class Scheduler:
                 top_k=params.top_k,
                 seed=int(seed),
             )
+        from .sampling import prime_reasoning_guard
+
+        prime_reasoning_guard(sampler, getattr(request, "prompt_token_ids", None))
         request._seeded_sampler = sampler
         return sampler
 

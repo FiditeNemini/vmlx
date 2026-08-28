@@ -13618,13 +13618,18 @@ class MLLMBatchGenerator:
         if cached is not None:
             return cached
 
-        from .sampling import make_sampler
+        from .sampling import make_sampler, prime_reasoning_guard
         base_sampler = make_sampler(
             temp=request.temperature,
             top_p=request.top_p,
             top_k=request.top_k if request.top_k > 0 else 0,
             min_p=request.min_p if request.min_p > 0 else 0.0,
             seed=getattr(request, "seed", None),
+        )
+        # Pre-opened think templates put <think> in the prompt; the EOS
+        # guard's state machine must start inside the block for them.
+        prime_reasoning_guard(
+            base_sampler, getattr(request, "prompt_token_ids", None)
         )
 
         logits_processors = []

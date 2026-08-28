@@ -51,6 +51,7 @@ def test_eos_banned_inside_think_and_allowed_after_close():
     inside = int(s(_logits_pref(EOS)).item())
     assert inside != EOS
     assert int(s(_logits_pref(CLOSE)).item()) == CLOSE      # think closes
+    assert int(s(_logits_pref(WORD)).item()) == WORD        # visible answer token
     assert int(s(_logits_pref(EOS)).item()) == EOS          # EOS now legal
 
 
@@ -64,6 +65,7 @@ def test_state_resets_after_eos_for_sampler_reuse():
     s = _guarded()
     assert int(s(_logits_pref(OPEN)).item()) == OPEN
     assert int(s(_logits_pref(CLOSE)).item()) == CLOSE
+    assert int(s(_logits_pref(WORD)).item()) == WORD
     assert int(s(_logits_pref(EOS)).item()) == EOS
     # A generator-owned sampler may serve the next request: EOS must not be
     # banned by stale think state.
@@ -119,3 +121,42 @@ def test_exact_live_failure_sequence_now_completes():
     assert EOS not in out[:4]           # the mid-think EOS was refused
     assert out[4] == CLOSE
     assert out[-1] == EOS               # normal stop after visible content
+
+
+def test_priming_from_pre_opened_prompt_tail():
+    """qwen4_exp's template appends <think>\n to the generation prompt — the
+    guard must start INSIDE the block even though it never samples OPEN."""
+    s = _guarded()
+    sampling.prime_reasoning_guard(s, [1, 2, OPEN])
+    banned = int(s(_logits_pref(EOS)).item())
+    assert banned != EOS                                     # engaged from token 0
+    assert int(s(_logits_pref(CLOSE)).item()) == CLOSE
+    assert int(s(_logits_pref(WORD)).item()) == WORD
+    assert int(s(_logits_pref(EOS)).item()) == EOS
+
+
+def test_priming_ignores_closed_blocks_in_history():
+    s = _guarded()
+    sampling.prime_reasoning_guard(s, [OPEN, WORD, CLOSE, WORD])
+    assert int(s(_logits_pref(EOS)).item()) == EOS
+
+
+def test_close_then_immediate_eos_is_refused_until_visible_token():
+    """Second measured failure shape: the model closes think and EOSes with
+    zero visible answer. At least one visible token must follow the close."""
+    s = _guarded()
+    assert int(s(_logits_pref(OPEN)).item()) == OPEN
+    assert int(s(_logits_pref(CLOSE)).item()) == CLOSE
+    refused = int(s(_logits_pref(EOS)).item())
+    assert refused != EOS
+    assert int(s(_logits_pref(WORD)).item()) == WORD
+    assert int(s(_logits_pref(EOS)).item()) == EOS
+
+
+def test_primed_close_then_eos_also_refused():
+    s = _guarded()
+    sampling.prime_reasoning_guard(s, [OPEN])
+    assert int(s(_logits_pref(CLOSE)).item()) == CLOSE
+    assert int(s(_logits_pref(EOS)).item()) != EOS
+    assert int(s(_logits_pref(WORD)).item()) == WORD
+    assert int(s(_logits_pref(EOS)).item()) == EOS

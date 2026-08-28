@@ -16,7 +16,6 @@ on:
       private_evidence_root:
         description: Absolute private evidence root on the release runner
         required: true
-        default: /Users/eric/vmlx-private-evidence
 
 permissions:
   contents: read

@@ -231,3 +231,47 @@ def test_unsigned_dev_escape_hatch_is_impossible_in_production():
     assert '"$DEV_UNSIGNED" == "1" && "$RELEASE_SCOPE" != "codex_ui_only"' in source
     assert "unsigned DMGs are allowed only" in source
     assert "--config.mac.identity=null" in source
+
+
+def test_release_automation_excludes_private_docs_and_machine_paths():
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--no-index", "docs/internal/ISSUE-LEDGER.md"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert ignored.returncode == 0
+    assert ignored.stdout.strip() == "docs/internal/ISSUE-LEDGER.md"
+
+    tracked = subprocess.run(
+        ["git", "ls-files", "docs/internal"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert tracked.stdout == ""
+
+    public_release_files = [
+        *(ROOT / ".github/workflows").glob("*.yml"),
+        *(ROOT / ".github/scripts").glob("*"),
+        ROOT / "docs/development/release-automation.md",
+    ]
+    public_text = "\n".join(
+        path.read_text(errors="replace")
+        for path in public_release_files
+        if path.is_file()
+    )
+    forbidden = (
+        "/Users/",
+        "/private/tmp",
+        "docs/internal",
+        "ISSUE-LEDGER",
+        "TO-DO-AFTER-RELEASE",
+        "bench-keep",
+        "remote-cdp",
+        ".ndjson",
+        "screenshot",
+    )
+    assert not [needle for needle in forbidden if needle in public_text]

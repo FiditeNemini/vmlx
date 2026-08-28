@@ -30,11 +30,9 @@ The runner needs Node 22.12 or newer at `/opt/homebrew/bin/node`, matching
 `npm` and `npx`, a current full Xcode selected with `xcode-select`, Python 3.11
 or newer, enough disk for both app bundles, and the private evidence root used
 by the production gate. Keep the private evidence root outside the Git
-checkout. The workflow defaults to:
-
-```text
-/Users/eric/vmlx-private-evidence
-```
+checkout. The candidate workflow requires its absolute path as an explicit
+dispatch input; no runner username or machine-specific path is stored in the
+public workflow.
 
 The runner does not need a persistent release keychain. The candidate workflow
 creates a per-run keychain, imports the certificate and App Store Connect API

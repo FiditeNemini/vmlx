@@ -2810,6 +2810,16 @@ class BlockAwarePrefixCache:
         except AttributeError:
             return str(terminal_hash)
 
+    # request_id suffixes the server layer appends for a SECOND, internal
+    # fetch_cache() call issued for the same user-facing request (e.g. the
+    # bounded ":visible-answer" retry when reasoning content exhausts budget
+    # with no visible answer yet -- server.py's answer_kwargs["request_id"]).
+    # A naive reader of last_fetch_telemetry right after a response can land
+    # on this internal call instead of the base request's own fetch; expose
+    # is_internal_continuation/base_request_id so a caller can filter without
+    # string-matching request_id itself.
+    _FETCH_TELEMETRY_CONTINUATION_SUFFIXES = (":visible-answer",)
+
     def _record_fetch_telemetry(
         self,
         *,
@@ -2832,8 +2842,17 @@ class BlockAwarePrefixCache:
         observability add-on into a request-affecting change.
         """
         try:
+            base_request_id = request_id
+            is_continuation = False
+            for suffix in self._FETCH_TELEMETRY_CONTINUATION_SUFFIXES:
+                if request_id.endswith(suffix):
+                    base_request_id = request_id[: -len(suffix)]
+                    is_continuation = True
+                    break
             record: Dict[str, Any] = {
                 "request_id": request_id,
+                "base_request_id": base_request_id,
+                "is_internal_continuation": is_continuation,
                 "cache_key": cache_key,
                 "match_kind": match_kind,
                 "origin": origin,
@@ -8705,6 +8724,14 @@ class BlockAwarePrefixCache:
             # debug flag needed since that surface already exposes internal
             # cache-routing detail unconditionally.
             "last_fetch_telemetry": self._last_fetch_telemetry,
+            "last_fetch_telemetry_excluding_continuations": next(
+                (
+                    r
+                    for r in reversed(self._fetch_telemetry.values())
+                    if not r.get("is_internal_continuation")
+                ),
+                None,
+            ),
             "recent_fetch_telemetry": list(self._fetch_telemetry.values())[-20:],
             **paged_stats,
         }

@@ -149,6 +149,52 @@ class TestFetchCacheTelemetryTaxonomy:
             f"reader-{i}" for i in range(5)
         ]
 
+    def test_visible_answer_continuation_is_labeled_and_excludable(self):
+        """A base request's own fetch_cache() call must stay findable as
+        "last_fetch_telemetry_excluding_continuations" even after a second,
+        internal ":visible-answer" retry fetch overwrites plain
+        last_fetch_telemetry (task #31 -- found live: a genuinely cold base
+        request's real miss/0 result was masked by a later continuation
+        fetch reporting an unrelated hit, and a naive last_fetch_telemetry
+        reader had no way to tell them apart without string-matching
+        request_id itself).
+        """
+        mx = pytest.importorskip("mlx.core")
+        paged, cache = _new_cache()
+        tokens = list(range(8))
+
+        # Base request: genuine miss, nothing stored yet.
+        cache.fetch_cache("chatcmpl-abc", tokens)
+        base_telemetry = cache.get_stats()["last_fetch_telemetry"]
+        assert base_telemetry["request_id"] == "chatcmpl-abc"
+        assert base_telemetry["base_request_id"] == "chatcmpl-abc"
+        assert base_telemetry["is_internal_continuation"] is False
+        assert base_telemetry["match_kind"] == "miss"
+
+        # Something else stores the prefix (e.g. the base pass's own prefill),
+        # then the bounded visible-answer retry re-fetches it as a genuine hit.
+        cache.store_cache("writer", tokens, _tensor_snapshot(mx, len(tokens)))
+        cache.fetch_cache("chatcmpl-abc:visible-answer", tokens + [99])
+
+        stats = cache.get_stats()
+        assert stats["last_fetch_telemetry"]["request_id"] == (
+            "chatcmpl-abc:visible-answer"
+        )
+        assert stats["last_fetch_telemetry"]["is_internal_continuation"] is True
+        assert stats["last_fetch_telemetry"]["base_request_id"] == "chatcmpl-abc"
+
+        # The convenience field must skip the continuation and surface the
+        # base request's own real telemetry, not silently drop it either --
+        # both entries stay present in recent_fetch_telemetry.
+        excluding = stats["last_fetch_telemetry_excluding_continuations"]
+        assert excluding["request_id"] == "chatcmpl-abc"
+        assert excluding["match_kind"] == "miss"
+        assert excluding["logical_restored_tokens"] == 0
+        assert {r["request_id"] for r in stats["recent_fetch_telemetry"]} == {
+            "chatcmpl-abc",
+            "chatcmpl-abc:visible-answer",
+        }
+
     def test_reset_stats_clears_fetch_telemetry(self):
         _paged, cache = _new_cache()
         cache.fetch_cache("reader", [1, 2, 3])

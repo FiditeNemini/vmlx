@@ -272,6 +272,19 @@ def _run_inference_test(model_path: str) -> tuple[bool, str]:
         from ..utils.nemotron_latent_moe import ensure_latent_moe_support
         ensure_latent_moe_support(model_path)
 
+        # vmlx#262: native-MTP bundles store the MTP MoE stacked
+        # (mtp.layers.N.mlp.switch_mlp.*). Serve applies the sanitize/runtime
+        # patches before building the module tree; without them the tree is
+        # built per-expert and weight binding KeyErrors on
+        # 'language_model.mtp.layers.0.mlp.experts.0.gate_proj.weight' -- a
+        # doctor-only false negative (same class as #213). maybe_apply_
+        # native_mtp() self-inspects and is a no-op on non-MTP bundles.
+        try:
+            from ..native_mtp import maybe_apply_native_mtp
+            maybe_apply_native_mtp(model_path, allow_runtime=False)
+        except Exception as mtp_err:
+            logger.debug(f"doctor: native MTP pre-load autodetect skipped: {mtp_err}")
+
         from mlx_lm.sample_utils import make_sampler
 
         # Use load_model_with_fallback which detects JANG models and routes

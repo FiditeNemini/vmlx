@@ -143,7 +143,23 @@ check_local_jang_source_clean() {
   # is simply behind origin/main passes every check above and silently bundles
   # a stale JANG — that is how a release went out with the pre-fix DSV4 decode
   # path, from a long-lived feature branch that looked perfectly healthy.
-  if [ "${VMLX_ALLOW_STALE_JANG_SOURCE:-0}" = "1" ]; then
+  #
+  # VMLX_JANG_TOOLS_RELEASE_PIN is the release-grade alternative to the
+  # generic stale bypass: it names ONE exact full commit that this release
+  # deliberately bundles even though origin/main has moved on (e.g. 1.6.44
+  # pins 3a5101e — the runtime already shipped as jang 2.5.46 — while the
+  # unreleased Aug-27 sync on origin/main awaits its own 2.5.47 release).
+  # The pin only passes when HEAD matches it exactly, so it cannot silently
+  # bless an arbitrary stale checkout the way ALLOW_STALE does.
+  if [ -n "${VMLX_JANG_TOOLS_RELEASE_PIN:-}" ]; then
+    _jang_head="$(git -C "$JANG_LOCAL" rev-parse HEAD)"
+    if [ "$_jang_head" != "$VMLX_JANG_TOOLS_RELEASE_PIN" ]; then
+      echo "ERROR: RELEASE BLOCKED — jang-tools HEAD $_jang_head does not match" >&2
+      echo "       VMLX_JANG_TOOLS_RELEASE_PIN=$VMLX_JANG_TOOLS_RELEASE_PIN" >&2
+      exit 1
+    fi
+    echo "    jang-tools release pin matched: $_jang_head (freshness gate satisfied by exact pin)" >&2
+  elif [ "${VMLX_ALLOW_STALE_JANG_SOURCE:-0}" = "1" ]; then
     echo "    WARNING: VMLX_ALLOW_STALE_JANG_SOURCE=1 — not checking jang-tools freshness" >&2
   elif git -C "$JANG_LOCAL" rev-parse --verify --quiet origin/main >/dev/null; then
     local behind

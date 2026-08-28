@@ -11156,6 +11156,22 @@ class MLLMBatchGenerator:
             # legacy prefix, disk L2, SSM companion — so benchmark runs get
             # fresh execution without pollution from prior multimodal requests.
             _mllm_bypass = bool(getattr(req, "_bypass_prefix_cache", False))
+            if _mllm_bypass:
+                req._cache_execution.update(
+                    {
+                        "selection": "bypass",
+                        "cache_outcome": "bypass",
+                        "fallback_reason": "skip_prefix_cache",
+                    }
+                )
+                _record_fetch_bypass = getattr(
+                    self.block_aware_cache, "record_fetch_bypass", None
+                )
+                if callable(_record_fetch_bypass):
+                    _record_fetch_bypass(
+                        req.request_id,
+                        attempted_tokens=len(_all_tokens),
+                    )
             _media_context = self._request_has_media_cache_context(req)
             _media_cache_allowed = (
                 _media_context and self._media_prefix_cache_allowed(req)
@@ -12817,6 +12833,14 @@ class MLLMBatchGenerator:
                     int(execution.get("attempted_cached_tokens", 0) or 0),
                     _final_cached_tokens,
                 )
+                if bool(getattr(req, "_bypass_prefix_cache", False)):
+                    _cache_outcome = "bypass"
+                elif _final_cached_tokens > 0:
+                    _cache_outcome = "hit"
+                elif _attempted_cached_tokens > 0:
+                    _cache_outcome = "discarded"
+                else:
+                    _cache_outcome = "miss"
                 execution.update(
                     {
                         "request_id": normalize_ssm_telemetry_request_id(
@@ -12839,13 +12863,7 @@ class MLLMBatchGenerator:
                         "prefill_tokens": _mllm_input_ids_token_count(
                             req.input_ids
                         ),
-                        "cache_outcome": (
-                            "hit"
-                            if _final_cached_tokens > 0
-                            else "discarded"
-                            if _attempted_cached_tokens > 0
-                            else "miss"
-                        ),
+                        "cache_outcome": _cache_outcome,
                         "cache_reuse_applied": bool(
                             req.prompt_cache is not None
                             and _final_cached_tokens > 0

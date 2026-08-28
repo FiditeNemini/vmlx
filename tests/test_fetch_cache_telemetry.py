@@ -109,6 +109,31 @@ class TestFetchCacheTelemetryTaxonomy:
         assert telemetry["match_kind"] == "empty_request"
         assert telemetry["logical_restored_tokens"] == 0
 
+    def test_request_bypass_replaces_stale_fetch_telemetry_without_cache_io(self):
+        _paged, cache = _new_cache()
+
+        cache.fetch_cache("prior-request", [1, 2, 3, 4, 5])
+        counters_before = (
+            cache.get_stats()["hits"],
+            cache.get_stats()["misses"],
+            cache.get_stats()["tokens_saved"],
+        )
+
+        cache.record_fetch_bypass("bypass-request", attempted_tokens=4096)
+
+        stats = cache.get_stats()
+        telemetry = stats["last_fetch_telemetry"]
+        assert telemetry["request_id"] == "bypass-request"
+        assert telemetry["match_kind"] == "request_bypass"
+        assert telemetry["origin"] is None
+        assert telemetry["logical_restored_tokens"] == 0
+        assert telemetry["source"] == "none"
+        assert telemetry["miss_reason"] == "skip_prefix_cache"
+        assert telemetry["attempted_tokens"] == 4096
+        assert (stats["hits"], stats["misses"], stats["tokens_saved"]) == (
+            counters_before
+        )
+
     def test_n_minus_1_partial_index_origin_recorded_when_alt_lookup_wins(self):
         """The alt (tokens[:-1]) lookup winning is the real N-1 branch.
 

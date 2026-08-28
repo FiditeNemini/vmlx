@@ -2883,6 +2883,31 @@ class BlockAwarePrefixCache:
                 exc_info=True,
             )
 
+    def record_fetch_bypass(
+        self,
+        request_id: str,
+        *,
+        attempted_tokens: int,
+    ) -> None:
+        """Record an intentional per-request fetch bypass.
+
+        ``skip_prefix_cache`` deliberately avoids calling ``fetch_cache()``.
+        Without a record at that owning branch, the process-wide health
+        snapshot keeps exposing the preceding request's hit or miss as though
+        it belonged to the bypassed request.  This method is telemetry-only:
+        it does not consult, mutate, fetch, store, or account cache state.
+        """
+
+        self._record_fetch_telemetry(
+            request_id=request_id,
+            match_kind="request_bypass",
+            origin=None,
+            logical_restored_tokens=0,
+            source="none",
+            miss_reason="skip_prefix_cache",
+            attempted_tokens=attempted_tokens,
+        )
+
     def _write_admission_timeout_for_store(
         self,
         *,

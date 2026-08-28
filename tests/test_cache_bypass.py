@@ -323,6 +323,30 @@ class TestSchedulerBypassGating:
             f"fetches — found only {src.count('not _mllm_bypass')} gates"
         )
 
+    def test_bypass_records_current_request_cache_telemetry_at_both_owners(self):
+        """A bypass must replace the preceding request's health telemetry.
+
+        The standard and MLLM schedulers intentionally skip ``fetch_cache``;
+        both therefore own an explicit, zero-restore bypass record.
+        """
+        scheduler_src = self._read("vmlx_engine/scheduler.py")
+        scheduler_start = scheduler_src.index(
+            "_bypass = bool(getattr(request, \"_bypass_prefix_cache\""
+        )
+        scheduler_window = scheduler_src[scheduler_start : scheduler_start + 5000]
+        assert '"record_fetch_bypass"' in scheduler_window
+        assert "callable(_record_fetch_bypass)" in scheduler_window
+
+        mllm_src = self._read("vmlx_engine/mllm_batch_generator.py")
+        mllm_start = mllm_src.index(
+            "_mllm_bypass = bool(getattr(req, \"_bypass_prefix_cache\""
+        )
+        mllm_window = mllm_src[mllm_start : mllm_start + 1800]
+        assert '"record_fetch_bypass"' in mllm_window
+        assert "callable(_record_fetch_bypass)" in mllm_window
+        assert '"selection": "bypass"' in mllm_window
+        assert '"cache_outcome": "bypass"' in mllm_window
+
     def test_mllm_batch_generator_bypass_skips_ssm_capture_work(self):
         src = self._read("vmlx_engine/mllm_batch_generator.py")
         clean_idx = src.index("def _clean_ssm_boundary_for(")

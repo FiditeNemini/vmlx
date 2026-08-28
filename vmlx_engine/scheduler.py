@@ -6234,6 +6234,15 @@ class Scheduler:
             _gpl_suffix_tokens = []
         _cache_extra_keys = getattr(request, "_cache_extra_keys", None)
 
+        _record_fetch_bypass = getattr(
+            self.block_aware_cache, "record_fetch_bypass", None
+        )
+        if _bypass and callable(_record_fetch_bypass):
+            _record_fetch_bypass(
+                request.request_id,
+                attempted_tokens=len(_fetch_tokens),
+            )
+
         if self.block_aware_cache is not None and not _bypass:
             # Use paged cache
             request._paged_disk_hit = False

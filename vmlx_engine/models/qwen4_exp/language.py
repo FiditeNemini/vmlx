@@ -59,14 +59,17 @@ def _layer_profile_enabled(input_ids: Optional[mx.array]) -> bool:
     It separates SSD PLE lookup, GDN/QSA, routed MoE, and residual mixing wall
     time instead of attributing the whole lazy graph to a later ``mx.eval``.
     """
-    if os.environ.get("VMLINUX_QWEN4_PROFILE_LAYERS", "").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    mode = os.environ.get("VMLINUX_QWEN4_PROFILE_LAYERS", "").lower()
+    if mode not in {"1", "true", "yes", "on", "prefill", "all"}:
         return False
-    return input_ids is not None and input_ids.ndim == 2 and input_ids.shape[-1] == 1
+    if input_ids is None or input_ids.ndim != 2:
+        return False
+    seq_len = input_ids.shape[-1]
+    if mode == "prefill":
+        return seq_len > 1
+    if mode == "all":
+        return True
+    return seq_len == 1
 
 
 def _profile_eval(*values: mx.array) -> float:
@@ -538,11 +541,19 @@ class ShardedNGramEmbedding(nn.Module):
         self._file_backed = table
         self.output_dtype = table.output_dtype if output_dtype is None else output_dtype
 
-    def __call__(self, rows_np: np.ndarray) -> mx.array:
+    def __call__(
+        self,
+        rows_np: np.ndarray,
+        profile: Optional[Dict[str, float]] = None,
+    ) -> mx.array:
         """rows_np: int64 [B, S, H] row ids into the concatenated table."""
         fb = getattr(self, "_file_backed", None)
         if fb is not None:
-            vals = fb.gather_mlx(rows_np.reshape(-1))
+            vals = (
+                fb.gather_mlx(rows_np.reshape(-1))
+                if profile is None
+                else fb.gather_mlx(rows_np.reshape(-1), profile=profile)
+            )
             if self.output_dtype is not None and vals.dtype != self.output_dtype:
                 vals = vals.astype(self.output_dtype)
             return vals.reshape(*rows_np.shape, self.head_dim)
@@ -606,14 +617,25 @@ class PLELayer(nn.Module):
         # depthwise dilated conv taps: checkpoint [C,1,K] → sanitized to [C,K]
         self.conv1d_weight = mx.zeros((hc_hidden, self.conv_kernel_size))
 
-    def _embed(self, input_ids: mx.array, cache) -> mx.array:
+    def _embed(
+        self,
+        input_ids: mx.array,
+        cache,
+        profile: Optional[Dict[str, float]] = None,
+    ) -> mx.array:
+        started = time.perf_counter() if profile is not None else None
         ids_np = np.asarray(input_ids, dtype=np.int64)
         if cache is not None and cache[2] is not None:
             prev = np.asarray(cache[2], dtype=np.int64)
         else:
             prev = None
         rows = self.hasher.hash_tokens(ids_np, prev)  # [B, S, heads]
-        emb = self.ngram_embedding(rows)  # [B, S, heads, head_dim]
+        if profile is not None:
+            profile["hash_cpu_ms"] = (time.perf_counter() - started) * 1000.0
+        emb = self.ngram_embedding(
+            rows,
+            profile=profile,
+        )  # [B, S, heads, head_dim]
         if cache is not None:
             ctx = np.concatenate(
                 [
@@ -662,19 +684,48 @@ class PLELayer(nn.Module):
         )
         mx.eval(*self._conv_taps)
 
-    def __call__(self, hidden_states: mx.array, input_ids: mx.array, cache) -> mx.array:
-        emb = self._embed(input_ids, cache)
+    def __call__(
+        self,
+        hidden_states: mx.array,
+        input_ids: mx.array,
+        cache,
+        profile: bool = False,
+    ) -> mx.array:
+        phases: Optional[Dict[str, float]] = {} if profile else None
+        total_started = time.perf_counter() if profile else None
+        emb = self._embed(input_ids, cache, profile=phases)
+        projection_started = time.perf_counter() if profile else None
         key = self.norm_key(self.key_proj(emb))
         key = key.reshape(*key.shape[:-1], self.hc_count, self.hidden_size)
         value = self.value_proj(emb)
         query = self.norm_query(hidden_states)
         query = query.reshape(*query.shape[:-1], self.hc_count, self.hidden_size)
+        if phases is not None:
+            mx.eval(key, value, query)
+            phases["projections_gpu_ms"] = (
+                time.perf_counter() - projection_started
+            ) * 1000.0
+        finalize_started = time.perf_counter() if profile else None
         gate = (key * query).sum(-1, keepdims=True) / (self.hidden_size**0.5)
         gate = mx.sqrt(mx.maximum(mx.abs(gate), 1e-6)) * mx.sign(gate)
         gated_value = mx.sigmoid(gate) * value[..., None, :]
         gated_value = gated_value.reshape(*gated_value.shape[:-2], -1)
         gated_value_normed = self.norm_conv(gated_value)
-        return gated_value + self._short_conv(gated_value_normed, cache)
+        output = gated_value + self._short_conv(gated_value_normed, cache)
+        if phases is not None:
+            mx.eval(output)
+            phases["gate_conv_gpu_ms"] = (
+                time.perf_counter() - finalize_started
+            ) * 1000.0
+            logger.info(
+                "QWEN4_PLE_PROFILE seq_len=%d total_ms=%.3f phases_ms=%s",
+                input_ids.shape[-1],
+                (time.perf_counter() - total_started) * 1000.0,
+                ",".join(
+                    f"{name}:{value:.3f}" for name, value in phases.items()
+                ),
+            )
+        return output
 
 
 # --------------------------------------------------------------------------- #
@@ -1289,7 +1340,10 @@ class DecoderLayer(nn.Module):
                 confirmed_ids = input_ids[:, :n_confirmed]
                 draft_ids = input_ids[:, n_confirmed:]
                 confirmed_h = confirmed_h + self.ple(
-                    confirmed_h, confirmed_ids, cache
+                    confirmed_h,
+                    confirmed_ids,
+                    cache,
+                    profile=profile_layer is not None,
                 )
                 ple_context = cache[2]
                 ple_conv = cache[3]
@@ -1311,10 +1365,20 @@ class DecoderLayer(nn.Module):
                     return _cache[2], _cache[3]
 
                 cache.rollback_aux_to = rollback_aux_to
-                draft_h = draft_h + self.ple(draft_h, draft_ids, cache)
+                draft_h = draft_h + self.ple(
+                    draft_h,
+                    draft_ids,
+                    cache,
+                    profile=profile_layer is not None,
+                )
                 h = mx.concatenate([confirmed_h, draft_h], axis=1)
             else:
-                h = h + self.ple(h, input_ids, cache)
+                h = h + self.ple(
+                    h,
+                    input_ids,
+                    cache,
+                    profile=profile_layer is not None,
+                )
             if profile_layer is not None:
                 phase_ms["ple"] = _profile_eval(h)
 
@@ -1381,7 +1445,10 @@ class Qwen4ExpTextModel(nn.Module):
         h = mx.tile(h, (1, 1, self.args.hc_count))
         profile = _layer_profile_enabled(inputs)
         if profile:
-            logger.info("QWEN4_LAYER_PROFILE begin seq_len=1")
+            logger.info(
+                "QWEN4_LAYER_PROFILE begin seq_len=%d",
+                inputs.shape[-1],
+            )
         if cache is None:
             cache = [None] * len(self.layers)
         for layer_index, (layer, c) in enumerate(zip(self.layers, cache)):

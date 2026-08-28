@@ -835,7 +835,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         "hyper_fused=%s, hyper_compiled=%s, hyper_dtype_normalized=%s/%s, "
         "zero_norms_folded=%s, runtime_compute_dtype=%s, runtime_dtype_casts=%s, "
         "runtime_dtype_mismatches=%s, ple_storage_dtype=%s, "
-        "ple_output_dtype=%s)",
+        "ple_output_dtype=%s, ple_random_access_advised=%s/%s)",
         model_config.text_config.split_ngram_parts,
         model_config.text_config.mtp_num_hidden_layers,
         fused_hyper,
@@ -848,5 +848,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         runtime_dtype_mismatches,
         table.output_dtype,
         runtime_dtype if runtime_dtype is not None else table.output_dtype,
+        table.random_access_advised_readers,
+        table.random_access_reader_count,
     )
     return model, processor

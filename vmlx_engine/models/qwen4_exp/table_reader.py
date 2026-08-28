@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import mmap
 import struct
+import time
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -28,6 +30,26 @@ _MLX_DTYPES = {
     "U32": mx.uint32,
     "I64": mx.int64,
 }
+
+
+def _advise_random_access(array: np.memmap) -> bool:
+    """Tell the kernel that PLE table pages are sparse random reads.
+
+    The hash table lookup touches nearly unique rows spread across a very large
+    file.  Default sequential readahead therefore fetches pages that the
+    request will not use.  Keep this best-effort so platforms without
+    ``madvise`` retain the original reader behavior.
+    """
+    mapping = getattr(array, "_mmap", None)
+    advice = getattr(mmap, "MADV_RANDOM", None)
+    madvise = getattr(mapping, "madvise", None)
+    if advice is None or not callable(madvise):
+        return False
+    try:
+        madvise(advice)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
 
 
 def resolve_jang_bit_map_spec(
@@ -221,6 +243,7 @@ class SafetensorsRowReader:
             offset=8 + header_len + start,
             shape=self.shape,
         )
+        self.random_access_advised = _advise_random_access(self.mm)
 
     def rows(self, indices: np.ndarray) -> np.ndarray:
         values = self.mm[indices]
@@ -291,14 +314,39 @@ class _AffineShard:
     def output_dtype(self):
         return self.scales.mlx_dtype
 
-    def gather_mlx(self, rows: np.ndarray) -> mx.array:
-        packed = self.weight.mlx_rows(rows)
+    def gather_mlx(
+        self,
+        rows: np.ndarray,
+        profile: dict[str, float] | None = None,
+    ) -> mx.array:
+        if profile is None:
+            packed = self.weight.mlx_rows(rows)
+        else:
+            started = time.perf_counter()
+            packed_rows = self.weight.rows(rows)
+            scale_rows = self.scales.rows(rows)
+            bias_rows = self.biases.rows(rows)
+            profile["ssd_rows_cpu_ms"] = profile.get("ssd_rows_cpu_ms", 0.0) + (
+                time.perf_counter() - started
+            ) * 1000.0
+
+            started = time.perf_counter()
+            packed = mx.array(packed_rows).astype(self.weight.mlx_dtype)
+            scales = mx.array(scale_rows).astype(self.scales.mlx_dtype)
+            biases = mx.array(bias_rows).astype(self.biases.mlx_dtype)
+            mx.eval(packed, scales, biases)
+            profile["host_to_mlx_ms"] = profile.get("host_to_mlx_ms", 0.0) + (
+                time.perf_counter() - started
+            ) * 1000.0
+
+        started = time.perf_counter() if profile is not None else None
         runtime_bits = self.logical_bits
         if self.storage_bits == 1:
             packed = expand_packed_1bit_to_2bit_mlx(packed)
             runtime_bits = 2
-        scales = self.scales.mlx_rows(rows)
-        biases = self.biases.mlx_rows(rows)
+        if profile is None:
+            scales = self.scales.mlx_rows(rows)
+            biases = self.biases.mlx_rows(rows)
         values = mx.dequantize(
             packed,
             scales,
@@ -308,6 +356,11 @@ class _AffineShard:
             mode=self.mode,
             dtype=self.output_dtype,
         )
+        if profile is not None:
+            mx.eval(values)
+            profile["dequant_gpu_ms"] = profile.get("dequant_gpu_ms", 0.0) + (
+                time.perf_counter() - started
+            ) * 1000.0
         if values.shape[-1] != self.head_dim:
             raise ValueError(
                 "PLE dequantized row width differs from the model contract: "
@@ -414,13 +467,26 @@ class FileBackedQuantizedNGramTable:
             ):
                 raise ValueError("PLE final shard row count is invalid")
         self.total_rows = sum(shard.rows_count for shard in self.shards)
+        readers = tuple(
+            reader
+            for shard in self.shards
+            for reader in (shard.weight, shard.scales, shard.biases)
+        )
+        self.random_access_reader_count = len(readers)
+        self.random_access_advised_readers = sum(
+            bool(reader.random_access_advised) for reader in readers
+        )
 
     def gather(self, flat_rows: np.ndarray) -> np.ndarray:
         values = self.gather_mlx(flat_rows)
         mx.eval(values)
         return np.asarray(values).astype(np.float32, copy=False)
 
-    def gather_mlx(self, flat_rows: np.ndarray) -> mx.array:
+    def gather_mlx(
+        self,
+        flat_rows: np.ndarray,
+        profile: dict[str, float] | None = None,
+    ) -> mx.array:
         """Gather random SSD rows and keep dequantized values on the MLX path."""
         flat_rows = np.asarray(flat_rows, dtype=np.int64).reshape(-1)
         if flat_rows.size and int(flat_rows.min()) < 0:
@@ -436,6 +502,13 @@ class FileBackedQuantizedNGramTable:
             selected = np.nonzero(shard_indices == shard_index)[0]
             selected_mx = mx.array(selected.astype(np.uint32))
             out[selected_mx] = self.shards[int(shard_index)].gather_mlx(
-                local_rows[selected]
+                local_rows[selected],
+                profile=profile,
             )
+        if profile is not None:
+            started = time.perf_counter()
+            mx.eval(out)
+            profile["scatter_gpu_ms"] = profile.get("scatter_gpu_ms", 0.0) + (
+                time.perf_counter() - started
+            ) * 1000.0
         return out

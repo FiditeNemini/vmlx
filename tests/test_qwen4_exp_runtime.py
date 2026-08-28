@@ -1570,6 +1570,12 @@ def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
         def mlx_rows(self, rows):
             return self.values[mx.array(rows.astype(np.uint32))]
 
+        def rows(self, rows):
+            values = self.values[mx.array(rows.astype(np.uint32))]
+            if self.dtype_tag == "BF16":
+                values = values.astype(mx.float32)
+            return np.asarray(values)
+
     shard = _AffineShard.__new__(_AffineShard)
     shard.weight = ArrayRows(quantized.weight, "U32")
     shard.scales = ArrayRows(quantized.scales, "BF16")
@@ -1580,6 +1586,11 @@ def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
     shard.mode = "affine"
     shard.head_dim = 64
     gathered = shard.gather_mlx(np.array([0, 2], dtype=np.int64))
+    profile = {}
+    profiled = shard.gather_mlx(
+        np.array([0, 2], dtype=np.int64),
+        profile=profile,
+    )
     assert gathered.dtype == mx.bfloat16
 
     class FileBackedTable:
@@ -1592,15 +1603,111 @@ def test_qwen4_exp_file_backed_ple_preserves_bfloat16_residual_dtype():
     embedding.set_file_backed(FileBackedTable())
     ple = embedding(np.array([[[0], [2]]], dtype=np.int64))
     residual = mx.zeros(ple.shape, dtype=mx.bfloat16) + ple
-    mx.eval(gathered, ple, residual)
+    mx.eval(gathered, profiled, ple, residual)
 
     assert ple.dtype == mx.bfloat16
     assert residual.dtype == mx.bfloat16
+    np.testing.assert_array_equal(
+        np.asarray(profiled.astype(mx.float32)),
+        np.asarray(gathered.astype(mx.float32)),
+    )
+    assert set(profile) == {
+        "ssd_rows_cpu_ms",
+        "host_to_mlx_ms",
+        "dequant_gpu_ms",
+    }
+    assert all(value >= 0 for value in profile.values())
 
     embedding.set_file_backed(FileBackedTable(), output_dtype=mx.float16)
     overridden = embedding(np.array([[[0], [2]]], dtype=np.int64))
     mx.eval(overridden)
     assert overridden.dtype == mx.float16
+
+
+def test_qwen4_exp_layer_profiler_modes(monkeypatch):
+    from vmlx_engine.models.qwen4_exp.language import _layer_profile_enabled
+
+    decode_ids = mx.zeros((1, 1), dtype=mx.int32)
+    prefill_ids = mx.zeros((1, 8), dtype=mx.int32)
+
+    monkeypatch.delenv("VMLINUX_QWEN4_PROFILE_LAYERS", raising=False)
+    assert not _layer_profile_enabled(decode_ids)
+    assert not _layer_profile_enabled(prefill_ids)
+
+    monkeypatch.setenv("VMLINUX_QWEN4_PROFILE_LAYERS", "1")
+    assert _layer_profile_enabled(decode_ids)
+    assert not _layer_profile_enabled(prefill_ids)
+
+    monkeypatch.setenv("VMLINUX_QWEN4_PROFILE_LAYERS", "prefill")
+    assert not _layer_profile_enabled(decode_ids)
+    assert _layer_profile_enabled(prefill_ids)
+
+    monkeypatch.setenv("VMLINUX_QWEN4_PROFILE_LAYERS", "all")
+    assert _layer_profile_enabled(decode_ids)
+    assert _layer_profile_enabled(prefill_ids)
+
+
+def test_qwen4_exp_profiled_file_backed_gather_preserves_row_order():
+    from vmlx_engine.models.qwen4_exp.table_reader import (
+        FileBackedQuantizedNGramTable,
+    )
+
+    class FakeShard:
+        def __init__(self, offset):
+            self.offset = offset
+
+        def gather_mlx(self, rows, profile=None):
+            if profile is not None:
+                profile["fake_shard_calls"] = profile.get("fake_shard_calls", 0) + 1
+            return mx.array(rows[:, None] + self.offset, dtype=mx.float32)
+
+    table = FileBackedQuantizedNGramTable.__new__(FileBackedQuantizedNGramTable)
+    table.shards = [FakeShard(0), FakeShard(100)]
+    table.per = 4
+    table.head_dim = 1
+    table.output_dtype = mx.float32
+    table.total_rows = 8
+    rows = np.array([5, 1, 6, 0], dtype=np.int64)
+
+    baseline = table.gather_mlx(rows)
+    profile = {}
+    profiled = table.gather_mlx(rows, profile=profile)
+    mx.eval(baseline, profiled)
+
+    np.testing.assert_array_equal(np.asarray(profiled), np.asarray(baseline))
+    np.testing.assert_array_equal(
+        np.asarray(profiled).reshape(-1),
+        np.array([101.0, 1.0, 102.0, 0.0], dtype=np.float32),
+    )
+    assert profile["fake_shard_calls"] == 2
+    assert profile["scatter_gpu_ms"] >= 0
+
+
+def test_qwen4_exp_ple_random_access_advice_is_fail_safe():
+    from vmlx_engine.models.qwen4_exp.table_reader import _advise_random_access
+
+    class Mapping:
+        def __init__(self, error=None):
+            self.calls = []
+            self.error = error
+
+        def madvise(self, advice):
+            self.calls.append(advice)
+            if self.error is not None:
+                raise self.error
+
+    class MemMap:
+        def __init__(self, mapping):
+            self._mmap = mapping
+
+    mapping = Mapping()
+    assert _advise_random_access(MemMap(mapping)) is True
+    assert len(mapping.calls) == 1
+
+    unsupported = Mapping(OSError("unsupported"))
+    assert _advise_random_access(MemMap(unsupported)) is False
+    assert len(unsupported.calls) == 1
+    assert _advise_random_access(object()) is False
 
 
 @pytest.mark.parametrize("runtime_dtype", [mx.float16, mx.bfloat16])

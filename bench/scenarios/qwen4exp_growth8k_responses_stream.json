@@ -29,5 +29,6 @@
       "expect": "Berlin",
       "expect_reuse": true
     }
-  ]
+  ],
+  "hybrid_companion_family": true
 }

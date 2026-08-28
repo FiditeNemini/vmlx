@@ -37,5 +37,6 @@
       "kind": "tool_round",
       "city": "Tokyo"
     }
-  ]
+  ],
+  "hybrid_companion_family": true
 }

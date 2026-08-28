@@ -13,6 +13,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 
 from api_agentic_scenarios import (  # noqa: E402
+    _grade_cache_match,
+    best_cache_match,
+    classify_cache_candidate,
     expected_block_reuse,
     fit_filler_to_target,
     grade_tool_call,
@@ -138,3 +141,109 @@ class TestDeepSleepConfirmation:
             timeout_s=0.2, interval_s=0.05,
         )
         assert errors and "never confirmed" in errors[0]
+
+
+class TestCacheMatchKindsAndBestMatch:
+    """Six scenarios named by Codex's third re-audit: chain-block,
+    exact-partial (N-1), and best-match-across-history must be modeled
+    separately, never collapsed into one universal formula."""
+
+    def test_tools_off_to_on_diverges_at_the_prompt_head(self):
+        # A tool schema injected before the conversation shifts every
+        # downstream token position -- only the shared system preamble (well
+        # under one block) survives, never a chain-block or N-1 match.
+        no_tools = [1, 2, 3, 4] + list(range(100, 200))
+        tools_on = [1, 2, 3, 4] + list(range(900, 1000))  # diverges at index 4
+        match = classify_cache_candidate(no_tools, tools_on, 64)
+        assert match["match_kind"] == "none"
+        assert match["safe_expected"] == 0
+
+    def test_tools_on_continuation_uses_exact_n_minus_1(self):
+        # The continuation appends assistant tool_call + tool result after
+        # an UNCHANGED tools-on selection prompt -- content is identical
+        # through the selection prompt's own last token, so the N-1 exact
+        # boundary applies (not floored to a block).
+        selection_prompt = [7] * 6432  # not a multiple of 64
+        continuation = selection_prompt[:-1] + [8, 9, 10]
+        match = classify_cache_candidate(selection_prompt, continuation, 64)
+        assert match["match_kind"] == "n_minus_1_exact"
+        assert match["safe_expected"] == 6431
+
+    def test_tools_on_to_off_selects_the_older_compatible_chain(self):
+        # History: an early no-tools chain, then a tools-on turn that
+        # diverges from it near the start. A LATER no-tools turn that shares
+        # no_tools_v1's PREFIX (but then diverges before v1's own end, e.g.
+        # a shorter follow-up question) must match turn 0 via chain-block,
+        # not the intervening tools-on turn 1 it shares almost nothing with.
+        no_tools_v1 = [1, 2, 3] + list(range(100, 100 + 200))  # len 203
+        tools_on = [1, 2, 3] + list(range(900, 900 + 200))
+        no_tools_v2 = no_tools_v1[:150] + [-1, -2, -3]  # LCP=150 with v1, len<v1
+        best = best_cache_match([no_tools_v1, tools_on], no_tools_v2, 64)
+        assert best["source_index"] == 0
+        assert best["match_kind"] == "chain_block"
+        assert best["safe_expected"] == 128  # floor(150/64)*64
+
+    def test_off_boundary_exact_partial_floors_to_the_block(self):
+        # Divergence lands mid-block (not on a 64-token boundary) and well
+        # before the predecessor's own end -- only full chain-hash blocks
+        # are safe, the partial final block is NOT credited.
+        previous = list(range(1000))
+        current = list(range(150)) + [-1] * 850  # LCP=150, floor(150/64)*64=128
+        match = classify_cache_candidate(previous, current, 64)
+        assert match["match_kind"] == "chain_block"
+        assert match["safe_expected"] == 128
+        assert match["safe_expected"] < match["lcp"]
+
+    def test_n_minus_1_wins_over_an_earlier_chain_block_candidate(self):
+        # best_cache_match must pick the candidate with the HIGHEST safe
+        # extent, not the first or the most recent -- here an exact N-1
+        # match against turn 1 beats a larger raw source_len chain-block
+        # partial match against turn 0.
+        turn0 = list(range(2000))  # current diverges from turn0 early
+        turn1 = list(range(5000, 5999))  # current matches turn1 through N-1
+        current = turn1[:-1] + [42]
+        best = best_cache_match([turn0, turn1], current, 64)
+        assert best["source_index"] == 1
+        assert best["match_kind"] == "n_minus_1_exact"
+        assert best["safe_expected"] == 998
+
+    def test_hybrid_companion_over_restore_is_flagged_not_silently_cleared(self):
+        # A hybrid SSM/GDN-companion family's separate short key CAN
+        # legitimately explain extra credit this LCP oracle doesn't model --
+        # but that must still surface as a distinguishable note, never
+        # silently pass as if nothing happened.
+        match = {"safe_expected": 0, "match_kind": "none", "lcp": 40,
+                 "source_len": 6141, "source_index": 0}
+        errors = _grade_cache_match(256, match, "server-verified", hybrid_companion_family=True)
+        assert len(errors) == 1
+        assert "OVER-restore" in errors[0] and "hybrid-companion" in errors[0]
+
+    def test_non_hybrid_over_restore_has_no_exemption(self):
+        match = {"safe_expected": 0, "match_kind": "none", "lcp": 40,
+                 "source_len": 6141, "source_index": 0}
+        errors = _grade_cache_match(256, match, "server-verified", hybrid_companion_family=False)
+        assert len(errors) == 1
+        assert "OVER-restore" in errors[0] and "hybrid-companion" not in errors[0]
+
+    def test_under_restore_always_fails_regardless_of_hybrid_flag(self):
+        match = {"safe_expected": 6400, "match_kind": "chain_block", "lcp": 6432,
+                 "source_len": 6433, "source_index": 0}
+        for hybrid in (True, False):
+            errors = _grade_cache_match(128, match, "server-verified", hybrid_companion_family=hybrid)
+            assert len(errors) == 1 and "UNDER-restore" in errors[0]
+
+    def test_no_slack_exact_boundary_passes_clean(self):
+        match = {"safe_expected": 6400, "match_kind": "chain_block", "lcp": 6432,
+                 "source_len": 6433, "source_index": 0}
+        assert _grade_cache_match(6400, match, "server-verified", False) == []
+
+    def test_responses_approximate_render_never_hard_fails(self):
+        # The Responses wire's client reconstruction was proven wrong
+        # against server telemetry repeatedly this campaign -- any
+        # discrepancy downgrades to an UNVERIFIED note, never UNDER/OVER.
+        match = {"safe_expected": 6400, "match_kind": "chain_block", "lcp": 6432,
+                 "source_len": 6433, "source_index": 0}
+        errors = _grade_cache_match(0, match, "approximate-unverified", False)
+        assert len(errors) == 1
+        assert errors[0].startswith("UNVERIFIED")
+        assert "UNDER-restore" not in errors[0] and "OVER-restore" not in errors[0]

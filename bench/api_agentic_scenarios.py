@@ -506,29 +506,123 @@ def grade_tool_call(calls: list[dict[str, Any]], expected_city: str) -> tuple[di
     return (call if not errors else None), errors
 
 
-def expected_block_reuse(previous_tokens: list[int], current_tokens: list[int], block_tokens: int) -> int:
-    """Expected safe restore from the tokenized longest common prefix — the
-    grading oracle, instead of comparing against the previous turn's cached
-    count.
-
-    Two separate engine mechanisms apply, never composed as
-    block_floor(lcp - 1) (internally inconsistent: block_floor(6140) with a
-    64-token block is 6080, not 6140 -- caught 2026-08-28). When the current
-    render is identical all the way through the predecessor's own last
-    token (lcp >= len(previous_tokens) - 1), the engine's documented N-1
-    partial-terminal-block index applies and the safe extent is exactly
-    len(previous_tokens) - 1, unaligned to any block boundary. Otherwise
-    (content diverges before the predecessor's end -- e.g. a tool schema
-    injected mid-conversation) only full chain-hash blocks are safe.
-    """
+def _tokenized_lcp(previous_tokens: list[int], current_tokens: list[int]) -> int:
     limit = min(len(previous_tokens), len(current_tokens))
     lcp = 0
     while lcp < limit and previous_tokens[lcp] == current_tokens[lcp]:
         lcp += 1
+    return lcp
+
+
+def classify_cache_candidate(
+    previous_tokens: list[int], current_tokens: list[int], block_tokens: int
+) -> dict[str, Any]:
+    """Classify ONE candidate predecessor render against the current render.
+
+    Two separate engine mechanisms apply, never composed as
+    block_floor(lcp - 1) (internally inconsistent: block_floor(6140) with a
+    64-token block is 6080, not 6140 -- caught by Codex re-audit,
+    2026-08-28). When the current render is identical all the way through
+    the candidate's own last token (lcp >= len(previous_tokens) - 1), the
+    engine's documented N-1 partial-terminal-block index applies and the
+    safe extent is exactly len(previous_tokens) - 1, unaligned to any block
+    boundary ("n_minus_1_exact"). Otherwise (content diverges before the
+    candidate's end -- e.g. a tool schema injected mid-conversation) only
+    full chain-hash blocks are safe ("chain_block", possibly 0 -> "none").
+    """
+    lcp = _tokenized_lcp(previous_tokens, current_tokens)
     predecessor_terminal = len(previous_tokens) - 1
     if predecessor_terminal >= 0 and lcp >= predecessor_terminal:
-        return predecessor_terminal
-    return (lcp // block_tokens) * block_tokens
+        return {
+            "safe_expected": predecessor_terminal,
+            "match_kind": "n_minus_1_exact",
+            "lcp": lcp,
+            "source_len": len(previous_tokens),
+        }
+    safe = (lcp // block_tokens) * block_tokens
+    return {
+        "safe_expected": safe,
+        "match_kind": "chain_block" if safe > 0 else "none",
+        "lcp": lcp,
+        "source_len": len(previous_tokens),
+    }
+
+
+def best_cache_match(
+    history: list[list[int]], current_tokens: list[int], block_tokens: int
+) -> dict[str, Any]:
+    """Best-match across EVERY eligible prior render, not only the immediate
+    predecessor -- a later turn can align better with an OLDER chain than
+    with the turn immediately before it (e.g. tools on -> off -> off again
+    should be graded against the earlier no-tools chain, not the
+    intervening tools-on turn it diverged from at the prompt head)."""
+    best: dict[str, Any] = {
+        "safe_expected": 0, "match_kind": "none", "lcp": 0,
+        "source_len": 0, "source_index": None,
+    }
+    for i, previous_tokens in enumerate(history):
+        candidate = classify_cache_candidate(previous_tokens, current_tokens, block_tokens)
+        if candidate["safe_expected"] > best["safe_expected"]:
+            candidate["source_index"] = i
+            best = candidate
+    return best
+
+
+def expected_block_reuse(previous_tokens: list[int], current_tokens: list[int], block_tokens: int) -> int:
+    """Back-compat scalar wrapper over classify_cache_candidate (single
+    candidate). Prefer best_cache_match against the full render history for
+    new call sites -- kept for the existing offline regressions."""
+    return classify_cache_candidate(previous_tokens, current_tokens, block_tokens)["safe_expected"]
+
+
+def _grade_cache_match(
+    observed_cached: int,
+    match: dict[str, Any],
+    render_confidence: str,
+    hybrid_companion_family: bool,
+) -> list[str]:
+    """Fail closed, both directions, no slack.
+
+    Under-restore is ALWAYS a failure when it can be checked: no legitimate
+    engine mechanism reports LESS than the safe extent it actually has.
+    Over-restore is a failure UNLESS the served family is a documented
+    hybrid SSM/GDN-companion family, whose companion cache uses a SEPARATE,
+    SHORTER key than the full attention prefix (memory:
+    ssm_companion_cache_size, key=SHA-256(tokens[:N])) and can legitimately
+    contribute credit this LCP-based oracle does not model -- that case is
+    still surfaced as a note, never silently dropped.
+
+    Responses-wire client reconstruction was PROVEN wrong against server
+    telemetry repeatedly this campaign (2026-08-28 minimal-reproduction
+    probes: tool-schema rendering size never matched any offline
+    reconstruction). Grading Responses turns from that approximation as if
+    it were ground truth would be exactly the "approximate client render"
+    Codex's audit forbade -- downgrade to a note, never a FAIL, unless
+    render_confidence == "server-verified" (chat wire only, currently).
+    """
+    safe = match["safe_expected"]
+    kind = match["match_kind"]
+    note = (
+        f"cache match: observed={observed_cached} safe_expected={safe} "
+        f"kind={kind} source_turn={match.get('source_index')} "
+        f"source_len={match.get('source_len')} lcp={match.get('lcp')} "
+        f"render_confidence={render_confidence}"
+    )
+    if render_confidence != "server-verified":
+        return [f"UNVERIFIED (not graded, approximate client render): {note}"]
+    errors = []
+    if observed_cached < safe:
+        errors.append(f"UNDER-restore: {note}")
+    if observed_cached > safe:
+        if hybrid_companion_family:
+            errors.append(
+                f"OVER-restore vs LCP-based oracle, family is hybrid-companion "
+                f"(SSM/GDN companion has a separate shorter key -- NOT auto-cleared, "
+                f"still requires manual confirmation): {note}"
+            )
+        else:
+            errors.append(f"OVER-restore (non-hybrid family, no companion-credit exemption): {note}")
+    return errors
 
 
 def fit_filler_to_target(
@@ -594,7 +688,19 @@ def run_scenario(
     records: list[TurnRecord] = []
     scenario_errors: list[str] = []
     reuse_watch_from = 3  # project rule: judge reuse from turn 3 on
-    previous_render_tokens: list[int] = []
+    # Full render history (not just the immediate predecessor) -- best-match
+    # must consider every eligible prior turn, since a later turn can align
+    # better with an OLDER chain than the one right before it (Codex
+    # re-audit, 2026-08-28).
+    render_history: list[list[int]] = []
+    # Chat-wire client reconstruction was validated against server telemetry
+    # (matches within the growth tolerance across many live probes). The
+    # Responses wire's client reconstruction was PROVEN wrong repeatedly
+    # this campaign (never matched the server's actual continuation prompt
+    # size regardless of tools/no-tools/thinking permutation) -- grade it as
+    # informational only, never as a pass/fail oracle.
+    render_confidence = "server-verified" if wire_name == "chat" else "approximate-unverified"
+    hybrid_companion_family = bool(manifest.get("hybrid_companion_family", False))
 
     def render_tokens() -> list[int]:
         try:
@@ -661,10 +767,11 @@ def run_scenario(
             continue
 
         request_render = render_tokens()
-        expected_reuse = expected_block_reuse(previous_render_tokens, request_render, block_tokens)
+        best_match = best_cache_match(render_history, request_render, block_tokens)
         record.notes["client_render_tokens"] = len(request_render)
-        record.notes["expected_block_reuse_approx"] = expected_reuse
-        record.notes["render_is_approximation"] = wire_name != "chat"
+        record.notes["cache_match"] = best_match
+        record.notes["render_confidence"] = render_confidence
+        record.notes["hybrid_companion_family"] = hybrid_companion_family
 
         with ContinuousSampler(base, api_key, port) as sampler:
             result = wire.run_turn(
@@ -707,10 +814,13 @@ def run_scenario(
                 wire.commit_tool_result(
                     call, json.dumps({"city": expected_city, "temp_c": 21, "sky": "sunny"})
                 )
+                # request_render joins render_history AFTER this call so the
+                # continuation's own best-match can consider it as a candidate
+                # (the tool round-1 selection prompt) alongside every earlier
+                # turn -- never only the immediate predecessor.
+                render_history.append(request_render)
                 continuation_render = render_tokens()
-                continuation_expected = expected_block_reuse(
-                    request_render, continuation_render, block_tokens
-                )
+                continuation_match = best_cache_match(render_history, continuation_render, block_tokens)
                 with ContinuousSampler(base, api_key, port) as cont_sampler:
                     continuation = wire.run_turn(
                         stream=stream, tools=True,
@@ -724,7 +834,8 @@ def run_scenario(
                     "latency_s": float(continuation.get("latency_s") or 0.0),
                     "errors": list(continuation.get("errors") or []),
                     "memory": cont_sampler.summary(),
-                    "expected_block_reuse_approx": continuation_expected,
+                    "cache_match": continuation_match,
+                    "render_confidence": render_confidence,
                     "raw": {
                         "request_payload": continuation.get("request_payload"),
                         "response_raw": continuation.get("raw"),
@@ -746,22 +857,32 @@ def run_scenario(
                     )
                 wire.commit_assistant(continuation_content, continuation_calls,
                                        reasoning_items=_reasoning(continuation))
-                previous_render_tokens = render_tokens()
+                if index >= reuse_watch_from and turn.get("expect_reuse"):
+                    cache_errors = _grade_cache_match(
+                        cont_record["cached_tokens"], continuation_match,
+                        render_confidence, hybrid_companion_family,
+                    )
+                    cont_record["errors"].extend(cache_errors)
+                    record.errors.extend(cache_errors)
+                render_history.append(continuation_render)
         else:
             if not content.strip():
                 record.errors.append("turn produced no visible content")
             if expect and expect not in content:
                 record.errors.append(f"expected {expect!r} in answer, got {content[:80]!r}")
             wire.commit_assistant(content, [], reasoning_items=_reasoning(result))
-            previous_render_tokens = render_tokens()
+            render_history.append(request_render)
 
         if index >= reuse_watch_from and turn.get("expect_reuse"):
-            slack = 2 * block_tokens
-            if record.cached_tokens + slack < expected_reuse:
-                record.errors.append(
-                    f"reuse below block-aligned expectation: cached={record.cached_tokens}, "
-                    f"expected≈{expected_reuse} (client-render approximation)"
+            # Round-1's own match: kind == "tool_round" fresh selection turns
+            # legitimately expect ~0 (the tool schema shifts the prompt head)
+            # unless the manifest says otherwise -- graded the same as any
+            # other turn, both directions, no exemption for tool rounds.
+            record.errors.extend(
+                _grade_cache_match(
+                    record.cached_tokens, best_match, render_confidence, hybrid_companion_family
                 )
+            )
 
         memory_max = record.notes["memory"].get("active_mb_max")
         if max_active_gb and isinstance(memory_max, (int, float)) and memory_max > max_active_gb * 1024:

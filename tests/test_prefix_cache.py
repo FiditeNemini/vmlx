@@ -548,3 +548,68 @@ if __name__ == "__main__":
             print("=" * 70)
 
     asyncio.run(run_cache_test())
+
+
+class TestMinimaxDetectionWalkIsBounded:
+    """The M3-detection walk once spun forever inside Scheduler.__init__.
+
+    Every visited candidate pushes its _model/model/language_model children.
+    An object that materializes a FRESH child per attribute access (MagicMock,
+    lazy proxies) therefore grew the frontier faster than `seen` drained it,
+    and the full test suite hung at collection-adjacent Scheduler construction.
+    The walk is now capped; these rows pin both the cap and the detection it
+    must not break.
+    """
+
+    def test_self_multiplying_proxy_terminates_and_is_not_m3(self):
+        from vmlx_engine.prefix_cache import _model_is_minimax_m3
+
+        class Endless:
+            def __getattr__(self, name):
+                if name.startswith("__"):
+                    raise AttributeError(name)
+                return Endless()
+
+        import time
+        start = time.monotonic()
+        assert _model_is_minimax_m3(Endless()) is False
+        assert time.monotonic() - start < 2.0
+
+    def test_magicmock_model_terminates(self):
+        from unittest.mock import MagicMock
+        from vmlx_engine.prefix_cache import _model_is_minimax_m3
+
+        import time
+        start = time.monotonic()
+        assert _model_is_minimax_m3(MagicMock()) in (True, False)
+        assert time.monotonic() - start < 2.0
+
+    def test_real_nested_wrapper_chain_still_detects_m3(self):
+        from vmlx_engine.prefix_cache import _model_is_minimax_m3
+
+        class Cfg:
+            model_type = "minimax_m3"
+
+        class Inner:
+            config = Cfg()
+
+        class Mid:
+            config = type("C", (), {"model_type": "wrapper"})()
+            model = Inner()
+
+        class Outer:
+            config = type("C", (), {"model_type": "wrapper"})()
+            language_model = Mid()
+
+        assert _model_is_minimax_m3(Outer()) is True
+
+    def test_plain_non_m3_model_is_false(self):
+        from vmlx_engine.prefix_cache import _model_is_minimax_m3
+
+        class Cfg:
+            model_type = "qwen4_exp"
+
+        class Model:
+            config = Cfg()
+
+        assert _model_is_minimax_m3(Model()) is False

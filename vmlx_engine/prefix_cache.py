@@ -1104,7 +1104,12 @@ def _model_is_minimax_m3(model: Any) -> bool:
     """
     seen: set[int] = set()
     pending = [model]
-    while pending:
+    # Real wrapper chains are a few levels deep. A probe that keeps yielding
+    # fresh objects on every unwrap (auto-creating proxies, test doubles) would
+    # otherwise walk forever — the full suite hung here inside Scheduler.__init__
+    # because MagicMock materializes a new child for each _model/model/
+    # language_model access, so the frontier never drained.
+    while pending and len(seen) < 32:
         candidate = pending.pop()
         if candidate is None or id(candidate) in seen:
             continue

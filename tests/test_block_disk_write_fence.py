@@ -942,7 +942,11 @@ def test_fence_block_wait_rejects_commit_visible_before_budget_eviction(
 
         # This is the old, insufficient boundary: _write_block() has committed
         # the row/file, but aggregate accounting and eviction are still paused.
-        assert store.wait_for_blocks([block_hash], timeout=0.5) == {block_hash}
+        # 5.0s like every sibling wait in this test: under full-suite thread
+        # pressure the background writer needs more than half a second to make
+        # the committed row visible, and this row's visibility is the premise,
+        # not the property under test.
+        assert store.wait_for_blocks([block_hash], timeout=5.0) == {block_hash}
 
         waiter.start()
         waiter_started = True

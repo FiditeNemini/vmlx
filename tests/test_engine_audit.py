@@ -3202,8 +3202,10 @@ class TestServerSamplingResolution:
     def test_wake_reload_preserves_max_tokens_explicitness(self):
         """Deep-sleep reload must not turn fallback max_tokens into override."""
         source = Path("./vmlx_engine/server.py").read_text()
+        # The reload body lives in _admin_wake_impl since aae5885d3; slice
+        # from there so the explicitness marker stays inside the window.
         wake_block = source[
-            source.index("async def admin_wake"):
+            source.index("async def _admin_wake_impl"):
             source.index("@app.get(\"/v1/cache/stats\"")
         ]
 
@@ -14646,9 +14648,15 @@ class TestTurboQuantKVTelemetry:
         parser_aliases_source = Path(
             "./panel/src/shared/toolParserAliases.ts"
         ).read_text()
+        # The "// KV cache quantization" preview section was retired with
+        # generic KV-quant emission; the parser block now ends where the
+        # shared cache builder takes over.
         preview_parser_block = preview_source[
             preview_source.index("// Parser resolution"):
-            preview_source.index("// KV cache quantization", preview_source.index("// Parser resolution"))
+            preview_source.index(
+                "// One shared builder owns every cache-tier",
+                preview_source.index("// Parser resolution"),
+            )
         ]
         assert "resolveEffectiveToolParser" in preview_parser_block
         assert "canonicalizeToolParserId" in parser_aliases_source

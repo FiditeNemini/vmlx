@@ -879,7 +879,8 @@ class TestImageGenWorkerExecutor:
 
         gen_source = inspect.getsource(srv.create_image)
         edit_source = inspect.getsource(srv.create_image_edit)
-        wake_source = inspect.getsource(srv.admin_wake)
+        # The wake body lives in _admin_wake_impl since aae5885d3.
+        wake_source = inspect.getsource(srv._admin_wake_impl)
         shutdown_source = inspect.getsource(srv.lifespan)
 
         assert "_run_image_gen_call(" in gen_source

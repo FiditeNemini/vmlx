@@ -3863,12 +3863,15 @@ class TestSleepWakeContract:
         )
 
     def test_wake_restores_cache_limit(self):
-        """Source pin: admin_wake reads _pre_sleep_cache_limit and
-        restores it on wake (both from soft and deep paths)."""
+        """Source pin: the shared wake implementation reads
+        _pre_sleep_cache_limit and restores it on wake (both from soft and
+        deep paths). aae5885d3 moved the wake body out of admin_wake into
+        _admin_wake_impl so JIT-middleware and /admin/wake converge on one
+        lock-held reload; the contract lives there now."""
         src = (REPO_ROOT / "vmlx_engine/server.py").read_text()
-        idx = src.find("async def admin_wake")
+        idx = src.find("async def _admin_wake_impl")
         assert idx > 0
-        body = src[idx:idx + 4000]
+        body = src[idx:idx + 8000]
         assert "_pre_sleep_cache_limit" in body, (
             "wake must consult saved cache limit"
         )
@@ -3878,10 +3881,11 @@ class TestSleepWakeContract:
         )
 
     def test_wake_from_deep_sleep_reloads_model(self):
-        """Deep sleep unloads the model; wake must reload it from _cli_args."""
+        """Deep sleep unloads the model; wake must reload it from _cli_args.
+        The reload body lives in _admin_wake_impl since aae5885d3."""
         src = (REPO_ROOT / "vmlx_engine/server.py").read_text()
-        idx = src.find("async def admin_wake")
-        body = src[idx:idx + 4000]
+        idx = src.find("async def _admin_wake_impl")
+        body = src[idx:idx + 8000]
         # Must call load_model with args from _cli_args
         assert "load_model" in body
         assert "_cli_args" in body

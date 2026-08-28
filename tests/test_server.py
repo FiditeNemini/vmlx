@@ -417,7 +417,9 @@ class TestHelperFunctions:
 
         from vmlx_engine import server
 
-        source = inspect.getsource(server.admin_wake)
+        # aae5885d3 moved the wake body into _admin_wake_impl (shared by the
+        # JIT middleware and /admin/wake); the ordering contract lives there.
+        source = inspect.getsource(server._admin_wake_impl)
 
         assert source.index(
             "await _run_on_model_executor(load_draft_model, _spec_cfg)"

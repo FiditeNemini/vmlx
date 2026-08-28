@@ -127,8 +127,11 @@ def test_deep_sleep_yields_before_post_teardown_mlx_cleanup():
         "await _post_async_engine_teardown_mlx_cleanup"
     )
     assert (
+        # aae5885d3 moved the wake body into _admin_wake_impl (shared by the
+        # JIT middleware and /admin/wake), which sits BEFORE the admin_wake
+        # endpoint in the file — slice from the impl, not the endpoint.
         'await _post_async_engine_teardown_mlx_cleanup("admin_wake_before_deep_reload")'
-        in source[source.index("async def admin_wake"):]
+        in source[source.index("async def _admin_wake_impl"):]
     )
     assert (
         '_post_async_engine_teardown_mlx_cleanup("admin_deep_sleep_deferred")'

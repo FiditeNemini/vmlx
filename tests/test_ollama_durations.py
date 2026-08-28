@@ -94,3 +94,47 @@ def test_non_streaming_without_a_start_stamp_is_unchanged():
     out = openai_chat_response_to_ollama(_resp(), "m")
     assert out["total_duration"] == 0
     assert "eval_duration" not in out
+
+
+# A deep-sleep JIT wake reloads the model inside the request. Measured live
+# (DSV4 102 GB, frozen 1.6.44 head): wall time 51 s, but the terminal row
+# said total_duration=2.766 s and load_duration=0 — the entire wake was
+# dropped. Real Ollama reports model load in load_duration and includes it
+# in total_duration. The wake middleware stamps request.state.vmlx_wake_ns;
+# the adapter folds it in WITHOUT touching the prefill/decode split.
+
+
+def test_wake_time_lands_in_load_and_total_but_never_in_the_split():
+    fields = ollama_duration_fields(0, 1 * NS, 3 * NS, load_ns=48 * NS)
+    assert fields["load_duration"] == 48 * NS
+    assert fields["total_duration"] == 51 * NS
+    # tok/s must be wake-independent: split unchanged by load_ns
+    assert fields["prompt_eval_duration"] == 1 * NS
+    assert fields["eval_duration"] == 2 * NS
+
+
+def test_no_wake_still_reports_a_measured_zero_load():
+    fields = ollama_duration_fields(0, 1 * NS, 3 * NS)
+    assert fields["load_duration"] == 0
+    assert fields["total_duration"] == 3 * NS
+
+
+def test_a_negative_or_none_wake_stamp_clamps_to_zero():
+    assert ollama_duration_fields(0, None, NS, load_ns=-5)["load_duration"] == 0
+    assert ollama_duration_fields(0, None, NS, load_ns=None)["load_duration"] == 0
+
+
+def test_non_streaming_chat_carries_the_wake_stamp():
+    resp = {"choices": [{"message": {"content": "hi"}}], "usage": {}}
+    row = openai_chat_response_to_ollama(resp, "m", started_ns=0, load_ns=7 * NS)
+    assert row["load_duration"] == 7 * NS
+    assert row["total_duration"] >= 7 * NS
+
+
+def test_non_streaming_generate_carries_the_wake_stamp():
+    resp = {"choices": [{"message": {"content": "hi"}}], "usage": {}}
+    row = openai_chat_response_to_ollama_generate(
+        resp, "m", started_ns=0, load_ns=7 * NS
+    )
+    assert row["load_duration"] == 7 * NS
+    assert row["total_duration"] >= 7 * NS

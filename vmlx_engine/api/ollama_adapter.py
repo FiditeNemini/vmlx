@@ -409,6 +409,7 @@ def ollama_duration_fields(
     started_ns: int | None,
     first_content_ns: int | None,
     ended_ns: int | None,
+    load_ns: int = 0,
 ) -> dict[str, int]:
     """Ollama's nanosecond timing fields, from measurements only.
 
@@ -424,17 +425,27 @@ def ollama_duration_fields(
     see one) the split is OMITTED rather than guessed — reporting total time
     as decode time would understate tok/s with a number that looks precise.
 
-    ``load_duration`` is 0 because the model is already resident by the time a
-    request is served; that is a fact, not a placeholder.
+    ``load_ns`` is the time this request spent waiting for a sleeping model
+    to become servable (JIT wake reload, stamped by the wake middleware as
+    ``request.state.vmlx_wake_ns``). Real Ollama reports model load in
+    ``load_duration`` and includes it in ``total_duration``; a deep-sleep
+    wake of a 100 GB model is tens of seconds, and dropping it made a 51 s
+    request report ``total_duration`` of 2.8 s. When no wake happened the
+    stamp is absent and ``load_duration`` is a measured 0. ``load_ns`` never
+    contaminates the prefill/decode split — tok/s stays wake-independent.
     """
     if started_ns is None or ended_ns is None:
         return {}
-    total = max(0, int(ended_ns) - int(started_ns))
-    fields: dict[str, int] = {"total_duration": total, "load_duration": 0}
+    load = max(0, int(load_ns or 0))
+    gen_total = max(0, int(ended_ns) - int(started_ns))
+    fields: dict[str, int] = {
+        "total_duration": gen_total + load,
+        "load_duration": load,
+    }
     if first_content_ns is not None:
         prompt_eval = max(0, int(first_content_ns) - int(started_ns))
-        fields["prompt_eval_duration"] = min(prompt_eval, total)
-        fields["eval_duration"] = max(0, total - fields["prompt_eval_duration"])
+        fields["prompt_eval_duration"] = min(prompt_eval, gen_total)
+        fields["eval_duration"] = max(0, gen_total - fields["prompt_eval_duration"])
     return fields
 
 
@@ -443,7 +454,8 @@ def _now_iso() -> str:
 
 
 def openai_chat_response_to_ollama(
-    openai_resp: dict, model: str, started_ns: int | None = None
+    openai_resp: dict, model: str, started_ns: int | None = None,
+    load_ns: int = 0,
 ) -> dict:
     """Convert non-streaming OpenAI chat response to Ollama format."""
     choices = openai_resp.get("choices", [])
@@ -505,13 +517,14 @@ def openai_chat_response_to_ollama(
     # total is reported; the prefill/decode split is omitted rather than
     # guessed.
     result.update(
-        ollama_duration_fields(started_ns, None, time.perf_counter_ns())
+        ollama_duration_fields(started_ns, None, time.perf_counter_ns(), load_ns)
     )
     return result
 
 
 def openai_chat_response_to_ollama_generate(
-    openai_resp: dict, model: str, started_ns: int | None = None
+    openai_resp: dict, model: str, started_ns: int | None = None,
+    load_ns: int = 0,
 ) -> dict:
     """Convert non-streaming chat-completions response to /api/generate shape."""
     choices = openai_resp.get("choices", [])
@@ -531,7 +544,7 @@ def openai_chat_response_to_ollama_generate(
         "prompt_eval_count": usage.get("prompt_tokens", 0),
     }
     result.update(
-        ollama_duration_fields(started_ns, None, time.perf_counter_ns())
+        ollama_duration_fields(started_ns, None, time.perf_counter_ns(), load_ns)
     )
     if reasoning:
         result["thinking"] = reasoning

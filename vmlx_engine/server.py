@@ -6043,6 +6043,12 @@ async def track_request_time(request: Request, call_next):
         if _wake_lock is None:
             _wake_lock = asyncio.Lock()
 
+        # Stamp how long this request spent waiting for the model to become
+        # servable — its own JIT reload, or another request's in-flight wake.
+        # API adapters read request.state.vmlx_wake_ns to attribute this as
+        # model-load time (Ollama load_duration) instead of dropping it.
+        _wake_wait_t0 = time.perf_counter_ns()
+
         async with _wake_lock:
             # Re-check after acquiring lock (another request may have woken us)
             if _standby_state is None:
@@ -6102,6 +6108,8 @@ async def track_request_time(request: Request, call_next):
                             }
                         },
                     )
+
+        request.state.vmlx_wake_ns = time.perf_counter_ns() - _wake_wait_t0
 
     # Gate: image servers only serve /health, /v1/models, /v1/images/*
     if _model_type == "image" and path.startswith("/v1/"):
@@ -16408,6 +16416,8 @@ async def ollama_chat(fastapi_request: Request):
     )
     _ollama_max_prompt_tokens = _effective_max_prompt_tokens(chat_req)
 
+    _ollama_wake_ns = int(getattr(fastapi_request.state, "vmlx_wake_ns", 0) or 0)
+
     if not is_streaming:
         _ollama_started_ns = time.perf_counter_ns()
         result = await create_chat_completion(chat_req, fastapi_request)
@@ -16423,7 +16433,8 @@ async def ollama_chat(fastapi_request: Request):
         else:
             result_dict = dict(result)
         return openai_chat_response_to_ollama(
-            result_dict, model_name, started_ns=_ollama_started_ns
+            result_dict, model_name, started_ns=_ollama_started_ns,
+            load_ns=_ollama_wake_ns,
         )
 
     # Streaming: wrap SSE generator → NDJSON
@@ -16705,7 +16716,9 @@ async def ollama_chat(fastapi_request: Request):
         def _with_timings(row: dict) -> dict:
             row = dict(row)
             row.update(
-                ollama_duration_fields(_t0, _t_first, time.perf_counter_ns())
+                ollama_duration_fields(
+                    _t0, _t_first, time.perf_counter_ns(), _ollama_wake_ns
+                )
             )
             return row
 
@@ -16882,6 +16895,8 @@ async def ollama_generate(fastapi_request: Request):
         openai_chat_chunk_to_ollama_generate_ndjson,
     )
 
+    _ollama_gen_wake_ns = int(getattr(fastapi_request.state, "vmlx_wake_ns", 0) or 0)
+
     if not raw_mode:
         openai_chat_req = ollama_generate_to_openai_chat(body)
         from .api.models import ChatCompletionRequest
@@ -16901,7 +16916,8 @@ async def ollama_generate(fastapi_request: Request):
             else:
                 result_dict = dict(result)
             return openai_chat_response_to_ollama_generate(
-                result_dict, model_name, started_ns=_ollama_started_ns
+                result_dict, model_name, started_ns=_ollama_started_ns,
+                load_ns=_ollama_gen_wake_ns,
             )
 
         from starlette.responses import StreamingResponse as _SR
@@ -16917,7 +16933,9 @@ async def ollama_generate(fastapi_request: Request):
             def _with_timings(row: dict) -> dict:
                 row = dict(row)
                 row.update(
-                    ollama_duration_fields(_t0, _t_first, time.perf_counter_ns())
+                    ollama_duration_fields(
+                        _t0, _t_first, time.perf_counter_ns(), _ollama_gen_wake_ns
+                    )
                 )
                 return row
 

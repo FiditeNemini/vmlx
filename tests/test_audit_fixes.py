@@ -245,6 +245,25 @@ class TestCLIValidation:
     before reaching the mock.
     """
 
+    @pytest.fixture(autouse=True)
+    def _isolate_cli_env(self):
+        """serve_command mutates process env (VMLX_DISABLE_TQ_KV,
+        JANGTQ_MPP_NAX, ...) before its validation raises SystemExit. That is
+        fine for a real CLI process, which exits immediately — but poison for
+        this long-lived test process: a leaked VMLX_DISABLE_TQ_KV=1
+        deterministically flipped the block-disk fence visibility test that
+        runs 30 files later in suite order. Snapshot and restore every engine
+        env namespace around each CLI-validation test.
+        """
+        import os
+        prefixes = ("VMLX_", "VMLINUX_", "DSV4_", "JANGTQ_")
+        saved = {k: v for k, v in os.environ.items() if k.startswith(prefixes)}
+        yield
+        for key in [k for k in os.environ if k.startswith(prefixes)]:
+            if key not in saved:
+                os.environ.pop(key, None)
+        os.environ.update(saved)
+
     def _make_args(self, **overrides):
         """Create a minimal args namespace for serve_command."""
         defaults = {

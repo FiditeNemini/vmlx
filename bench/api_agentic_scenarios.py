@@ -628,7 +628,7 @@ def _grade_cache_match(
     )
     if render_confidence != "server-verified":
         return [f"UNVERIFIED (not graded, approximate client render): {note}"]
-    errors = []
+    errors: list[str] = []
     if observed_cached < safe:
         errors.append(f"UNDER-restore: {note}")
     if observed_cached > safe:
@@ -641,6 +641,22 @@ def _grade_cache_match(
         else:
             errors.append(f"OVER-restore (non-hybrid family, no companion-credit exemption): {note}")
     return errors
+
+
+def split_cache_grading(items: list[str]) -> tuple[list[str], list[str]]:
+    """Route _grade_cache_match's output into (blocking_errors, notes).
+
+    An UNVERIFIED note must stay VISIBLE (never silently dropped) but must
+    NOT fail the scenario -- routing it into record.errors made this
+    harness incapable of ever passing a cache check on any wire, forever,
+    since render_confidence_for correctly never trusts a wire by default
+    (2026-08-28: caught on this exact harness's first live rerun after that
+    fix landed). Only genuine UNDER-restore/OVER-restore verdicts are
+    errors.
+    """
+    errors = [item for item in items if not item.startswith("UNVERIFIED")]
+    notes = [item for item in items if item.startswith("UNVERIFIED")]
+    return errors, notes
 
 
 def fit_filler_to_target(
@@ -907,12 +923,14 @@ def run_scenario(
                 wire.commit_assistant(continuation_content, continuation_calls,
                                        reasoning_items=_reasoning(continuation))
                 if index >= reuse_watch_from and turn.get("expect_reuse"):
-                    cache_errors = _grade_cache_match(
+                    cache_errors, cache_notes = split_cache_grading(_grade_cache_match(
                         cont_record["cached_tokens"], continuation_match,
                         continuation_confidence, hybrid_companion_family,
-                    )
+                    ))
                     cont_record["errors"].extend(cache_errors)
+                    cont_record["cache_notes"] = cache_notes
                     record.errors.extend(cache_errors)
+                    record.notes.setdefault("cache_notes", []).extend(cache_notes)
                 render_history.append(continuation_render)
         else:
             if not content.strip():
@@ -927,11 +945,11 @@ def run_scenario(
             # legitimately expect ~0 (the tool schema shifts the prompt head)
             # unless the manifest says otherwise -- graded the same as any
             # other turn, both directions, no exemption for tool rounds.
-            record.errors.extend(
-                _grade_cache_match(
-                    record.cached_tokens, best_match, render_confidence, hybrid_companion_family
-                )
-            )
+            cache_errors, cache_notes = split_cache_grading(_grade_cache_match(
+                record.cached_tokens, best_match, render_confidence, hybrid_companion_family
+            ))
+            record.errors.extend(cache_errors)
+            record.notes.setdefault("cache_notes", []).extend(cache_notes)
 
         memory_max = record.notes["memory"].get("active_mb_max")
         if max_active_gb and isinstance(memory_max, (int, float)) and memory_max > max_active_gb * 1024:

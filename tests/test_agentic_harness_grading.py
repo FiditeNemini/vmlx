@@ -269,3 +269,35 @@ class TestRenderConfidenceNeverTrustsWireType:
 
         assert render_confidence_for("responses", False) == "approximate-unverified"
         assert render_confidence_for("responses", True) == "approximate-unverified"
+
+
+class TestUnverifiedNeverFailsTheScenario:
+    """render_confidence_for now always returns approximate-unverified (no
+    wire trusted by default) -- caught on this harness's own first live
+    rerun: routing UNVERIFIED into record.errors made the scenario FAIL on
+    every single cache check, forever, since nothing can ever be
+    server-verified yet. UNVERIFIED must stay visible but never block."""
+
+    def test_unverified_routes_to_notes_not_errors(self):
+        from api_agentic_scenarios import split_cache_grading
+
+        raw = ["UNVERIFIED (not graded, approximate client render): cache match: ..."]
+        errors, notes = split_cache_grading(raw)
+        assert errors == []
+        assert notes == raw
+
+    def test_under_restore_routes_to_errors_not_notes(self):
+        from api_agentic_scenarios import split_cache_grading
+
+        raw = ["UNDER-restore: cache match: ..."]
+        errors, notes = split_cache_grading(raw)
+        assert errors == raw
+        assert notes == []
+
+    def test_mixed_list_routes_each_independently(self):
+        from api_agentic_scenarios import split_cache_grading
+
+        raw = ["UNVERIFIED (not graded...): a", "OVER-restore: b"]
+        errors, notes = split_cache_grading(raw)
+        assert errors == ["OVER-restore: b"]
+        assert notes == ["UNVERIFIED (not graded...): a"]

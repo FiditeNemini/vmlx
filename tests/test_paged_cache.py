@@ -2003,6 +2003,27 @@ class TestBlockAwarePrefixCache:
             assert len(remaining) == read_len - 192
             assert remaining == tokens[192:read_len]
             assert restarted.get_stats()["tokens_saved"] == 192
+
+            telemetry = restarted.get_stats()["last_fetch_telemetry"]
+            assert telemetry["request_id"] == "reader"
+            # Below the next 64-token block boundary (256), get_computed_blocks()
+            # never even probes the pending interior block at position 192, so
+            # it resolves the exact 192-token anchor directly -- no trimming
+            # needed, and match_kind correctly says so instead of overclaiming
+            # a normalization that did not run. At/above 256 the probe reaches
+            # that pending block and the trim is the thing under test.
+            if read_len >= 256:
+                assert telemetry["match_kind"] == "rotating_swa_anchor_normalized"
+                assert telemetry["rotating_swa_normalized"] is True
+                assert telemetry["native_companion_boundary"] == 192
+            else:
+                assert telemetry["match_kind"] == "chain_block_hit"
+                assert telemetry["rotating_swa_normalized"] is False
+                assert telemetry["native_companion_boundary"] is None
+            assert telemetry["logical_restored_tokens"] == 192
+            # Fresh restart: nothing is resident in RAM, everything the
+            # candidate used had to come back through BlockDiskStore.
+            assert telemetry["source"] == "disk_l2"
         finally:
             restarted_store.shutdown()
 
@@ -2086,6 +2107,11 @@ class TestBlockAwarePrefixCache:
             assert remaining == tokens[:192]
             assert restarted.get_stats()["misses"] == 1
             assert restarted.get_stats()["tokens_saved"] == 0
+
+            telemetry = restarted.get_stats()["last_fetch_telemetry"]
+            assert telemetry["match_kind"] == "miss"
+            assert telemetry["miss_reason"] == "rotating_swa_no_anchor"
+            assert telemetry["logical_restored_tokens"] == 0
         finally:
             restarted_store.shutdown()
 

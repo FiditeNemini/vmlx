@@ -2721,6 +2721,17 @@ class BlockAwarePrefixCache:
         # SSM/GDN hybrids.
         self._hit_credits: Dict[str, int] = {}
 
+        # fetch_cache() match telemetry (task #23: cached_tokens alone cannot
+        # say WHICH branch produced it). Kept on self rather than widening
+        # fetch_cache()'s return tuple: ~80 call sites across
+        # scheduler.py/mllm_scheduler.py/mllm_batch_generator.py and the test
+        # suite unpack `block_table, remaining = fetch_cache(...)`, so a
+        # return-shape change would be a breaking edit to every one of them
+        # for a debug-only signal. Bounded ring so a long-running server does
+        # not accumulate one entry per request forever.
+        self._fetch_telemetry: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._last_fetch_telemetry: Optional[Dict[str, Any]] = None
+
         # Lazy-cached expected KV head count for validation
         self._n_kv_heads: Optional[int] = None
         # Lazy-cached set of ALL valid KV head counts (for mixed-head models
@@ -2757,6 +2768,101 @@ class BlockAwarePrefixCache:
                 if _ln:
                     self._expected_num_layers = int(_ln)
                     break
+
+    _FETCH_TELEMETRY_MAX_ENTRIES = 128
+
+    @staticmethod
+    def _fetch_telemetry_source(blocks: Optional[List[Any]]) -> str:
+        """Which tier actually supplied the winning blocks.
+
+        Two independent disk-origin signals, either one sufficient:
+        ``cache_data_from_disk`` is set by ``PagedCacheManager._promote_from_disk()``
+        whenever this fetch had to read the block from L2 -- true regardless of
+        whether the promoted payload stays resident afterward (frugal/disk-only
+        promotions set ``cache_data_transient`` instead of evicting it, so a
+        ``cache_data is None`` check alone misses them). ``cache_data is None``
+        alone still catches the complementary case: a metadata-only block whose
+        hash chain is resident but whose payload was never mirrored into RAM at
+        store time (paged_frugal skip) and has not been promoted by this
+        request. Mirrors the same signals server.py's ``/health`` cache
+        snapshot already reads to tell a resident block from a disk-only one
+        (see ``_cache_telemetry_snapshot``), rather than inferring source from
+        a disk-hit counter delta.
+        """
+        if not blocks:
+            return "unknown"
+        for block in blocks:
+            if getattr(block, "cache_data_from_disk", False):
+                return "disk_l2"
+            if getattr(block, "cache_data", None) is None:
+                return "disk_l2"
+        return "memory_l1"
+
+    @staticmethod
+    def _fetch_telemetry_cache_key(blocks: Optional[List[Any]]) -> Optional[str]:
+        if not blocks:
+            return None
+        terminal_hash = getattr(blocks[-1], "block_hash", None)
+        if terminal_hash is None:
+            return None
+        try:
+            return terminal_hash.hex()
+        except AttributeError:
+            return str(terminal_hash)
+
+    def _record_fetch_telemetry(
+        self,
+        *,
+        request_id: str,
+        match_kind: str,
+        origin: Optional[str],
+        logical_restored_tokens: int,
+        native_companion_boundary: Optional[int] = None,
+        source: str = "unknown",
+        cache_key: Optional[str] = None,
+        dsv4_delta_applied: bool = False,
+        rotating_swa_normalized: bool = False,
+        miss_reason: Optional[str] = None,
+        attempted_tokens: Optional[int] = None,
+    ) -> None:
+        """Record one fetch_cache() outcome as a pure side effect.
+
+        Must never influence fetch_cache()'s control flow or return values --
+        any failure here is swallowed so telemetry can never turn an
+        observability add-on into a request-affecting change.
+        """
+        try:
+            record: Dict[str, Any] = {
+                "request_id": request_id,
+                "cache_key": cache_key,
+                "match_kind": match_kind,
+                "origin": origin,
+                "logical_restored_tokens": int(logical_restored_tokens),
+                "native_companion_boundary": (
+                    int(native_companion_boundary)
+                    if native_companion_boundary is not None
+                    else None
+                ),
+                "source": source,
+                "dsv4_delta_applied": bool(dsv4_delta_applied),
+                "rotating_swa_normalized": bool(rotating_swa_normalized),
+                "miss_reason": miss_reason,
+                "attempted_tokens": (
+                    int(attempted_tokens) if attempted_tokens is not None else None
+                ),
+                "timestamp": time.time(),
+            }
+            self._fetch_telemetry[request_id] = record
+            self._fetch_telemetry.move_to_end(request_id)
+            while len(self._fetch_telemetry) > self._FETCH_TELEMETRY_MAX_ENTRIES:
+                self._fetch_telemetry.popitem(last=False)
+            self._last_fetch_telemetry = record
+        except Exception:
+            logger.debug(
+                "fetch_cache telemetry recording failed for %s",
+                request_id,
+                exc_info=True,
+            )
 
     def _write_admission_timeout_for_store(
         self,
@@ -3083,12 +3189,19 @@ class BlockAwarePrefixCache:
             scheduler's normal completion cleanup can release those refs.
         """
         if not tokens:
+            self._record_fetch_telemetry(
+                request_id=request_id,
+                match_kind="empty_request",
+                origin=None,
+                logical_restored_tokens=0,
+            )
             return None, tokens
 
         cache_extra_keys = self._shape_scoped_cache_extra_keys(
             tokens,
             cache_extra_keys,
         )
+        _fetch_origin = "chain_block_hit"
 
         # Primary path: chain-hash lookup. This includes the parent block hash
         # and therefore the full prefix context. Do not use the legacy
@@ -3126,6 +3239,7 @@ class BlockAwarePrefixCache:
                     except Exception:
                         pass
                 cached_blocks, num_cached = alt_blocks, alt_num_cached
+                _fetch_origin = "n_minus_1_partial_index"
             elif alt_blocks:
                 try:
                     self.paged_cache.release_request_refs(
@@ -3175,6 +3289,8 @@ class BlockAwarePrefixCache:
                 self._release_pinned_prefix_match(request_id, best_match)
                 best_match = None
         if cached_blocks:
+            _pre_normalization_cached_blocks = list(cached_blocks)
+            _pre_normalization_num_cached = num_cached
             _disk_store = getattr(self.paged_cache, "_disk_store", None)
             # Metadata-only/frugal blocks keep their immutable payload solely
             # in L2. Share one request-local read-through cache across DSV4
@@ -3212,6 +3328,18 @@ class BlockAwarePrefixCache:
                         )
                     )
                     self._misses += 1
+                    self._record_fetch_telemetry(
+                        request_id=request_id,
+                        match_kind="miss",
+                        origin=_fetch_origin,
+                        logical_restored_tokens=0,
+                        source=self._fetch_telemetry_source(
+                            _pre_normalization_cached_blocks
+                        ),
+                        dsv4_delta_applied=True,
+                        miss_reason="dsv4_delta_no_safe_checkpoint",
+                        attempted_tokens=_pre_normalization_num_cached,
+                    )
                     return None, tokens
                 dropped_blocks = cached_blocks[len(kept_blocks) :]
                 if dropped_blocks:
@@ -3233,6 +3361,7 @@ class BlockAwarePrefixCache:
             # to its latest safe anchor before applying the generic mixed-SWA
             # terminal guard; non-DSV4 chains still take the unchanged guard on
             # their original matched boundary.
+            _rotating_normalized = False
             if (
                 self._validate_rotating_terminal
                 and self._rotating_l2_chain_missing_terminal_state(
@@ -3273,6 +3402,7 @@ class BlockAwarePrefixCache:
                     )
                     cached_blocks = _kept_rot
                     num_cached = int(_rot_tokens)
+                    _rotating_normalized = True
                 else:
                     _reject_table = BlockTable(
                         request_id=request_id,
@@ -3292,6 +3422,16 @@ class BlockAwarePrefixCache:
                         num_cached,
                     )
                     self._misses += 1
+                    self._record_fetch_telemetry(
+                        request_id=request_id,
+                        match_kind="miss",
+                        origin=_fetch_origin,
+                        logical_restored_tokens=0,
+                        source=self._fetch_telemetry_source(cached_blocks),
+                        dsv4_delta_applied=dsv4_matched_tokens is not None,
+                        miss_reason="rotating_swa_no_anchor",
+                        attempted_tokens=num_cached,
+                    )
                     return None, tokens
 
             if (
@@ -3318,6 +3458,16 @@ class BlockAwarePrefixCache:
                     request_id,
                 )
                 self._misses += 1
+                self._record_fetch_telemetry(
+                    request_id=request_id,
+                    match_kind="miss",
+                    origin=_fetch_origin,
+                    logical_restored_tokens=0,
+                    source=self._fetch_telemetry_source(cached_blocks),
+                    dsv4_delta_applied=dsv4_matched_tokens is not None,
+                    miss_reason="dsv4_l2_missing_terminal_state",
+                    attempted_tokens=num_cached,
+                )
                 return None, tokens
 
             if (
@@ -3342,6 +3492,16 @@ class BlockAwarePrefixCache:
                     request_id,
                 )
                 self._misses += 1
+                self._record_fetch_telemetry(
+                    request_id=request_id,
+                    match_kind="miss",
+                    origin=_fetch_origin,
+                    logical_restored_tokens=0,
+                    source=self._fetch_telemetry_source(cached_blocks),
+                    dsv4_delta_applied=dsv4_matched_tokens is not None,
+                    miss_reason="zaya_l2_missing_terminal_state",
+                    attempted_tokens=num_cached,
+                )
                 return None, tokens
 
             # get_computed_blocks() holds request refs for each returned
@@ -3390,6 +3550,27 @@ class BlockAwarePrefixCache:
                 block_table.num_tokens,
                 cache_extra_keys,
             )
+            self._record_fetch_telemetry(
+                request_id=request_id,
+                match_kind=(
+                    "rotating_swa_anchor_normalized"
+                    if _rotating_normalized
+                    else "dsv4_delta_checkpoint"
+                    if dsv4_matched_tokens is not None
+                    else _fetch_origin
+                ),
+                origin=_fetch_origin,
+                logical_restored_tokens=block_table.num_tokens,
+                native_companion_boundary=(
+                    block_table.num_tokens
+                    if _rotating_normalized or dsv4_matched_tokens is not None
+                    else None
+                ),
+                source=self._fetch_telemetry_source(cached_blocks),
+                cache_key=self._fetch_telemetry_cache_key(cached_blocks),
+                dsv4_delta_applied=dsv4_matched_tokens is not None,
+                rotating_swa_normalized=_rotating_normalized,
+            )
             return block_table, remaining
 
         # Try prefix index for longer matches
@@ -3432,6 +3613,16 @@ class BlockAwarePrefixCache:
                 if not kept_blocks or checkpoint_tokens <= 0:
                     self.paged_cache.release_request_refs(pinned_table)
                     self._misses += 1
+                    self._record_fetch_telemetry(
+                        request_id=request_id,
+                        match_kind="miss",
+                        origin="prefix_index_match",
+                        logical_restored_tokens=0,
+                        source=self._fetch_telemetry_source(matched_blocks),
+                        dsv4_delta_applied=True,
+                        miss_reason="dsv4_delta_no_safe_checkpoint",
+                        attempted_tokens=len(matched_tokens),
+                    )
                     return None, tokens
                 dropped_blocks = matched_blocks[len(kept_blocks) :]
                 if dropped_blocks:
@@ -3452,6 +3643,7 @@ class BlockAwarePrefixCache:
                 pinned_table.checkpoint_tokens = int(checkpoint_tokens)
                 pinned_table.replayed_tokens = int(dsv4_replayed_tokens)
 
+            _rotating_normalized = False
             if (
                 self._validate_rotating_terminal
                 and self._rotating_l2_chain_missing_terminal_state(
@@ -3497,6 +3689,7 @@ class BlockAwarePrefixCache:
                     pinned_table.block_ids = [b.block_id for b in _kept_rot]
                     pinned_table.num_tokens = int(_rot_tokens)
                     pinned_table.checkpoint_tokens = int(_rot_tokens)
+                    _rotating_normalized = True
                 else:
                     self.paged_cache.release_request_refs(pinned_table)
                     logger.info(
@@ -3507,6 +3700,16 @@ class BlockAwarePrefixCache:
                         pinned_table.num_tokens,
                     )
                     self._misses += 1
+                    self._record_fetch_telemetry(
+                        request_id=request_id,
+                        match_kind="miss",
+                        origin="prefix_index_match",
+                        logical_restored_tokens=0,
+                        source=self._fetch_telemetry_source(matched_blocks),
+                        dsv4_delta_applied=dsv4_matched_tokens is not None,
+                        miss_reason="rotating_swa_no_anchor",
+                        attempted_tokens=pinned_table.num_tokens,
+                    )
                     return None, tokens
             if (
                 self._validate_dsv4_terminal
@@ -3524,6 +3727,16 @@ class BlockAwarePrefixCache:
                     request_id,
                 )
                 self._misses += 1
+                self._record_fetch_telemetry(
+                    request_id=request_id,
+                    match_kind="miss",
+                    origin="prefix_index_match",
+                    logical_restored_tokens=0,
+                    source=self._fetch_telemetry_source(matched_blocks),
+                    dsv4_delta_applied=dsv4_matched_tokens is not None,
+                    miss_reason="dsv4_l2_missing_terminal_state",
+                    attempted_tokens=pinned_table.num_tokens,
+                )
                 return None, tokens
             if (
                 self._validate_zaya_terminal
@@ -3540,6 +3753,16 @@ class BlockAwarePrefixCache:
                     request_id,
                 )
                 self._misses += 1
+                self._record_fetch_telemetry(
+                    request_id=request_id,
+                    match_kind="miss",
+                    origin="prefix_index_match",
+                    logical_restored_tokens=0,
+                    source=self._fetch_telemetry_source(matched_blocks),
+                    dsv4_delta_applied=dsv4_matched_tokens is not None,
+                    miss_reason="zaya_l2_missing_terminal_state",
+                    attempted_tokens=pinned_table.num_tokens,
+                )
                 return None, tokens
 
             # The index lookup pinned this exact chain before releasing the
@@ -3578,11 +3801,39 @@ class BlockAwarePrefixCache:
                 block_table.num_tokens,
                 cache_extra_keys,
             )
+            self._record_fetch_telemetry(
+                request_id=request_id,
+                match_kind=(
+                    "rotating_swa_anchor_normalized"
+                    if _rotating_normalized
+                    else "dsv4_delta_checkpoint"
+                    if dsv4_matched_tokens is not None
+                    else "prefix_index_match"
+                ),
+                origin="prefix_index_match",
+                logical_restored_tokens=block_table.num_tokens,
+                native_companion_boundary=(
+                    block_table.num_tokens
+                    if _rotating_normalized or dsv4_matched_tokens is not None
+                    else None
+                ),
+                source=self._fetch_telemetry_source(matched_blocks),
+                cache_key=self._fetch_telemetry_cache_key(matched_blocks),
+                dsv4_delta_applied=dsv4_matched_tokens is not None,
+                rotating_swa_normalized=_rotating_normalized,
+            )
             return block_table, remaining
 
         # No cache hit
         self._misses += 1
         logger.debug(f"Cache miss for {request_id}")
+        self._record_fetch_telemetry(
+            request_id=request_id,
+            match_kind="miss",
+            origin=None,
+            logical_restored_tokens=0,
+            miss_reason="no_candidate",
+        )
         return None, tokens
 
     def _release_pinned_prefix_match(
@@ -8445,6 +8696,16 @@ class BlockAwarePrefixCache:
             "entries_by_type": {
                 t: len(self._entries_by_type[t]) for t in _CACHE_TYPE_PRIORITY
             },
+            # Server-exact fetch_cache() match provenance (task #23): which
+            # branch produced the returned num_cached, not a client-side
+            # inference from cached_tokens/latency. Flows into /health and
+            # /v1/cache/stats through scheduler.get_cache_stats() ->
+            # _cache_telemetry_snapshot(), the same ungated path that already
+            # surfaces last_cache_selection/last_cache_execution -- no new
+            # debug flag needed since that surface already exposes internal
+            # cache-routing detail unconditionally.
+            "last_fetch_telemetry": self._last_fetch_telemetry,
+            "recent_fetch_telemetry": list(self._fetch_telemetry.values())[-20:],
             **paged_stats,
         }
 
@@ -8454,6 +8715,8 @@ class BlockAwarePrefixCache:
         self._misses = 0
         self._tokens_saved = 0
         self._hit_credits.clear()
+        self._fetch_telemetry.clear()
+        self._last_fetch_telemetry = None
         self.paged_cache.reset_stats()
 
     def clear(self, force: bool = False) -> bool:

@@ -500,6 +500,14 @@ def test_dsv4_native_shadow_parent_extends_and_reconstructs_all_layers():
     assert parent_table.replayed_tokens == 70
     assert remaining == extended_tokens[256:]
 
+    telemetry = cache.get_stats()["last_fetch_telemetry"]
+    assert telemetry["request_id"] == "continuation"
+    assert telemetry["match_kind"] == "dsv4_delta_checkpoint"
+    assert telemetry["dsv4_delta_applied"] is True
+    assert telemetry["rotating_swa_normalized"] is False
+    assert telemetry["logical_restored_tokens"] == 256
+    assert telemetry["native_companion_boundary"] == 256
+
     native_extension = _native_transport(
         _topology_interval(256, 512, terminal=True, append_safe=True)
     )

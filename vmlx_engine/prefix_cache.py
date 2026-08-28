@@ -8723,16 +8723,26 @@ class BlockAwarePrefixCache:
             # surfaces last_cache_selection/last_cache_execution -- no new
             # debug flag needed since that surface already exposes internal
             # cache-routing detail unconditionally.
-            "last_fetch_telemetry": self._last_fetch_telemetry,
+            # getattr, not direct reads: several regression fixtures build
+            # this cache via __new__ without __init__ (legacy-construction
+            # tests for accounting rollback), and get_stats() must keep
+            # working there exactly as it did before telemetry existed.
+            "last_fetch_telemetry": getattr(self, "_last_fetch_telemetry", None),
             "last_fetch_telemetry_excluding_continuations": next(
                 (
                     r
-                    for r in reversed(self._fetch_telemetry.values())
+                    for r in reversed(
+                        list(
+                            (getattr(self, "_fetch_telemetry", None) or {}).values()
+                        )
+                    )
                     if not r.get("is_internal_continuation")
                 ),
                 None,
             ),
-            "recent_fetch_telemetry": list(self._fetch_telemetry.values())[-20:],
+            "recent_fetch_telemetry": list(
+                (getattr(self, "_fetch_telemetry", None) or {}).values()
+            )[-20:],
             **paged_stats,
         }
 
@@ -8742,7 +8752,7 @@ class BlockAwarePrefixCache:
         self._misses = 0
         self._tokens_saved = 0
         self._hit_credits.clear()
-        self._fetch_telemetry.clear()
+        self._fetch_telemetry = OrderedDict()
         self._last_fetch_telemetry = None
         self.paged_cache.reset_stats()
 

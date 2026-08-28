@@ -195,6 +195,36 @@ class TestFetchCacheTelemetryTaxonomy:
             "chatcmpl-abc:visible-answer",
         }
 
+    def test_legacy_new_construction_get_stats_never_crashes(self):
+        """Several accounting-rollback regressions build this cache via
+        __new__ without __init__ (tests/test_hybrid_ssm_companion_
+        regressions.py:113 and the write-fence legacy fixture). get_stats()
+        crashed on such instances with AttributeError once telemetry state
+        moved into __init__ -- caught by the 2026-08-28 full-suite run after
+        the targeted cache suites missed those files entirely. Telemetry
+        reads must degrade to None/[] there, exactly like the pre-telemetry
+        behavior."""
+        from types import SimpleNamespace
+
+        from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+        # Byte-for-byte the _accounting_cache fixture from
+        # tests/test_hybrid_ssm_companion_regressions.py:112 -- the exact
+        # construction that caught the original crash.
+        cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+        cache._hits = 1
+        cache._misses = 0
+        cache._tokens_saved = 128
+        cache._hit_credits = {"request-1": 128}
+        cache._request_tables = {}
+        cache._entries_by_type = {"assistant": {}, "user": {}, "system": {}}
+        cache.paged_cache = SimpleNamespace(get_memory_usage=lambda: {})
+
+        stats = cache.get_stats()
+        assert stats["last_fetch_telemetry"] is None
+        assert stats["last_fetch_telemetry_excluding_continuations"] is None
+        assert stats["recent_fetch_telemetry"] == []
+
     def test_reset_stats_clears_fetch_telemetry(self):
         _paged, cache = _new_cache()
         cache.fetch_cache("reader", [1, 2, 3])

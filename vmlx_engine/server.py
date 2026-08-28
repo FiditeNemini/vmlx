@@ -3039,6 +3039,17 @@ _REASONING_ANSWER_PASS_FAMILIES = frozenset(
         "nemotron",
         "nemotron_h",
         "openpangu_v2",
+        # Qwen3.8-Flash-Next (family qwen4_exp, qwen3 parser,
+        # think_in_template). Live-measured 2026-08-28 on the JANG_1L bundle:
+        # at the template-default xhigh effort with bundle sampling
+        # (temp 1.0/top_k 20), ~25% of tool-result continuations and a raw
+        # /v1/completions rate of 20/20 never generate </think> — the model
+        # answers INSIDE the open think block and EOSes, finalizing
+        # reasoning-only (chat 502 reasoning_only_no_content; silently empty
+        # /v1/responses message). Identical disease to the DSV4 note above,
+        # and the same never-empty answer pass is the owner. Its thinking-off
+        # rail renders via ensure_thinking_off_sentinel on the MLLM lane.
+        "qwen4_exp",
         "qwen3",
         "qwen3_5",
         "qwen3_5_moe",
@@ -3187,7 +3198,7 @@ def _dsv4_default_thinking_cap(
 # nemotron uses the plain hard split (kwargs max_tokens) like an explicit
 # max_thinking_tokens would.
 _DEFAULT_ANSWER_RESERVE_FAMILIES = frozenset(
-    {"deepseek_v4", "nemotron", "nemotron_h"}
+    {"deepseek_v4", "nemotron", "nemotron_h", "qwen4_exp"}
 )
 
 
@@ -3215,7 +3226,7 @@ def _dsv4_answer_pass_thinking_cap(
             "%s thinking budget: first pass capped at %d of %d output tokens "
             "(%.0f%%); %d reserved so the answer pass can emit visible content. "
             "Override with %s.",
-            "DSV4" if is_dsv4 else "Nemotron",
+            "DSV4" if is_dsv4 else _reasoning_answer_pass_family_label(family_name or ""),
             cap, total, (cap / max(1, total)) * 100.0, total - cap, env_var,
         )
     return cap
@@ -3237,6 +3248,7 @@ def _reasoning_answer_pass_family_label(family_name: str) -> str:
         "nemotron": "Nemotron",
         "nemotron_h": "Nemotron",
         "openpangu_v2": "openPangu",
+        "qwen4_exp": "Qwen3.8-Next",
         "qwen3": "Qwen3",
         "qwen3_next": "Qwen3-Next",
         "deepseek_v4": "DeepSeek-V4",

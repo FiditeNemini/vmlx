@@ -104,6 +104,33 @@ class TestFamilyGate:
             assert _dsv4_answer_pass_thinking_cap(family, True, 8000) == 6000, family
             assert _dsv4_answer_pass_thinking_cap(family, None, 8000) == 6000, family
 
+    def test_qwen4_exp_gets_the_default_reserve(self):
+        """Qwen3.8-Flash-Next never generating </think> is the identical
+        disease: live-measured 2026-08-28 (JANG_1L, template-default xhigh,
+        temp 1.0/top_k 20) — ~25% of tool-result continuations and 20/20 raw
+        /v1/completions runs answered INSIDE the open think block and EOSed,
+        finalizing reasoning-only. Callers never send max_thinking_tokens, so
+        the never-empty answer pass needs the server-side default reserve."""
+        assert _dsv4_answer_pass_thinking_cap("qwen4_exp", True, 8000) == 6000
+        assert _dsv4_answer_pass_thinking_cap("qwen4_exp", None, 8000) == 6000
+        # Thinking explicitly OFF never splits the budget.
+        assert _dsv4_answer_pass_thinking_cap("qwen4_exp", False, 8000) is None
+
+    def test_qwen4_exp_is_in_the_answer_pass_sets(self):
+        from vmlx_engine.server import (
+            _DEFAULT_ANSWER_RESERVE_FAMILIES,
+            _REASONING_ANSWER_PASS_FAMILIES,
+            _THINKING_BUDGET_CAP_FAMILIES,
+        )
+
+        assert "qwen4_exp" in _DEFAULT_ANSWER_RESERVE_FAMILIES
+        assert "qwen4_exp" in _REASONING_ANSWER_PASS_FAMILIES
+        assert "qwen4_exp" in _THINKING_BUDGET_CAP_FAMILIES
+
+    def test_qwen4_exp_honors_the_family_neutral_env(self, monkeypatch):
+        monkeypatch.setenv("VMLX_ANSWER_RESERVE", "0")
+        assert _dsv4_answer_pass_thinking_cap("qwen4_exp", True, 8000) is None
+
     def test_nemotron_reserve_env_override_is_family_neutral(self, monkeypatch):
         """Nemotron honors VMLX_ANSWER_RESERVE, and the DSV4-named env does
         not leak across families."""

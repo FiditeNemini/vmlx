@@ -1282,6 +1282,14 @@ export function registerChatHandlers(
       // labelled Deep Sleep for the whole reload and could not show resident
       // progress.  Wake through SessionManager first: it owns the visible
       // loading state, progress monitor, failure rollback, and idle clock.
+      const settleTimeoutMsFor = (session?: { config?: string }) => {
+        let configured = 300;
+        try {
+          configured = Number(JSON.parse(session?.config || "{}").timeout) || 300;
+        } catch {}
+        return Math.max(configured * 1000, 120_000) + 60_000;
+      };
+
       if (!isRemote && resolvedSession?.status === "standby") {
         console.log(`[CHAT] Waking standby session ${resolvedSession.id} before inference`);
         const wake = await sessionManager.wakeSession(resolvedSession.id);
@@ -1302,15 +1310,7 @@ export function registerChatHandlers(
       if (!isRemote && resolvedSession?.id) {
         const liveStatus = db.getSession(resolvedSession.id)?.status;
         if (liveStatus === "loading") {
-          const configuredTimeoutSeconds = (() => {
-            try {
-              return Number(JSON.parse(resolvedSession.config || "{}").timeout) || 300;
-            } catch {
-              return 300;
-            }
-          })();
-          const settleTimeoutMs =
-            Math.max(configuredTimeoutSeconds * 1000, 120_000) + 60_000;
+          const settleTimeoutMs = settleTimeoutMsFor(resolvedSession);
           console.log(
             `[CHAT] Session ${resolvedSession.id.slice(0, 8)} is loading — queueing message until ready (up to ${Math.round(settleTimeoutMs / 1000)}s)`,
           );
@@ -1407,6 +1407,25 @@ export function registerChatHandlers(
               console.log(
                 `[CHAT] Server up but not inference-ready (attempt ${attempt + 1}/${maxHealthRetries})`,
               );
+              const live = resolvedSession?.id
+                ? db.getSession(resolvedSession.id)
+                : undefined;
+              if (live?.status === "standby") {
+                // The engine was slept externally and the monitor synced the
+                // row after this send began. Wake through SessionManager (the
+                // visible progress owner) and queue until readiness.
+                console.log(
+                  `[CHAT] Engine asleep mid-poll — waking session ${live.id.slice(0, 8)} and queueing`,
+                );
+                const wake = await sessionManager.wakeSession(live.id);
+                if (wake.success) {
+                  const settled = await sessionManager.waitForSessionLifecycleSettled(
+                    live.id,
+                    { timeoutMs: settleTimeoutMsFor(live), signal: abortController.signal },
+                  );
+                  if (settled === "running") continue;
+                }
+              }
               if (attempt < maxHealthRetries - 1) {
                 await new Promise((r) => setTimeout(r, healthRetryDelay));
               }

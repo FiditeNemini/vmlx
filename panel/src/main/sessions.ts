@@ -4090,6 +4090,18 @@ export class SessionManager extends EventEmitter {
             } else if (isStandby) {
               // Server is in standby — keep session alive, don't fail-count
               this.failCounts.delete(session.id)
+              if (session.status === 'running' && data.wake_in_progress !== true) {
+                // The engine was put to sleep behind the panel's back (direct
+                // /admin sleep call). A row that keeps saying "running" for a
+                // sleeping engine blocks BOTH wake paths: chat cannot route
+                // through wakeSession (it requires status standby) and the
+                // external-wake detector only watches standby sessions — so a
+                // message just failed the readiness poll forever.
+                const depth = data.status === 'standby_deep' ? 'deep' : 'soft'
+                db.updateSession(session.id, { status: 'standby', standbyDepth: depth })
+                this.emit('session:standby', { sessionId: session.id, depth })
+                this.pushLog(session.id, `[Sleep] Engine entered ${depth} sleep externally — synced`)
+              }
             } else if (modelReady) {
               // Reset fail counter on success
               this.failCounts.delete(session.id)

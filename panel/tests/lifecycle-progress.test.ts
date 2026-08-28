@@ -300,6 +300,24 @@ describe('state machine: contract events drive the panel', () => {
     await expect(aborted).rejects.toThrow('Request canceled')
   })
 
+  it('a failed load clears every piece of progress bookkeeping', async () => {
+    const manager = new SessionManager()
+    const sessionId = 'failed-load-rollback'
+    state.sessions = [localSession(sessionId)]
+    manager.pushLog(sessionId, contractLine({ phase: 'loading_weights', completed: 2, total: 4, model_loaded: false, ready: false, generation: 3 }))
+    expect(manager.getLoadProgressSnapshot()[sessionId]).toBeTruthy()
+
+    ;(manager as any).clearLoadProgressBookkeeping(sessionId)
+    // Hydration snapshot gone — a renderer reload cannot resurrect the bar.
+    expect(manager.getLoadProgressSnapshot()[sessionId]).toBeUndefined()
+    // Generation high-water mark gone — a replacement engine restarting at
+    // generation 1 is not discarded.
+    const events: any[] = []
+    manager.on('session:loadProgress', (data: any) => events.push(data))
+    manager.pushLog(sessionId, contractLine({ phase: 'starting', completed: 0, total: 0, model_loaded: false, ready: false, generation: 1 }))
+    expect(events).toHaveLength(1)
+  })
+
   it('wake presentation still publishes the waking event', () => {
     const manager = new SessionManager()
     const sessionId = 'wake-presentation'

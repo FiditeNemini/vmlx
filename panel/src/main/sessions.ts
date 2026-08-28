@@ -1689,6 +1689,23 @@ export class SessionManager extends EventEmitter {
     this.loadResidentTimers.set(sessionId, setInterval(tick, 1000))
   }
 
+  /**
+   * A session that transitions to error must not leave stale progress
+   * bookkeeping behind: a renderer reload would hydrate a bar for a dead
+   * attempt, and a stale generation high-water mark would discard the
+   * replacement engine's events.
+   */
+  private clearLoadProgressBookkeeping(sessionId: string): void {
+    this.stopLoadResidentMonitor(sessionId)
+    this.stopWakeHealthPoller(sessionId)
+    this.loadProgressState.delete(sessionId)
+    this.loadProgressMeta.delete(sessionId)
+    this.lastLoadProgressEvents.delete(sessionId)
+    this.lifecycleGenerations.delete(sessionId)
+    this.contractSessions.delete(sessionId)
+    this.externalWakes.delete(sessionId)
+  }
+
   /** Store-and-emit so a page opened mid-load can hydrate the current state. */
   private emitLoadProgress(payload: { sessionId: string } & Record<string, unknown>): void {
     this.lastLoadProgressEvents.set(payload.sessionId, payload)
@@ -3308,6 +3325,7 @@ export class SessionManager extends EventEmitter {
     proc.on('error', (error) => {
       this.processes.delete(sessionId)
       this.failCounts.delete(sessionId)
+      this.clearLoadProgressBookkeeping(sessionId)
       db.updateSession(sessionId, {
         status: 'error',
         pid: undefined
@@ -3336,7 +3354,7 @@ export class SessionManager extends EventEmitter {
         ...(proc.pid ? { pid: proc.pid } : {})
       })
     } catch (err) {
-      this.stopLoadResidentMonitor(sessionId)
+      this.clearLoadProgressBookkeeping(sessionId)
       db.updateSession(sessionId, { status: 'error' })
       this.emit('session:error', { sessionId, error: (err as Error).message })
       throw err

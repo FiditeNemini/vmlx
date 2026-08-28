@@ -52,16 +52,29 @@ class TestToolCallGrading:
 
 class TestBlockReuseOracle:
     def test_expected_reuse_is_block_floor_of_lcp(self):
+        # Divergence well before the predecessor's terminal token: only the
+        # chain-hash block-floor branch applies.
         previous = list(range(1000))
-        current = list(range(990)) + [7, 8, 9]
-        assert expected_block_reuse(previous, current, 64) == (990 // 64) * 64
+        current = list(range(500)) + [-1] * 500
+        assert expected_block_reuse(previous, current, 64) == (500 // 64) * 64
 
     def test_disjoint_prefixes_expect_zero(self):
         assert expected_block_reuse([1, 2, 3], [4, 5, 6], 64) == 0
 
+    def test_identical_prefix_uses_exact_n_minus_1_boundary_not_block_floor(self):
+        # Content identical through the predecessor's own last token: the
+        # N-1 partial-terminal-block index applies exactly, NOT block_floor.
+        # A 1000-token predecessor is not a multiple of 64 -- this is the
+        # exact shape that caught the block_floor(lcp - 1) composition bug
+        # (block_floor(999) == 960, but the true safe extent is 999).
+        previous = list(range(1000))
+        current = list(range(999)) + [12345]
+        assert expected_block_reuse(previous, current, 64) == 999
+        assert expected_block_reuse(previous, current, 64) != (999 // 64) * 64
+
     def test_identical_prefix_full_blocks(self):
         tokens = list(range(640))
-        assert expected_block_reuse(tokens, tokens + [1], 64) == 640
+        assert expected_block_reuse(tokens, tokens + [1], 64) == 639
 
 
 class TestGrowthFitting:

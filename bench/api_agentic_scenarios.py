@@ -507,13 +507,27 @@ def grade_tool_call(calls: list[dict[str, Any]], expected_city: str) -> tuple[di
 
 
 def expected_block_reuse(previous_tokens: list[int], current_tokens: list[int], block_tokens: int) -> int:
-    """Expected complete-block restore from the tokenized longest common
-    prefix — the grading oracle, instead of comparing against the previous
-    turn's cached count."""
+    """Expected safe restore from the tokenized longest common prefix — the
+    grading oracle, instead of comparing against the previous turn's cached
+    count.
+
+    Two separate engine mechanisms apply, never composed as
+    block_floor(lcp - 1) (internally inconsistent: block_floor(6140) with a
+    64-token block is 6080, not 6140 -- caught 2026-08-28). When the current
+    render is identical all the way through the predecessor's own last
+    token (lcp >= len(previous_tokens) - 1), the engine's documented N-1
+    partial-terminal-block index applies and the safe extent is exactly
+    len(previous_tokens) - 1, unaligned to any block boundary. Otherwise
+    (content diverges before the predecessor's end -- e.g. a tool schema
+    injected mid-conversation) only full chain-hash blocks are safe.
+    """
     limit = min(len(previous_tokens), len(current_tokens))
     lcp = 0
     while lcp < limit and previous_tokens[lcp] == current_tokens[lcp]:
         lcp += 1
+    predecessor_terminal = len(previous_tokens) - 1
+    if predecessor_terminal >= 0 and lcp >= predecessor_terminal:
+        return predecessor_terminal
     return (lcp // block_tokens) * block_tokens
 
 
@@ -597,6 +611,11 @@ def run_scenario(
             return len(tokenizer.encode(text, add_special_tokens=False))
         except TypeError:
             return len(tokenizer.encode(text))
+
+    replay_reasoning = bool(manifest.get("replay_reasoning", True))
+
+    def _reasoning(result_dict):
+        return result_dict.get("reasoning_items") if replay_reasoning else None
 
     for index, turn in enumerate(manifest.get("turns") or [], start=1):
         kind = turn.get("kind")
@@ -684,7 +703,7 @@ def run_scenario(
             call, tool_errors = grade_tool_call(calls, expected_city or "")
             record.errors.extend(tool_errors)
             if call is not None:
-                wire.commit_assistant(content, calls, reasoning_items=result.get("reasoning_items"))
+                wire.commit_assistant(content, calls, reasoning_items=_reasoning(result))
                 wire.commit_tool_result(
                     call, json.dumps({"city": expected_city, "temp_c": 21, "sky": "sunny"})
                 )
@@ -726,14 +745,14 @@ def run_scenario(
                         f"continuation answer missing tool result: {continuation_content[:80]!r}"
                     )
                 wire.commit_assistant(continuation_content, continuation_calls,
-                                       reasoning_items=continuation.get("reasoning_items"))
+                                       reasoning_items=_reasoning(continuation))
                 previous_render_tokens = render_tokens()
         else:
             if not content.strip():
                 record.errors.append("turn produced no visible content")
             if expect and expect not in content:
                 record.errors.append(f"expected {expect!r} in answer, got {content[:80]!r}")
-            wire.commit_assistant(content, [], reasoning_items=result.get("reasoning_items"))
+            wire.commit_assistant(content, [], reasoning_items=_reasoning(result))
             previous_render_tokens = render_tokens()
 
         if index >= reuse_watch_from and turn.get("expect_reuse"):

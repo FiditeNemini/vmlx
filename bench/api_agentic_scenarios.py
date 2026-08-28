@@ -600,6 +600,9 @@ def run_scenario(
 
     for index, turn in enumerate(manifest.get("turns") or [], start=1):
         kind = turn.get("kind")
+        if turn.get("delay_s"):
+            # Explicit inter-turn delay arm (store-latency investigations).
+            time.sleep(float(turn["delay_s"]))
         stream = bool(turn.get("stream", default_stream))
         record = TurnRecord(index=index, kind=str(kind), wire=wire_name, stream=stream)
         records.append(record)

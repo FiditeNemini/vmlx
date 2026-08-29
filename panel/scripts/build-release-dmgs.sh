@@ -1627,7 +1627,7 @@ build_one() {
   run_electron_builder_action --mac --dir \
     --config.directories.output="$staged_output" \
     --config.mac.minimumSystemVersion="$minimum_system_version" \
-    "${identity_args[@]}"
+    ${identity_args[@]+"${identity_args[@]}"}
   assert_r20_source_identity "after ${flavor} app staging"
   app_path="$(find_staged_app "$staged_output")"
   if [[ "$DEV_UNSIGNED" == "1" ]]; then
@@ -1643,7 +1643,7 @@ build_one() {
     --config.directories.output="$DIST_DIR" \
     --config.mac.minimumSystemVersion="$minimum_system_version" \
     --config.mac.artifactName="vMLX-\${version}-${flavor}-\${arch}.\${ext}" \
-    "${identity_args[@]}"
+    ${identity_args[@]+"${identity_args[@]}"}
   if [[ ! -s "$dmg_path" ]]; then
     echo "ERROR: missing expected ${flavor} release DMG: $dmg_path" >&2
     exit 1

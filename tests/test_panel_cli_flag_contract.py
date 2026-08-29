@@ -279,10 +279,15 @@ def test_command_preview_uses_runtime_numeric_sanitizers_for_advanced_modes() ->
 
     assert "buildNativeMtpLaunchArgs" in runtime_native
     assert "buildNativeMtpLaunchArgs" in preview_native
-    assert "input.depthOverride === true" in mtp_helper
+    # Adaptive mode emits NO explicit depth (an explicit --native-mtp-depth
+    # becomes the engine's VMLINUX_NATIVE_MTP_DEPTH override, pinning the
+    # start depth and bypassing tuning sidecars and the session profile);
+    # only a user Fixed override sends a sanitized depth.
+    assert "input.depthOverride !== true" in mtp_helper
     assert "input.configuredDepth" in mtp_helper
-    assert "finitePositiveInteger(selectedDepth)" in mtp_helper
-    assert "input.depthOverride === true ? 'fixed' : 'adaptive'" in mtp_helper
+    assert "finitePositiveInteger(input.configuredDepth)" in mtp_helper
+    assert "'--native-mtp-depth-policy', 'adaptive'" in mtp_helper
+    assert "'fixed'" in mtp_helper
     assert "Math.round(Number(configuredDepth" not in preview_native
     for expression in (
         "finitePositiveInteger((config as any).smeltExperts)",

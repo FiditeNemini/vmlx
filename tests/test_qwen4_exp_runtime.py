@@ -1514,6 +1514,83 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
     assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
 
 
+def test_qwen4_exp_qsa_quantized_qkv_group_is_exact_and_releases_sources():
+    from vmlx_engine.models.qwen4_exp.language import QSAAttention
+
+    args = _tiny_args()
+    attention = QSAAttention(args)
+    attention.q_proj = attention.q_proj.to_quantized(group_size=64, bits=4)
+    attention.k_proj = attention.k_proj.to_quantized(group_size=64, bits=4)
+    attention.v_proj = attention.v_proj.to_quantized(group_size=64, bits=4)
+    x = (mx.arange(args.hidden_size, dtype=mx.float32) / 127.0).reshape(
+        1, 1, args.hidden_size
+    )
+    reference = (
+        attention.q_proj(x),
+        attention.k_proj(x),
+        attention.v_proj(x),
+    )
+
+    assert attention.prepare_runtime() is True
+    candidate = attention._project_qkv(x)
+    mx.eval(*reference, *candidate)
+
+    assert attention.q_proj is attention.k_proj is attention.v_proj is None
+    for expected, actual in zip(reference, candidate):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+
+def test_qwen4_exp_shared_expert_quantized_gate_up_group_is_exact():
+    from vmlx_engine.models.qwen4_exp.language import SharedExpertMLP
+
+    module = SharedExpertMLP(64, 96)
+    module.gate_proj = module.gate_proj.to_quantized(group_size=64, bits=4)
+    module.up_proj = module.up_proj.to_quantized(group_size=64, bits=4)
+    x = (mx.arange(128, dtype=mx.float32) / 127.0).reshape(1, 2, 64)
+    reference = (module.gate_proj(x), module.up_proj(x))
+
+    assert module.prepare_runtime() is True
+    candidate = module.gate_up_group(x)
+    mx.eval(*reference, *candidate)
+
+    assert module.gate_proj is module.up_proj is None
+    for expected, actual in zip(reference, candidate):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+
+def test_qwen4_exp_projection_group_preparation_walks_nested_modules():
+    from vmlx_engine.models.qwen4_exp.language import (
+        QSAAttention,
+        SharedExpertMLP,
+        prepare_quantized_projection_groups,
+    )
+
+    holder = nn.Module()
+    holder.attention = QSAAttention(_tiny_args())
+    holder.shared = SharedExpertMLP(64, 96)
+    for name in ("q_proj", "k_proj", "v_proj"):
+        projection = getattr(holder.attention, name)
+        setattr(
+            holder.attention,
+            name,
+            projection.to_quantized(group_size=64, bits=4),
+        )
+    for name in ("gate_proj", "up_proj"):
+        projection = getattr(holder.shared, name)
+        setattr(
+            holder.shared,
+            name,
+            projection.to_quantized(group_size=64, bits=4),
+        )
+
+    assert prepare_quantized_projection_groups(holder) == {
+        "qsa_qkv": 1,
+        "shared_gate_up": 1,
+    }
+    assert holder.attention.qkv_group is not None
+    assert holder.shared.gate_up_group is not None
+
+
 def test_qwen4_exp_grouped_rms_norm_uses_loader_homogeneous_dtype():
     from vmlx_engine.models.qwen4_exp.language import (
         GroupedRMSNorm,

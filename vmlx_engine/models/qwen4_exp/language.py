@@ -44,6 +44,7 @@ from vmlx_engine.models.minimax_m3.cache import (
 )
 from vmlx_engine.metal.qwen4_affine_moe_decode import qwen4_affine_switchglu
 from vmlx_engine.metal.quantized_projection_group import (
+    QuantizedProjectionGroup,
     cached_quantized_projection_group,
     quantized_projection_group_reason,
 )
@@ -1136,6 +1137,24 @@ class QSAAttention(nn.Module):
             base=args.rope_theta,
             mrope_section=args.mrope_section,
         )
+        self.qkv_group = None
+
+    def prepare_runtime(self) -> bool:
+        """Replace compatible packed q/k/v rows with one exact projection."""
+
+        linears = (self.q_proj, self.k_proj, self.v_proj)
+        if quantized_projection_group_reason(linears) is not None:
+            return False
+        group = QuantizedProjectionGroup(linears)
+        mx.eval(group.weight, group.scales, group.biases)
+        self.qkv_group = group
+        self.q_proj = self.k_proj = self.v_proj = None
+        return True
+
+    def _project_qkv(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        if self.qkv_group is not None:
+            return self.qkv_group(x)
+        return self.q_proj(x), self.k_proj(x), self.v_proj(x)
 
     def __call__(
         self,
@@ -1147,11 +1166,12 @@ class QSAAttention(nn.Module):
         B, S, _ = x.shape
         offset = cache.offset if cache is not None else 0
 
-        qg = self.q_proj(x).reshape(B, S, self.num_heads, 2 * self.head_dim)
+        qg, key_states, value_states = self._project_qkv(x)
+        qg = qg.reshape(B, S, self.num_heads, 2 * self.head_dim)
         queries, gate = mx.split(qg, 2, axis=-1)
         gate = gate.reshape(B, S, -1)
-        keys = self.k_proj(x).reshape(B, S, self.num_kv_heads, self.head_dim)
-        values = self.v_proj(x).reshape(B, S, self.num_kv_heads, self.head_dim)
+        keys = key_states.reshape(B, S, self.num_kv_heads, self.head_dim)
+        values = value_states.reshape(B, S, self.num_kv_heads, self.head_dim)
 
         queries = self.q_norm(queries).transpose(0, 2, 1, 3)
         keys = self.k_norm(keys).transpose(0, 2, 1, 3)
@@ -1213,9 +1233,44 @@ class SharedExpertMLP(nn.Module):
         self.gate_proj = nn.Linear(dim, hidden, bias=False)
         self.up_proj = nn.Linear(dim, hidden, bias=False)
         self.down_proj = nn.Linear(hidden, dim, bias=False)
+        self.gate_up_group = None
+
+    def prepare_runtime(self) -> bool:
+        """Replace compatible packed gate/up rows with one exact projection."""
+
+        linears = (self.gate_proj, self.up_proj)
+        if quantized_projection_group_reason(linears) is not None:
+            return False
+        group = QuantizedProjectionGroup(linears)
+        mx.eval(group.weight, group.scales, group.biases)
+        self.gate_up_group = group
+        self.gate_proj = self.up_proj = None
+        return True
 
     def __call__(self, x):
-        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
+        if self.gate_up_group is not None:
+            gate, up = self.gate_up_group(x)
+        else:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(nn.silu(gate) * up)
+
+
+def prepare_quantized_projection_groups(model: nn.Module) -> Dict[str, int]:
+    """Prepare exact QSA and shared-expert groups across backbone and MTP."""
+
+    prepared = {"qsa_qkv": 0, "shared_gate_up": 0}
+    modules = [model]
+    modules.extend(module for _, module in model.named_modules() if module is not model)
+    seen: set[int] = set()
+    for module in modules:
+        if id(module) in seen:
+            continue
+        seen.add(id(module))
+        if isinstance(module, QSAAttention) and module.prepare_runtime():
+            prepared["qsa_qkv"] += 1
+        elif isinstance(module, SharedExpertMLP) and module.prepare_runtime():
+            prepared["shared_gate_up"] += 1
+    return prepared
 
 
 class SparseMoeBlock(nn.Module):

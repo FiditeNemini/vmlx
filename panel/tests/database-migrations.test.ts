@@ -68,6 +68,45 @@ describe('database startup migrations', () => {
     expect(config.modelParserDefaultsVersion).toBe(MODEL_PARSER_DEFAULTS_VERSION)
   })
 
+  it('migrates stale qwen4-exp hermes tool parser to qwen exactly once', () => {
+    const config: Record<string, any> = {
+      modelParserDefaultsVersion: 2,
+      toolCallParser: 'hermes',
+    }
+
+    expect(migrateModelParserDefaults(config, 'qwen4-exp')).toBe(true)
+    expect(config.toolCallParser).toBe('qwen')
+    expect(config.modelParserDefaultsVersion).toBe(MODEL_PARSER_DEFAULTS_VERSION)
+
+    // After the version marker is written, a later explicit hermes choice
+    // survives — the migration fires exactly once.
+    config.toolCallParser = 'hermes'
+    expect(migrateModelParserDefaults(config, 'qwen4-exp')).toBe(false)
+    expect(config.toolCallParser).toBe('hermes')
+  })
+
+  it('leaves non-hermes qwen4-exp parser choices untouched', () => {
+    for (const parser of ['qwen', 'auto', '', undefined, 'xml_function']) {
+      const config: Record<string, any> = {
+        modelParserDefaultsVersion: 2,
+        toolCallParser: parser,
+      }
+      migrateModelParserDefaults(config, 'qwen4-exp')
+      expect(config.toolCallParser).toBe(parser)
+    }
+  })
+
+  it('leaves hermes on every non-qwen4-exp family untouched', () => {
+    for (const family of ['qwen3.5', 'qwen3-next', 'qwen3', 'qwen2', 'phi4', 'hermes', 'laguna']) {
+      const config: Record<string, any> = {
+        modelParserDefaultsVersion: 2,
+        toolCallParser: 'hermes',
+      }
+      migrateModelParserDefaults(config, family)
+      expect(config.toolCallParser).toBe('hermes')
+    }
+  })
+
   it('preserves an explicit non-stale Laguna parser while versioning defaults', () => {
     const config: Record<string, any> = { toolCallParser: 'none' }
 

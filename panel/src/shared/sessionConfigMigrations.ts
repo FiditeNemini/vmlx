@@ -1,7 +1,7 @@
 import { canonicalizeReasoningParserForCli } from './reasoningParserAliases'
 
 export const GENERATION_STARTUP_DEFAULTS_VERSION = 4
-export const MODEL_PARSER_DEFAULTS_VERSION = 2
+export const MODEL_PARSER_DEFAULTS_VERSION = 3
 export const LEGACY_GENERIC_MAX_OUTPUT_TOKENS = new Set([4096, 12000, 12068, 32768])
 
 /**
@@ -43,6 +43,17 @@ export function migrateModelParserDefaults(
     canonicalizeReasoningParserForCli(detectedReasoningParser) === 'deepseek_r1'
   ) {
     config.reasoningParser = 'deepseek_r1'
+  }
+  // v3: Qwen4Exp bundles were converter-stamped tool_parser="hermes", and
+  // sessions created in that era persisted "hermes" as if it were an
+  // explicit user override, so the registry/panel stale-stamp
+  // neutralization never reached them. Hermes parses only JSON bodies while
+  // the bundle template emits Qwen <function=/<parameter= XML — live-proven
+  // sampled required-mode tool_calls_required 400s on Flash-Next JANG_1L.
+  // Migrate exactly this one auto-derived value, once; every other family
+  // and every non-hermes choice (qwen/auto/''/None/other) is untouched.
+  if (detectedFamily === 'qwen4-exp' && config.toolCallParser === 'hermes') {
+    config.toolCallParser = 'qwen'
   }
   config.modelParserDefaultsVersion = MODEL_PARSER_DEFAULTS_VERSION
   return true

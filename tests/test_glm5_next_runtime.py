@@ -176,6 +176,20 @@ class TestCacheAndForward:
         for expected, actual in zip(reference, candidate):
             assert float(mx.abs(expected - actual).max()) == 0.0
 
+    def test_kda_fused_gated_norm_matches_reference_at_mtp_width(self, glm5):
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        attn = glm5.KDAAttention(args)
+        attn._fused_gated_norm = True
+        x = (mx.arange(4 * 64, dtype=mx.float32) / 127.0).reshape(1, 4, 64)
+
+        fused = attn(x)
+        attn._fused_gated_norm = False
+        reference = attn(x)
+        mx.eval(fused, reference)
+
+        assert fused.shape == reference.shape
+        assert float(mx.abs(fused - reference).max()) < 2e-2
+
     def test_sanitize_drops_visual_and_mtp_keeps_indexer(self, tiny_model):
         weights = {
             "visual.blocks.0.attn.proj.weight": mx.zeros((1,)),

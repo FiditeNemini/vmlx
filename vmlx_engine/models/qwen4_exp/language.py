@@ -43,6 +43,10 @@ from vmlx_engine.models.minimax_m3.cache import (
     MiniMaxM3SparseCache as _SparseIndexerKVCache,
 )
 from vmlx_engine.metal.qwen4_affine_moe_decode import qwen4_affine_switchglu
+from vmlx_engine.metal.gated_rmsnorm_decode import (
+    fused_gated_rmsnorm_requested,
+    sigmoid_gated_rmsnorm_small_rows,
+)
 from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
     cached_quantized_projection_group,
@@ -330,8 +334,19 @@ class RMSNormGatedSigmoid(nn.Module):
         super().__init__()
         self.weight = mx.ones((dims,))
         self.eps = eps
+        self._fused_decode = fused_gated_rmsnorm_requested()
 
     def __call__(self, x: mx.array, gate: mx.array) -> mx.array:
+        fused = sigmoid_gated_rmsnorm_small_rows(
+            x,
+            gate,
+            self.weight,
+            self.eps,
+            output_dtype=x.dtype,
+            enabled=self._fused_decode,
+        )
+        if fused is not None:
+            return fused
         normed = mx.fast.rms_norm(x, self.weight, self.eps)
         return (normed.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(
             x.dtype

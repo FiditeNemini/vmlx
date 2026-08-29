@@ -1502,6 +1502,50 @@ def test_qwen4_exp_gdn_decode_projection_fusion_is_bit_identical():
         )
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("rows", [1, 4, 8])
+def test_small_row_sigmoid_gated_rmsnorm_matches_qwen_reference(dtype, rows):
+    from vmlx_engine.metal.gated_rmsnorm_decode import (
+        sigmoid_gated_rmsnorm_small_rows,
+    )
+
+    dims = 64
+    x = (mx.arange(rows * 2 * dims, dtype=mx.float32) / 127.0 - 1.0)
+    x = x.reshape(1, rows, 2, dims).astype(dtype)
+    gate = (mx.flip(x, axis=-1) * 0.75).astype(dtype)
+    weight = (mx.arange(dims, dtype=mx.float32) / 256.0 + 0.75).astype(dtype)
+    reference = (
+        mx.fast.rms_norm(x, weight, 1e-6).astype(mx.float32)
+        * mx.sigmoid(gate.astype(mx.float32))
+    ).astype(dtype)
+    candidate = sigmoid_gated_rmsnorm_small_rows(
+        x, gate, weight, 1e-6, output_dtype=dtype, enabled=True
+    )
+    assert candidate is not None
+    mx.eval(reference, candidate)
+    np.testing.assert_allclose(
+        np.asarray(candidate.astype(mx.float32)),
+        np.asarray(reference.astype(mx.float32)),
+        rtol=8e-3,
+        atol=8e-3,
+    )
+
+
+def test_small_row_sigmoid_gated_rmsnorm_refuses_prefill_width():
+    from vmlx_engine.metal.gated_rmsnorm_decode import (
+        sigmoid_gated_rmsnorm_small_rows,
+    )
+
+    x = mx.ones((1, 9, 2, 64), dtype=mx.float16)
+    assert sigmoid_gated_rmsnorm_small_rows(
+        x,
+        x,
+        mx.ones((64,), dtype=mx.float16),
+        1e-6,
+        enabled=True,
+    ) is None
+
+
 def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
     from vmlx_engine.models.qwen4_exp.language import (
         _decode_quantized_linears_fused,

@@ -46,6 +46,11 @@ from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from vmlx_engine.metal.gated_rmsnorm_decode import (
+    fused_gated_rmsnorm_requested,
+    sigmoid_gated_rmsnorm_small_rows,
+)
+
 from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
     quantized_projection_group_reason,
@@ -326,6 +331,7 @@ class KDAAttention(nn.Module):
         self.o_proj = nn.Linear(qkv, d, bias=False)
         self.rms_eps = args.rms_norm_eps
         self.qkv_group = None
+        self._fused_gated_norm = fused_gated_rmsnorm_requested()
 
     def prepare_runtime(self) -> bool:
         """Group q/k/v packed rows once and release superseded references."""
@@ -389,13 +395,24 @@ class KDAAttention(nn.Module):
             else:
                 o, s1 = kda_chunked(q, k, v, g, beta, s0)
             gate = self.g_b_proj(self.g_a_proj(seg)).reshape(B, seg_t, H, K)
-            o32 = o.astype(mx.float32)
-            o32 = o32 * mx.rsqrt(
-                mx.mean(o32 * o32, axis=-1, keepdims=True) + self.rms_eps
+            gated = sigmoid_gated_rmsnorm_small_rows(
+                o,
+                gate,
+                self.o_norm,
+                self.rms_eps,
+                output_dtype=seg.dtype,
+                enabled=self._fused_gated_norm,
             )
-            o32 = self.o_norm.astype(mx.float32) * o32
-            o32 = o32 * mx.sigmoid(gate.astype(mx.float32))
-            projected = self.o_proj(o32.astype(seg.dtype).reshape(B, seg_t, H * K))
+            if gated is None:
+                o32 = o.astype(mx.float32)
+                o32 = o32 * mx.rsqrt(
+                    mx.mean(o32 * o32, axis=-1, keepdims=True) + self.rms_eps
+                )
+                o32 = self.o_norm.astype(mx.float32) * o32
+                gated = (o32 * mx.sigmoid(gate.astype(mx.float32))).astype(
+                    seg.dtype
+                )
+            projected = self.o_proj(gated.reshape(B, seg_t, H * K))
             return projected, cq1, ck1, cv1, s1
 
         if (

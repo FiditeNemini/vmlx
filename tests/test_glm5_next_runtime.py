@@ -155,6 +155,63 @@ class TestCacheAndForward:
         with pytest.raises(ValueError, match="context limit"):
             model(mx.array([[1] * 65]))
 
+    @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+    def test_kda_qkv_conv_fusion_matches_stock(self, dtype):
+        from vmlx_engine.metal.kda_conv_decode import glm5_kda_conv_decode
+        from vmlx_engine.models.glm5_next.kda import short_conv
+
+        channels = 64
+        kernel_size = 4
+        arrays = [
+            (mx.random.normal((1, 1, channels)) * 0.2).astype(dtype)
+            for _ in range(3)
+        ]
+        states = [
+            (mx.random.normal((1, kernel_size - 1, channels)) * 0.2).astype(
+                dtype
+            )
+            for _ in range(3)
+        ]
+        weights = [
+            (mx.random.normal((channels, kernel_size)) * 0.2).astype(dtype)
+            for _ in range(3)
+        ]
+        reference = [
+            short_conv(array, weight, state)
+            for array, weight, state in zip(arrays, weights, states)
+        ]
+        candidate = glm5_kda_conv_decode(
+            *arrays,
+            *states,
+            *weights,
+            enabled=True,
+        )
+        assert candidate is not None
+        mx.eval(*candidate, *(value for pair in reference for value in pair))
+        for index, (expected_out, expected_state) in enumerate(reference):
+            actual_out = candidate[index]
+            actual_state = candidate[index + 3]
+            assert mx.array_equal(actual_state, expected_state)
+            assert mx.allclose(
+                actual_out,
+                expected_out,
+                rtol=8e-3,
+                atol=8e-3,
+            )
+
+    def test_kda_qkv_conv_fusion_refuses_prefill(self):
+        from vmlx_engine.metal.kda_conv_decode import glm5_kda_conv_decode
+
+        arrays = [mx.zeros((1, 2, 64), dtype=mx.float16) for _ in range(3)]
+        states = [mx.zeros((1, 3, 64), dtype=mx.float16) for _ in range(3)]
+        weights = [mx.zeros((64, 4), dtype=mx.float16) for _ in range(3)]
+        assert glm5_kda_conv_decode(
+            *arrays,
+            *states,
+            *weights,
+            enabled=True,
+        ) is None
+
     def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         attn = glm5.KDAAttention(args)

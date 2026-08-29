@@ -55,6 +55,10 @@ from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
     sigmoid_gated_rmsnorm_small_rows,
 )
+from vmlx_engine.metal.kda_conv_decode import (
+    fused_kda_conv_requested,
+    glm5_kda_conv_decode,
+)
 
 from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
@@ -356,6 +360,7 @@ class KDAAttention(nn.Module):
         self.rms_eps = args.rms_norm_eps
         self.qkv_group = None
         self._fused_gated_norm = fused_gated_rmsnorm_requested()
+        self._fused_kda_conv = fused_kda_conv_requested()
 
     def prepare_runtime(self) -> bool:
         """Group q/k/v packed rows once and release superseded references."""
@@ -401,9 +406,24 @@ class KDAAttention(nn.Module):
         def run_segment(seg, cq0, ck0, cv0, s0):
             seg_t = seg.shape[1]
             q, k, v = self._project_qkv(seg)
-            q, cq1 = short_conv(q, self.q_conv1d, cq0)
-            k, ck1 = short_conv(k, self.k_conv1d, ck0)
-            v, cv1 = short_conv(v, self.v_conv1d, cv0)
+            fused_conv = glm5_kda_conv_decode(
+                q,
+                k,
+                v,
+                cq0,
+                ck0,
+                cv0,
+                self.q_conv1d,
+                self.k_conv1d,
+                self.v_conv1d,
+                enabled=self._fused_kda_conv,
+            )
+            if fused_conv is not None:
+                q, k, v, cq1, ck1, cv1 = fused_conv
+            else:
+                q, cq1 = short_conv(q, self.q_conv1d, cq0)
+                k, ck1 = short_conv(k, self.k_conv1d, ck0)
+                v, cv1 = short_conv(v, self.v_conv1d, cv0)
             q = l2norm(q.reshape(B, seg_t, H, K))
             k = l2norm(k.reshape(B, seg_t, H, K))
             v = v.reshape(B, seg_t, H, K)

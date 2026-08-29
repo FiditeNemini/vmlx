@@ -798,8 +798,12 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     projection_groups = prepare_quantized_projection_groups(model)
 
     from vmlx_engine.metal.qwen4_affine_moe_decode import install_qwen4_affine_moe
+    from vmlx_engine.metal.affine_moe_pair_decode import (
+        install_affine_moe_pair_decode,
+    )
 
     install_qwen4_affine_moe(model)
+    install_affine_moe_pair_decode(model, family="qwen4_exp")
 
     _validate_ple_hash_buffers(model, ple_buffers)
     weight_map = json.loads(

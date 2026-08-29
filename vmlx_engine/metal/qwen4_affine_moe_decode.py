@@ -21,6 +21,8 @@ from typing import Any, Optional
 import mlx.core as mx
 import mlx.nn as nn
 
+from vmlx_engine.metal.affine_moe_pair_decode import affine_moe_pair_activation
+
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +292,10 @@ def qwen4_affine_switchglu(
     scores: mx.array,
 ) -> tuple[mx.array, bool]:
     """Return the weighted routed output and whether the fused path owned it."""
+    activated, pair_fused = affine_moe_pair_activation(switch, x, indices)
+    if pair_fused:
+        selected = switch.down_proj(activated, indices).squeeze(-2)
+        return (selected * scores[..., None]).sum(axis=-2), True
     if getattr(switch, _EXACT_OK_ATTR, False):
         return _exact_gate_up_switchglu(switch, x, indices, scores), True
     if not getattr(switch, _OK_ATTR, False):

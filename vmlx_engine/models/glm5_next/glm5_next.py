@@ -46,6 +46,11 @@ from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from vmlx_engine.metal.affine_moe_pair_decode import (
+    affine_moe_pair_activation,
+    install_affine_moe_pair_decode,
+)
+
 from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
     sigmoid_gated_rmsnorm_small_rows,
@@ -721,7 +726,13 @@ class MoEBlock(nn.Module):
         if self.norm_topk:
             w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
         w = w * self.scaling
-        routed = self.switch_mlp(x, idx)                   # [B, T, k, d]
+        activated, pair_fused = affine_moe_pair_activation(
+            self.switch_mlp, x, idx
+        )
+        if pair_fused:
+            routed = self.switch_mlp.down_proj(activated, idx).squeeze(-2)
+        else:
+            routed = self.switch_mlp(x, idx)               # [B, T, k, d]
         routed = mx.sum(routed * w[..., None].astype(routed.dtype), axis=-2)
         return routed.astype(x.dtype) + self.shared_experts(x)
 
@@ -895,6 +906,10 @@ class Model(nn.Module):
     def prepare_acceleration(self) -> dict[str, int]:
         """Install exact launch-reduction groups after checkpoint hydration."""
 
+        fused_moe_pair_modules = install_affine_moe_pair_decode(
+            self, family="glm5_next"
+        )
+
         base_kda_groups = 0
         base_dense_gate_up_groups = 0
         for layer in self.model.layers:
@@ -915,6 +930,7 @@ class Model(nn.Module):
             "base_kda_qkv_groups": base_kda_groups,
             "base_dense_gate_up_groups": base_dense_gate_up_groups,
             "mtp_dense_gate_up_groups": mtp_dense_gate_up_groups,
+            "fused_moe_pair_modules": fused_moe_pair_modules,
             "base_launches_removed_per_forward": (
                 2 * base_kda_groups + base_dense_gate_up_groups
             ),

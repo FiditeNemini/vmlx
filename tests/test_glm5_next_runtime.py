@@ -422,9 +422,18 @@ class TestPublicLoaderMtpHandoff:
             "family": "glm5_next",
             "mtp": {"mtp_mode": "preserved_enabled", "num_layers": 1},
         }
+        cfg["quantization"] = {
+            "group_size": 64,
+            "bits": 4,
+            "model.layers.5.mlp.switch_mlp.gate_proj": {
+                "group_size": 64,
+                "bits": 2,
+            },
+        }
         (tmp_path / "config.json").write_text(json.dumps(cfg))
 
         events = []
+        load_kwargs = {}
         monkeypatch.setattr(tokenizer, "_register_mimo_v2_runtime_for_mlx_lm", lambda: False)
         monkeypatch.setattr(tokenizer, "_needs_tokenizer_fallback", lambda _path: False)
         monkeypatch.setattr(tokenizer, "_inject_chat_template_if_missing", lambda *_a, **_k: None)
@@ -439,12 +448,13 @@ class TestPublicLoaderMtpHandoff:
             "maybe_apply_native_mtp",
             lambda *_a, **_k: events.append("activate") or dict(mtp_status),
         )
-        monkeypatch.setattr(
-            mlx_lm,
-            "load",
-            lambda *_a, **_k: events.append("load") or (model, object()),
-        )
-        return tokenizer, events
+        def fake_load(*_args, **kwargs):
+            events.append("load")
+            load_kwargs.update(kwargs)
+            return model, object()
+
+        monkeypatch.setattr(mlx_lm, "load", fake_load)
+        return tokenizer, events, load_kwargs
 
     def test_glm_mtp_activation_precedes_generic_model_construction(
         self, monkeypatch, tmp_path
@@ -458,7 +468,7 @@ class TestPublicLoaderMtpHandoff:
             def make_mtp_cache(self):
                 pass
 
-        tokenizer, events = self._prepare_loader(
+        tokenizer, events, load_kwargs = self._prepare_loader(
             monkeypatch,
             tmp_path,
             mtp_status={"runtime_active": True, "status": "native_runtime_ready"},
@@ -468,11 +478,14 @@ class TestPublicLoaderMtpHandoff:
         tokenizer.load_model_with_fallback(str(tmp_path), skip_turboquant=True)
 
         assert events == ["register", "activate", "load"]
+        assert load_kwargs["model_config"]["quantization"][
+            "mtp.mlp.switch_mlp.gate_proj"
+        ] == {"group_size": 64, "bits": 2}
 
     def test_glm_mtp_bundle_fails_if_generic_load_drops_attached_head(
         self, monkeypatch, tmp_path
     ):
-        tokenizer, events = self._prepare_loader(
+        tokenizer, events, _load_kwargs = self._prepare_loader(
             monkeypatch,
             tmp_path,
             mtp_status={"runtime_active": True, "status": "native_runtime_ready"},
@@ -488,7 +501,7 @@ class TestPublicLoaderMtpHandoff:
         self, monkeypatch, tmp_path
     ):
         model = object()
-        tokenizer, events = self._prepare_loader(
+        tokenizer, events, _load_kwargs = self._prepare_loader(
             monkeypatch,
             tmp_path,
             mtp_status={"runtime_active": False, "status": "not_configured"},

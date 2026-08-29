@@ -24,6 +24,62 @@ logger = logging.getLogger(__name__)
 _NEMOTRON_QUANT_ROOT_KEYS = frozenset({"group_size", "bits", "mode"})
 
 
+def _glm5_next_model_config_for_load(config: dict) -> tuple[dict, int]:
+    """Alias appended GLM MTP-layer quantization to its runtime module path.
+
+    GLM checkpoints store the draft block as ``model.layers.N.*`` while the
+    vendored runtime exposes the attached module as ``mtp.*``.  ``mlx_lm``
+    sanitizes weights before quantizing modules, then resolves per-module
+    overrides by exact config key.  Without matching aliases the MTP head uses
+    the top-level fallback bits and its packed tensors fail strict shape load.
+
+    Return a shallow config copy; never mutate the bundle metadata object and
+    never overwrite an explicit runtime-path entry.
+    """
+    text_config = config.get("text_config")
+    model_types = {
+        str(config.get("model_type") or ""),
+        str(text_config.get("model_type") or "")
+        if isinstance(text_config, dict)
+        else "",
+    }
+    if not model_types.intersection({"glm5_next", "glm5_next_text"}):
+        return config, 0
+    quantization = config.get("quantization")
+    if not isinstance(quantization, dict):
+        return config, 0
+    base_layers = (
+        text_config.get("num_hidden_layers")
+        if isinstance(text_config, dict)
+        else config.get("num_hidden_layers")
+    )
+    if not isinstance(base_layers, int) or base_layers <= 0:
+        return config, 0
+
+    source_prefix = f"model.layers.{base_layers}."
+    aliases: dict[str, dict] = {}
+    for key, value in quantization.items():
+        if not isinstance(key, str) or not key.startswith(source_prefix):
+            continue
+        if not isinstance(value, dict):
+            continue
+        target = f"mtp.{key[len(source_prefix):]}"
+        existing = quantization.get(target)
+        if existing is not None and existing != value:
+            raise ValueError(
+                "GLM-5.3 MTP quantization metadata conflicts between "
+                f"{key!r} and {target!r}"
+            )
+        if existing is None:
+            aliases[target] = value
+
+    if not aliases:
+        return config, 0
+    override = dict(config)
+    override["quantization"] = {**quantization, **aliases}
+    return override, len(aliases)
+
+
 def _chat_template_is_unresolved_include(template) -> bool:
     """True when a tokenizer template is only a sidecar include directive.
 
@@ -1079,6 +1135,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
     # draft head.  The finalizer below then proves the head survived model
     # construction instead of silently serving the MTP bundle as plain AR.
     _glm5_next_native_mtp_expected = False
+    _glm5_next_model_config_override = None
 
     # Nanbeige 4.2 is a looped transformer: 22 shared module layers execute
     # twice and require 44 independent KV-cache slots. Register the loop-aware
@@ -1169,6 +1226,19 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                 _glm5_next_native_mtp_expected = bool(
                     _glm_mtp_status.get("runtime_active")
                 )
+                (
+                    _glm5_next_model_config_override,
+                    _glm_mtp_quant_alias_count,
+                ) = _glm5_next_model_config_for_load(_cfg_arch)
+                if _glm_mtp_quant_alias_count:
+                    logger.info(
+                        "GLM-5.3 load: aliased %d appended-head quantization "
+                        "overrides from model.layers.%s.* to mtp.*",
+                        _glm_mtp_quant_alias_count,
+                        (_cfg_arch.get("text_config") or _cfg_arch).get(
+                            "num_hidden_layers"
+                        ),
+                    )
             if _mt_arch == "zaya" or _tc_mt_arch == "zaya":
                 _jcfg_path_arch = Path(local_model_path) / "jang_config.json"
                 _zaya_wf = None
@@ -1339,7 +1409,10 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
     try:
         model, tokenizer = load(
-            model_name, tokenizer_config=tokenizer_config, lazy=False
+            model_name,
+            tokenizer_config=tokenizer_config,
+            model_config=_glm5_next_model_config_override,
+            lazy=False,
         )
         if not skip_turboquant:
             _apply_turboquant_to_model(model, local_model_path)

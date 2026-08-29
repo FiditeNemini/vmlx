@@ -5,9 +5,12 @@ from __future__ import annotations
 import fnmatch
 import json
 import mmap
+import os
 import struct
+import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import mlx.core as mx
@@ -30,6 +33,44 @@ _MLX_DTYPES = {
     "U32": mx.uint32,
     "I64": mx.int64,
 }
+
+_PARALLEL_READ_MAX_ROWS = 128
+_PARALLEL_READ_MAX_WORKERS = 16
+
+
+def _parallel_ple_read_requested() -> bool:
+    value = os.environ.get("VMLX_QWEN4_PLE_PARALLEL_READ", "0").strip().lower()
+    return value not in {"", "0", "false", "off", "no"}
+
+
+class _SharedPreadFile:
+    """One lazily opened descriptor shared by all tensors in a shard file."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._fd: int | None = None
+        self._lock = threading.Lock()
+
+    def _fileno(self) -> int:
+        if self._fd is None:
+            with self._lock:
+                if self._fd is None:
+                    self._fd = os.open(self.path, os.O_RDONLY)
+        return self._fd
+
+    def read(self, size: int, offset: int) -> bytes:
+        data = os.pread(self._fileno(), size, offset)
+        if len(data) != size:
+            raise OSError(
+                f"short PLE pread from {self.path}: {len(data)} != {size}"
+            )
+        return data
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fd is not None:
+                os.close(self._fd)
+                self._fd = None
 
 
 def _advise_random_access(array: np.memmap) -> bool:
@@ -223,7 +264,13 @@ def _validate_affine_layout(
 class SafetensorsRowReader:
     """Memory-map one two-dimensional safetensors tensor and fetch rows only."""
 
-    def __init__(self, path: str | Path, tensor_name: str):
+    def __init__(
+        self,
+        path: str | Path,
+        tensor_name: str,
+        *,
+        pread_file: _SharedPreadFile | None = None,
+    ):
         path = Path(path)
         with path.open("rb") as handle:
             (header_len,) = struct.unpack("<Q", handle.read(8))
@@ -236,13 +283,17 @@ class SafetensorsRowReader:
         if len(self.shape) != 2:
             raise ValueError(f"PLE tensor must be rank 2, got {self.shape}")
         start, _end = info["data_offsets"]
+        self.data_offset = 8 + header_len + start
         self.mm = np.memmap(
             path,
             dtype=_DTYPES[self.dtype_tag],
             mode="r",
-            offset=8 + header_len + start,
+            offset=self.data_offset,
             shape=self.shape,
         )
+        self.row_bytes = int(np.dtype(_DTYPES[self.dtype_tag]).itemsize)
+        self.row_bytes *= int(np.prod(self.shape[1:], dtype=np.int64))
+        self._pread_file = pread_file
         self.random_access_advised = _advise_random_access(self.mm)
 
     def rows(self, indices: np.ndarray) -> np.ndarray:
@@ -251,6 +302,33 @@ class SafetensorsRowReader:
             raw = np.asarray(values, dtype=np.uint16)
             return (raw.astype(np.uint32) << 16).view(np.float32)
         return np.asarray(values)
+
+    def rows_pread(self, indices: np.ndarray) -> np.ndarray:
+        """Read selected rows without faulting the process-wide mmap."""
+
+        if self._pread_file is None:
+            raise RuntimeError("PLE pread source is unavailable")
+        indices = np.asarray(indices, dtype=np.int64)
+        flat = indices.reshape(-1)
+        if flat.size and (int(flat.min()) < 0 or int(flat.max()) >= self.shape[0]):
+            raise IndexError("PLE row is outside the tensor")
+        unique, inverse = np.unique(flat, return_inverse=True)
+        host = np.empty((unique.size, *self.shape[1:]), dtype=_DTYPES[self.dtype_tag])
+        for position, row in enumerate(unique):
+            raw = self._pread_file.read(
+                self.row_bytes,
+                self.data_offset + int(row) * self.row_bytes,
+            )
+            host[position] = np.frombuffer(
+                raw,
+                dtype=_DTYPES[self.dtype_tag],
+                count=int(np.prod(self.shape[1:], dtype=np.int64)),
+            ).reshape(self.shape[1:])
+        values = host[inverse].reshape(*indices.shape, *self.shape[1:])
+        if self.dtype_tag == "BF16":
+            raw = np.asarray(values, dtype=np.uint16)
+            return (raw.astype(np.uint32) << 16).view(np.float32)
+        return values
 
     @property
     def mlx_dtype(self):
@@ -271,10 +349,18 @@ class _AffineShard:
         quant_spec: dict,
         storage_bits: int | None,
         expected_head_dim: int,
+        pread_files: dict[Path, _SharedPreadFile] | None = None,
     ):
         def reader(suffix: str) -> SafetensorsRowReader:
             key = f"{module_path}.{suffix}"
-            return SafetensorsRowReader(model_dir / weight_map[key], key)
+            path = model_dir / weight_map[key]
+            pread_file = None
+            if pread_files is not None:
+                pread_file = pread_files.get(path)
+                if pread_file is None:
+                    pread_file = _SharedPreadFile(path)
+                    pread_files[path] = pread_file
+            return SafetensorsRowReader(path, key, pread_file=pread_file)
 
         self.weight = reader("weight")
         self.scales = reader("scales")
@@ -321,32 +407,61 @@ class _AffineShard:
     ) -> mx.array:
         if profile is None:
             packed = self.weight.mlx_rows(rows)
+            scales = self.scales.mlx_rows(rows)
+            biases = self.biases.mlx_rows(rows)
         else:
             started = time.perf_counter()
-            packed_rows = self.weight.rows(rows)
-            scale_rows = self.scales.rows(rows)
-            bias_rows = self.biases.rows(rows)
+            host_rows = self.read_rows(rows)
             profile["ssd_rows_cpu_ms"] = profile.get("ssd_rows_cpu_ms", 0.0) + (
                 time.perf_counter() - started
             ) * 1000.0
+            return self.dequantize_rows_mlx(host_rows, profile=profile)
 
-            started = time.perf_counter()
-            packed = mx.array(packed_rows).astype(self.weight.mlx_dtype)
-            scales = mx.array(scale_rows).astype(self.scales.mlx_dtype)
-            biases = mx.array(bias_rows).astype(self.biases.mlx_dtype)
+        return self._dequantize_mlx(packed, scales, biases, profile=profile)
+
+    def read_rows(
+        self,
+        rows: np.ndarray,
+        *,
+        use_pread: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        read = "rows_pread" if use_pread else "rows"
+        return (
+            getattr(self.weight, read)(rows),
+            getattr(self.scales, read)(rows),
+            getattr(self.biases, read)(rows),
+        )
+
+    def dequantize_rows_mlx(
+        self,
+        host_rows: tuple[np.ndarray, np.ndarray, np.ndarray],
+        *,
+        profile: dict[str, float] | None = None,
+    ) -> mx.array:
+        started = time.perf_counter() if profile is not None else None
+        packed = mx.array(host_rows[0]).astype(self.weight.mlx_dtype)
+        scales = mx.array(host_rows[1]).astype(self.scales.mlx_dtype)
+        biases = mx.array(host_rows[2]).astype(self.biases.mlx_dtype)
+        if profile is not None:
             mx.eval(packed, scales, biases)
             profile["host_to_mlx_ms"] = profile.get("host_to_mlx_ms", 0.0) + (
                 time.perf_counter() - started
             ) * 1000.0
+        return self._dequantize_mlx(packed, scales, biases, profile=profile)
 
+    def _dequantize_mlx(
+        self,
+        packed: mx.array,
+        scales: mx.array,
+        biases: mx.array,
+        *,
+        profile: dict[str, float] | None,
+    ) -> mx.array:
         started = time.perf_counter() if profile is not None else None
         runtime_bits = self.logical_bits
         if self.storage_bits == 1:
             packed = expand_packed_1bit_to_2bit_mlx(packed)
             runtime_bits = 2
-        if profile is None:
-            scales = self.scales.mlx_rows(rows)
-            biases = self.biases.mlx_rows(rows)
         values = mx.dequantize(
             packed,
             scales,
@@ -412,6 +527,7 @@ class FileBackedQuantizedNGramTable:
         if n_shards <= 0:
             raise ValueError("PLE n_shards must be positive")
         self.shards = []
+        self._pread_files: dict[Path, _SharedPreadFile] = {}
         for shard_index in range(n_shards):
             module_path = module_key_format.format(shard_index)
             spec = (
@@ -445,6 +561,7 @@ class FileBackedQuantizedNGramTable:
                     spec,
                     storage_bits,
                     expected_head_dim,
+                    self._pread_files,
                 )
             )
         self.per = self.shards[0].rows_count
@@ -476,6 +593,29 @@ class FileBackedQuantizedNGramTable:
         self.random_access_advised_readers = sum(
             bool(reader.random_access_advised) for reader in readers
         )
+        self._parallel_read = _parallel_ple_read_requested()
+        self._read_pool = (
+            ThreadPoolExecutor(
+                max_workers=min(_PARALLEL_READ_MAX_WORKERS, n_shards),
+                thread_name_prefix="vmlx-ple-read",
+            )
+            if self._parallel_read
+            else None
+        )
+
+    def close(self) -> None:
+        pool = getattr(self, "_read_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
+            self._read_pool = None
+        for pread_file in getattr(self, "_pread_files", {}).values():
+            pread_file.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def gather(self, flat_rows: np.ndarray) -> np.ndarray:
         values = self.gather_mlx(flat_rows)
@@ -498,13 +638,62 @@ class FileBackedQuantizedNGramTable:
         out = mx.zeros(
             (flat_rows.size, self.head_dim), dtype=self.output_dtype
         )
-        for shard_index in np.unique(shard_indices):
-            selected = np.nonzero(shard_indices == shard_index)[0]
-            selected_mx = mx.array(selected.astype(np.uint32))
-            out[selected_mx] = self.shards[int(shard_index)].gather_mlx(
-                local_rows[selected],
-                profile=profile,
+        unique_shards = np.unique(shard_indices)
+        selections = [
+            (
+                int(shard_index),
+                np.nonzero(shard_indices == shard_index)[0],
             )
+            for shard_index in unique_shards
+        ]
+        pool = getattr(self, "_read_pool", None)
+        parallel = (
+            pool is not None
+            and 1 < len(selections)
+            and flat_rows.size <= _PARALLEL_READ_MAX_ROWS
+            and all(
+                hasattr(self.shards[shard_index], "read_rows")
+                for shard_index, _selected in selections
+            )
+        )
+        futures = {}
+        host_batches = {}
+        if parallel:
+            started = time.perf_counter() if profile is not None else None
+            futures = {
+                shard_index: pool.submit(
+                    self.shards[shard_index].read_rows,
+                    local_rows[selected],
+                    use_pread=True,
+                )
+                for shard_index, selected in selections
+            }
+            host_batches = {
+                shard_index: future.result()
+                for shard_index, future in futures.items()
+            }
+            if profile is not None:
+                read_wall_ms = (time.perf_counter() - started) * 1000.0
+                # Preserve the established aggregate key for profile consumers
+                # while exposing the parallel wall-clock component separately.
+                profile["ssd_rows_cpu_ms"] = profile.get(
+                    "ssd_rows_cpu_ms", 0.0
+                ) + read_wall_ms
+                profile["ssd_rows_parallel_wall_ms"] = profile.get(
+                    "ssd_rows_parallel_wall_ms", 0.0
+                ) + read_wall_ms
+
+        for shard_index, selected in selections:
+            selected_mx = mx.array(selected.astype(np.uint32))
+            shard = self.shards[shard_index]
+            if parallel:
+                values = shard.dequantize_rows_mlx(
+                    host_batches[shard_index],
+                    profile=profile,
+                )
+            else:
+                values = shard.gather_mlx(local_rows[selected], profile=profile)
+            out[selected_mx] = values
         if profile is not None:
             started = time.perf_counter()
             mx.eval(out)

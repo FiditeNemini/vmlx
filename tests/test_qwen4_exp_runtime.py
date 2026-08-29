@@ -1804,6 +1804,85 @@ def test_qwen4_exp_profiled_file_backed_gather_preserves_row_order():
     assert profile["scatter_gpu_ms"] >= 0
 
 
+def test_qwen4_exp_pread_rows_match_memmap_rows(tmp_path):
+    import json
+
+    from vmlx_engine.models.qwen4_exp.table_reader import (
+        SafetensorsRowReader,
+        _SharedPreadFile,
+    )
+
+    values = np.arange(24, dtype=np.uint32).reshape(4, 6)
+    tensor_name = "table.weight"
+    header = json.dumps(
+        {
+            tensor_name: {
+                "dtype": "U32",
+                "shape": list(values.shape),
+                "data_offsets": [0, values.nbytes],
+            }
+        },
+        separators=(",", ":"),
+    ).encode()
+    path = tmp_path / "rows.safetensors"
+    path.write_bytes(len(header).to_bytes(8, "little") + header + values.tobytes())
+    source = _SharedPreadFile(path)
+    try:
+        reader = SafetensorsRowReader(path, tensor_name, pread_file=source)
+        rows = np.array([3, 0, 3, 1], dtype=np.int64)
+        np.testing.assert_array_equal(reader.rows_pread(rows), reader.rows(rows))
+    finally:
+        source.close()
+
+
+def test_qwen4_exp_parallel_pread_gather_preserves_order_and_profiles():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from vmlx_engine.models.qwen4_exp.table_reader import (
+        FileBackedQuantizedNGramTable,
+    )
+
+    class FakeShard:
+        def __init__(self, offset):
+            self.offset = offset
+
+        def read_rows(self, rows, *, use_pread=False):
+            assert use_pread is True
+            return (rows.copy(), rows.copy(), rows.copy())
+
+        def dequantize_rows_mlx(self, host_rows, *, profile=None):
+            if profile is not None:
+                profile["host_to_mlx_ms"] = profile.get("host_to_mlx_ms", 0.0)
+                profile["dequant_gpu_ms"] = profile.get("dequant_gpu_ms", 0.0)
+            return mx.array(host_rows[0][:, None] + self.offset, dtype=mx.float32)
+
+    table = FileBackedQuantizedNGramTable.__new__(FileBackedQuantizedNGramTable)
+    table.shards = [FakeShard(0), FakeShard(100)]
+    table.per = 4
+    table.head_dim = 1
+    table.output_dtype = mx.float32
+    table.total_rows = 8
+    table._pread_files = {}
+    table._parallel_read = True
+    table._read_pool = ThreadPoolExecutor(max_workers=2)
+    try:
+        profile = {}
+        actual = table.gather_mlx(
+            np.array([5, 1, 6, 0], dtype=np.int64),
+            profile=profile,
+        )
+        mx.eval(actual)
+        np.testing.assert_array_equal(
+            np.asarray(actual).reshape(-1),
+            np.array([101.0, 1.0, 102.0, 0.0], dtype=np.float32),
+        )
+        assert profile["ssd_rows_cpu_ms"] >= 0
+        assert profile["ssd_rows_parallel_wall_ms"] >= 0
+        assert profile["scatter_gpu_ms"] >= 0
+    finally:
+        table.close()
+
+
 def test_qwen4_exp_ple_random_access_advice_is_fail_safe():
     from vmlx_engine.models.qwen4_exp.table_reader import _advise_random_access
 

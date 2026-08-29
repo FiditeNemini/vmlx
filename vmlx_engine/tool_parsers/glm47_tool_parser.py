@@ -19,7 +19,7 @@ from .abstract_tool_parser import (
 )
 
 
-@ToolParserManager.register_module(["glm47", "glm4", "poolside_v1"])
+@ToolParserManager.register_module(["glm47", "glm4", "poolside_v1", "glm_xml_args"])
 class Glm47ToolParser(ToolParser):
     """
     Tool call parser for GLM-4.7/GLM-4.7-Flash and Poolside/Laguna v1 models.

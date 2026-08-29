@@ -95,6 +95,13 @@ def _register_builtin_parsers():
     # generation_config.json values such as "poolside_v1" are accepted instead
     # of silently depending on a JANG-side canonical alias.
     register_parser("poolside_v1", DeepSeekR1ReasoningParser)
+    # GLM-5.3-Flash (glm5_next) uses the same <think>...</think> rail with the
+    # template force-opening the block in the assistant prefix
+    # ('<|assistant|><think>'). Bundles stamp reasoning_parser=glm_think_block;
+    # register that vendor id on the R1-rail parser so the stamp resolves
+    # instead of silently nulling reasoning extraction (which drops the whole
+    # thinking rail on served responses).
+    register_parser("glm_think_block", DeepSeekR1ReasoningParser)
     register_parser("minimax_m2", MiniMaxM2ReasoningParser)
     register_parser("think_xml", ThinkXmlReasoningParser)
     # GPT-OSS / GLM-4.7-Flash / Harmony protocol (<|channel|>analysis/final)

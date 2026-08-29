@@ -797,6 +797,23 @@ class Scheduler:
 
         self._model_type_for_runtime = self._detect_model_type_for_runtime(model)
         self._uses_openpangu_cache = self._model_type_for_runtime == "openpangu_v2"
+        # GLM-5.3-Flash (glm5_next): the typed native cache schema
+        # (glm5_next_native_v1 — 34 KDA conv+recurrent states, 11 MLA KV
+        # prefixes, DSA pool state at ONE aligned boundary) is a follow-up
+        # phase. Generic prefix store/fetch on the mixed ArraysCache/KVCache
+        # layout reconstructs wrong shapes (live-proven: a warm continuation
+        # broadcast (1,64,T,256) KV into a (1,1,T,256) slot and 500'd), so
+        # prefix caching FAILS CLOSED for this family until the typed schema
+        # lands. Every turn recomputes its full prefix; correctness first.
+        self._glm5_next_cache_unsupported = (
+            self._model_type_for_runtime in ("glm5_next", "glm5_next_text")
+        )
+        if self._glm5_next_cache_unsupported:
+            logger.info(
+                "glm5_next: prefix caching disabled (typed native-state "
+                "schema not implemented yet) — every request recomputes its "
+                "full prefix"
+            )
         self._prefix_cache_requested = bool(self.config.enable_prefix_cache)
         self._prompt_disk_cache_requested = bool(self.config.enable_disk_cache)
         self._block_disk_cache_requested = bool(self.config.enable_block_disk_cache)
@@ -6196,6 +6213,12 @@ class Scheduler:
         # API request). When set, skip EVERY prefix cache lookup below AND
         # ensure no store happens at the end. This is the hard guarantee that
         # benchmark runs need to avoid pollution from prior requests.
+        if getattr(self, "_glm5_next_cache_unsupported", False):
+            # Family-level fail-closed: no typed glm5_next native-state cache
+            # yet; generic restore reconstructs wrong shapes (see __init__).
+            # Set the REQUEST flag so every downstream store/L2/telemetry
+            # branch honors the same bypass uniformly.
+            request._bypass_prefix_cache = True
         _bypass = bool(getattr(request, "_bypass_prefix_cache", False))
         if _bypass:
             logger.debug(

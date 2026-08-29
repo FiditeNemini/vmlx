@@ -781,6 +781,18 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     if weight_key_error:
         issues.append(weight_key_error)
     mtp_keys = _mtp_keys_from_weight_keys(weight_keys) if not weight_key_error else []
+    # glm5_next stores its MTP block as model.layers.<num_hidden_layers>.*
+    # (the block appended after the base stack), NOT under an `mtp.` prefix.
+    # Without this the tensor counter reports 0 on a preserved-MTP bundle and
+    # the status falsely reads "metadata_inconsistent" (mode=preserved_enabled
+    # vs 0 tensors). Count the layer-N block so health honestly reports
+    # weights-present; runtime remains unwired (glm5_next is not in the
+    # supported-runtime set — no draft/verify path yet).
+    if family == "glm5_next" and not mtp_keys and not weight_key_error:
+        base_layers = (cfg.get("text_config") or cfg).get("num_hidden_layers")
+        if isinstance(base_layers, int) and base_layers > 0:
+            mtp_prefix = f"model.layers.{base_layers}."
+            mtp_keys = [k for k in weight_keys if str(k).startswith(mtp_prefix)]
     has_mtp_tensors = bool(mtp_keys)
     indexed_layer_count = _mtp_layer_count_from_keys(mtp_keys)
 

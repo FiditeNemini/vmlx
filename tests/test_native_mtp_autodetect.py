@@ -255,6 +255,84 @@ def _write_qwen36_jang2k_mtp_bundle(path):
     (path / "jang_config.json").write_text(json.dumps(jang_config))
 
 
+def _write_glm5_next_mtp_bundle(path):
+    """GLM-5.3-Flash-JANG-MTP shape: MTP block stored as
+    model.layers.<num_hidden_layers>.* (NOT an `mtp.` prefix)."""
+    (path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "glm5_next",
+                "vision_config": {"model_type": "glm5_next"},
+                "text_config": {
+                    "model_type": "glm5_next_text",
+                    "num_hidden_layers": 45,
+                    "num_nextn_predict_layers": 1,
+                },
+                "jang_config": {
+                    "mtp": {"mtp_mode": "preserved_enabled", "num_layers": 1},
+                },
+            }
+        )
+    )
+    (path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.embed_tokens.weight": "m.safetensors",
+                    "model.layers.44.self_attn.q_proj.weight": "m.safetensors",
+                    # layer 45 == num_hidden_layers is the MTP block
+                    "model.layers.45.eh_proj.weight": "m.safetensors",
+                    "model.layers.45.self_attn.q_a_proj.weight": "m.safetensors",
+                    "model.layers.45.mlp.gate.weight": "m.safetensors",
+                    "model.layers.45.shared_head.norm.weight": "m.safetensors",
+                    "lm_head.weight": "m.safetensors",
+                }
+            }
+        )
+    )
+
+
+class TestGlm5NextMtpDetection:
+    def test_glm5_next_mtp_block_reports_weights_present_runtime_unwired(self, tmp_path):
+        """The MTP layer-45 tensors must be COUNTED (glm5_next stores them
+        under model.layers.N, not `mtp.`), so health honestly reports
+        weights-present, and the runtime stays truthfully unwired (glm5_next
+        is not on the native-MTP support map — no draft/verify path yet)."""
+        from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+        _write_glm5_next_mtp_bundle(tmp_path)
+        status = inspect_native_mtp_bundle(str(tmp_path))
+
+        assert status["family"] == "glm5_next"
+        assert status["mtp_tensor_count"] == 4  # the four model.layers.45.* keys
+        assert status["runtime_mtp_mode"] == "preserved_enabled"
+        assert status["runtime_supported"] is False
+        assert status["runtime_available"] is False
+        assert status["runtime_active"] is False
+        assert status["status"] == "weights_present_runtime_unwired"
+
+    def test_glm5_next_ar_bundle_reports_mtp_dropped(self, tmp_path):
+        from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "glm5_next",
+                    "text_config": {"model_type": "glm5_next_text", "num_hidden_layers": 45},
+                    "jang_config": {"mtp": {"mtp_mode": "none"}},
+                }
+            )
+        )
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"model.embed_tokens.weight": "m.safetensors"}})
+        )
+        status = inspect_native_mtp_bundle(str(tmp_path))
+        assert status["family"] == "glm5_next"
+        assert status["mtp_tensor_count"] == 0
+        assert status["runtime_active"] is False
+        assert status["runtime_mtp_mode"] == "none"
+
+
 class TestNativeMtpAutodetect:
     def test_cli_exposes_native_mtp_runtime_flags(self):
         import subprocess

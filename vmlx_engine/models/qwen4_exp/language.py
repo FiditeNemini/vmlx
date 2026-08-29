@@ -60,6 +60,10 @@ from vmlx_engine.metal.quantized_projection_group import (
     cached_quantized_projection_group,
     quantized_projection_group_reason,
 )
+from vmlx_engine.metal.sparse_index_score_decode import (
+    fused_sparse_index_score_requested,
+    sparse_index_scores_decode,
+)
 
 from .ngram import NGramHasher
 
@@ -1024,6 +1028,9 @@ class QSAIndexer(nn.Module):
             base=args.rope_theta,
             mrope_section=args.mrope_section,
         )
+        self._fused_score_decode = fused_sparse_index_score_requested(
+            "qwen4_exp"
+        )
 
     @staticmethod
     def _position_payload(position_ids: mx.array, batch: int, length: int) -> mx.array:
@@ -1121,10 +1128,21 @@ class QSAIndexer(nn.Module):
         pooled = pooled[:, 0, :, :]
 
         # scores: relu(q·k) summed over heads / sqrt(D) → [B, S, NB]
-        scores = mx.einsum(
-            "bshd,bnd->bshn", q.astype(mx.float32), pooled.astype(mx.float32)
+        scores = sparse_index_scores_decode(
+            q.astype(mx.float32),
+            pooled.astype(mx.float32),
+            scale=self.head_dim**-0.5,
+            enabled=self._fused_score_decode,
         )
-        scores = mx.maximum(scores, 0.0).sum(axis=2) / (self.head_dim**0.5)
+        if scores is None:
+            scores = mx.einsum(
+                "bshd,bnd->bshn",
+                q.astype(mx.float32),
+                pooled.astype(mx.float32),
+            )
+            scores = mx.maximum(scores, 0.0).sum(axis=2) / (
+                self.head_dim**0.5
+            )
 
         # per query i (absolute pos p = offset+i): visible tokens 0..p
         #   complete blocks for that query: ncb(p) = (p+1)//ratio

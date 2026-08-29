@@ -72,6 +72,10 @@ from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
     quantized_projection_group_reason,
 )
+from vmlx_engine.metal.sparse_index_score_decode import (
+    fused_sparse_index_score_requested,
+    sparse_index_scores_decode,
+)
 
 try:  # package import (registered under mlx_lm.models.glm5_next)
     from vmlx_engine.models.glm5_next.kda import (
@@ -563,6 +567,9 @@ class Glm5NextIndexer(nn.Module):
         self.weights_proj = nn.Linear(args.hidden_size, self.n_heads, bias=False)
         self.index_kpool_compress_ape = mx.zeros((self.kpool, self.head_dim))
         self.index_kpool_compress_gate = mx.zeros((self.head_dim, args.hidden_size))
+        self._fused_score_decode = fused_sparse_index_score_requested(
+            "glm5_next"
+        )
 
     def packed_states(self, x: mx.array) -> mx.array:
         """Per-token indexer state: [B, T, head_dim(k) + head_dim(gate)]."""
@@ -646,9 +653,17 @@ class Glm5NextIndexer(nn.Module):
                 )
 
             # scores per idx head then head-weighted sum: [B, S, n_pools]
-            scores = mx.einsum("bshd,bpd->bshp", q, pool_keys)
-            scores = mx.maximum(scores * self.scale, 0.0)
-            pool_scores = mx.einsum("bsh,bshp->bsp", head_w, scores)
+            pool_scores = sparse_index_scores_decode(
+                q,
+                pool_keys,
+                scale=self.scale,
+                head_weights=head_w,
+                enabled=self._fused_score_decode,
+            )
+            if pool_scores is None:
+                scores = mx.einsum("bshd,bpd->bshp", q, pool_keys)
+                scores = mx.maximum(scores * self.scale, 0.0)
+                pool_scores = mx.einsum("bsh,bshp->bsp", head_w, scores)
 
             # a pool is selectable only if its final token is visible
             pool_end = mx.arange(n_pools) * P + (P - 1)        # [n_pools]

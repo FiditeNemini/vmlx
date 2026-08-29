@@ -143,6 +143,39 @@ class TestCacheAndForward:
         with pytest.raises(ValueError, match="context limit"):
             model(mx.array([[1] * 65]))
 
+    def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        attn = glm5.KDAAttention(args)
+        attn.q_proj = attn.q_proj.to_quantized(group_size=32, bits=4)
+        attn.k_proj = attn.k_proj.to_quantized(group_size=32, bits=4)
+        attn.v_proj = attn.v_proj.to_quantized(group_size=32, bits=4)
+        x = (mx.arange(128, dtype=mx.float32) / 127.0).reshape(1, 2, 64)
+        reference = (attn.q_proj(x), attn.k_proj(x), attn.v_proj(x))
+
+        assert attn.prepare_runtime() is True
+        candidate = attn._project_qkv(x)
+        mx.eval(*reference, *candidate)
+
+        assert attn.q_proj is attn.k_proj is attn.v_proj is None
+        for expected, actual in zip(reference, candidate):
+            assert float(mx.abs(expected - actual).max()) == 0.0
+
+    def test_dense_quantized_gate_up_group_is_exact_and_releases_sources(self, glm5):
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        mlp = glm5.DenseMLP(args, 96)
+        mlp.gate_proj = mlp.gate_proj.to_quantized(group_size=32, bits=4)
+        mlp.up_proj = mlp.up_proj.to_quantized(group_size=32, bits=4)
+        x = (mx.arange(128, dtype=mx.float32) / 127.0).reshape(1, 2, 64)
+        reference = (mlp.gate_proj(x), mlp.up_proj(x))
+
+        assert mlp.prepare_runtime() is True
+        candidate = mlp.gate_up_group(x)
+        mx.eval(*reference, *candidate)
+
+        assert mlp.gate_proj is mlp.up_proj is None
+        for expected, actual in zip(reference, candidate):
+            assert float(mx.abs(expected - actual).max()) == 0.0
+
     def test_sanitize_drops_visual_and_mtp_keeps_indexer(self, tiny_model):
         weights = {
             "visual.blocks.0.attn.proj.weight": mx.zeros((1,)),
@@ -538,6 +571,31 @@ class TestPublicLoaderMtpHandoff:
         _warm_glm5_next_first_forward(_Model())
 
         assert events == ["cache", ("forward", (1, 1), cache)]
+
+    def test_glm_startup_warmup_prepares_acceleration_before_forward(self):
+        from vmlx_engine.utils.tokenizer import _warm_glm5_next_first_forward
+
+        events = []
+
+        class _Model:
+            def prepare_acceleration(self):
+                events.append("prepare")
+                return {
+                    "base_launches_removed_per_forward": 113,
+                    "mtp_launches_removed_per_forward": 1,
+                }
+
+            def make_cache(self):
+                events.append("cache")
+                return []
+
+            def __call__(self, inputs, *, cache):
+                events.append(("forward", inputs.shape, cache))
+                return mx.array([[[1.0]]])
+
+        _warm_glm5_next_first_forward(_Model())
+
+        assert events == ["prepare", "cache", ("forward", (1, 1), [])]
 
 
 class TestGlmHealthTruth:

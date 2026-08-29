@@ -101,6 +101,10 @@ def _warm_glm5_next_first_forward(model) -> None:
         raise RuntimeError(
             "GLM-5.3 runtime has no native cache factory for startup warmup"
         )
+    prepare = getattr(model, "prepare_acceleration", None)
+    if callable(prepare):
+        status = prepare()
+        logger.info("GLM-5.3 acceleration preparation: %s", status)
     warmup_cache = make_cache()
     warmup_input = mx.array([[0]], dtype=mx.int32)
     output = model(warmup_input, cache=warmup_cache)

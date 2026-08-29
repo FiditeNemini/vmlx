@@ -46,6 +46,11 @@ from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from vmlx_engine.metal.quantized_projection_group import (
+    QuantizedProjectionGroup,
+    quantized_projection_group_reason,
+)
+
 try:  # package import (registered under mlx_lm.models.glm5_next)
     from vmlx_engine.models.glm5_next.kda import (
         kda_chunked,
@@ -320,6 +325,25 @@ class KDAAttention(nn.Module):
         self.o_norm = mx.ones((K,))
         self.o_proj = nn.Linear(qkv, d, bias=False)
         self.rms_eps = args.rms_norm_eps
+        self.qkv_group = None
+
+    def prepare_runtime(self) -> bool:
+        """Group q/k/v packed rows once and release superseded references."""
+
+        linears = (self.q_proj, self.k_proj, self.v_proj)
+        if quantized_projection_group_reason(linears) is not None:
+            return False
+        group = QuantizedProjectionGroup(linears)
+        mx.eval(group.weight, group.scales, group.biases)
+        self.qkv_group = group
+        self.q_proj = self.k_proj = self.v_proj = None
+        return True
+
+    def _project_qkv(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        if self.qkv_group is not None:
+            q, k, v = self.qkv_group(x)
+            return q, k, v
+        return self.q_proj(x), self.k_proj(x), self.v_proj(x)
 
     def _gate(self, x: mx.array) -> mx.array:
         # lower_bound * sigmoid(exp(A_log) * (f + dt_bias)) — smooth (-5, 0).
@@ -346,9 +370,10 @@ class KDAAttention(nn.Module):
 
         def run_segment(seg, cq0, ck0, cv0, s0):
             seg_t = seg.shape[1]
-            q, cq1 = short_conv(self.q_proj(seg), self.q_conv1d, cq0)
-            k, ck1 = short_conv(self.k_proj(seg), self.k_conv1d, ck0)
-            v, cv1 = short_conv(self.v_proj(seg), self.v_conv1d, cv0)
+            q, k, v = self._project_qkv(seg)
+            q, cq1 = short_conv(q, self.q_conv1d, cq0)
+            k, ck1 = short_conv(k, self.k_conv1d, ck0)
+            v, cv1 = short_conv(v, self.v_conv1d, cv0)
             q = l2norm(q.reshape(B, seg_t, H, K))
             k = l2norm(k.reshape(B, seg_t, H, K))
             v = v.reshape(B, seg_t, H, K)
@@ -623,9 +648,26 @@ class DenseMLP(nn.Module):
         self.up_proj = nn.Linear(args.hidden_size, inter, bias=False)
         self.down_proj = nn.Linear(inter, args.hidden_size, bias=False)
         self.limit = args.swiglu_limit
+        self.gate_up_group = None
+
+    def prepare_runtime(self) -> bool:
+        """Group compatible packed gate/up rows without retaining a copy."""
+
+        linears = (self.gate_proj, self.up_proj)
+        if quantized_projection_group_reason(linears) is not None:
+            return False
+        group = QuantizedProjectionGroup(linears)
+        mx.eval(group.weight, group.scales, group.biases)
+        self.gate_up_group = group
+        self.gate_proj = self.up_proj = None
+        return True
 
     def __call__(self, x):
-        return self.down_proj(_clamped_swiglu(self.gate_proj(x), self.up_proj(x), self.limit))
+        if self.gate_up_group is not None:
+            gate, up = self.gate_up_group(x)
+        else:
+            gate, up = self.gate_proj(x), self.up_proj(x)
+        return self.down_proj(_clamped_swiglu(gate, up, self.limit))
 
 
 class ClampedSwiGLU(nn.Module):
@@ -832,6 +874,35 @@ class Model(nn.Module):
 
     def make_mtp_cache(self):
         return [Glm5MLACache()] if hasattr(self, "mtp") else []
+
+    def prepare_acceleration(self) -> dict[str, int]:
+        """Install exact launch-reduction groups after checkpoint hydration."""
+
+        base_kda_groups = 0
+        base_dense_gate_up_groups = 0
+        for layer in self.model.layers:
+            if layer.is_linear and layer.self_attn.prepare_runtime():
+                base_kda_groups += 1
+            dense = (
+                layer.mlp
+                if isinstance(layer.mlp, DenseMLP)
+                else layer.mlp.shared_experts
+            )
+            if dense.prepare_runtime():
+                base_dense_gate_up_groups += 1
+        mtp_dense_gate_up_groups = 0
+        if hasattr(self, "mtp") and self.mtp.mlp.shared_experts.prepare_runtime():
+            mtp_dense_gate_up_groups = 1
+        mx.clear_cache()
+        return {
+            "base_kda_qkv_groups": base_kda_groups,
+            "base_dense_gate_up_groups": base_dense_gate_up_groups,
+            "mtp_dense_gate_up_groups": mtp_dense_gate_up_groups,
+            "base_launches_removed_per_forward": (
+                2 * base_kda_groups + base_dense_gate_up_groups
+            ),
+            "mtp_launches_removed_per_forward": mtp_dense_gate_up_groups,
+        }
 
     @property
     def layers(self):

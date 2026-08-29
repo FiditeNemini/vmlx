@@ -43,6 +43,10 @@ from vmlx_engine.models.minimax_m3.cache import (
     MiniMaxM3SparseCache as _SparseIndexerKVCache,
 )
 from vmlx_engine.metal.qwen4_affine_moe_decode import qwen4_affine_switchglu
+from vmlx_engine.metal.quantized_projection_group import (
+    cached_quantized_projection_group,
+    quantized_projection_group_reason,
+)
 
 from .ngram import NGramHasher
 
@@ -742,57 +746,18 @@ def _decode_quantized_linears_fused(
     Qwen3.8 GDN has four such projections in each of its 36 linear-attention
     layers, so the unfused path paid 108 unnecessary launches per token.
     """
-    if (
-        x.ndim != 3
-        or x.shape[1] != 1
-        or not linears
-        or not all(isinstance(linear, nn.QuantizedLinear) for linear in linears)
-    ):
+    if x.ndim != 3 or x.shape[1] != 1:
         return None
-
-    first = linears[0]
-    if not all(
-        linear.bits == first.bits
-        and linear.group_size == first.group_size
-        and linear.mode == first.mode
-        and linear.biases is not None
-        and linear.scales.dtype == x.dtype
-        and linear.biases.dtype == x.dtype
-        and "bias" not in linear
-        for linear in linears
-    ):
+    if quantized_projection_group_reason(
+        linears, activation_dtype=x.dtype
+    ) is not None:
         return None
-
-    cache_key = tuple(
-        (id(linear.weight), id(linear.scales), id(linear.biases))
-        for linear in linears
+    group = cached_quantized_projection_group(
+        linears,
+        owner=linears[0],
+        cache_attr="_qwen4_fused_decode_linears",
     )
-    cached = getattr(first, "_qwen4_fused_decode_linears", None)
-    if cached is None or cached[0] != cache_key:
-        weights = mx.concatenate([linear.weight for linear in linears], axis=0)
-        scales = mx.concatenate([linear.scales for linear in linears], axis=0)
-        biases = mx.concatenate([linear.biases for linear in linears], axis=0)
-        split_indices = []
-        offset = 0
-        for linear in linears[:-1]:
-            offset += linear.weight.shape[0]
-            split_indices.append(offset)
-        mx.eval(weights, scales, biases)
-        cached = (cache_key, weights, scales, biases, split_indices)
-        first._qwen4_fused_decode_linears = cached
-
-    _, weights, scales, biases, split_indices = cached
-    output = mx.quantized_matmul(
-        x,
-        weights,
-        scales=scales,
-        biases=biases,
-        transpose=True,
-        group_size=first.group_size,
-        bits=first.bits,
-        mode=first.mode,
-    )
-    return tuple(mx.split(output, split_indices, axis=-1))
+    return group(x)
 
 
 class GatedDeltaNet(_Qwen35GatedDeltaNet):

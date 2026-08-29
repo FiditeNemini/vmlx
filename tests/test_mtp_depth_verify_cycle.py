@@ -122,6 +122,7 @@ def _tokens_at_depth(monkeypatch, depth, attach_mtp: bool, max_tokens=24):
         monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
     else:
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", str(depth))
+    monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
 
     prev = None
     try:
@@ -163,6 +164,7 @@ class TestMtpDepthGreedyIdentity:
 
         assert apply_mlx_lm_mtp_patch() is True
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
         gm = sys.modules["mlx_lm.generate"]
 
         prev = is_mtp_active()
@@ -192,6 +194,70 @@ class TestMtpDepthGreedyIdentity:
         finally:
             set_mtp_active(prev)
 
+    def test_adaptive_starts_shallow_and_retains_configured_ceiling(self, monkeypatch):
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
+        prev = is_mtp_active()
+        try:
+            set_mtp_active(True)
+            model = _build_model(attach_mtp=True)
+            batch = _make_batch(model, [3, 5, 7], 16)
+            state = batch._omlx_mtp_state
+            assert state.depth == 1
+            assert state.depth_ceiling == 3
+            assert state.stats.starting_depth == 1
+            assert state.stats.depth_ceiling == 3
+            assert state.stats.depth_policy == "adaptive"
+            assert len(state.draft_toks) == 1
+        finally:
+            set_mtp_active(prev)
+
+    def test_adaptive_promotes_only_after_measured_shallow_cycles(self, monkeypatch):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _MtpState,
+            _adaptive_arm_cycle,
+            _adaptive_finish_cycle,
+        )
+
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_VALUE_MIN_SAMPLES", "2")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_VALUE_COOLDOWN_CYCLES", "2")
+        state = _MtpState(depth=1, depth_ceiling=3, adaptive_enabled=True)
+        state.stats.depth = 1
+        _adaptive_arm_cycle(state, now=1.0)
+
+        state.stats.cycles = 1
+        _adaptive_finish_cycle(
+            "adaptive-row",
+            state,
+            completed_depth=1,
+            accepted=1,
+            now=2.0,
+        )
+        assert state.depth == 1
+        _adaptive_arm_cycle(state, now=2.0)
+
+        state.stats.cycles = 2
+        _adaptive_finish_cycle(
+            "adaptive-row",
+            state,
+            completed_depth=1,
+            accepted=1,
+            now=3.0,
+        )
+        assert state.depth == 2
+        assert state.stats.depth == 2
+        assert state.stats.adaptive_depth_value["active_probe"] == {
+            "origin": 1,
+            "target": 2,
+        }
+
     def test_cache_length_tracks_emitted_tokens_exactly(self, monkeypatch):
         """Rollback must leave the KV cache exactly at the confirmed prefix.
 
@@ -211,6 +277,7 @@ class TestMtpDepthGreedyIdentity:
 
         assert apply_mlx_lm_mtp_patch() is True
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
         gm = sys.modules["mlx_lm.generate"]
 
         prev = is_mtp_active()
@@ -350,6 +417,7 @@ def _run_fake(monkeypatch, depth: int, wrong_from_step=None, max_tokens=18,
 
     assert apply_mlx_lm_mtp_patch() is True
     monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", str(depth))
+    monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
     gm = sys.modules["mlx_lm.generate"]
 
     prev = is_mtp_active()
@@ -502,6 +570,7 @@ class TestMtpAcceptPathWithOracleDrafts:
 
             assert apply_mlx_lm_mtp_patch() is True
             monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", str(depth))
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
             gm = sys.modules["mlx_lm.generate"]
             prev = is_mtp_active()
             try:

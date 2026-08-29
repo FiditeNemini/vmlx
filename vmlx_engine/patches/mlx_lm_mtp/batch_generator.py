@@ -77,6 +77,13 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, List, Optional, Tuple
 
+from ...native_mtp_adaptive import (
+    NativeMTPAdaptiveValueState,
+    adaptive_value_snapshot,
+    arm_depth_cycle,
+    choose_depth_by_value,
+    finish_armed_depth_cycle,
+)
 from ...native_mtp_cache_telemetry import (
     native_mtp_cache_lifecycle_snapshot,
     native_mtp_cache_snapshot,
@@ -350,6 +357,9 @@ class _MtpStats:
     # Depth-aware counters (depth > 1 engages only when every cache layer is
     # trimmable — pure-KV families like hy_v3; hybrids stay depth-1).
     depth: int = 1  # resolved draft depth for this sequence
+    starting_depth: int = 1
+    depth_ceiling: int = 1
+    depth_policy: str = "fixed"
     draft_tokens_proposed: int = 0  # sum of chain lengths across cycles
     draft_tokens_accepted: int = 0  # sum of accepted prefix lengths
     accepted_by_depth: List[int] = field(default_factory=lambda: [0, 0, 0])
@@ -369,6 +379,7 @@ class _MtpStats:
     mtp_cache_recreated_on_rejects: int = 0
     mtp_cache_retained_on_rejects: int = 0
     mtp_head_cache: dict = field(default_factory=dict)
+    adaptive_depth_value: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -401,6 +412,11 @@ class _MtpState:
 
     # Resolved draft depth for this sequence (1..3).
     depth: int = 1
+    depth_ceiling: int = 1
+    adaptive_enabled: bool = False
+    adaptive_value: NativeMTPAdaptiveValueState = field(
+        default_factory=NativeMTPAdaptiveValueState
+    )
 
     # Accept-rate / throughput counters. Surfaced via logger.info on finish.
     stats: _MtpStats = field(default_factory=_MtpStats)
@@ -435,6 +451,9 @@ def _native_mtp_payload(
         "request_id": str(uid),
         "finish_reason": finish_reason,
         "final_depth": int(stats.depth or 1),
+        "starting_depth": int(stats.starting_depth or 1),
+        "depth_ceiling": int(stats.depth_ceiling or 1),
+        "depth_policy": str(stats.depth_policy or "fixed"),
         "cycles": int(stats.cycles),
         "accepts": int(stats.accepts),
         "rejects": int(stats.rejects),
@@ -451,6 +470,7 @@ def _native_mtp_payload(
         "accepted_by_depth": list(stats.accepted_by_depth),
         "drafted_by_depth": list(stats.drafted_by_depth),
         "depth_acceptance_rates": depth_rates,
+        "adaptive_depth_value": dict(stats.adaptive_depth_value),
         "forwards": {
             "seed_main": int(stats.seed_main_forwards),
             "verify_main": int(stats.verify_main_forwards),
@@ -673,6 +693,127 @@ def _effective_depth(gen_batch: Any) -> int:
     return depth
 
 
+def _adaptive_depth_enabled() -> bool:
+    raw = os.environ.get(
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        os.environ.get("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "1"),
+    ).strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _adaptive_env_int(default: int, *names: str, minimum: int = 1) -> int:
+    raw = next((os.environ.get(name) for name in names if name in os.environ), None)
+    try:
+        value = int(raw) if raw is not None else int(default)
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(int(minimum), value)
+
+
+def _adaptive_env_float(default: float, *names: str) -> float:
+    raw = next((os.environ.get(name) for name in names if name in os.environ), None)
+    try:
+        return float(raw) if raw is not None else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _adaptive_value_min_samples() -> int:
+    return _adaptive_env_int(
+        8,
+        "VMLINUX_NATIVE_MTP_VALUE_MIN_SAMPLES",
+        "VMLX_NATIVE_MTP_VALUE_MIN_SAMPLES",
+        minimum=2,
+    )
+
+
+def _adaptive_arm_cycle(state: _MtpState, *, now: float) -> None:
+    if not state.adaptive_enabled:
+        return
+    arm_depth_cycle(state.adaptive_value, depth=state.depth, now=now)
+
+
+def _adaptive_finish_cycle(
+    request_id: str,
+    state: _MtpState,
+    *,
+    completed_depth: int,
+    accepted: int,
+    now: float,
+) -> None:
+    """Record one real cycle and select the next depth by wall value.
+
+    The completed verify/rollback cycle always stays at its original depth.
+    Any decision applies only to the next draft chain, where no speculative
+    state exists yet. Fixed D1/D2/D3 never enter this function.
+    """
+    if not state.adaptive_enabled:
+        return
+    window = _adaptive_env_int(
+        16,
+        "VMLINUX_NATIVE_MTP_VALUE_WINDOW",
+        "VMLX_NATIVE_MTP_VALUE_WINDOW",
+        minimum=4,
+    )
+    finish_armed_depth_cycle(
+        state.adaptive_value,
+        depth=completed_depth,
+        accepted_drafts=accepted,
+        cycle=int(state.stats.cycles),
+        now=now,
+        window=window,
+    )
+    minimum_samples = _adaptive_value_min_samples()
+    decision = choose_depth_by_value(
+        state.adaptive_value,
+        current_depth=state.depth,
+        depth_ceiling=state.depth_ceiling,
+        cycle=int(state.stats.cycles),
+        minimum_samples=minimum_samples,
+        cooldown_cycles=_adaptive_env_int(
+            8,
+            "VMLINUX_NATIVE_MTP_VALUE_COOLDOWN_CYCLES",
+            "VMLX_NATIVE_MTP_VALUE_COOLDOWN_CYCLES",
+            minimum=2,
+        ),
+        probe_interval_cycles=_adaptive_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_VALUE_PROBE_INTERVAL_CYCLES",
+            "VMLX_NATIVE_MTP_VALUE_PROBE_INTERVAL_CYCLES",
+            minimum=4,
+        ),
+        hysteresis=_adaptive_env_float(
+            0.05,
+            "VMLINUX_NATIVE_MTP_VALUE_HYSTERESIS",
+            "VMLX_NATIVE_MTP_VALUE_HYSTERESIS",
+        ),
+        raise_min_acceptance=_adaptive_env_float(
+            0.88,
+            "VMLINUX_NATIVE_MTP_VALUE_RAISE_MIN_ACCEPT",
+            "VMLX_NATIVE_MTP_VALUE_RAISE_MIN_ACCEPT",
+        ),
+    )
+    state.stats.adaptive_depth_value = adaptive_value_snapshot(
+        state.adaptive_value,
+        minimum_samples=minimum_samples,
+    )
+    if decision is None:
+        return
+    target = max(1, min(state.depth_ceiling, int(decision.target_depth)))
+    current = state.depth
+    state.depth = target
+    state.stats.depth = target
+    logger.info(
+        "MTP[%s] adaptive value %s D%d -> D%d after cycles=%d: %s",
+        request_id,
+        decision.event,
+        current,
+        target,
+        state.stats.cycles,
+        decision.reason,
+    )
+
+
 def _clear_rollback(prompt_cache: List[Any]) -> None:
     """Drop ``rollback_state`` snapshots after a draft is accepted."""
     for c in prompt_cache:
@@ -749,8 +890,13 @@ def _post_init_mtp(gen_batch: Any) -> None:
 
     state = _MtpState()
     state.mtp_cache = gen_batch.model.make_mtp_cache()
-    state.depth = _effective_depth(gen_batch)
+    state.depth_ceiling = _effective_depth(gen_batch)
+    state.adaptive_enabled = _adaptive_depth_enabled()
+    state.depth = 1 if state.adaptive_enabled else state.depth_ceiling
     state.stats.depth = state.depth
+    state.stats.starting_depth = state.depth
+    state.stats.depth_ceiling = state.depth_ceiling
+    state.stats.depth_policy = "adaptive" if state.adaptive_enabled else "fixed"
     state.stats.seed_main_forwards = 1
     state.next_main = _ensure_uint32(next_main_tok)
     state.queue.append((int(main_tok.tolist()[0]), main_lp, "init"))
@@ -762,6 +908,7 @@ def _post_init_mtp(gen_batch: Any) -> None:
     # Draft chain: the head sees (hidden_at_main, next_main_tok) and proposes
     # d1..dN for the first verify cycle forward([next_main, d1..dN]).
     hidden_at_main = hidden[:, -1:, :]  # (1, 1, H)
+    _adaptive_arm_cycle(state, now=time.perf_counter())
     _draft_chain(
         gen_batch,
         state,
@@ -1034,6 +1181,17 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
             _trim_token_buffer(gen_batch, n - k)
     state.stats.cache_ops_ms += (time.perf_counter() - t0) * 1000
 
+    # The decision applies only to the next chain. The just-completed verify
+    # and its rollback/commit are already final, so changing depth here cannot
+    # alter current output or cache state.
+    _adaptive_finish_cycle(
+        str(gen_batch.uids[0]) if gen_batch.uids else "?",
+        state,
+        completed_depth=n,
+        accepted=k,
+        now=time.perf_counter(),
+    )
+
     # --- queue emits: k accepted drafts + 1 correction/bonus ---
     for i in range(k):
         state.queue.append((state.draft_ids[i], state.draft_lps[i], "draft"))
@@ -1062,6 +1220,7 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     # --- new draft chain from the last confirmed position ---
     emit_tok = mx.array([emit_id], dtype=mx.uint32)
     state.next_main = emit_tok
+    _adaptive_arm_cycle(state, now=time.perf_counter())
     _draft_chain(
         gen_batch,
         state,

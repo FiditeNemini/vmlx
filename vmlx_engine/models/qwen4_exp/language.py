@@ -47,6 +47,10 @@ from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
     sigmoid_gated_rmsnorm_small_rows,
 )
+from vmlx_engine.metal.ple_conv_decode import (
+    fused_ple_conv_requested,
+    qwen4_ple_conv_decode,
+)
 from vmlx_engine.metal.gdn_conv_decode import (
     fused_gdn_conv_requested,
     qwen4_gdn_conv_decode,
@@ -640,6 +644,7 @@ class PLELayer(nn.Module):
         self.short_conv_state_len = (self.conv_kernel_size - 1) * self.conv_dilation
         # depthwise dilated conv taps: checkpoint [C,1,K] → sanitized to [C,K]
         self.conv1d_weight = mx.zeros((hc_hidden, self.conv_kernel_size))
+        self._fused_conv_decode = fused_ple_conv_requested()
 
     def _embed(
         self,
@@ -684,6 +689,18 @@ class PLELayer(nn.Module):
             state = cache[3]
         else:
             state = mx.zeros((B, self.short_conv_state_len, C), dtype=x.dtype)
+        fused = qwen4_ple_conv_decode(
+            x,
+            state,
+            self.conv1d_weight,
+            dilation=self.conv_dilation,
+            enabled=self._fused_conv_decode,
+        )
+        if fused is not None:
+            output, next_state = fused
+            if cache is not None:
+                cache[3] = next_state
+            return output
         full = mx.concatenate([state, x], axis=1)
         if cache is not None:
             cache[3] = mx.contiguous(full[:, -self.short_conv_state_len :, :])

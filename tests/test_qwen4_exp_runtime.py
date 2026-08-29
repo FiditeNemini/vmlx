@@ -2002,6 +2002,65 @@ def test_qwen4_exp_ple_short_conv_uses_prepared_runtime_dtype(runtime_dtype):
     assert all(output.dtype == runtime_dtype for output in fused)
 
 
+@pytest.mark.parametrize("runtime_dtype", [mx.float16, mx.bfloat16])
+def test_qwen4_exp_ple_fused_decode_conv_matches_stock(runtime_dtype):
+    from vmlx_engine.metal.ple_conv_decode import qwen4_ple_conv_decode
+    from vmlx_engine.models.qwen4_exp.language import PLELayer
+
+    ple = PLELayer(_tiny_args(), 0)
+    mx.random.seed(17)
+    ple.conv1d_weight = (
+        mx.random.normal(ple.conv1d_weight.shape) * 0.1
+    ).astype(runtime_dtype)
+    state = (
+        mx.random.normal((1, ple.short_conv_state_len, 256)) * 0.1
+    ).astype(runtime_dtype)
+    token = (mx.random.normal((1, 1, 256)) * 0.1).astype(runtime_dtype)
+
+    full = mx.concatenate([state, token], axis=1)
+    taps = [
+        full[:, index * ple.conv_dilation : index * ple.conv_dilation + 1]
+        * ple.conv1d_weight[:, index]
+        for index in range(ple.conv_kernel_size)
+    ]
+    reference_output = nn.silu(sum(taps))
+    reference_state = mx.contiguous(full[:, -ple.short_conv_state_len :, :])
+    candidate = qwen4_ple_conv_decode(
+        token,
+        state,
+        ple.conv1d_weight,
+        dilation=ple.conv_dilation,
+        enabled=True,
+    )
+    assert candidate is not None
+    mx.eval(reference_output, reference_state, *candidate)
+    max_delta = float(
+        mx.max(
+            mx.abs(
+                candidate[0].astype(mx.float32)
+                - reference_output.astype(mx.float32)
+            )
+        ).item()
+    )
+    # The fused FP32 accumulation may round once at the final storage step,
+    # while MLX's elementwise tap graph rounds intermediates in runtime dtype.
+    # Production-width probes bound that difference to one output-dtype step.
+    limit = 6.2e-5 if runtime_dtype == mx.float16 else 4.9e-4
+    assert max_delta <= limit
+    assert mx.array_equal(candidate[1], reference_state)
+
+
+def test_qwen4_exp_ple_fused_decode_conv_refuses_prefill():
+    from vmlx_engine.metal.ple_conv_decode import qwen4_ple_conv_decode
+
+    token = mx.zeros((1, 2, 256), dtype=mx.bfloat16)
+    state = mx.zeros((1, 9, 256), dtype=mx.bfloat16)
+    weight = mx.zeros((256, 4), dtype=mx.bfloat16)
+    assert qwen4_ple_conv_decode(
+        token, state, weight, dilation=3, enabled=True
+    ) is None
+
+
 def test_qwen4_exp_zero_centered_norm_offset_is_folded_once():
     from vmlx_engine.models.qwen4_exp.language import (
         ZeroCenteredRMSNorm,

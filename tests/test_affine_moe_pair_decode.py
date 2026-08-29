@@ -9,7 +9,9 @@ from vmlx_engine.metal.affine_moe_pair_decode import (
     _CONFIG_ATTR,
     _PairConfig,
     _run_pair,
+    _run_weighted_down,
     affine_moe_pair_activation,
+    affine_moe_routed_output,
 )
 from vmlx_engine.models.glm5_next.glm5_next import ClampedSwiGLU
 
@@ -91,6 +93,47 @@ def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
         )
         assert used is False
         assert output is None
+    finally:
+        delattr(switch, _CONFIG_ATTR)
+
+
+def test_affine_moe_weighted_down_matches_stock_route_reduction():
+    switch = _quantized_switch(bits=2, activation=ClampedSwiGLU(10.0))
+    config = _PairConfig(
+        family="test_full_glm",
+        hidden=128,
+        intermediate=64,
+        top_k=4,
+        bits=2,
+        group_size=32,
+        clamp_limit=10.0,
+        fuse_down=True,
+    )
+    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(mx.float16)
+    indices = mx.array([0, 2, 5, 7], dtype=mx.uint32).reshape(1, 1, 4)
+    scores = mx.array([0.1, 0.2, 0.3, 0.4], dtype=mx.float32).reshape(
+        1, 1, 4
+    )
+    activated = _run_pair(switch, config, x, indices)
+    selected = switch.down_proj(activated, indices).squeeze(-2)
+    reference = (selected * scores[..., None].astype(selected.dtype)).sum(
+        axis=-2
+    )
+    candidate = _run_weighted_down(
+        switch, config, activated, indices, scores
+    )
+    mx.eval(reference, candidate)
+    assert candidate.shape == reference.shape
+    assert mx.allclose(candidate, reference, atol=6.2e-5, rtol=3e-3)
+
+    setattr(switch, _CONFIG_ATTR, config)
+    try:
+        routed, used = affine_moe_routed_output(
+            switch, x, indices, scores
+        )
+        assert used is True
+        mx.eval(routed)
+        assert mx.allclose(routed, reference, atol=6.2e-5, rtol=3e-3)
     finally:
         delattr(switch, _CONFIG_ATTR)
 

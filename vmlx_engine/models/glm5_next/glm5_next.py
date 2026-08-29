@@ -47,7 +47,7 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
-    affine_moe_pair_activation,
+    affine_moe_routed_output,
     install_affine_moe_pair_decode,
 )
 
@@ -859,14 +859,14 @@ class MoEBlock(nn.Module):
         if self.norm_topk:
             w = w / (mx.sum(w, axis=-1, keepdims=True) + 1e-20)
         w = w * self.scaling
-        activated, pair_fused = affine_moe_pair_activation(
-            self.switch_mlp, x, idx
+        routed, pair_fused = affine_moe_routed_output(
+            self.switch_mlp, x, idx, w
         )
-        if pair_fused:
-            routed = self.switch_mlp.down_proj(activated, idx).squeeze(-2)
-        else:
+        if not pair_fused:
             routed = self.switch_mlp(x, idx)               # [B, T, k, d]
-        routed = mx.sum(routed * w[..., None].astype(routed.dtype), axis=-2)
+            routed = mx.sum(
+                routed * w[..., None].astype(routed.dtype), axis=-2
+            )
         return routed.astype(x.dtype) + self.shared_experts(x)
 
 

@@ -3,9 +3,9 @@
 The production Qwen4-Exp and GLM5-Next affine bundles issue two selected-
 expert ``gather_qmm`` calls before SwiGLU on every routed-MoE layer.  This
 module reads the existing gate/up tensors in place and produces the activated
-rows with one Metal dispatch.  The down projection and route-score reduction
-remain on MLX so this optimization neither duplicates the expert payload nor
-changes the model-owned reduction order.
+rows with one Metal dispatch. Compatible GLM q2/g128 down projections also
+reduce all selected experts directly into the routed output; mixed q3 layers
+retain MLX down/reduction. No path duplicates the expert payload.
 
 Only source-audited production geometries are accepted.  Registration is
 atomic per family and disabled by default until exact-bundle live A/B proves a
@@ -21,7 +21,6 @@ from functools import lru_cache
 from typing import Any
 
 import mlx.core as mx
-
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,7 @@ class _PairConfig:
     bits: int
     group_size: int
     clamp_limit: float | None
+    fuse_down: bool = False
 
     @property
     def packed_per_row(self) -> int:
@@ -56,6 +56,14 @@ class _PairConfig:
     @property
     def words_per_group(self) -> int:
         return self.group_size // self.values_per_word
+
+    @property
+    def down_packed_per_row(self) -> int:
+        return self.intermediate * self.bits // 32
+
+    @property
+    def down_groups_per_row(self) -> int:
+        return self.intermediate // self.group_size
 
 
 _FAMILY_CONTRACTS = {
@@ -161,6 +169,15 @@ def _switch_config(switch: Any, family: str) -> _PairConfig:
             )
     elif float(getattr(switch.activation, "_limit", -1.0)) != float(clamp_limit):
         raise ValueError("GLM clamped SwiGLU limit differs from 10")
+    down_reason = _projection_reason(
+        switch.down_proj,
+        hidden=intermediate,
+        intermediate=hidden,
+    )
+    down_layout = (
+        int(getattr(switch.down_proj, "bits", -1)),
+        int(getattr(switch.down_proj, "group_size", -1)),
+    )
     return _PairConfig(
         family=family,
         hidden=hidden,
@@ -169,6 +186,11 @@ def _switch_config(switch: Any, family: str) -> _PairConfig:
         bits=gate_layout[0],
         group_size=gate_layout[1],
         clamp_limit=clamp_limit,
+        fuse_down=(
+            family == "glm5_next"
+            and down_reason is None
+            and down_layout == gate_layout == (2, 128)
+        ),
     )
 
 
@@ -280,6 +302,95 @@ def _run_pair(
     return output.reshape(*x.shape[:-1], config.top_k, 1, config.intermediate)
 
 
+def _down_source(config: _PairConfig) -> str:
+    return f"""
+        uint tid = thread_position_in_grid.x;
+        uint out_d = tid / 32u;
+        uint lane = thread_index_in_simdgroup;
+        if (out_d >= {config.hidden}u) return;
+
+        float weighted = 0.0f;
+        for (uint route = 0u; route < {config.top_k}u; ++route) {{
+            uint expert = (uint)expert_ids[route];
+            size_t row = (size_t)expert * {config.hidden}u + out_d;
+            const device uint32_t* packed_row =
+                down_weight + row * {config.down_packed_per_row}u;
+            size_t meta_row = row * {config.down_groups_per_row}u;
+            float acc = 0.0f;
+            for (uint word_idx = lane;
+                 word_idx < {config.down_packed_per_row}u;
+                 word_idx += 32u) {{
+                uint group = word_idx / {config.words_per_group}u;
+                float scale = (float)down_scales[meta_row + group];
+                float bias = (float)down_biases[meta_row + group];
+                uint32_t packed = packed_row[word_idx];
+                uint input_base = route * {config.intermediate}u +
+                    word_idx * {config.values_per_word}u;
+                float quant_dot = 0.0f;
+                float input_sum = 0.0f;
+                for (uint item = 0u; item < {config.values_per_word}u; ++item) {{
+                    float value = (float)activated[input_base + item];
+                    input_sum += value;
+                    uint shift = {config.bits}u * item;
+                    quant_dot += value *
+                        (float)((packed >> shift) & {(1 << config.bits) - 1}u);
+                }}
+                acc += scale * quant_dot + bias * input_sum;
+            }}
+            acc = simd_sum(acc);
+            weighted += (float)route_scores[route] * acc;
+        }}
+        if (lane == 0u) output[out_d] = (T)weighted;
+"""
+
+
+@lru_cache(maxsize=4)
+def _down_kernel(config: _PairConfig):
+    return mx.fast.metal_kernel(
+        name=(
+            f"vmlx_{config.family}_q{config.bits}g{config.group_size}_"
+            "weighted_down"
+        ),
+        input_names=[
+            "activated",
+            "down_weight",
+            "down_scales",
+            "down_biases",
+            "expert_ids",
+            "route_scores",
+        ],
+        output_names=["output"],
+        header="#include <metal_stdlib>\nusing namespace metal;\n",
+        source=_down_source(config),
+    )
+
+
+def _run_weighted_down(
+    switch: Any,
+    config: _PairConfig,
+    activated: mx.array,
+    indices: mx.array,
+    scores: mx.array,
+) -> mx.array:
+    projection = switch.down_proj
+    output = _down_kernel(config)(
+        inputs=[
+            activated.reshape(config.top_k, config.intermediate),
+            projection.weight,
+            projection.scales,
+            projection.biases,
+            indices.reshape(-1).astype(mx.uint32),
+            scores.reshape(-1).astype(activated.dtype),
+        ],
+        template=[("T", activated.dtype)],
+        grid=(32 * config.hidden, 1, 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[(config.hidden,)],
+        output_dtypes=[activated.dtype],
+    )[0]
+    return output.reshape(*scores.shape[:-1], config.hidden)
+
+
 def affine_moe_pair_activation(
     switch: Any,
     x: mx.array,
@@ -333,6 +444,38 @@ def affine_moe_pair_activation(
         return None, False
 
 
+def affine_moe_routed_output(
+    switch: Any,
+    x: mx.array,
+    indices: mx.array,
+    scores: mx.array,
+) -> tuple[mx.array | None, bool]:
+    """Return the weighted routed output when a registered decode path owns it."""
+
+    activated, pair_fused = affine_moe_pair_activation(switch, x, indices)
+    if not pair_fused or activated is None:
+        return None, False
+    config = getattr(switch, _CONFIG_ATTR)
+    if config.fuse_down:
+        try:
+            return _run_weighted_down(
+                switch, config, activated, indices, scores
+            ), True
+        except Exception as exc:
+            if hasattr(switch, _CONFIG_ATTR):
+                delattr(switch, _CONFIG_ATTR)
+            logger.exception(
+                "%s affine weighted-down fusion failed; disabling this module",
+                config.family,
+            )
+            _STATUS.setdefault(config.family, {})["last_down_runtime_error"] = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            return None, False
+    selected = switch.down_proj(activated, indices).squeeze(-2)
+    return (selected * scores[..., None].astype(selected.dtype)).sum(axis=-2), True
+
+
 def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
     """Register every compatible SwitchGLU atomically for one model family."""
 
@@ -370,16 +513,20 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
     for module, config in accepted:
         setattr(module, _CONFIG_ATTR, config)
     layouts = sorted({(config.bits, config.group_size) for _, config in accepted})
+    full_down_modules = sum(config.fuse_down for _, config in accepted)
     _STATUS[family] = {
         "installed": len(accepted),
         "reason": None,
         "layouts": layouts,
+        "full_down_modules": full_down_modules,
     }
     logger.info(
-        "%s affine MoE pair fusion registered for %d modules; layouts=%s",
+        "%s affine MoE pair fusion registered for %d modules; layouts=%s; "
+        "full_down=%d",
         family,
         len(accepted),
         layouts,
+        full_down_modules,
     )
     return len(accepted)
 
@@ -392,6 +539,7 @@ def affine_moe_pair_status(family: str | None = None) -> dict[str, Any]:
 
 __all__ = [
     "affine_moe_pair_activation",
+    "affine_moe_routed_output",
     "affine_moe_pair_status",
     "install_affine_moe_pair_decode",
 ]

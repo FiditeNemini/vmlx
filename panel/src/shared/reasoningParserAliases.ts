@@ -26,6 +26,10 @@ export function canonicalizeReasoningParserForCli(parser?: string): string | und
   // the panel/argv boundary so the vendor spelling cannot be silently dropped
   // to Auto or replaced by the incompatible think_xml parser.
   if (parser === 'poolside_v1') return 'deepseek_r1'
+  // GLM-5.3-Flash bundles stamp glm_think_block — the same <think> rail
+  // contract; the engine registers the literal name as a deepseek_r1 alias.
+  // Canonicalize so released engines without the alias still resolve it.
+  if (parser === 'glm_think_block') return 'deepseek_r1'
   // The engine registers `muse` as an alias of `muse_glimmer`; canonicalize so
   // either spelling survives the argv boundary instead of dropping to Auto.
   if (parser === 'muse') return 'muse_glimmer'

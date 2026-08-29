@@ -2082,6 +2082,11 @@ const TOOL_PARSER_OPTIONS: ParserOption[] = [
     ]
   },
   {
+    value: 'glm_xml_args', label: 'GLM-5.3 — arg_key/arg_value XML (glm47 dialect)', format: '<tool_call>name\n<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>', models: [
+      'GLM-5.3-Flash (JANG)',
+    ]
+  },
+  {
     value: 'granite', label: 'Granite — IBM Granite 3.x / Granite-Code', format: '<|tool_call|>[{"name":"fn","arguments":{...}}]', models: [
       'Granite 3.0/3.1/3.2/3.3 (2B/8B)', 'Granite-Code (3B/8B/20B/34B)',
     ]
@@ -2160,6 +2165,11 @@ const REASONING_PARSER_OPTIONS: ParserOption[] = [
     value: 'minimax_m3', label: 'MiniMax M3 — MiniMax-M3 (sparse MSA)', format: '<mm:think>...reasoning...</mm:think>content  (MiniMax M3 parser)', models: [
       'MiniMax-M3 (REAP22 / JANG_2L)',
       'Auto-detected for minimax_m3 / minimax_m3_vl bundles.',
+    ]
+  },
+  {
+    value: 'glm_think_block', label: 'GLM-5.3 — <think> rail (R1 contract)', format: '<think>...reasoning...</think>content  (template force-opens <think>)', models: [
+      'GLM-5.3-Flash (JANG)',
     ]
   },
   {

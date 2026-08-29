@@ -181,6 +181,34 @@ registerFamily('qwen3.5-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningPa
 // present in the registry just as it is in Python model_configs.py.  Falling
 // through to DEFAULT_CONFIG hid low/medium/xhigh, the Qwen tool parser, and the
 // native-MTP control even while the loaded engine advertised all three.
+registerFamily('glm5-next', {
+  cacheType: 'hybrid',
+  cacheSubtype: 'glm5_next_native_v1',
+  // Bundle-stamped ids are registered engine aliases: glm_xml_args -> the
+  // glm47 arg_key/arg_value XML parser, glm_think_block -> the R1 <think>
+  // rail parser. Template force-opens <think> in the assistant prefix.
+  toolParser: 'glm_xml_args',
+  reasoningParser: 'glm_think_block',
+  supportsThinking: true,
+  thinkInTemplate: true,
+  defaultEnableThinking: true,
+  supportedReasoningEfforts: ['low', 'high', 'max'],
+  defaultReasoningEffort: 'max',
+  usePagedCache: false,
+  enableAutoToolChoice: true,
+  // Vision tower ships in the bundle but the glm5_next VLM runtime is not
+  // implemented yet — the engine text-routes this family (is_mllm_model
+  // override) and drops visual weights at sanitize.
+  isMultimodal: false,
+  architectureHints: {
+    attentionArch: 'kda_mla_dsa',
+    cacheSchema: 'glm5_next_native_v1',
+    cachePrecision: 'full',
+  },
+  description: 'GLM-5.3-Flash (KDA + sparse-MLA/DSA + mHC MoE)',
+  priority: 3,
+})
+
 registerFamily('qwen4-exp', {
   cacheType: 'hybrid',
   cacheSubtype: 'qsa_gdn_ple_v1',
@@ -444,6 +472,8 @@ const MODEL_TYPE_TO_FAMILY: Record<string, string> = {
   'qwen3_5_moe': 'qwen3.5-moe',
   'qwen3_5_moe_text': 'qwen3.5-moe', // Qwen3.6-35B-A3B inner text_config model_type
   'qwen4_exp': 'qwen4-exp',
+  'glm5_next': 'glm5-next',
+  'glm5_next_text': 'glm5-next',
   'qwen4_exp_text': 'qwen4-exp',
   'qwen3': 'qwen3',
   'qwen3_next': 'qwen3-next',
@@ -1693,6 +1723,15 @@ function applyJangCapabilities(
   if (zayaTypedCca) {
     next.usePagedCache = false
   }
+  if (next.family === 'glm5-next') {
+    // The bundle ships a vision tower, but the glm5_next VLM runtime is not
+    // implemented yet — the engine text-routes this family (is_mllm_model
+    // override) and drops visual weights at sanitize. Advertising
+    // multimodal here would render a media-attach UI that cannot work.
+    // Remove when the V-phase vision runtime lands.
+    next.isMultimodal = false
+    next.forceTextOnly = true
+  }
   return next
 }
 
@@ -1918,6 +1957,15 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
           }
           detected = applyLagunaVariantHint(detected, parsed, parsedJangConfig)
           detected = applyConfigMetadataOverrides(detected, parsed)
+          if (detected.family === 'glm5-next') {
+            // The bundle ships a vision tower, but the glm5_next VLM runtime
+            // is not implemented yet — the engine text-routes this family
+            // (is_mllm_model override) and drops visual weights at sanitize.
+            // Advertising multimodal would render a media-attach UI that
+            // cannot work. Remove when the V-phase vision runtime lands.
+            detected.isMultimodal = false
+            detected.forceTextOnly = true
+          }
           return detected
         }
       }

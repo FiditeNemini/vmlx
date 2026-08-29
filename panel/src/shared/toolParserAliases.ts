@@ -18,6 +18,10 @@ const TOOL_PARSER_CANONICAL_ALIASES: Record<string, string> = {
   // engine (dots_tool_parser.py); canonical serving name is 'dots'.
   dots3: 'dots',
   dots3_note: 'dots',
+  // GLM-5.3-Flash (glm5_next) bundles stamp glm_xml_args; the dialect is the
+  // glm47 arg_key/arg_value XML and the engine registers the literal name as
+  // a glm47 alias. Canonicalize to a name every released engine also knows.
+  glm_xml_args: 'glm47',
 }
 
 export const TOOL_PARSERS_FOR_CLI = new Set([

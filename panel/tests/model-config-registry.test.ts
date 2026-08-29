@@ -196,6 +196,32 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detected.nativeMtp).toBeUndefined()
   })
 
+  it('detects GLM-5.3-Flash (glm5_next) with its serving contract', () => {
+    const dir = makeModelDir({
+      model_type: 'glm5_next',
+      text_config: {
+        model_type: 'glm5_next_text',
+        max_position_embeddings: 1048576,
+        num_hidden_layers: 45,
+      },
+      vision_config: { model_type: 'glm5_next' },
+    })
+
+    expect(detectModelConfigFromDir(dir)).toMatchObject({
+      family: 'glm5-next',
+      cacheType: 'hybrid',
+      cacheSubtype: 'glm5_next_native_v1',
+      toolParser: 'glm_xml_args',
+      reasoningParser: 'glm_think_block',
+      supportsThinking: true,
+      thinkInTemplate: true,
+      supportedReasoningEfforts: ['low', 'high', 'max'],
+      defaultReasoningEffort: 'max',
+      usePagedCache: false,
+      isMultimodal: false,
+    })
+  })
+
   it('keeps an explicit non-hermes Qwen4Exp tool_parser stamp authoritative', () => {
     const dir = makeModelDir({
       model_type: 'qwen4_exp',

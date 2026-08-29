@@ -55,6 +55,10 @@ from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
     sigmoid_gated_rmsnorm_small_rows,
 )
+from vmlx_engine.metal.glm5_mhc_decode import (
+    fused_glm5_mhc_requested,
+    glm5_mhc_decode,
+)
 from vmlx_engine.metal.kda_conv_decode import (
     fused_kda_conv_requested,
     glm5_kda_conv_decode,
@@ -307,10 +311,23 @@ class HyperConnection(nn.Module):
         self.hc_fn = mx.zeros(((2 + h) * h, h * d))
         self.hc_base = mx.zeros(((2 + h) * h,))
         self.hc_scale = mx.ones((3,))
+        self._fused_decode = fused_glm5_mhc_requested()
 
     def __call__(self, streams: mx.array):
         # streams: [B, S, H, D]
         h = self.hc_mult
+        fused = glm5_mhc_decode(
+            streams,
+            self.hc_fn,
+            self.hc_base,
+            self.hc_scale,
+            rms_eps=self.rms_eps,
+            sink_eps=self.eps,
+            iterations=self.iters,
+            enabled=self._fused_decode,
+        )
+        if fused is not None:
+            return fused
         flat = streams.reshape(*streams.shape[:2], -1).astype(mx.float32)
         flat = flat * mx.rsqrt(mx.mean(flat * flat, axis=-1, keepdims=True) + self.rms_eps)
         mix = flat @ self.hc_fn.astype(mx.float32).T

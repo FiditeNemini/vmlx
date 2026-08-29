@@ -261,6 +261,55 @@ class TestCacheAndForward:
             q, q, v, q, beta, state, enabled=True
         ) is None
 
+    @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
+    def test_mhc_decode_fusion_matches_stock(self, dtype, glm5):
+        from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
+
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        module = glm5.HyperConnection(args)
+        module.hc_fn = (mx.random.normal(module.hc_fn.shape) * 0.01).astype(dtype)
+        module.hc_base = (mx.random.normal(module.hc_base.shape) * 0.01).astype(
+            mx.float32
+        )
+        streams = (mx.random.normal((1, 1, args.hc_mult, 64)) * 0.1).astype(
+            dtype
+        )
+
+        module._fused_decode = False
+        reference = module(streams)
+        candidate = glm5_mhc_decode(
+            streams,
+            module.hc_fn,
+            module.hc_base,
+            module.hc_scale,
+            rms_eps=module.rms_eps,
+            sink_eps=module.eps,
+            iterations=module.iters,
+            enabled=True,
+        )
+        assert candidate is not None
+        mx.eval(*reference, *candidate)
+        assert mx.allclose(candidate[0], reference[0], rtol=2e-4, atol=2e-5)
+        assert mx.allclose(candidate[1], reference[1], rtol=2e-4, atol=2e-5)
+        assert mx.allclose(candidate[2], reference[2], rtol=2e-4, atol=2e-5)
+
+    def test_mhc_decode_fusion_refuses_prefill(self, glm5):
+        from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
+
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        module = glm5.HyperConnection(args)
+        streams = mx.zeros((1, 2, args.hc_mult, args.hidden_size))
+        assert glm5_mhc_decode(
+            streams,
+            module.hc_fn,
+            module.hc_base,
+            module.hc_scale,
+            rms_eps=module.rms_eps,
+            sink_eps=module.eps,
+            iterations=module.iters,
+            enabled=True,
+        ) is None
+
     def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         attn = glm5.KDAAttention(args)

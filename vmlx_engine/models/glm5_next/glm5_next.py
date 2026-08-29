@@ -59,6 +59,10 @@ from vmlx_engine.metal.glm5_mhc_decode import (
     fused_glm5_mhc_requested,
     glm5_mhc_decode,
 )
+from vmlx_engine.metal.glm5_hc_place_decode import (
+    fused_glm5_hc_place_requested,
+    glm5_hc_place_decode,
+)
 from vmlx_engine.metal.kda_conv_decode import (
     fused_kda_conv_requested,
     glm5_kda_conv_decode,
@@ -352,8 +356,20 @@ class HyperConnection(nn.Module):
         return post, comb, collapsed.astype(streams.dtype)
 
 
-def hc_place(post: mx.array, comb: mx.array, out: mx.array, residual: mx.array) -> mx.array:
+def hc_place(
+    post: mx.array,
+    comb: mx.array,
+    out: mx.array,
+    residual: mx.array,
+    *,
+    fused_decode: bool = False,
+) -> mx.array:
     """streams' = post⊗out + combᵀ @ residual   (all [B,S,·] shapes)."""
+    fused = glm5_hc_place_decode(
+        post, comb, out, residual, enabled=fused_decode
+    )
+    if fused is not None:
+        return fused
     dt = residual.dtype
     return (post.astype(dt)[..., None] * out[..., None, :]
             + mx.matmul(comb.astype(dt).transpose(0, 1, 3, 2), residual))
@@ -897,6 +913,7 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(args.hidden_size, args.rms_norm_eps)
         self.attn_hc = HyperConnection(args)
         self.ffn_hc = HyperConnection(args)
+        self._fused_hc_place = fused_glm5_hc_place_requested()
 
     def __call__(self, streams: mx.array, cache=None, n_confirmed: int = 0):
         residual = streams
@@ -908,12 +925,16 @@ class DecoderLayer(nn.Module):
             )
         else:
             x = self.self_attn(attn_input, cache=cache)
-        streams = hc_place(post, comb, x, residual)
+        streams = hc_place(
+            post, comb, x, residual, fused_decode=self._fused_hc_place
+        )
 
         residual = streams
         post, comb, x = self.ffn_hc(streams)
         x = self.mlp(self.post_attention_layernorm(x))
-        return hc_place(post, comb, x, residual)
+        return hc_place(
+            post, comb, x, residual, fused_decode=self._fused_hc_place
+        )
 
 
 class Glm5NextMTPSharedHead(nn.Module):

@@ -310,6 +310,46 @@ class TestCacheAndForward:
             enabled=True,
         ) is None
 
+    @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
+    def test_hc_place_decode_fusion_matches_stock(self, dtype, glm5):
+        mx.random.seed(113)
+        post = mx.sigmoid(mx.random.normal((1, 1, 4))).astype(mx.float32) * 2
+        comb = mx.softmax(mx.random.normal((1, 1, 4, 4)), axis=-1).astype(
+            mx.float32
+        )
+        out = (mx.random.normal((1, 1, 64)) * 0.1).astype(dtype)
+        residual = (mx.random.normal((1, 1, 4, 64)) * 0.1).astype(dtype)
+        reference = glm5.hc_place(post, comb, out, residual)
+        candidate = glm5.hc_place(
+            post, comb, out, residual, fused_decode=True
+        )
+        mx.eval(reference, candidate)
+        max_abs = float(
+            mx.max(
+                mx.abs(
+                    candidate.astype(mx.float32)
+                    - reference.astype(mx.float32)
+                )
+            ).item()
+        )
+        max_ref = max(
+            float(mx.max(mx.abs(reference.astype(mx.float32))).item()), 1e-9
+        )
+        # MLX's 4x4 matmul and the direct four-term kernel use different
+        # accumulation order. Production-shape probes bound BF16 to one final
+        # storage step; F16/F32 remain below 0.1% relative.
+        relative_limit = 6e-3 if dtype == mx.bfloat16 else 1e-3
+        assert max_abs / max_ref <= relative_limit
+
+    def test_hc_place_decode_fusion_refuses_prefill(self, glm5):
+        post = mx.ones((1, 2, 4), dtype=mx.float32)
+        comb = mx.ones((1, 2, 4, 4), dtype=mx.float32)
+        out = mx.zeros((1, 2, 64), dtype=mx.bfloat16)
+        residual = mx.zeros((1, 2, 4, 64), dtype=mx.bfloat16)
+        assert glm5.hc_place(
+            post, comb, out, residual, fused_decode=True
+        ).shape == residual.shape
+
     def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         attn = glm5.KDAAttention(args)

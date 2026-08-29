@@ -1,16 +1,31 @@
-"""Session-scoped adaptive-MTP profile contract.
+"""Session-scoped validated adaptive-MTP profile contract.
 
-The per-request controller previously restarted every request at the
-configured depth and re-ran the whole AR-vs-MTP experiment (48-64 cycles)
-before demoting, so short/first turns paid for a lesson no later turn
-remembered. These tests pin the profile store that fixes that lifetime.
+Audited contract (2026-08-28): the only honest first-turn guarantee is AR.
+Unknown profiles never activate MTP; immediate seeding requires MEASURED
+evidence (validated tuning record or an in-process entry that beat its own
+AR baseline); cancelled/errored/sample-starved requests teach nothing; no
+user request is sacrificed to a periodic re-probe.
 """
 
 from vmlx_engine.native_mtp_profile import (
-    REPROBE_EVERY_REQUESTS,
+    MIN_WALL_SAMPLES,
     NativeMTPProfileStore,
     profile_key,
 )
+
+
+def _observe_profitable(store, key, depth=2, value=45.0, ar=30.0, n=None):
+    label = f"d{depth}"
+    store.observe(
+        key,
+        final_depth=depth,
+        fallback_to_ar=False,
+        fallback_reason=None,
+        finish_reason="stop",
+        values_tok_s={label: value},
+        sample_counts={label: MIN_WALL_SAMPLES if n is None else n},
+        ar_baseline_tps=ar,
+    )
 
 
 class TestProfileKey:
@@ -21,69 +36,82 @@ class TestProfileKey:
         assert sampled[0] == "sampled"
         assert greedy != sampled
 
-    def test_restored_prefix_split(self):
-        cold = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=100)
+    def test_restored_and_tools_split(self):
+        base = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=100)
         warm = profile_key(temperature=0.0, restored_prefix=True, prompt_tokens=100)
-        assert cold != warm
+        tools = profile_key(temperature=0.0, restored_prefix=False,
+                            prompt_tokens=100, has_tools=True)
+        assert len({base, warm, tools}) == 3
 
     def test_context_buckets(self):
-        short = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
-        medium = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=8000)
-        long = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=40000)
-        assert short[2] == "short"
-        assert medium[2] == "medium"
-        assert long[2] == "long"
+        assert profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)[2] == "short"
+        assert profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=8000)[2] == "medium"
+        assert profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=40000)[2] == "long"
 
 
 class TestStartDepth:
-    def test_unseen_profile_starts_at_d1_never_configured_d3(self):
+    def test_unknown_profile_stays_ar(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
         depth, source = store.start_depth(key, configured_depth=3)
-        assert depth == 1, (
-            "An unseen profile must start at the bounded near-AR D1 probe, "
-            "never optimistically at the configured D2/D3 for a whole request."
+        assert depth == 0, (
+            "An unknown workload shape must stay AR — the only honest "
+            "first-turn guarantee. MTP requires measured evidence."
         )
-        assert source == "unseen_probe_d1"
+        assert source == "unseen_ar"
 
-    def test_learned_depth_is_reused(self):
+    def test_validated_tuning_record_seeds_immediately(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
-        store.observe(key, final_depth=2, fallback_to_ar=False,
-                      fallback_reason=None, finish_reason="stop")
+        depth, source = store.start_depth(
+            key, configured_depth=2, tuning_validated=True
+        )
+        assert depth == 2
+        assert source == "tuning_validated_d2"
+
+    def test_profitable_learned_depth_is_reused(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
+        _observe_profitable(store, key, depth=2, value=45.0, ar=30.0)
         depth, source = store.start_depth(key, configured_depth=3)
         assert depth == 2
-        assert source == "profile_learned_d2"
+        assert source == "profile_validated_d2"
 
     def test_learned_depth_clamped_to_configured_ceiling(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
-        store.observe(key, final_depth=3, fallback_to_ar=False,
-                      fallback_reason=None, finish_reason="stop")
+        _observe_profitable(store, key, depth=3, value=50.0, ar=30.0)
         depth, _ = store.start_depth(key, configured_depth=2)
         assert depth == 2
 
-    def test_ar_learned_profile_skips_activation(self):
-        store = NativeMTPProfileStore()
-        key = profile_key(temperature=0.7, restored_prefix=False, prompt_tokens=64)
-        store.observe(key, final_depth=1, fallback_to_ar=True,
-                      fallback_reason="cost_ratio=1.2", finish_reason="fallback_to_ar")
-        depth, source = store.start_depth(key, configured_depth=3)
-        assert depth == 0
-        assert source == "profile_ar_skip"
-
-    def test_ar_profile_reprobes_on_bounded_interval(self):
+    def test_ar_verdict_holds_within_ttl_no_per_request_reprobe(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.7, restored_prefix=False, prompt_tokens=64)
         store.observe(key, final_depth=1, fallback_to_ar=True,
                       fallback_reason="cost", finish_reason="fallback_to_ar")
-        sources = [store.start_depth(key, configured_depth=3)
-                   for _ in range(REPROBE_EVERY_REQUESTS)]
-        skips = [s for s in sources if s[0] == 0]
-        probes = [s for s in sources if s[0] == 1]
-        assert len(probes) == 1, "exactly one bounded re-probe per interval"
-        assert probes[0][1] == "ar_reprobe_d1"
-        assert len(skips) == REPROBE_EVERY_REQUESTS - 1
+        results = [store.start_depth(key, configured_depth=3, now=100.0 + i)
+                   for i in range(50)]
+        assert all(d == 0 for d, _ in results), (
+            "inside the TTL no user request may be sacrificed to a re-probe"
+        )
+
+    def test_ar_verdict_expires_and_reprobes_exactly_once(self):
+        from vmlx_engine.native_mtp_profile import AR_VERDICT_TTL_S
+
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.7, restored_prefix=False, prompt_tokens=64)
+        store.observe(key, final_depth=1, fallback_to_ar=True,
+                      fallback_reason="cost", finish_reason="fallback_to_ar")
+        base = store._profiles[key].ar_verdict_at
+        later = base + AR_VERDICT_TTL_S + 1
+        first = store.start_depth(key, configured_depth=3, now=later)
+        assert first == (1, "ar_reprobe_d1"), (
+            "the AR verdict is adaptive — after the TTL one bounded D1 "
+            "re-probe re-validates it"
+        )
+        # Immediately after, the TTL is re-armed: no probe storm.
+        second = store.start_depth(key, configured_depth=3, now=later + 1)
+        assert second == (0, "profile_ar")
 
     def test_keys_do_not_poison_each_other(self):
         store = NativeMTPProfileStore()
@@ -92,44 +120,62 @@ class TestStartDepth:
         store.observe(sampled, final_depth=1, fallback_to_ar=True,
                       fallback_reason="cost", finish_reason="fallback_to_ar")
         depth, source = store.start_depth(greedy, configured_depth=3)
-        assert depth == 1
-        assert source == "unseen_probe_d1"
+        assert (depth, source) == (0, "unseen_ar")
 
 
 class TestObserve:
-    def test_error_finishes_prove_nothing(self):
+    def test_cancelled_and_error_teach_nothing(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
-        store.observe(key, final_depth=3, fallback_to_ar=False,
-                      fallback_reason=None, finish_reason="error")
-        depth, source = store.start_depth(key, configured_depth=3)
-        assert depth == 1
-        assert source == "unseen_probe_d1"
+        for reason in ("cancelled", "error"):
+            store.observe(key, final_depth=3, fallback_to_ar=False,
+                          fallback_reason=None, finish_reason=reason,
+                          values_tok_s={"d3": 99.0},
+                          sample_counts={"d3": 10}, ar_baseline_tps=10.0)
+        assert store.start_depth(key, configured_depth=3) == (0, "unseen_ar")
 
-    def test_recovery_after_ar_reprobe_succeeds(self):
+    def test_sample_starved_request_teaches_nothing(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
+        _observe_profitable(store, key, depth=2, value=99.0, ar=10.0,
+                            n=MIN_WALL_SAMPLES - 1)
+        assert store.start_depth(key, configured_depth=3) == (0, "unseen_ar")
+
+    def test_value_below_ar_margin_learns_ar(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
+        _observe_profitable(store, key, depth=2, value=30.5, ar=30.0)
+        depth, source = store.start_depth(key, configured_depth=3)
+        assert depth == 0
+        assert source == "profile_ar"
+
+    def test_missing_ar_baseline_teaches_nothing(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
+        store.observe(key, final_depth=2, fallback_to_ar=False,
+                      fallback_reason=None, finish_reason="stop",
+                      values_tok_s={"d2": 99.0},
+                      sample_counts={"d2": 10}, ar_baseline_tps=None)
+        assert store.start_depth(key, configured_depth=3) == (0, "unseen_ar")
+
+    def test_fallback_records_ar_wins(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.7, restored_prefix=False, prompt_tokens=64)
         store.observe(key, final_depth=1, fallback_to_ar=True,
-                      fallback_reason="cost", finish_reason="fallback_to_ar")
-        # a later successful probe re-learns a real depth
-        store.observe(key, final_depth=2, fallback_to_ar=False,
-                      fallback_reason=None, finish_reason="stop")
-        depth, source = store.start_depth(key, configured_depth=3)
-        assert depth == 2
-        assert source == "profile_learned_d2"
+                      fallback_reason="cost_ratio=1.2",
+                      finish_reason="fallback_to_ar")
+        assert store.start_depth(key, configured_depth=3) == (0, "profile_ar")
 
     def test_snapshot_shape(self):
         store = NativeMTPProfileStore()
-        key = profile_key(temperature=0.0, restored_prefix=True, prompt_tokens=64)
-        store.observe(key, final_depth=2, fallback_to_ar=False,
-                      fallback_reason=None, finish_reason="stop",
-                      values_tok_s={"d1": 30.0, "d2": 41.5, "d3": None})
+        key = profile_key(temperature=0.0, restored_prefix=True,
+                          prompt_tokens=64, has_tools=True)
+        _observe_profitable(store, key, depth=2, value=41.5, ar=30.0)
         snap = store.snapshot()
-        assert "greedy|restored|short" in snap
-        entry = snap["greedy|restored|short"]
+        assert "greedy|restored|short|tools" in snap
+        entry = snap["greedy|restored|short|tools"]
         assert entry["learned_depth"] == 2
-        assert entry["requests_observed"] == 1
-        assert entry["last_values_tok_s"]["d2"] == 41.5
+        assert entry["last_ar_baseline_tps"] == 30.0
 
 
 class TestSeedPathIntegration:
@@ -197,30 +243,31 @@ class TestSeedPathIntegration:
         first_token = mx.array([2], dtype=mx.uint32)
         return generator, req, first_token
 
-    def test_unseen_profile_seeds_depth1_and_ar_profile_skips(self, monkeypatch):
-        import mlx.core as mx  # noqa: F401 — fixture requires MLX
+    def test_unknown_profile_stays_ar_and_validated_profile_activates(
+        self, monkeypatch
+    ):
+        from vmlx_engine.native_mtp_profile import NativeMTPProfileStore
 
         generator, req, first_token = self._build_generator(monkeypatch)
 
         assert generator._seed_native_mtp_from_prefill(
             req, [object()], first_token, [None]
-        ) is True
-        state = req._native_mtp_state
-        assert state.depth == 1, (
-            "unseen profile must seed the bounded D1 probe, not configured D3"
-        )
-        assert state.stats.profile_seed == "unseen_probe_d1"
-        assert state.profile_key is not None
+        ) is False, "unknown workload shape must stay AR"
+        assert not hasattr(req, "_native_mtp_state")
 
-        # Teach the profile that AR wins, then reseed: activation must skip.
-        generator._native_mtp_profiles.observe(
-            state.profile_key, final_depth=1, fallback_to_ar=True,
-            fallback_reason="cost", finish_reason="fallback_to_ar",
-        )
-        delattr(req, "_native_mtp_state")
+        # A validated in-process profile entry activates MTP at its depth.
+        store = generator._native_mtp_profiles
+        assert isinstance(store, NativeMTPProfileStore)
+        from vmlx_engine.native_mtp_profile import profile_key as pk
+        key = pk(temperature=0.0, restored_prefix=False, prompt_tokens=2)
+        _observe_profitable(store, key, depth=2, value=45.0, ar=30.0)
         assert generator._seed_native_mtp_from_prefill(
             req, [object()], first_token, [None]
-        ) is False, "AR-learned profile must skip MTP activation entirely"
+        ) is True
+        state = req._native_mtp_state
+        assert state.depth == 2
+        assert state.stats.profile_seed == "profile_validated_d2"
+        assert state.stats.profile_key_label == "greedy|False|short|False"
 
     def test_explicit_env_depth_override_bypasses_profile(self, monkeypatch):
         generator, req, first_token = self._build_generator(monkeypatch)
@@ -230,25 +277,19 @@ class TestSeedPathIntegration:
             req, [object()], first_token, [None]
         ) is True
         state = req._native_mtp_state
-        assert state.depth == 3, (
-            "an explicit user depth override must not be second-guessed by "
-            "the session profile"
-        )
+        assert state.depth == 3
         assert state.stats.profile_seed == "configured"
 
 
 class TestStateIntegration:
-    def test_state_carries_profile_key_and_stats_report_seed(self):
-        from vmlx_engine.mllm_batch_generator import (
-            MLLMNativeMTPState,
-            MLLMNativeMTPStats,
-        )
+    def test_stats_report_profile_fields(self):
+        from vmlx_engine.mllm_batch_generator import MLLMNativeMTPStats
 
-        state = MLLMNativeMTPState(profile_key=("greedy", False, "short"))
-        assert state.profile_key == ("greedy", False, "short")
         stats = MLLMNativeMTPStats()
-        stats.profile_seed = "profile_learned_d2"
+        stats.profile_seed = "profile_validated_d2"
+        stats.profile_key_label = "greedy|False|short|False"
         payload = stats.to_dict(
             request_id="r1", finish_reason="stop", final_depth=2
         )
-        assert payload["profile_seed"] == "profile_learned_d2"
+        assert payload["profile_seed"] == "profile_validated_d2"
+        assert payload["profile_key"] == "greedy|False|short|False"

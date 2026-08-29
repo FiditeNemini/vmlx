@@ -1,4 +1,4 @@
-"""Session-scoped learned depth profiles for adaptive native MTP.
+"""Session-scoped validated depth profiles for adaptive native MTP.
 
 The per-request wall-value controller (native_mtp_adaptive) starts every
 request at the configured depth and needs tens of verify cycles before its
@@ -7,23 +7,29 @@ Because ``MLLMNativeMTPState`` is request-local, every request repeated that
 whole failed experiment: short and first turns finished before the controller
 learned anything, and later turns relearned the same lesson from scratch.
 
-This module remembers what the controller concluded, per workload shape, for
-the lifetime of one loaded model:
+Contract (audited 2026-08-28):
 
+- The only honest first-turn guarantee is AR. An UNKNOWN or unvalidated
+  profile does not activate MTP at all; no user request is sacrificed to a
+  speculative experiment or a periodic re-probe.
+- MTP may seed immediately only from MEASURED evidence: either a validated
+  model-local tuning record (vmlx_mtp_tuning.json best_depth, resolved by
+  native_mtp_effective_depth and flagged by the caller) or a profile entry
+  this store learned from completed requests whose measured per-depth
+  wall value beat the same requests' own AR baseline.
+- Learning requires completed requests (stop/length) with at least
+  ``MIN_WALL_SAMPLES`` wall-clock samples at the winning depth. Cancelled,
+  errored and sample-starved requests teach nothing. Acceptance rate alone
+  never promotes — only confirmed-tokens-per-wall-second versus the AR
+  baseline, with a hysteresis margin.
 - The store lives on the generator instance, so a model/bundle/config reload
-  or a new engine process starts clean (invalidation for free).
-- Profiles are keyed by (sampler class, restored-prefix, context bucket) so
-  greedy/sampled, cold/restored, and short/long observations cannot poison
-  one another.
-- An unseen profile starts at depth 1 — a bounded, near-AR probe — never at
-  an optimistic D2/D3 for a whole short request. The rolling controller
-  promotes from there only on measured profitable evidence.
-- A profile that learned "AR wins" (cost/acceptance fallback) skips MTP
-  activation entirely on later requests, with a bounded re-probe every
-  ``REPROBE_EVERY_REQUESTS`` requests so a workload shift can re-enable it.
+  or a new engine process starts clean. Cross-process persistence of
+  measured depth remains the tuning-sidecar mechanism.
+- Keys separate sampler class, restored-prefix, context bucket, and
+  tools-present so materially different workloads cannot poison one another.
 - Nothing here changes sampling, verification, or emitted tokens: it only
-  chooses the STARTING draft depth (or AR) that the existing controller and
-  safety gates then adjust with their own measurements.
+  chooses whether MTP activates and at what STARTING depth; the existing
+  controller and safety gates still adjust with their own measurements.
 """
 
 from __future__ import annotations
@@ -32,13 +38,20 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
 
-# After this many consecutive AR-profiled requests, allow one D1 probe again.
-REPROBE_EVERY_REQUESTS = 8
+# Wall-clock samples required at a depth before its value is trusted.
+MIN_WALL_SAMPLES = 3
+# Measured depth value must beat the AR baseline by this margin to be
+# learned as a profitable seed.
+PROMOTE_MARGIN = 0.05
+# An AR-wins verdict is adaptive, not a permanent lock: after this many
+# seconds it expires and the next request re-validates with a single
+# bounded D1 probe (near-AR cost; the controller's cost/acceptance gates
+# demote it quickly if AR still wins).
+AR_VERDICT_TTL_S = 300.0
 
-# Context buckets are deliberately coarse so evidence accumulates quickly.
 _CTX_BUCKETS = ((2048, "short"), (16384, "medium"))
 
-ProfileKey = Tuple[str, bool, str]
+ProfileKey = Tuple[str, bool, str, bool]
 
 
 def profile_key(
@@ -46,6 +59,7 @@ def profile_key(
     temperature: float,
     restored_prefix: bool,
     prompt_tokens: int,
+    has_tools: bool = False,
 ) -> ProfileKey:
     sampler_class = "greedy" if float(temperature or 0.0) <= 0.0 else "sampled"
     bucket = "long"
@@ -53,19 +67,24 @@ def profile_key(
         if int(prompt_tokens or 0) < limit:
             bucket = name
             break
-    return (sampler_class, bool(restored_prefix), bucket)
+    return (sampler_class, bool(restored_prefix), bucket, bool(has_tools))
 
 
 @dataclass
 class NativeMTPSessionProfile:
-    """Learned starting depth for one workload shape. 0 means AR."""
+    """Validated starting depth for one workload shape.
+
+    learned_depth: None = unknown (AR until measured evidence exists);
+    0 = measured AR-wins; 1..3 = measured profitable depth.
+    """
 
     learned_depth: Optional[int] = None
     requests_observed: int = 0
-    requests_since_ar_probe: int = 0
     last_finish_reason: str = ""
     last_fallback_reason: Optional[str] = None
     last_values_tok_s: Dict[str, Any] = field(default_factory=dict)
+    last_ar_baseline_tps: Optional[float] = None
+    ar_verdict_at: float = 0.0
 
 
 class NativeMTPProfileStore:
@@ -80,26 +99,41 @@ class NativeMTPProfileStore:
         key: ProfileKey,
         *,
         configured_depth: int,
+        tuning_validated: bool = False,
+        now: Optional[float] = None,
     ) -> Tuple[int, str]:
         """Return (starting depth, seed source). Depth 0 means stay AR.
 
-        The configured depth stays a ceiling for the seed only; the
-        controller's own depth_ceiling still governs later promotion.
+        ``tuning_validated`` marks a configured depth that came from a
+        MEASURED model-local tuning record — the one advisory source that
+        already carries wall-clock proof, so it may seed immediately even
+        when this in-process store has no entry yet.
+
+        An AR-wins verdict is adaptive, not permanent: after
+        AR_VERDICT_TTL_S it expires and this request runs a single bounded
+        D1 re-probe so a workload shift can re-enable MTP.
         """
 
+        import time as _time
+
+        now = _time.monotonic() if now is None else float(now)
         ceiling = max(1, min(3, int(configured_depth or 1)))
         with self._lock:
             profile = self._profiles.get(key)
-            if profile is None or profile.learned_depth is None:
-                return min(1, ceiling), "unseen_probe_d1"
-            if profile.learned_depth <= 0:
-                profile.requests_since_ar_probe += 1
-                if profile.requests_since_ar_probe >= REPROBE_EVERY_REQUESTS:
-                    profile.requests_since_ar_probe = 0
-                    return min(1, ceiling), "ar_reprobe_d1"
-                return 0, "profile_ar_skip"
-            depth = max(1, min(profile.learned_depth, ceiling))
-            return depth, f"profile_learned_d{depth}"
+            if profile is not None and profile.learned_depth is not None:
+                if profile.learned_depth <= 0:
+                    if now - float(profile.ar_verdict_at or 0.0) >= AR_VERDICT_TTL_S:
+                        # Expired: re-validate once at near-AR D1 cost and
+                        # re-arm the TTL so back-to-back requests don't all
+                        # probe if the verdict is immediately re-confirmed.
+                        profile.ar_verdict_at = now
+                        return min(1, ceiling), "ar_reprobe_d1"
+                    return 0, "profile_ar"
+                depth = max(1, min(profile.learned_depth, ceiling))
+                return depth, f"profile_validated_d{depth}"
+        if tuning_validated:
+            return ceiling, f"tuning_validated_d{ceiling}"
+        return 0, "unseen_ar"
 
     def observe(
         self,
@@ -110,36 +144,70 @@ class NativeMTPProfileStore:
         fallback_reason: Optional[str],
         finish_reason: str,
         values_tok_s: Optional[Dict[str, Any]] = None,
+        sample_counts: Optional[Dict[str, Any]] = None,
+        ar_baseline_tps: Optional[float] = None,
     ) -> None:
-        """Record what one finished request's controller concluded."""
+        """Record what one COMPLETED request measured.
 
-        if finish_reason == "error":
-            # A crashed request proves nothing about depth value.
+        Only completed requests (stop/length) teach anything. A fallback to
+        AR with real samples records AR-wins. A profitable depth is learned
+        only when its measured wall value beats the request's own AR
+        baseline by PROMOTE_MARGIN with MIN_WALL_SAMPLES samples.
+        Sample-starved requests leave the profile unchanged.
+        """
+
+        if finish_reason not in ("stop", "length", "fallback_to_ar"):
             return
+        values = values_tok_s or {}
+        counts = sample_counts or {}
         with self._lock:
             profile = self._profiles.setdefault(key, NativeMTPSessionProfile())
             profile.requests_observed += 1
             profile.last_finish_reason = str(finish_reason)
             profile.last_fallback_reason = fallback_reason
-            if values_tok_s:
-                profile.last_values_tok_s = dict(values_tok_s)
-            if fallback_to_ar:
+            profile.last_values_tok_s = dict(values)
+            profile.last_ar_baseline_tps = ar_baseline_tps
+
+            if fallback_to_ar or finish_reason == "fallback_to_ar":
+                import time as _time
+
                 profile.learned_depth = 0
-                profile.requests_since_ar_probe = 0
-            else:
-                profile.learned_depth = max(1, min(3, int(final_depth or 1)))
+                profile.ar_verdict_at = _time.monotonic()
+                return
+
+            depth = max(1, min(3, int(final_depth or 1)))
+            label = f"d{depth}"
+            value = values.get(label)
+            n = int(counts.get(label) or 0)
+            if value is None or n < MIN_WALL_SAMPLES:
+                # Not enough measured evidence — profile stays as it was.
+                return
+            if ar_baseline_tps and ar_baseline_tps > 0:
+                if float(value) >= float(ar_baseline_tps) * (1.0 + PROMOTE_MARGIN):
+                    profile.learned_depth = depth
+                else:
+                    import time as _time
+
+                    profile.learned_depth = 0
+                    profile.ar_verdict_at = _time.monotonic()
+            # With no AR baseline available, the depth's value alone cannot
+            # prove profitability — leave the profile unchanged.
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             return {
-                "|".join(
-                    (key[0], "restored" if key[1] else "cold", key[2])
-                ): {
+                "|".join((
+                    key[0],
+                    "restored" if key[1] else "cold",
+                    key[2],
+                    "tools" if key[3] else "notools",
+                )): {
                     "learned_depth": profile.learned_depth,
                     "requests_observed": profile.requests_observed,
                     "last_finish_reason": profile.last_finish_reason,
                     "last_fallback_reason": profile.last_fallback_reason,
                     "last_values_tok_s": dict(profile.last_values_tok_s),
+                    "last_ar_baseline_tps": profile.last_ar_baseline_tps,
                 }
                 for key, profile in self._profiles.items()
             }

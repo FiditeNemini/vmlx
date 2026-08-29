@@ -3868,6 +3868,7 @@ class MLLMNativeMTPStats:
     mtp_head_cache: Dict[str, Any] = field(default_factory=dict)
     adaptive_depth_value: Dict[str, Any] = field(default_factory=dict)
     profile_seed: str = ""
+    profile_key_label: str = ""
 
     def to_dict(
         self,
@@ -3943,6 +3944,7 @@ class MLLMNativeMTPStats:
             ),
             "adaptive_depth_value": dict(self.adaptive_depth_value),
             "profile_seed": self.profile_seed,
+            "profile_key": self.profile_key_label,
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
         }
@@ -6985,7 +6987,9 @@ class MLLMBatchGenerator:
                         final_depth=mtp_state.depth,
                         fallback_reason=mtp_state.ar_fallback_reason,
                     )
-                    self._observe_native_mtp_profile(mtp_state, "cancelled")
+                    # Cancelled requests deliberately do NOT update the
+                    # session profile — an aborted request proves nothing
+                    # about depth value.
                 except Exception:
                     logger.debug(
                         "MLLM MTP cancellation telemetry publication failed",
@@ -14108,9 +14112,12 @@ class MLLMBatchGenerator:
         if store is None:
             return
         snapshot = state.stats.adaptive_depth_value
-        values = (
-            snapshot.get("values_tok_s") if isinstance(snapshot, dict) else None
-        )
+        values = counts = None
+        if isinstance(snapshot, dict):
+            values = snapshot.get("values_tok_s")
+            counts = snapshot.get("sample_counts")
+        ar_ms = float(getattr(state, "ar_step_ms", 0.0) or 0.0)
+        ar_baseline_tps = (1000.0 / ar_ms) if ar_ms > 0 else None
         try:
             store.observe(
                 key,
@@ -14122,6 +14129,8 @@ class MLLMBatchGenerator:
                 fallback_reason=state.ar_fallback_reason,
                 finish_reason=finish_reason,
                 values_tok_s=values,
+                sample_counts=counts,
+                ar_baseline_tps=ar_baseline_tps,
             )
         except Exception:
             logger.debug("native MTP profile observe failed", exc_info=True)
@@ -14146,6 +14155,60 @@ class MLLMBatchGenerator:
         if first_id in self.stop_tokens:
             return False
 
+        # Resolve the AR-vs-MTP decision BEFORE the MTP seed forward below:
+        # a skipped activation must not pay the extra hidden-state forward.
+        from .native_mtp import native_mtp_effective_depth
+
+        depth, depth_source = native_mtp_effective_depth()
+        depth = max(1, min(3, depth))
+        profile_seed = "configured"
+        request_profile_key = None
+        # An explicit VMLX/VMLINUX_NATIVE_MTP_DEPTH env override is a user
+        # decision the session profile must not second-guess; the profile
+        # governs only advisory sources (default/tuning/bundle stamps).
+        depth_is_explicit_override = depth_source.startswith("VML")
+        if not depth_is_explicit_override and _native_mtp_env_flag(
+            True,
+            "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
+            "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        ):
+            # Adaptive policy contract: the only honest first-turn guarantee
+            # is AR. MTP activates immediately only from MEASURED evidence —
+            # a validated tuning record or an in-process profile entry that
+            # already beat its own AR baseline. Unknown workload shapes stay
+            # AR; no user request is sacrificed to a speculative experiment.
+            request_profile_key = native_mtp_profile_key(
+                temperature=float(getattr(request, "temperature", 0.0) or 0.0),
+                restored_prefix=bool(
+                    int(getattr(request, "_cached_tokens", 0) or 0) > 0
+                ),
+                prompt_tokens=(
+                    int(request.input_ids.shape[-1])
+                    if getattr(request, "input_ids", None) is not None
+                    else 0
+                ),
+                has_tools=bool(getattr(request, "tools", None)),
+            )
+            # Lazy fallback: some fixtures build the generator via __new__
+            # and never run __init__ (same class of construction the
+            # prefix-cache get_stats hardening covers).
+            store = getattr(self, "_native_mtp_profiles", None)
+            if store is None:
+                store = self._native_mtp_profiles = NativeMTPProfileStore()
+            depth, profile_seed = store.start_depth(
+                request_profile_key,
+                configured_depth=depth,
+                tuning_validated="vmlx_mtp_tuning" in depth_source,
+            )
+            if depth <= 0:
+                logger.info(
+                    "MLLM native MTP stays AR for request=%s seed=%s key=%s",
+                    request.request_id,
+                    profile_seed,
+                    request_profile_key,
+                )
+                return False
+
         sampler = self._make_request_sampler(request)
         seed_main_forwards = 1
         _seed_t0 = time.perf_counter()
@@ -14169,54 +14232,6 @@ class MLLMBatchGenerator:
         # perfectly healthy MTP.
         mx.eval(next_tok)
         _seed_ar_ms = (time.perf_counter() - _seed_t0) * 1000.0
-        from .native_mtp import native_mtp_effective_depth
-
-        depth, depth_source = native_mtp_effective_depth()
-        depth = max(1, min(3, depth))
-        profile_seed = "configured"
-        request_profile_key = None
-        # An explicit VMLX/VMLINUX_NATIVE_MTP_DEPTH env override is a user
-        # decision the session profile must not second-guess; the profile
-        # governs only advisory sources (default/tuning/bundle stamps).
-        depth_is_explicit_override = depth_source.startswith("VML")
-        if not depth_is_explicit_override and _native_mtp_env_flag(
-            True,
-            "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
-            "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
-        ):
-            # Under the adaptive policy the configured depth is only a
-            # ceiling: the session profile picks the starting point so a
-            # short/first request never pays a whole failed D2/D3
-            # experiment, and a profile that learned "AR wins" skips MTP
-            # activation entirely (with a bounded re-probe).
-            request_profile_key = native_mtp_profile_key(
-                temperature=float(getattr(request, "temperature", 0.0) or 0.0),
-                restored_prefix=bool(
-                    int(getattr(request, "_cached_tokens", 0) or 0) > 0
-                ),
-                prompt_tokens=(
-                    int(request.input_ids.shape[-1])
-                    if getattr(request, "input_ids", None) is not None
-                    else 0
-                ),
-            )
-            # Lazy fallback: some fixtures build the generator via __new__
-            # and never run __init__ (same class of construction the
-            # prefix-cache get_stats hardening covers).
-            store = getattr(self, "_native_mtp_profiles", None)
-            if store is None:
-                store = self._native_mtp_profiles = NativeMTPProfileStore()
-            depth, profile_seed = store.start_depth(
-                request_profile_key, configured_depth=depth
-            )
-            if depth <= 0:
-                logger.info(
-                    "MLLM native MTP skipped for request=%s: session profile "
-                    "learned AR wins for %s",
-                    request.request_id,
-                    request_profile_key,
-                )
-                return False
         mtp_cache = self.language_model.make_mtp_cache()
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
             request,
@@ -14244,6 +14259,10 @@ class MLLMBatchGenerator:
             profile_key=request_profile_key,
         )
         state.stats.profile_seed = profile_seed
+        if request_profile_key is not None:
+            state.stats.profile_key_label = "|".join(
+                str(part) for part in request_profile_key
+            )
         state.stats.seed_main_forwards += seed_main_forwards
         state.stats.mtp_forwards += len(drafts)
         if first_logprobs:

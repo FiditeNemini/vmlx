@@ -212,6 +212,55 @@ class TestCacheAndForward:
             enabled=True,
         ) is None
 
+    @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
+    def test_kda_step_fusion_matches_stock(self, dtype):
+        from vmlx_engine.metal.kda_step_decode import glm5_kda_step_decode
+        from vmlx_engine.models.glm5_next.kda import kda_step
+
+        heads, key_dim, value_dim = 4, 16, 16
+        q = (mx.random.normal((1, heads, key_dim)) * 0.2).astype(dtype)
+        k = (mx.random.normal((1, heads, key_dim)) * 0.2).astype(dtype)
+        q = q.astype(mx.float32)
+        q = q * mx.rsqrt(mx.sum(q * q, axis=-1, keepdims=True) + 1e-6)
+        q = q.astype(dtype)
+        k = k.astype(mx.float32)
+        k = k * mx.rsqrt(mx.sum(k * k, axis=-1, keepdims=True) + 1e-6)
+        k = k.astype(dtype)
+        v = (mx.random.normal((1, heads, value_dim)) * 0.2).astype(dtype)
+        g = (-mx.abs(mx.random.normal((1, heads, key_dim))) * 0.05).astype(
+            dtype
+        )
+        beta = mx.sigmoid(mx.random.normal((1, heads))).astype(dtype)
+        state = (mx.random.normal((1, heads, key_dim, value_dim)) * 0.1).astype(
+            mx.float32
+        )
+
+        reference = kda_step(q, k, v, g, beta, state)
+        candidate = glm5_kda_step_decode(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            state,
+            enabled=True,
+        )
+        assert candidate is not None
+        mx.eval(*reference, *candidate)
+        assert mx.allclose(candidate[0], reference[0], rtol=2e-4, atol=2e-5)
+        assert mx.allclose(candidate[1], reference[1], rtol=2e-4, atol=2e-5)
+
+    def test_kda_step_fusion_refuses_non_fp32_state(self):
+        from vmlx_engine.metal.kda_step_decode import glm5_kda_step_decode
+
+        q = mx.zeros((1, 4, 16), dtype=mx.float16)
+        v = mx.zeros((1, 4, 16), dtype=mx.float16)
+        beta = mx.zeros((1, 4), dtype=mx.float16)
+        state = mx.zeros((1, 4, 16, 16), dtype=mx.float16)
+        assert glm5_kda_step_decode(
+            q, q, v, q, beta, state, enabled=True
+        ) is None
+
     def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         attn = glm5.KDAAttention(args)

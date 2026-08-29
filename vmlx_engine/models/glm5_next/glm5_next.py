@@ -59,6 +59,10 @@ from vmlx_engine.metal.kda_conv_decode import (
     fused_kda_conv_requested,
     glm5_kda_conv_decode,
 )
+from vmlx_engine.metal.kda_step_decode import (
+    fused_kda_step_requested,
+    glm5_kda_step_decode,
+)
 
 from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
@@ -361,6 +365,7 @@ class KDAAttention(nn.Module):
         self.qkv_group = None
         self._fused_gated_norm = fused_gated_rmsnorm_requested()
         self._fused_kda_conv = fused_kda_conv_requested()
+        self._fused_kda_step = fused_kda_step_requested()
 
     def prepare_runtime(self) -> bool:
         """Group q/k/v packed rows once and release superseded references."""
@@ -430,9 +435,26 @@ class KDAAttention(nn.Module):
             g = self._gate(seg)
             beta = mx.sigmoid(self.b_proj(seg).astype(mx.float32))
             if seg_t == 1 and s0 is not None:
-                o, s1 = kda_step(
-                    q[:, 0], k[:, 0], v[:, 0], g[:, 0], beta[:, 0], s0
+                fused_step = glm5_kda_step_decode(
+                    q[:, 0],
+                    k[:, 0],
+                    v[:, 0],
+                    g[:, 0],
+                    beta[:, 0],
+                    s0,
+                    enabled=self._fused_kda_step,
                 )
+                if fused_step is not None:
+                    o, s1 = fused_step
+                else:
+                    o, s1 = kda_step(
+                        q[:, 0],
+                        k[:, 0],
+                        v[:, 0],
+                        g[:, 0],
+                        beta[:, 0],
+                        s0,
+                    )
                 o = o[:, None]
             elif seg_t <= 64:
                 o, s1 = kda_recurrent(q, k, v, g, beta, s0)

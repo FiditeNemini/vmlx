@@ -5,6 +5,17 @@ import { useTranslation } from '../../i18n'
 type BenchmarkProfileId = 'peak' | 'representative'
 type BenchmarkScenarioKind = 'decode' | 'prefill' | 'mixed'
 
+interface BenchmarkMtpSnapshot {
+  runtimeActive?: boolean
+  effectiveDepth?: number
+  telemetryState: 'engaged' | 'skipped' | 'stale' | 'missing'
+  finalDepth?: number
+  draftedTokens?: number
+  acceptedTokens?: number
+  acceptanceRate?: number
+  skipReason?: string
+}
+
 interface BenchmarkPanelProps {
   sessionId: string
   endpoint: { host: string; port: number }
@@ -34,7 +45,31 @@ interface PromptResult {
   maxTokens?: number
   temperature?: number
   thinkingDisabled?: boolean
+  requestId?: string
+  mtp?: BenchmarkMtpSnapshot
   error?: string
+}
+
+function mtpSummary(snapshot?: BenchmarkMtpSnapshot): string | null {
+  if (!snapshot) return null
+  if (snapshot.telemetryState === 'engaged') {
+    const depth = snapshot.finalDepth || snapshot.effectiveDepth
+    const acceptance =
+      snapshot.acceptanceRate != null
+        ? `${(snapshot.acceptanceRate * 100).toFixed(0)}%`
+        : snapshot.acceptedTokens != null && snapshot.draftedTokens
+          ? `${snapshot.acceptedTokens}/${snapshot.draftedTokens}`
+          : null
+    return [`MTP D${depth || '?'}`, acceptance ? `accept=${acceptance}` : null]
+      .filter(Boolean)
+      .join(' ')
+  }
+  if (snapshot.telemetryState === 'skipped') {
+    return `AR · MTP skipped=${snapshot.skipReason || 'unspecified'}`
+  }
+  if (snapshot.runtimeActive === false) return 'AR · no native MTP runtime'
+  if (snapshot.telemetryState === 'stale') return 'MTP telemetry stale'
+  return snapshot.runtimeActive ? 'MTP telemetry missing' : null
 }
 
 interface BenchmarkRun {
@@ -415,6 +450,7 @@ function ResultsTable({
               result.cachedPromptTokens
                 ? `cached=${result.cachedPromptTokens}`
                 : 'cache=0',
+              mtpSummary(result.mtp),
               result.error || null,
             ]
               .filter(Boolean)

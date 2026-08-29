@@ -10,6 +10,10 @@ import {
   type BenchmarkScenario,
   type BenchmarkScenarioKind,
 } from '../../shared/benchmarkProfiles'
+import {
+  extractBenchmarkMtpSnapshot,
+  type BenchmarkMtpSnapshot,
+} from '../../shared/benchmarkTelemetry'
 import { db } from '../database'
 import { connectHost, resolveUrl } from '../sessions'
 import { getAuthHeaders } from './utils'
@@ -44,6 +48,8 @@ interface PromptResult {
   maxTokens: number
   temperature: number
   thinkingDisabled: boolean
+  requestId?: string
+  mtp?: BenchmarkMtpSnapshot
   error?: string
 }
 
@@ -54,6 +60,23 @@ interface BenchmarkRunOptions {
 
 function usageCachedTokens(usage: any): number {
   return Number(usage?.prompt_tokens_details?.cached_tokens || 0)
+}
+
+async function readBenchmarkMtpSnapshot(
+  baseUrl: string,
+  requestId: string | undefined,
+  authHeaders: Record<string, string>,
+): Promise<BenchmarkMtpSnapshot | undefined> {
+  try {
+    const response = await fetch(`${baseUrl}/health`, {
+      headers: authHeaders,
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (!response.ok) return undefined
+    return extractBenchmarkMtpSnapshot(await response.json(), requestId)
+  } catch {
+    return undefined
+  }
 }
 
 async function runSingleBenchmark(
@@ -69,6 +92,7 @@ async function runSingleBenchmark(
   let tokenCount = 0
   let promptTokens = 0
   let cachedPromptTokens = 0
+  let requestId: string | undefined
   const messages = buildBenchmarkMessages(scenario, randomUUID())
   const requestBody: Record<string, any> = {
     model: 'default',
@@ -116,6 +140,7 @@ async function runSingleBenchmark(
 
       try {
         const parsed = JSON.parse(data)
+        if (!requestId && typeof parsed.id === 'string') requestId = parsed.id
         let serverUsageThisChunk = false
         if (parsed.usage) {
           promptTokens = Number(parsed.usage.prompt_tokens || promptTokens)
@@ -165,6 +190,11 @@ async function runSingleBenchmark(
   const uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens)
   const ppSpeed =
     ttft > 0.001 && uncachedPromptTokens > 0 ? uncachedPromptTokens / ttft : 0
+  const mtp = await readBenchmarkMtpSnapshot(
+    baseUrl,
+    requestId,
+    authHeaders,
+  )
 
   return {
     label: scenario.label,
@@ -188,6 +218,8 @@ async function runSingleBenchmark(
     maxTokens: scenario.maxTokens,
     temperature: scenario.temperature,
     thinkingDisabled: scenario.disableThinking,
+    requestId,
+    mtp,
   }
 }
 

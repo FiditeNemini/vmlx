@@ -1577,6 +1577,20 @@ function applyJangCapabilities(
     // of the engine-side model_config_registry exception.
     next.toolParser = 'openpangu'
     next.enableAutoToolChoice = caps.supports_tools !== false
+  } else if (next.family === 'qwen4-exp' && caps.tool_parser === 'hermes') {
+    // Qwen4Exp ships the Qwen function/parameter template
+    // (<function=name><parameter=arg>), but older converter stamps wrote
+    // tool_parser="hermes", which only parses JSON bodies. Live
+    // required-mode proof on Flash-Next JANG_1L: sampled turns following
+    // the template's XML dialect failed closed with tool_calls_required
+    // (3/14 at temp 0.7). The engine "qwen" parser accepts both the hermes
+    // JSON body and every XML variant. The panel passes --tool-call-parser
+    // explicitly, so the stale stamp must be neutralized here too — mirror
+    // of the engine-side model_config_registry exception.
+    next.toolParser = 'qwen'
+    if (caps.supports_tools !== false) {
+      next.enableAutoToolChoice = true
+    }
   } else if (typeof caps.tool_parser === 'string') {
     next.toolParser = caps.tool_parser === 'none' ? undefined : caps.tool_parser
     if (next.toolParser && caps.supports_tools !== false) {

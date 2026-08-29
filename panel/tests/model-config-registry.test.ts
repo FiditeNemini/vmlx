@@ -183,12 +183,42 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
 
     expect(detected).toMatchObject({
       family: 'qwen4-exp',
-      toolParser: 'hermes',
+      // Stale converter stamps say hermes (JSON-only), but the bundle
+      // template teaches <function=...><parameter=...> XML; the qwen
+      // parser accepts both dialects, so the stale stamp is neutralized —
+      // mirror of the engine-side registry exception. Live proof:
+      // sampled required-mode 400s on Flash-Next JANG_1L under hermes.
+      toolParser: 'qwen',
       reasoningParser: 'qwen3',
       supportsThinking: true,
       isMultimodal: true,
     })
     expect(detected.nativeMtp).toBeUndefined()
+  })
+
+  it('keeps an explicit non-hermes Qwen4Exp tool_parser stamp authoritative', () => {
+    const dir = makeModelDir({
+      model_type: 'qwen4_exp',
+      text_config: { model_type: 'qwen4_exp_text', max_position_embeddings: 262144 },
+      vision_config: { model_type: 'qwen4_exp' },
+      jang_config: {
+        format: 'jang_v2',
+        mtp: { mtp_mode: 'none' },
+        capabilities: {
+          tool_parser: 'xml_function',
+          reasoning_parser: 'qwen3',
+          supports_thinking: true,
+          has_vision: true,
+          has_video: true,
+          has_audio: false,
+        },
+      },
+    })
+
+    expect(detectModelConfigFromDir(dir)).toMatchObject({
+      family: 'qwen4-exp',
+      toolParser: 'xml_function',
+    })
   })
 
   it('detects Nemotron Omni media from its sidecar and matching component tensors', () => {

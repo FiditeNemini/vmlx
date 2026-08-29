@@ -1558,6 +1558,67 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
     assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_qwen4_exp_gdn_conv_fusion_matches_stock(dtype):
+    from vmlx_engine.metal.gdn_conv_decode import qwen4_gdn_conv_decode
+
+    channels = 96
+    kernel_size = 4
+    conv = nn.Conv1d(
+        channels,
+        channels,
+        kernel_size=kernel_size,
+        groups=channels,
+        bias=False,
+    )
+    conv.weight = conv.weight.astype(dtype)
+    state = (
+        mx.arange((kernel_size - 1) * channels, dtype=mx.float32)
+        .reshape(1, kernel_size - 1, channels)
+        .astype(dtype)
+        / 127.0
+    )
+    token = (
+        mx.arange(channels, dtype=mx.float32).reshape(1, 1, channels)
+        .astype(dtype)
+        / 191.0
+    )
+    full = mx.concatenate([state, token], axis=1)
+    reference_conv = nn.silu(conv(full))
+    reference_state = mx.contiguous(full[:, -(kernel_size - 1) :, :])
+    candidate = qwen4_gdn_conv_decode(
+        token,
+        state,
+        conv.weight,
+        enabled=True,
+    )
+    assert candidate is not None
+    candidate_conv, candidate_state = candidate
+    mx.eval(reference_conv, reference_state, candidate_conv, candidate_state)
+
+    np.testing.assert_array_equal(
+        np.asarray(candidate_state.astype(mx.float32)),
+        np.asarray(reference_state.astype(mx.float32)),
+    )
+    np.testing.assert_allclose(
+        np.asarray(candidate_conv.astype(mx.float32)),
+        np.asarray(reference_conv.astype(mx.float32)),
+        rtol=8e-3,
+        atol=8e-3,
+    )
+
+
+def test_qwen4_exp_gdn_conv_fusion_refuses_prefill():
+    from vmlx_engine.metal.gdn_conv_decode import qwen4_gdn_conv_decode
+
+    assert qwen4_gdn_conv_decode(
+        mx.zeros((1, 2, 64), dtype=mx.float16),
+        mx.zeros((1, 3, 64), dtype=mx.float16),
+        mx.zeros((64, 4, 1), dtype=mx.float16),
+        enabled=True,
+    ) is None
+
+
 def test_qwen4_exp_qsa_quantized_qkv_group_is_exact_and_releases_sources():
     from vmlx_engine.models.qwen4_exp.language import QSAAttention
 

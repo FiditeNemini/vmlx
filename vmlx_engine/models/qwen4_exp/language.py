@@ -47,6 +47,10 @@ from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
     sigmoid_gated_rmsnorm_small_rows,
 )
+from vmlx_engine.metal.gdn_conv_decode import (
+    fused_gdn_conv_requested,
+    qwen4_gdn_conv_decode,
+)
 from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
     cached_quantized_projection_group,
@@ -799,6 +803,7 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
                 self.head_v_dim, eps=self.layer_norm_epsilon
             )
         # else: keep the inherited silu-gated norm
+        self._fused_conv_decode = fused_gdn_conv_requested()
 
     def _process_chunk(
         self,
@@ -811,15 +816,30 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
         lengths=None,
     ):
         batch_size, seq_len = qkv.shape[:2]
-        conv_input = mx.concatenate([conv_state, qkv], axis=1)
         keep = self.conv_kernel_size - 1
-        if lengths is not None:
-            ends = mx.clip(lengths, 0, seq_len)
-            positions = (ends[:, None] + mx.arange(keep))[..., None]
-            new_conv_state = mx.take_along_axis(conv_input, positions, axis=1)
+        fused_conv = (
+            qwen4_gdn_conv_decode(
+                qkv,
+                conv_state,
+                self.conv1d.weight,
+                enabled=self._fused_conv_decode,
+            )
+            if lengths is None
+            else None
+        )
+        if fused_conv is not None:
+            conv_out, new_conv_state = fused_conv
         else:
-            new_conv_state = mx.contiguous(conv_input[:, -keep:, :])
-        conv_out = nn.silu(self.conv1d(conv_input))
+            conv_input = mx.concatenate([conv_state, qkv], axis=1)
+            if lengths is not None:
+                ends = mx.clip(lengths, 0, seq_len)
+                positions = (ends[:, None] + mx.arange(keep))[..., None]
+                new_conv_state = mx.take_along_axis(
+                    conv_input, positions, axis=1
+                )
+            else:
+                new_conv_state = mx.contiguous(conv_input[:, -keep:, :])
+            conv_out = nn.silu(self.conv1d(conv_input))
         q, k, v = [
             tensor.reshape(batch_size, seq_len, heads, dim)
             for tensor, heads, dim in zip(

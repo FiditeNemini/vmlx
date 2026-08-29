@@ -16,17 +16,16 @@ Architecture (45 layers, hidden 4096, vocab 154880, untied lm_head):
     fp32 + 3 conv states per layer (~150 MB total) — context-independent.
   * 11 MLA layers (DeepSeek-V3 MLA, PURE NoPE — qk_rope_head_dim=0, no rotary
     anywhere; q_lora 1536 / kv_lora 512; 64 heads x 256qk/256v) at every 4th
-    position. DSA indexer NOT yet implemented: for total sequence length
-    <= index_topk (2048) the top-k selects every key, so dense causal
-    attention is BIT-EXACT; the model refuses (clear error, upstream context
-    clamp) beyond that until the sparse path lands.
+    position. The DSA indexer selects compressed key pools beyond index_topk;
+    below that boundary dense causal attention is bit-exact.
   * mHC hyper-connections with 20-iteration Sinkhorn per sublayer (4 streams,
     unweighted-mean final collapse). ALL mHC math in fp32.
   * MoE layers 3-44: 288 routed experts top-8 (sigmoid scores +
     e_score_correction_bias, n_group=1), norm_topk_prob, scaling 2.5, shared
     expert; clamped SwiGLU (±10) EVERYWHERE incl. dense layers 0-2.
-  * MTP layer 45 (in the -MTP bundle) is dropped at sanitize — detection-only
-    for this family until its own correctness phase.
+  * The optional layer-45 MTP block is a non-mHC MLA+MoE decoder fed by
+    eh_proj(concat(enorm(next-token embedding), hnorm(previous hidden))). Its
+    private shared-head norm precedes the model's shared LM head.
   * fp32 storage keeps: A_log, dt_bias, e_score_correction_bias, hc_base,
     hc_scale. fp32 COMPUTE regardless of storage: router logits+topk, mHC,
     KDA gate/beta/recurrence, l2norm, o_norm, SDPA (the L==1 MLA-absorb
@@ -70,6 +69,39 @@ MLA_VALUES = 1
 MLA_PACKED = 2  # indexer packed history: [B, T, head_dim(k) + head_dim(gate)]
 
 
+class Glm5KDACache(ArraysCache):
+    """KDA recurrent state with exact partial speculative rollback.
+
+    A multi-draft verify forward commits one target token and speculatively
+    advances over N draft tokens.  Unlike a KV cache, KDA cannot be rewound by
+    trimming a token offset: every token mutates the recurrent matrix and the
+    three causal-convolution tails.  The GLM attention layer therefore records
+    the state after each verify position.  A partial rejection can restore the
+    state after the confirmed token plus the accepted draft prefix.
+    """
+
+    supports_partial_rollback = True
+
+    def __init__(self):
+        super().__init__(4)
+        self._speculative_states: list[tuple[mx.array, ...]] | None = None
+
+    def set_speculative_states(self, states: list[tuple[mx.array, ...]]) -> None:
+        self._speculative_states = states
+
+    def rollback_speculative(self, rejected: int) -> bool:
+        states = self._speculative_states
+        if not states or rejected < 0 or rejected >= len(states):
+            return False
+        accepted_drafts = len(states) - 1 - rejected
+        self.cache = list(states[accepted_drafts])
+        self._speculative_states = None
+        return True
+
+    def commit_speculative(self) -> None:
+        self._speculative_states = None
+
+
 class Glm5MLACache(ArraysCache):
     """Per-MLA-layer cache: expanded K/V plus the DSA indexer's packed
     per-token history (index key + kpool gate scores). ArraysCache-shaped so
@@ -97,6 +129,20 @@ class Glm5MLACache(ArraysCache):
             packed = mx.concatenate([self.cache[MLA_PACKED], packed], axis=1)
         self.cache[MLA_PACKED] = packed
         return packed
+
+    def is_trimmable(self) -> bool:
+        return True
+
+    def trim(self, n: int) -> int:
+        n = max(0, min(int(n), self.offset))
+        if n == 0:
+            return 0
+        keep = self.offset - n
+        if self.cache[MLA_KEYS] is not None:
+            self.cache[MLA_KEYS] = self.cache[MLA_KEYS][..., :keep, :]
+            self.cache[MLA_VALUES] = self.cache[MLA_VALUES][..., :keep, :]
+            self.cache[MLA_PACKED] = self.cache[MLA_PACKED][:, :keep, :]
+        return n
 
 
 @dataclass
@@ -138,6 +184,8 @@ class ModelArgs(BaseModelArgs):
     swiglu_limit: float = 10.0
     first_k_dense_replace: int = 3
     layer_types: List[str] = field(default_factory=list)
+    num_nextn_predict_layers: int = 0
+    index_share_for_mtp_iteration: bool = False
 
     @classmethod
     def from_dict(cls, params: dict) -> "ModelArgs":
@@ -183,6 +231,12 @@ class ModelArgs(BaseModelArgs):
             "swiglu_limit": t.get("swiglu_limit", 10.0),
             "first_k_dense_replace": t.get("first_k_dense_replace", 3),
             "layer_types": list(t["layer_types"]),
+            "num_nextn_predict_layers": int(
+                t.get("num_nextn_predict_layers", 0) or 0
+            ),
+            "index_share_for_mtp_iteration": bool(
+                t.get("index_share_for_mtp_iteration", False)
+            ),
         }
         return cls(**merged)
 
@@ -275,7 +329,12 @@ class KDAAttention(nn.Module):
         rate = mx.exp(self.A_log.astype(mx.float32)).reshape(1, 1, self.H, 1)
         return self.lower_bound * mx.sigmoid(rate * f)
 
-    def __call__(self, x: mx.array, cache: Optional[ArraysCache] = None):
+    def __call__(
+        self,
+        x: mx.array,
+        cache: Optional[ArraysCache] = None,
+        n_confirmed: int = 0,
+    ):
         B, T, _ = x.shape
         H, K = self.H, self.K
         conv_q = conv_k = conv_v = state = None
@@ -284,32 +343,70 @@ class KDAAttention(nn.Module):
             conv_k = cache.cache[KDA_CONV_K]
             conv_v = cache.cache[KDA_CONV_V]
             state = cache.cache[KDA_STATE]
-        q, cq = short_conv(self.q_proj(x), self.q_conv1d, conv_q)
-        k, ck = short_conv(self.k_proj(x), self.k_conv1d, conv_k)
-        v, cv = short_conv(self.v_proj(x), self.v_conv1d, conv_v)
-        q = l2norm(q.reshape(B, T, H, K))
-        k = l2norm(k.reshape(B, T, H, K))
-        v = v.reshape(B, T, H, K)
-        g = self._gate(x)
-        beta = mx.sigmoid(self.b_proj(x).astype(mx.float32))
-        if T == 1 and state is not None:
-            o, S = kda_step(q[:, 0], k[:, 0], v[:, 0], g[:, 0], beta[:, 0], state)
-            o = o[:, None]
-        elif T <= 64:
-            o, S = kda_recurrent(q, k, v, g, beta, state)
+
+        def run_segment(seg, cq0, ck0, cv0, s0):
+            seg_t = seg.shape[1]
+            q, cq1 = short_conv(self.q_proj(seg), self.q_conv1d, cq0)
+            k, ck1 = short_conv(self.k_proj(seg), self.k_conv1d, ck0)
+            v, cv1 = short_conv(self.v_proj(seg), self.v_conv1d, cv0)
+            q = l2norm(q.reshape(B, seg_t, H, K))
+            k = l2norm(k.reshape(B, seg_t, H, K))
+            v = v.reshape(B, seg_t, H, K)
+            g = self._gate(seg)
+            beta = mx.sigmoid(self.b_proj(seg).astype(mx.float32))
+            if seg_t == 1 and s0 is not None:
+                o, s1 = kda_step(
+                    q[:, 0], k[:, 0], v[:, 0], g[:, 0], beta[:, 0], s0
+                )
+                o = o[:, None]
+            elif seg_t <= 64:
+                o, s1 = kda_recurrent(q, k, v, g, beta, s0)
+            else:
+                o, s1 = kda_chunked(q, k, v, g, beta, s0)
+            gate = self.g_b_proj(self.g_a_proj(seg)).reshape(B, seg_t, H, K)
+            o32 = o.astype(mx.float32)
+            o32 = o32 * mx.rsqrt(
+                mx.mean(o32 * o32, axis=-1, keepdims=True) + self.rms_eps
+            )
+            o32 = self.o_norm.astype(mx.float32) * o32
+            o32 = o32 * mx.sigmoid(gate.astype(mx.float32))
+            projected = self.o_proj(o32.astype(seg.dtype).reshape(B, seg_t, H * K))
+            return projected, cq1, ck1, cv1, s1
+
+        if (
+            cache is not None
+            and isinstance(cache, Glm5KDACache)
+            and 0 < n_confirmed < T
+        ):
+            outputs = []
+            states = []
+            # The confirmed prefix may contain more than one token in future
+            # callers.  Each speculative token is then advanced separately so
+            # every accepted-prefix rollback boundary has an exact state.
+            out, conv_q, conv_k, conv_v, state = run_segment(
+                x[:, :n_confirmed], conv_q, conv_k, conv_v, state
+            )
+            outputs.append(out)
+            states.append((conv_q, conv_k, conv_v, state))
+            for pos in range(n_confirmed, T):
+                out, conv_q, conv_k, conv_v, state = run_segment(
+                    x[:, pos : pos + 1], conv_q, conv_k, conv_v, state
+                )
+                outputs.append(out)
+                states.append((conv_q, conv_k, conv_v, state))
+            cache.set_speculative_states(states)
+            result = mx.concatenate(outputs, axis=1)
         else:
-            o, S = kda_chunked(q, k, v, g, beta, state)
+            result, conv_q, conv_k, conv_v, state = run_segment(
+                x, conv_q, conv_k, conv_v, state
+            )
+
         if cache is not None:
-            cache.cache[KDA_CONV_Q] = cq
-            cache.cache[KDA_CONV_K] = ck
-            cache.cache[KDA_CONV_V] = cv
-            cache.cache[KDA_STATE] = S
-        gate = self.g_b_proj(self.g_a_proj(x)).reshape(B, T, H, K)
-        o32 = o.astype(mx.float32)
-        o32 = o32 * mx.rsqrt(mx.mean(o32 * o32, axis=-1, keepdims=True) + self.rms_eps)
-        o32 = self.o_norm.astype(mx.float32) * o32
-        o32 = o32 * mx.sigmoid(gate.astype(mx.float32))
-        return self.o_proj(o32.astype(x.dtype).reshape(B, T, H * K))
+            cache.cache[KDA_CONV_Q] = conv_q
+            cache.cache[KDA_CONV_K] = conv_k
+            cache.cache[KDA_CONV_V] = conv_v
+            cache.cache[KDA_STATE] = state
+        return result
 
 
 # ---------------------------------------------------------------- DSA ------
@@ -583,16 +680,64 @@ class DecoderLayer(nn.Module):
         self.attn_hc = HyperConnection(args)
         self.ffn_hc = HyperConnection(args)
 
-    def __call__(self, streams: mx.array, cache=None):
+    def __call__(self, streams: mx.array, cache=None, n_confirmed: int = 0):
         residual = streams
         post, comb, x = self.attn_hc(streams)
-        x = self.self_attn(self.input_layernorm(x), cache=cache)
+        attn_input = self.input_layernorm(x)
+        if self.is_linear:
+            x = self.self_attn(
+                attn_input, cache=cache, n_confirmed=n_confirmed
+            )
+        else:
+            x = self.self_attn(attn_input, cache=cache)
         streams = hc_place(post, comb, x, residual)
 
         residual = streams
         post, comb, x = self.ffn_hc(streams)
         x = self.mlp(self.post_attention_layernorm(x))
         return hc_place(post, comb, x, residual)
+
+
+class Glm5NextMTPSharedHead(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.norm = RMSNorm(args.hidden_size, args.rms_norm_eps)
+
+
+class Glm5NextMTP(nn.Module):
+    """Checkpoint-native layer-45 draft head.
+
+    The checkpoint does not store mHC parameters for this layer.  Its block
+    is the ordinary residual form used by the upstream MTP implementation:
+    MLA residual followed by MoE residual, then a private output-head norm.
+    """
+
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.enorm = RMSNorm(args.hidden_size, args.rms_norm_eps)
+        self.hnorm = RMSNorm(args.hidden_size, args.rms_norm_eps)
+        self.eh_proj = nn.Linear(args.hidden_size * 2, args.hidden_size, bias=False)
+        self.input_layernorm = RMSNorm(args.hidden_size, args.rms_norm_eps)
+        self.self_attn = MLAAttention(args)
+        self.post_attention_layernorm = RMSNorm(
+            args.hidden_size, args.rms_norm_eps
+        )
+        self.mlp = MoEBlock(args)
+        self.shared_head = Glm5NextMTPSharedHead(args)
+
+    def __call__(self, previous_hidden, next_token_ids, embed_tokens, cache=None):
+        embedding = embed_tokens(next_token_ids)
+        fused = self.eh_proj(
+            mx.concatenate(
+                [self.enorm(embedding), self.hnorm(previous_hidden)], axis=-1
+            )
+        )
+        residual = fused
+        fused = residual + self.self_attn(
+            self.input_layernorm(fused), cache=cache
+        )
+        residual = fused
+        return residual + self.mlp(self.post_attention_layernorm(fused))
 
 
 class Glm5NextModel(nn.Module):
@@ -603,7 +748,13 @@ class Glm5NextModel(nn.Module):
         self.layers = [DecoderLayer(args, i) for i in range(args.num_hidden_layers)]
         self.norm = RMSNorm(args.hidden_size, args.rms_norm_eps)
 
-    def __call__(self, input_ids: mx.array, cache=None):
+    def __call__(
+        self,
+        input_ids: mx.array,
+        cache=None,
+        n_confirmed: int = 0,
+        return_pre_norm: bool = False,
+    ):
         x = self.embed_tokens(input_ids)
         offset = 0
         if cache is not None:
@@ -620,8 +771,11 @@ class Glm5NextModel(nn.Module):
                                   (*x.shape[:2], self.args.hc_mult, x.shape[-1]))
         for i, layer in enumerate(self.layers):
             lc = cache[i] if cache is not None else None
-            streams = layer(streams, cache=lc)
-        return self.norm(mx.mean(streams, axis=2))
+            streams = layer(
+                streams, cache=lc, n_confirmed=n_confirmed
+            )
+        hidden = mx.mean(streams, axis=2)
+        return hidden if return_pre_norm else self.norm(hidden)
 
 
 class Model(nn.Module):
@@ -635,9 +789,49 @@ class Model(nn.Module):
         self.config = {"model_type": args.model_type}
         self.model = Glm5NextModel(args)
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
+        from vmlx_engine.patches.mlx_lm_mtp import is_mtp_active
 
-    def __call__(self, inputs: mx.array, cache=None, **kwargs):
-        return self.lm_head(self.model(inputs, cache=cache))
+        if args.num_nextn_predict_layers > 0 and is_mtp_active():
+            self.mtp = Glm5NextMTP(args)
+
+    def __call__(
+        self,
+        inputs: mx.array,
+        cache=None,
+        return_hidden: bool = False,
+        return_logits: bool = True,
+        n_confirmed: int = 0,
+        **kwargs,
+    ):
+        hidden = self.model(
+            inputs,
+            cache=cache,
+            n_confirmed=n_confirmed,
+            return_pre_norm=True,
+        )
+        if not return_logits:
+            return hidden
+        logits = self.lm_head(self.model.norm(hidden))
+        return (logits, hidden) if return_hidden else logits
+
+    def mtp_forward(
+        self,
+        hidden_states,
+        next_token_ids,
+        mtp_cache,
+        return_hidden: bool = False,
+    ):
+        hidden = self.mtp(
+            hidden_states,
+            next_token_ids,
+            self.model.embed_tokens,
+            mtp_cache[0] if mtp_cache else None,
+        )
+        logits = self.lm_head(self.mtp.shared_head.norm(hidden))
+        return (logits, hidden) if return_hidden else logits
+
+    def make_mtp_cache(self):
+        return [Glm5MLACache()] if hasattr(self, "mtp") else []
 
     @property
     def layers(self):
@@ -647,7 +841,7 @@ class Model(nn.Module):
         caches = []
         for layer in self.model.layers:
             if layer.is_linear:
-                caches.append(ArraysCache(4))
+                caches.append(Glm5KDACache())
             else:
                 caches.append(Glm5MLACache())
         return caches
@@ -663,8 +857,13 @@ class Model(nn.Module):
         """
         n = self.args.num_hidden_layers
         mtp_prefix = f"model.layers.{n}."
-        return {
-            k: v for k, v in weights.items()
-            if not k.startswith(("visual.", "model.visual."))
-            and not k.startswith(mtp_prefix)
-        }
+        sanitized = {}
+        for key, value in weights.items():
+            if key.startswith(("visual.", "model.visual.")):
+                continue
+            if key.startswith(mtp_prefix):
+                if hasattr(self, "mtp"):
+                    sanitized[f"mtp.{key[len(mtp_prefix):]}"] = value
+                continue
+            sanitized[key] = value
+        return sanitized

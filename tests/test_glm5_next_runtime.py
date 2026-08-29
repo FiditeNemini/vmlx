@@ -48,6 +48,8 @@ TINY_CFG = {
         ],
         "qk_rope_head_dim": 0,
         "index_topk": 200,
+        "num_nextn_predict_layers": 1,
+        "index_share_for_mtp_iteration": True,
     },
 }
 
@@ -80,6 +82,8 @@ class TestRegistration:
         assert args.num_hidden_layers == 5
         assert args.linear_num_heads == 4
         assert args.index_topk == 200
+        assert args.num_nextn_predict_layers == 1
+        assert args.index_share_for_mtp_iteration is True
 
     def test_rejects_rope_and_grouped_router(self, glm5):
         bad = json.loads(json.dumps(TINY_CFG))
@@ -98,8 +102,9 @@ class TestCacheAndForward:
 
         cache = tiny_model.make_cache()
         kinds = [type(c) for c in cache]
-        assert kinds == [ArraysCache, ArraysCache, ArraysCache,
-                         glm5.Glm5MLACache, ArraysCache]
+        assert kinds == [glm5.Glm5KDACache, glm5.Glm5KDACache,
+                         glm5.Glm5KDACache, glm5.Glm5MLACache,
+                         glm5.Glm5KDACache]
         assert len(cache[0].cache) == 4  # conv_q, conv_k, conv_v, S
         assert len(cache[3].cache) == 3  # keys, values, indexer packed
 
@@ -259,6 +264,121 @@ class TestSparseDSA:
 
         d = float(mx.abs(out_full[0, -1] - out_inc[0, -1]).max())
         assert d < 2e-2, f"sparse incremental diverged beyond noise floor: {d}"
+
+
+class TestNativeMTP:
+    def _active_model(self, glm5):
+        from vmlx_engine.patches.mlx_lm_mtp import set_mtp_active
+
+        set_mtp_active(True)
+        try:
+            model = glm5.Model(glm5.ModelArgs.from_dict(TINY_CFG))
+            mx.eval(model.parameters())
+            return model
+        finally:
+            set_mtp_active(False)
+
+    def test_layer45_head_attaches_and_runs(self, glm5):
+        model = self._active_model(glm5)
+        assert hasattr(model, "mtp")
+        ids = mx.array([[1, 2, 3, 4]])
+        logits, hidden = model(
+            ids, cache=model.make_cache(), return_hidden=True
+        )
+        mtp_cache = model.make_mtp_cache()
+        draft_logits, draft_hidden = model.mtp_forward(
+            hidden[:, -1:, :], ids[:, -1:], mtp_cache, return_hidden=True
+        )
+        mx.eval(logits, hidden, draft_logits, draft_hidden)
+        assert logits.shape == (1, 4, 512)
+        assert hidden.shape == (1, 4, 64)
+        assert draft_logits.shape == (1, 1, 512)
+        assert draft_hidden.shape == (1, 1, 64)
+        assert len(mtp_cache) == 1
+        assert isinstance(mtp_cache[0], glm5.Glm5MLACache)
+
+    def test_active_sanitize_remaps_appended_layer_to_mtp(self, glm5):
+        model = self._active_model(glm5)
+        weights = {
+            "model.layers.5.enorm.weight": mx.ones((64,)),
+            "model.layers.5.shared_head.norm.weight": mx.ones((64,)),
+            "model.layers.4.self_attn.q_proj.weight": mx.ones((1,)),
+            "visual.blocks.0.weight": mx.ones((1,)),
+        }
+        kept = model.sanitize(weights)
+        assert set(kept) == {
+            "mtp.enorm.weight",
+            "mtp.shared_head.norm.weight",
+            "model.layers.4.self_attn.q_proj.weight",
+        }
+
+    def test_depth3_partial_rejection_restores_accepted_prefix(self, glm5):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _restore_or_trim_caches,
+        )
+
+        model = self._active_model(glm5)
+        prefix = mx.array([[1, 2, 3, 4, 5, 6]])
+        control = model.make_cache()
+        verify = model.make_cache()
+        model(prefix, cache=control)
+        model(prefix, cache=verify)
+
+        # A D2 verify advances [confirmed, accepted draft, rejected draft].
+        # Rolling one token back must retain the first two positions.
+        model(mx.array([[7]]), cache=control)
+        model(mx.array([[8]]), cache=control)
+        model(
+            mx.array([[7, 8, 9]]),
+            cache=verify,
+            return_hidden=True,
+            n_confirmed=1,
+        )
+        assert _restore_or_trim_caches(verify, 1) is True
+        assert control[3].offset == verify[3].offset == 8
+
+        for expected_cache, actual_cache in zip(control, verify):
+            for expected, actual in zip(expected_cache.cache, actual_cache.cache):
+                if expected is None or actual is None:
+                    assert expected is actual
+                    continue
+                mx.eval(expected, actual)
+                delta = float(mx.abs(expected - actual).max())
+                assert delta < 3e-2, delta
+
+    def test_depth_policy_accepts_glm_partial_rollback_cache(self, glm5, monkeypatch):
+        from types import SimpleNamespace
+
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import _effective_depth
+
+        model = self._active_model(glm5)
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        assert _effective_depth(SimpleNamespace(prompt_cache=model.make_cache())) == 3
+
+    def test_bundle_inspection_marks_appended_layer_runtime_ready(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.native_mtp import inspect_native_mtp_bundle
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
+        (tmp_path / "config.json").write_text(json.dumps(TINY_CFG))
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "model.layers.5.enorm.weight": "model-1.safetensors",
+                        "model.layers.5.self_attn.q_a_proj.weight": "model-1.safetensors",
+                    }
+                }
+            )
+        )
+        status = inspect_native_mtp_bundle(tmp_path)
+        assert status["artifact_available"] is True
+        assert status["runtime_supported"] is True
+        assert status["runtime_available"] is True
+        assert status["index_mtp_layer_count"] == 1
+        assert status["status"] == "native_runtime_ready"
 
 
 class TestRegistryDetection:

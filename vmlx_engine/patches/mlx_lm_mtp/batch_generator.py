@@ -600,14 +600,12 @@ def _restore_or_trim_caches(prompt_cache: List[Any], n: int = 1) -> bool:
     """Roll back ``n`` speculative tokens from each layer cache after a
     (possibly partial) draft-chain rejection.
 
-    SSM / linear-attention layers expose ``rollback_state`` populated by the
-    patched ``GatedDeltaNet.__call__``; that snapshot restores to the
-    confirmed prefix, i.e. it drops ALL speculative tokens of the last
-    forward. Partial rollback (n < chain length) is therefore only valid on
-    trimmable KV layers — which is why depth > 1 is gated on every cache
-    layer being trimmable (see ``_effective_depth``). Standard KV cache
-    layers trim by ``n``. Layers that support neither cause the entire MTP
-    step to fall back to the standard path.
+    SSM / linear-attention layers normally expose ``rollback_state`` populated
+    by their model adapter; that snapshot restores to the confirmed prefix and
+    therefore supports depth 1 only.  A family that records every speculative
+    prefix can instead expose ``rollback_speculative(n)`` plus
+    ``supports_partial_rollback``. Standard KV caches trim by ``n``. Layers
+    that support neither cause the entire MTP step to fail closed.
     """
     # Two-phase: validate EVERY layer before mutating ANY. The old
     # first-refusal-mid-loop return left earlier layers already trimmed —
@@ -617,12 +615,19 @@ def _restore_or_trim_caches(prompt_cache: List[Any], n: int = 1) -> bool:
     # the speculative verify advance, so no continuation is sound — the
     # caller must fail the request loudly (uniform with the MLLM path).
     for c in prompt_cache:
+        if callable(getattr(c, "rollback_speculative", None)):
+            continue
         if getattr(c, "rollback_state", None) is not None:
             continue
         if hasattr(c, "is_trimmable") and c.is_trimmable():
             continue
         return False
     for c in prompt_cache:
+        rollback_speculative = getattr(c, "rollback_speculative", None)
+        if callable(rollback_speculative):
+            if not rollback_speculative(n):
+                return False
+            continue
         rollback = getattr(c, "rollback_state", None)
         if rollback is not None:
             conv_snap, ssm_snap = rollback
@@ -640,8 +645,8 @@ def _effective_depth(gen_batch: Any) -> int:
     Sources, in order: VMLINUX/VMLX_NATIVE_MTP_DEPTH env, the bundle's
     validated ``vmlx_mtp_tuning.json``, default (via
     ``native_mtp_effective_depth``). Depth > 1 additionally requires:
-      - every prompt-cache layer trimmable (partial rollback is a KV trim;
-        SSM rollback_state can only restore to the confirmed prefix), and
+      - every prompt-cache layer trimmable, or explicitly capable of restoring
+        an arbitrary accepted speculative prefix, and
       - ``mtp_forward`` supporting ``return_hidden`` (chained drafting feeds
         the head's hidden back as the next step's previous-hidden).
     Hybrid families (qwen3.5/3.6) fail the trimmable check and keep the
@@ -657,6 +662,10 @@ def _effective_depth(gen_batch: Any) -> int:
     if depth <= 1:
         return 1
     for c in gen_batch.prompt_cache:
+        if bool(getattr(c, "supports_partial_rollback", False)) and callable(
+            getattr(c, "rollback_speculative", None)
+        ):
+            continue
         if getattr(c, "rollback_state", None) is not None:
             return 1
         if not (hasattr(c, "is_trimmable") and c.is_trimmable()):
@@ -667,6 +676,9 @@ def _effective_depth(gen_batch: Any) -> int:
 def _clear_rollback(prompt_cache: List[Any]) -> None:
     """Drop ``rollback_state`` snapshots after a draft is accepted."""
     for c in prompt_cache:
+        commit_speculative = getattr(c, "commit_speculative", None)
+        if callable(commit_speculative):
+            commit_speculative()
         if hasattr(c, "rollback_state") and c.rollback_state is not None:
             c.rollback_state = None
 

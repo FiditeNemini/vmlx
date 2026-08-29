@@ -293,11 +293,10 @@ def _write_glm5_next_mtp_bundle(path):
 
 
 class TestGlm5NextMtpDetection:
-    def test_glm5_next_mtp_block_reports_weights_present_runtime_unwired(self, tmp_path):
+    def test_glm5_next_mtp_block_reports_native_runtime_ready(self, tmp_path):
         """The MTP layer-45 tensors must be COUNTED (glm5_next stores them
         under model.layers.N, not `mtp.`), so health honestly reports
-        weights-present, and the runtime stays truthfully unwired (glm5_next
-        is not on the native-MTP support map — no draft/verify path yet)."""
+        weights-present and the wired draft/verify runtime is selectable."""
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
 
         _write_glm5_next_mtp_bundle(tmp_path)
@@ -306,10 +305,11 @@ class TestGlm5NextMtpDetection:
         assert status["family"] == "glm5_next"
         assert status["mtp_tensor_count"] == 4  # the four model.layers.45.* keys
         assert status["runtime_mtp_mode"] == "preserved_enabled"
-        assert status["runtime_supported"] is False
-        assert status["runtime_available"] is False
+        assert status["runtime_supported"] is True
+        assert status["runtime_available"] is True
         assert status["runtime_active"] is False
-        assert status["status"] == "weights_present_runtime_unwired"
+        assert status["status"] == "native_runtime_ready"
+        assert status["runtime_scope"] == "text"
 
     def test_glm5_next_ar_bundle_reports_mtp_dropped(self, tmp_path):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle

@@ -1225,6 +1225,8 @@ function detectNativeMtpCapability(
     'qwen4_exp_text',
     'hy_v3',
     'dots3_note',
+    'glm5_next',
+    'glm5_next_text',
   ])
   const modelTypes = [
     parsedConfig.model_type,
@@ -1233,6 +1235,7 @@ function detectNativeMtpCapability(
   ].map(value => String(value || '').toLowerCase())
   if (!modelTypes.some(value => supportedFamilies.has(value))) return undefined
   const hy3 = modelTypes.includes('hy_v3')
+  const glm5Next = modelTypes.includes('glm5_next') || modelTypes.includes('glm5_next_text')
   const tuningDepth = readNativeMtpTuningDepth(modelPath)
   const hy3OutputEquivalent = hy3
     ? nativeMtpOutputEquivalent(modelPath)
@@ -1253,7 +1256,15 @@ function detectNativeMtpCapability(
     const weightMap = index?.weight_map
     if (!weightMap || typeof weightMap !== 'object') return undefined
     const keys = Object.keys(weightMap)
-    const hasMtp = keys.some(key => /(^|\.)mtp(\.|$)/.test(key))
+    const baseLayerCount = Number(
+      parsedConfig?.text_config?.num_hidden_layers
+      ?? parsedConfig?.num_hidden_layers,
+    )
+    const hasAppendedGlmMtp = glm5Next
+      && Number.isInteger(baseLayerCount)
+      && baseLayerCount > 0
+      && keys.some(key => key.startsWith(`model.layers.${baseLayerCount}.`))
+    const hasMtp = keys.some(key => /(^|\.)mtp(\.|$)/.test(key)) || hasAppendedGlmMtp
     if (!hasMtp) return undefined
     const hasVisionWeights = keys.some(key =>
       /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
@@ -1285,12 +1296,22 @@ function detectNativeMtpCapability(
         tuningDepth?.source
         ?? declaredDrafts?.source
         ?? configuredMtp.source,
-      runtimeScope: configDeclaresMedia(parsedConfig) && hasVisionWeights ? 'text+vl' : 'text',
+      // The current vendored GLM runtime is text-routed even though the
+      // checkpoint also contains a vision tower. Do not advertise VL MTP
+      // until that tower is wired into the serving path.
+      runtimeScope:
+        !glm5Next && configDeclaresMedia(parsedConfig) && hasVisionWeights
+          ? 'text+vl'
+          : 'text',
       // Match the runtime schema string reported by /v1/capabilities
       // (cache.native.schema): hy3 is plain attention (plain_kv_v1); the
       // qwen3.6 hybrid SSM+attention bundle reports hybrid_ssm_v1 (NOT
       // hybrid_ssm_attention_kv_v1, which matched nothing the engine emits).
-      nativeCacheType: hy3 ? 'plain_kv_v1' : 'hybrid_ssm_v1',
+      nativeCacheType: hy3
+        ? 'plain_kv_v1'
+        : glm5Next
+          ? 'glm5_next_native_v1'
+          : 'hybrid_ssm_v1',
       requiresDeterministicSampling: false,
     }
   } catch {

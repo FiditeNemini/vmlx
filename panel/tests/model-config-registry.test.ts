@@ -353,6 +353,39 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     })
   })
 
+  it('detects the appended layer-N GLM MTP block and keeps its runtime text-only', () => {
+    const dir = makeModelDir({
+      model_type: 'glm5_next',
+      text_config: {
+        model_type: 'glm5_next_text',
+        num_hidden_layers: 45,
+        num_nextn_predict_layers: 1,
+        layer_types: ['linear_attention', 'deepseek_sparse_attention'],
+      },
+      vision_config: { model_type: 'glm5_next_vision' },
+    })
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model-00001.safetensors',
+        'visual.patch_embed.proj.weight': 'model-00027.safetensors',
+        'model.layers.45.enorm.weight': 'model-00021.safetensors',
+        'model.layers.45.self_attn.q_a_proj.weight': 'model-00021.safetensors',
+        'model.layers.45.shared_head.norm.weight': 'model-00021.safetensors',
+      },
+    }))
+
+    const detected = detectModelConfigFromDir(dir)
+
+    expect(detected.nativeMtp).toMatchObject({
+      supported: true,
+      depth: 1,
+      depthSource: 'config.text_config.num_nextn_predict_layers',
+      runtimeScope: 'text',
+      nativeCacheType: 'glm5_next_native_v1',
+      requiresDeterministicSampling: false,
+    })
+  })
+
   it('marks Qwen3.6 VL JANG bundles with indexed MTP tensors as native MTP capable', () => {
     const dir = makeModelDir(
       {

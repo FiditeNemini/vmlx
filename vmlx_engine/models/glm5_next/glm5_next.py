@@ -427,6 +427,10 @@ class Model(nn.Module):
         super().__init__()
         self.args = args
         self.model_type = args.model_type
+        # Scheduler runtime policy detects the family from model.config
+        # (dict) — provide it so glm5_next-specific policy (e.g. the
+        # fail-closed prefix-cache gate) reliably arms.
+        self.config = {"model_type": args.model_type}
         self.model = Glm5NextModel(args)
         self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
 

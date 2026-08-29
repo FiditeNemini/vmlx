@@ -3156,6 +3156,8 @@ class Scheduler:
             return "minimax_m2"
         if "bailing" in joined or "ling" in joined:
             return "bailing_hybrid"
+        if "glm5_next" in joined:
+            return "glm5_next"
         return ""
 
     def _canonicalize_tags(self, text: str) -> str:

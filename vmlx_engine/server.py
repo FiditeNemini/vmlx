@@ -9332,6 +9332,23 @@ def _bundle_weight_index_status(bundle_path: str | None) -> dict | None:
         routed_layout_counts: dict[str, int] = defaultdict(int)
         sample_tq_packed_targets: list[str] = []
         mtp_tensor_count = 0
+        glm_mtp_prefix: str | None = None
+        cfg = _read_bundle_json(bundle_path, "config.json")
+        text_cfg = cfg.get("text_config") if isinstance(cfg, dict) else None
+        model_types = {
+            str(cfg.get("model_type") or "") if isinstance(cfg, dict) else "",
+            str(text_cfg.get("model_type") or "")
+            if isinstance(text_cfg, dict)
+            else "",
+        }
+        if model_types.intersection({"glm5_next", "glm5_next_text"}):
+            base_layers = (
+                text_cfg.get("num_hidden_layers")
+                if isinstance(text_cfg, dict)
+                else cfg.get("num_hidden_layers")
+            )
+            if isinstance(base_layers, int) and base_layers > 0:
+                glm_mtp_prefix = f"model.layers.{base_layers}."
         suffixes = (
             "tq_packed",
             "tq_norms",
@@ -9354,7 +9371,11 @@ def _bundle_weight_index_status(bundle_path: str | None) -> dict | None:
                 tq_target_counts[_weight_index_role_for_key(key)] += 1
             if suffix == "tq_packed" and len(sample_tq_packed_targets) < 12:
                 sample_tq_packed_targets.append(key[: -len(".tq_packed")])
-            if key.startswith("mtp.") or ".mtp." in lowered:
+            if (
+                key.startswith("mtp.")
+                or ".mtp." in lowered
+                or (glm_mtp_prefix is not None and key.startswith(glm_mtp_prefix))
+            ):
                 mtp_tensor_count += 1
             if ".switch_mlp." in lowered:
                 routed_layout_counts["prestacked_switch"] += 1
@@ -11350,6 +11371,75 @@ def _native_cache_status(
             status["native_state_memory"] = native_state_memory
         status.update(layout)
         return _with_runtime_layout(status)
+
+    if (
+        family_name in {"glm5_next", "glm5_next_text"}
+        or scheduler_family in {"glm5_next", "glm5_next_text"}
+        or cache_subtype == "glm5_next_native_v1"
+        or getattr(scheduler, "_glm5_next_cache_unsupported", False)
+    ):
+        # GLM's executable cache is a mixed, path-dependent structure: KDA
+        # convolution/recurrent state plus MLA KV and DSA indexer state.  The
+        # scheduler deliberately bypasses every generic prefix/L2 branch until
+        # a typed round-trip schema exists.  Report that effective behavior,
+        # even if the session requested prefix or block-disk caching and the
+        # generic cache managers were constructed before family detection.
+        prefix_configured = bool(
+            getattr(
+                scheduler,
+                "_prefix_cache_requested",
+                getattr(getattr(scheduler, "config", None), "enable_prefix_cache", False),
+            )
+        )
+        prompt_disk_configured = bool(
+            getattr(
+                scheduler,
+                "_prompt_disk_cache_requested",
+                getattr(getattr(scheduler, "config", None), "enable_disk_cache", False),
+            )
+        )
+        block_disk_configured = bool(
+            getattr(
+                scheduler,
+                "_block_disk_cache_requested",
+                getattr(
+                    getattr(scheduler, "config", None),
+                    "enable_block_disk_cache",
+                    False,
+                ),
+            )
+        )
+        return _with_runtime_layout({
+            "family": "glm5_next",
+            "schema": "glm5_next_native_v1",
+            "schema_implemented": False,
+            "cache_type": "native_mixed_state_fail_closed",
+            "cache_subtype": "glm5_next_native_v1",
+            "components": [
+                "kda_conv_state",
+                "kda_recurrent_state",
+                "mla_kv",
+                "dsa_indexer_state",
+            ],
+            "reason": "typed_glm5_next_native_state_schema_not_implemented",
+            "cache_store_policy": {
+                "generic_prefix_restore": "unsupported",
+                "generic_paged_blocks": "unsupported",
+                "prompt_disk_l2": "unsupported",
+                "every_request_recomputes_full_prefix": True,
+            },
+            "generic_turboquant_kv": {
+                "enabled": False,
+                "reason": "mixed_path_dependent_native_state",
+            },
+            "prefix_configured": prefix_configured,
+            "prompt_disk_l2_configured": prompt_disk_configured,
+            "block_disk_l2_configured": block_disk_configured,
+            "prefix": False,
+            "paged": False,
+            "prompt_disk_l2": False,
+            "block_disk_l2": False,
+        })
 
     if (
         family_name == "openpangu_v2"

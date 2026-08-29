@@ -285,6 +285,7 @@ def _write_glm5_next_mtp_bundle(path):
                     "model.layers.45.self_attn.q_a_proj.weight": "m.safetensors",
                     "model.layers.45.mlp.gate.weight": "m.safetensors",
                     "model.layers.45.shared_head.norm.weight": "m.safetensors",
+                    "visual.patch_embed.proj.weight": "m.safetensors",
                     "lm_head.weight": "m.safetensors",
                 }
             }
@@ -310,6 +311,10 @@ class TestGlm5NextMtpDetection:
         assert status["runtime_active"] is False
         assert status["status"] == "native_runtime_ready"
         assert status["runtime_scope"] == "text"
+        assert status["has_vision_config"] is True
+        assert status["has_vision_weights"] is True
+        assert status["vl_runtime_available"] is False
+        assert "visual tower is not wired" in status["runtime_reason"]
 
     def test_glm5_next_ar_bundle_reports_mtp_dropped(self, tmp_path):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle

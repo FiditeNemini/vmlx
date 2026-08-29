@@ -1075,6 +1075,11 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
     if local_model_path != model_name:
         logger.info(f"Resolved HF model to: {local_model_path}")
 
+    # Set only when the exact GLM bundle inspection enables its preserved
+    # draft head.  The finalizer below then proves the head survived model
+    # construction instead of silently serving the MTP bundle as plain AR.
+    _glm5_next_native_mtp_expected = False
+
     # Nanbeige 4.2 is a looped transformer: 22 shared module layers execute
     # twice and require 44 independent KV-cache slots. Register the loop-aware
     # model before either generic mlx-lm or JANG resolves model_type, then
@@ -1088,6 +1093,19 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
     def _finalize_loaded_model(model, tokenizer):
         validate_nanbeige_loop_cache_contract(model, local_model_path)
+        if _glm5_next_native_mtp_expected:
+            from ..native_mtp import (
+                deactivate_native_mtp,
+                model_has_native_mtp_runtime,
+            )
+
+            if not model_has_native_mtp_runtime(model):
+                deactivate_native_mtp()
+                raise RuntimeError(
+                    "GLM-5.3 bundle inspection enabled native MTP, but the "
+                    "loaded model has no attached draft head/runtime contract; "
+                    "refusing to silently serve it autoregressively"
+                )
         # Must execute here, on the caller's pinned loader/step worker. Moving
         # this to server startup crosses MLX's thread-local stream boundary.
         from ..mlx_memory import maybe_harmonize_quant_metadata_dtypes
@@ -1117,6 +1135,40 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
             _cfg_arch = _json_arch.loads(_cfg_path_arch.read_text())
             _mt_arch = _cfg_arch.get("model_type")
             _tc_mt_arch = (_cfg_arch.get("text_config") or {}).get("model_type")
+            if _mt_arch == "glm5_next" or _tc_mt_arch == "glm5_next_text":
+                # GLM JANG-affine bundles intentionally use mlx_lm's generic
+                # hydration path after registering the vendored architecture.
+                # Their JANG metadata is embedded as config["jang_config"]
+                # (format="jang_v2"), so is_jang_model() correctly does not
+                # reroute them through the codec loader.  Native MTP still
+                # must be activated BEFORE Model construction: its constructor
+                # attaches the appended layer-N head only while that process
+                # gate is active.  Missing this handoff made a preserved-MTP
+                # bundle load and serve silently as AR.
+                from ..models.glm5_next.register import (
+                    glm5_next_runtime_available,
+                    register_glm5_next_runtime,
+                )
+                from ..native_mtp import maybe_apply_native_mtp
+
+                register_glm5_next_runtime()
+                if not glm5_next_runtime_available():
+                    raise RuntimeError(
+                        "GLM-5.3 runtime registration is unavailable; refusing "
+                        "generic model resolution"
+                    )
+                _glm_mtp_status = maybe_apply_native_mtp(
+                    local_model_path,
+                    allow_runtime=True,
+                )
+                if _glm_mtp_status.get("status") == "runtime_patch_failed":
+                    raise RuntimeError(
+                        "GLM-5.3 native-MTP activation failed before model load; "
+                        "refusing to discard the preserved draft head"
+                    )
+                _glm5_next_native_mtp_expected = bool(
+                    _glm_mtp_status.get("runtime_active")
+                )
             if _mt_arch == "zaya" or _tc_mt_arch == "zaya":
                 _jcfg_path_arch = Path(local_model_path) / "jang_config.json"
                 _zaya_wf = None

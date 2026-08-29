@@ -405,3 +405,165 @@ class TestRegistryDetection:
         (tmp_path / "config.json").write_text(json.dumps(cfg))
         assert is_mllm_model(str(tmp_path)) is False
         assert is_mllm_model(str(tmp_path), force_mllm=True) is False
+
+
+class TestPublicLoaderMtpHandoff:
+    @staticmethod
+    def _prepare_loader(monkeypatch, tmp_path, *, mtp_status, model):
+        import mlx_lm
+
+        from vmlx_engine import mlx_memory, native_mtp
+        from vmlx_engine.models.glm5_next import register as glm_register
+        from vmlx_engine.utils import jang_loader, nanbeige_runtime, tokenizer
+
+        cfg = json.loads(json.dumps(TINY_CFG))
+        cfg["jang_config"] = {
+            "format": "jang_v2",
+            "family": "glm5_next",
+            "mtp": {"mtp_mode": "preserved_enabled", "num_layers": 1},
+        }
+        (tmp_path / "config.json").write_text(json.dumps(cfg))
+
+        events = []
+        monkeypatch.setattr(tokenizer, "_register_mimo_v2_runtime_for_mlx_lm", lambda: False)
+        monkeypatch.setattr(tokenizer, "_needs_tokenizer_fallback", lambda _path: False)
+        monkeypatch.setattr(tokenizer, "_inject_chat_template_if_missing", lambda *_a, **_k: None)
+        monkeypatch.setattr(jang_loader, "is_jang_model", lambda _path: False)
+        monkeypatch.setattr(nanbeige_runtime, "ensure_nanbeige_runtime_registered", lambda _path: None)
+        monkeypatch.setattr(nanbeige_runtime, "validate_nanbeige_loop_cache_contract", lambda *_a: None)
+        monkeypatch.setattr(mlx_memory, "maybe_harmonize_quant_metadata_dtypes", lambda *_a, **_k: None)
+        monkeypatch.setattr(glm_register, "register_glm5_next_runtime", lambda: events.append("register") or True)
+        monkeypatch.setattr(glm_register, "glm5_next_runtime_available", lambda: True)
+        monkeypatch.setattr(
+            native_mtp,
+            "maybe_apply_native_mtp",
+            lambda *_a, **_k: events.append("activate") or dict(mtp_status),
+        )
+        monkeypatch.setattr(
+            mlx_lm,
+            "load",
+            lambda *_a, **_k: events.append("load") or (model, object()),
+        )
+        return tokenizer, events
+
+    def test_glm_mtp_activation_precedes_generic_model_construction(
+        self, monkeypatch, tmp_path
+    ):
+        class _MtpModel:
+            mtp = object()
+
+            def mtp_forward(self):
+                pass
+
+            def make_mtp_cache(self):
+                pass
+
+        tokenizer, events = self._prepare_loader(
+            monkeypatch,
+            tmp_path,
+            mtp_status={"runtime_active": True, "status": "native_runtime_ready"},
+            model=_MtpModel(),
+        )
+
+        tokenizer.load_model_with_fallback(str(tmp_path), skip_turboquant=True)
+
+        assert events == ["register", "activate", "load"]
+
+    def test_glm_mtp_bundle_fails_if_generic_load_drops_attached_head(
+        self, monkeypatch, tmp_path
+    ):
+        tokenizer, events = self._prepare_loader(
+            monkeypatch,
+            tmp_path,
+            mtp_status={"runtime_active": True, "status": "native_runtime_ready"},
+            model=object(),
+        )
+
+        with pytest.raises(RuntimeError, match="no attached draft head"):
+            tokenizer.load_model_with_fallback(str(tmp_path), skip_turboquant=True)
+
+        assert events == ["register", "activate", "load"]
+
+    def test_glm_ar_bundle_does_not_require_an_mtp_head(
+        self, monkeypatch, tmp_path
+    ):
+        model = object()
+        tokenizer, events = self._prepare_loader(
+            monkeypatch,
+            tmp_path,
+            mtp_status={"runtime_active": False, "status": "not_configured"},
+            model=model,
+        )
+
+        loaded, _ = tokenizer.load_model_with_fallback(
+            str(tmp_path), skip_turboquant=True
+        )
+
+        assert loaded is model
+        assert events == ["register", "activate", "load"]
+
+
+class TestGlmHealthTruth:
+    def test_native_cache_health_reports_fail_closed_effective_state(self):
+        from types import SimpleNamespace
+
+        from vmlx_engine.server import _native_cache_status
+
+        scheduler = SimpleNamespace(
+            _model_type_for_runtime="glm5_next",
+            _glm5_next_cache_unsupported=True,
+            _prefix_cache_requested=True,
+            _prompt_disk_cache_requested=True,
+            _block_disk_cache_requested=True,
+            config=SimpleNamespace(
+                enable_prefix_cache=True,
+                enable_disk_cache=True,
+                enable_block_disk_cache=True,
+            ),
+            block_aware_cache=object(),
+            paged_cache_manager=SimpleNamespace(_disk_store=object()),
+            disk_cache=object(),
+        )
+
+        status = _native_cache_status(scheduler, family="glm5_next")
+
+        assert status["schema"] == "glm5_next_native_v1"
+        assert status["schema_implemented"] is False
+        assert status["prefix_configured"] is True
+        assert status["prompt_disk_l2_configured"] is True
+        assert status["block_disk_l2_configured"] is True
+        assert status["prefix"] is False
+        assert status["paged"] is False
+        assert status["prompt_disk_l2"] is False
+        assert status["block_disk_l2"] is False
+        assert status["cache_store_policy"]["every_request_recomputes_full_prefix"] is True
+
+    def test_weight_index_counts_appended_glm_mtp_layer(self, tmp_path):
+        from vmlx_engine.server import _bundle_weight_index_status
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "glm5_next",
+                    "text_config": {
+                        "model_type": "glm5_next_text",
+                        "num_hidden_layers": 45,
+                    },
+                }
+            )
+        )
+        keys = {
+            "model.layers.44.self_attn.q_proj.weight": "a.safetensors",
+            "model.layers.45.enorm.weight": "b.safetensors",
+            "model.layers.45.eh_proj.weight": "b.safetensors",
+            "model.layers.45.self_attn.q_a_proj.weight": "b.safetensors",
+            "model.layers.45.shared_head.norm.weight": "b.safetensors",
+        }
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": keys})
+        )
+
+        status = _bundle_weight_index_status(str(tmp_path))
+
+        assert status is not None
+        assert status["mtp_tensor_count"] == 4

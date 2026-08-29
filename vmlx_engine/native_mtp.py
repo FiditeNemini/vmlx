@@ -899,10 +899,22 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     capabilities = jang_cfg.get("capabilities") if isinstance(jang_cfg.get("capabilities"), dict) else {}
     cache_type = capabilities.get("cache_type") if isinstance(capabilities, dict) else None
 
-    vl_runtime_available = bool(runtime_available and has_vision and runtime_supported)
+    normalized_family = _normalize_family(family)
+    # The current vendored glm5_next implementation is the text runtime.  The
+    # source bundle can legitimately contain a visual tower, but its loader
+    # filters those weights and no GLM image/video bridge is wired yet.  Keep
+    # artifact capability separate from executable capability so /health does
+    # not advertise a VL path that cannot run.
+    text_only_runtime = normalized_family == "glm5_next"
+    vl_runtime_available = bool(
+        runtime_available
+        and has_vision
+        and runtime_supported
+        and not text_only_runtime
+    )
     runtime_scope = (
         "text+vl"
-        if runtime_supported and has_vision
+        if runtime_supported and has_vision and not text_only_runtime
         else "text"
         if runtime_supported
         else None
@@ -926,6 +938,9 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
             "native MTP runtime will be enabled for supported text and VL "
             "sessions"
             if vl_runtime_available
+            else "native MTP runtime will be enabled for the GLM text "
+            "runtime; the bundled visual tower is not wired"
+            if text_only_runtime and has_vision
             else "native MTP runtime will be enabled for supported text "
             "BatchGenerator sessions"
         )

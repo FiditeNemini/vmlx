@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   appendMetalWiredLimitGuidance,
   classifyLargeModelMemoryPreflight,
+  classifyWiredLimitPreflight,
   metalWiredLimitCommand,
   metalWiredLimitHelpText,
 } from '../src/shared/metalWiredLimit'
@@ -74,5 +75,64 @@ describe('Metal wired-memory limit guidance', () => {
 
     expect(result.action).toBe('warn')
     expect(result.message).toContain('Memory warning')
+  })
+})
+
+describe('classifyWiredLimitPreflight', () => {
+  const GB = 1e9
+
+  it('recommends the exact sysctl command when a GLM-5.3-class model exceeds the stock limit on 128GB', () => {
+    // 128 GiB Mac (137.4e9 bytes), sysctl at 0 (macOS default ~= 75% =>
+    // ~103,050 MB ~= 96 GiB budget), GLM-5.3-Flash bundle = 102.4e9 bytes
+    // on disk (the real du measurement).
+    const r = classifyWiredLimitPreflight({
+      modelSizeBytes: 102.4 * GB,
+      wiredLimitMb: 0,
+      totalBytes: 137.4 * GB,
+    })
+    expect(r.action).toBe('recommend')
+    expect(r.command).toMatch(/^sudo sysctl iogpu\.wired_limit_mb=\d+$/)
+    expect(r.recommendedMb).toBeGreaterThan(96000)
+    // never recommend wiring the whole machine
+    expect(r.recommendedMb).toBeLessThanOrEqual(137400 - 8000 + 1000)
+    expect(r.detail).toContain(r.command)
+    expect(r.detail).toContain('Loading will proceed')
+  })
+
+  it('stays quiet when the model fits the current limit comfortably', () => {
+    const r = classifyWiredLimitPreflight({
+      modelSizeBytes: 18 * GB,
+      wiredLimitMb: 0,
+      totalBytes: 137.4 * GB,
+    })
+    expect(r.action).toBe('ok')
+  })
+
+  it('respects a user-raised limit that already covers the model', () => {
+    const r = classifyWiredLimitPreflight({
+      modelSizeBytes: 102.4 * GB,
+      wiredLimitMb: 120000,
+      totalBytes: 137.4 * GB,
+    })
+    expect(r.action).toBe('ok')
+  })
+
+  it('recommends raising a user limit that is set but too low', () => {
+    const r = classifyWiredLimitPreflight({
+      modelSizeBytes: 102.4 * GB,
+      wiredLimitMb: 90000,
+      totalBytes: 137.4 * GB,
+    })
+    expect(r.action).toBe('recommend')
+    expect(r.recommendedMb).toBeGreaterThan(90000)
+  })
+
+  it('has no block arm by type — the union is ok|recommend only', () => {
+    const r = classifyWiredLimitPreflight({
+      modelSizeBytes: 300 * GB,
+      wiredLimitMb: 0,
+      totalBytes: 137.4 * GB,
+    })
+    expect(['ok', 'recommend']).toContain(r.action)
   })
 })

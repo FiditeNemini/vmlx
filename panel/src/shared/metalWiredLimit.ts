@@ -63,6 +63,72 @@ export function classifyLargeModelMemoryPreflight(input: {
   return { action: 'ok', message: '' }
 }
 
+/**
+ * Wired-limit preflight: compare the model's resident footprint against the
+ * user's EFFECTIVE Metal wired limit and, when the load would brush or exceed
+ * it, produce a visual recommendation with the exact sysctl command.
+ *
+ * ADVISORY ONLY by type: there is no block/refuse arm and none may be added.
+ * macOS/Metal fail loudly on a genuine miss; this exists so the user learns
+ * the one-line fix BEFORE that happens instead of after.
+ */
+export type WiredLimitPreflight =
+  | { action: 'ok' }
+  | {
+      action: 'recommend'
+      recommendedMb: number
+      command: string
+      message: string
+      detail: string
+    }
+
+// Apple Silicon's default GPU wired limit (iogpu.wired_limit_mb=0) is ~75% of
+// physical RAM (measured: 128 GB Mac -> ~96 GiB Metal working-set budget).
+const DEFAULT_WIRED_FRACTION = 0.75
+// Runtime overhead on top of raw weights: KV/native state, scratch arenas,
+// vision tower activations, allocator slack. Deliberately modest — this tunes
+// when we ADVISE, never whether we load.
+const RUNTIME_OVERHEAD_BYTES = 6e9
+// Never recommend wiring everything: leave OS/WindowServer headroom.
+const MIN_OS_HEADROOM_MB = 8000
+
+export function classifyWiredLimitPreflight(input: {
+  modelSizeBytes: number
+  wiredLimitMb: number // current sysctl value; 0 or negative = macOS default
+  totalBytes: number
+}): WiredLimitPreflight {
+  const { modelSizeBytes, wiredLimitMb, totalBytes } = input
+  if (modelSizeBytes <= 0 || totalBytes <= 0) return { action: 'ok' }
+
+  const totalMb = Math.floor(totalBytes / 1e6)
+  const effectiveLimitMb =
+    wiredLimitMb > 0 ? wiredLimitMb : Math.floor(totalMb * DEFAULT_WIRED_FRACTION)
+  const neededMb = Math.ceil((modelSizeBytes + RUNTIME_OVERHEAD_BYTES) / 1e6)
+  if (neededMb <= effectiveLimitMb) return { action: 'ok' }
+
+  const cappedMb = Math.max(effectiveLimitMb, Math.min(totalMb - MIN_OS_HEADROOM_MB, neededMb))
+  // Round up to the nearest 1000 MB for a clean, memorable command.
+  const recommendedMb = Math.ceil(cappedMb / 1000) * 1000
+  if (recommendedMb <= effectiveLimitMb) return { action: 'ok' }
+
+  const command = `sudo sysctl iogpu.wired_limit_mb=${recommendedMb}`
+  const modelGb = (modelSizeBytes / 1e9).toFixed(1)
+  const limitGb = (effectiveLimitMb / 1000).toFixed(0)
+  return {
+    action: 'recommend',
+    recommendedMb,
+    command,
+    message:
+      `This model (~${modelGb} GB) is close to or above your Metal wired-memory ` +
+      `limit (~${limitGb} GB${wiredLimitMb > 0 ? '' : ', the macOS default'}).`,
+    detail:
+      `Loading will proceed, but it may fail with a Metal out-of-memory error or ` +
+      `run degraded. To raise the limit, run this in Terminal (admin password ` +
+      `required; resets after reboot):\n\n${command}\n\nDo not set it equal to ` +
+      `physical RAM — leave OS and app headroom.`,
+  }
+}
+
 const METAL_WIRED_LIMIT_RE =
   /(?:Command buffer execution failed|Insufficient Memory|kIOGPUCommandBufferCallbackErrorOutOfMemory|Metal OOM|kernel-panic risk|SIGKILL|likely out of memory|out of memory)/i
 

@@ -5,7 +5,7 @@ import {
 } from '../shared/enginePatienceWindows'
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
-import { powerSaveBlocker } from 'electron'
+import { clipboard, dialog, powerSaveBlocker } from 'electron'
 import { EventEmitter } from 'events'
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { createServer } from 'net'
@@ -43,7 +43,7 @@ import {
   MODEL_PARSER_DEFAULTS_VERSION,
   migrateModelParserDefaults,
 } from '../shared/sessionConfigMigrations'
-import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
+import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight, classifyWiredLimitPreflight } from '../shared/metalWiredLimit'
 import { sessionMatchesModelPath } from '../shared/sessionUtils'
 import { normalizeHfTokenSetting } from '../shared/hfSettings'
 import { shouldUseProofOwnedEngineLifecycle } from '../shared/userDataOverride'
@@ -2952,6 +2952,36 @@ export class SessionManager extends EventEmitter {
       // No `block` arm: classifyLargeModelMemoryPreflight can no longer return
       // one (the variant was deleted from its type on 2026-08-17). Preflight
       // advises; it never refuses.
+      // Wired-limit recommendation (Eric, 2026-08-29): compare the model's
+      // resident footprint to the user's EFFECTIVE Metal wired limit and show
+      // a visible popup with the exact sysctl command when the load would
+      // brush or exceed it. ADVISORY ONLY — the load proceeds regardless and
+      // the dialog is not awaited (never gates or delays the start).
+      try {
+        let wiredLimitMb = 0
+        try {
+          wiredLimitMb = parseInt(
+            execFileSync('sysctl', ['-n', 'iogpu.wired_limit_mb'], { timeout: 3000 })
+              .toString().trim(), 10) || 0
+        } catch { /* non-macOS or sysctl unavailable — default fraction used */ }
+        const wiredPreflight = classifyWiredLimitPreflight({ modelSizeBytes, wiredLimitMb, totalBytes })
+        if (wiredPreflight.action === 'recommend') {
+          const logLine = `${wiredPreflight.message} ${wiredPreflight.detail.replace(/\n+/g, ' ')}`
+          console.warn(`[SESSION] ${logLine}`)
+          this.emit('session:log', { sessionId, data: `⚠️  ${logLine}\n` })
+          void dialog.showMessageBox({
+            type: 'warning',
+            title: 'Metal wired-memory limit recommendation',
+            message: wiredPreflight.message,
+            detail: wiredPreflight.detail,
+            buttons: ['Copy Command', 'Continue'],
+            defaultId: 0,
+            cancelId: 1,
+          }).then((result) => {
+            if (result.response === 0) clipboard.writeText(wiredPreflight.command)
+          }).catch(() => { /* headless/test environments have no dialog */ })
+        }
+      } catch { /* advisory-only path must never break a launch */ }
       const memoryPreflight = classifyLargeModelMemoryPreflight({ modelSizeBytes, availableBytes, totalBytes })
       if (memoryPreflight.action === 'warn') {
         if (modelSizeBytes > availableBytes * 0.9) {

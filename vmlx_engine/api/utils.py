@@ -591,6 +591,37 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
     except Exception:
         pass
 
+    # GLM-5.3-Flash (glm5_next): always route through the text engine for now.
+    # The bundle ships a vision tower, but the vMLX VLM runtime for this
+    # family is not implemented yet — the source-owned text runtime
+    # (mlx_lm.models.glm5_next, vendored) drops visual weights at sanitize.
+    # Letting force_mllm push it into generic mlx_vlm would fail at load
+    # (no glm5_next mlx_vlm class). Remove this block when the V-phase
+    # vision runtime lands.
+    try:
+        _cfg_p_glm = os.path.join(local_path, "config.json")
+        if os.path.isfile(_cfg_p_glm):
+            _cfg_glm = json.loads(open(_cfg_p_glm).read())
+            _top_glm = str(_cfg_glm.get("model_type") or "")
+            _txt_glm = str((_cfg_glm.get("text_config") or {}).get("model_type") or "")
+            if "glm5_next" in _top_glm or "glm5_next" in _txt_glm:
+                if force_mllm:
+                    _logger.warning(
+                        "is_mllm_model(%s): glm5_next overrides force_mllm — "
+                        "the glm5_next VLM runtime is not implemented; routing "
+                        "through the source-owned text runtime",
+                        model_name,
+                    )
+                else:
+                    _logger.info(
+                        "is_mllm_model(%s): tier=glm5_next_text_route "
+                        "result=False (vision phase not implemented yet)",
+                        model_name,
+                    )
+                return False
+    except Exception:
+        pass
+
     def _mimo_v2_media_runtime_auto_wired_path(path: str, cfg: dict) -> bool:
         """True when current source and bundle sidecars prove MiMo media wiring."""
         try:

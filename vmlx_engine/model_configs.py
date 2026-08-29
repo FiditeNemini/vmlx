@@ -824,6 +824,33 @@ def register_all(registry=None):
     # (live-proven tool_calls=None). The registry neutralizes the stale stamp.
     _register(
         ModelConfig(
+            family_name="glm5_next",
+            model_types=["glm5_next", "glm5_next_text"],
+            cache_type="hybrid",
+            cache_subtype="glm5_next_native_v1",
+            eos_tokens=[
+                "<|endoftext|>",
+                "<|user|>",
+                "<|observation|>",
+            ],
+            # arg_key/arg_value XML inside <tool_call> with a bare function
+            # name — exactly the registered glm47 dialect (hermes and qwen
+            # <function=> parsers both fail on it; verified by rendering).
+            tool_parser="glm47",
+            # Template force-opens <think> at generation
+            # ('<|assistant|><think>'), so generation starts inside the
+            # thinking rail — deepseek_r1 extraction with think_in_template.
+            reasoning_parser="deepseek_r1",
+            think_in_template=True,
+            supports_thinking=True,
+            supported_reasoning_efforts=["low", "high", "max"],
+            priority=3,
+        )
+    )
+
+    # ── openPangu-2.0-Flash ──
+    _register(
+        ModelConfig(
             family_name="openpangu_v2",
             model_types=["openpangu_v2"],
             cache_type="kv",

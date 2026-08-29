@@ -1157,6 +1157,14 @@ def serve_command(args):
     except Exception as _opv2reg_e:
         logger.debug("openpangu_v2 runtime registration skipped: %s", _opv2reg_e)
 
+    # Install the vendored GLM-5.3-Flash runtime under mlx_lm.models.glm5_next
+    # so the text loader can resolve model_type=glm5_next. Idempotent.
+    try:
+        from .models.glm5_next.register import register_glm5_next_runtime
+        register_glm5_next_runtime()
+    except Exception as _glm5reg_e:
+        logger.debug("glm5_next runtime registration skipped: %s", _glm5reg_e)
+
     # -- openPangu-2.0-Flash auto-settings TRANSPARENCY log + policy --
     # Mirrors the M3 block below: on an openpangu_v2 bundle, force-disable JIT
     # (the DSA lightning-indexer top-k selection is input-dependent/dynamic —

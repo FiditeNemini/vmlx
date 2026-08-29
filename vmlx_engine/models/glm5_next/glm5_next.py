@@ -64,6 +64,40 @@ KDA_CONV_K = 1
 KDA_CONV_V = 2
 KDA_STATE = 3
 
+# Glm5MLACache slot layout for MLA layers.
+MLA_KEYS = 0
+MLA_VALUES = 1
+MLA_PACKED = 2  # indexer packed history: [B, T, head_dim(k) + head_dim(gate)]
+
+
+class Glm5MLACache(ArraysCache):
+    """Per-MLA-layer cache: expanded K/V plus the DSA indexer's packed
+    per-token history (index key + kpool gate scores). ArraysCache-shaped so
+    the engine's generic hybrid handling recognizes it (prefix caching is
+    fail-closed for this family regardless)."""
+
+    def __init__(self):
+        super().__init__(3)
+
+    @property
+    def offset(self) -> int:
+        k = self.cache[MLA_KEYS]
+        return 0 if k is None else int(k.shape[2])
+
+    def update_kv(self, k: mx.array, v: mx.array):
+        if self.cache[MLA_KEYS] is not None:
+            k = mx.concatenate([self.cache[MLA_KEYS], k], axis=2)
+            v = mx.concatenate([self.cache[MLA_VALUES], v], axis=2)
+        self.cache[MLA_KEYS] = k
+        self.cache[MLA_VALUES] = v
+        return k, v
+
+    def update_packed(self, packed: mx.array) -> mx.array:
+        if self.cache[MLA_PACKED] is not None:
+            packed = mx.concatenate([self.cache[MLA_PACKED], packed], axis=1)
+        self.cache[MLA_PACKED] = packed
+        return packed
+
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -88,6 +122,11 @@ class ModelArgs(BaseModelArgs):
     qk_nope_head_dim: int = 256
     v_head_dim: int = 256
     index_topk: int = 2048
+    index_n_heads: int = 32
+    index_head_dim: int = 128
+    index_kpool: int = 4
+    index_kpool_always_select_tail: bool = True
+    max_position_embeddings: int = 1_048_576
     # MoE
     n_routed_experts: int = 288
     num_experts_per_tok: int = 8
@@ -127,6 +166,13 @@ class ModelArgs(BaseModelArgs):
             "qk_nope_head_dim": t["qk_nope_head_dim"],
             "v_head_dim": t["v_head_dim"],
             "index_topk": t.get("index_topk", 2048),
+            "index_n_heads": t.get("index_n_heads", 32),
+            "index_head_dim": t.get("index_head_dim", 128),
+            "index_kpool": t.get("index_kpool", 4),
+            "index_kpool_always_select_tail": t.get(
+                "index_kpool_always_select_tail", True
+            ),
+            "max_position_embeddings": t.get("max_position_embeddings", 1_048_576),
             "n_routed_experts": t["n_routed_experts"],
             "num_experts_per_tok": t["num_experts_per_tok"],
             "moe_intermediate_size": t["moe_intermediate_size"],
@@ -266,10 +312,120 @@ class KDAAttention(nn.Module):
         return self.o_proj(o32.astype(x.dtype).reshape(B, T, H * K))
 
 
+# ---------------------------------------------------------------- DSA ------
+class Glm5NextIndexer(nn.Module):
+    """DSA indexer with k-pool compression (port of Glm5NextTextIndexer).
+
+    Scores softmax-compressed pools of ``index_kpool`` index keys with relu'd
+    per-head dot products, weights heads via ``weights_proj / sqrt(H)``,
+    selects the top ``index_topk // index_kpool`` pools whose FINAL token is
+    causally visible to the query, expands them back to raw token indices,
+    and always appends the query's incomplete tail pool as raw indices.
+
+    Serving restriction: batch size 1, no padding (the vMLX single-active
+    lane) — valid_keys is all-true and first_key is 0, which removes the
+    padding-offset re-basing of the official implementation.
+    """
+
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.n_heads = args.index_n_heads
+        self.head_dim = args.index_head_dim
+        self.topk = args.index_topk
+        self.kpool = args.index_kpool
+        self.select_tail = args.index_kpool_always_select_tail
+        self.scale = self.head_dim ** -0.5
+        self.wq_b = nn.Linear(args.q_lora_rank, self.n_heads * self.head_dim, bias=False)
+        self.wk = nn.Linear(args.hidden_size, self.head_dim, bias=False)
+        self.k_norm = nn.LayerNorm(self.head_dim, eps=1e-6)
+        self.weights_proj = nn.Linear(args.hidden_size, self.n_heads, bias=False)
+        self.index_kpool_compress_ape = mx.zeros((self.kpool, self.head_dim))
+        self.index_kpool_compress_gate = mx.zeros((self.head_dim, args.hidden_size))
+
+    def packed_states(self, x: mx.array) -> mx.array:
+        """Per-token indexer state: [B, T, head_dim(k) + head_dim(gate)]."""
+        k = mx.fast.layer_norm(
+            self.wk(x).astype(mx.float32),
+            self.k_norm.weight.astype(mx.float32),
+            self.k_norm.bias.astype(mx.float32),
+            1e-6,
+        )
+        gate = x.astype(mx.float32) @ self.index_kpool_compress_gate.astype(mx.float32).T
+        return mx.concatenate([k, gate], axis=-1)
+
+    def topk_indices(
+        self,
+        x: mx.array,
+        q_resid: mx.array,
+        packed: mx.array,
+        q_positions: mx.array,
+    ) -> tuple[mx.array, mx.array]:
+        """Return (indices [B, S, W], valid [B, S, W]) raw token selections."""
+        B, S = x.shape[:2]
+        T = packed.shape[1]
+        P = self.kpool
+        n_pools = T // P  # complete pools only; the tail covers the remainder
+
+        keys, gates = mx.split(packed.astype(mx.float32), [self.head_dim], axis=-1)
+
+        q = self.wq_b(q_resid).reshape(B, S, self.n_heads, self.head_dim).astype(mx.float32)
+        head_w = (self.weights_proj(x).astype(mx.float32)
+                  * (self.n_heads ** -0.5))                    # [B, S, H]
+
+        if n_pools > 0:
+            gk = keys[:, : n_pools * P].reshape(B, n_pools, P, self.head_dim)
+            gg = gates[:, : n_pools * P].reshape(B, n_pools, P, self.head_dim)
+            logits = gg + self.index_kpool_compress_ape.astype(mx.float32)[None, None]
+            probs = mx.softmax(logits, axis=2)
+            pool_keys = mx.sum(probs * gk, axis=2)             # [B, n_pools, D]
+
+            # scores per idx head then head-weighted sum: [B, S, n_pools]
+            scores = mx.einsum("bshd,bpd->bshp", q, pool_keys)
+            scores = mx.maximum(scores * self.scale, 0.0)
+            pool_scores = mx.einsum("bsh,bshp->bsp", head_w, scores)
+
+            # a pool is selectable only if its final token is visible
+            pool_end = mx.arange(n_pools) * P + (P - 1)        # [n_pools]
+            visible = pool_end[None, None, :] <= q_positions[None, :, None]
+            pool_scores = mx.where(visible, pool_scores, mx.full(pool_scores.shape, -mx.inf))
+
+            select_k = min(self.topk // P, n_pools)
+            sel = mx.argpartition(-pool_scores, kth=select_k - 1, axis=-1)[..., :select_k]
+            sel_visible = mx.take_along_axis(visible.astype(mx.bool_)
+                                             if visible.ndim == 3 else visible,
+                                             sel, axis=-1)
+            # expand pools -> raw indices [B, S, select_k * P]
+            raw = (sel[..., None] * P + mx.arange(P)[None, None, None, :])
+            raw = raw.reshape(B, S, select_k * P)
+            raw_valid = mx.repeat(sel_visible, P, axis=-1).reshape(B, S, select_k * P)
+        else:
+            raw = mx.zeros((B, S, 0), dtype=mx.int32)
+            raw_valid = mx.zeros((B, S, 0), dtype=mx.bool_)
+
+        if self.select_tail and P > 1:
+            count = (q_positions + 1)                          # visible tokens per query
+            tail_start = (count // P) * P                      # [S]
+            offs = mx.arange(P - 1)
+            tail = tail_start[:, None] + offs[None, :]         # [S, P-1]
+            tail_valid = tail < count[:, None]
+            tail = mx.broadcast_to(tail[None], (B, S, P - 1))
+            tail_valid = mx.broadcast_to(tail_valid[None], (B, S, P - 1))
+            raw = mx.concatenate([raw.astype(mx.int32), tail.astype(mx.int32)], axis=-1)
+            raw_valid = mx.concatenate([raw_valid, tail_valid], axis=-1)
+
+        return raw, raw_valid
+
+
 # ---------------------------------------------------------------- MLA ------
 class MLAAttention(nn.Module):
-    """DeepSeek-V3 MLA, pure NoPE. Dense causal attention — exact for total
-    sequence <= index_topk (bounded by the model __call__)."""
+    """DeepSeek-V3 MLA, pure NoPE, with the DSA sparse path.
+
+    Dense causal attention whenever the total sequence fits index_topk (the
+    top-k would select every key — bit-exact, and the calibration/KL evidence
+    all ran under this bound). Beyond index_topk, the DSA indexer selects
+    each query's visible set; decode gathers the selected K/V rows, prefill
+    builds an additive visibility mask.
+    """
 
     def __init__(self, args: ModelArgs):
         super().__init__()
@@ -277,6 +433,7 @@ class MLAAttention(nn.Module):
         self.n_heads = args.num_attention_heads
         self.qk = args.qk_nope_head_dim
         self.vd = args.v_head_dim
+        self.index_topk = args.index_topk
         self.q_a_proj = nn.Linear(d, args.q_lora_rank, bias=False)
         self.q_a_layernorm = RMSNorm(args.q_lora_rank, args.rms_norm_eps)
         self.q_b_proj = nn.Linear(args.q_lora_rank, self.n_heads * self.qk, bias=False)
@@ -284,23 +441,73 @@ class MLAAttention(nn.Module):
         self.kv_a_layernorm = RMSNorm(args.kv_lora_rank, args.rms_norm_eps)
         self.kv_b_proj = nn.Linear(args.kv_lora_rank, self.n_heads * (self.qk + self.vd), bias=False)
         self.o_proj = nn.Linear(self.n_heads * self.vd, d, bias=False)
+        self.indexer = Glm5NextIndexer(args)
         self.scale = self.qk ** -0.5
 
-    def __call__(self, x: mx.array, cache: Optional[KVCache] = None):
+    def __call__(self, x: mx.array, cache: Optional[Glm5MLACache] = None):
         B, T, _ = x.shape
-        q = self.q_b_proj(self.q_a_layernorm(self.q_a_proj(x)))
+        q_resid = self.q_a_layernorm(self.q_a_proj(x))
+        q = self.q_b_proj(q_resid)
         q = q.reshape(B, T, self.n_heads, self.qk).transpose(0, 2, 1, 3)
         kv = self.kv_b_proj(self.kv_a_layernorm(self.kv_a_proj_with_mqa(x)))
         kv = kv.reshape(B, T, self.n_heads, self.qk + self.vd).transpose(0, 2, 1, 3)
         k, v = mx.split(kv, [self.qk], axis=-1)
+
+        offset = 0
+        packed = self.indexer.packed_states(x)
         if cache is not None:
-            k, v = cache.update_and_fetch(k, v)
-        # fp32 SDPA: bf16 at L==1 decode is the known MLA-absorb trap; the
-        # plain path keeps fp32 for safety. "causal" aligns queries to the
-        # END of the key sequence, which is exactly the history semantics.
-        o = mx.fast.scaled_dot_product_attention(
-            q.astype(mx.float32), k.astype(mx.float32), v.astype(mx.float32),
-            scale=self.scale, mask="causal" if T > 1 else None)
+            offset = cache.offset
+            k, v = cache.update_kv(k, v)
+            packed = cache.update_packed(packed)
+
+        total = offset + T
+        q32 = q.astype(mx.float32)
+        k32 = k.astype(mx.float32)
+        v32 = v.astype(mx.float32)
+
+        if total <= self.index_topk:
+            # Dense bypass: top-k selects every key — bit-exact.
+            o = mx.fast.scaled_dot_product_attention(
+                q32, k32, v32, scale=self.scale,
+                mask="causal" if T > 1 else None)
+        else:
+            if B != 1:
+                raise ValueError(
+                    "glm5_next sparse DSA path currently supports batch "
+                    "size 1 (single-active serving lane)")
+            q_positions = offset + mx.arange(T)
+            idx, idx_valid = self.indexer.topk_indices(x, q_resid, packed, q_positions)
+            if T == 1:
+                # Decode: gather selected K/V rows, dense SDPA over them.
+                flat = idx[0, 0]
+                valid = idx_valid[0, 0]
+                flat = mx.where(valid, flat, mx.zeros_like(flat))
+                # dedup not required: duplicate keys receive identical
+                # scores; softmax over a multiset changes the result, so
+                # invalid slots are pointed at index 0 and masked instead.
+                gk = mx.take(k32, flat, axis=2)                # [B, H, W, D]
+                gv = mx.take(v32, flat, axis=2)
+                bias = mx.where(valid, mx.zeros(valid.shape, dtype=mx.float32),
+                                mx.full(valid.shape, -1e30))
+                o = mx.fast.scaled_dot_product_attention(
+                    q32, gk, gv, scale=self.scale,
+                    mask=bias[None, None, None, :])
+            else:
+                # Prefill chunk: additive visibility mask over the full
+                # width, built via a trash-column scatter (W duplicates are
+                # idempotent for set-to-visible).
+                W = idx.shape[-1]
+                safe = mx.where(idx_valid, idx, mx.full(idx.shape, total, dtype=idx.dtype))
+                mask = mx.zeros((B, T, total + 1), dtype=mx.bool_)
+                mask = mx.put_along_axis(
+                    mask, safe.astype(mx.int64),
+                    mx.ones(safe.shape, dtype=mx.bool_), axis=-1)
+                mask = mask[..., :total]
+                bias = mx.where(mask, mx.zeros(mask.shape, dtype=mx.float32),
+                                mx.full(mask.shape, -1e30))
+                o = mx.fast.scaled_dot_product_attention(
+                    q32, k32, v32, scale=self.scale,
+                    mask=bias[:, None])
         o = o.astype(x.dtype).transpose(0, 2, 1, 3).reshape(B, T, self.n_heads * self.vd)
         return self.o_proj(o)
 
@@ -398,22 +605,17 @@ class Glm5NextModel(nn.Module):
 
     def __call__(self, input_ids: mx.array, cache=None):
         x = self.embed_tokens(input_ids)
-        # Dense-attention DSA bypass is EXACT only up to index_topk total
-        # tokens. Beyond that the sparse indexer path is REQUIRED and not yet
-        # implemented — refuse loudly rather than emit silently-wrong output.
-        # (The serving layer clamps declared context to the same bound.)
         offset = 0
         if cache is not None:
             for c in cache:
-                if isinstance(c, KVCache):
+                if isinstance(c, (Glm5MLACache, KVCache)):
                     offset = c.offset
                     break
         seen = offset + x.shape[1]
-        if seen > self.args.index_topk:
+        if seen > self.args.max_position_embeddings:
             raise ValueError(
-                f"glm5_next dense-attention path is exact only up to "
-                f"{self.args.index_topk} total tokens (requested {seen}); the "
-                f"sparse DSA indexer path is not implemented yet")
+                f"glm5_next context limit is {self.args.max_position_embeddings} "
+                f"tokens (requested {seen})")
         streams = mx.broadcast_to(x[:, :, None, :],
                                   (*x.shape[:2], self.args.hc_mult, x.shape[-1]))
         for i, layer in enumerate(self.layers):
@@ -447,17 +649,17 @@ class Model(nn.Module):
             if layer.is_linear:
                 caches.append(ArraysCache(4))
             else:
-                caches.append(KVCache())
+                caches.append(Glm5MLACache())
         return caches
 
     def sanitize(self, weights: dict) -> dict:
         """Drop subsystems the text runtime does not construct.
 
         The JANG bundle stores runtime naming already (attn_hc/ffn_hc,
-        stacked switch_mlp experts, squeezed [C,W] convs, bare o_norm);
-        only the vision tower, the MTP block (layer == num_hidden_layers),
-        and the not-yet-served DSA indexer weights are removed. Everything
-        else must match the module tree exactly (strict load).
+        stacked switch_mlp experts, squeezed [C,W] convs, bare o_norm,
+        indexer under self_attn.indexer); only the vision tower and the MTP
+        block (layer == num_hidden_layers) are removed. Everything else must
+        match the module tree exactly (strict load).
         """
         n = self.args.num_hidden_layers
         mtp_prefix = f"model.layers.{n}."
@@ -465,5 +667,4 @@ class Model(nn.Module):
             k: v for k, v in weights.items()
             if not k.startswith(("visual.", "model.visual."))
             and not k.startswith(mtp_prefix)
-            and ".self_attn.indexer." not in k
         }

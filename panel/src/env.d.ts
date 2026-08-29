@@ -303,7 +303,10 @@ declare global {
           endpoint: { host: string; port: number },
           modelPath: string,
           modelName?: string,
-          options?: { flushCache?: boolean },
+          options?: {
+            flushCache?: boolean;
+            profileId?: "peak" | "representative";
+          },
         ) => Promise<any>;
         history: (modelPath?: string) => Promise<any[]>;
         delete: (id: string) => Promise<{ success: boolean }>;

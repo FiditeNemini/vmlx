@@ -221,7 +221,7 @@ const api = {
 
   // Benchmark
   benchmark: {
-    run: (sessionId: string, endpoint: { host: string; port: number }, modelPath: string, modelName?: string, options?: { flushCache?: boolean }) =>
+    run: (sessionId: string, endpoint: { host: string; port: number }, modelPath: string, modelName?: string, options?: { flushCache?: boolean; profileId?: 'peak' | 'representative' }) =>
       ipcRenderer.invoke('benchmark:run', sessionId, endpoint, modelPath, modelName, options),
     history: (modelPath?: string) =>
       ipcRenderer.invoke('benchmark:history', modelPath),

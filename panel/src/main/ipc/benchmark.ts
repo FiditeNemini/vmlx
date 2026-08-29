@@ -1,88 +1,97 @@
-import { ipcMain } from 'electron'
 import { randomUUID } from 'crypto'
+import { ipcMain } from 'electron'
+
+import {
+  buildBenchmarkMessages,
+  getBenchmarkProfile,
+  type BenchmarkFamilyId,
+  type BenchmarkProfile,
+  type BenchmarkProfileId,
+  type BenchmarkScenario,
+  type BenchmarkScenarioKind,
+} from '../../shared/benchmarkProfiles'
 import { db } from '../database'
-import { resolveUrl, connectHost } from '../sessions'
+import { connectHost, resolveUrl } from '../sessions'
 import { getAuthHeaders } from './utils'
 
 /**
  * Benchmark IPC handlers.
- * Sends test prompts to the running session and measures TTFT, TPS, and throughput.
+ *
+ * Peak and representative profiles remain deliberately separate. A peak row
+ * is an explicitly labelled best-case microbenchmark; it is never averaged
+ * together with long-form or agentic work and presented as general speed.
  */
-
-interface BenchPrompt {
-  label: string
-  messages: Array<{ role: string; content: string }>
-  maxTokens: number
-}
-
-const BENCH_PROMPTS: BenchPrompt[] = [
-  {
-    label: 'Short generation',
-    messages: [
-      { role: 'user', content: 'Write a haiku about silicon.' }
-    ],
-    maxTokens: 64
-  },
-  {
-    label: 'Medium generation',
-    messages: [
-      { role: 'user', content: 'Explain how a transformer neural network processes a sentence, step by step.' }
-    ],
-    maxTokens: 256
-  },
-  {
-    label: 'Long generation',
-    messages: [
-      { role: 'user', content: 'Write a detailed technical blog post about the advantages and challenges of running large language models on Apple Silicon. Cover memory bandwidth, unified memory architecture, and the role of quantization.' }
-    ],
-    maxTokens: 512
-  },
-  {
-    label: 'Long prompt (prefill test)',
-    messages: [
-      { role: 'system', content: 'You are a helpful assistant that summarizes text concisely.' },
-      { role: 'user', content: `Summarize the following passage in 2 sentences:\n\n${'The development of artificial intelligence has progressed through several distinct phases. In the early days, researchers focused on symbolic AI, attempting to encode human knowledge into explicit rules and logical frameworks. This approach showed promise in narrow domains but struggled with the complexity and ambiguity of real-world problems. The emergence of machine learning shifted the paradigm, allowing systems to learn patterns from data rather than following hand-crafted rules. Deep learning, powered by neural networks with many layers, further revolutionized the field by enabling automatic feature extraction from raw data. The introduction of the transformer architecture in 2017 marked another watershed moment, leading to large language models that could generate coherent text, translate languages, and answer questions with unprecedented accuracy. Today, the focus has shifted to making these models more efficient, more aligned with human values, and more accessible to a broader range of users and applications. '.repeat(3)}` }
-    ],
-    maxTokens: 128
-  }
-]
 
 interface PromptResult {
   label: string
-  ttft: number      // seconds
-  tps: number       // tokens per second
+  scenarioId: string
+  kind: BenchmarkScenarioKind
+  profileId: BenchmarkProfileId
+  profileLabel: string
+  familyId: BenchmarkFamilyId
+  familyLabel: string
+  trial: number
+  repetitions: number
+  ttft: number
+  tps: number
   promptTokens: number
+  cachedPromptTokens: number
+  uncachedPromptTokens: number
   completionTokens: number
-  totalTime: number  // seconds
-  ppSpeed: number    // prompt processing tokens/sec
+  totalTime: number
+  decodeTime: number
+  ppSpeed: number
+  maxTokens: number
+  temperature: number
+  thinkingDisabled: boolean
+  error?: string
+}
+
+interface BenchmarkRunOptions {
+  flushCache?: boolean
+  profileId?: BenchmarkProfileId
+}
+
+function usageCachedTokens(usage: any): number {
+  return Number(usage?.prompt_tokens_details?.cached_tokens || 0)
 }
 
 async function runSingleBenchmark(
   baseUrl: string,
-  prompt: BenchPrompt,
-  authHeaders: Record<string, string> = {}
+  profile: BenchmarkProfile,
+  scenario: BenchmarkScenario,
+  trial: number,
+  authHeaders: Record<string, string> = {},
 ): Promise<PromptResult> {
   const fetchStart = Date.now()
   let firstTokenTime: number | null = null
+  let lastTokenTime: number | null = null
   let tokenCount = 0
   let promptTokens = 0
+  let cachedPromptTokens = 0
+  const messages = buildBenchmarkMessages(scenario, randomUUID())
+  const requestBody: Record<string, any> = {
+    model: 'default',
+    messages,
+    max_tokens: scenario.maxTokens,
+    temperature: scenario.temperature,
+    stream: true,
+    stream_options: { include_usage: true },
+  }
+  if (scenario.disableThinking) requestBody.enable_thinking = false
 
   const res = await fetch(`${baseUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders },
-    body: JSON.stringify({
-      model: 'default',
-      messages: prompt.messages,
-      max_tokens: prompt.maxTokens,
-      temperature: 0.7,
-      stream: true,
-      stream_options: { include_usage: true }
-    }),
-    signal: AbortSignal.timeout(120000)
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(scenario.timeoutMs),
   })
 
   if (!res.ok) {
-    throw new Error(`Benchmark request failed: ${res.status} ${res.statusText}`)
+    const detail = await res.text().catch(() => '')
+    throw new Error(
+      `Benchmark request failed: ${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 240)}` : ''}`,
+    )
   }
 
   const reader = res.body?.getReader()
@@ -107,121 +116,233 @@ async function runSingleBenchmark(
 
       try {
         const parsed = JSON.parse(data)
-
-        // Usage info (final chunk with usage) — server count is authoritative
         let serverUsageThisChunk = false
         if (parsed.usage) {
-          promptTokens = parsed.usage.prompt_tokens || promptTokens
+          promptTokens = Number(parsed.usage.prompt_tokens || promptTokens)
+          cachedPromptTokens = usageCachedTokens(parsed.usage)
           if (parsed.usage.completion_tokens != null) {
-            tokenCount = parsed.usage.completion_tokens
+            tokenCount = Number(parsed.usage.completion_tokens)
             serverUsageThisChunk = true
           }
         }
 
-        // Content delta — only client-count when server didn't provide usage this chunk
         const delta = parsed.choices?.[0]?.delta
-        if (delta?.content) {
-          if (!firstTokenTime) firstTokenTime = Date.now()
+        const emitted =
+          delta?.content || delta?.reasoning_content || delta?.reasoning
+        if (emitted) {
+          const now = Date.now()
+          if (firstTokenTime == null) firstTokenTime = now
+          lastTokenTime = now
           if (!serverUsageThisChunk) tokenCount++
         }
-      } catch { /* ignore parse errors */ }
+      } catch {
+        // Ignore non-JSON SSE comments/heartbeats. Malformed terminal payloads
+        // still surface through missing usage/zero-rate results below.
+      }
     }
   }
 
-  const totalTime = (Date.now() - fetchStart) / 1000
-  const ttft = firstTokenTime ? (firstTokenTime - fetchStart) / 1000 : totalTime
-  const generationTime = firstTokenTime ? (Date.now() - firstTokenTime) / 1000 : totalTime
-  const tps = generationTime > 0.01 ? tokenCount / generationTime : 0
-  const ppSpeed = ttft > 0.001 && promptTokens > 0 ? promptTokens / ttft : 0
+  const requestEnd = Date.now()
+  const totalTime = (requestEnd - fetchStart) / 1000
+  const ttft =
+    firstTokenTime == null ? totalTime : (firstTokenTime - fetchStart) / 1000
+  const streamedDecodeTime =
+    firstTokenTime != null &&
+    lastTokenTime != null &&
+    lastTokenTime > firstTokenTime
+      ? (lastTokenTime - firstTokenTime) / 1000
+      : 0
+  const fallbackDecodeTime =
+    firstTokenTime == null ? totalTime : (requestEnd - firstTokenTime) / 1000
+  const decodeTime =
+    streamedDecodeTime > 0 ? streamedDecodeTime : fallbackDecodeTime
+  const tps =
+    streamedDecodeTime > 0 && tokenCount > 1
+      ? (tokenCount - 1) / streamedDecodeTime
+      : decodeTime > 0.01
+        ? tokenCount / decodeTime
+        : 0
+  const uncachedPromptTokens = Math.max(0, promptTokens - cachedPromptTokens)
+  const ppSpeed =
+    ttft > 0.001 && uncachedPromptTokens > 0 ? uncachedPromptTokens / ttft : 0
 
   return {
-    label: prompt.label,
+    label: scenario.label,
+    scenarioId: scenario.id,
+    kind: scenario.kind,
+    profileId: profile.id,
+    profileLabel: profile.label,
+    familyId: profile.familyId,
+    familyLabel: profile.familyLabel,
+    trial,
+    repetitions: scenario.repetitions,
     ttft,
     tps,
     promptTokens,
+    cachedPromptTokens,
+    uncachedPromptTokens,
     completionTokens: tokenCount,
     totalTime,
-    ppSpeed
+    decodeTime,
+    ppSpeed,
+    maxTokens: scenario.maxTokens,
+    temperature: scenario.temperature,
+    thinkingDisabled: scenario.disableThinking,
   }
 }
 
-export function registerBenchmarkHandlers(getWindow: () => Electron.BrowserWindow | null): void {
-  ipcMain.handle('benchmark:run', async (_, sessionId: string, endpoint: { host: string; port: number }, modelPath: string, modelName?: string, options?: { flushCache?: boolean }) => {
-    const baseUrl = await resolveUrl(`http://${connectHost(endpoint.host)}:${endpoint.port}`)
-    const authHeaders = getAuthHeaders(sessionId)
-    const results: PromptResult[] = []
-    const win = getWindow()
+function failedResult(
+  profile: BenchmarkProfile,
+  scenario: BenchmarkScenario,
+  trial: number,
+  error: unknown,
+): PromptResult {
+  return {
+    label: scenario.label,
+    scenarioId: scenario.id,
+    kind: scenario.kind,
+    profileId: profile.id,
+    profileLabel: profile.label,
+    familyId: profile.familyId,
+    familyLabel: profile.familyLabel,
+    trial,
+    repetitions: scenario.repetitions,
+    ttft: 0,
+    tps: 0,
+    promptTokens: 0,
+    cachedPromptTokens: 0,
+    uncachedPromptTokens: 0,
+    completionTokens: 0,
+    totalTime: 0,
+    decodeTime: 0,
+    ppSpeed: 0,
+    maxTokens: scenario.maxTokens,
+    temperature: scenario.temperature,
+    thinkingDisabled: scenario.disableThinking,
+    error: error instanceof Error ? error.message : String(error),
+  }
+}
 
-    // Optionally flush prefix cache before benchmark to get clean results
-    if (options?.flushCache) {
-      try {
-        const cacheRes = await fetch(`${baseUrl}/v1/cache`, {
-          method: 'DELETE',
-          headers: authHeaders,
-          signal: AbortSignal.timeout(10000)
-        })
-        if (cacheRes.ok) {
-          console.log('[BENCHMARK] Prefix cache flushed before benchmark run')
+export function registerBenchmarkHandlers(
+  getWindow: () => Electron.BrowserWindow | null,
+): void {
+  ipcMain.handle(
+    'benchmark:run',
+    async (
+      _,
+      sessionId: string,
+      endpoint: { host: string; port: number },
+      modelPath: string,
+      modelName?: string,
+      options?: BenchmarkRunOptions,
+    ) => {
+      const baseUrl = await resolveUrl(
+        `http://${connectHost(endpoint.host)}:${endpoint.port}`,
+      )
+      const authHeaders = getAuthHeaders(sessionId)
+      const profile = getBenchmarkProfile(
+        options?.profileId || 'peak',
+        `${modelName || ''} ${modelPath}`,
+      )
+      const results: PromptResult[] = []
+      const win = getWindow()
+      const total = profile.scenarios.reduce(
+        (count, scenario) => count + scenario.repetitions,
+        0,
+      )
+
+      if (options?.flushCache) {
+        try {
+          const cacheRes = await fetch(`${baseUrl}/v1/cache`, {
+            method: 'DELETE',
+            headers: authHeaders,
+            signal: AbortSignal.timeout(10_000),
+          })
+          if (cacheRes.ok) {
+            console.log('[BENCHMARK] Prefix cache flushed before benchmark run')
+          }
+        } catch (error: any) {
+          console.warn(
+            '[BENCHMARK] Cache flush failed (non-fatal):',
+            error.message,
+          )
         }
-      } catch (err: any) {
-        console.warn('[BENCHMARK] Cache flush failed (non-fatal):', err.message)
-      }
-    }
-
-    for (let i = 0; i < BENCH_PROMPTS.length; i++) {
-      const prompt = BENCH_PROMPTS[i]
-
-      // Notify progress
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('benchmark:progress', {
-          sessionId,
-          current: i + 1,
-          total: BENCH_PROMPTS.length,
-          label: prompt.label
-        })
       }
 
-      try {
-        const result = await runSingleBenchmark(baseUrl, prompt, authHeaders)
-        results.push(result)
-      } catch (err: any) {
-        results.push({
-          label: prompt.label,
-          ttft: 0,
-          tps: 0,
-          promptTokens: 0,
-          completionTokens: 0,
-          totalTime: 0,
-          ppSpeed: 0
-        })
-        console.error(`[BENCHMARK] Prompt "${prompt.label}" failed:`, err.message)
+      let current = 0
+      for (const scenario of profile.scenarios) {
+        for (let trial = 1; trial <= scenario.repetitions; trial++) {
+          current++
+          if (win && !win.isDestroyed()) {
+            win.webContents.send('benchmark:progress', {
+              sessionId,
+              current,
+              total,
+              label: `${scenario.label} · ${trial}/${scenario.repetitions}`,
+            })
+          }
+
+          try {
+            results.push(
+              await runSingleBenchmark(
+                baseUrl,
+                profile,
+                scenario,
+                trial,
+                authHeaders,
+              ),
+            )
+          } catch (error) {
+            results.push(failedResult(profile, scenario, trial, error))
+            console.error(
+              `[BENCHMARK] ${scenario.label} trial ${trial} failed:`,
+              error,
+            )
+          }
+        }
       }
-    }
 
-    // Save to database
-    const benchmark = {
-      id: randomUUID(),
-      sessionId,
-      modelPath,
-      modelName,
-      resultsJson: JSON.stringify(results),
-      createdAt: Date.now()
-    }
-    db.saveBenchmark(benchmark)
+      const benchmark = {
+        id: randomUUID(),
+        sessionId,
+        modelPath,
+        modelName,
+        resultsJson: JSON.stringify(results),
+        createdAt: Date.now(),
+      }
+      db.saveBenchmark(benchmark)
 
-    return { id: benchmark.id, results, createdAt: benchmark.createdAt }
-  })
+      return {
+        id: benchmark.id,
+        profileId: profile.id,
+        profileLabel: profile.label,
+        familyId: profile.familyId,
+        familyLabel: profile.familyLabel,
+        disclosure: profile.disclosure,
+        results,
+        createdAt: benchmark.createdAt,
+      }
+    },
+  )
 
   ipcMain.handle('benchmark:history', async (_, modelPath?: string) => {
     const benchmarks = db.getBenchmarks(modelPath)
-    return benchmarks.map(b => ({
-      id: b.id,
-      sessionId: b.sessionId,
-      modelPath: b.modelPath,
-      modelName: b.modelName,
-      results: JSON.parse(b.resultsJson),
-      createdAt: b.createdAt
-    }))
+    return benchmarks.map((benchmark) => {
+      const results = JSON.parse(benchmark.resultsJson) as PromptResult[]
+      const first = results[0]
+      return {
+        id: benchmark.id,
+        sessionId: benchmark.sessionId,
+        modelPath: benchmark.modelPath,
+        modelName: benchmark.modelName,
+        profileId: first?.profileId || 'legacy',
+        profileLabel: first?.profileLabel || 'Legacy',
+        familyId: first?.familyId || 'generic',
+        familyLabel: first?.familyLabel || benchmark.modelName || 'Model',
+        results,
+        createdAt: benchmark.createdAt,
+      }
+    })
   })
 
   ipcMain.handle('benchmark:delete', async (_, id: string) => {

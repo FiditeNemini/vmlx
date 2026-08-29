@@ -145,6 +145,10 @@ from .native_mtp_adaptive import (
     finish_armed_depth_cycle,
     note_forced_depth_change,
 )
+from .native_mtp_profile import (
+    NativeMTPProfileStore,
+    profile_key as native_mtp_profile_key,
+)
 
 logger = logging.getLogger(__name__)
 _MIMO_AUDIO_TOKENIZER_CACHE: Dict[str, Any] = {}
@@ -3863,6 +3867,7 @@ class MLLMNativeMTPStats:
     mtp_cache_retained_on_rejects: int = 0
     mtp_head_cache: Dict[str, Any] = field(default_factory=dict)
     adaptive_depth_value: Dict[str, Any] = field(default_factory=dict)
+    profile_seed: str = ""
 
     def to_dict(
         self,
@@ -3937,6 +3942,7 @@ class MLLMNativeMTPStats:
                 retained_on_rejects=self.mtp_cache_retained_on_rejects,
             ),
             "adaptive_depth_value": dict(self.adaptive_depth_value),
+            "profile_seed": self.profile_seed,
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
         }
@@ -3988,6 +3994,8 @@ class MLLMNativeMTPState:
     # demoted D3->D1 at cycle 129 on d2=0.574 that recovers to ~0.85 once
     # the head warms, and the lowered ceiling made 17.4 t/s permanent.
     restored_prefix: bool = False
+    # Session-profile identity this request seeds from / reports back to.
+    profile_key: Optional[Tuple[str, bool, str]] = None
 
 
 @dataclass
@@ -6569,6 +6577,10 @@ class MLLMBatchGenerator:
             )
         )
         self._mixed_attention_cache_model = bool(mixed_attention_cache_model)
+        # Session-scoped learned MTP depth profiles. Lifetime == this
+        # generator (== one loaded model in one process), so bundle/config
+        # reloads and new PIDs invalidate them for free.
+        self._native_mtp_profiles = NativeMTPProfileStore()
 
         self._prefix_cache_enabled = bool(enable_prefix_cache)
         self._ssm_companion_enabled = bool(
@@ -6973,6 +6985,7 @@ class MLLMBatchGenerator:
                         final_depth=mtp_state.depth,
                         fallback_reason=mtp_state.ar_fallback_reason,
                     )
+                    self._observe_native_mtp_profile(mtp_state, "cancelled")
                 except Exception:
                     logger.debug(
                         "MLLM MTP cancellation telemetry publication failed",
@@ -14084,6 +14097,35 @@ class MLLMBatchGenerator:
             _native_mtp_trace_stop(stats, "draft_ms", trace_t0)
         return drafts, draft_lps, []
 
+    def _observe_native_mtp_profile(
+        self, state: "MLLMNativeMTPState", finish_reason: str
+    ) -> None:
+        """Report a finished request's controller outcome to the session profile."""
+        key = getattr(state, "profile_key", None)
+        if key is None:
+            return
+        store = getattr(self, "_native_mtp_profiles", None)
+        if store is None:
+            return
+        snapshot = state.stats.adaptive_depth_value
+        values = (
+            snapshot.get("values_tok_s") if isinstance(snapshot, dict) else None
+        )
+        try:
+            store.observe(
+                key,
+                final_depth=int(state.depth or 1),
+                fallback_to_ar=bool(
+                    state.ar_fallback_pending
+                    or finish_reason == "fallback_to_ar"
+                ),
+                fallback_reason=state.ar_fallback_reason,
+                finish_reason=finish_reason,
+                values_tok_s=values,
+            )
+        except Exception:
+            logger.debug("native MTP profile observe failed", exc_info=True)
+
     def _seed_native_mtp_from_prefill(
         self,
         request: MLLMBatchRequest,
@@ -14127,8 +14169,55 @@ class MLLMBatchGenerator:
         # perfectly healthy MTP.
         mx.eval(next_tok)
         _seed_ar_ms = (time.perf_counter() - _seed_t0) * 1000.0
+        from .native_mtp import native_mtp_effective_depth
+
+        depth, depth_source = native_mtp_effective_depth()
+        depth = max(1, min(3, depth))
+        profile_seed = "configured"
+        request_profile_key = None
+        # An explicit VMLX/VMLINUX_NATIVE_MTP_DEPTH env override is a user
+        # decision the session profile must not second-guess; the profile
+        # governs only advisory sources (default/tuning/bundle stamps).
+        depth_is_explicit_override = depth_source.startswith("VML")
+        if not depth_is_explicit_override and _native_mtp_env_flag(
+            True,
+            "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
+            "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        ):
+            # Under the adaptive policy the configured depth is only a
+            # ceiling: the session profile picks the starting point so a
+            # short/first request never pays a whole failed D2/D3
+            # experiment, and a profile that learned "AR wins" skips MTP
+            # activation entirely (with a bounded re-probe).
+            request_profile_key = native_mtp_profile_key(
+                temperature=float(getattr(request, "temperature", 0.0) or 0.0),
+                restored_prefix=bool(
+                    int(getattr(request, "_cached_tokens", 0) or 0) > 0
+                ),
+                prompt_tokens=(
+                    int(request.input_ids.shape[-1])
+                    if getattr(request, "input_ids", None) is not None
+                    else 0
+                ),
+            )
+            # Lazy fallback: some fixtures build the generator via __new__
+            # and never run __init__ (same class of construction the
+            # prefix-cache get_stats hardening covers).
+            store = getattr(self, "_native_mtp_profiles", None)
+            if store is None:
+                store = self._native_mtp_profiles = NativeMTPProfileStore()
+            depth, profile_seed = store.start_depth(
+                request_profile_key, configured_depth=depth
+            )
+            if depth <= 0:
+                logger.info(
+                    "MLLM native MTP skipped for request=%s: session profile "
+                    "learned AR wins for %s",
+                    request.request_id,
+                    request_profile_key,
+                )
+                return False
         mtp_cache = self.language_model.make_mtp_cache()
-        depth = _native_mtp_depth_for_request(request)
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
             request,
             hidden[:, -1:, :],
@@ -14152,7 +14241,9 @@ class MLLMBatchGenerator:
             restored_prefix=bool(
                 int(getattr(request, "_cached_tokens", 0) or 0) > 0
             ),
+            profile_key=request_profile_key,
         )
+        state.stats.profile_seed = profile_seed
         state.stats.seed_main_forwards += seed_main_forwards
         state.stats.mtp_forwards += len(drafts)
         if first_logprobs:
@@ -14165,9 +14256,10 @@ class MLLMBatchGenerator:
         state.queue.append((int(next_tok.tolist()[0]), next_lp, "init"))
         request._native_mtp_state = state
         logger.info(
-            "MLLM native MTP path activated for request=%s depth=%d",
+            "MLLM native MTP path activated for request=%s depth=%d seed=%s",
             request.request_id,
             depth,
+            profile_seed,
         )
         return True
 
@@ -14931,6 +15023,9 @@ class MLLMBatchGenerator:
                         final_depth=mtp_state.depth,
                         fallback_reason=mtp_state.ar_fallback_reason,
                     )
+                    self._observe_native_mtp_profile(
+                        mtp_state, "fallback_to_ar"
+                    )
                     logger.info(
                         "MLLM MTP[%s] fallback to AR after queue drain: %s",
                         batch.requests[0].request_id,
@@ -15074,6 +15169,9 @@ class MLLMBatchGenerator:
                         finish_reason=finish_reason,
                         final_depth=mtp_state_for_finish.depth,
                         fallback_reason=mtp_state_for_finish.ar_fallback_reason,
+                    )
+                    self._observe_native_mtp_profile(
+                        mtp_state_for_finish, finish_reason
                     )
                     try:
                         delattr(req, "_native_mtp_state")

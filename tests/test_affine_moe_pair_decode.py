@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import mlx.core as mx
 import mlx.nn as nn
 import pytest
@@ -91,3 +93,39 @@ def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
         assert output is None
     finally:
         delattr(switch, _CONFIG_ATTR)
+
+
+def test_qwen_full_affine_moe_precedes_pair_only_candidate(monkeypatch):
+    from vmlx_engine.metal import qwen4_affine_moe_decode as full_moe
+
+    switch = SimpleNamespace()
+    setattr(switch, full_moe._OK_ATTR, True)
+    expected = mx.ones((1, 1, 2560), dtype=mx.float16)
+    monkeypatch.setattr(full_moe, "_fused", lambda *_args: expected)
+
+    def pair_must_not_run(*_args):
+        raise AssertionError("gate/up-only fusion shadowed the full MoE kernel")
+
+    monkeypatch.setattr(full_moe, "affine_moe_pair_activation", pair_must_not_run)
+    x = mx.zeros((1, 1, 2560), dtype=mx.float16)
+    indices = mx.zeros((1, 1, 10), dtype=mx.uint32)
+    scores = mx.zeros((1, 1, 10), dtype=mx.float16)
+
+    output, used = full_moe.qwen4_affine_switchglu(
+        switch, x, indices, scores
+    )
+    assert used is True
+    assert output is expected
+
+
+def test_qwen_full_affine_moe_accepts_standard_and_legacy_env(monkeypatch):
+    from vmlx_engine.metal import qwen4_affine_moe_decode as full_moe
+
+    monkeypatch.delenv("VMLX_QWEN4_AFFINE_MOE", raising=False)
+    monkeypatch.setenv("VMLINUX_QWEN4_AFFINE_MOE", "1")
+    assert full_moe._enabled() is True
+    monkeypatch.setenv("VMLX_QWEN4_AFFINE_MOE", "0")
+    assert full_moe._enabled() is False
+    monkeypatch.setenv("VMLX_QWEN4_AFFINE_MOE", "1")
+    monkeypatch.setenv("VMLINUX_QWEN4_AFFINE_MOE", "0")
+    assert full_moe._enabled() is True

@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 import mlx.core as mx
 import mlx.nn as nn
 
 from vmlx_engine.metal.affine_moe_pair_decode import affine_moe_pair_activation
-
 
 logger = logging.getLogger(__name__)
 
@@ -126,19 +125,25 @@ _DOWN_SRC = f"""
     }}
 """
 
-_KERNELS: Optional[tuple[Any, Any]] = None
+_KERNELS: tuple[Any, Any] | None = None
 _STATUS: dict[str, Any] = {"installed": 0, "reason": None}
 
 
 def _enabled() -> bool:
     # The first live q4/g64 prototype is diagnostic-only until it demonstrates
     # an answer-preserving median improvement over MLX's selected-expert QMM.
-    value = os.environ.get("VMLINUX_QWEN4_AFFINE_MOE", "0").strip().lower()
+    value = os.environ.get(
+        "VMLX_QWEN4_AFFINE_MOE",
+        os.environ.get("VMLINUX_QWEN4_AFFINE_MOE", "0"),
+    ).strip().lower()
     return value not in {"0", "false", "off", "no"}
 
 
 def _exact_enabled() -> bool:
-    value = os.environ.get("VMLINUX_QWEN4_EXACT_GATE_UP", "0").strip().lower()
+    value = os.environ.get(
+        "VMLX_QWEN4_EXACT_GATE_UP",
+        os.environ.get("VMLINUX_QWEN4_EXACT_GATE_UP", "0"),
+    ).strip().lower()
     return value not in {"0", "false", "off", "no"}
 
 
@@ -292,6 +297,20 @@ def qwen4_affine_switchglu(
     scores: mx.array,
 ) -> tuple[mx.array, bool]:
     """Return the weighted routed output and whether the fused path owned it."""
+    full_fused_eligible = (
+        getattr(switch, _OK_ATTR, False)
+        and x.ndim in (2, 3)
+        and int(x.size) == int(x.shape[-1])
+        and int(x.shape[-1]) == _D
+        and int(indices.shape[-1]) == _K
+        and tuple(indices.shape[:-1]) == tuple(x.shape[:-1])
+        and x.dtype in (mx.float16, mx.bfloat16)
+    )
+    # When both diagnostic flags are active, the complete q4/g64 kernel owns
+    # its exact shape.  Falling into the generic pair hook first would retain
+    # stock down/reduction and silently defeat the larger measured win.
+    if full_fused_eligible:
+        return _fused(switch, x, indices, scores), True
     activated, pair_fused = affine_moe_pair_activation(switch, x, indices)
     if pair_fused:
         selected = switch.down_proj(activated, indices).squeeze(-2)
@@ -301,17 +320,10 @@ def qwen4_affine_switchglu(
     if not getattr(switch, _OK_ATTR, False):
         routed = switch(x, indices)
         return (routed * scores[..., None]).sum(axis=-2), False
-    if (
-        x.ndim not in (2, 3)
-        or int(x.size) != int(x.shape[-1])
-        or int(x.shape[-1]) != _D
-        or int(indices.shape[-1]) != _K
-        or tuple(indices.shape[:-1]) != tuple(x.shape[:-1])
-        or x.dtype not in (mx.float16, mx.bfloat16)
-    ):
+    if not full_fused_eligible:
         routed = switch(x, indices)
         return (routed * scores[..., None]).sum(axis=-2), False
-    return _fused(switch, x, indices, scores), True
+    raise AssertionError("unreachable Qwen4 affine MoE dispatch state")
 
 
 def _self_test(switch: Any) -> str | None:

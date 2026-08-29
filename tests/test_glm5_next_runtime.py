@@ -106,7 +106,7 @@ class TestCacheAndForward:
                          glm5.Glm5KDACache, glm5.Glm5MLACache,
                          glm5.Glm5KDACache]
         assert len(cache[0].cache) == 4  # conv_q, conv_k, conv_v, S
-        assert len(cache[3].cache) == 3  # keys, values, indexer packed
+        assert len(cache[3].cache) == 4  # keys, values, packed, DSA pool keys
 
     def test_prefill_and_decode_shapes(self, tiny_model):
         cache = tiny_model.make_cache()
@@ -117,6 +117,18 @@ class TestCacheAndForward:
         # KDA state is fp32 and fixed-shape after decode
         assert cache[0].cache[3].dtype == mx.float32
         assert cache[0].cache[3].shape == (1, 4, 16, 16)
+
+    def test_mla_pool_cache_trim_keeps_only_complete_pools(self, glm5):
+        cache = glm5.Glm5MLACache(kpool=4)
+        cache.cache[glm5.MLA_KEYS] = mx.zeros((1, 2, 10, 8))
+        cache.cache[glm5.MLA_VALUES] = mx.zeros((1, 2, 10, 8))
+        cache.cache[glm5.MLA_PACKED] = mx.zeros((1, 10, 16))
+        cache.cache[glm5.MLA_POOL_KEYS] = mx.zeros((1, 2, 8))
+
+        assert cache.trim(3) == 3
+        assert cache.offset == 7
+        assert cache.cache[glm5.MLA_PACKED].shape[1] == 7
+        assert cache.cache[glm5.MLA_POOL_KEYS].shape[1] == 1
 
     def test_chunked_prefill_bit_exact_vs_split_recurrent(self, tiny_model):
         """T=100 goes through kda_chunked; 50+50 goes through kda_recurrent
@@ -255,6 +267,7 @@ class TestSparseDSA:
                 layer.self_attn.indexer.topk = 4096
         c2 = sparse.make_cache()
         sparse(mx.array([toks]), cache=c2)
+        assert c2[3].cache[3].shape[1] == len(toks) // 4
         out_s = sparse(mx.array([[7]]), cache=c2)
         mx.eval(out_d, out_s)
         d = float(mx.abs(out_d[0, -1] - out_s[0, -1]).max())
@@ -304,7 +317,14 @@ class TestSparseDSA:
         # position: one-shot vs incremental share `packed` by construction,
         # so equality here proves accumulation produced the same history.
         idx_a, val_a = attn.indexer.topk_indices(x_last, mx.zeros((1, 1, 32)), packed, q_pos)
-        idx_b, val_b = attn.indexer.topk_indices(x_last, mx.zeros((1, 1, 32)), packed, q_pos)
+        pool_keys = cache[3].cache[3]
+        idx_b, val_b = attn.indexer.topk_indices(
+            x_last,
+            mx.zeros((1, 1, 32)),
+            packed,
+            q_pos,
+            pool_keys=pool_keys,
+        )
         sel_a = sorted(int(i) for i, v in zip(idx_a[0, 0].tolist(), val_a[0, 0].tolist()) if v)
         sel_b = sorted(int(i) for i, v in zip(idx_b[0, 0].tolist(), val_b[0, 0].tolist()) if v)
         assert sel_a == sel_b and len(sel_a) > 0

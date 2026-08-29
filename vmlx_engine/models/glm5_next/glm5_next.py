@@ -82,6 +82,7 @@ KDA_STATE = 3
 MLA_KEYS = 0
 MLA_VALUES = 1
 MLA_PACKED = 2  # indexer packed history: [B, T, head_dim(k) + head_dim(gate)]
+MLA_POOL_KEYS = 3  # completed DSA k-pools: [B, floor(T / kpool), head_dim]
 
 
 class Glm5KDACache(ArraysCache):
@@ -119,12 +120,15 @@ class Glm5KDACache(ArraysCache):
 
 class Glm5MLACache(ArraysCache):
     """Per-MLA-layer cache: expanded K/V plus the DSA indexer's packed
-    per-token history (index key + kpool gate scores). ArraysCache-shaped so
-    the engine's generic hybrid handling recognizes it (prefix caching is
-    fail-closed for this family regardless)."""
+    per-token history (index key + kpool gate scores) and completed compressed
+    pool keys. ArraysCache-shaped so the engine's generic hybrid handling
+    recognizes it (prefix caching is fail-closed for this family regardless)."""
 
-    def __init__(self):
-        super().__init__(3)
+    def __init__(self, kpool: int = 4):
+        super().__init__(4)
+        if int(kpool) <= 0:
+            raise ValueError("GLM DSA kpool must be positive")
+        self.kpool = int(kpool)
 
     @property
     def offset(self) -> int:
@@ -145,6 +149,13 @@ class Glm5MLACache(ArraysCache):
         self.cache[MLA_PACKED] = packed
         return packed
 
+    def update_pool_keys(self, pool_keys: mx.array) -> mx.array:
+        existing = self.cache[MLA_POOL_KEYS]
+        if existing is not None:
+            pool_keys = mx.concatenate([existing, pool_keys], axis=1)
+        self.cache[MLA_POOL_KEYS] = pool_keys
+        return pool_keys
+
     def is_trimmable(self) -> bool:
         return True
 
@@ -157,6 +168,14 @@ class Glm5MLACache(ArraysCache):
             self.cache[MLA_KEYS] = self.cache[MLA_KEYS][..., :keep, :]
             self.cache[MLA_VALUES] = self.cache[MLA_VALUES][..., :keep, :]
             self.cache[MLA_PACKED] = self.cache[MLA_PACKED][:, :keep, :]
+            if self.cache[MLA_POOL_KEYS] is not None:
+                # A compressed pool is valid only when all of its raw tokens
+                # remain.  A future append recomputes the newly completed pool
+                # from MLA_PACKED after speculative rollback.
+                keep_pools = keep // int(self.kpool)
+                self.cache[MLA_POOL_KEYS] = self.cache[MLA_POOL_KEYS][
+                    :, :keep_pools, :
+                ]
         return n
 
 
@@ -497,12 +516,53 @@ class Glm5NextIndexer(nn.Module):
         gate = x.astype(mx.float32) @ self.index_kpool_compress_gate.astype(mx.float32).T
         return mx.concatenate([k, gate], axis=-1)
 
+    def compress_pool_keys(self, packed: mx.array) -> mx.array:
+        """Compress one or more complete raw k-pools exactly once."""
+
+        B, T, width = packed.shape
+        if T % self.kpool:
+            raise ValueError("DSA pool compression requires complete pools")
+        if width != 2 * self.head_dim:
+            raise ValueError("DSA packed-state width differs from indexer contract")
+        n_pools = T // self.kpool
+        if n_pools == 0:
+            return mx.zeros((B, 0, self.head_dim), dtype=mx.float32)
+        keys, gates = mx.split(
+            packed.astype(mx.float32), [self.head_dim], axis=-1
+        )
+        keys = keys.reshape(B, n_pools, self.kpool, self.head_dim)
+        gates = gates.reshape(B, n_pools, self.kpool, self.head_dim)
+        logits = gates + self.index_kpool_compress_ape.astype(mx.float32)[
+            None, None
+        ]
+        return mx.sum(mx.softmax(logits, axis=2) * keys, axis=2)
+
+    def update_pool_cache(
+        self,
+        cache: Glm5MLACache,
+        packed: mx.array,
+    ) -> mx.array | None:
+        """Append only newly completed DSA pools to the typed MLA cache."""
+
+        complete = int(packed.shape[1]) // self.kpool
+        existing = cache.cache[MLA_POOL_KEYS]
+        cached = 0 if existing is None else int(existing.shape[1])
+        if cached > complete:
+            raise ValueError("DSA pool cache is ahead of packed token history")
+        if cached < complete:
+            start = cached * self.kpool
+            end = complete * self.kpool
+            new_keys = self.compress_pool_keys(packed[:, start:end, :])
+            existing = cache.update_pool_keys(new_keys)
+        return existing
+
     def topk_indices(
         self,
         x: mx.array,
         q_resid: mx.array,
         packed: mx.array,
         q_positions: mx.array,
+        pool_keys: mx.array | None = None,
     ) -> tuple[mx.array, mx.array]:
         """Return (indices [B, S, W], valid [B, S, W]) raw token selections."""
         B, S = x.shape[:2]
@@ -510,18 +570,21 @@ class Glm5NextIndexer(nn.Module):
         P = self.kpool
         n_pools = T // P  # complete pools only; the tail covers the remainder
 
-        keys, gates = mx.split(packed.astype(mx.float32), [self.head_dim], axis=-1)
-
         q = self.wq_b(q_resid).reshape(B, S, self.n_heads, self.head_dim).astype(mx.float32)
         head_w = (self.weights_proj(x).astype(mx.float32)
                   * (self.n_heads ** -0.5))                    # [B, S, H]
 
         if n_pools > 0:
-            gk = keys[:, : n_pools * P].reshape(B, n_pools, P, self.head_dim)
-            gg = gates[:, : n_pools * P].reshape(B, n_pools, P, self.head_dim)
-            logits = gg + self.index_kpool_compress_ape.astype(mx.float32)[None, None]
-            probs = mx.softmax(logits, axis=2)
-            pool_keys = mx.sum(probs * gk, axis=2)             # [B, n_pools, D]
+            if pool_keys is None:
+                pool_keys = self.compress_pool_keys(
+                    packed[:, : n_pools * P, :]
+                )
+            elif tuple(pool_keys.shape) != (B, n_pools, self.head_dim):
+                raise ValueError(
+                    "DSA cached pool-key shape differs from packed history: "
+                    f"cached={tuple(pool_keys.shape)} "
+                    f"expected={(B, n_pools, self.head_dim)}"
+                )
 
             # scores per idx head then head-weighted sum: [B, S, n_pools]
             scores = mx.einsum("bshd,bpd->bshp", q, pool_keys)
@@ -620,7 +683,18 @@ class MLAAttention(nn.Module):
                     "glm5_next sparse DSA path currently supports batch "
                     "size 1 (single-active serving lane)")
             q_positions = offset + mx.arange(T)
-            idx, idx_valid = self.indexer.topk_indices(x, q_resid, packed, q_positions)
+            pool_keys = (
+                self.indexer.update_pool_cache(cache, packed)
+                if cache is not None
+                else None
+            )
+            idx, idx_valid = self.indexer.topk_indices(
+                x,
+                q_resid,
+                packed,
+                q_positions,
+                pool_keys=pool_keys,
+            )
             if T == 1:
                 # Decode: gather selected K/V rows, dense SDPA over them.
                 flat = idx[0, 0]
@@ -901,7 +975,11 @@ class Model(nn.Module):
         return (logits, hidden) if return_hidden else logits
 
     def make_mtp_cache(self):
-        return [Glm5MLACache()] if hasattr(self, "mtp") else []
+        return (
+            [Glm5MLACache(self.args.index_kpool)]
+            if hasattr(self, "mtp")
+            else []
+        )
 
     def prepare_acceleration(self) -> dict[str, int]:
         """Install exact launch-reduction groups after checkpoint hydration."""
@@ -947,7 +1025,7 @@ class Model(nn.Module):
             if layer.is_linear:
                 caches.append(Glm5KDACache())
             else:
-                caches.append(Glm5MLACache())
+                caches.append(Glm5MLACache(self.args.index_kpool))
         return caches
 
     def sanitize(self, weights: dict) -> dict:

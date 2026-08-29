@@ -2375,7 +2375,17 @@ class TestModelConfigComprehensiveChecks:
             "reasoning."
         )
 
-    def test_qwen4_exp_embedded_stamp_controls_bundle_parsers(self, registry, tmp_path):
+    def test_qwen4_exp_stale_hermes_stamp_is_neutralized_to_family_qwen_parser(
+        self, registry, tmp_path
+    ):
+        # Qwen4Exp bundles ship the Qwen function/parameter template, but
+        # older converter stamps wrote tool_parser="hermes" (JSON-only).
+        # Live required-mode proof on Flash-Next JANG_1L: sampled turns that
+        # followed the template's XML dialect failed closed with
+        # tool_calls_required. The registry must neutralize the stale hermes
+        # stamp so the family "qwen" parser (which accepts both the hermes
+        # JSON body and every XML variant) wins. Other stamped fields keep
+        # their normal override behavior.
         import json
 
         (tmp_path / "config.json").write_text(
@@ -2408,10 +2418,71 @@ class TestModelConfigComprehensiveChecks:
         config = registry.lookup(str(tmp_path))
 
         assert config.family_name == "qwen4_exp"
-        assert config.tool_parser == "hermes"
+        assert config.tool_parser == "qwen", (
+            "A stale hermes stamp on a qwen4_exp bundle must not displace the "
+            "family qwen parser: hermes only parses JSON bodies, while the "
+            "bundle template teaches <function=...><parameter=...> XML."
+        )
         assert config.reasoning_parser == "qwen3"
         assert config.supports_thinking is True
         assert config.is_mllm is True
+
+    def test_qwen4_exp_non_hermes_tool_parser_stamp_still_wins(
+        self, registry, tmp_path
+    ):
+        # The neutralization is scoped to the known-wrong hermes stamp only.
+        # An explicit different parser stamp keeps normal converter-wins
+        # override semantics.
+        import json
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen4_exp",
+                    "text_config": {"model_type": "qwen4_exp_text"},
+                    "vision_config": {"model_type": "qwen4_exp"},
+                    "jang_config": {
+                        "format": "jang_v2",
+                        "mtp": {"mtp_mode": "none"},
+                        "capabilities": {
+                            "tool_parser": "xml_function",
+                            "reasoning_parser": "qwen3",
+                            "supports_thinking": True,
+                            "has_vision": True,
+                            "has_video": True,
+                            "has_audio": False,
+                        },
+                    },
+                }
+            )
+        )
+
+        registry.clear_cache()
+        config = registry.lookup(str(tmp_path))
+
+        assert config.family_name == "qwen4_exp"
+        assert config.tool_parser == "xml_function"
+
+    def test_qwen4_exp_unstamped_bundle_defaults_to_family_qwen_parser(
+        self, registry, tmp_path
+    ):
+        import json
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen4_exp",
+                    "text_config": {"model_type": "qwen4_exp_text"},
+                    "vision_config": {"model_type": "qwen4_exp"},
+                }
+            )
+        )
+
+        registry.clear_cache()
+        config = registry.lookup(str(tmp_path))
+
+        assert config.family_name == "qwen4_exp"
+        assert config.tool_parser == "qwen"
 
     def test_mimo_v2_jang_stamp_rejects_stale_non_xml_tool_parser_claim(self, registry, tmp_path):
         import json

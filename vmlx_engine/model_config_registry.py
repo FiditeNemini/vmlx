@@ -821,6 +821,17 @@ class ModelConfigRegistry:
                 updates["supports_thinking"] = False
             elif isinstance(sth, bool):
                 updates["supports_thinking"] = sth
+            if base.family_name == "qwen4_exp" and tp == "hermes":
+                # Qwen4Exp ships the Qwen function/parameter chat template
+                # (<function=name><parameter=arg>), but older converter stamps
+                # wrote tool_parser="hermes", which only parses JSON bodies.
+                # Live required-mode proof on Flash-Next JANG_1L: sampled turns
+                # that follow the template's XML dialect failed closed with
+                # tool_calls_required (3/14 at temp 0.7). The registry's
+                # "qwen" parser accepts both the hermes JSON body and every
+                # XML variant, so neutralize the stale stamp and let the
+                # family parser win.
+                tp = None
             if base.family_name == "openpangu_v2":
                 # The converter stamps the coarse cache_type="hybrid", but the
                 # vendored runtime's cache contract is kv/openpangu_v2_composite

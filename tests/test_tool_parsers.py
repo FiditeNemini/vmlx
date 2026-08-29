@@ -682,6 +682,39 @@ class TestQwenToolParser:
         # the raw parameter XML must NOT leak into content
         assert result.content is None or "<parameter" not in result.content
 
+    def test_mixed_dialect_equals_function_attribute_parameter(self, parser):
+        """Exact live-observed Flash-Next JANG_1L failure shape (temp 0.7,
+        tool_choice=required, 2026-08-28): canonical <function=name> mixed
+        with attribute <parameter name="...">, multiline value, trailing
+        newlines. Under the stale hermes stamp this failed closed with
+        tool_calls_required; the qwen parser must accept the mix.
+        """
+        text = (
+            "<tool_call>\n<function=get_weather>\n"
+            '<parameter name="city">Paris\n</parameter>\n'
+            "</function>\n</tool_call>"
+        )
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Paris"
+        assert result.content is None or "<parameter" not in result.content
+
+    def test_hermes_json_body_parses_under_qwen_parser(self, parser):
+        """The qwen parser must remain a superset of hermes for the
+        <tool_call>{json}</tool_call> body: Flash-Next emits the JSON body on
+        most sampled turns, so switching the family off the stale hermes
+        stamp must not break those."""
+        text = '<tool_call>{"name": "get_weather", "arguments": {"city": "Tokyo"}}</tool_call>'
+        result = parser.extract_tool_calls(text)
+
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0]["name"] == "get_weather"
+        assert json.loads(result.tool_calls[0]["arguments"])["city"] == "Tokyo"
+
     def test_canonical_equals_still_parses(self, parser):
         """Regression guard: canonical equals form still parses after the
         attribute-variant tolerance was added."""

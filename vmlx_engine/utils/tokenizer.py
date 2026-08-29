@@ -80,6 +80,36 @@ def _glm5_next_model_config_for_load(config: dict) -> tuple[dict, int]:
     return override, len(aliases)
 
 
+def _warm_glm5_next_first_forward(model) -> None:
+    """Realize GLM's first Metal forward before the server reports ready.
+
+    ``mlx_lm.load(..., lazy=False)`` materializes every stored parameter but it
+    does not execute the model.  On the 95 GB GLM-5.3 affine bundle, the first
+    real prompt therefore paid a measured ~24 second one-time Metal/residency
+    cost before ordinary prefill began (the same-PID second request did not).
+
+    This is a request-independent kernel/residency warmup, not a generation:
+    no tokenizer text is rendered, no token is sampled, no output is retained,
+    and all KDA/MLA state lives in a disposable native cache.  Running it at the
+    public load boundary also keeps readiness honest -- the first user turn no
+    longer owns work required to make the loaded model executable.
+    """
+    import mlx.core as mx
+
+    make_cache = getattr(model, "make_cache", None)
+    if not callable(make_cache):
+        raise RuntimeError(
+            "GLM-5.3 runtime has no native cache factory for startup warmup"
+        )
+    warmup_cache = make_cache()
+    warmup_input = mx.array([[0]], dtype=mx.int32)
+    output = model(warmup_input, cache=warmup_cache)
+    mx.eval(output)
+    if hasattr(mx, "synchronize"):
+        mx.synchronize()
+    del output, warmup_input, warmup_cache
+
+
 def _chat_template_is_unresolved_include(template) -> bool:
     """True when a tokenizer template is only a sidecar include directive.
 
@@ -1135,6 +1165,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
     # draft head.  The finalizer below then proves the head survived model
     # construction instead of silently serving the MTP bundle as plain AR.
     _glm5_next_native_mtp_expected = False
+    _glm5_next_runtime_expected = False
     _glm5_next_model_config_override = None
 
     # Nanbeige 4.2 is a looped transformer: 22 shared module layers execute
@@ -1172,6 +1203,12 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
             model_path=local_model_path,
             log=logger,
         )
+        if _glm5_next_runtime_expected:
+            _warm_glm5_next_first_forward(model)
+            logger.info(
+                "GLM-5.3 startup warmup complete -- model is Metal-resident "
+                "before readiness"
+            )
         return model, tokenizer
 
     # ── Architecture-specific routing BEFORE the JANG gate ──
@@ -1193,6 +1230,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
             _mt_arch = _cfg_arch.get("model_type")
             _tc_mt_arch = (_cfg_arch.get("text_config") or {}).get("model_type")
             if _mt_arch == "glm5_next" or _tc_mt_arch == "glm5_next_text":
+                _glm5_next_runtime_expected = True
                 # GLM JANG-affine bundles intentionally use mlx_lm's generic
                 # hydration path after registering the vendored architecture.
                 # Their JANG metadata is embedded as config["jang_config"]

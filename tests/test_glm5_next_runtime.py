@@ -441,6 +441,11 @@ class TestPublicLoaderMtpHandoff:
         monkeypatch.setattr(nanbeige_runtime, "ensure_nanbeige_runtime_registered", lambda _path: None)
         monkeypatch.setattr(nanbeige_runtime, "validate_nanbeige_loop_cache_contract", lambda *_a: None)
         monkeypatch.setattr(mlx_memory, "maybe_harmonize_quant_metadata_dtypes", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            tokenizer,
+            "_warm_glm5_next_first_forward",
+            lambda _model: events.append("warm"),
+        )
         monkeypatch.setattr(glm_register, "register_glm5_next_runtime", lambda: events.append("register") or True)
         monkeypatch.setattr(glm_register, "glm5_next_runtime_available", lambda: True)
         monkeypatch.setattr(
@@ -477,7 +482,7 @@ class TestPublicLoaderMtpHandoff:
 
         tokenizer.load_model_with_fallback(str(tmp_path), skip_turboquant=True)
 
-        assert events == ["register", "activate", "load"]
+        assert events == ["register", "activate", "load", "warm"]
         assert load_kwargs["model_config"]["quantization"][
             "mtp.mlp.switch_mlp.gate_proj"
         ] == {"group_size": 64, "bits": 2}
@@ -513,7 +518,26 @@ class TestPublicLoaderMtpHandoff:
         )
 
         assert loaded is model
-        assert events == ["register", "activate", "load"]
+        assert events == ["register", "activate", "load", "warm"]
+
+    def test_glm_startup_warmup_uses_disposable_native_cache(self):
+        from vmlx_engine.utils.tokenizer import _warm_glm5_next_first_forward
+
+        events = []
+        cache = [object()]
+
+        class _Model:
+            def make_cache(self):
+                events.append("cache")
+                return cache
+
+            def __call__(self, inputs, *, cache):
+                events.append(("forward", inputs.shape, cache))
+                return mx.array([[[1.0]]])
+
+        _warm_glm5_next_first_forward(_Model())
+
+        assert events == ["cache", ("forward", (1, 1), cache)]
 
 
 class TestGlmHealthTruth:

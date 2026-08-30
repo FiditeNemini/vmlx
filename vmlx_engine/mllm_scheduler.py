@@ -189,6 +189,20 @@ from .utils.cache_extent import cache_offset, logical_truncate_target
 
 logger = logging.getLogger(__name__)
 
+
+def _finalize_detokenizer_delta(detokenizer) -> str:
+    """Finalize a streaming detokenizer and return its newly readable tail.
+
+    BPE detokenizers may retain a trailing byte sequence until ``finalize()``.
+    The complete ``text`` property includes that tail afterwards, but streaming
+    consumers only receive ``RequestOutput.new_text``. Reading
+    ``last_segment`` after finalization advances the same incremental offset
+    used for ordinary token deltas and prevents the final character from being
+    present only on the non-streaming surface.
+    """
+    detokenizer.finalize()
+    return detokenizer.last_segment
+
 _PROMOTION_ENABLE_VALUES = {"1", "true", "TRUE", "yes", "YES", "on", "ON"}
 _PROMOTION_DISABLE_VALUES = {"0", "false", "FALSE", "no", "NO", "off", "OFF"}
 
@@ -3181,7 +3195,9 @@ class MLLMScheduler:
 
                 output.finished = True
                 output.finish_reason = finish_reason
-                detok.finalize()
+                final_text_delta = _finalize_detokenizer_delta(detok)
+                if final_text_delta:
+                    output.new_text += final_text_delta
                 output.output_text = detok.text
                 request.output_text = output.output_text
                 request.finish_reason = finish_reason
@@ -3405,7 +3421,9 @@ class MLLMScheduler:
                 finished_ids.add(request_id)
 
                 # Finalize detokenizer and use its complete text
-                detok.finalize()
+                final_text_delta = _finalize_detokenizer_delta(detok)
+                if string_stop_truncate < 0 and final_text_delta:
+                    output.new_text += final_text_delta
                 if string_stop_truncate >= 0:
                     output.output_text = detok.text[:string_stop_truncate]
                 else:

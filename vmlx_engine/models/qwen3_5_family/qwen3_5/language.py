@@ -14,6 +14,10 @@ from vmlx_engine.metal.gdn_conv_decode import (
     fused_qwen35_gdn_conv_requested,
     qwen35_gdn_conv_decode,
 )
+from vmlx_engine.metal.qwen35_gdn_gate_terms import (
+    fused_qwen35_gdn_gates_requested,
+    qwen35_gated_delta_decode,
+)
 
 from ..base import (
     LanguageModelOutput,
@@ -347,6 +351,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
         self.input_group = None
         self._fused_gdn_conv = fused_qwen35_gdn_conv_requested()
+        self._fused_gdn_gates = fused_qwen35_gdn_gates_requested()
 
     def prepare_runtime(self) -> bool:
         """Group QKV/Z/B/A packed rows after checkpoint hydration."""
@@ -462,18 +467,35 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
         k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
 
-        out, state = gated_delta_update(
-            q,
-            k,
-            v,
-            a,
-            b,
-            self.A_log,
-            self.dt_bias,
-            state,
-            mask,
-            use_kernel=not self.training,
-        )
+        fused_update = None
+        if self._fused_gdn_gates and not self.training:
+            fused_update = qwen35_gated_delta_decode(
+                q,
+                k,
+                v,
+                a,
+                b,
+                self.A_log,
+                self.dt_bias,
+                state,
+                mask,
+                enabled=True,
+            )
+        if fused_update is not None:
+            out, state = fused_update
+        else:
+            out, state = gated_delta_update(
+                q,
+                k,
+                v,
+                a,
+                b,
+                self.A_log,
+                self.dt_bias,
+                state,
+                mask,
+                use_kernel=not self.training,
+            )
 
         if cache is not None:
             cache[1] = state

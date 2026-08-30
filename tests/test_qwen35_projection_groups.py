@@ -157,6 +157,58 @@ def test_qwen35_gdn_conv_fusion_refuses_prefill():
     ) is None
 
 
+def test_qwen35_joint_gdn_gate_terms_match_stock_update_exactly():
+    from mlx_lm.models.gated_delta import gated_delta_update
+
+    from vmlx_engine.metal.qwen35_gdn_gate_terms import (
+        qwen35_gated_delta_decode,
+        qwen35_gdn_gate_terms_status,
+    )
+
+    key_heads = 2
+    value_heads = 4
+    key_dim = value_dim = 32
+    q = mx.random.normal((1, 1, key_heads, key_dim)).astype(mx.bfloat16)
+    k = mx.random.normal((1, 1, key_heads, key_dim)).astype(mx.bfloat16)
+    v = mx.random.normal((1, 1, value_heads, value_dim)).astype(mx.bfloat16)
+    a = mx.random.normal((1, 1, value_heads)).astype(mx.bfloat16)
+    b = mx.random.normal((1, 1, value_heads)).astype(mx.bfloat16)
+    A_log = mx.random.normal((value_heads,)).astype(mx.float32)
+    dt_bias = mx.random.normal((value_heads,)).astype(mx.float32)
+    state = mx.random.normal(
+        (1, value_heads, value_dim, key_dim)
+    ).astype(mx.float32)
+
+    reference = gated_delta_update(
+        q, k, v, a, b, A_log, dt_bias, state, None, use_kernel=True
+    )
+    candidate = qwen35_gated_delta_decode(
+        q, k, v, a, b, A_log, dt_bias, state, None, enabled=True
+    )
+    assert candidate is not None
+    _assert_exact(reference, candidate)
+    assert qwen35_gdn_gate_terms_status()["observed_calls"] == 1
+
+
+def test_qwen35_joint_gdn_gate_terms_refuse_prefill():
+    from vmlx_engine.metal.qwen35_gdn_gate_terms import (
+        qwen35_gated_delta_decode,
+    )
+
+    assert qwen35_gated_delta_decode(
+        mx.zeros((1, 2, 2, 16), dtype=mx.bfloat16),
+        mx.zeros((1, 2, 2, 16), dtype=mx.bfloat16),
+        mx.zeros((1, 2, 4, 16), dtype=mx.bfloat16),
+        mx.zeros((1, 2, 4), dtype=mx.bfloat16),
+        mx.zeros((1, 2, 4), dtype=mx.bfloat16),
+        mx.zeros((4,), dtype=mx.float32),
+        mx.zeros((4,), dtype=mx.float32),
+        None,
+        None,
+        enabled=True,
+    ) is None
+
+
 def test_qwen35_projection_preparation_walks_backbone_and_draft_siblings():
     language = _language_module()
     gdn_type = language.Qwen3_5GatedDeltaNet
@@ -200,6 +252,7 @@ def test_qwen35_vlm_mtp_wrappers_consume_prepared_projection_groups():
 
     assert 'getattr(self, "_project_inputs", None)' in gdn_source
     assert "qwen35_gdn_conv_decode" in gdn_source
+    assert "qwen35_gated_delta_decode" in gdn_source
     assert "lengths is None" in gdn_source
 
 
@@ -211,6 +264,7 @@ def test_qwen35_text_mtp_wrapper_consumes_exact_decode_conv_candidate():
     gdn_source = inspect.getsource(qwen35_model._patch_gated_delta_net)
 
     assert "qwen35_gdn_conv_decode" in gdn_source
+    assert "qwen35_gated_delta_decode" in gdn_source
     assert "lengths is None" in gdn_source
 
 

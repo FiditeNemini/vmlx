@@ -57,6 +57,10 @@ from vmlx_engine.metal.gdn_conv_decode import (
     fused_qwen35_gdn_conv_requested,
     qwen35_gdn_conv_decode,
 )
+from vmlx_engine.metal.qwen35_gdn_gate_terms import (
+    fused_qwen35_gdn_gates_requested,
+    qwen35_gated_delta_decode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -301,18 +305,38 @@ def _patch_gated_delta_net(q35: Any) -> None:
         q = (inv_scale**2) * mx.fast.rms_norm(q, None, 1e-6)
         k = inv_scale * mx.fast.rms_norm(k, None, 1e-6)
 
-        out, new_ssm_state = gated_delta_update(
-            q,
-            k,
-            v,
-            a_chunk,
-            b_chunk,
-            self.A_log,
-            self.dt_bias,
-            ssm_state,
-            ssm_mask,
-            use_kernel=not self.training,
-        )
+        fused_gates = getattr(self, "_fused_gdn_gates", None)
+        if fused_gates is None:
+            fused_gates = fused_qwen35_gdn_gates_requested()
+        fused_update = None
+        if fused_gates and not self.training:
+            fused_update = qwen35_gated_delta_decode(
+                q,
+                k,
+                v,
+                a_chunk,
+                b_chunk,
+                self.A_log,
+                self.dt_bias,
+                ssm_state,
+                ssm_mask,
+                enabled=True,
+            )
+        if fused_update is not None:
+            out, new_ssm_state = fused_update
+        else:
+            out, new_ssm_state = gated_delta_update(
+                q,
+                k,
+                v,
+                a_chunk,
+                b_chunk,
+                self.A_log,
+                self.dt_bias,
+                ssm_state,
+                ssm_mask,
+                use_kernel=not self.training,
+            )
         return out, new_conv_state, new_ssm_state
 
     def __call__(

@@ -152,6 +152,14 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 env=("VMLX_QWEN35_FUSED_GDN_CONV",),
             ),
             _feature(
+                "gdn_gate_terms",
+                label="joint GDN beta and decay preparation",
+                kind="mlx_compiled_graph",
+                scopes=("ar_decode", "mtp_decode"),
+                default=False,
+                env=("VMLX_QWEN35_FUSED_GDN_GATES",),
+            ),
+            _feature(
                 "mtp_verify_qmm",
                 label="four-row native-MTP verifier QMM",
                 kind="metal_kernel",
@@ -186,6 +194,14 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 scopes=("ar_decode", "mtp_decode"),
                 default=False,
                 env=("VMLX_QWEN35_FUSED_GDN_CONV",),
+            ),
+            _feature(
+                "gdn_gate_terms",
+                label="joint GDN beta and decay preparation",
+                kind="mlx_compiled_graph",
+                scopes=("ar_decode", "mtp_decode"),
+                default=False,
+                env=("VMLX_QWEN35_FUSED_GDN_GATES",),
             ),
             _feature(
                 "mtp_verify_qmm",

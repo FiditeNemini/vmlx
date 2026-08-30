@@ -97,6 +97,33 @@ class TestRegistration:
 
 
 class TestCacheAndForward:
+    def test_glm_prompt_history_folds_through_head_only_prime(self, glm5):
+        from vmlx_engine.native_mtp_prompt_priming import (
+            prepare_prompt,
+            prime_stats,
+        )
+
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        model = glm5.Model(args)
+        model.mtp = glm5.Glm5NextMTP(args)
+        cache = model.make_cache()
+        mx.eval(model.parameters())
+        assert not prepare_prompt(
+            model,
+            request_id="glm-tiny-prime",
+            prompt_tokens=[1, 2, 3],
+            cached_tokens=0,
+            prefix_cache=None,
+        )
+
+        logits = model(mx.array([[1, 2, 3]]), cache=cache)
+        mx.eval(logits)
+        assert prime_stats(model) == {
+            "active": True,
+            "folded_pairs": 2,
+            "window_exceeded": False,
+        }
+
     def test_cache_layout(self, tiny_model, glm5):
         cache = tiny_model.make_cache()
         kinds = [type(c) for c in cache]

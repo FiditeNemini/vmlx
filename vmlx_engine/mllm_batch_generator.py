@@ -14162,11 +14162,24 @@ class MLLMBatchGenerator:
         # proven independently.
         model_type = str(getattr(self, "_model_type", "") or "").lower()
         if model_type not in {
+            "glm5_next",
+            "glm5_next_text",
             "qwen4_exp",
             "qwen3_5",
             "qwen3_5_text",
             "qwen3_5_vl",
         }:
+            drop_context(self.language_model)
+            return False
+        if model_type.startswith("glm5_next") and not _native_mtp_env_flag(
+            False,
+            "VMLINUX_GLM5_MTP_PROMPT_PRIMING",
+            "VMLX_GLM5_MTP_PROMPT_PRIMING",
+        ):
+            # GLM's layer-45 head consumes the same pre-norm-hidden plus
+            # next-token contract, but its one-layer MLA/MoE prefill cost and
+            # acceptance benefit require a family-owned wall-time A/B before
+            # this becomes a default.
             drop_context(self.language_model)
             return False
         if model_type.startswith("qwen3_5") and not _native_mtp_env_flag(

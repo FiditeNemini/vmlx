@@ -1276,6 +1276,14 @@ class Model(nn.Module):
             n_confirmed=n_confirmed,
             return_pre_norm=True,
         )
+        if not return_hidden:
+            from vmlx_engine.native_mtp_prompt_priming import (
+                capture_prefill,
+                capture_requested,
+            )
+
+            if capture_requested(self):
+                capture_prefill(self, inputs, hidden, cache)
         if not return_logits:
             return hidden
         logits = self.lm_head(self.model.norm(hidden))
@@ -1296,6 +1304,16 @@ class Model(nn.Module):
         )
         logits = self.lm_head(self.mtp.shared_head.norm(hidden))
         return (logits, hidden) if return_hidden else logits
+
+    def mtp_prime(self, hidden_states, next_token_ids, mtp_cache):
+        """Advance GLM's native MLA/MoE head cache without a vocabulary head."""
+
+        return self.mtp(
+            hidden_states,
+            next_token_ids,
+            self.model.embed_tokens,
+            mtp_cache[0] if mtp_cache else None,
+        )
 
     def make_mtp_cache(self):
         return (

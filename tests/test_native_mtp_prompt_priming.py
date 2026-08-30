@@ -119,6 +119,63 @@ def test_scheduler_arms_dense_qwen35_only_with_measured_opt_in(monkeypatch):
     assert not capture_requested(generator.language_model)
 
 
+def test_scheduler_arms_glm_only_with_family_opt_in(monkeypatch):
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.language_model = _Host()
+    generator.block_aware_cache = None
+    generator._native_mtp_disabled_reason_for_request = lambda _request: None
+    generator._model_type = "glm5_next"
+    request = SimpleNamespace(
+        request_id="glm",
+        max_tokens=32,
+        _original_token_ids=[1, 2, 3],
+        _cached_tokens=0,
+        _cache_extra_keys=None,
+    )
+
+    assert not generator._prepare_native_mtp_prompt_priming(request)
+    assert not capture_requested(generator.language_model)
+
+    monkeypatch.setenv("VMLX_GLM5_MTP_PROMPT_PRIMING", "1")
+    assert not generator._prepare_native_mtp_prompt_priming(request)
+    assert capture_requested(generator.language_model)
+
+
+def test_prompt_fold_prefers_head_only_prime_boundary():
+    class _PrimeHost(_Host):
+        def __init__(self):
+            super().__init__()
+            self.prime_calls: list[list[int]] = []
+
+        def mtp_prime(self, hidden, tokens, cache):
+            del hidden
+            ids = [int(token) for token in tokens.reshape(-1).tolist()]
+            self.prime_calls.append(ids)
+            cache[0].append(len(ids))
+
+    host = _PrimeHost()
+    prepare_prompt(
+        host,
+        request_id="head-only",
+        prompt_tokens=[1, 2, 3],
+        cached_tokens=0,
+        prefix_cache=None,
+    )
+    backbone = [_Cache(offset=3)]
+    capture_prefill(
+        host,
+        mx.array([[1, 2, 3]]),
+        mx.zeros((1, 3, 2)),
+        backbone,
+    )
+    backbone[0].offset = 4
+    assert take_primed(host, backbone, mx.array([4])) is not None
+    assert host.prime_calls == [[2, 3], [4]]
+    assert host.calls == []
+
+
 def test_cold_prompt_is_folded_and_published_at_full_block_boundary():
     host = _Host()
     sidecar = _SidecarStore()

@@ -14198,6 +14198,7 @@ class MLLMBatchGenerator:
             depth, profile_seed = store.start_depth(
                 request_profile_key,
                 configured_depth=depth,
+                capability_ceiling=_native_mtp_depth_ceiling_for_request(request),
                 tuning_validated="vmlx_mtp_tuning" in depth_source,
             )
             if depth <= 0:

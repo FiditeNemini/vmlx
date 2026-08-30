@@ -99,6 +99,7 @@ class NativeMTPProfileStore:
         key: ProfileKey,
         *,
         configured_depth: int,
+        capability_ceiling: int = 3,
         tuning_validated: bool = False,
         now: Optional[float] = None,
     ) -> Tuple[int, str]:
@@ -117,7 +118,8 @@ class NativeMTPProfileStore:
         import time as _time
 
         now = _time.monotonic() if now is None else float(now)
-        ceiling = max(1, min(3, int(configured_depth or 1)))
+        configured = max(1, min(3, int(configured_depth or 1)))
+        ceiling = max(1, min(3, int(capability_ceiling or 1)))
         with self._lock:
             profile = self._profiles.get(key)
             if profile is not None and profile.learned_depth is not None:
@@ -132,7 +134,8 @@ class NativeMTPProfileStore:
                 depth = max(1, min(profile.learned_depth, ceiling))
                 return depth, f"profile_validated_d{depth}"
         if tuning_validated:
-            return ceiling, f"tuning_validated_d{ceiling}"
+            depth = min(configured, ceiling)
+            return depth, f"tuning_validated_d{depth}"
         return 0, "unseen_ar"
 
     def observe(

@@ -77,11 +77,22 @@ class TestStartDepth:
         assert depth == 2
         assert source == "profile_validated_d2"
 
-    def test_learned_depth_clamped_to_configured_ceiling(self):
+    def test_learned_depth_can_improve_beyond_configured_start(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
         _observe_profitable(store, key, depth=3, value=50.0, ar=30.0)
         depth, _ = store.start_depth(key, configured_depth=2)
+        assert depth == 3
+
+    def test_learned_depth_clamped_to_runtime_capability_ceiling(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
+        _observe_profitable(store, key, depth=3, value=50.0, ar=30.0)
+        depth, _ = store.start_depth(
+            key,
+            configured_depth=2,
+            capability_ceiling=2,
+        )
         assert depth == 2
 
     def test_ar_verdict_holds_within_ttl_no_per_request_reprobe(self):

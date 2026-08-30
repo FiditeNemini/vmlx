@@ -140,11 +140,9 @@ def test_qwen35_gdn_conv_fusion_matches_stock(dtype):
         np.asarray(candidate_state.astype(mx.float32)),
         np.asarray(reference_state.astype(mx.float32)),
     )
-    np.testing.assert_allclose(
+    np.testing.assert_array_equal(
         np.asarray(candidate_conv.astype(mx.float32)),
         np.asarray(reference_conv.astype(mx.float32)),
-        rtol=8e-3,
-        atol=8e-3,
     )
 
 

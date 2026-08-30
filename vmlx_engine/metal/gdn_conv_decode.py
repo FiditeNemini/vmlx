@@ -46,7 +46,7 @@ def _kernel(channels: int, kernel_size: int):
                 state[(size_t)(tap + 1u) * {channels}u + channel];
         }}
         next_state[(size_t){kernel_size - 2}u * {channels}u + channel] = (T)current;
-        convolved[channel] = (T)(acc / (1.0f + metal::exp(-acc)));
+        convolved[channel] = (T)acc;
 """
     return mx.fast.metal_kernel(
         name=f"vmlx_qwen4_gdn_conv_k{kernel_size}_c{channels}",
@@ -91,7 +91,11 @@ def _gdn_conv_decode(
         output_shapes=[tuple(state.shape), tuple(qkv.shape)],
         output_dtypes=[qkv.dtype, qkv.dtype],
     )
-    return convolved, next_state
+    # Keep activation on MLX's compiled primitive. The depthwise convolution
+    # and state shift are bit-exact in BF16/F16, while spelling SiLU as a raw
+    # Metal exp changes rounding enough to fork greedy model output.
+    activated = convolved * mx.sigmoid(convolved)
+    return activated, next_state
 
 
 def qwen4_gdn_conv_decode(

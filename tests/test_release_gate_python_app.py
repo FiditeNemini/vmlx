@@ -635,6 +635,25 @@ def test_release_builder_retries_transient_private_asar_cleanup():
     assert 'rm -rf "$DIST_DIR"' not in builder
 
 
+def test_release_verifier_retries_transient_private_asar_cleanup():
+    verifier = Path("panel/scripts/verify-release-dmgs.sh").read_text()
+
+    assert "remove_owned_verification_tree_with_retry()" in verifier
+    assert "for attempt in 1 2 3 4 5 6 7 8" in verifier
+    assert '/bin/rm -rf -- "$target" || true' in verifier
+    assert "retrying transient owned verification cleanup" in verifier
+    assert "owned verification cleanup did not converge after 8 attempts" in verifier
+    assert 'remove_owned_verification_tree_with_retry "$mount_dir"' in verifier
+    assert 'remove_owned_verification_tree_with_retry "$extracted_asar"' in verifier
+    assert (
+        'trap \'remove_owned_verification_tree_with_retry "$verification_root"\' EXIT'
+        in verifier
+    )
+    assert 'rm -rf "$mount_dir"' not in verifier
+    assert 'rm -rf "$extracted_asar"' not in verifier
+    assert 'rm -rf "$verification_root"' not in verifier
+
+
 def test_electron_package_excludes_mutable_finder_metadata_from_asar():
     package = json.loads(Path("panel/package.json").read_text(encoding="utf-8"))
 

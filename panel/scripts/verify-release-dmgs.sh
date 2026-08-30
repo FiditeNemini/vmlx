@@ -46,6 +46,25 @@ APPLE_CODESIGN="/usr/bin/codesign"
 APPLE_HDIUTIL="/usr/bin/hdiutil"
 APPLE_SPCTL="/usr/sbin/spctl"
 
+remove_owned_verification_tree_with_retry() {
+  local target="$1"
+  local attempt
+
+  for attempt in 1 2 3 4 5 6 7 8; do
+    /bin/rm -rf -- "$target" || true
+    if [[ ! -e "$target" && ! -L "$target" ]]; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 8 ]]; then
+      echo "WARNING: retrying transient owned verification cleanup ($attempt/8): $target" >&2
+      /bin/sleep 0.1
+    fi
+  done
+
+  echo "ERROR: owned verification cleanup did not converge after 8 attempts: $target" >&2
+  return 1
+}
+
 if [[ -z "$NOTARY_PROFILE" ]]; then
   echo "ERROR: set VMLX_NOTARY_KEYCHAIN_PROFILE from the private release environment" >&2
   exit 1
@@ -295,8 +314,8 @@ verify_mounted_release_dmg() {
           || "$APPLE_HDIUTIL" detach -force "$mount_dir" >/dev/null 2>&1 \
           || true
       fi
-      rm -rf "$mount_dir"
-      rm -rf "$extracted_asar"
+      remove_owned_verification_tree_with_retry "$mount_dir"
+      remove_owned_verification_tree_with_retry "$extracted_asar"
     }
     trap cleanup_mount EXIT
 
@@ -427,8 +446,8 @@ PY
     attached=0
     assert_file_record "$dmg" "$bound_record" "final ${flavor} DMG after detach"
     trap - EXIT
-    rm -rf "$mount_dir"
-    rm -rf "$extracted_asar"
+    remove_owned_verification_tree_with_retry "$mount_dir"
+    remove_owned_verification_tree_with_retry "$extracted_asar"
   )
 }
 
@@ -462,7 +481,7 @@ verify_final_release_chain() {
   chmod 0700 "$verification_root"
   (
     set -euo pipefail
-    trap 'rm -rf "$verification_root"' EXIT
+    trap 'remove_owned_verification_tree_with_retry "$verification_root"' EXIT
     local flavor
     local expected_sha256
     local submitted_sha256

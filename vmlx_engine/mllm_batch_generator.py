@@ -3869,6 +3869,8 @@ class MLLMNativeMTPStats:
     adaptive_depth_value: Dict[str, Any] = field(default_factory=dict)
     profile_seed: str = ""
     profile_key_label: str = ""
+    prompt_primed_pairs: int = 0
+    prompt_prime_source: str = "unprimed"
 
     def to_dict(
         self,
@@ -3945,6 +3947,10 @@ class MLLMNativeMTPStats:
             "adaptive_depth_value": dict(self.adaptive_depth_value),
             "profile_seed": self.profile_seed,
             "profile_key": self.profile_key_label,
+            "prompt_priming": {
+                "source": self.prompt_prime_source,
+                "folded_pairs": int(self.prompt_primed_pairs),
+            },
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
         }
@@ -12671,6 +12677,7 @@ class MLLMBatchGenerator:
                             type(req_cache[0]).__name__ if req_cache else None,
                             _cache_in_offset,
                         )
+                    self._prepare_native_mtp_prompt_priming(req)
                     logits = self._run_vision_encoding(req, cache=req_cache)
                     from .utils.turboquant_config import turboquant_cache_telemetry
 
@@ -12840,6 +12847,7 @@ class MLLMBatchGenerator:
                             req_cache = [KVCache() for _ in self.language_model.layers]
                         if trace is not None:
                             trace.start("forward")
+                        self._prepare_native_mtp_prompt_priming(req)
                         logits = self._run_vision_encoding(req, cache=req_cache)
                         if trace is not None:
                             trace.stop("forward")
@@ -14141,6 +14149,41 @@ class MLLMBatchGenerator:
         except Exception:
             logger.debug("native MTP profile observe failed", exc_info=True)
 
+    def _prepare_native_mtp_prompt_priming(
+        self, request: MLLMBatchRequest
+    ) -> bool:
+        """Arm Qwen4 prompt-history capture immediately before prefill."""
+        from .native_mtp_prompt_priming import drop_context, prepare_prompt
+
+        # This first implementation owns the vendored Qwen4/Flash-Next head
+        # whose hidden-state contract is known exactly.  Other MTP families
+        # stay on their existing path until their head-input variant and cache
+        # topology have independent live proof.
+        if str(getattr(self, "_model_type", "") or "").lower() != "qwen4_exp":
+            drop_context(self.language_model)
+            return False
+        if (
+            request is None
+            or int(getattr(request, "max_tokens", 0) or 0) <= 1
+            or self._native_mtp_disabled_reason_for_request(request) is not None
+        ):
+            drop_context(self.language_model)
+            return False
+        tokens = list(getattr(request, "_original_token_ids", None) or [])
+        if not tokens:
+            drop_context(self.language_model)
+            return False
+        return prepare_prompt(
+            self.language_model,
+            request_id=request.request_id,
+            prompt_tokens=tokens,
+            cached_tokens=int(getattr(request, "_cached_tokens", 0) or 0),
+            prefix_cache=self.block_aware_cache,
+            # This is the canonical scoped cache-key structure already used by
+            # fetch/store.  The sidecar hashes each block with the same helper.
+            extra_keys=getattr(request, "_cache_extra_keys", None),
+        )
+
     def _seed_native_mtp_from_prefill(
         self,
         request: MLLMBatchRequest,
@@ -14249,7 +14292,20 @@ class MLLMBatchGenerator:
         # perfectly healthy MTP.
         mx.eval(next_tok)
         _seed_ar_ms = (time.perf_counter() - _seed_t0) * 1000.0
-        mtp_cache = self.language_model.make_mtp_cache()
+        from .native_mtp_prompt_priming import take_primed
+
+        primed = take_primed(self.language_model, cache, first_tok)
+        if primed is None:
+            mtp_cache = self.language_model.make_mtp_cache()
+            primed_pairs = 0
+            prime_source = "unprimed"
+        else:
+            mtp_cache, primed_pairs = primed
+            prime_source = (
+                "restored_prefix_and_tail"
+                if int(getattr(request, "_cached_tokens", 0) or 0) > 0
+                else "cold_prompt"
+            )
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
             request,
             hidden[:, -1:, :],
@@ -14276,6 +14332,8 @@ class MLLMBatchGenerator:
             profile_key=request_profile_key,
         )
         state.stats.profile_seed = profile_seed
+        state.stats.prompt_primed_pairs = int(primed_pairs)
+        state.stats.prompt_prime_source = prime_source
         if request_profile_key is not None:
             state.stats.profile_key_label = "|".join(
                 str(part) for part in request_profile_key
@@ -14292,10 +14350,13 @@ class MLLMBatchGenerator:
         state.queue.append((int(next_tok.tolist()[0]), next_lp, "init"))
         request._native_mtp_state = state
         logger.info(
-            "MLLM native MTP path activated for request=%s depth=%d seed=%s",
+            "MLLM native MTP path activated for request=%s depth=%d seed=%s "
+            "prompt_prime=%s folded_pairs=%d",
             request.request_id,
             depth,
             profile_seed,
+            prime_source,
+            int(primed_pairs),
         )
         return True
 

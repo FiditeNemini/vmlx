@@ -108,6 +108,7 @@ PAGED_CACHE_SCHEMA_VERSION = (
 DSV4_APPEND_SAFE_CHECKPOINT_POLICY = "full_block_v1"
 
 _LOOPED_CACHE_LAYOUT = "looped_kv_v1"
+_MTP_PREFIX_SNAPSHOT_MAX_ENTRIES = 16
 
 
 def _resolve_runtime_cache_fingerprint() -> str:
@@ -2627,6 +2628,14 @@ class BlockAwarePrefixCache:
             )
             else "conservative_payload_probe"
         )
+        # Exact native-MTP prompt-history snapshots are opaque, memory-only
+        # sidecars of ordinary full-block backbone entries.  They are never
+        # trusted without the matching live block hash and are discarded with
+        # that hash; SSD persistence requires a future versioned tensor schema.
+        self._mtp_prefix_snapshots: OrderedDict[bytes, tuple[int, Any]] = (
+            OrderedDict()
+        )
+        self._mtp_prefix_snapshot_lock = threading.RLock()
         self._strict_block_disk_write_fence = os.environ.get(
             "VMLX_STRICT_BLOCK_DISK_WRITE_FENCE",
             "",
@@ -8686,6 +8695,107 @@ class BlockAwarePrefixCache:
                     ),
                 )
 
+    def _mtp_prefix_chain_tip(
+        self,
+        tokens: List[int],
+        boundary_tokens: int,
+        *,
+        extra_keys: Optional[Any] = None,
+        extra_key_token_start: Optional[int] = None,
+        extra_key_ranges: Optional[list[tuple[int, tuple[Any, ...]]]] = None,
+    ) -> Optional[bytes]:
+        """Return the ordinary full-block chain tip for an MTP sidecar.
+
+        Complex legacy range arguments are intentionally rejected.  Current
+        vMLX callers pass the canonical scoped ``cache_extra_keys`` object as
+        ``extra_keys``; the same per-block resolver as the backbone store then
+        makes media/text identity exact.
+        """
+        boundary_tokens = int(boundary_tokens)
+        if (
+            boundary_tokens <= 0
+            or boundary_tokens > len(tokens)
+            or boundary_tokens % self.block_size != 0
+            or extra_key_token_start is not None
+            or extra_key_ranges is not None
+        ):
+            return None
+        parent_hash = None
+        for start in range(0, boundary_tokens, self.block_size):
+            end = start + self.block_size
+            parent_hash = compute_block_hash(
+                parent_hash,
+                tokens[start:end],
+                extra_keys=cache_extra_keys_for_token_range(
+                    extra_keys, start, end
+                ),
+            )
+        return parent_hash
+
+    def store_mtp_prefix_snapshot(
+        self,
+        tokens: List[int],
+        boundary_tokens: int,
+        snapshot: Any,
+        *,
+        extra_keys: Optional[Any] = None,
+        extra_key_token_start: Optional[int] = None,
+        extra_key_ranges: Optional[list[tuple[int, tuple[Any, ...]]]] = None,
+    ) -> bool:
+        """Store one opaque, memory-only MTP history at a full block tip."""
+        tip = self._mtp_prefix_chain_tip(
+            tokens,
+            boundary_tokens,
+            extra_keys=extra_keys,
+            extra_key_token_start=extra_key_token_start,
+            extra_key_ranges=extra_key_ranges,
+        )
+        if tip is None or snapshot is None:
+            return False
+        lock = getattr(self, "_mtp_prefix_snapshot_lock", None)
+        snapshots = getattr(self, "_mtp_prefix_snapshots", None)
+        if lock is None or snapshots is None:
+            return False
+        with lock:
+            snapshots[tip] = (int(boundary_tokens), snapshot)
+            snapshots.move_to_end(tip)
+            while len(snapshots) > _MTP_PREFIX_SNAPSHOT_MAX_ENTRIES:
+                snapshots.popitem(last=False)
+        return True
+
+    def restore_mtp_prefix_snapshot(
+        self,
+        tokens: List[int],
+        boundary_tokens: int,
+        *,
+        extra_keys: Optional[Any] = None,
+        extra_key_token_start: Optional[int] = None,
+        extra_key_ranges: Optional[list[tuple[int, tuple[Any, ...]]]] = None,
+    ) -> Any:
+        """Restore an MTP sidecar only while its exact backbone tip is live."""
+        tip = self._mtp_prefix_chain_tip(
+            tokens,
+            boundary_tokens,
+            extra_keys=extra_keys,
+            extra_key_token_start=extra_key_token_start,
+            extra_key_ranges=extra_key_ranges,
+        )
+        if tip is None:
+            return None
+        block_map = getattr(self.paged_cache, "cached_block_hash_to_block", None)
+        if block_map is None or block_map.get_block(tip) is None:
+            return None
+        lock = getattr(self, "_mtp_prefix_snapshot_lock", None)
+        snapshots = getattr(self, "_mtp_prefix_snapshots", None)
+        if lock is None or snapshots is None:
+            return None
+        with lock:
+            entry = snapshots.get(tip)
+            if entry is None or int(entry[0]) != int(boundary_tokens):
+                return None
+            snapshots.move_to_end(tip)
+            return entry[1]
+
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         paged_stats = self.paged_cache.get_memory_usage()
@@ -8799,6 +8909,11 @@ class BlockAwarePrefixCache:
         self._reconstruct_memo = None
         with self.paged_cache._lock:
             self._prefix_index.clear()
+        lock = getattr(self, "_mtp_prefix_snapshot_lock", None)
+        snapshots = getattr(self, "_mtp_prefix_snapshots", None)
+        if lock is not None and snapshots is not None:
+            with lock:
+                snapshots.clear()
         for d in self._entries_by_type.values():
             d.clear()
         self.paged_cache.clear(force=True)

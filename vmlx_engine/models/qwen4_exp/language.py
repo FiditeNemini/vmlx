@@ -1692,6 +1692,13 @@ class LanguageModel(nn.Module):
             return_expanded=True,
             n_confirmed=int(kwargs.get("n_confirmed", 0) or 0),
         )
+        # Prompt-history priming is armed by the scheduler only for an active
+        # native-MTP request.  Capture normal prompt forwards, never the
+        # return_hidden seed/verify forwards that advance speculative state.
+        if not return_hidden and inputs_embeds is None:
+            from vmlx_engine.native_mtp_prompt_priming import capture_prefill
+
+            capture_prefill(self, inputs, expanded_hidden, cache)
         if not return_logits:
             return (hidden, expanded_hidden) if return_hidden else hidden
         if self.args.tie_word_embeddings:

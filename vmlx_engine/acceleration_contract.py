@@ -239,6 +239,17 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 default=True,
             ),
             _feature(
+                "vectorized_kda_verify",
+                label="batched KDA speculative verification with exact rollback",
+                kind="state_algorithm",
+                scopes=("mtp_verify",),
+                default=True,
+                env=(
+                    "VMLX_GLM5_VECTOR_KDA_VERIFY",
+                    "VMLINUX_GLM5_VECTOR_KDA_VERIFY",
+                ),
+            ),
+            _feature(
                 "affine_moe_pair",
                 label="affine MoE gate/up and weighted-down fusion",
                 kind="metal_kernel",

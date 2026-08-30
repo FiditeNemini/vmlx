@@ -643,7 +643,7 @@ class KDAAttention(nn.Module):
         self._fused_kda_step = fused_kda_step_requested()
         self._vectorized_speculative_verify = os.environ.get(
             "VMLINUX_GLM5_VECTOR_KDA_VERIFY",
-            os.environ.get("VMLX_GLM5_VECTOR_KDA_VERIFY", "0"),
+            os.environ.get("VMLX_GLM5_VECTOR_KDA_VERIFY", "1"),
         ).strip().lower() in {"1", "true", "yes", "on"}
 
     def prepare_runtime(self) -> bool:
@@ -1402,6 +1402,13 @@ class Model(nn.Module):
             "base_kda_qkv_groups": base_kda_groups,
             "base_dense_gate_up_groups": base_dense_gate_up_groups,
             "mtp_dense_gate_up_groups": mtp_dense_gate_up_groups,
+            "vectorized_kda_verify_layers": sum(
+                int(
+                    layer.is_linear
+                    and layer.self_attn._vectorized_speculative_verify
+                )
+                for layer in self.model.layers
+            ),
             "fused_moe_pair_modules": fused_moe_pair_modules,
             "base_launches_removed_per_forward": (
                 2 * base_kda_groups + base_dense_gate_up_groups

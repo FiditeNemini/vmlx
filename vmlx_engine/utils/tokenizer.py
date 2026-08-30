@@ -140,6 +140,12 @@ def _warm_glm5_next_first_forward(model) -> None:
                 "installed": True,
                 "observed_calls": 0,
             },
+            "vectorized_kda_verify": {
+                "installed": int(
+                    preparation.get("vectorized_kda_verify_layers", 0) or 0
+                ),
+                "observed_calls": 0,
+            },
         },
     )
     warmup_cache = make_cache()

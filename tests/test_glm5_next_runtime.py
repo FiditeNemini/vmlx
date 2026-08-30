@@ -875,6 +875,53 @@ class TestNativeMTP:
         assert len(mtp_cache) == 1
         assert isinstance(mtp_cache[0], glm5.Glm5MLACache)
 
+    def test_vectorized_verify_generation_matches_ar_at_all_depths(
+        self, glm5, monkeypatch
+    ):
+        from mlx_lm.generate import BatchGenerator
+
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        monkeypatch.setenv("VMLX_GLM5_VECTOR_KDA_VERIFY", "1")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        previous = is_mtp_active()
+
+        def generate(*, attach_mtp: bool, depth: int | None) -> list[int]:
+            if depth is None:
+                monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+            else:
+                monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", str(depth))
+            mx.random.seed(7713)
+            set_mtp_active(attach_mtp)
+            model = glm5.Model(glm5.ModelArgs.from_dict(TINY_CFG))
+            model.eval()
+            mx.eval(model.parameters())
+            generator = BatchGenerator(model, max_tokens=32)
+            generator.insert([[3, 5, 7, 11, 13, 17, 19]])
+            tokens = []
+            while len(tokens) < 32:
+                _prompt, responses = generator.next()
+                for response in responses:
+                    tokens.append(int(response.token))
+                    if response.finish_reason is not None:
+                        generator.close()
+                        return tokens
+            generator.close()
+            return tokens
+
+        try:
+            baseline = generate(attach_mtp=False, depth=None)
+            assert len(baseline) == 32
+            for depth in (1, 2, 3):
+                assert generate(attach_mtp=True, depth=depth) == baseline
+        finally:
+            set_mtp_active(previous)
+
     def test_mtp_batch_generator_carries_exact_n_minus_one_snapshot(
         self, glm5
     ):

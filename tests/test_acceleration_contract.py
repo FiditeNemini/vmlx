@@ -73,6 +73,23 @@ def test_glm_mhc_default_has_explicit_opt_out(monkeypatch):
     assert fused_glm5_mhc_requested() is False
 
 
+def test_glm_vectorized_kda_verify_defaults_on_with_explicit_opt_out(
+    monkeypatch,
+):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+
+    monkeypatch.delenv("VMLX_GLM5_VECTOR_KDA_VERIFY", raising=False)
+    monkeypatch.delenv("VMLINUX_GLM5_VECTOR_KDA_VERIFY", raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["vectorized_kda_verify"]["requested"] is True
+    assert rows["vectorized_kda_verify"]["selection_source"] == "default"
+
+    monkeypatch.setenv("VMLX_GLM5_VECTOR_KDA_VERIFY", "0")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["vectorized_kda_verify"]["requested"] is False
+    assert rows["vectorized_kda_verify"]["state"] == "disabled"
+
+
 def test_qwen35_gdn_conv_candidate_is_family_scoped(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
 
@@ -117,10 +134,10 @@ def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     assert rows["startup_warmup"]["state"] == "active_observed"
     assert rows["kda_conv_state"]["state"] == "installed_unobserved"
     assert contract["summary"] == {
-        "requested": 5,
+        "requested": 6,
         "installed": 3,
         "observed": 1,
-        "source_only_or_unattested": 2,
+        "source_only_or_unattested": 3,
     }
 
 

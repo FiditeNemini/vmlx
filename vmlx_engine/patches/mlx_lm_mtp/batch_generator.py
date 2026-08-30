@@ -204,6 +204,26 @@ def apply() -> bool:
                 return
             try:
                 _post_init_mtp(self)
+                base_model = getattr(self.model, "model", None)
+                vectorized_kda_layers = sum(
+                    int(
+                        bool(getattr(layer, "is_linear", False))
+                        and bool(
+                            getattr(
+                                getattr(layer, "self_attn", None),
+                                "_vectorized_speculative_verify",
+                                False,
+                            )
+                        )
+                    )
+                    for layer in getattr(base_model, "layers", ())
+                )
+                if vectorized_kda_layers:
+                    logger.info(
+                        "GLM vectorized KDA verify active for uid=%s layers=%d",
+                        getattr(self, "uids", ["?"])[0],
+                        vectorized_kda_layers,
+                    )
                 logger.info(
                     "MTP path activated for uid=%s (model has mtp_forward, batch=1)",
                     getattr(self, "uids", ["?"])[0],

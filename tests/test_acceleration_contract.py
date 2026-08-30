@@ -241,3 +241,23 @@ def test_server_reports_observed_qwen_kernel_only_after_qualifying_call(
     after = server._family_acceleration_contract(str(tmp_path))
     assert _rows(after)["gdn_conv_state"]["state"] == "active_observed"
     assert _rows(after)["gdn_conv_state"]["runtime"]["observed_calls"] == 1
+
+
+def test_dsv4_indexer_runtime_keeps_decode_fallback_separate_from_hits():
+    import vmlx_engine.server as server
+
+    status = server._dsv4_indexer_runtime_feature(
+        {
+            "self_test": "passed",
+            "calls": 588,
+            "reason": None,
+            "declined": "tile work below kernel threshold",
+        }
+    )
+
+    assert status == {
+        "installed": True,
+        "observed_calls": 588,
+        "reason": None,
+        "last_fallback_reason": "tile work below kernel threshold",
+    }

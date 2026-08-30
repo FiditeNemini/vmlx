@@ -10435,6 +10435,18 @@ def _loaded_acceleration_attestation() -> dict[str, Any] | None:
     return find_acceleration_attestation(candidates)
 
 
+def _dsv4_indexer_runtime_feature(status: dict[str, Any]) -> dict[str, Any]:
+    """Separate successful DSV4 indexer calls from later stock fallbacks."""
+
+    calls = int(status.get("calls", 0) or 0)
+    return {
+        "installed": status.get("self_test") == "passed",
+        "observed_calls": calls,
+        "reason": None if calls else status.get("reason") or status.get("declined"),
+        "last_fallback_reason": status.get("declined"),
+    }
+
+
 def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
     """Return configured and loader-attested acceleration without inference."""
 
@@ -10528,13 +10540,9 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
 
             from .metal.fused_pair_moe_decode import dsv4_fused_pair_moe_status
 
-            indexer_status = fused_indexer_status()
-            runtime_features["indexer_scores"] = {
-                "installed": indexer_status.get("self_test") == "passed",
-                "observed_calls": int(indexer_status.get("calls", 0) or 0),
-                "reason": indexer_status.get("reason")
-                or indexer_status.get("declined"),
-            }
+            runtime_features["indexer_scores"] = (
+                _dsv4_indexer_runtime_feature(fused_indexer_status())
+            )
             runtime_features["fused_moe_pair"] = {
                 **runtime_features.get("fused_moe_pair", {}),
                 **dsv4_fused_pair_moe_status(),

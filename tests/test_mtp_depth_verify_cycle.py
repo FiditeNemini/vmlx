@@ -232,7 +232,10 @@ class TestMtpDepthGreedyIdentity:
         state.stats.depth = 1
         _adaptive_arm_cycle(state, now=1.0)
 
-        state.stats.cycles = 1
+        # Production holds the configured/profile seed for 48 cycles so a
+        # cold MTP-head cache cannot trigger a false early depth decision.
+        # Exercise the final two measured D1 cycles at that boundary.
+        state.stats.cycles = 47
         _adaptive_finish_cycle(
             "adaptive-row",
             state,
@@ -243,7 +246,7 @@ class TestMtpDepthGreedyIdentity:
         assert state.depth == 1
         _adaptive_arm_cycle(state, now=2.0)
 
-        state.stats.cycles = 2
+        state.stats.cycles = 48
         _adaptive_finish_cycle(
             "adaptive-row",
             state,
@@ -679,6 +682,120 @@ class TestDepthGating:
         assert _effective_depth(_Batch()) == 3
         monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "0")
         assert _effective_depth(_Batch()) == 1
+
+    def test_adaptive_unmeasured_text_workload_stays_ar(self, monkeypatch):
+        from vmlx_engine import native_mtp
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _adaptive_mtp_activation_decision,
+        )
+
+        class _Cache:
+            rollback_state = None
+
+            def is_trimmable(self):
+                return True
+
+        class _Batch:
+            prompt_cache = [_Cache()]
+
+        monkeypatch.setattr(
+            native_mtp,
+            "native_mtp_effective_depth",
+            lambda _path=None: (3, "default"),
+        )
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
+
+        assert _adaptive_mtp_activation_decision(_Batch()) == (
+            False,
+            3,
+            "adaptive_unseen_ar",
+        )
+
+    def test_adaptive_unmeasured_generation_batch_skips_seed(self, monkeypatch):
+        from vmlx_engine import native_mtp
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            native_mtp_stats_snapshot,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        monkeypatch.setattr(
+            native_mtp,
+            "native_mtp_effective_depth",
+            lambda _path=None: (3, "default"),
+        )
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
+
+        previous = is_mtp_active()
+        try:
+            set_mtp_active(True)
+            batch = _make_batch(_build_model(attach_mtp=True), [3, 5, 7], 16)
+            assert getattr(batch, "_omlx_mtp_state", None) is None
+            skip = native_mtp_stats_snapshot()["last_native_mtp_skip"]
+            assert skip == {
+                "uid": "0",
+                "reason": "adaptive_unseen_ar",
+                "configured_depth": 3,
+            }
+        finally:
+            set_mtp_active(previous)
+
+    def test_adaptive_validated_tuning_activates_text_mtp(self, monkeypatch):
+        from vmlx_engine import native_mtp
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _adaptive_mtp_activation_decision,
+        )
+
+        class _Cache:
+            rollback_state = None
+
+            def is_trimmable(self):
+                return True
+
+        class _Batch:
+            prompt_cache = [_Cache()]
+
+        source = "vmlx_mtp_tuning.json:native_mtp.best_depth"
+        monkeypatch.setattr(
+            native_mtp,
+            "native_mtp_effective_depth",
+            lambda _path=None: (2, source),
+        )
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
+
+        assert _adaptive_mtp_activation_decision(_Batch()) == (True, 2, source)
+
+    def test_fixed_depth_policy_still_activates_exact_depth(self, monkeypatch):
+        from vmlx_engine import native_mtp
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _adaptive_mtp_activation_decision,
+        )
+
+        class _Cache:
+            rollback_state = None
+
+            def is_trimmable(self):
+                return True
+
+        class _Batch:
+            prompt_cache = [_Cache()]
+
+        monkeypatch.setattr(
+            native_mtp,
+            "native_mtp_effective_depth",
+            lambda _path=None: (2, "VMLINUX_NATIVE_MTP_DEPTH"),
+        )
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+
+        assert _adaptive_mtp_activation_decision(_Batch()) == (
+            True,
+            2,
+            "fixed_policy",
+        )
 
 
 class TestMeasurementHooksDefaultOff:

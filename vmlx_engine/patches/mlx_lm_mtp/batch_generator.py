@@ -154,10 +154,28 @@ def apply() -> bool:
     original_extend = GenerationBatch.extend
 
     def patched_init(self, *args, **kwargs):
+        global _LAST_NATIVE_MTP_SKIP
+
         original_init(self, *args, **kwargs)
         if _MTP_BYPASS:
             return  # head stays loaded; decode via the standard step
         if _is_mtp_eligible(self):
+            activate, depth, seed = _adaptive_mtp_activation_decision(self)
+            if not activate:
+                uid = str(getattr(self, "uids", ["?"])[0])
+                with _MTP_TELEMETRY_LOCK:
+                    _LAST_NATIVE_MTP_SKIP = {
+                        "uid": uid,
+                        "reason": seed,
+                        "configured_depth": depth,
+                    }
+                logger.info(
+                    "MTP path stays AR for uid=%s seed=%s configured_depth=%d",
+                    uid,
+                    seed,
+                    depth,
+                )
+                return
             try:
                 _post_init_mtp(self)
                 logger.info(
@@ -182,7 +200,6 @@ def apply() -> bool:
                     # engine ever produced that key, so the skip tile was dead
                     # UI and only positive engagement could ever display. A
                     # DEBUG line is not a surface a user can see.
-                    global _LAST_NATIVE_MTP_SKIP
                     with _MTP_TELEMETRY_LOCK:
                         _LAST_NATIVE_MTP_SKIP = {
                             "uid": str(uids[0]),
@@ -659,8 +676,8 @@ def _restore_or_trim_caches(prompt_cache: List[Any], n: int = 1) -> bool:
     return True
 
 
-def _effective_depth(gen_batch: Any) -> int:
-    """Resolve the draft-chain depth (1..3) for this sequence.
+def _effective_depth_resolution(gen_batch: Any) -> tuple[int, str]:
+    """Resolve the draft-chain depth and its owning configuration source.
 
     Sources, in order: VMLINUX/VMLX_NATIVE_MTP_DEPTH env, the bundle's
     validated ``vmlx_mtp_tuning.json``, default (via
@@ -675,22 +692,49 @@ def _effective_depth(gen_batch: Any) -> int:
     try:
         from vmlx_engine.native_mtp import native_mtp_effective_depth
 
-        depth, _source = native_mtp_effective_depth(None)
+        depth, source = native_mtp_effective_depth(None)
     except Exception:
         depth = 1
+        source = "resolution_error"
     depth = max(1, min(3, int(depth or 1)))
     if depth <= 1:
-        return 1
+        return 1, source
     for c in gen_batch.prompt_cache:
         if bool(getattr(c, "supports_partial_rollback", False)) and callable(
             getattr(c, "rollback_speculative", None)
         ):
             continue
         if getattr(c, "rollback_state", None) is not None:
-            return 1
+            return 1, source
         if not (hasattr(c, "is_trimmable") and c.is_trimmable()):
-            return 1
-    return depth
+            return 1, source
+    return depth, source
+
+
+def _effective_depth(gen_batch: Any) -> int:
+    """Resolve the draft-chain depth (1..3) for this sequence."""
+    return _effective_depth_resolution(gen_batch)[0]
+
+
+def _adaptive_mtp_activation_decision(gen_batch: Any) -> tuple[bool, int, str]:
+    """Choose whether text-path adaptive MTP may seed this request.
+
+    The MLLM scheduler already enforces the same first-turn contract through
+    ``NativeMTPProfileStore``: an unseen workload stays AR and MTP activates
+    only from measured evidence. ``GenerationBatch`` has no request-level
+    workload/profile owner, so it must not silently spend the user's request
+    discovering whether speculation loses. A validated model-local tuning
+    record is the text path's persistent measured evidence. Explicit depth
+    overrides and fixed policy remain authoritative user choices.
+    """
+    depth, source = _effective_depth_resolution(gen_batch)
+    if not _adaptive_depth_enabled():
+        return True, depth, "fixed_policy"
+    if str(source).startswith("VML"):
+        return True, depth, str(source)
+    if "vmlx_mtp_tuning.json" in str(source):
+        return True, depth, str(source)
+    return False, depth, "adaptive_unseen_ar"
 
 
 def _adaptive_depth_enabled() -> bool:

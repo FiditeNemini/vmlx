@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -206,6 +207,57 @@ def test_build_native_mtp_env_omits_depth_when_unset():
     assert "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH" not in env
     assert env["VMLINUX_NATIVE_MTP_TRACE"] == ""
     assert env["VMLX_MTP_PROFILE"] == ""
+
+
+def test_load_reused_baseline_requires_matching_contract(tmp_path):
+    mod = load_speed_ab_module()
+    model = tmp_path / "model"
+    model.mkdir()
+    baseline = {
+        "created_at": "20260830_000000",
+        "model_path": str(model),
+        "cache_mode": "off",
+        "kv_cache_quantization": "auto",
+        "enable_jit": False,
+        "max_tokens": 256,
+        "repeats": 3,
+        "warmup": 1,
+        "enable_thinking": "off",
+        "prompt": "same prompt",
+        "rows": [{
+            "label": "baseline_no_mtp",
+            "mtp_enabled": False,
+            "generations": [{}, {}, {}],
+            "summary": {"runs": 3, "mean_wall_tok_s": 20.0},
+        }],
+    }
+    artifact = tmp_path / "partial.json"
+    artifact.write_text(json.dumps(baseline), encoding="utf-8")
+    args = SimpleNamespace(
+        model_path=str(model),
+        cache="off",
+        kv_cache_quantization="auto",
+        enable_jit=False,
+        max_tokens=256,
+        repeats=3,
+        warmup=1,
+        enable_thinking="off",
+        prompt="same prompt",
+    )
+
+    row, source = mod.load_reused_baseline(str(artifact), args=args)
+
+    assert row == baseline["rows"][0]
+    assert source["path"] == str(artifact.resolve())
+    assert len(source["sha256"]) == 64
+
+    args.prompt = "changed prompt"
+    try:
+        mod.load_reused_baseline(str(artifact), args=args)
+    except ValueError as exc:
+        assert "contract mismatch" in str(exc)
+    else:
+        raise AssertionError("mismatched baseline contract was accepted")
 
 
 def test_build_native_mtp_env_sets_cost_fallback_calibration():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -209,6 +210,56 @@ def parse_depth_sweep(raw: str | None) -> list[int]:
         if depth not in depths:
             depths.append(depth)
     return depths
+
+
+def load_reused_baseline(
+    path_value: str | None,
+    *,
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Load one contract-matched AR row instead of recomputing it."""
+    if not path_value:
+        return None, None
+    path = Path(path_value).expanduser().resolve()
+    payload_bytes = path.read_bytes()
+    payload = json.loads(payload_bytes)
+    expected = {
+        "model_path": str(Path(args.model_path).expanduser().resolve()),
+        "cache_mode": args.cache,
+        "kv_cache_quantization": args.kv_cache_quantization,
+        "enable_jit": args.enable_jit,
+        "max_tokens": args.max_tokens,
+        "repeats": args.repeats,
+        "warmup": args.warmup,
+        "enable_thinking": args.enable_thinking,
+        "prompt": args.prompt,
+    }
+    actual = dict(payload)
+    if "model_path" in actual:
+        actual["model_path"] = str(Path(actual["model_path"]).expanduser().resolve())
+    mismatches = {
+        key: {"expected": value, "actual": actual.get(key)}
+        for key, value in expected.items()
+        if actual.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(f"baseline result contract mismatch: {mismatches}")
+    baseline = next(
+        (row for row in payload.get("rows", []) if row.get("label") == "baseline_no_mtp"),
+        None,
+    )
+    if not isinstance(baseline, dict) or baseline.get("mtp_enabled") is not False:
+        raise ValueError("baseline result has no disabled-MTP baseline_no_mtp row")
+    generations = baseline.get("generations") or []
+    if len(generations) != args.repeats:
+        raise ValueError(
+            f"baseline result has {len(generations)} generations; expected {args.repeats}"
+        )
+    return baseline, {
+        "path": str(path),
+        "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "created_at": payload.get("created_at"),
+    }
 
 
 _MTP_FINISH_RE = re.compile(
@@ -924,6 +975,14 @@ def main() -> int:
             "for example 1,2,3. When omitted, only --depth is tested."
         ),
     )
+    ap.add_argument(
+        "--baseline-result",
+        default=None,
+        help=(
+            "Reuse the contract-matched baseline_no_mtp row from a prior "
+            "result.json or partial.json, so only invalidated MTP depths rerun."
+        ),
+    )
     ap.add_argument("--trace-mtp", action="store_true")
     ap.add_argument("--debug-mtp-tokens", action="store_true")
     ap.add_argument(
@@ -1017,12 +1076,26 @@ def main() -> int:
         "warmup": args.warmup,
         "enable_thinking": args.enable_thinking,
         "prompt": args.prompt,
+        "max_num_seqs": args.max_num_seqs,
+        "disable_prompt_reuse": args.disable_prompt_reuse,
         "rows": [],
     }
 
-    rows: list[tuple[str, bool, int, int | None]] = [
-        ("baseline_no_mtp", False, args.port, None),
-    ]
+    reused_baseline, baseline_source = load_reused_baseline(
+        args.baseline_result,
+        args=args,
+    )
+    result["baseline_source"] = baseline_source
+    if reused_baseline is not None:
+        result["rows"].append(reused_baseline)
+        result["mtp_cost_ar_step_ms"] = calibrate_mtp_cost_fallback(
+            args,
+            reused_baseline,
+        )
+
+    rows: list[tuple[str, bool, int, int | None]] = []
+    if reused_baseline is None:
+        rows.append(("baseline_no_mtp", False, args.port, None))
     if args.depth_sweep is None:
         rows.append(("native_mtp", True, args.port + 1, explicit_single_depth))
     else:

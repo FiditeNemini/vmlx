@@ -228,24 +228,38 @@ def _validated_flat_tuning_depth(tuning: dict[str, Any]) -> int | None:
         return None
 
     raw_speeds = tuning.get("measured_tok_s_by_depth")
-    if raw_speeds is not None:
-        if not isinstance(raw_speeds, dict):
-            return None
-        speeds: dict[int, float] = {}
-        for raw_key, raw_speed in raw_speeds.items():
-            try:
-                key = int(raw_key)
-            except (TypeError, ValueError):
-                continue
-            speed = _positive_finite_number(raw_speed)
-            if 1 <= key <= 3 and speed is not None:
-                speeds[key] = speed
-        if depth not in speeds or not speeds:
-            return None
-        fastest_speed = max(speeds.values())
-        fastest_depth = min(key for key, speed in speeds.items() if speed == fastest_speed)
-        if fastest_depth != depth:
-            return None
+    if not isinstance(raw_speeds, dict):
+        return None
+    speeds: dict[int, float] = {}
+    for raw_key, raw_speed in raw_speeds.items():
+        try:
+            key = int(raw_key)
+        except (TypeError, ValueError):
+            continue
+        speed = _positive_finite_number(raw_speed)
+        if 1 <= key <= 3 and speed is not None:
+            speeds[key] = speed
+
+    # "best" is meaningful only across the producer's complete supported
+    # depth surface.  A 4M Flash-Next sidecar stamped D2 after measuring only
+    # D1/D2 and explicitly saying "D3 NOT measured" remained authoritative
+    # after newer kernels made D3 the matched wall winner.  Require D1..D3 by
+    # default; a genuinely narrower runtime may declare the ceiling it
+    # actually supports and measured.
+    raw_ceiling = tuning.get("measured_depth_ceiling", tuning.get("depth_ceiling", 3))
+    try:
+        measured_ceiling = max(1, min(3, int(raw_ceiling)))
+    except (TypeError, ValueError):
+        return None
+    required_depths = set(range(1, measured_ceiling + 1))
+    if depth > measured_ceiling or not required_depths.issubset(speeds):
+        return None
+    fastest_speed = max(speeds[key] for key in required_depths)
+    fastest_depth = min(
+        key for key in required_depths if speeds[key] == fastest_speed
+    )
+    if fastest_depth != depth:
+        return None
     return depth
 
 

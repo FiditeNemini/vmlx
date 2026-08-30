@@ -1828,6 +1828,48 @@ class TestNativeMtpAutodetect:
         assert depth == 2
         assert source == "vmlx_mtp_tuning.json:best_depth"
 
+    def test_flat_qwen_tuning_cannot_call_d2_best_without_measuring_d3(
+        self, monkeypatch, tmp_path
+    ):
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+        (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({
+            "best_depth": 2,
+            "blocked": False,
+            "validated": True,
+            "baseline_tok_s": 40.49,
+            "best_tok_s": 66.47,
+            "speedup_vs_baseline": 1.642,
+            "measured_tok_s_by_depth": {"1": 54.51, "2": 66.47},
+        }))
+
+        assert native_mtp_effective_depth(tmp_path) == (3, "default")
+
+    def test_flat_tuning_may_declare_a_fully_measured_lower_depth_ceiling(
+        self, monkeypatch, tmp_path
+    ):
+        from vmlx_engine.native_mtp import native_mtp_effective_depth
+
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_DEPTH", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH", raising=False)
+        (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({
+            "best_depth": 2,
+            "measured_depth_ceiling": 2,
+            "blocked": False,
+            "validated": True,
+            "baseline_tok_s": 40.0,
+            "best_tok_s": 60.0,
+            "speedup_vs_baseline": 1.5,
+            "measured_tok_s_by_depth": {"1": 55.0, "2": 60.0},
+        }))
+
+        assert native_mtp_effective_depth(tmp_path) == (
+            2,
+            "vmlx_mtp_tuning.json:best_depth",
+        )
+
     def test_flat_qwen_d3_contradiction_falls_back_to_bundle_d2(
         self, monkeypatch, tmp_path
     ):

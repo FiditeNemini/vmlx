@@ -6,6 +6,11 @@ import mlx.nn as nn
 from mlx_lm.models.activations import swiglu
 from mlx_lm.models.gated_delta import gated_delta_update
 
+from vmlx_engine.metal.quantized_projection_group import (
+    QuantizedProjectionGroup,
+    quantized_projection_group_reason,
+)
+
 from ..base import (
     LanguageModelOutput,
     create_attention_mask,
@@ -336,6 +341,41 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         self.norm = Qwen3_5RMSNormGated(self.head_v_dim, eps=self.layer_norm_epsilon)
 
         self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self.input_group = None
+
+    def prepare_runtime(self) -> bool:
+        """Group QKV/Z/B/A packed rows after checkpoint hydration."""
+
+        linears = (
+            self.in_proj_qkv,
+            self.in_proj_z,
+            self.in_proj_b,
+            self.in_proj_a,
+        )
+        if quantized_projection_group_reason(linears) is not None:
+            return False
+        group = QuantizedProjectionGroup(linears)
+        mx.eval(group.weight, group.scales, group.biases)
+        self.input_group = group
+        self.in_proj_qkv = None
+        self.in_proj_z = None
+        self.in_proj_b = None
+        self.in_proj_a = None
+        return True
+
+    def _project_inputs(
+        self, inputs: mx.array
+    ) -> tuple[mx.array, mx.array, mx.array, mx.array]:
+        if self.input_group is not None:
+            if inputs.ndim == 3 and inputs.shape[1] == 1:
+                return self.input_group(inputs)
+            return self.input_group.separate(inputs)
+        return (
+            self.in_proj_qkv(inputs),
+            self.in_proj_z(inputs),
+            self.in_proj_b(inputs),
+            self.in_proj_a(inputs),
+        )
 
     def __call__(
         self,
@@ -345,13 +385,8 @@ class Qwen3_5GatedDeltaNet(nn.Module):
     ) -> mx.array:
         B, S, _ = inputs.shape
 
-        mixed_qkv = self.in_proj_qkv(inputs)
-
-        z = self.in_proj_z(inputs)
+        mixed_qkv, z, b, a = self._project_inputs(inputs)
         z = z.reshape(B, S, -1, self.head_v_dim)
-
-        b = self.in_proj_b(inputs)
-        a = self.in_proj_a(inputs)
 
         if cache is not None and cache[0] is not None:
             conv_state = cache[0]
@@ -478,6 +513,11 @@ class Qwen3_5Model(nn.Module):
         self.ssm_idx = 0
         self.fa_idx = args.full_attention_interval - 1
 
+    def prepare_acceleration(self) -> dict[str, int]:
+        """Install exact affine projection groups across base and MTP layers."""
+
+        return prepare_quantized_projection_groups(self)
+
     def __call__(
         self,
         inputs: mx.array,
@@ -514,6 +554,25 @@ class Qwen3_5Model(nn.Module):
             )
 
         return self.norm(h)
+
+
+def prepare_quantized_projection_groups(model: nn.Module) -> dict[str, int]:
+    """Prepare exact Qwen3.5 groups without assuming dense vs MoE topology."""
+
+    prepared = {
+        "gdn_inputs": 0,
+    }
+    modules = [model]
+    modules.extend(module for _, module in model.named_modules() if module is not model)
+    seen: set[int] = set()
+    for module in modules:
+        if id(module) in seen:
+            continue
+        seen.add(id(module))
+        if isinstance(module, Qwen3_5GatedDeltaNet) and module.prepare_runtime():
+            prepared["gdn_inputs"] += 1
+    mx.clear_cache()
+    return prepared
 
 
 class LanguageModel(nn.Module):

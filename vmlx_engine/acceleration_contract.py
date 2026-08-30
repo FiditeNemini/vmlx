@@ -130,6 +130,13 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "native_state": ["attention", "GDN", "SSM companion state"],
         "features": [
             _feature(
+                "projection_groups",
+                label="exact GDN decode projection grouping",
+                kind="load_time_graph",
+                scopes=("ar_decode", "mtp_decode"),
+                default=True,
+            ),
+            _feature(
                 "vendored_hybrid_runtime",
                 label="vMLX hybrid GDN/attention runtime",
                 kind="runtime",
@@ -150,6 +157,13 @@ _FAMILIES: dict[str, dict[str, Any]] = {
         "display_family": "Qwen3.5 MoE hybrid",
         "native_state": ["attention", "GDN", "SSM companion state", "MoE"],
         "features": [
+            _feature(
+                "projection_groups",
+                label="exact GDN decode projection grouping",
+                kind="load_time_graph",
+                scopes=("ar_decode", "mtp_decode"),
+                default=True,
+            ),
             _feature(
                 "vendored_hybrid_runtime",
                 label="vMLX hybrid GDN/attention/MoE runtime",

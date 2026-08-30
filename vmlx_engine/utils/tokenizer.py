@@ -1260,6 +1260,14 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
                 "GLM-5.3 startup warmup complete -- model is Metal-resident "
                 "before readiness"
             )
+        else:
+            prepare = getattr(model, "prepare_acceleration", None)
+            if callable(prepare):
+                preparation = prepare()
+                logger.info(
+                    "Post-hydration acceleration preparation: %s",
+                    preparation,
+                )
         return model, tokenizer
 
     # ── Architecture-specific routing BEFORE the JANG gate ──

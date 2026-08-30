@@ -21,6 +21,32 @@ class Model(Qwen3VLModel):
         self.vision_tower = VisionModel(config.vision_config)
         self.language_model = LanguageModel(config.text_config, config)
 
+    def prepare_acceleration(self) -> dict[str, int]:
+        """Prepare exact packed projections after all weights are hydrated."""
+
+        from vmlx_engine.acceleration_contract import (
+            canonical_acceleration_family,
+            record_acceleration_attestation,
+        )
+
+        # Traverse the complete language owner rather than only the backbone:
+        # the native-MTP adapter attaches its draft block beside ``model``.
+        from .language import prepare_quantized_projection_groups
+
+        prepared = prepare_quantized_projection_groups(self.language_model)
+        family = canonical_acceleration_family(self.config.text_config.model_type)
+        record_acceleration_attestation(
+            self,
+            family or "qwen3_5",
+            {
+                "projection_groups": {
+                    "installed": sum(int(value) for value in prepared.values()),
+                    "groups": dict(prepared),
+                }
+            },
+        )
+        return prepared
+
     def get_input_embeddings(
         self,
         input_ids: Optional[mx.array] = None,

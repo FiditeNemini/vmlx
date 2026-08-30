@@ -71,6 +71,30 @@ class QuantizedProjectionGroup(nn.Module):
         )
         return tuple(mx.split(output, self.split_indices, axis=-1))
 
+    def separate(self, x: mx.array) -> tuple[mx.array, ...]:
+        """Run original-size QMMs from non-owning row slices of grouped storage.
+
+        Large concatenated output matrices can select a different MLX prefill
+        kernel than the original projections.  Calling each row slice
+        separately preserves that original dispatch and its exact bytes while
+        keeping only one resident copy of the packed weights and metadata.
+        """
+
+        boundaries = (0, *self.split_indices, self.output_dims)
+        return tuple(
+            mx.quantized_matmul(
+                x,
+                self.weight[start:end],
+                scales=self.scales[start:end],
+                biases=self.biases[start:end],
+                transpose=True,
+                group_size=self.group_size,
+                bits=self.bits,
+                mode=self.mode,
+            )
+            for start, end in zip(boundaries, boundaries[1:])
+        )
+
 
 def quantized_projection_group_reason(
     linears: Sequence[nn.Module],

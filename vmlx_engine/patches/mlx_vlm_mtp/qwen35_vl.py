@@ -401,12 +401,17 @@ def _patch_gated_delta_net(qlang: Any) -> None:
     ):
         batch_size, seq_len, _ = inputs.shape
 
-        qkv = self.in_proj_qkv(inputs)
-        z = self.in_proj_z(inputs).reshape(
+        project_inputs = getattr(self, "_project_inputs", None)
+        if callable(project_inputs):
+            qkv, z, b, a = project_inputs(inputs)
+        else:
+            qkv = self.in_proj_qkv(inputs)
+            z = self.in_proj_z(inputs)
+            b = self.in_proj_b(inputs)
+            a = self.in_proj_a(inputs)
+        z = z.reshape(
             batch_size, seq_len, self.num_v_heads, self.head_v_dim
         )
-        b = self.in_proj_b(inputs)
-        a = self.in_proj_a(inputs)
 
         if cache is not None and cache[0] is not None:
             conv_state = cache[0]

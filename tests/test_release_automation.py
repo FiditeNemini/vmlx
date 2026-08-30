@@ -213,6 +213,14 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "jjang-ai/jangq" in candidate
     assert "private_evidence_root" in candidate
     assert "private_evidence_root }}" not in candidate.split("Upload immutable release candidate", 1)[1]
+    assert "vars.APPLE_NOTARY_KEYCHAIN_PROFILE" in candidate
+    assert "steps.apple.outputs.notary_keychain" in candidate
+
+    signing = (ROOT / ".github/scripts/setup_apple_signing.sh").read_text()
+    assert "APPLE_NOTARY_EXISTING_PROFILE" in signing
+    assert 'notary_keychain=""' in signing
+    assert 'echo "notary_keychain=$notary_keychain"' in signing
+    assert 'notarytool history' in signing
 
     publish = files["publish-release.yml"][0]
     assert "jjang-ai/vmlx" in publish and "jjang-ai/mlxstudio" in publish

@@ -38,6 +38,12 @@ The runner does not need a persistent release keychain. The candidate workflow
 creates a per-run keychain, imports the certificate and App Store Connect API
 key, then removes both in an `always()` cleanup step.
 
+On a dedicated runner that already has a validated notarytool profile in its
+login Keychain, set the `apple-release-signing` environment variable
+`APPLE_NOTARY_KEYCHAIN_PROFILE` to that profile name. The workflow still
+creates and removes an ephemeral Developer ID signing keychain, but validates
+and uses the existing notary profile without exporting its private key.
+
 ### Protected environments
 
 Create all four environments with Eric as a required reviewer. While Eric is

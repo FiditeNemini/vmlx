@@ -122,6 +122,7 @@ jobs:
           APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_EXISTING_PROFILE: ${{ vars.APPLE_NOTARY_KEYCHAIN_PROFILE }}
         run: .github/scripts/setup_apple_signing.sh install
 
       - name: Install isolated release dependencies
@@ -178,7 +179,7 @@ jobs:
           VMLX_R20_EXPECTED_VERSION: ${{ inputs.version }}
           VMLX_JANG_TOOLS_SOURCE: ${{ github.workspace }}/jangq/jang-tools
           VMLX_NOTARY_KEYCHAIN_PROFILE: ${{ steps.apple.outputs.profile }}
-          VMLX_NOTARY_KEYCHAIN: ${{ steps.apple.outputs.keychain }}
+          VMLX_NOTARY_KEYCHAIN: ${{ steps.apple.outputs.notary_keychain }}
           CSC_KEYCHAIN: ${{ steps.apple.outputs.keychain }}
         run: |
           set -euo pipefail

@@ -14,6 +14,7 @@ SEARCH_LIST_FILE="$STATE_DIR/original-search-list"
 P12_FILE="$STATE_DIR/developer-id.p12"
 P8_FILE="$STATE_DIR/notary-api-key.p8"
 PROFILE="vmlx-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}"
+EXISTING_NOTARY_PROFILE="${APPLE_NOTARY_EXISTING_PROFILE:-}"
 
 decode_secret() {
   local env_name="$1"
@@ -54,15 +55,25 @@ restore_search_list() {
 
 install_signing() {
   : "${APPLE_DEVELOPER_ID_P12_PASSWORD:?APPLE_DEVELOPER_ID_P12_PASSWORD is required}"
-  : "${APPLE_NOTARY_KEY_ID:?APPLE_NOTARY_KEY_ID is required}"
-  : "${APPLE_NOTARY_ISSUER_ID:?APPLE_NOTARY_ISSUER_ID is required}"
+  if [[ -n "$EXISTING_NOTARY_PROFILE" ]]; then
+    if [[ ! "$EXISTING_NOTARY_PROFILE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      echo "ERROR: APPLE_NOTARY_EXISTING_PROFILE has unsafe characters" >&2
+      exit 1
+    fi
+    PROFILE="$EXISTING_NOTARY_PROFILE"
+  else
+    : "${APPLE_NOTARY_KEY_ID:?APPLE_NOTARY_KEY_ID is required}"
+    : "${APPLE_NOTARY_ISSUER_ID:?APPLE_NOTARY_ISSUER_ID is required}"
+  fi
   mkdir -p "$STATE_DIR"
   /usr/bin/security list-keychains -d user > "$SEARCH_LIST_FILE"
   /usr/bin/openssl rand -hex 32 > "$PASSWORD_FILE"
   local password
   password="$(<"$PASSWORD_FILE")"
   decode_secret APPLE_DEVELOPER_ID_P12_BASE64 "$P12_FILE"
-  decode_secret APPLE_NOTARY_KEY_P8_BASE64 "$P8_FILE"
+  if [[ -z "$EXISTING_NOTARY_PROFILE" ]]; then
+    decode_secret APPLE_NOTARY_KEY_P8_BASE64 "$P8_FILE"
+  fi
 
   /usr/bin/security create-keychain -p "$password" "$KEYCHAIN_PATH"
   /usr/bin/security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
@@ -85,15 +96,24 @@ install_signing() {
     -S apple-tool:,apple:,codesign: \
     -s -k "$password" "$KEYCHAIN_PATH" >/dev/null
 
-  /usr/bin/xcrun notarytool store-credentials "$PROFILE" \
-    --key "$P8_FILE" \
-    --key-id "$APPLE_NOTARY_KEY_ID" \
-    --issuer "$APPLE_NOTARY_ISSUER_ID" \
-    --keychain "$KEYCHAIN_PATH" >/dev/null
+  local notary_keychain="$KEYCHAIN_PATH"
+  if [[ -n "$EXISTING_NOTARY_PROFILE" ]]; then
+    /usr/bin/xcrun notarytool history \
+      --keychain-profile "$PROFILE" \
+      --output-format json >/dev/null
+    notary_keychain=""
+  else
+    /usr/bin/xcrun notarytool store-credentials "$PROFILE" \
+      --key "$P8_FILE" \
+      --key-id "$APPLE_NOTARY_KEY_ID" \
+      --issuer "$APPLE_NOTARY_ISSUER_ID" \
+      --keychain "$KEYCHAIN_PATH" >/dev/null
+  fi
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     {
       echo "keychain=$KEYCHAIN_PATH"
+      echo "notary_keychain=$notary_keychain"
       echo "profile=$PROFILE"
       echo "state_dir=$STATE_DIR"
     } >> "$GITHUB_OUTPUT"

@@ -129,9 +129,10 @@ jobs:
         working-directory: vmlx
         run: |
           set -euo pipefail
-          RELEASE_PYTHON=/opt/homebrew/bin/python3
-          "$RELEASE_PYTHON" -c 'import sys; assert (3, 11) <= sys.version_info < (3, 15), sys.version'
-          "$RELEASE_PYTHON" -m venv .venv
+          UV_BIN="$(command -v uv)"
+          test -x "$UV_BIN"
+          "$UV_BIN" venv --seed --python 3.13 .venv
+          .venv/bin/python -c 'import pathlib, sys; assert sys.version_info[:2] == (3, 13), sys.version; assert pathlib.Path(sys.executable).absolute() == (pathlib.Path.cwd() / ".venv/bin/python").absolute(), sys.executable'
           .venv/bin/python -m pip install --upgrade pip build twine
           .venv/bin/python -m pip install -e '.[dev]'
           cd panel

@@ -18,6 +18,7 @@ All notable changes to vMLX Engine will be documented in this file.
 - **Candidate provenance validation runs on the runner's system Python.** The version check no longer assumes Python 3.11's `tomllib` before the workflow creates its isolated release environment.
 - **Dedicated release runners may keep the Developer ID identity non-exportable.** Candidate CI validates the exact ShieldStack team identity in the login Keychain instead of requiring a PKCS#12 round trip.
 - **Candidate dependency setup rejects macOS's legacy system Python.** Release CI now creates its isolated environment from the documented Homebrew Python 3.11–3.14 range.
+- **Candidate Python provenance stays checkout-local.** Release CI now creates its CPython 3.13 environment with `uv`, preventing Homebrew framework resolution from escaping the candidate checkout's `.venv` provenance gate.
 
 ---
 

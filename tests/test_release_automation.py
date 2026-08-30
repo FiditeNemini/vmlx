@@ -218,7 +218,10 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "steps.apple.outputs.notary_keychain" in candidate
     assert "import tomllib" not in candidate
     assert "pathlib.Path('pyproject.toml').read_text()" in candidate
-    assert "RELEASE_PYTHON=/opt/homebrew/bin/python3" in candidate
+    assert 'UV_BIN="$(command -v uv)"' in candidate
+    assert '"$UV_BIN" venv --seed --python 3.13 .venv' in candidate
+    assert 'Path(sys.executable).absolute()' in candidate
+    assert "RELEASE_PYTHON=/opt/homebrew/bin/python3" not in candidate
     assert "/usr/bin/python3 -m venv" not in candidate
 
     signing = (ROOT / ".github/scripts/setup_apple_signing.sh").read_text()

@@ -27,9 +27,12 @@ self-hosted, macOS, ARM64, vmlx-release
 ```
 
 The runner needs Node 22.12 or newer at `/opt/homebrew/bin/node`, matching
-`npm` and `npx`, a current full Xcode selected with `xcode-select`, Python 3.11
-or newer, enough disk for both app bundles, and the private evidence root used
-by the production gate. Keep the private evidence root outside the Git
+`npm` and `npx`, a current full Xcode selected with `xcode-select`, and `uv`
+on `PATH` with managed CPython 3.13 available. Candidate setup uses `uv venv`
+so `sys.executable` remains bound to the isolated checkout's `.venv`, rather
+than Homebrew's framework interpreter. It also needs enough disk for both app
+bundles and the private evidence root used by the production gate. Keep the
+private evidence root outside the Git
 checkout. The candidate workflow requires its absolute path as an explicit
 dispatch input; no runner username or machine-specific path is stored in the
 public workflow.

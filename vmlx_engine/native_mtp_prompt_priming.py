@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Prompt-history priming for native speculative decoding heads.
+"""Prompt-history priming for native Qwen speculative decoding.
 
 The target model already computes the trunk hidden state for every prompt
 token.  Native MTP previously discarded those rows and began every request
@@ -309,17 +309,8 @@ def _capture_boundary(ctx: _PrimeContext, hidden: Any, start: int, end: int) -> 
     ctx.boundary_candidate = _BoundaryCandidate(boundary, candidate_hidden)
 
 
-def _fold_head(host: Any, hidden: Any, tokens: Any, cache: Any) -> Any:
-    """Advance only the native head when the family exposes that boundary."""
-
-    prime = getattr(host, "mtp_prime", None)
-    if callable(prime):
-        return prime(hidden, tokens, cache)
-    return host.mtp_forward(hidden, tokens, cache)
-
-
 def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) -> None:
-    """Fold one contiguous prompt forward into the native MTP cache."""
+    """Fold one contiguous Qwen prompt forward into the native MTP cache."""
     if not priming_enabled() or not _eligible(host):
         return
     if inputs is None or getattr(inputs, "ndim", 0) != 2 or inputs.shape[0] != 1:
@@ -396,7 +387,7 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
 
     # The logits tail is intentionally left lazy and discarded.  The head
     # cache writes are materialized below, which is the only state we need.
-    _fold_head(host, pair_hidden, pair_tokens, ctx.mtp_cache)
+    host.mtp_forward(pair_hidden, pair_tokens, ctx.mtp_cache)
     pairs = int(pair_tokens.shape[1])
     ctx.folded += pairs
     ctx.folded_this_request += pairs
@@ -469,8 +460,7 @@ def take_primed(host: Any, backbone_cache: Any, main_token: Any) -> Optional[tup
         )
         return None
     try:
-        _fold_head(
-            host,
+        host.mtp_forward(
             ctx.pending_hidden,
             main_token.reshape(1, 1),
             ctx.mtp_cache,

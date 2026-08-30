@@ -613,7 +613,7 @@ def test_dsv4_ui_exposes_native_composite_reuse_without_a_second_toggle():
     assert "applyDsv4CompositeCacheToggle" not in form
     assert "cacheControlUpdatesForDsv4PoolQuantToggle" not in form
     assert "applyDsv4PoolQuantToggle" not in form
-    assert "const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache" in form
+    assert "const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || exactTypedPromptDiskCache" in form
     # The no-second-toggle copy is rendered via the locale catalog since the
     # i18n pass; the form must reference the key and English must still carry
     # the promise this test is named after.

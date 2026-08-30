@@ -274,7 +274,13 @@ def _capture_boundary(ctx: _PrimeContext, hidden: Any, start: int, end: int) -> 
     block = int(ctx.block_size or 0)
     if block <= 0 or ctx.prefix_cache is None or not ctx.prompt_tokens:
         return
-    boundary = (end // block) * block
+    full_block_boundary = (end // block) * block
+    terminal_boundary = len(ctx.prompt_tokens) - 1
+    boundary = full_block_boundary
+    if start < terminal_boundary <= end:
+        # vMLX stores the predecessor's exact N-1 terminal cache and can
+        # restore that non-block-aligned boundary on an identical request.
+        boundary = max(boundary, terminal_boundary)
     if boundary <= start or boundary > len(ctx.prompt_tokens) or boundary <= 1:
         return
     prior = ctx.boundary_candidate

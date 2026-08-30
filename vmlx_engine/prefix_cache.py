@@ -2632,7 +2632,7 @@ class BlockAwarePrefixCache:
         # sidecars of ordinary full-block backbone entries.  They are never
         # trusted without the matching live block hash and are discarded with
         # that hash; SSD persistence requires a future versioned tensor schema.
-        self._mtp_prefix_snapshots: OrderedDict[bytes, tuple[int, Any]] = (
+        self._mtp_prefix_snapshots: OrderedDict[Any, tuple[int, Any]] = (
             OrderedDict()
         )
         self._mtp_prefix_snapshot_lock = threading.RLock()
@@ -8695,7 +8695,7 @@ class BlockAwarePrefixCache:
                     ),
                 )
 
-    def _mtp_prefix_chain_tip(
+    def _mtp_prefix_snapshot_key(
         self,
         tokens: List[int],
         boundary_tokens: int,
@@ -8703,8 +8703,8 @@ class BlockAwarePrefixCache:
         extra_keys: Optional[Any] = None,
         extra_key_token_start: Optional[int] = None,
         extra_key_ranges: Optional[list[tuple[int, tuple[Any, ...]]]] = None,
-    ) -> Optional[bytes]:
-        """Return the ordinary full-block chain tip for an MTP sidecar.
+    ) -> Optional[Any]:
+        """Return the ordinary block/partial-index key for an MTP sidecar.
 
         Complex legacy range arguments are intentionally rejected.  Current
         vMLX callers pass the canonical scoped ``cache_extra_keys`` object as
@@ -8715,11 +8715,29 @@ class BlockAwarePrefixCache:
         if (
             boundary_tokens <= 0
             or boundary_tokens > len(tokens)
-            or boundary_tokens % self.block_size != 0
             or extra_key_token_start is not None
             or extra_key_ranges is not None
         ):
             return None
+        if boundary_tokens % self.block_size != 0:
+            # The engine's exact-repeat fast path indexes the predecessor's
+            # N-1 terminal partial block without flooring it.  Reuse that same
+            # in-memory key; the restore path below still verifies every live
+            # block id/hash before trusting the sidecar.
+            return (
+                "partial_index",
+                (
+                    self._prefix_index_key(
+                        tokens[:boundary_tokens],
+                        cache_extra_keys=extra_keys,
+                    )
+                    if hasattr(self, "_chained_prefix_index_hash")
+                    else self._prefix_index_hash(
+                        tokens[:boundary_tokens],
+                        cache_extra_keys=extra_keys,
+                    )
+                ),
+            )
         parent_hash = None
         for start in range(0, boundary_tokens, self.block_size):
             end = start + self.block_size
@@ -8730,7 +8748,7 @@ class BlockAwarePrefixCache:
                     extra_keys, start, end
                 ),
             )
-        return parent_hash
+        return ("block_hash", parent_hash)
 
     def store_mtp_prefix_snapshot(
         self,
@@ -8743,7 +8761,14 @@ class BlockAwarePrefixCache:
         extra_key_ranges: Optional[list[tuple[int, tuple[Any, ...]]]] = None,
     ) -> bool:
         """Store one opaque, memory-only MTP history at a full block tip."""
-        tip = self._mtp_prefix_chain_tip(
+        # Only the predecessor's exact N-1 boundary may publish a partial
+        # sidecar.  Arbitrary non-block boundaries are not cache contracts.
+        if (
+            int(boundary_tokens) % self.block_size != 0
+            and int(boundary_tokens) != len(tokens) - 1
+        ):
+            return False
+        tip = self._mtp_prefix_snapshot_key(
             tokens,
             boundary_tokens,
             extra_keys=extra_keys,
@@ -8773,7 +8798,7 @@ class BlockAwarePrefixCache:
         extra_key_ranges: Optional[list[tuple[int, tuple[Any, ...]]]] = None,
     ) -> Any:
         """Restore an MTP sidecar only while its exact backbone tip is live."""
-        tip = self._mtp_prefix_chain_tip(
+        tip = self._mtp_prefix_snapshot_key(
             tokens,
             boundary_tokens,
             extra_keys=extra_keys,
@@ -8782,9 +8807,27 @@ class BlockAwarePrefixCache:
         )
         if tip is None:
             return None
-        block_map = getattr(self.paged_cache, "cached_block_hash_to_block", None)
-        if block_map is None or block_map.get_block(tip) is None:
-            return None
+        key_kind, key_value = tip
+        if key_kind == "block_hash":
+            block_map = getattr(
+                self.paged_cache, "cached_block_hash_to_block", None
+            )
+            if block_map is None or block_map.get_block(key_value) is None:
+                return None
+        else:
+            prefix_entry = getattr(self, "_prefix_index", {}).get(key_value)
+            if prefix_entry is None or len(prefix_entry) < 2:
+                return None
+            indexed_tokens, block_ids = prefix_entry[:2]
+            expected = list(tokens[: int(boundary_tokens)])
+            if list(indexed_tokens) != expected:
+                return None
+            if not self._prefix_index_blocks_are_current(
+                expected,
+                list(block_ids),
+                cache_extra_keys=extra_keys,
+            ):
+                return None
         lock = getattr(self, "_mtp_prefix_snapshot_lock", None)
         snapshots = getattr(self, "_mtp_prefix_snapshots", None)
         if lock is None or snapshots is None:

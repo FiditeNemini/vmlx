@@ -227,10 +227,14 @@ def test_block_cache_sidecar_is_aligned_bounded_and_requires_live_tip():
     cache._mtp_prefix_snapshots = OrderedDict()
     cache._mtp_prefix_snapshot_lock = threading.RLock()
     live = SimpleNamespace(get_block=lambda _key: object())
-    cache.paged_cache = SimpleNamespace(cached_block_hash_to_block=live)
+    cache.paged_cache = SimpleNamespace(
+        cached_block_hash_to_block=live,
+        compute_block_hash=lambda tokens: repr(list(tokens)),
+    )
 
     marker = object()
-    assert not cache.store_mtp_prefix_snapshot([1, 2, 3], 3, marker)
+    assert cache.store_mtp_prefix_snapshot([1, 2, 3, 4], 3, marker)
+    assert not cache.store_mtp_prefix_snapshot([1, 2, 3, 4, 5], 3, marker)
     assert cache.store_mtp_prefix_snapshot([1, 2, 3, 4], 4, marker)
     assert cache.restore_mtp_prefix_snapshot([1, 2, 3, 4], 4) is marker
 
@@ -238,6 +242,28 @@ def test_block_cache_sidecar_is_aligned_bounded_and_requires_live_tip():
         get_block=lambda _key: None
     )
     assert cache.restore_mtp_prefix_snapshot([1, 2, 3, 4], 4) is None
+
+
+def test_partial_n_minus_one_sidecar_uses_live_prefix_index_chain():
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache.block_size = 2
+    cache._mtp_prefix_snapshots = OrderedDict()
+    cache._mtp_prefix_snapshot_lock = threading.RLock()
+    cache._prefix_index = {}
+    cache.paged_cache = SimpleNamespace(
+        compute_block_hash=lambda tokens: repr(list(tokens))
+    )
+    cache._prefix_index_blocks_are_current = lambda *args, **kwargs: True
+
+    tokens = [1, 2, 3, 4]
+    marker = object()
+    assert cache.store_mtp_prefix_snapshot(tokens, 3, marker)
+    partial_key = cache._prefix_index_hash(tokens[:3])
+    cache._prefix_index[partial_key] = (tokens[:3], [10, 11], None)
+    assert cache.restore_mtp_prefix_snapshot(tokens, 3) is marker
+
+    cache._prefix_index_blocks_are_current = lambda *args, **kwargs: False
+    assert cache.restore_mtp_prefix_snapshot(tokens, 3) is None
 
 
 def test_native_mtp_stats_expose_prompt_priming_provenance():

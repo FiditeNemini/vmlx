@@ -126,6 +126,28 @@ def test_slow_d3_probe_returns_to_d2_even_with_perfect_acceptance():
     assert decision is not None
     assert decision.target_depth == 2
     assert decision.event == "probe_revert"
+    assert state.probe_revert_counts == [0, 0, 1]
+
+
+def test_reverted_neighbor_uses_exponential_reprobe_backoff():
+    state = NativeMTPAdaptiveValueState()
+    _samples(state, 3, elapsed_ms=6.0, accepted=3)
+    assert _choose(state, 3, 8).target_depth == 2
+    _samples(state, 2, elapsed_ms=15.0, accepted=2, first_cycle=9)
+
+    decision = _choose(state, 2, 16)
+    assert decision is not None
+    assert decision.target_depth == 3
+    assert decision.event == "probe_revert"
+    assert state.probe_revert_counts[1] == 1
+
+    # The old fixed interval would probe D2 again at cycle 56 (48 cycles
+    # after cycle 8). One loss doubles that target's interval to 96 cycles.
+    assert _choose(state, 3, 56) is None
+    decision = _choose(state, 3, 104)
+    assert decision is not None
+    assert decision.target_depth == 2
+    assert decision.event == "probe_start"
 
 
 def test_fast_d3_probe_is_kept_only_after_beating_hysteresis():
@@ -197,6 +219,7 @@ def test_acceptance_safety_change_resets_probe_without_lowering_capability():
     state = NativeMTPAdaptiveValueState(
         active_probe_origin=2,
         active_probe_target=3,
+        probe_revert_counts=[0, 2, 1],
     )
     note_forced_depth_change(
         state,
@@ -208,6 +231,7 @@ def test_acceptance_safety_change_resets_probe_without_lowering_capability():
 
     assert state.active_probe_origin == 0
     assert state.active_probe_target == 0
+    assert state.probe_revert_counts == [0, 0, 0]
     assert state.last_change_cycle == 20
     assert state.transitions[-1]["event"] == "safety_change"
 
@@ -224,4 +248,5 @@ def test_snapshot_exposes_value_acceptance_probe_and_transition_history():
     assert snapshot["values_tok_s"]["d2"] == 500.0
     assert snapshot["conditional_acceptance"]["d2"] == 1.0
     assert snapshot["active_probe"] == {"origin": 2, "target": 3}
+    assert snapshot["probe_revert_counts"] == {"d1": 0, "d2": 0, "d3": 0}
     assert snapshot["transitions"][-1]["event"] == "probe_start"

@@ -149,6 +149,28 @@ class TestObserve:
         assert depth == 0
         assert source == "profile_ar"
 
+    def test_transient_final_probe_does_not_override_best_measured_depth(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(
+            temperature=0.0, restored_prefix=False, prompt_tokens=64
+        )
+        store.observe(
+            key,
+            # The request ended during a D3 -> D2 neighbor probe.
+            final_depth=2,
+            fallback_to_ar=False,
+            fallback_reason=None,
+            finish_reason="stop",
+            values_tok_s={"d1": 58.0, "d2": 66.0, "d3": 75.0},
+            sample_counts={"d1": 8, "d2": 8, "d3": 16},
+            ar_baseline_tps=40.0,
+        )
+
+        assert store.start_depth(key, configured_depth=3) == (
+            3,
+            "profile_validated_d3",
+        )
+
     def test_missing_ar_baseline_teaches_nothing(self):
         store = NativeMTPProfileStore()
         key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)

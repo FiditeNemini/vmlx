@@ -153,7 +153,12 @@ class NativeMTPProfileStore:
         AR with real samples records AR-wins. A profitable depth is learned
         only when its measured wall value beats the request's own AR
         baseline by PROMOTE_MARGIN with MIN_WALL_SAMPLES samples.
-        Sample-starved requests leave the profile unchanged.
+
+        ``final_depth`` is telemetry, not the winner: a response can terminate
+        during a bounded neighbor probe. Learning that transient target made a
+        D3-winning request seed D2 on its next turn. Select the best qualified
+        measured depth across the request instead. Sample-starved requests
+        leave the profile unchanged.
         """
 
         if finish_reason not in ("stop", "length", "fallback_to_ar"):
@@ -175,16 +180,26 @@ class NativeMTPProfileStore:
                 profile.ar_verdict_at = _time.monotonic()
                 return
 
-            depth = max(1, min(3, int(final_depth or 1)))
-            label = f"d{depth}"
-            value = values.get(label)
-            n = int(counts.get(label) or 0)
-            if value is None or n < MIN_WALL_SAMPLES:
+            qualified: list[tuple[float, int]] = []
+            for depth in (1, 2, 3):
+                label = f"d{depth}"
+                value = values.get(label)
+                n = int(counts.get(label) or 0)
+                if value is None or n < MIN_WALL_SAMPLES:
+                    continue
+                try:
+                    numeric_value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if numeric_value > 0.0:
+                    qualified.append((numeric_value, depth))
+            if not qualified:
                 # Not enough measured evidence — profile stays as it was.
                 return
             if ar_baseline_tps and ar_baseline_tps > 0:
-                if float(value) >= float(ar_baseline_tps) * (1.0 + PROMOTE_MARGIN):
-                    profile.learned_depth = depth
+                best_value, best_depth = max(qualified)
+                if best_value >= float(ar_baseline_tps) * (1.0 + PROMOTE_MARGIN):
+                    profile.learned_depth = best_depth
                 else:
                     import time as _time
 

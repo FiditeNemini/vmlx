@@ -40,6 +40,12 @@ class NativeMTPAdaptiveValueState:
     )
     last_sample_cycle: list[int] = field(default_factory=lambda: [0, 0, 0])
     last_probe_cycle: list[int] = field(default_factory=lambda: [0, 0, 0])
+    # Consecutive wall-value losses by probe TARGET. A stable winning depth
+    # must not pay the same known-loser experiment every fixed interval for
+    # the rest of a long response. Each loss doubles that target's re-probe
+    # interval (capped below); a later win or a safety-driven phase change
+    # resets the debt.
+    probe_revert_counts: list[int] = field(default_factory=lambda: [0, 0, 0])
     active_probe_origin: int = 0
     active_probe_target: int = 0
     last_change_cycle: int = 0
@@ -193,6 +199,9 @@ def note_forced_depth_change(
     target = _bounded_depth(target)
     state.active_probe_origin = 0
     state.active_probe_target = 0
+    # A safety gate is evidence that the workload phase changed. Do not carry
+    # old wall-value loser backoff into the new phase.
+    state.probe_revert_counts[:] = [0, 0, 0]
     if target == origin:
         return
     state.last_change_cycle = int(cycle)
@@ -252,6 +261,7 @@ def choose_depth_by_value(
             state.active_probe_origin = 0
             state.active_probe_target = 0
             if target_value >= origin_value * (1.0 + hysteresis):
+                state.probe_revert_counts[current - 1] = 0
                 reason = (
                     f"probe_value D{current}={target_value:.2f}>=D{probe_origin}="
                     f"{origin_value:.2f}x{1.0 + hysteresis:.3f}"
@@ -271,6 +281,9 @@ def choose_depth_by_value(
                 f"{origin_value:.2f}x{1.0 + hysteresis:.3f}"
             )
             state.last_change_cycle = cycle
+            state.probe_revert_counts[current - 1] = min(
+                31, int(state.probe_revert_counts[current - 1] or 0) + 1
+            )
             _record_transition(
                 state,
                 cycle=cycle,
@@ -320,7 +333,12 @@ def choose_depth_by_value(
         for possible in candidates:
             last_probe = int(state.last_probe_cycle[possible - 1] or 0)
             never_probed = last_probe <= 0
-            if never_probed or cycle - last_probe >= probe_interval_cycles:
+            losses = max(0, int(state.probe_revert_counts[possible - 1] or 0))
+            # Cap at 4x: enough to stop long stable generations repeatedly
+            # paying for the same loser, while still allowing a genuine phase
+            # change to re-evaluate the neighbor within the same request.
+            effective_interval = probe_interval_cycles * (1 << min(losses, 2))
+            if never_probed or cycle - last_probe >= effective_interval:
                 candidate = possible
                 break
         if candidate <= 0:
@@ -373,6 +391,10 @@ def adaptive_value_snapshot(
         "active_probe": {
             "origin": int(state.active_probe_origin or 0),
             "target": int(state.active_probe_target or 0),
+        },
+        "probe_revert_counts": {
+            f"d{depth}": int(state.probe_revert_counts[depth - 1] or 0)
+            for depth in (1, 2, 3)
         },
         "transitions": list(state.transitions),
     }

@@ -14178,11 +14178,14 @@ class MLLMBatchGenerator:
             "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
             "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
         ):
-            # Adaptive policy contract: the only honest first-turn guarantee
-            # is AR. MTP activates immediately only from MEASURED evidence —
-            # a validated tuning record or an in-process profile entry that
-            # already beat its own AR baseline. Unknown workload shapes stay
-            # AR; no user request is sacrificed to a speculative experiment.
+            # Adaptive policy normally keeps unseen workloads on AR.  The
+            # qwen4_exp runtime is the narrow measured exception: live 2L
+            # AR/D1/D2/D3 receipts on the installed app showed D3 at 82.6
+            # tok/s vs 35.4 AR on predictable output, while sampled novel code
+            # still improved to 41.4 vs 39.5 tok/s.  Seed unseen qwen4_exp
+            # shapes at the configured/capability-clamped depth and let the
+            # existing request-local value controller demote it when measured
+            # acceptance or wall cost changes.  No other family inherits this.
             request_profile_key = native_mtp_profile_key(
                 temperature=float(getattr(request, "temperature", 0.0) or 0.0),
                 restored_prefix=bool(
@@ -14206,6 +14209,13 @@ class MLLMBatchGenerator:
                 configured_depth=depth,
                 capability_ceiling=_native_mtp_depth_ceiling_for_request(request),
                 tuning_validated="vmlx_mtp_tuning" in depth_source,
+                unseen_start_depth=(
+                    depth
+                    if str(getattr(self, "_model_type", "") or "").lower()
+                    == "qwen4_exp"
+                    else None
+                ),
+                unseen_start_source="qwen4_exp_measured_cold_start",
             )
             if depth <= 0:
                 logger.info(

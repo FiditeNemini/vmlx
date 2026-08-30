@@ -1,10 +1,9 @@
 """Session-scoped validated adaptive-MTP profile contract.
 
-Audited contract (2026-08-28): the only honest first-turn guarantee is AR.
-Unknown profiles never activate MTP; immediate seeding requires MEASURED
-evidence (validated tuning record or an in-process entry that beat its own
-AR baseline); cancelled/errored/sample-starved requests teach nothing; no
-user request is sacrificed to a periodic re-probe.
+Audited contract (2026-08-30): unknown profiles stay AR unless the owning
+runtime supplies a live-measured family cold-start depth.  Immediate seeding
+otherwise requires a validated tuning record or an in-process entry that beat
+its own AR baseline; cancelled/errored/sample-starved requests teach nothing.
 """
 
 from vmlx_engine.native_mtp_profile import (
@@ -68,6 +67,34 @@ class TestStartDepth:
         )
         assert depth == 2
         assert source == "tuning_validated_d2"
+
+    def test_measured_family_cold_start_is_explicit_and_clamped(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.0, restored_prefix=False, prompt_tokens=64)
+        assert store.start_depth(
+            key,
+            configured_depth=3,
+            capability_ceiling=2,
+            unseen_start_depth=3,
+            unseen_start_source="qwen4_exp_measured_cold_start",
+        ) == (2, "qwen4_exp_measured_cold_start_d2")
+
+    def test_learned_ar_verdict_overrides_family_cold_start(self):
+        store = NativeMTPProfileStore()
+        key = profile_key(temperature=0.7, restored_prefix=False, prompt_tokens=64)
+        store.observe(
+            key,
+            final_depth=1,
+            fallback_to_ar=True,
+            fallback_reason="cost",
+            finish_reason="fallback_to_ar",
+        )
+        assert store.start_depth(
+            key,
+            configured_depth=3,
+            unseen_start_depth=3,
+            unseen_start_source="qwen4_exp_measured_cold_start",
+        ) == (0, "profile_ar")
 
     def test_profitable_learned_depth_is_reused(self):
         store = NativeMTPProfileStore()
@@ -312,6 +339,17 @@ class TestSeedPathIntegration:
         state = req._native_mtp_state
         assert state.depth == 3
         assert state.stats.profile_seed == "configured"
+
+    def test_qwen4_exp_unseen_profile_starts_at_measured_d3(self, monkeypatch):
+        generator, req, first_token = self._build_generator(monkeypatch)
+        generator._model_type = "qwen4_exp"
+
+        assert generator._seed_native_mtp_from_prefill(
+            req, [object()], first_token, [None]
+        ) is True
+        state = req._native_mtp_state
+        assert state.depth == 3
+        assert state.stats.profile_seed == "qwen4_exp_measured_cold_start_d3"
 
 
 class TestStateIntegration:

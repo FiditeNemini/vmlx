@@ -7,11 +7,13 @@ Because ``MLLMNativeMTPState`` is request-local, every request repeated that
 whole failed experiment: short and first turns finished before the controller
 learned anything, and later turns relearned the same lesson from scratch.
 
-Contract (audited 2026-08-28):
+Contract (audited 2026-08-30):
 
-- The only honest first-turn guarantee is AR. An UNKNOWN or unvalidated
-  profile does not activate MTP at all; no user request is sacrificed to a
-  speculative experiment or a periodic re-probe.
+- An UNKNOWN profile stays AR unless the owning runtime explicitly supplies a
+  measured family cold-start depth.  That opt-in is intentionally separate
+  from the generic profile policy: it is allowed only after live AR/D1/D2/D3
+  evidence shows the family's native head wins on first-turn work.  The
+  request-local value controller still measures and may demote that seed.
 - MTP may seed immediately only from MEASURED evidence: either a validated
   model-local tuning record (vmlx_mtp_tuning.json best_depth, resolved by
   native_mtp_effective_depth and flagged by the caller) or a profile entry
@@ -101,6 +103,8 @@ class NativeMTPProfileStore:
         configured_depth: int,
         capability_ceiling: int = 3,
         tuning_validated: bool = False,
+        unseen_start_depth: Optional[int] = None,
+        unseen_start_source: str = "measured_family_cold_start",
         now: Optional[float] = None,
     ) -> Tuple[int, str]:
         """Return (starting depth, seed source). Depth 0 means stay AR.
@@ -109,6 +113,10 @@ class NativeMTPProfileStore:
         MEASURED model-local tuning record — the one advisory source that
         already carries wall-clock proof, so it may seed immediately even
         when this in-process store has no entry yet.
+
+        ``unseen_start_depth`` is an owning-runtime opt-in for a family whose
+        cold start has already been measured live.  It never overrides a
+        learned profile or validated tuning record.
 
         An AR-wins verdict is adaptive, not permanent: after
         AR_VERDICT_TTL_S it expires and this request runs a single bounded
@@ -136,6 +144,10 @@ class NativeMTPProfileStore:
         if tuning_validated:
             depth = min(configured, ceiling)
             return depth, f"tuning_validated_d{depth}"
+        if unseen_start_depth is not None:
+            depth = max(1, min(3, int(unseen_start_depth), ceiling))
+            source = str(unseen_start_source or "measured_family_cold_start")
+            return depth, f"{source}_d{depth}"
         return 0, "unseen_ar"
 
     def observe(

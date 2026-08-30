@@ -79,6 +79,57 @@ def kda_recurrent(
     return mx.stack(out, axis=1), S
 
 
+def kda_recurrent_with_states(
+    q: mx.array,
+    k: mx.array,
+    v: mx.array,
+    g: mx.array,
+    beta: mx.array,
+    state: mx.array | None = None,
+    scale: float | None = None,
+) -> tuple[mx.array, mx.array, list[mx.array]]:
+    """Recurrent KDA plus the exact state after every input position.
+
+    Speculative verification needs an accepted-prefix rollback boundary for
+    every draft token.  Returning those states lets the caller keep the QMM,
+    gate, convolution, norm, and output projections batched over the verify
+    slab instead of rerunning the entire attention block one token at a time.
+    """
+    B, T, H, K = q.shape
+    V = v.shape[-1]
+    if scale is None:
+        scale = K ** -0.5
+
+    q = q.astype(mx.float32) * scale
+    k = k.astype(mx.float32)
+    v = v.astype(mx.float32)
+    g = g.astype(mx.float32)
+    beta = beta.astype(mx.float32)
+    S = (
+        mx.zeros((B, H, K, V), dtype=mx.float32)
+        if state is None
+        else state.astype(mx.float32)
+    )
+
+    decay = mx.exp(g)
+    out = []
+    states = []
+    for t in range(T):
+        k_t = k[:, t]
+        v_t = v[:, t]
+        q_t = q[:, t]
+        b_t = beta[:, t]
+        S = S * decay[:, t][..., None]
+        kS = mx.sum(k_t[..., None] * S, axis=-2)
+        S = S + (b_t[..., None] * k_t)[..., None] * (
+            v_t - kS
+        )[..., None, :]
+        out.append(mx.sum(q_t[..., None] * S, axis=-2))
+        states.append(S)
+
+    return mx.stack(out, axis=1), S, states
+
+
 def kda_step(
     q: mx.array,
     k: mx.array,
@@ -131,6 +182,31 @@ def short_conv(
     new_state = padded[:, padded.shape[1] - (W - 1):]
     y = y * mx.sigmoid(y)                    # silu
     return y.astype(x.dtype), new_state
+
+
+def short_conv_with_states(
+    x: mx.array,
+    weight: mx.array,
+    state: mx.array | None = None,
+) -> tuple[mx.array, mx.array, list[mx.array]]:
+    """Causal short convolution plus its tail after every input position."""
+    if weight.ndim == 3:
+        weight = weight.reshape(weight.shape[0], -1)
+    C, W = weight.shape
+    B, T, _ = x.shape
+    if state is None:
+        state = mx.zeros((B, W - 1, C), dtype=x.dtype)
+    padded = mx.concatenate([state.astype(x.dtype), x], axis=1)
+
+    y = mx.zeros((B, T, C), dtype=mx.float32)
+    for w in range(W):
+        y = y + padded[:, w : w + T].astype(mx.float32) * weight[
+            :, w
+        ].astype(mx.float32)
+
+    states = [padded[:, t + 1 : t + W] for t in range(T)]
+    y = y * mx.sigmoid(y)
+    return y.astype(x.dtype), states[-1], states
 
 
 def kda_chunked(

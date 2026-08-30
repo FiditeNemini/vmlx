@@ -1042,28 +1042,46 @@ class TestNativeMTP:
             "model.layers.4.self_attn.q_proj.weight",
         }
 
-    def test_depth3_partial_rejection_restores_accepted_prefix(self, glm5):
+    @pytest.mark.parametrize("vectorized_verify", [False, True])
+    def test_depth3_partial_rejection_restores_accepted_prefix(
+        self, glm5, monkeypatch, vectorized_verify
+    ):
         from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
             _restore_or_trim_caches,
         )
 
+        monkeypatch.setenv(
+            "VMLX_GLM5_VECTOR_KDA_VERIFY",
+            "1" if vectorized_verify else "0",
+        )
         model = self._active_model(glm5)
         prefix = mx.array([[1, 2, 3, 4, 5, 6]])
         control = model.make_cache()
+        sequential = model.make_cache()
         verify = model.make_cache()
         model(prefix, cache=control)
+        model(prefix, cache=sequential)
         model(prefix, cache=verify)
 
         # A D2 verify advances [confirmed, accepted draft, rejected draft].
         # Rolling one token back must retain the first two positions.
         model(mx.array([[7]]), cache=control)
         model(mx.array([[8]]), cache=control)
-        model(
+        sequential_logits = mx.concatenate(
+            [
+                model(mx.array([[token]]), cache=sequential)
+                for token in (7, 8, 9)
+            ],
+            axis=1,
+        )
+        verify_logits = model(
             mx.array([[7, 8, 9]]),
             cache=verify,
             return_hidden=True,
             n_confirmed=1,
-        )
+        )[0]
+        mx.eval(sequential_logits, verify_logits)
+        assert float(mx.abs(sequential_logits - verify_logits).max()) < 3e-2
         assert _restore_or_trim_caches(verify, 1) is True
         assert control[3].offset == verify[3].offset == 8
 

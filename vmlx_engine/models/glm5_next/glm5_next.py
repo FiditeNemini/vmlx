@@ -36,6 +36,7 @@ Created by Jinho Jang (eric@jangq.ai) — 2026-08-29.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -86,12 +87,22 @@ try:  # package import (registered under mlx_lm.models.glm5_next)
     from vmlx_engine.models.glm5_next.kda import (
         kda_chunked,
         kda_recurrent,
+        kda_recurrent_with_states,
         kda_step,
         l2norm,
         short_conv,
+        short_conv_with_states,
     )
 except ImportError:  # direct file execution fallback
-    from kda import kda_chunked, kda_recurrent, kda_step, l2norm, short_conv  # type: ignore
+    from kda import (  # type: ignore
+        kda_chunked,
+        kda_recurrent,
+        kda_recurrent_with_states,
+        kda_step,
+        l2norm,
+        short_conv,
+        short_conv_with_states,
+    )
 
 # ArraysCache slot layout for KDA layers.
 KDA_CONV_Q = 0
@@ -630,6 +641,10 @@ class KDAAttention(nn.Module):
         self._fused_gated_norm = fused_gated_rmsnorm_requested()
         self._fused_kda_conv = fused_kda_conv_requested()
         self._fused_kda_step = fused_kda_step_requested()
+        self._vectorized_speculative_verify = os.environ.get(
+            "VMLINUX_GLM5_VECTOR_KDA_VERIFY",
+            os.environ.get("VMLX_GLM5_VECTOR_KDA_VERIFY", "0"),
+        ).strip().lower() in {"1", "true", "yes", "on"}
 
     def prepare_runtime(self) -> bool:
         """Group q/k/v packed rows once and release superseded references."""
@@ -750,24 +765,80 @@ class KDAAttention(nn.Module):
             and isinstance(cache, Glm5KDACache)
             and 0 < n_confirmed < T
         ):
-            outputs = []
-            states = []
-            # The confirmed prefix may contain more than one token in future
-            # callers.  Each speculative token is then advanced separately so
-            # every accepted-prefix rollback boundary has an exact state.
-            out, conv_q, conv_k, conv_v, state = run_segment(
-                x[:, :n_confirmed], conv_q, conv_k, conv_v, state
-            )
-            outputs.append(out)
-            states.append((conv_q, conv_k, conv_v, state))
-            for pos in range(n_confirmed, T):
+            if self._vectorized_speculative_verify:
+                # Compute every position-independent operation once over the
+                # full verify slab.  Only the true KDA recurrence stays
+                # sequential; it returns each accepted-prefix state for exact
+                # partial rollback.  This preserves speculative correctness
+                # without paying (draft_depth + 1) separate QMM/gate/output
+                # projection dispatches in every KDA layer.
+                q, k, v = self._project_qkv(x)
+                q, conv_q, conv_q_states = short_conv_with_states(
+                    q, self.q_conv1d, conv_q
+                )
+                k, conv_k, conv_k_states = short_conv_with_states(
+                    k, self.k_conv1d, conv_k
+                )
+                v, conv_v, conv_v_states = short_conv_with_states(
+                    v, self.v_conv1d, conv_v
+                )
+                q = l2norm(q.reshape(B, T, H, K))
+                k = l2norm(k.reshape(B, T, H, K))
+                v = v.reshape(B, T, H, K)
+                g = self._gate(x)
+                beta = mx.sigmoid(self.b_proj(x).astype(mx.float32))
+                o, state, recurrent_states = kda_recurrent_with_states(
+                    q, k, v, g, beta, state
+                )
+                gate = self.g_b_proj(self.g_a_proj(x)).reshape(B, T, H, K)
+                gated = sigmoid_gated_rmsnorm_small_rows(
+                    o,
+                    gate,
+                    self.o_norm,
+                    self.rms_eps,
+                    output_dtype=x.dtype,
+                    enabled=self._fused_gated_norm,
+                )
+                if gated is None:
+                    o32 = o.astype(mx.float32)
+                    o32 = o32 * mx.rsqrt(
+                        mx.mean(o32 * o32, axis=-1, keepdims=True)
+                        + self.rms_eps
+                    )
+                    o32 = self.o_norm.astype(mx.float32) * o32
+                    gated = (
+                        o32 * mx.sigmoid(gate.astype(mx.float32))
+                    ).astype(x.dtype)
+                result = self.o_proj(gated.reshape(B, T, H * K))
+                cache.set_speculative_states(
+                    list(
+                        zip(
+                            conv_q_states,
+                            conv_k_states,
+                            conv_v_states,
+                            recurrent_states,
+                        )
+                    )
+                )
+            else:
+                outputs = []
+                states = []
+                # The confirmed prefix may contain more than one token in
+                # future callers. Each speculative token is advanced
+                # separately so every rollback boundary has an exact state.
                 out, conv_q, conv_k, conv_v, state = run_segment(
-                    x[:, pos : pos + 1], conv_q, conv_k, conv_v, state
+                    x[:, :n_confirmed], conv_q, conv_k, conv_v, state
                 )
                 outputs.append(out)
                 states.append((conv_q, conv_k, conv_v, state))
-            cache.set_speculative_states(states)
-            result = mx.concatenate(outputs, axis=1)
+                for pos in range(n_confirmed, T):
+                    out, conv_q, conv_k, conv_v, state = run_segment(
+                        x[:, pos : pos + 1], conv_q, conv_k, conv_v, state
+                    )
+                    outputs.append(out)
+                    states.append((conv_q, conv_k, conv_v, state))
+                cache.set_speculative_states(states)
+                result = mx.concatenate(outputs, axis=1)
         else:
             result, conv_q, conv_k, conv_v, state = run_segment(
                 x, conv_q, conv_k, conv_v, state

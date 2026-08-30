@@ -528,6 +528,35 @@ const expectPagedCache = envBool('VMLINUX_REAL_UI_EXPECT_PAGED_CACHE', false)
 // L1+L2 family looked healthy — was never exercised through the UI at all.
 // Default OFF so existing rows are byte-unchanged.
 const forceSsdOnlyLane = envBool('VMLINUX_REAL_UI_FORCE_SSD_ONLY_LANE', false)
+const nativeMtpModeOverride = (
+  process.env.VMLINUX_REAL_UI_NATIVE_MTP_MODE
+  || process.env.VMLX_REAL_UI_NATIVE_MTP_MODE
+  || ''
+).trim().toLowerCase() || undefined
+const nativeMtpDepthOverride = envNumber('VMLINUX_REAL_UI_NATIVE_MTP_DEPTH')
+if (
+  nativeMtpModeOverride
+  && !['auto', 'deterministic', 'off'].includes(nativeMtpModeOverride)
+) {
+  throw new Error(
+    'Real UI Native MTP mode must be auto, deterministic, or off',
+  )
+}
+if (
+  nativeMtpDepthOverride != null
+  && (
+    !Number.isInteger(nativeMtpDepthOverride)
+    || nativeMtpDepthOverride < 1
+    || nativeMtpDepthOverride > 3
+  )
+) {
+  throw new Error('Real UI Native MTP depth must be an integer from 1 through 3')
+}
+if (nativeMtpDepthOverride != null && nativeMtpModeOverride !== 'deterministic') {
+  throw new Error(
+    'Real UI fixed Native MTP depth requires deterministic mode',
+  )
+}
 const blockDiskCacheMaxPercentOverride = envNumber(
   'VMLINUX_REAL_UI_BLOCK_DISK_CACHE_MAX_PERCENT',
 )
@@ -5285,6 +5314,9 @@ export function validateNativeMtpSurfaceParity(result) {
   if (result?.requestedServerCacheControls !== true) return failures
   const surface = result?.serverCacheControls?.nativeMtpControl
   const mtp = result?.server?.health?.mtp
+  const requestedMode = result?.requestContract?.nativeMtpMode
+  const requestedDepth = result?.requestContract?.nativeMtpDepth
+  const selection = result?.nativeMtpSelection
   if (!surface || typeof surface !== 'object') {
     failures.push('server cache controls were inspected but the Native MTP surface was not captured')
     return failures
@@ -5315,6 +5347,47 @@ export function validateNativeMtpSurfaceParity(result) {
     }
   } else if (surface.labelVisible === true || surface.modeSelectPresent === true) {
     failures.push('engine reports no MTP weights in the bundle but the UI rendered a Native MTP control')
+  }
+  if (requestedMode != null) {
+    if (!selection || selection.requested !== true) {
+      failures.push('requested Native MTP selection was not captured before Start')
+    } else {
+      if (selection.selectedMode !== requestedMode) {
+        failures.push(`visible Native MTP mode ${selection.selectedMode || 'missing'} did not match requested ${requestedMode}`)
+      }
+      if (selection.persistedMode !== requestedMode) {
+        failures.push(`persisted Native MTP mode ${selection.persistedMode || 'missing'} did not match requested ${requestedMode}`)
+      }
+    }
+    if (surface?.selectedMode !== requestedMode) {
+      failures.push(`running-session Native MTP mode ${surface?.selectedMode || 'missing'} did not match requested ${requestedMode}`)
+    }
+  }
+  if (requestedDepth != null) {
+    if (selection?.selectedDepthPolicy !== 'fixed') {
+      failures.push('visible Native MTP depth policy was not fixed before Start')
+    }
+    if (Number(selection?.selectedDepth) !== Number(requestedDepth)) {
+      failures.push(`visible Native MTP depth ${selection?.selectedDepth ?? 'missing'} did not match requested D${requestedDepth}`)
+    }
+    if (
+      selection?.persistedDepthOverride !== true
+      || Number(selection?.persistedDepth) !== Number(requestedDepth)
+    ) {
+      failures.push(`persisted Native MTP depth did not retain fixed D${requestedDepth}`)
+    }
+    if (
+      result?.effectiveSessionConfig?.nativeMtpDepthOverride !== true
+      || Number(result?.effectiveSessionConfig?.nativeMtpDepth) !== Number(requestedDepth)
+    ) {
+      failures.push(`started session did not retain fixed Native MTP D${requestedDepth}`)
+    }
+    if (mtp.runtime_active !== true) {
+      failures.push(`requested fixed Native MTP D${requestedDepth} but /health did not report the runtime active`)
+    }
+    if (Number(mtp.effective_depth) !== Number(requestedDepth)) {
+      failures.push(`/health Native MTP effective depth ${mtp.effective_depth ?? 'missing'} did not match requested D${requestedDepth}`)
+    }
   }
   return failures
 }
@@ -9725,6 +9798,130 @@ async function main() {
           // Optional lane selection, before Start so the session is CREATED in
           // the SSD-only configuration rather than toggled afterwards.
           let ssdOnlyLaneSelection = null;
+          let nativeMtpSelection = null;
+          if (
+            ${JSON.stringify(nativeMtpModeOverride)} != null
+            || ${JSON.stringify(nativeMtpDepthOverride)} != null
+          ) {
+            const preDrawer = document.querySelector(
+              '[data-vmlx-surface="server-settings"]'
+            );
+            const nativeSectionButton = [...(preDrawer?.querySelectorAll('button') || [])]
+              .find((button) => (
+                (button.innerText || '').replace(/\\s+/g, ' ').trim() === 'Native MTP'
+              ));
+            const labelFor = (text) => [...(preDrawer?.querySelectorAll('label') || [])]
+              .find((label) => (
+                (label.innerText || '').replace(/\\s+/g, ' ').trim().startsWith(text)
+              ));
+            if (!labelFor('Native MTP Mode')) {
+              if (!(nativeSectionButton instanceof HTMLButtonElement)) {
+                throw new Error('Visible Native MTP section was not available before Start');
+              }
+              nativeSectionButton.scrollIntoView({ block: 'center' });
+              nativeSectionButton.click();
+              await waitFor(
+                () => labelFor('Native MTP Mode') || null,
+                'visible Native MTP controls before Start',
+              );
+            }
+            const setSelect = async (labelText, requestedValue) => {
+              const select = labelFor(labelText)?.querySelector('select');
+              if (!(select instanceof HTMLSelectElement) || select.disabled) {
+                throw new Error('Visible ' + labelText + ' control was not editable');
+              }
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLSelectElement.prototype,
+                'value',
+              )?.set;
+              setter?.call(select, requestedValue);
+              select.dispatchEvent(new Event('input', { bubbles: true }));
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              await waitFor(
+                () => select.value === requestedValue ? select : null,
+                'visible ' + labelText + ' to update',
+              );
+              await new Promise((resolve) => setTimeout(resolve, 150));
+              return select;
+            };
+            const requestedMode = ${JSON.stringify(nativeMtpModeOverride)};
+            const requestedDepth = ${JSON.stringify(nativeMtpDepthOverride)};
+            if (requestedMode != null) {
+              await setSelect('Native MTP Mode', requestedMode);
+            }
+            if (requestedDepth != null) {
+              await setSelect('MTP Depth Policy', 'fixed');
+              const depthSetting = preDrawer?.querySelector(
+                '[data-setting-label="Native MTP Depth"]'
+              );
+              const depthInput = depthSetting?.querySelector('input[type="range"]');
+              if (!(depthInput instanceof HTMLInputElement) || depthInput.disabled) {
+                throw new Error('Visible Native MTP Depth control was not editable');
+              }
+              const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype,
+                'value',
+              )?.set;
+              setter?.call(depthInput, String(requestedDepth));
+              depthInput.dispatchEvent(new Event('input', { bubbles: true }));
+              depthInput.dispatchEvent(new Event('change', { bubbles: true }));
+              await waitFor(
+                () => Number(depthSetting?.getAttribute('data-setting-value')) === requestedDepth,
+                'visible Native MTP depth to update',
+              );
+            }
+            const saveCandidates = [...(preDrawer?.querySelectorAll('button') || [])]
+              .filter((button) => /^(save|save & restart|save and restart)$/i.test(
+                (button.innerText || '').replace(/\\s+/g, ' ').trim(),
+              ) && isVisible(button) && !button.disabled);
+            const plainSave = saveCandidates.find(
+              (button) => /^save$/i.test((button.innerText || '').trim()),
+            ) || saveCandidates[0] || null;
+            if (!(plainSave instanceof HTMLButtonElement)) {
+              throw new Error('Visible Server Settings Save control was not available');
+            }
+            plainSave.scrollIntoView({ block: 'center' });
+            plainSave.click();
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            const reread = await window.api.sessions.get(created.session.id);
+            const persisted = JSON.parse(reread?.config || '{}');
+            if (
+              requestedMode != null
+              && persisted.nativeMtpMode !== requestedMode
+            ) {
+              throw new Error(
+                'Native MTP mode did not persist: ' + (persisted.nativeMtpMode || 'missing')
+              );
+            }
+            if (
+              requestedDepth != null
+              && (
+                persisted.nativeMtpDepthOverride !== true
+                || Number(persisted.nativeMtpDepth) !== requestedDepth
+              )
+            ) {
+              throw new Error(
+                'Native MTP fixed depth did not persist: override='
+                  + persisted.nativeMtpDepthOverride
+                  + ' depth=' + persisted.nativeMtpDepth
+              );
+            }
+            nativeMtpSelection = {
+              requested: true,
+              requestedMode,
+              requestedDepth,
+              selectedMode: labelFor('Native MTP Mode')?.querySelector('select')?.value || null,
+              selectedDepthPolicy: labelFor('MTP Depth Policy')?.querySelector('select')?.value || null,
+              selectedDepth: Number(preDrawer?.querySelector(
+                '[data-setting-label="Native MTP Depth"]'
+              )?.getAttribute('data-setting-value')),
+              savedVia: (plainSave.innerText || '').trim(),
+              persistedMode: persisted.nativeMtpMode ?? null,
+              persistedDepthOverride: persisted.nativeMtpDepthOverride === true,
+              persistedDepth: persisted.nativeMtpDepth ?? null,
+            };
+            sessionBeforeStart = reread;
+          }
           if (
             ${JSON.stringify(forceSsdOnlyLane)}
             || ${JSON.stringify(blockDiskCacheMaxPercentOverride)} != null
@@ -11178,6 +11375,7 @@ async function main() {
             uiStartControl,
             gatewaySingleModelMode,
             ssdOnlyLaneSelection,
+            nativeMtpSelection,
             chatId: chat.id,
             chatOverrides,
             rendererGenerationDefaults,
@@ -11340,6 +11538,8 @@ async function main() {
             Object.entries(samplingOverrides).filter(([, value]) => value !== undefined),
           ),
           checkServerCacheControls,
+          nativeMtpMode: nativeMtpModeOverride ?? null,
+          nativeMtpDepth: nativeMtpDepthOverride ?? null,
           checkMedia,
           checkVideo,
           expectPagedCacheLocked,
@@ -12337,6 +12537,8 @@ async function main() {
           Object.entries(samplingOverrides).filter(([, value]) => value !== undefined),
         ),
         checkServerCacheControls,
+        nativeMtpMode: nativeMtpModeOverride ?? null,
+        nativeMtpDepth: nativeMtpDepthOverride ?? null,
         checkMedia,
         checkVideo,
         expectPagedCacheLocked,

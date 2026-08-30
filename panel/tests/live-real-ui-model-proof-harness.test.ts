@@ -6260,6 +6260,59 @@ describe("native MTP surface / engine parity", () => {
     expect(validateNativeMtpSurfaceParity(mtpBundleResult())).toEqual([]);
   });
 
+  it("accepts a visibly selected and persisted fixed D2 runtime", () => {
+    const result: any = mtpBundleResult();
+    result.requestContract = {
+      nativeMtpMode: "deterministic",
+      nativeMtpDepth: 2,
+    };
+    result.nativeMtpSelection = {
+      requested: true,
+      requestedMode: "deterministic",
+      requestedDepth: 2,
+      selectedMode: "deterministic",
+      selectedDepthPolicy: "fixed",
+      selectedDepth: 2,
+      persistedMode: "deterministic",
+      persistedDepthOverride: true,
+      persistedDepth: 2,
+    };
+    result.serverCacheControls.nativeMtpControl.selectedMode = "deterministic";
+    result.effectiveSessionConfig = {
+      nativeMtpMode: "deterministic",
+      nativeMtpDepthOverride: true,
+      nativeMtpDepth: 2,
+    };
+    expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
+  });
+
+  it("rejects a fixed D2 request that silently runs adaptive D1", () => {
+    const result: any = mtpBundleResult();
+    result.requestContract = {
+      nativeMtpMode: "deterministic",
+      nativeMtpDepth: 2,
+    };
+    result.nativeMtpSelection = {
+      requested: true,
+      selectedMode: "deterministic",
+      selectedDepthPolicy: "adaptive",
+      selectedDepth: 1,
+      persistedMode: "deterministic",
+      persistedDepthOverride: false,
+      persistedDepth: 1,
+    };
+    result.serverCacheControls.nativeMtpControl.selectedMode = "deterministic";
+    result.effectiveSessionConfig = {
+      nativeMtpMode: "deterministic",
+      nativeMtpDepthOverride: false,
+      nativeMtpDepth: 1,
+    };
+    result.server.health.mtp.effective_depth = 1;
+    expect(validateNativeMtpSurfaceParity(result).join("\n")).toMatch(
+      /depth policy was not fixed|did not retain fixed D2|did not match requested D2/,
+    );
+  });
+
   it("accepts a non-MTP bundle that renders no control", () => {
     expect(validateNativeMtpSurfaceParity(nonMtpBundleResult())).toEqual([]);
   });

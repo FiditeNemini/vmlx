@@ -14169,6 +14169,19 @@ class MLLMBatchGenerator:
         }:
             drop_context(self.language_model)
             return False
+        if model_type.startswith("qwen3_5") and not _native_mtp_env_flag(
+            False,
+            "VMLINUX_QWEN35_MTP_PROMPT_PRIMING",
+            "VMLX_QWEN35_MTP_PROMPT_PRIMING",
+        ):
+            # Exact-output A/B at 84d2c7c39 showed the dense 27B head accepts
+            # more drafts with prompt history, but did not establish a wall
+            # speed win: three fresh-process adaptive pairs were neutral to
+            # ~3% slower and fixed-depth runs were thermally noisy.  Keep the
+            # proven implementation available for controlled profiling, not
+            # silently enabled as a claimed optimization.
+            drop_context(self.language_model)
+            return False
         if (
             request is None
             or int(getattr(request, "max_tokens", 0) or 0) <= 1

@@ -91,7 +91,7 @@ def test_capture_requested_tracks_only_an_armed_prompt_timeline():
     assert not capture_requested(host)
 
 
-def test_scheduler_arms_dense_qwen35_but_not_unproven_mtp_families():
+def test_scheduler_arms_dense_qwen35_only_with_measured_opt_in(monkeypatch):
     from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
 
     generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
@@ -107,6 +107,10 @@ def test_scheduler_arms_dense_qwen35_but_not_unproven_mtp_families():
     )
 
     generator._model_type = "qwen3_5"
+    assert not generator._prepare_native_mtp_prompt_priming(request)
+    assert not capture_requested(generator.language_model)
+
+    monkeypatch.setenv("VMLX_QWEN35_MTP_PROMPT_PRIMING", "1")
     assert not generator._prepare_native_mtp_prompt_priming(request)
     assert capture_requested(generator.language_model)
 

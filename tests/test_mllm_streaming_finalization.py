@@ -126,6 +126,15 @@ def test_terminal_reconciliation_never_rewrites_a_nonmonotonic_stream():
     ) == " bytes"
 
 
+def test_terminal_reconciliation_uses_the_existing_display_normalization():
+    assert _reconcile_mllm_terminal_delta(
+        "<|im_start|>assert value == [",
+        "",
+        "assert value == []",
+        finished=True,
+    ) == "]"
+
+
 class _TerminalSuffixScheduler:
     async def add_request_async(self, **_kwargs):
         return "terminal-suffix"

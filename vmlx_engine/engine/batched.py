@@ -76,7 +76,30 @@ def _reconcile_mllm_terminal_delta(
         return delta
     streamed = emitted_text + delta
     if output_text.startswith(streamed):
-        return delta + output_text[len(streamed) :]
+        suffix = output_text[len(streamed) :]
+        if suffix:
+            logger.info(
+                "Reconciled raw MLLM terminal stream suffix: chars=%d",
+                len(suffix),
+            )
+        return delta + suffix
+
+    # NaiveStreamingDetokenizer may revise an earlier raw segment as more
+    # tokens arrive (special-marker removal and tokenizer whitespace cleanup are
+    # the common cases).  The server already exposes ``clean_output_text`` as
+    # the canonical display view.  Compare that same view before declaring the
+    # stream non-monotonic; still append only a strict suffix and never replace
+    # bytes the client has received.
+    display_streamed = clean_output_text(streamed)
+    display_output = clean_output_text(output_text)
+    if display_output.startswith(display_streamed):
+        suffix = display_output[len(display_streamed) :]
+        if suffix:
+            logger.info(
+                "Reconciled normalized MLLM terminal stream suffix: chars=%d",
+                len(suffix),
+            )
+        return delta + suffix
     return delta
 
 

@@ -1,4 +1,4 @@
-"""Single-dispatch GLM-5.3 hyper-connection placement for decode."""
+"""Single-dispatch GLM-5.3 hyper-connection placement for decode/verify."""
 
 from __future__ import annotations
 
@@ -15,18 +15,23 @@ def fused_glm5_hc_place_requested() -> bool:
     return value not in {"", "0", "false", "off", "no"}
 
 
-@lru_cache(maxsize=8)
-def _kernel(streams: int, hidden: int):
+@lru_cache(maxsize=16)
+def _kernel(streams: int, hidden: int, rows: int):
     source = f"""
         uint index = thread_position_in_grid.x;
-        if (index >= {streams * hidden}u) return;
-        uint target = index / {hidden}u;
+        if (index >= {rows * streams * hidden}u) return;
+        uint token_target = index / {hidden}u;
+        uint token = token_target / {streams}u;
+        uint target = token_target % {streams}u;
         uint dim = index % {hidden}u;
 
-        float value = float(T(post[target])) * float(block_out[dim]);
+        size_t stream_base = (size_t)token * {streams * hidden}u;
+        size_t comb_base = (size_t)token * {streams * streams}u;
+        float value = float(T(post[(size_t)token * {streams}u + target])) *
+            float(block_out[(size_t)token * {hidden}u + dim]);
         for (uint source = 0u; source < {streams}u; ++source) {{
-            value += float(T(comb[source * {streams}u + target])) *
-                float(residual[source * {hidden}u + dim]);
+            value += float(T(comb[comb_base + source * {streams}u + target])) *
+                float(residual[stream_base + source * {hidden}u + dim]);
         }}
         output[index] = T(value);
 """
@@ -52,13 +57,13 @@ def glm5_hc_place_decode(
     if not enabled or residual.ndim != 4:
         return None
     batch, rows, streams, hidden = (int(value) for value in residual.shape)
-    if batch != 1 or rows != 1 or streams != 4 or hidden <= 0:
+    if batch != 1 or not 1 <= rows <= 4 or streams != 4 or hidden <= 0:
         return None
-    if tuple(post.shape) != (1, 1, streams):
+    if tuple(post.shape) != (1, rows, streams):
         return None
-    if tuple(comb.shape) != (1, 1, streams, streams):
+    if tuple(comb.shape) != (1, rows, streams, streams):
         return None
-    if tuple(block_out.shape) != (1, 1, hidden):
+    if tuple(block_out.shape) != (1, rows, hidden):
         return None
     supported = (mx.float16, mx.bfloat16, mx.float32)
     if residual.dtype not in supported or block_out.dtype != residual.dtype:
@@ -66,10 +71,10 @@ def glm5_hc_place_decode(
     if post.dtype != mx.float32 or comb.dtype != mx.float32:
         return None
 
-    output = _kernel(streams, hidden)(
+    output = _kernel(streams, hidden, rows)(
         inputs=[post, comb, block_out, residual],
         template=[("T", residual.dtype)],
-        grid=(streams * hidden, 1, 1),
+        grid=(rows * streams * hidden, 1, 1),
         threadgroup=(256, 1, 1),
         output_shapes=[tuple(residual.shape)],
         output_dtypes=[residual.dtype],

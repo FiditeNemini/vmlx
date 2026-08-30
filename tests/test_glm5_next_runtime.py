@@ -606,12 +606,60 @@ class TestCacheAndForward:
         assert mx.allclose(candidate[1], reference[1], rtol=2e-4, atol=2e-5)
         assert mx.allclose(candidate[2], reference[2], rtol=2e-4, atol=2e-5)
 
-    def test_mhc_decode_fusion_refuses_prefill(self, glm5):
+    @pytest.mark.parametrize("rows", [2, 3, 4])
+    def test_mhc_decode_fusion_matches_mtp_verify_slabs(self, rows, glm5):
         from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
 
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         module = glm5.HyperConnection(args)
-        streams = mx.zeros((1, 2, args.hc_mult, args.hidden_size))
+        module.hc_fn = (mx.random.normal(module.hc_fn.shape) * 0.01).astype(
+            mx.bfloat16
+        )
+        module.hc_base = (mx.random.normal(module.hc_base.shape) * 0.01).astype(
+            mx.float32
+        )
+        streams = (
+            mx.random.normal((1, rows, args.hc_mult, args.hidden_size)) * 0.1
+        ).astype(mx.bfloat16)
+        module._fused_decode = False
+        reference = module(streams)
+        candidate = glm5_mhc_decode(
+            streams,
+            module.hc_fn,
+            module.hc_base,
+            module.hc_scale,
+            rms_eps=module.rms_eps,
+            sink_eps=module.eps,
+            iterations=module.iters,
+            enabled=True,
+        )
+        assert candidate is not None
+        mx.eval(*reference, *candidate)
+        assert mx.allclose(candidate[0], reference[0], rtol=2e-4, atol=2e-5)
+        assert mx.allclose(candidate[1], reference[1], rtol=2e-4, atol=2e-5)
+        max_abs = float(
+            mx.max(
+                mx.abs(
+                    candidate[2].astype(mx.float32)
+                    - reference[2].astype(mx.float32)
+                )
+            ).item()
+        )
+        max_ref = max(
+            float(mx.max(mx.abs(reference[2].astype(mx.float32))).item()),
+            1e-9,
+        )
+        # The direct Metal reduction and MLX matmul use different accumulation
+        # orders. Bound the BF16 collapsed stream to the same one-storage-step
+        # envelope as the already-qualified single-token kernel.
+        assert max_abs / max_ref <= 6e-3
+
+    def test_mhc_decode_fusion_refuses_long_prefill(self, glm5):
+        from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
+
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        module = glm5.HyperConnection(args)
+        streams = mx.zeros((1, 5, args.hc_mult, args.hidden_size))
         assert glm5_mhc_decode(
             streams,
             module.hc_fn,
@@ -657,14 +705,34 @@ class TestCacheAndForward:
         relative_limit = 6e-3 if dtype == mx.bfloat16 else 1e-3
         assert max_abs / max_ref <= relative_limit
 
-    def test_hc_place_decode_fusion_refuses_prefill(self, glm5):
-        post = mx.ones((1, 2, 4), dtype=mx.float32)
-        comb = mx.ones((1, 2, 4, 4), dtype=mx.float32)
-        out = mx.zeros((1, 2, 64), dtype=mx.bfloat16)
-        residual = mx.zeros((1, 2, 4, 64), dtype=mx.bfloat16)
-        assert glm5.hc_place(
+    @pytest.mark.parametrize("rows", [2, 3, 4])
+    def test_hc_place_decode_fusion_matches_mtp_verify_slabs(self, rows, glm5):
+        post = mx.sigmoid(mx.random.normal((1, rows, 4))).astype(mx.float32) * 2
+        comb = mx.softmax(mx.random.normal((1, rows, 4, 4)), axis=-1).astype(
+            mx.float32
+        )
+        out = (mx.random.normal((1, rows, 64)) * 0.1).astype(mx.bfloat16)
+        residual = (mx.random.normal((1, rows, 4, 64)) * 0.1).astype(
+            mx.bfloat16
+        )
+        reference = glm5.hc_place(post, comb, out, residual)
+        candidate = glm5.hc_place(
             post, comb, out, residual, fused_decode=True
-        ).shape == residual.shape
+        )
+        mx.eval(reference, candidate)
+        assert mx.allclose(candidate, reference, rtol=6e-3, atol=2e-3)
+
+    def test_hc_place_decode_fusion_refuses_long_prefill(self, glm5):
+        post = mx.ones((1, 5, 4), dtype=mx.float32)
+        comb = mx.ones((1, 5, 4, 4), dtype=mx.float32)
+        out = mx.zeros((1, 5, 64), dtype=mx.bfloat16)
+        residual = mx.zeros((1, 5, 4, 64), dtype=mx.bfloat16)
+        reference = glm5.hc_place(post, comb, out, residual)
+        candidate = glm5.hc_place(
+            post, comb, out, residual, fused_decode=True
+        )
+        mx.eval(reference, candidate)
+        assert mx.array_equal(candidate, reference)
 
     def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
         args = glm5.ModelArgs.from_dict(TINY_CFG)

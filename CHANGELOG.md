@@ -4,6 +4,13 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **Hugging Face downloads no longer fail after transfer begins when the Hub client refreshes its progress bar.** The app's structured byte-progress adapter now implements the `refresh()` method required by current `huggingface_hub` download paths.
+
+---
+
 ## [1.6.47] - 2026-08-30
 
 ### Performance

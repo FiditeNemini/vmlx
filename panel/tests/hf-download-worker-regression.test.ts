@@ -56,8 +56,12 @@ function writeFakeHubPackage(root: string): void {
       '        raise _auth_error()',
       '    os.makedirs(local_dir, exist_ok=True)',
       '    path = os.path.join(local_dir, filename)',
+      '    progress = tqdm_class(total=4, initial=0)',
+      '    progress.refresh()',
       "    with open(path, 'wb') as f:",
       "        f.write(b'test')",
+      '    progress.update(4)',
+      '    progress.close()',
       '    return path',
       '',
     ].join('\n'),
@@ -83,7 +87,7 @@ function writeFakeHubPackage(root: string): void {
 }
 
 describe('HuggingFace download worker fallback', () => {
-  it('recovers public downloads from a stale backup endpoint plus stale token', () => {
+  it('supports refresh while recovering from a stale backup endpoint plus stale token', () => {
     const workerScript = extractDownloadWorkerScript()
     const root = mkdtempSync(join(tmpdir(), 'vmlx-hf-worker-'))
     const fakeHubRoot = join(root, 'fake-hub')
@@ -117,6 +121,7 @@ describe('HuggingFace download worker fallback', () => {
       expect(result.status).toBe(0)
       expect(result.stderr).toBe('')
       expect(result.stdout).toContain('"type": "fallback"')
+      expect(result.stdout).toContain('"type": "file_progress"')
       expect(result.stdout).toContain('"status": "complete"')
     } finally {
       rmSync(root, { recursive: true, force: true })

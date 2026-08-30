@@ -30,6 +30,7 @@ import queue
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -244,6 +245,7 @@ class DiskCacheManager:
         max_size_gb: float = 10.0,
         expected_num_layers: Optional[int] = None,
         required_cache_class: Optional[str] = None,
+        required_cache_classes: Optional[Iterable[str]] = None,
         allow_tq_native: Optional[bool] = None,
     ):
         self.cache_dir = Path(cache_dir)
@@ -256,6 +258,10 @@ class DiskCacheManager:
         # Families with first-class cache subclasses (MiniMax-M3 MSA, DSV4, etc.)
         # must not accept stale legacy KV-only files from the same prompt hash.
         self._required_cache_class: Optional[str] = required_cache_class
+        required = {str(name) for name in (required_cache_classes or ()) if name}
+        if required_cache_class:
+            required.add(str(required_cache_class))
+        self._required_cache_classes: frozenset[str] = frozenset(required)
         if allow_tq_native is None:
             allow_tq_native = os.environ.get("VMLX_DISABLE_TQ_KV", "").lower() not in {
                 "1",
@@ -582,8 +588,14 @@ class DiskCacheManager:
                     str(file_path), return_metadata=True
                 )
                 cache_classes = _metadata_cache_classes(file_metadata)
+                required_classes = set(
+                    getattr(self, "_required_cache_classes", ()) or ()
+                )
                 required_class = getattr(self, "_required_cache_class", None)
-                if required_class and required_class not in cache_classes:
+                if required_class:
+                    required_classes.add(required_class)
+                missing_classes = sorted(required_classes - set(cache_classes))
+                if missing_classes:
                     try:
                         file_path.unlink(missing_ok=True)
                     except OSError:
@@ -597,8 +609,8 @@ class DiskCacheManager:
                         self.misses += 1
                     logger.warning(
                         "Disk prompt cache class mismatch; treating as miss "
-                        "(required=%s, stored=%s, file=%s)",
-                        required_class,
+                        "(missing=%s, stored=%s, file=%s)",
+                        ",".join(missing_classes),
                         ",".join(cache_classes[:8]) or "missing",
                         file_name,
                     )
@@ -1095,6 +1107,21 @@ class DiskCacheManager:
             cache_info = [c.meta_state for c in cache]
             cache_data_flat = dict(tree_flatten(cache_data))
             cache_classes = [type(c).__name__ for c in cache]
+            required_classes = set(
+                getattr(self, "_required_cache_classes", ()) or ()
+            )
+            required_class = getattr(self, "_required_cache_class", None)
+            if required_class:
+                required_classes.add(required_class)
+            missing_classes = sorted(required_classes - set(cache_classes))
+            if missing_classes:
+                logger.warning(
+                    "Refusing disk prompt cache with missing typed classes "
+                    "(missing=%s, stored=%s)",
+                    ",".join(missing_classes),
+                    ",".join(cache_classes[:8]) or "missing",
+                )
+                return False
 
             save_metadata = metadata or {}
             save_metadata["num_tokens"] = str(len(tokens))

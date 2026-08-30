@@ -303,6 +303,18 @@ class SingleBatchGenerator:
                 )
             except Exception:
                 return None
+        if type(cache_obj).__name__ in {"Glm5KDACache", "Glm5MLACache"}:
+            try:
+                from ..models.glm5_next.glm5_next import (
+                    clone_glm5_next_layer_cache,
+                )
+
+                return clone_glm5_next_layer_cache(
+                    cache_obj,
+                    copy_fn=cls._clone_array,
+                )
+            except Exception:
+                return None
         if isinstance(cache_obj, mlx_cache.KVCache):
             cloned = type(cache_obj)()
             if cache_obj.keys is not None:
@@ -327,6 +339,8 @@ class SingleBatchGenerator:
             return any(cls._cache_needs_prompt_snapshot(c) for c in cache_obj.caches)
         return type(cache_obj).__name__ in {
             "DeepseekV4Cache",
+            "Glm5KDACache",
+            "Glm5MLACache",
             "MiniMaxM3SparseCache",
             "OpenPanguV2LayerCache",
         }
@@ -338,6 +352,14 @@ class SingleBatchGenerator:
         if isinstance(cache_obj, (list, tuple)):
             return any(cls._cache_uses_openpangu(c) for c in cache_obj)
         return type(cache_obj).__name__ == "OpenPanguV2LayerCache"
+
+    @classmethod
+    def _cache_uses_glm5_next(cls, cache_obj) -> bool:
+        if isinstance(cache_obj, mlx_cache.CacheList):
+            return any(cls._cache_uses_glm5_next(c) for c in cache_obj.caches)
+        if isinstance(cache_obj, (list, tuple)):
+            return any(cls._cache_uses_glm5_next(c) for c in cache_obj)
+        return type(cache_obj).__name__ in {"Glm5KDACache", "Glm5MLACache"}
 
     @classmethod
     def _cache_uses_m3_msa(cls, cache_obj) -> bool:
@@ -910,16 +932,22 @@ class SingleBatchGenerator:
             else:
                 self._prefill(_cold_tokens, req)
         uses_openpangu = self._cache_uses_openpangu(req.cache)
-        # openPangu's KV, DSA-indexer, rotating-SWA and causal-conv states are a
-        # single path-dependent unit.  Capture the immutable N-1 boundary BEFORE
-        # the last prompt token is consumed; the post-decode live cache cannot be
-        # rewound safely.  This also works on a cache hit whose remaining prompt
-        # is only the final token because the restored cache already owns N-1.
-        openpangu_prompt_snapshot = None
+        uses_glm5_next = self._cache_uses_glm5_next(req.cache)
+        # openPangu and GLM each own a path-dependent native state unit. Capture
+        # the immutable N-1 boundary BEFORE the final prompt token is consumed;
+        # post-decode convolution/recurrent/indexer state cannot be rewound.
+        typed_prompt_snapshot = None
         if uses_openpangu and any(
             int(getattr(layer, "offset", 0) or 0) > 0 for layer in req.cache
         ):
-            openpangu_prompt_snapshot = self._clone_admissible_prompt_cache_snapshot(
+            typed_prompt_snapshot = self._clone_admissible_prompt_cache_snapshot(
+                req.cache
+            )
+        elif uses_glm5_next and any(
+            any(value is not None for value in getattr(layer, "cache", ()))
+            for layer in req.cache
+        ):
+            typed_prompt_snapshot = self._clone_admissible_prompt_cache_snapshot(
                 req.cache
             )
         last_token = int(req.prompt_tokens[-1])
@@ -932,8 +960,8 @@ class SingleBatchGenerator:
         # (e.g., prompt [11,12] -> sampled 3 would yield [11,3]).
         req.context_tokens.append(last_token)
         prompt_cache_snapshot = (
-            openpangu_prompt_snapshot
-            if uses_openpangu
+            typed_prompt_snapshot
+            if uses_openpangu or uses_glm5_next
             else self._clone_admissible_prompt_cache_snapshot(req.cache)
         )
         req.prompt_cache_snapshot = prompt_cache_snapshot

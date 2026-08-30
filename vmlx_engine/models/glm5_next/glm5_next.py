@@ -36,6 +36,7 @@ Created by Jinho Jang (eric@jangq.ai) — 2026-08-29.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
@@ -155,6 +156,40 @@ class Glm5KDACache(ArraysCache):
         ]
         return extracted
 
+    @property
+    def meta_state(self):
+        return ("glm5_next_native_v1", "kda")
+
+    @meta_state.setter
+    def meta_state(self, value):
+        meta = tuple(value or ())
+        if meta != ("glm5_next_native_v1", "kda"):
+            raise ValueError("GLM KDA cache metadata is missing its typed schema")
+
+    @classmethod
+    def from_state(cls, state, meta_state) -> "Glm5KDACache":
+        meta = tuple(meta_state or ())
+        if meta != ("glm5_next_native_v1", "kda"):
+            raise ValueError("GLM KDA cache metadata is missing its typed schema")
+        values = list(state or ())
+        if len(values) != 4:
+            raise ValueError("GLM KDA cache must contain exactly four state arrays")
+        populated = [value is not None for value in values]
+        if any(populated) and not all(populated):
+            raise ValueError("GLM KDA cache has a partial recurrent-state record")
+        if all(populated):
+            if any(getattr(value, "ndim", -1) != 3 for value in values[:3]):
+                raise ValueError("GLM KDA convolution states must be rank 3")
+            if getattr(values[KDA_STATE], "ndim", -1) != 4:
+                raise ValueError("GLM KDA recurrent state must be rank 4")
+            batch = int(values[0].shape[0])
+            if any(int(value.shape[0]) != batch for value in values[1:]):
+                raise ValueError("GLM KDA state arrays disagree on batch size")
+        rebuilt = cls()
+        rebuilt.cache = values
+        rebuilt._speculative_states = None
+        return rebuilt
+
 
 class Glm5MLACache(ArraysCache):
     """Per-MLA-layer cache: expanded K/V plus the DSA indexer's packed
@@ -177,6 +212,35 @@ class Glm5MLACache(ArraysCache):
             for value in self.cache
         ]
         return extracted
+
+    @property
+    def state(self):
+        """Return a safetensors-safe representation of the typed MLA state.
+
+        Dense-only MLA prompts legitimately have no materialized DSA pool even
+        after KV/index history exists.  ``mlx.utils.tree_flatten`` retains that
+        ``None`` leaf, but safetensors accepts tensors only.  Encode the absent
+        pool as a typed zero-length tensor; ``from_state`` accepts this as the
+        exact not-yet-materialized state.
+        """
+
+        values = list(self.cache)
+        packed = values[MLA_PACKED]
+        if packed is not None and values[MLA_POOL_KEYS] is None:
+            packed_width = int(packed.shape[-1])
+            if packed_width <= 0 or packed_width % 2:
+                raise ValueError(
+                    "GLM MLA packed index width must be positive and even"
+                )
+            values[MLA_POOL_KEYS] = mx.zeros(
+                (int(packed.shape[0]), 0, packed_width // 2),
+                dtype=packed.dtype,
+            )
+        return values
+
+    @state.setter
+    def state(self, value):
+        self.cache = list(value)
 
     @property
     def offset(self) -> int:
@@ -225,6 +289,83 @@ class Glm5MLACache(ArraysCache):
                     :, :keep_pools, :
                 ]
         return n
+
+    @property
+    def meta_state(self):
+        return (
+            "glm5_next_native_v1",
+            "mla",
+            str(self.kpool),
+            str(self.offset),
+        )
+
+    @meta_state.setter
+    def meta_state(self, value):
+        # Validation and constructor invariants are owned by from_state().
+        meta = tuple(value or ())
+        if len(meta) != 4 or meta[:2] != ("glm5_next_native_v1", "mla"):
+            raise ValueError("GLM MLA cache metadata is missing its typed schema")
+
+    @classmethod
+    def from_state(cls, state, meta_state) -> "Glm5MLACache":
+        meta = tuple(meta_state or ())
+        if len(meta) != 4 or meta[:2] != ("glm5_next_native_v1", "mla"):
+            raise ValueError("GLM MLA cache metadata is missing its typed schema")
+        try:
+            kpool = int(meta[2])
+            expected_offset = int(meta[3])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("GLM MLA cache metadata is not integral") from exc
+        if kpool <= 0 or expected_offset < 0:
+            raise ValueError("GLM MLA cache metadata is outside its valid range")
+        values = list(state or ())
+        if len(values) != 4:
+            raise ValueError("GLM MLA cache must contain exactly four state arrays")
+        populated = [value is not None for value in values]
+        if any(populated) and not all(populated[:3]):
+            raise ValueError("GLM MLA cache is missing KV or packed index state")
+        if all(populated[:3]):
+            keys, vals, packed = values[:3]
+            if getattr(keys, "ndim", -1) != 4 or getattr(vals, "ndim", -1) != 4:
+                raise ValueError("GLM MLA keys and values must be rank 4")
+            if getattr(packed, "ndim", -1) != 3:
+                raise ValueError("GLM MLA packed index history must be rank 3")
+            lengths = (int(keys.shape[2]), int(vals.shape[2]), int(packed.shape[1]))
+            if lengths != (expected_offset, expected_offset, expected_offset):
+                raise ValueError(
+                    "GLM MLA KV/index lengths do not match the typed offset"
+                )
+            pool = values[MLA_POOL_KEYS]
+            if pool is not None:
+                if getattr(pool, "ndim", -1) != 3:
+                    raise ValueError("GLM MLA pool keys must be rank 3")
+                if int(pool.shape[0]) != int(keys.shape[0]):
+                    raise ValueError("GLM MLA pool keys disagree on batch size")
+                expected_pool_length = expected_offset // kpool
+                if int(pool.shape[1]) not in (0, expected_pool_length):
+                    raise ValueError(
+                        "GLM MLA pool length is neither absent nor offset/kpool"
+                    )
+        elif expected_offset != 0:
+            raise ValueError("GLM MLA empty cache cannot carry a non-zero offset")
+        rebuilt = cls(kpool)
+        rebuilt.cache = values
+        return rebuilt
+
+
+def clone_glm5_next_layer_cache(
+    source: Glm5KDACache | Glm5MLACache,
+    *,
+    copy_fn: Callable[[mx.array], mx.array],
+) -> Glm5KDACache | Glm5MLACache:
+    """Return an isolated copy of one exact GLM native-state boundary."""
+
+    if type(source).__name__ not in {"Glm5KDACache", "Glm5MLACache"}:
+        raise TypeError(f"unexpected GLM cache class: {type(source).__name__}")
+    copied_state = [
+        None if value is None else copy_fn(value) for value in source.state
+    ]
+    return type(source).from_state(copied_state, source.meta_state)
 
 
 @dataclass

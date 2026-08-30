@@ -139,6 +139,184 @@ class TestCacheAndForward:
         assert extracted_mla.cache[glm5.MLA_KEYS].shape == (1, 1, 3, 4)
         assert extracted_mla.cache[glm5.MLA_PACKED].shape == (1, 3, 8)
 
+    def test_typed_cache_clone_preserves_every_native_state_without_aliasing(
+        self, tiny_model, glm5
+    ):
+        from vmlx_engine.models.glm5_next.glm5_next import (
+            clone_glm5_next_layer_cache,
+        )
+
+        live = tiny_model.make_cache()
+        tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8]]), cache=live)
+        mx.eval(*[value for layer in live for value in layer.state if value is not None])
+
+        def copy_array(value):
+            copied = value + mx.zeros_like(value)
+            mx.eval(copied)
+            return copied
+
+        cloned = [
+            clone_glm5_next_layer_cache(layer, copy_fn=copy_array)
+            for layer in live
+        ]
+        assert [type(layer) for layer in cloned] == [type(layer) for layer in live]
+        assert cloned[3].kpool == live[3].kpool
+        assert cloned[3].offset == live[3].offset == 8
+        for source, copy in zip(live, cloned):
+            assert copy.meta_state == source.meta_state
+            for original, duplicate in zip(source.state, copy.state):
+                if original is None:
+                    assert duplicate is None
+                else:
+                    assert duplicate is not original
+                    assert duplicate.shape == original.shape
+                    assert duplicate.dtype == original.dtype
+                    if original.size:
+                        assert float(mx.max(mx.abs(original - duplicate))) == 0.0
+
+    def test_typed_cache_metadata_rejects_partial_or_misaligned_state(self, glm5):
+        with pytest.raises(ValueError, match="typed schema"):
+            glm5.Glm5KDACache.from_state([None] * 4, ())
+        with pytest.raises(ValueError, match="partial recurrent"):
+            glm5.Glm5KDACache.from_state(
+                [mx.zeros((1, 3, 4)), None, None, None],
+                ("glm5_next_native_v1", "kda"),
+            )
+        with pytest.raises(ValueError, match="typed offset"):
+            glm5.Glm5MLACache.from_state(
+                [
+                    mx.zeros((1, 2, 3, 4)),
+                    mx.zeros((1, 2, 3, 4)),
+                    mx.zeros((1, 3, 8)),
+                    None,
+                ],
+                ("glm5_next_native_v1", "mla", "4", "4"),
+            )
+
+    def test_single_batch_snapshot_is_exact_n_minus_one(self, tiny_model, glm5):
+        from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+        generator = SingleBatchGenerator(tiny_model, max_tokens=1)
+        generator.insert([[10, 11, 12, 13]])
+        prompt_responses, generation_responses = generator.next()
+
+        assert generation_responses == []
+        response = prompt_responses[0]
+        snapshot = response.prompt_cache_snapshot
+        assert snapshot is not None
+        assert isinstance(snapshot[0], glm5.Glm5KDACache)
+        assert isinstance(snapshot[3], glm5.Glm5MLACache)
+        assert snapshot[3].offset == 3
+        assert response.prompt_cache[3].offset >= 4
+        assert snapshot[0].cache[glm5.KDA_STATE] is not response.prompt_cache[0].cache[
+            glm5.KDA_STATE
+        ]
+
+    def test_disk_cache_roundtrip_restores_both_typed_cache_classes(
+        self, tiny_model, glm5, tmp_path
+    ):
+        from vmlx_engine.disk_cache import DiskCacheManager
+        from vmlx_engine.models.glm5_next.glm5_next import (
+            clone_glm5_next_layer_cache,
+        )
+
+        live = tiny_model.make_cache()
+        tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8]]), cache=live)
+        assert live[3].cache[glm5.MLA_POOL_KEYS] is None
+        payload = [
+            clone_glm5_next_layer_cache(
+                layer,
+                copy_fn=lambda value: value + mx.zeros_like(value),
+            )
+            for layer in live
+        ]
+        cache_dir = tmp_path / "glm5-l2"
+        required = ("Glm5KDACache", "Glm5MLACache")
+        writer = DiskCacheManager(
+            str(cache_dir),
+            expected_num_layers=5,
+            required_cache_classes=required,
+        )
+        assert writer.store(list(range(9)), payload)
+        writer.shutdown()
+
+        reader = DiskCacheManager(
+            str(cache_dir),
+            expected_num_layers=5,
+            required_cache_classes=required,
+        )
+        try:
+            restored = reader.fetch(list(range(9)))
+            assert restored is not None
+            assert {type(layer).__name__ for layer in restored} == set(required)
+            assert restored[3].offset == 8
+            assert restored[3].cache[glm5.MLA_POOL_KEYS].shape[1] == 0
+            assert restored[0].cache[glm5.KDA_STATE].dtype == mx.float32
+            for expected_layer, restored_layer in zip(payload, restored):
+                assert restored_layer.meta_state == expected_layer.meta_state
+                for expected, actual in zip(
+                    expected_layer.state,
+                    restored_layer.state,
+                ):
+                    assert actual.shape == expected.shape
+                    assert actual.dtype == expected.dtype
+                    if expected.size:
+                        assert float(mx.max(mx.abs(actual - expected))) == 0.0
+        finally:
+            reader.shutdown()
+
+    def test_disk_cache_refuses_incomplete_typed_glm_payload(
+        self, glm5, tmp_path
+    ):
+        from vmlx_engine.disk_cache import DiskCacheManager
+
+        manager = DiskCacheManager(
+            str(tmp_path / "glm5-incomplete-l2"),
+            required_cache_classes=("Glm5KDACache", "Glm5MLACache"),
+        )
+        try:
+            assert manager.store([1, 2], [glm5.Glm5KDACache()]) is False
+        finally:
+            manager.shutdown()
+
+    def test_memory_cache_hit_is_typed_isolated_and_not_reverse_truncatable(
+        self, tiny_model, glm5
+    ):
+        from vmlx_engine.memory_cache import (
+            MemoryAwarePrefixCache,
+            MemoryCacheConfig,
+        )
+
+        stored = tiny_model.make_cache()
+        tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8]]), cache=stored)
+        prefix = MemoryAwarePrefixCache(
+            model=tiny_model,
+            config=MemoryCacheConfig(max_memory_mb=512),
+            model_path="/tmp/glm5-next-typed-cache-test",
+        )
+        tokens = list(range(8))
+        assert prefix.store(tokens, stored)
+
+        exact, remaining = prefix.fetch(tokens)
+        assert exact is not None
+        assert remaining == []
+        assert [type(layer) for layer in exact] == [type(layer) for layer in stored]
+        assert exact[3].offset == stored[3].offset == 8
+        assert exact[0].cache[glm5.KDA_STATE] is not stored[0].cache[glm5.KDA_STATE]
+
+        tiny_model(mx.array([[9]]), cache=exact)
+        assert exact[3].offset == 9
+        assert stored[3].offset == 8
+
+        forward, remaining = prefix.fetch(tokens + [8])
+        assert forward is not None
+        assert remaining == [8]
+        assert forward[3].offset == 8
+
+        reverse, remaining = prefix.fetch(tokens[:-1])
+        assert reverse is None
+        assert remaining == tokens[:-1]
+
     def test_prefill_and_decode_shapes(self, tiny_model):
         cache = tiny_model.make_cache()
         out = tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7]]), cache=cache)
@@ -907,6 +1085,39 @@ class TestGlmHealthTruth:
         assert status["prompt_disk_l2"] is False
         assert status["block_disk_l2"] is False
         assert status["cache_store_policy"]["every_request_recomputes_full_prefix"] is True
+
+    def test_native_cache_health_reports_typed_exact_boundary_state(self):
+        from types import SimpleNamespace
+
+        from vmlx_engine.server import _native_cache_status
+
+        scheduler = SimpleNamespace(
+            _model_type_for_runtime="glm5_next",
+            _uses_glm5_next_cache=True,
+            _glm5_next_cache_unsupported=False,
+            _prefix_cache_requested=True,
+            _prompt_disk_cache_requested=True,
+            _block_disk_cache_requested=True,
+            config=SimpleNamespace(
+                enable_prefix_cache=True,
+                enable_disk_cache=True,
+                enable_block_disk_cache=False,
+            ),
+            memory_aware_cache=object(),
+            disk_cache=object(),
+            block_aware_cache=None,
+            paged_cache_manager=None,
+        )
+
+        status = _native_cache_status(scheduler, family="glm5_next")
+
+        assert status["schema"] == "glm5_next_native_v1"
+        assert status["schema_implemented"] is True
+        assert status["prefix"] is True
+        assert status["paged"] is False
+        assert status["prompt_disk_l2"] is True
+        assert status["block_disk_l2"] is False
+        assert status["cache_store_policy"]["prompt_boundary"] == "exact_n_minus_one"
 
     def test_weight_index_counts_appended_glm_mtp_layer(self, tmp_path):
         from vmlx_engine.server import _bundle_weight_index_status

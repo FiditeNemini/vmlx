@@ -797,26 +797,33 @@ class Scheduler:
 
         self._model_type_for_runtime = self._detect_model_type_for_runtime(model)
         self._uses_openpangu_cache = self._model_type_for_runtime == "openpangu_v2"
-        # GLM-5.3-Flash (glm5_next): the typed native cache schema
-        # (glm5_next_native_v1 — 34 KDA conv+recurrent states, 11 MLA KV
-        # prefixes, DSA pool state at ONE aligned boundary) is a follow-up
-        # phase. Generic prefix store/fetch on the mixed ArraysCache/KVCache
-        # layout reconstructs wrong shapes (live-proven: a warm continuation
-        # broadcast (1,64,T,256) KV into a (1,1,T,256) slot and 500'd), so
-        # prefix caching FAILS CLOSED for this family until the typed schema
-        # lands. Every turn recomputes its full prefix; correctness first.
-        self._glm5_next_cache_unsupported = (
+        self._uses_glm5_next_cache = (
             self._model_type_for_runtime in ("glm5_next", "glm5_next_text")
         )
-        if self._glm5_next_cache_unsupported:
-            logger.info(
-                "glm5_next: prefix caching disabled (typed native-state "
-                "schema not implemented yet) — every request recomputes its "
-                "full prefix"
-            )
+        self._glm5_next_cache_unsupported = False
         self._prefix_cache_requested = bool(self.config.enable_prefix_cache)
         self._prompt_disk_cache_requested = bool(self.config.enable_disk_cache)
         self._block_disk_cache_requested = bool(self.config.enable_block_disk_cache)
+        if self._uses_glm5_next_cache:
+            # GLM's 34 KDA layers carry cumulative convolution/recurrent state,
+            # while its 11 MLA layers carry positional KV plus packed DSA and
+            # compressed pool history. Arbitrary paged blocks cannot rebuild
+            # that mixed boundary. Use one immutable N-1 typed snapshot and the
+            # prompt-disk codec; generic block/TQ routes remain fail-closed.
+            if self.config.use_paged_cache or self.config.enable_block_disk_cache:
+                logger.warning(
+                    "glm5_next native cache does not support generic paged/block "
+                    "reuse; disabling those lanes while preserving exact typed "
+                    "memory/prompt-disk reuse"
+                )
+            self.config.use_paged_cache = False
+            self.config.enable_block_disk_cache = False
+            self.config.use_memory_aware_cache = True
+            if self.config.enable_prefix_cache:
+                logger.info(
+                    "glm5_next_native_v1 exact prefix cache enabled: N-1 "
+                    "snapshots round-trip KDA conv/recurrent and MLA/DSA state"
+                )
         if self._uses_openpangu_cache:
             # OpenPanguV2LayerCache contains path-dependent convolution state in
             # addition to MLA latent KV, DSA indexer, and rotating SWA state.
@@ -935,7 +942,8 @@ class Scheduler:
         # correct because max_num_seqs defaults to 1; pin it like the others so
         # a user-set --max-num-seqs>1 queues serially instead of DoS-ing.
         _single_batch_native_family = (
-            self._model_type_for_runtime in {"openpangu_v2", "zaya"}
+            self._model_type_for_runtime
+            in {"glm5_next", "glm5_next_text", "openpangu_v2", "zaya"}
             or self._uses_zaya_cache
             or self._uses_m3_msa_cache
         )
@@ -1322,13 +1330,14 @@ class Scheduler:
         _allow_mla_kvq = _mla_kvq_env in ("1", "true", "True", "yes", "on")
         _is_dsv4_composite = self._uses_dsv4_cache
         if (
-            self._uses_openpangu_cache
+            (self._uses_openpangu_cache or self._uses_glm5_next_cache)
             and self.config.kv_cache_quantization != "none"
         ):
             logger.info(
-                "openPangu composite cache detected — forcing generic KV cache "
+                "%s native mixed cache detected — forcing generic KV cache "
                 "quantization off (was: %s). MLA latents and path-dependent conv "
                 "state must round-trip through the typed full-precision codec.",
+                "glm5_next" if self._uses_glm5_next_cache else "openPangu",
                 self.config.kv_cache_quantization,
             )
             self.config.kv_cache_quantization = "none"
@@ -1811,6 +1820,11 @@ class Scheduler:
                     if self._uses_m3_msa_cache
                     else None
                 ),
+                required_cache_classes=(
+                    ("Glm5KDACache", "Glm5MLACache")
+                    if self._uses_glm5_next_cache
+                    else None
+                ),
             )
             if self.config.step_executor is not None:
                 self.disk_cache.set_load_executor(self.config.step_executor)
@@ -2088,7 +2102,10 @@ class Scheduler:
             # it is also not an SSM companion cache.  Classifying it as hybrid
             # silently forces paged cache and advertises an inapplicable async
             # SSM-rederive contract.
-            if "OpenPanguV2LayerCache" in cache_types:
+            if "OpenPanguV2LayerCache" in cache_types or cache_types & {
+                "Glm5KDACache",
+                "Glm5MLACache",
+            }:
                 return False
             if cache_types and cache_types == kv_types:
                 return False
@@ -6215,12 +6232,6 @@ class Scheduler:
         # API request). When set, skip EVERY prefix cache lookup below AND
         # ensure no store happens at the end. This is the hard guarantee that
         # benchmark runs need to avoid pollution from prior requests.
-        if getattr(self, "_glm5_next_cache_unsupported", False):
-            # Family-level fail-closed: no typed glm5_next native-state cache
-            # yet; generic restore reconstructs wrong shapes (see __init__).
-            # Set the REQUEST flag so every downstream store/L2/telemetry
-            # branch honors the same bypass uniformly.
-            request._bypass_prefix_cache = True
         _bypass = bool(getattr(request, "_bypass_prefix_cache", False))
         if _bypass:
             logger.debug(
@@ -6238,6 +6249,7 @@ class Scheduler:
         if (
             getattr(self, "_mixed_attention_cache_model", False)
             or getattr(self, "_uses_openpangu_cache", False)
+            or getattr(self, "_uses_glm5_next_cache", False)
         ):
             # Mixed full/SWA models must use the full effective prompt as the
             # cache key for strict logprob equivalence. Stripping the generation
@@ -6621,7 +6633,10 @@ class Scheduler:
         ):
             _disk_fetch_tokens = list(request.prompt_token_ids)
             _gpl = getattr(request, "_gen_prompt_len", 0) or 0
-            if getattr(self, "_uses_openpangu_cache", False):
+            if (
+                getattr(self, "_uses_openpangu_cache", False)
+                or getattr(self, "_uses_glm5_next_cache", False)
+            ):
                 # The typed snapshot is the exact full effective prompt's N-1
                 # state.  Do not strip/replay template trailer tokens against a
                 # different causal-conv boundary.
@@ -6778,6 +6793,7 @@ class Scheduler:
                         self.memory_aware_cache is not None
                         and not _disk_needs_worker_dequant
                         and not getattr(self, "_uses_openpangu_cache", False)
+                        and not getattr(self, "_uses_glm5_next_cache", False)
                     ):
                         try:
                             _l1_store_tokens = (
@@ -9995,12 +10011,21 @@ class Scheduler:
                                         request._extracted_cache = None
                                     else:
                                         request._extracted_cache = None
-                                elif getattr(self, "_uses_openpangu_cache", False):
-                                    # SingleBatchGenerator captured this exact N-1
-                                    # typed boundary before consuming the final
-                                    # prompt token.  Never fall back to the live
-                                    # post-decode composite: it contains output-side
-                                    # convolution/indexer state and cannot be rewound.
+                                elif (
+                                    getattr(self, "_uses_openpangu_cache", False)
+                                    or getattr(self, "_uses_glm5_next_cache", False)
+                                ):
+                                    # SingleBatchGenerator captured this exact
+                                    # N-1 typed boundary before consuming the
+                                    # final prompt token. Never fall back to the
+                                    # live post-decode path-dependent state.
+                                    _typed_family = (
+                                        "glm5_next"
+                                        if getattr(
+                                            self, "_uses_glm5_next_cache", False
+                                        )
+                                        else "openPangu"
+                                    )
                                     if snapshot_cache is not None:
                                         request._extracted_cache = snapshot_cache
                                         request._extracted_cache_key_tokens = list(
@@ -10008,16 +10033,18 @@ class Scheduler:
                                         )
                                         request._extracted_cache_from_prompt_snapshot = True
                                         logger.info(
-                                            "openPangu prefix store using exact typed "
+                                            "%s prefix store using exact typed "
                                             "N-1 prompt snapshot (%d layers, %d key tokens)",
+                                            _typed_family,
                                             len(snapshot_cache),
                                             len(request._extracted_cache_key_tokens),
                                         )
                                     else:
                                         request._extracted_cache = None
                                         logger.warning(
-                                            "openPangu request produced no exact N-1 "
-                                            "typed snapshot; skipping cache store"
+                                            "%s request produced no exact N-1 typed "
+                                            "snapshot; skipping cache store",
+                                            _typed_family,
                                         )
                                 elif getattr(self, "_uses_m3_msa_cache", False):
                                     # MiniMax-M3 MSA is path-dependent: a cache
@@ -11069,7 +11096,10 @@ class Scheduler:
                             # append role trailer tokens that differ on every turn;
                             # without this strip, fetches on later turns miss 100%.
                             _gpl_store = getattr(request, "_gen_prompt_len", 0) or 0
-                            if getattr(self, "_uses_openpangu_cache", False):
+                            if (
+                                getattr(self, "_uses_openpangu_cache", False)
+                                or getattr(self, "_uses_glm5_next_cache", False)
+                            ):
                                 _gpl_store = 0
                             if 0 < _gpl_store < len(prompt_tokens):
                                 prompt_tokens = prompt_tokens[:-_gpl_store]
@@ -11154,11 +11184,26 @@ class Scheduler:
                                     ),
                                 )
                                 if stored:
-                                    if getattr(self, "_uses_openpangu_cache", False):
+                                    if (
+                                        getattr(self, "_uses_openpangu_cache", False)
+                                        or getattr(
+                                            self, "_uses_glm5_next_cache", False
+                                        )
+                                    ):
+                                        _typed_family = (
+                                            "glm5_next"
+                                            if getattr(
+                                                self,
+                                                "_uses_glm5_next_cache",
+                                                False,
+                                            )
+                                            else "openPangu"
+                                        )
                                         logger.info(
-                                            "Stored openPangu exact typed cache for "
+                                            "Stored %s exact typed cache for "
                                             "%s (%d N-1 key tokens from %d prompt "
                                             "tokens; composite state not truncated)",
+                                            _typed_family,
                                             request_id,
                                             len(cache_key_tokens),
                                             prompt_len,

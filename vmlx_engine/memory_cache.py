@@ -509,10 +509,10 @@ class MemoryAwarePrefixCache:
         copied arrays -> independent offset and (on next update) independent buffer,
         so generation cannot contaminate the stored entry. Handled: KVCache /
         QuantizedKVCache (incl. CacheList of those), RotatingKVCache,
-        MiniMaxM3SparseCache, TurboQuantKVCache, and cumulative SSM/conv state
-        (MambaCache / ArraysCache) — the last of these only because this method is
-        by contract called at the entry's FULL cached length, where the state needs
-        copying rather than reducing.
+        MiniMaxM3SparseCache, TurboQuantKVCache, GLM typed KDA/MLA state, and
+        cumulative SSM/conv state (MambaCache / ArraysCache) — the last two only
+        because this method is by contract called at the entry's FULL cached
+        length, where the state needs copying rather than reducing.
 
         This NEVER returns the stored reference. Decode writes through every layer
         it is handed, so sharing the cached object corrupts it (F11's sibling F20:
@@ -530,6 +530,8 @@ class MemoryAwarePrefixCache:
             _CacheList = ()
 
         def _safe(layer) -> bool:
+            if type(layer).__name__ in {"Glm5KDACache", "Glm5MLACache"}:
+                return True
             # openPangu exact-boundary composite: safe only because
             # _truncate_cache has a dedicated full-length clone that preserves
             # inner KV, DSA indexer, rotating metadata, and all conv states.
@@ -826,6 +828,37 @@ class MemoryAwarePrefixCache:
 
         truncated = []
         for layer_cache in cache:
+            if type(layer_cache).__name__ in {
+                "Glm5KDACache",
+                "Glm5MLACache",
+            }:
+                # KDA recurrent/conv state and MLA packed DSA history form one
+                # typed, path-dependent boundary. They can be isolated at the
+                # stored length but never truncated to a shorter prefix.
+                if not allow_cumulative_clone:
+                    return None
+                if (
+                    type(layer_cache).__name__ == "Glm5MLACache"
+                    and int(getattr(layer_cache, "offset", 0) or 0) != target_len
+                ):
+                    return None
+                try:
+                    from .models.glm5_next.glm5_next import (
+                        clone_glm5_next_layer_cache,
+                    )
+
+                    cloned = clone_glm5_next_layer_cache(
+                        layer_cache,
+                        copy_fn=_copy_positional_slice,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "GLM typed cache clone failed (%s); forcing miss",
+                        exc,
+                    )
+                    return None
+                truncated.append(cloned)
+                continue
             if type(layer_cache).__name__ == "OpenPanguV2LayerCache":
                 # This class is cumulative/path-dependent.  Only a faithful copy
                 # at the stored logical boundary is valid; reverse-prefix

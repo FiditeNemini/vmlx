@@ -11572,11 +11572,9 @@ def _native_cache_status(
         or getattr(scheduler, "_glm5_next_cache_unsupported", False)
     ):
         # GLM's executable cache is a mixed, path-dependent structure: KDA
-        # convolution/recurrent state plus MLA KV and DSA indexer state.  The
-        # scheduler deliberately bypasses every generic prefix/L2 branch until
-        # a typed round-trip schema exists.  Report that effective behavior,
-        # even if the session requested prefix or block-disk caching and the
-        # generic cache managers were constructed before family detection.
+        # convolution/recurrent state plus MLA KV and DSA indexer state. Only
+        # the exact N-1 typed snapshot/prompt-disk path may advertise reuse;
+        # generic paged blocks remain unsupported.
         prefix_configured = bool(
             getattr(
                 scheduler,
@@ -11602,37 +11600,82 @@ def _native_cache_status(
                 ),
             )
         )
-        return _with_runtime_layout({
-            "family": "glm5_next",
-            "schema": "glm5_next_native_v1",
-            "schema_implemented": False,
-            "cache_type": "native_mixed_state_fail_closed",
-            "cache_subtype": "glm5_next_native_v1",
-            "components": [
-                "kda_conv_state",
-                "kda_recurrent_state",
-                "mla_kv",
-                "dsa_indexer_state",
-            ],
-            "reason": "typed_glm5_next_native_state_schema_not_implemented",
-            "cache_store_policy": {
-                "generic_prefix_restore": "unsupported",
-                "generic_paged_blocks": "unsupported",
-                "prompt_disk_l2": "unsupported",
-                "every_request_recomputes_full_prefix": True,
-            },
-            "generic_turboquant_kv": {
-                "enabled": False,
-                "reason": "mixed_path_dependent_native_state",
-            },
-            "prefix_configured": prefix_configured,
-            "prompt_disk_l2_configured": prompt_disk_configured,
-            "block_disk_l2_configured": block_disk_configured,
-            "prefix": False,
-            "paged": False,
-            "prompt_disk_l2": False,
-            "block_disk_l2": False,
-        })
+        schema_implemented = bool(
+            getattr(scheduler, "_uses_glm5_next_cache", False)
+            and not getattr(scheduler, "_glm5_next_cache_unsupported", False)
+        )
+        memory_cache = getattr(scheduler, "memory_aware_cache", None)
+        prompt_disk_cache = getattr(scheduler, "disk_cache", None)
+        if not schema_implemented:
+            return _with_runtime_layout(
+                {
+                    "family": "glm5_next",
+                    "schema": "glm5_next_native_v1",
+                    "schema_implemented": False,
+                    "cache_type": "native_mixed_state_fail_closed",
+                    "cache_subtype": "glm5_next_native_v1",
+                    "components": [
+                        "kda_conv_state",
+                        "kda_recurrent_state",
+                        "mla_kv",
+                        "dsa_indexer_state",
+                    ],
+                    "reason": "typed_glm5_next_native_state_schema_not_implemented",
+                    "cache_store_policy": {
+                        "generic_prefix_restore": "unsupported",
+                        "generic_paged_blocks": "unsupported",
+                        "prompt_disk_l2": "unsupported",
+                        "every_request_recomputes_full_prefix": True,
+                    },
+                    "generic_turboquant_kv": {
+                        "enabled": False,
+                        "reason": "mixed_path_dependent_native_state",
+                    },
+                    "prefix_configured": prefix_configured,
+                    "prompt_disk_l2_configured": prompt_disk_configured,
+                    "block_disk_l2_configured": block_disk_configured,
+                    "prefix": False,
+                    "paged": False,
+                    "prompt_disk_l2": False,
+                    "block_disk_l2": False,
+                }
+            )
+        return _with_runtime_layout(
+            {
+                "family": "glm5_next",
+                "schema": "glm5_next_native_v1",
+                "schema_implemented": True,
+                "cache_type": "native_mixed_state_exact_boundary",
+                "cache_subtype": "glm5_next_native_v1",
+                "components": [
+                    "kda_conv_state",
+                    "kda_recurrent_state",
+                    "mla_kv",
+                    "dsa_indexer_state",
+                ],
+                "reason": None,
+                "cache_store_policy": {
+                    "prompt_boundary": "exact_n_minus_one",
+                    "generic_prefix_restore": "unsupported",
+                    "generic_paged_blocks": "unsupported",
+                    "prompt_disk_l2": "typed_full_state",
+                    "every_request_recomputes_full_prefix": False,
+                },
+                "generic_turboquant_kv": {
+                    "enabled": False,
+                    "reason": "mixed_path_dependent_native_state",
+                },
+                "prefix_configured": prefix_configured,
+                "prompt_disk_l2_configured": prompt_disk_configured,
+                "block_disk_l2_configured": block_disk_configured,
+                "prefix": bool(
+                    memory_cache is not None or prompt_disk_cache is not None
+                ),
+                "paged": False,
+                "prompt_disk_l2": bool(prompt_disk_cache is not None),
+                "block_disk_l2": False,
+            }
+        )
 
     if (
         family_name == "openpangu_v2"

@@ -5181,10 +5181,18 @@ export function validateServerCacheEvidence(result) {
       failures.push('persisted SSD cache percentage does not match the requested aggregate budget')
     }
     const percentFlagIndex = argv.indexOf('--block-disk-cache-max-percent')
+    const escapedPercentFlag = '--block-disk-cache-max-percent'
+      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const commandLinePercentMatch = String(evidence.commandLine || '').match(
+      new RegExp(`(?:^|\\s)${escapedPercentFlag}(?:=|\\s+)([^\\s]+)`),
+    )
+    const percentFlagValue = percentFlagIndex >= 0 && argv[percentFlagIndex + 1] != null
+      ? argv[percentFlagIndex + 1]
+      : commandLinePercentMatch?.[1]
     if (
       percentFlagIndex < 0
       || !approximatelyEqual(
-        Number(argv[percentFlagIndex + 1]),
+        Number(percentFlagValue),
         Number(requestedBlockDiskPercent),
       )
     ) {
@@ -5196,7 +5204,10 @@ export function validateServerCacheEvidence(result) {
     const blockDiskStats = health?.cache?.block_disk_cache
       || health?.block_disk_cache
       || {}
-    if (!(Number(blockDiskStats.max_size_gb) > 0) && Number(requestedBlockDiskPercent) > 0) {
+    const finiteBudgetRecorded = Number(blockDiskStats.max_size_gb) > 0
+      || Number(blockDiskStats.max_size_bytes) > 0
+      || Number(blockDiskStats.global_budget?.max_size_bytes) > 0
+    if (!finiteBudgetRecorded && Number(requestedBlockDiskPercent) > 0) {
       failures.push('/health cache telemetry omitted the finite resolved SSD cache budget')
     }
   }
@@ -10389,7 +10400,7 @@ async function main() {
           const reopenedThinkingButton = [...(reopenedDrawer?.querySelectorAll('button') || [])]
             .find((button) => (
               isVisible(button)
-              && acceptableThinkingLabels.includes(
+              && acceptablePersistedThinkingLabels.includes(
                 (button.textContent || '').replace(/\\s+/g, ' ').trim()
               )
               && String(button.className || '').includes('bg-primary')

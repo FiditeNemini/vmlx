@@ -3644,6 +3644,16 @@ describe("real UI model proof harness", () => {
     expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
   });
 
+  it("reads the effort-only persisted mode with the persisted label set", () => {
+    const source = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /const reopenedThinkingButton =[\s\S]*?acceptablePersistedThinkingLabels\.includes\(/,
+    );
+  });
+
   it("includes nonstream recovery in the cancellation raw-capture contract", () => {
     const contract = {
       protocols: ["chat", "responses", "anthropic", "ollama"],
@@ -3858,6 +3868,28 @@ describe("real UI model proof harness", () => {
     expect(validateServerCacheEvidence(result).join("\n")).toMatch(
       /flat GB cap that overrides the requested SSD percentage/,
     );
+  });
+
+  it("accepts the live command-log and global-budget cache telemetry shapes", () => {
+    const result = structuredClone(goodResult());
+    result.requestedBlockDiskCacheMaxPercent = 10;
+    result.serverCacheControls.initialCacheControls.blockDiskCacheMaxPercent = 10;
+    result.session.effective_config.blockDiskCacheMaxPercent = 10;
+    result.serverCacheControls.argv = [
+      "--use-paged-cache",
+      "--enable-block-disk-cache",
+      "--block-disk-cache-max-percent",
+    ];
+    result.serverCacheControls.commandLine = [
+      "$ vmlx-serve model",
+      "--enable-block-disk-cache",
+      "--block-disk-cache-max-percent 10",
+    ].join(" ");
+    result.server.health.block_disk_cache = {
+      global_budget: { max_size_bytes: 399_625_232_056 },
+    };
+
+    expect(validateServerCacheEvidence(result)).toEqual([]);
   });
 
   it("accepts DSV4 only with visible SSD-only native cache and observed pool quant", () => {

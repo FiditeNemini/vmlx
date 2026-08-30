@@ -42,6 +42,10 @@ from mlx_vlm.models.qwen3_5.language import (
 from vmlx_engine.models.minimax_m3.cache import (
     MiniMaxM3SparseCache as _SparseIndexerKVCache,
 )
+from vmlx_engine.native_mtp_prompt_priming import (
+    capture_prefill,
+    capture_requested,
+)
 from vmlx_engine.metal.qwen4_affine_moe_decode import qwen4_affine_switchglu
 from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
@@ -1695,9 +1699,11 @@ class LanguageModel(nn.Module):
         # Prompt-history priming is armed by the scheduler only for an active
         # native-MTP request.  Capture normal prompt forwards, never the
         # return_hidden seed/verify forwards that advance speculative state.
-        if not return_hidden and inputs_embeds is None:
-            from vmlx_engine.native_mtp_prompt_priming import capture_prefill
-
+        if (
+            not return_hidden
+            and inputs_embeds is None
+            and capture_requested(self)
+        ):
             capture_prefill(self, inputs, expanded_hidden, cache)
         if not return_logits:
             return (hidden, expanded_hidden) if return_hidden else hidden

@@ -16,6 +16,10 @@ from typing import Any, Optional
 
 import mlx.core as mx
 
+from vmlx_engine.native_mtp_prompt_priming import (
+    capture_prefill,
+    capture_requested,
+)
 from vmlx_engine.metal.gdn_conv_decode import (
     fused_qwen35_gdn_conv_requested,
     qwen35_gdn_conv_decode,
@@ -884,7 +888,13 @@ def _patch_language_model(qlang: Any) -> None:
         **kwargs,
     ):
         force_text_rope = bool(getattr(self, "_vmlx_force_text_rope_1d", False))
-        if not force_text_rope and not return_hidden and return_logits and n_confirmed == 0:
+        if (
+            not force_text_rope
+            and not capture_requested(self)
+            and not return_hidden
+            and return_logits
+            and n_confirmed == 0
+        ):
             return original_call(
                 self,
                 inputs,
@@ -1006,6 +1016,12 @@ def _patch_language_model(qlang: Any) -> None:
             or not return_logits
             or n_confirmed > 0,
         )
+        if (
+            not return_hidden
+            and inputs_embeds is None
+            and capture_requested(self)
+        ):
+            capture_prefill(self, inputs, hidden, cache)
         if not return_logits:
             return hidden
         normed = self.model.norm(hidden)

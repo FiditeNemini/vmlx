@@ -8,7 +8,9 @@ import mlx.core as mx
 
 from vmlx_engine.mllm_batch_generator import MLLMNativeMTPStats
 from vmlx_engine.native_mtp_prompt_priming import (
+    capture_requested,
     capture_prefill,
+    drop_context,
     prepare_prompt,
     prime_stats,
     take_primed,
@@ -72,6 +74,45 @@ class _SidecarStore:
         if self.snapshot is not None and self.snapshot.boundary_tokens == boundary:
             return self.snapshot
         return None
+
+
+def test_capture_requested_tracks_only_an_armed_prompt_timeline():
+    host = _Host()
+    assert not capture_requested(host)
+    prepare_prompt(
+        host,
+        request_id="armed",
+        prompt_tokens=[1, 2, 3],
+        cached_tokens=0,
+        prefix_cache=None,
+    )
+    assert capture_requested(host)
+    drop_context(host)
+    assert not capture_requested(host)
+
+
+def test_scheduler_arms_dense_qwen35_but_not_unproven_mtp_families():
+    from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+    generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    generator.language_model = _Host()
+    generator.block_aware_cache = None
+    generator._native_mtp_disabled_reason_for_request = lambda _request: None
+    request = SimpleNamespace(
+        request_id="q35",
+        max_tokens=32,
+        _original_token_ids=[1, 2, 3],
+        _cached_tokens=0,
+        _cache_extra_keys=None,
+    )
+
+    generator._model_type = "qwen3_5"
+    assert not generator._prepare_native_mtp_prompt_priming(request)
+    assert capture_requested(generator.language_model)
+
+    generator._model_type = "deepseek_v4"
+    assert not generator._prepare_native_mtp_prompt_priming(request)
+    assert not capture_requested(generator.language_model)
 
 
 def test_cold_prompt_is_folded_and_published_at_full_block_boundary():

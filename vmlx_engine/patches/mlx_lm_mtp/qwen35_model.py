@@ -53,6 +53,10 @@ from typing import Any, Optional
 
 import mlx.core as mx
 
+from vmlx_engine.native_mtp_prompt_priming import (
+    capture_prefill,
+    capture_requested,
+)
 from vmlx_engine.metal.gdn_conv_decode import (
     fused_qwen35_gdn_conv_requested,
     qwen35_gdn_conv_decode,
@@ -603,6 +607,17 @@ def _patch_text_model(q35: Any) -> None:
             gdn_sink=gdn_sink,
             n_confirmed=n_confirmed,
         )
+        # The scheduler arms this only for a normal prompt prefill.  Seed and
+        # verify forwards request ``return_hidden`` and must never be folded
+        # into prompt history a second time.  Media embeddings are likewise
+        # excluded because the MTP head consumes token ids, not substituted
+        # image/video embeddings.
+        if (
+            not return_hidden
+            and input_embeddings is None
+            and capture_requested(self)
+        ):
+            capture_prefill(self, inputs, hidden, cache)
         if not return_logits:
             return hidden
         normed = self.model.norm(hidden)

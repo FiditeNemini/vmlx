@@ -14152,14 +14152,21 @@ class MLLMBatchGenerator:
     def _prepare_native_mtp_prompt_priming(
         self, request: MLLMBatchRequest
     ) -> bool:
-        """Arm Qwen4 prompt-history capture immediately before prefill."""
+        """Arm proven Qwen prompt-history capture immediately before prefill."""
         from .native_mtp_prompt_priming import drop_context, prepare_prompt
 
-        # This first implementation owns the vendored Qwen4/Flash-Next head
-        # whose hidden-state contract is known exactly.  Other MTP families
-        # stay on their existing path until their head-input variant and cache
-        # topology have independent live proof.
-        if str(getattr(self, "_model_type", "") or "").lower() != "qwen4_exp":
+        # Qwen4/Flash-Next and the patched dense Qwen3.5 family expose the
+        # same exact head-input contract: pre-norm trunk hidden at token t plus
+        # token t+1, with one KVCache per native MTP layer.  Other families
+        # stay unprimed until their own hidden variant/cache topology is
+        # proven independently.
+        model_type = str(getattr(self, "_model_type", "") or "").lower()
+        if model_type not in {
+            "qwen4_exp",
+            "qwen3_5",
+            "qwen3_5_text",
+            "qwen3_5_vl",
+        }:
             drop_context(self.language_model)
             return False
         if (

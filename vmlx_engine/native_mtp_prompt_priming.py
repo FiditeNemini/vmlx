@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Prompt-history priming for native Qwen4 speculative decoding.
+"""Prompt-history priming for native Qwen speculative decoding.
 
 The target model already computes the trunk hidden state for every prompt
 token.  Native MTP previously discarded those rows and began every request
@@ -104,6 +104,19 @@ def drop_context(host: Any) -> None:
                 delattr(host, attr)
             except AttributeError:
                 pass
+
+
+def capture_requested(host: Any) -> bool:
+    """Return whether the scheduler armed prompt-history capture on ``host``.
+
+    Patched upstream model wrappers use this to bypass their hidden-state-free
+    fast path only for the one prompt currently being primed.  Keeping the
+    check here avoids making every ordinary Qwen3.5 forward pay for the
+    replacement wrapper merely because native MTP support is installed.
+    """
+    return isinstance(getattr(host, _PLAN_ATTR, None), _PrimePlan) or isinstance(
+        getattr(host, _CTX_ATTR, None), _PrimeContext
+    )
 
 
 def _read_offset(entry: Any) -> Optional[int]:
@@ -297,7 +310,7 @@ def _capture_boundary(ctx: _PrimeContext, hidden: Any, start: int, end: int) -> 
 
 
 def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) -> None:
-    """Fold one contiguous Qwen4 prompt forward into the native MTP cache."""
+    """Fold one contiguous Qwen prompt forward into the native MTP cache."""
     if not priming_enabled() or not _eligible(host):
         return
     if inputs is None or getattr(inputs, "ndim", 0) != 2 or inputs.shape[0] != 1:

@@ -408,8 +408,65 @@ class _FakeCacheModel:
         return logits
 
 
+class _TrackingMtpCache:
+    def __init__(self):
+        self.history = []
+
+    def is_trimmable(self):
+        return True
+
+    def trim(self, count):
+        count = max(0, min(int(count), len(self.history)))
+        if count:
+            del self.history[-count:]
+        return count
+
+
+class _AlignedGlmFakeCacheModel(_FakeCacheModel):
+    """GLM-shaped head that records cache history at aligned commit calls."""
+
+    model_type = "glm5_next"
+
+    def __init__(self, wrong_from_step: int | None = None):
+        super().__init__(wrong_from_step=wrong_from_step)
+        self.config = {"model_type": "glm5_next"}
+        self.aligned_commit_prefixes = []
+
+    def make_mtp_cache(self):
+        return [_TrackingMtpCache()]
+
+    def mtp_forward(
+        self, hidden_states, next_token_ids, mtp_cache, return_hidden=False
+    ):
+        ids = [int(tok) for tok in next_token_ids[0].tolist()]
+        cache = mtp_cache[0]
+        if len(ids) > 1:
+            self.aligned_commit_prefixes.append(list(cache.history))
+        cache.history.extend(ids)
+
+        rows = []
+        hidden_rows = []
+        for index, tok in enumerate(ids):
+            draft = self._succ(tok)
+            backbone_hidden = float(hidden_states[0, index, 1].item()) > 0.5
+            if (
+                self.wrong_from_step is not None
+                and not backbone_hidden
+                and self.wrong_from_step <= 2
+            ):
+                draft = (draft + 1) % self.vocab
+            rows.append(
+                mx.where(mx.arange(self.vocab) == draft, 100.0, 0.0)
+            )
+            hidden_rows.append([float(draft)] + [0.0] * (self.hidden - 1))
+        logits = mx.stack(rows)[None, :, :]
+        if return_hidden:
+            return logits, mx.array([hidden_rows])
+        return logits
+
+
 def _run_fake(monkeypatch, depth: int, wrong_from_step=None, max_tokens=18,
-              attach: bool = True):
+              attach: bool = True, model_cls=_FakeCacheModel):
     import sys
 
     from vmlx_engine.patches.mlx_lm_mtp import (
@@ -426,7 +483,7 @@ def _run_fake(monkeypatch, depth: int, wrong_from_step=None, max_tokens=18,
     prev = is_mtp_active()
     try:
         set_mtp_active(attach)
-        model = _FakeCacheModel(wrong_from_step=wrong_from_step)
+        model = model_cls(wrong_from_step=wrong_from_step)
         if not attach:
             model.mtp = None
         cache = [gm.BatchKVCache(left_padding=[0])]
@@ -629,6 +686,107 @@ class TestMtpAcceptPathWithOracleDrafts:
         # Cache must sit at the confirmed frontier: 1 prompt token + emits.
         for c in cache:
             assert int(c.offset.tolist()[0]) == 1 + len(got)
+
+
+class TestGlmAlignedHeadCache:
+    def test_gate_is_exact_family_and_default_off(self, monkeypatch):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _glm_aligned_head_cache_enabled,
+        )
+
+        monkeypatch.delenv(
+            "VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", raising=False
+        )
+        monkeypatch.delenv(
+            "VMLINUX_GLM5_ALIGNED_MTP_HEAD_CACHE", raising=False
+        )
+
+        class _Batch:
+            model = type("Model", (), {"model_type": "glm5_next"})()
+
+        assert _glm_aligned_head_cache_enabled(_Batch()) is False
+        monkeypatch.setenv("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", "1")
+        assert _glm_aligned_head_cache_enabled(_Batch()) is True
+        _Batch.model.model_type = "qwen4_exp"
+        assert _glm_aligned_head_cache_enabled(_Batch()) is False
+
+    def test_trim_removes_only_unverified_chain_pairs(self):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _MtpState,
+            _trim_glm_head_chain,
+        )
+
+        cache = _TrackingMtpCache()
+        cache.history = [10, 11, 90, 91]
+        state = _MtpState(mtp_cache=[cache], head_chain_pairs=2)
+        assert _trim_glm_head_chain(state) is True
+        assert cache.history == [10, 11]
+        assert state.head_chain_pairs == 0
+
+    @pytest.mark.parametrize("depth", [1, 2, 3])
+    def test_aligned_glm_keeps_target_tokens_and_reports_policy(
+        self, monkeypatch, depth
+    ):
+        monkeypatch.setenv("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", "1")
+        expected, token = [], 3
+        for _ in range(18):
+            token = _FakeCacheModel._succ(token)
+            expected.append(token)
+        got, stats, _cache = _run_fake(
+            monkeypatch,
+            depth=depth,
+            wrong_from_step=2,
+            max_tokens=18,
+            model_cls=_AlignedGlmFakeCacheModel,
+        )
+        assert got == expected
+        assert stats is not None
+        assert stats.mtp_head_cache_policy == "glm_aligned"
+
+    def test_rejected_recursive_pair_is_trimmed_before_aligned_commit(
+        self, monkeypatch
+    ):
+        import sys
+
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        monkeypatch.setenv("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", "1")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        gm = sys.modules["mlx_lm.generate"]
+        previous = is_mtp_active()
+        try:
+            set_mtp_active(True)
+            model = _AlignedGlmFakeCacheModel(wrong_from_step=2)
+            batch = gm.GenerationBatch(
+                model=model,
+                uids=[0],
+                inputs=mx.array([3], dtype=mx.uint32),
+                prompt_cache=[gm.BatchKVCache(left_padding=[0])],
+                tokens=[[3]],
+                samplers=[None],
+                fallback_sampler=_greedy_sampler,
+                logits_processors=[None],
+                state_machines=[gm.SequenceStateMachine()],
+                max_tokens=[12],
+            )
+            # Drain the two init tokens, then force one partial-reject cycle.
+            batch.next()
+            batch.next()
+            batch.next()
+            assert model.aligned_commit_prefixes
+            # Initial history contains one confirmed pair plus two recursive
+            # proposals. The aligned commit must see only the confirmed pair.
+            assert model.aligned_commit_prefixes[0] == [
+                model.aligned_commit_prefixes[0][0]
+            ]
+        finally:
+            set_mtp_active(previous)
 
 
 class TestDepthGating:

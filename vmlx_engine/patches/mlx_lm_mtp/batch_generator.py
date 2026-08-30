@@ -541,11 +541,10 @@ class _MtpStats:
     mtp_head_ms: float = 0.0  # cumulative time inside MTP-head forwards
     sample_ms: float = 0.0  # cumulative time in sampling + acceptance check
     cache_ops_ms: float = 0.0  # cumulative time in trim / rollback restore
-    # MTP-head cache lifecycle. These are observability-only counters; text
-    # GenerationBatch deliberately retains its loose-history head cache after
-    # verifier rejection.
+    # MTP-head cache lifecycle. These are observability-only counters.
     mtp_cache_recreated_on_rejects: int = 0
     mtp_cache_retained_on_rejects: int = 0
+    mtp_head_cache_policy: str = "loose"
     mtp_head_cache: dict = field(default_factory=dict)
     adaptive_depth_value: dict = field(default_factory=dict)
 
@@ -562,6 +561,11 @@ class _MtpState:
 
     # Cache for the MTP head (separate from gen_batch.prompt_cache).
     mtp_cache: Optional[List[Any]] = None
+
+    # Number of recursively drafted MTP-head pairs that are not yet verifier
+    # confirmed. The GLM aligned-cache experiment trims exactly these pairs
+    # before recommitting confirmed backbone-hidden/token pairs.
+    head_chain_pairs: int = 0
 
     # First input token of the next verify forward. Tracked as a 1-element
     # mx.array (uint32) so it can be concatenated with the drafts cheaply.
@@ -622,6 +626,7 @@ def _native_mtp_payload(
         "starting_depth": int(stats.starting_depth or 1),
         "depth_ceiling": int(stats.depth_ceiling or 1),
         "depth_policy": str(stats.depth_policy or "fixed"),
+        "mtp_head_cache_policy": str(stats.mtp_head_cache_policy or "loose"),
         "cycles": int(stats.cycles),
         "accepts": int(stats.accepts),
         "rejects": int(stats.rejects),
@@ -1028,6 +1033,53 @@ def _ensure_uint32(arr):
     return arr.astype(mx.uint32)
 
 
+def _glm_aligned_head_cache_enabled(gen_batch: Any) -> bool:
+    """Return whether exact ``glm5_next`` may use aligned head history.
+
+    This remains an opt-in experiment until a same-source live wall-clock row
+    beats AR without changing the target output. No other family is eligible.
+    """
+
+    model = getattr(gen_batch, "model", None)
+    inner = getattr(model, "language_model", model)
+    model_type = getattr(inner, "model_type", None)
+    if model_type is None:
+        config = getattr(inner, "config", None)
+        if isinstance(config, dict):
+            model_type = config.get("model_type")
+    if str(model_type or "") != "glm5_next":
+        return False
+    value = os.environ.get(
+        "VMLINUX_GLM5_ALIGNED_MTP_HEAD_CACHE",
+        os.environ.get("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", "0"),
+    ).strip().lower()
+    return value not in {"", "0", "false", "off", "no"}
+
+
+def _trim_glm_head_chain(state: "_MtpState") -> bool:
+    """Trim only the unverified recursive pairs from GLM's MTP cache."""
+
+    count = max(0, int(getattr(state, "head_chain_pairs", 0) or 0))
+    if count == 0:
+        state.head_chain_pairs = 0
+        return True
+    layers = [layer for layer in (state.mtp_cache or []) if layer is not None]
+    if not layers or any(
+        not (
+            hasattr(layer, "is_trimmable")
+            and layer.is_trimmable()
+            and callable(getattr(layer, "trim", None))
+        )
+        for layer in layers
+    ):
+        return False
+    for layer in layers:
+        if int(layer.trim(count)) != count:
+            return False
+    state.head_chain_pairs = 0
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Post-init: run one extra backbone forward + MTP forward; queue the two
 # emitted tokens; stash a draft for the first verify cycle.
@@ -1416,6 +1468,24 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     emit_tok = mx.array([emit_id], dtype=mx.uint32)
     state.next_main = emit_tok
     _adaptive_arm_cycle(state, now=time.perf_counter())
+    if _glm_aligned_head_cache_enabled(gen_batch):
+        state.stats.mtp_head_cache_policy = "glm_aligned"
+        if not _trim_glm_head_chain(state):
+            raise RuntimeError(
+                "GLM aligned MTP head cache could not trim unverified pairs"
+            )
+        confirmed_tokens = mx.concatenate(
+            [_ensure_uint32(tok).reshape(1) for tok in state.draft_toks[:k]]
+            + [emit_tok.reshape(1)]
+        ).reshape(1, k + 1)
+        _draft_chain_aligned(
+            gen_batch,
+            state,
+            hidden[:, : k + 1, :],
+            confirmed_tokens,
+            prev_buf=prev_bufs[k] if procs is not None else None,
+        )
+        return
     _draft_chain(
         gen_batch,
         state,
@@ -1493,6 +1563,96 @@ def _draft_chain(
     # (mirrors the MLLM generator's ``_native_mtp_materialize_draft_ids``).
     state.draft_ids = []
     _pbar(*state.draft_toks)  # profiling: isolate real MTP-head GPU cost
+    state.stats.mtp_head_ms += (time.perf_counter() - t_start) * 1000
+    if _glm_aligned_head_cache_enabled(gen_batch):
+        state.stats.mtp_head_cache_policy = "glm_aligned"
+        state.head_chain_pairs = max(0, len(state.draft_toks) - 1)
+    else:
+        state.stats.mtp_head_cache_policy = "loose"
+        state.head_chain_pairs = 0
+
+
+def _draft_chain_aligned(
+    gen_batch: Any,
+    state: _MtpState,
+    confirmed_hidden: Any,
+    confirmed_tokens: Any,
+    prev_buf: Optional[Any],
+) -> None:
+    """Commit confirmed GLM pairs and draft the next chain in one pass.
+
+    ``confirmed_hidden[:, i]`` is verifier-backbone state for the token before
+    ``confirmed_tokens[:, i]``. The final row's logits are therefore the next
+    level-1 draft. Deeper rows remain recursive and are marked unverified so
+    the next cycle removes them before committing its confirmed prefix.
+    """
+
+    import time
+
+    import mlx.core as mx
+
+    if int(confirmed_hidden.shape[1]) != int(confirmed_tokens.shape[1]):
+        raise RuntimeError("GLM aligned MTP commit pair lengths disagree")
+    if int(confirmed_tokens.shape[1]) < 1:
+        raise RuntimeError("GLM aligned MTP commit cannot be empty")
+
+    sampler = _resolve_sampler(gen_batch)
+    procs = _proc_list(gen_batch)
+    state.draft_toks = []
+    state.draft_lps = []
+    state.draft_accept_lps = []
+    state.draft_ids = []
+
+    t_start = time.perf_counter()
+    state.stats.mtp_forwards += 1
+    with mx.stream(_get_generation_stream()):
+        mtp_logits, mtp_hidden = gen_batch.model.mtp_forward(
+            confirmed_hidden,
+            confirmed_tokens,
+            state.mtp_cache,
+            return_hidden=True,
+        )
+        logits_2d = mtp_logits[:, -1, :]
+    proc_ctx = prev_buf
+    last_confirmed = confirmed_tokens[:, -1].reshape(1)
+    if procs is not None and proc_ctx is not None:
+        proc_ctx = mx.concatenate([proc_ctx, _ensure_uint32(last_confirmed)])
+        logits_2d = _apply_processors(procs, proc_ctx, logits_2d)
+    draft_lp = _logprobs(logits_2d)
+    draft_tok = _ensure_uint32(sampler(draft_lp))
+    state.draft_toks.append(draft_tok)
+    state.draft_lps.append(draft_lp.squeeze(0))
+    state.draft_accept_lps.append(
+        _accept_lp_for(sampler, draft_lp).squeeze(0)
+    )
+
+    hidden = mtp_hidden[:, -1:, :]
+    cur_tok = draft_tok
+    for _ in range(1, max(1, state.depth)):
+        state.stats.mtp_forwards += 1
+        with mx.stream(_get_generation_stream()):
+            mtp_logits, mtp_hidden = gen_batch.model.mtp_forward(
+                hidden,
+                cur_tok.reshape(1, 1),
+                state.mtp_cache,
+                return_hidden=True,
+            )
+            logits_2d = mtp_logits[:, -1, :]
+        if procs is not None and proc_ctx is not None:
+            proc_ctx = mx.concatenate([proc_ctx, _ensure_uint32(cur_tok)])
+            logits_2d = _apply_processors(procs, proc_ctx, logits_2d)
+        draft_lp = _logprobs(logits_2d)
+        cur_tok = _ensure_uint32(sampler(draft_lp))
+        state.draft_toks.append(cur_tok)
+        state.draft_lps.append(draft_lp.squeeze(0))
+        state.draft_accept_lps.append(
+            _accept_lp_for(sampler, draft_lp).squeeze(0)
+        )
+        hidden = mtp_hidden[:, -1:, :]
+
+    state.head_chain_pairs = max(0, len(state.draft_toks) - 1)
+    state.draft_ids = []
+    _pbar(*state.draft_toks)
     state.stats.mtp_head_ms += (time.perf_counter() - t_start) * 1000
 
 

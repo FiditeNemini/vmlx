@@ -250,6 +250,17 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 ),
             ),
             _feature(
+                "aligned_mtp_head_cache",
+                label="verifier-confirmed GLM MTP-head cache alignment",
+                kind="state_algorithm",
+                scopes=("mtp_decode", "mtp_verify"),
+                default=False,
+                env=(
+                    "VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE",
+                    "VMLINUX_GLM5_ALIGNED_MTP_HEAD_CACHE",
+                ),
+            ),
+            _feature(
                 "affine_moe_pair",
                 label="affine MoE gate/up and weighted-down fusion",
                 kind="metal_kernel",

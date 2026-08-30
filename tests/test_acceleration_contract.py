@@ -104,6 +104,21 @@ def test_glm_mhc_verify_fusions_default_off_with_explicit_opt_in(monkeypatch):
     assert fused_glm5_hc_place_verify_requested() is True
 
 
+def test_glm_aligned_mtp_head_cache_is_exact_opt_in(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+
+    monkeypatch.delenv("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", raising=False)
+    monkeypatch.delenv("VMLINUX_GLM5_ALIGNED_MTP_HEAD_CACHE", raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["aligned_mtp_head_cache"]["requested"] is False
+    assert rows["aligned_mtp_head_cache"]["state"] == "disabled"
+
+    monkeypatch.setenv("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", "1")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["aligned_mtp_head_cache"]["requested"] is True
+    assert rows["aligned_mtp_head_cache"]["state"] == "configured_unattested"
+
+
 def test_glm_vectorized_kda_verify_defaults_on_with_explicit_opt_out(
     monkeypatch,
 ):

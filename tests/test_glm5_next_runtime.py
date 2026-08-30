@@ -1026,8 +1026,12 @@ class TestNativeMTP:
         try:
             baseline = generate(attach_mtp=False, depth=None)
             assert len(baseline) == 32
-            for depth in (1, 2, 3):
-                assert generate(attach_mtp=True, depth=depth) == baseline
+            for aligned in ("0", "1"):
+                monkeypatch.setenv(
+                    "VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", aligned
+                )
+                for depth in (1, 2, 3):
+                    assert generate(attach_mtp=True, depth=depth) == baseline
         finally:
             set_mtp_active(previous)
 

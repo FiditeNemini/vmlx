@@ -92,10 +92,9 @@ jobs:
           import json
           import pathlib
           import re
-          import tomllib
 
           versions = {
-              tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'],
+              re.search(r'(?m)^version\s*=\s*["\x27]([^"\x27]+)', pathlib.Path('pyproject.toml').read_text()).group(1),
               json.loads(pathlib.Path('panel/package.json').read_text())['version'],
               json.loads(pathlib.Path('panel/package-lock.json').read_text())['version'],
               re.search(r'__version__\s*=\s*["\x27]([^"\x27]+)', pathlib.Path('vmlx_engine/__init__.py').read_text()).group(1),

@@ -15,6 +15,7 @@ All notable changes to vMLX Engine will be documented in this file.
 - **Dense Qwen3.5 prompt priming is fail-safe.** The implementation remains available for explicit measurement, but stays off by default because its matched 27B trials improved acceptance without a repeatable wall-time win.
 - **Signed-candidate Actions restore only hash-sealed retained evidence for the exact source SHA.** Clean GitHub checkouts no longer discard the current live/packaged receipts required by the production prepackage gate; the gate still revalidates those artifacts before building.
 - **Dedicated release runners can use a prevalidated notarytool Keychain profile.** Developer ID signing still uses an ephemeral per-run keychain, while the existing App Store Connect credential remains non-exportable in the runner's login Keychain.
+- **Candidate provenance validation runs on the runner's system Python.** The version check no longer assumes Python 3.11's `tomllib` before the workflow creates its isolated release environment.
 
 ---
 

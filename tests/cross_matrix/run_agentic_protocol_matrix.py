@@ -4775,6 +4775,26 @@ def parse_named_urls(values: list[str], option: str) -> dict[str, str]:
     return parsed
 
 
+def backend_lifecycle_health_url(
+    base_label: str,
+    bases: dict[str, str],
+    health_urls: dict[str, str],
+) -> str:
+    """Return the engine health endpoint that owns request cleanup.
+
+    The gateway's own /health is required for topology/identity evidence, but
+    abort recovery must observe the bound backend scheduler rather than the
+    gateway process. Direct traffic uses its corresponding engine health URL.
+    """
+    lifecycle_label = "direct" if base_label == "gateway" else base_label
+    base_url = bases.get(lifecycle_label)
+    if not base_url:
+        raise ValueError(
+            f"missing {lifecycle_label} base URL for lifecycle observation"
+        )
+    return health_urls.get(lifecycle_label, base_url + "/health")
+
+
 def _validate_base_origins(bases: dict[str, str]) -> list[str]:
     failures: list[str] = []
     origins: dict[str, tuple[str, str, int | None, str]] = {}
@@ -5507,7 +5527,11 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         )
         output["flows"][base_label] = {}
         output["abort_recovery"][base_label] = {}
-        health_url = health_urls.get(base_label, base_url + "/health")
+        health_url = backend_lifecycle_health_url(
+            base_label,
+            bases,
+            health_urls,
+        )
         for protocol in protocols:
             output["flows"][base_label][protocol] = {}
             output["abort_recovery"][base_label][protocol] = {}

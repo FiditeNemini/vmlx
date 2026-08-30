@@ -2904,6 +2904,24 @@ def test_expected_parser_input_routes_include_nonstream_recovery():
     ]
 
 
+def test_gateway_abort_lifecycle_uses_bound_direct_backend_health():
+    bases = {
+        "direct": "http://127.0.0.1:8000",
+        "gateway": "http://127.0.0.1:8080",
+    }
+    health_urls = {
+        "direct": "http://127.0.0.1:8000/health/full",
+        "gateway": "http://127.0.0.1:8080/health",
+    }
+
+    assert matrix.backend_lifecycle_health_url("direct", bases, health_urls) == (
+        "http://127.0.0.1:8000/health/full"
+    )
+    assert matrix.backend_lifecycle_health_url("gateway", bases, health_urls) == (
+        "http://127.0.0.1:8000/health/full"
+    )
+
+
 def test_nonstream_chat_capture_preserves_parser_input_bytes(
     monkeypatch,
     tmp_path: Path,

@@ -383,6 +383,9 @@ def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, li
         return {}
 
     snapshots: dict[int, list[Any]] = {}
+    boundary_callback = getattr(
+        batch_generator, "_vmlx_prompt_boundary_callback", None
+    )
     for index in split:
         try:
             extracted = prompt_batch.extract_cache(index)
@@ -390,6 +393,15 @@ def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, li
                 type(layer).__name__ in {"Glm5KDACache", "Glm5MLACache"}
                 for layer in extracted
             ):
+                continue
+
+            uid = int(prompt_batch.uids[index])
+            if callable(boundary_callback):
+                # Production GLM cannot retain an expanded MLA N-1 image
+                # through the final-token allocation beside a 95GB model.
+                # The scheduler synchronously detaches/persists this exact
+                # boundary to SSD, then returns with no Metal snapshot owner.
+                boundary_callback(uid, extracted)
                 continue
 
             # MLX arrays are functionally replaced by GLM's KDA/MLA update
@@ -401,7 +413,7 @@ def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, li
                 clone_glm5_next_layer_cache(layer, copy_fn=lambda value: value)
                 for layer in extracted
             ]
-            snapshots[int(prompt_batch.uids[index])] = cloned
+            snapshots[uid] = cloned
         except Exception as exc:
             # Cache capture is an optimization. A copy failure must force a
             # clean miss on the next turn, never fail the current generation.

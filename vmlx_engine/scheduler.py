@@ -3501,6 +3501,73 @@ class Scheduler:
             except Exception:
                 pass
 
+    def _store_glm_prompt_boundary(self, uid: int, prompt_cache: List[Any]) -> bool:
+        """Detach GLM's exact N-1 state to SSD before the final prompt token.
+
+        Retaining that expanded MLA boundary in Metal while processing the
+        final token exceeds the stock M5 Max working-set cap. DiskCacheManager
+        converts the typed state to CPU-owned buffers synchronously; waiting
+        for its writer here releases those buffers and makes the entry visible
+        before decode or a following request can race it.
+        """
+
+        request_id = self.uid_to_request_id.get(int(uid))
+        request = self.running.get(request_id) if request_id is not None else None
+        if request is None:
+            logger.warning(
+                "GLM prompt-boundary cache skipped: no request owns uid=%s", uid
+            )
+            return False
+        if getattr(request, "_bypass_prefix_cache", False):
+            return False
+        if self.disk_cache is None:
+            logger.warning(
+                "GLM prompt-boundary cache skipped for %s: prompt SSD L2 is disabled",
+                request_id,
+            )
+            return False
+
+        prompt_tokens = list(request.prompt_token_ids or [])
+        if len(prompt_tokens) <= 1:
+            return False
+        stored = _call_with_optional_cache_extra(
+            self.disk_cache.store,
+            prompt_tokens,
+            prompt_cache,
+            cache_type=self._pick_cache_type_for_request(request),
+            cache_extra_keys=getattr(request, "_cache_extra_keys", None),
+        )
+        request._glm_prompt_boundary_disk_store = bool(stored)
+        request._glm_prompt_boundary_cache_layers = len(prompt_cache)
+        if not stored:
+            logger.warning(
+                "GLM exact N-1 prompt SSD store rejected for %s; generation "
+                "continues without a reusable cache",
+                request_id,
+            )
+            return False
+
+        durable = self.disk_cache.flush_pending_writes(
+            prompt_tokens,
+            cache_extra_keys=getattr(request, "_cache_extra_keys", None),
+        )
+        if not durable:
+            request._glm_prompt_boundary_disk_store = False
+            logger.warning(
+                "GLM exact N-1 prompt SSD write failed for %s; generation "
+                "continues without a reusable cache",
+                request_id,
+            )
+            return False
+        logger.info(
+            "GLM exact N-1 prompt boundary persisted before final token for "
+            "%s (%d layers, %d prompt tokens)",
+            request_id,
+            len(prompt_cache),
+            len(prompt_tokens),
+        )
+        return True
+
     @staticmethod
     def _pick_cache_type_for_request(request: Request) -> str:
         """Choose the cache_type to tag a full-prompt store with, based on
@@ -3691,7 +3758,7 @@ class Scheduler:
                     "even with max_num_seqs=1 so the draft/verify runtime and "
                     "SSM rollback path are active."
                 )
-                return BatchGenerator(
+                generator = BatchGenerator(
                     model=self.model,
                     max_tokens=sampling_params.max_tokens,
                     stop_tokens=stop_tokens,
@@ -3701,6 +3768,11 @@ class Scheduler:
                     completion_batch_size=self.config.completion_batch_size,
                     prefill_step_size=self.config.prefill_step_size,
                 )
+                if self._uses_glm5_next_cache:
+                    generator._vmlx_prompt_boundary_callback = (
+                        self._store_glm_prompt_boundary
+                    )
+                return generator
         except Exception as _mtp_gen_err:
             logger.debug(f"Native MTP generator detection failed: {_mtp_gen_err}")
 
@@ -10038,6 +10110,25 @@ class Scheduler:
                                             _typed_family,
                                             len(snapshot_cache),
                                             len(request._extracted_cache_key_tokens),
+                                        )
+                                    elif getattr(
+                                        request,
+                                        "_glm_prompt_boundary_disk_store",
+                                        False,
+                                    ):
+                                        request._extracted_cache = None
+                                        logger.info(
+                                            "glm5_next exact typed N-1 boundary "
+                                            "was already persisted to prompt SSD "
+                                            "before the final token (%d layers)",
+                                            int(
+                                                getattr(
+                                                    request,
+                                                    "_glm_prompt_boundary_cache_layers",
+                                                    0,
+                                                )
+                                                or 0
+                                            ),
                                         )
                                     else:
                                         request._extracted_cache = None

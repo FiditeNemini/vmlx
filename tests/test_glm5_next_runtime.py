@@ -268,7 +268,9 @@ class TestCacheAndForward:
             expected_num_layers=5,
             required_cache_classes=required,
         )
-        assert writer.store(list(range(9)), payload)
+        cache_tokens = list(range(9))
+        assert writer.store(cache_tokens, payload)
+        assert writer.flush_pending_writes(cache_tokens) is True
         writer.shutdown()
 
         cache_file = next(cache_dir.glob("*.safetensors"))
@@ -882,6 +884,101 @@ class TestNativeMTP:
                     assert bool(mx.array_equal(expected, actual).item())
         assert not hasattr(generator._generation_batch, "_vmlx_prompt_cache_snapshots")
         generator.close()
+
+    def test_mtp_batch_generator_hands_boundary_to_callback_without_retaining_it(
+        self, glm5
+    ):
+        """Production persists GLM's N-1 state before allocating the final step.
+
+        The callback may inspect/persist the extracted typed state, but the
+        BatchGenerator must not keep a second Metal owner or attach a terminal
+        snapshot after the callback returns.
+        """
+        from mlx_lm.generate import BatchGenerator
+
+        from vmlx_engine.patches.mlx_lm_mtp import apply_mlx_lm_mtp_patch
+
+        assert apply_mlx_lm_mtp_patch() is True
+        model = self._active_model(glm5)
+        generator = BatchGenerator(model, max_tokens=1)
+        boundaries = []
+
+        def persist(uid, cache):
+            boundaries.append(
+                {
+                    "uid": uid,
+                    "classes": [type(layer).__name__ for layer in cache],
+                    "mla_offset": cache[3].offset,
+                }
+            )
+            return True
+
+        generator._vmlx_prompt_boundary_callback = persist
+        generator.insert([[10, 11, 12, 13]])
+
+        prompt_responses, generation_responses = generator.next()
+        assert prompt_responses and generation_responses == []
+        prompt_responses, generation_responses = generator.next()
+        assert prompt_responses[0].end_of_prompt is True
+        assert generation_responses == []
+        assert boundaries == [
+            {
+                "uid": 0,
+                "classes": [
+                    "Glm5KDACache",
+                    "Glm5KDACache",
+                    "Glm5KDACache",
+                    "Glm5MLACache",
+                    "Glm5KDACache",
+                ],
+                "mla_offset": 3,
+            }
+        ]
+        assert not hasattr(generator._generation_batch, "_vmlx_prompt_cache_snapshots")
+
+        prompt_responses, generation_responses = generator.next()
+        assert prompt_responses == []
+        assert len(generation_responses) == 1
+        assert generation_responses[0].finish_reason == "length"
+        assert not hasattr(generation_responses[0], "prompt_cache_snapshot")
+        generator.close()
+
+    def test_scheduler_persists_glm_boundary_and_flushes_before_final_token(self):
+        """The scheduler binds the full prompt key to the exact N-1 payload."""
+        from types import SimpleNamespace
+
+        from vmlx_engine.scheduler import Scheduler
+
+        calls = []
+
+        class FakeDisk:
+            def store(self, tokens, cache, *, cache_type):
+                calls.append(("store", list(tokens), cache, cache_type))
+                return True
+
+            def flush_pending_writes(self, tokens, *, cache_extra_keys=None):
+                calls.append(("flush", list(tokens), cache_extra_keys))
+                return True
+
+        request = SimpleNamespace(
+            prompt_token_ids=[10, 11, 12, 13],
+            _bypass_prefix_cache=False,
+            _cache_extra_keys=None,
+            _segment_boundaries=[(2, "user")],
+        )
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.uid_to_request_id = {7: "request-7"}
+        scheduler.running = {"request-7": request}
+        scheduler.disk_cache = FakeDisk()
+        prompt_cache = [object(), object()]
+
+        assert scheduler._store_glm_prompt_boundary(7, prompt_cache) is True
+        assert calls == [
+            ("store", [10, 11, 12, 13], prompt_cache, "user"),
+            ("flush", [10, 11, 12, 13], None),
+        ]
+        assert request._glm_prompt_boundary_disk_store is True
+        assert request._glm_prompt_boundary_cache_layers == 2
 
     def test_active_sanitize_remaps_appended_layer_to_mtp(self, glm5):
         model = self._active_model(glm5)

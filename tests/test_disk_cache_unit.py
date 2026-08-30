@@ -14,10 +14,12 @@ Verifies:
 """
 
 import os
+import gc
 import sqlite3
 import tempfile
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -132,6 +134,27 @@ class TestDiskCacheUnit:
             join_thread.start()
             join_thread.join(timeout=2.0)
             assert join_done.is_set()
+        finally:
+            mgr.shutdown()
+
+    def test_background_writer_releases_completed_numpy_payload(self):
+        """A blocked writer must not pin the previous prompt's host buffers."""
+        import numpy as np
+
+        tmpdir = tempfile.mkdtemp(prefix="vmlx_disk_cache_test_")
+        mgr = _create_manager(tmpdir)
+        try:
+            mgr._write_cache = lambda *args, **kwargs: None
+            array = np.ones((128,), dtype=np.uint16)
+            reference = weakref.ref(array)
+            payload = {"0": array}
+            mgr._write_queue.put(("hash", [1, 2, 3], payload, {}, "assistant"))
+            del payload
+            del array
+
+            mgr._write_queue.join()
+            gc.collect()
+            assert reference() is None
         finally:
             mgr.shutdown()
 

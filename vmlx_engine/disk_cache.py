@@ -1254,11 +1254,12 @@ class DiskCacheManager:
             import numpy as np
             np_cache = {}
             if glm_typed_payload:
-                # Process one array at a time. ``np.asarray`` retains a
-                # read-only view whose base owns the evaluated MLX allocation
-                # until the background writer finishes; no aggregate Metal or
-                # host copy is created. GLM arrays are immutable after this
-                # prompt boundary because subsequent updates replace them.
+                # Process one array at a time and detach it into CPU-owned
+                # storage. This method is called at GLM's N-1 boundary, before
+                # the final prompt token needs to allocate the next expanded
+                # MLA image. A NumPy view would keep the old Metal allocation
+                # alive and reproduce the exact OOM this path exists to avoid.
+                # The CPU copy costs system RAM, never wired Metal headroom.
                 for k, v in cache_data_flat.items():
                     if not isinstance(v, mx.array):
                         np_cache[k] = v
@@ -1267,13 +1268,9 @@ class DiskCacheManager:
                     mx.eval(materialized)
                     if k in bitcast_dtypes:
                         materialized = materialized.view(mx.uint16)
-                    view = np.asarray(materialized)
-                    if not view.flags.c_contiguous:
-                        raise ValueError(
-                            f"GLM cache tensor {k!r} is not C-contiguous"
-                        )
-                    view.setflags(write=False)
-                    np_cache[k] = view
+                    detached = np.array(materialized, copy=True, order="C")
+                    detached.setflags(write=False)
+                    np_cache[k] = detached
                 cache_data_flat = np_cache
             else:
                 pending_arrays = []
@@ -1504,6 +1501,14 @@ class DiskCacheManager:
             except Exception as e:
                 logger.warning(f"Background disk cache write failed: {e}")
             finally:
+                # The writer blocks on its next queue.get(), so ordinary loop
+                # scoping would retain the previous item's unpacked payload
+                # indefinitely. A GLM prompt record can be several GiB of
+                # detached NumPy arrays; release every local owner before
+                # task_done() lets a synchronous waiter proceed.
+                item = None
+                cache_data_flat = None
+                cache_metadata_flat = None
                 try:
                     self._write_queue.task_done()
                 except ValueError:
@@ -1823,6 +1828,36 @@ class DiskCacheManager:
         # Close connection pool
         self._pool.close_all()
         logger.info("Disk cache shut down")
+
+    def flush_pending_writes(
+        self,
+        tokens: Optional[List[int]] = None,
+        cache_extra_keys: Any = None,
+    ) -> bool:
+        """Wait for queued writes and optionally verify one exact record.
+
+        GLM uses this at its pre-final-token boundary so detached CPU payloads
+        are released before decode and the immediately following request cannot
+        race the background writer into a false disk miss. Queue completion is
+        not itself proof of persistence: the writer deliberately logs and
+        swallows filesystem/serialization errors. When ``tokens`` is supplied,
+        confirm that both the index row and final safetensors file exist.
+        """
+
+        self._write_queue.join()
+        if tokens is None:
+            return True
+
+        token_hash = _hash_tokens(list(tokens), cache_extra_keys)
+        conn = self._pool.get()
+        try:
+            row = conn.execute(
+                "SELECT file_name FROM cache_entries WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+        finally:
+            self._pool.put(conn)
+        return bool(row and (self.cache_dir / row[0]).is_file())
 
     def stats(self) -> Dict[str, Any]:
         """Return cache statistics.

@@ -3941,7 +3941,10 @@ def run_paired_replay_discriminator(
     expected_backend_identity_fingerprint: str,
     gateway_direct_health_probe: Callable[[], dict[str, Any]] | None,
     health_timeout_s: float = 5.0,
-    health_poll_interval_s: float = 0.025,
+    # Cached tool-call replays can finish inside the old 25 ms sampling gap.
+    # Keep the gate strict (an active request must still be observed), but
+    # sample frequently enough to attest those short, real gateway requests.
+    health_poll_interval_s: float = 0.005,
 ) -> dict[str, Any]:
     """Run one frozen-body direct A1 / gateway B / direct A2 discriminator."""
     if (protocol, mode, int(stage)) not in PAIRED_REPLAY_TARGETS:
@@ -4834,10 +4837,18 @@ def expected_parser_input_capture_routes(
                 for capture_label in labels
             )
         if "nonstream" in mode_set:
-            routes.extend(
-                (base_label, protocol, f"nonstream-flow-round{round_number}")
-                for protocol in protocol_list
+            labels = [
+                f"nonstream-flow-round{round_number}"
                 for round_number in (1, 2, 3)
+            ]
+            if not skip_cancellation:
+                # Non-stream cancellation is a client disconnect followed by
+                # the same recovery request that run_matrix() records below.
+                labels.append("nonstream-recovery")
+            routes.extend(
+                (base_label, protocol, capture_label)
+                for protocol in protocol_list
+                for capture_label in labels
             )
     return routes
 

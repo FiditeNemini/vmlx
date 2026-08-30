@@ -2885,6 +2885,25 @@ def test_expected_parser_input_routes_include_nonresponses_nonstream():
     ]
 
 
+def test_expected_parser_input_routes_include_nonstream_recovery():
+    routes = matrix.expected_parser_input_capture_routes(
+        ["direct", "gateway"],
+        ["chat"],
+        ["nonstream"],
+        skip_cancellation=False,
+    )
+    assert routes == [
+        ("direct", "chat", "nonstream-flow-round1"),
+        ("direct", "chat", "nonstream-flow-round2"),
+        ("direct", "chat", "nonstream-flow-round3"),
+        ("direct", "chat", "nonstream-recovery"),
+        ("gateway", "chat", "nonstream-flow-round1"),
+        ("gateway", "chat", "nonstream-flow-round2"),
+        ("gateway", "chat", "nonstream-flow-round3"),
+        ("gateway", "chat", "nonstream-recovery"),
+    ]
+
+
 def test_nonstream_chat_capture_preserves_parser_input_bytes(
     monkeypatch,
     tmp_path: Path,

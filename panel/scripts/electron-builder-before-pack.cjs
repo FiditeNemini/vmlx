@@ -21,6 +21,7 @@ const {
   statSync,
   writeSync,
 } = require("node:fs");
+const { tmpdir } = require("node:os");
 const { dirname, join, relative, resolve } = require("node:path");
 const {
   bindingFromEnvironment,
@@ -956,9 +957,7 @@ function emitR20CompletionAttestation(panelDir, plan, planSha256) {
   ) {
     throw new Error(`vMLX ${R20_VERSION} staged application is missing or wrong`);
   }
-  const extracted = mkdtempSync(
-    join(outputDirectory, `.${plan.current_flavor}.asar.`),
-  );
+  const extracted = createR20AsarExtractionDirectory(plan.current_flavor);
   try {
     const appAsar = join(app, "Contents", "Resources", "app.asar");
     assertAsarExcludesFinderMetadata(panelDir, planSha256, appAsar);
@@ -1041,6 +1040,32 @@ function emitR20CompletionAttestation(panelDir, plan, planSha256) {
       retryDelay: 100,
     });
   }
+}
+
+function createR20AsarExtractionDirectory(flavor) {
+  if (!/^[a-z0-9_-]+$/.test(flavor)) {
+    throw new Error(`invalid vMLX ASAR extraction flavor: ${flavor}`);
+  }
+  // The sealed evidence directory may be visible in Finder. Finder can keep
+  // recreating node_modules/.DS_Store while recursive cleanup is in progress,
+  // defeating even fs.rmSync's bounded ENOTEMPTY retries after a valid DMG was
+  // already produced. Extract into the per-user system temporary directory,
+  // which is not Finder-managed, and keep the directory private.
+  const parent = realpathSync(tmpdir());
+  const extracted = mkdtempSync(
+    join(parent, `vmlx-r20-${R20_VERSION}-${flavor}-asar-`),
+  );
+  chmodSync(extracted, 0o700);
+  const metadata = lstatSync(extracted);
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    rmSync(extracted, { recursive: true, force: true });
+    throw new Error("vMLX ASAR extraction directory is not private");
+  }
+  return extracted;
 }
 
 function verifyR20PackagingContext(panelDir, context) {
@@ -1346,6 +1371,8 @@ module.exports.runPlanToolAction = runPlanToolAction;
 module.exports.inspectBundleRuntimeContract = inspectBundleRuntimeContract;
 module.exports.inspectAppRuntimeContract = inspectAppRuntimeContract;
 module.exports.emitR20CompletionAttestation = emitR20CompletionAttestation;
+module.exports.createR20AsarExtractionDirectory =
+  createR20AsarExtractionDirectory;
 module.exports.runR20ReleasePythonAction = runR20ReleasePythonAction;
 module.exports.stripVerifiedReleasePythonActionFromGitStatus =
   stripVerifiedReleasePythonActionFromGitStatus;

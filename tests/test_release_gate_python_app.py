@@ -1162,6 +1162,28 @@ def test_completion_attestation_cleanup_retries_transient_directory_races():
     assert "retryDelay: 100" in hook_src
 
 
+def test_completion_attestation_uses_private_system_temp_for_asar_extraction():
+    hook = Path("panel/scripts/electron-builder-before-pack.cjs").resolve()
+    script = r"""
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const hook = require(process.argv[1]);
+const extracted = hook.createR20AsarExtractionDirectory('sequoia');
+try {
+  const metadata = fs.lstatSync(extracted);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) process.exit(2);
+  if ((metadata.mode & 0o077) !== 0) process.exit(3);
+  if (fs.realpathSync(path.dirname(extracted)) !== fs.realpathSync(os.tmpdir())) {
+    process.exit(4);
+  }
+} finally {
+  fs.rmSync(extracted, { recursive: true, force: true });
+}
+"""
+    subprocess.run(["node", "-e", script, str(hook)], check=True)
+
+
 def test_electron_builder_before_pack_hook_rejects_skip_vite_in_pack_context(tmp_path):
     scripts = tmp_path / "scripts"
     scripts.mkdir()

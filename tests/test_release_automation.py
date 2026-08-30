@@ -218,6 +218,8 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "steps.apple.outputs.notary_keychain" in candidate
     assert "import tomllib" not in candidate
     assert "pathlib.Path('pyproject.toml').read_text()" in candidate
+    assert "RELEASE_PYTHON=/opt/homebrew/bin/python3" in candidate
+    assert "/usr/bin/python3 -m venv" not in candidate
 
     signing = (ROOT / ".github/scripts/setup_apple_signing.sh").read_text()
     assert "APPLE_NOTARY_EXISTING_PROFILE" in signing

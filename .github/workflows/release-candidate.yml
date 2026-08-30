@@ -129,7 +129,9 @@ jobs:
         working-directory: vmlx
         run: |
           set -euo pipefail
-          /usr/bin/python3 -m venv .venv
+          RELEASE_PYTHON=/opt/homebrew/bin/python3
+          "$RELEASE_PYTHON" -c 'import sys; assert (3, 11) <= sys.version_info < (3, 15), sys.version'
+          "$RELEASE_PYTHON" -m venv .venv
           .venv/bin/python -m pip install --upgrade pip build twine
           .venv/bin/python -m pip install -e '.[dev]'
           cd panel

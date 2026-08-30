@@ -17,6 +17,7 @@ All notable changes to vMLX Engine will be documented in this file.
 - **Dedicated release runners can use a prevalidated notarytool Keychain profile.** Developer ID signing still uses an ephemeral per-run keychain, while the existing App Store Connect credential remains non-exportable in the runner's login Keychain.
 - **Candidate provenance validation runs on the runner's system Python.** The version check no longer assumes Python 3.11's `tomllib` before the workflow creates its isolated release environment.
 - **Dedicated release runners may keep the Developer ID identity non-exportable.** Candidate CI validates the exact ShieldStack team identity in the login Keychain instead of requiring a PKCS#12 round trip.
+- **Candidate dependency setup rejects macOS's legacy system Python.** Release CI now creates its isolated environment from the documented Homebrew Python 3.11–3.14 range.
 
 ---
 

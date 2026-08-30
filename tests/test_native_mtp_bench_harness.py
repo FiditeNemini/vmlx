@@ -176,6 +176,8 @@ def test_build_native_mtp_env_sets_aliases_and_probe_knobs():
     assert env["VMLX_NATIVE_MTP"] == "1"
     assert env["VMLINUX_NATIVE_MTP_DEPTH"] == "2"
     assert env["VMLX_NATIVE_MTP_DEPTH"] == "2"
+    assert env["VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH"] == "0"
+    assert env["VMLX_NATIVE_MTP_ADAPTIVE_DEPTH"] == "0"
     assert env["VMLINUX_NATIVE_MTP_TRACE"] == "1"
     assert env["VMLX_MTP_PROFILE"] == "1"
     assert env["VMLINUX_NATIVE_MTP_DEBUG_TOKENS"] == "1"
@@ -200,6 +202,8 @@ def test_build_native_mtp_env_omits_depth_when_unset():
     assert env["VMLX_NATIVE_MTP"] == "1"
     assert "VMLINUX_NATIVE_MTP_DEPTH" not in env
     assert "VMLX_NATIVE_MTP_DEPTH" not in env
+    assert "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH" not in env
+    assert "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH" not in env
     assert env["VMLINUX_NATIVE_MTP_TRACE"] == ""
     assert env["VMLX_MTP_PROFILE"] == ""
 

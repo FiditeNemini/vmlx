@@ -139,6 +139,14 @@ def build_native_mtp_env(
     if depth is not None:
         env["VMLINUX_NATIVE_MTP_DEPTH"] = str(depth)
         env["VMLX_NATIVE_MTP_DEPTH"] = str(depth)
+        # An explicit --depth or --depth-sweep row is a fixed-depth arm.
+        # Leaving adaptive depth enabled lets the live value controller move
+        # between D1-D3 inside the request, so a row labelled D2/D3 no longer
+        # measures (or proves) the corresponding app control.  Keep both env
+        # aliases aligned with the launcher's --native-mtp-depth-policy fixed
+        # contract.
+        env["VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH"] = "0"
+        env["VMLX_NATIVE_MTP_ADAPTIVE_DEPTH"] = "0"
     profile_mtp = bool(getattr(args, "trace_mtp", False)) or (
         mtp_enabled and bool(getattr(args, "mtp_cost_fallback", False))
     )

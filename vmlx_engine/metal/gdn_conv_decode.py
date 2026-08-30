@@ -26,8 +26,11 @@ def fused_qwen35_gdn_conv_requested() -> bool:
     return value not in {"", "0", "false", "off", "no"}
 
 
-@lru_cache(maxsize=16)
-def _kernel(channels: int, kernel_size: int):
+@lru_cache(maxsize=32)
+def _kernel(channels: int, kernel_size: int, fuse_silu: bool):
+    activation = (
+        "(T)(acc / (1.0f + metal::exp(-acc)))" if fuse_silu else "(T)acc"
+    )
     source = f"""
         uint channel = thread_position_in_grid.x;
         if (channel >= {channels}u) return;
@@ -46,10 +49,13 @@ def _kernel(channels: int, kernel_size: int):
                 state[(size_t)(tap + 1u) * {channels}u + channel];
         }}
         next_state[(size_t){kernel_size - 2}u * {channels}u + channel] = (T)current;
-        convolved[channel] = (T)acc;
+        convolved[channel] = {activation};
 """
     return mx.fast.metal_kernel(
-        name=f"vmlx_qwen4_gdn_conv_k{kernel_size}_c{channels}",
+        name=(
+            f"vmlx_qwen_gdn_conv_k{kernel_size}_c{channels}_"
+            f"{'silu' if fuse_silu else 'linear'}"
+        ),
         input_names=["state", "token", "weight"],
         output_names=["next_state", "convolved"],
         header="#include <metal_stdlib>\nusing namespace metal;\n",
@@ -63,6 +69,7 @@ def _gdn_conv_decode(
     weight: mx.array,
     *,
     enabled: bool,
+    fuse_silu: bool,
 ) -> tuple[mx.array, mx.array] | None:
     """Return ``(silu(conv), next_state)`` for the exact AR decode shape."""
 
@@ -83,7 +90,7 @@ def _gdn_conv_decode(
     if state.dtype != qkv.dtype or weight.dtype != qkv.dtype:
         return None
 
-    next_state, convolved = _kernel(channels, kernel_size)(
+    next_state, convolved = _kernel(channels, kernel_size, fuse_silu)(
         inputs=[state, qkv, weight],
         template=[("T", qkv.dtype)],
         grid=(channels, 1, 1),
@@ -91,10 +98,11 @@ def _gdn_conv_decode(
         output_shapes=[tuple(state.shape), tuple(qkv.shape)],
         output_dtypes=[qkv.dtype, qkv.dtype],
     )
-    # Keep activation on MLX's compiled primitive. The depthwise convolution
-    # and state shift are bit-exact in BF16/F16, while spelling SiLU as a raw
-    # Metal exp changes rounding enough to fork greedy model output.
-    activated = convolved * mx.sigmoid(convolved)
+    # Qwen3.5 keeps activation on MLX's compiled primitive. Its depthwise
+    # convolution and state shift are bit-exact in BF16/F16, while spelling
+    # SiLU as a raw Metal exp changes enough timing/math to fork its adaptive
+    # MTP trajectory. Qwen4 retains its previously proved fused-SiLU path.
+    activated = convolved if fuse_silu else convolved * mx.sigmoid(convolved)
     return activated, next_state
 
 
@@ -107,7 +115,9 @@ def qwen4_gdn_conv_decode(
 ) -> tuple[mx.array, mx.array] | None:
     if enabled is None:
         enabled = fused_gdn_conv_requested()
-    result = _gdn_conv_decode(qkv, state, weight, enabled=enabled)
+    result = _gdn_conv_decode(
+        qkv, state, weight, enabled=enabled, fuse_silu=True
+    )
     if result is not None:
         global _OBSERVED
         _OBSERVED = True
@@ -123,7 +133,9 @@ def qwen35_gdn_conv_decode(
 ) -> tuple[mx.array, mx.array] | None:
     if enabled is None:
         enabled = fused_qwen35_gdn_conv_requested()
-    result = _gdn_conv_decode(qkv, state, weight, enabled=enabled)
+    result = _gdn_conv_decode(
+        qkv, state, weight, enabled=enabled, fuse_silu=False
+    )
     if result is not None:
         global _QWEN35_OBSERVED
         _QWEN35_OBSERVED = True

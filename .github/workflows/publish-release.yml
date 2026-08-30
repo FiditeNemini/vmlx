@@ -32,6 +32,11 @@ on:
       confirm:
         description: Type PUBLISH vX.Y.Z EXACT CANDIDATE
         required: true
+      pypi_recovery:
+        description: Publish only the already-released, digest-verified Python artifacts through Trusted Publishing
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   actions: read
@@ -44,6 +49,7 @@ concurrency:
 jobs:
   validate:
     name: Validate immutable candidate and public heads
+    if: ${{ !inputs.pypi_recovery }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -204,6 +210,72 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Publish without a stored PyPI token
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: candidate/python-dist/
+          verbose: true
+
+  recover-pypi:
+    name: Recover PyPI publication from exact GitHub release assets
+    if: ${{ inputs.pypi_recovery }}
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out the immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download and verify the already-public Python artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_INPUT: ${{ inputs.version }}
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          JANG_SHA_INPUT: ${{ inputs.jang_sha }}
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+          TAG: v${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRM_INPUT" = "PUBLISH v${VERSION_INPUT} EXACT CANDIDATE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA_INPUT"
+          test "$(git rev-list -n 1 "$TAG")" = "$SOURCE_SHA_INPUT"
+          test "$(gh release view "$TAG" --repo jjang-ai/vmlx --json isDraft --jq .isDraft)" = false
+          mkdir -p candidate/python-dist
+          gh release download "$TAG" --repo jjang-ai/vmlx \
+            --pattern release-info.json \
+            --pattern 'vmlx-*.whl' \
+            --pattern 'vmlx-*.tar.gz' \
+            --dir candidate
+          mv candidate/vmlx-*.whl candidate/vmlx-*.tar.gz candidate/python-dist/
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          metadata = json.loads(Path("candidate/release-info.json").read_text())
+          assert metadata["version"] == os.environ["VERSION_INPUT"]
+          assert metadata["source"]["commit"] == os.environ["SOURCE_SHA_INPUT"]
+          assert metadata["jangq"]["commit"] == os.environ["JANG_SHA_INPUT"]
+          for artifact in metadata["python_distributions"].values():
+              path = Path("candidate/python-dist") / artifact["filename"]
+              assert path.is_file(), path
+              assert path.stat().st_size == artifact["bytes"], path
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"], path
+          PY
+          if curl -fsS "https://pypi.org/pypi/vmlx/${VERSION_INPUT}/json" >/dev/null; then
+            echo "vmlx ${VERSION_INPUT} already exists on PyPI" >&2
+            exit 1
+          fi
+
+      - name: Publish exact release assets without a stored PyPI token
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           packages-dir: candidate/python-dist/

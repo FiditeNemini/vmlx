@@ -1212,6 +1212,82 @@ def test_direct_and_gateway_synthesis_prompts_are_byte_identical():
     assert "GATEWAY" not in direct
 
 
+def test_agentic_flow_turns_thinking_off_for_final_synthesis():
+    class RecordingClient:
+        def __init__(self):
+            self.payloads = []
+
+        def send(self, protocol, payload, stream, *, capture_label):
+            assert protocol == "chat"
+            assert stream is False
+            self.payloads.append(copy.deepcopy(payload))
+            if capture_label.endswith("round1"):
+                call = {
+                    "id": "call-file",
+                    "name": "file_info",
+                    "arguments": {"path": matrix.FILE_INFO_PATH},
+                }
+                terminal = "tool_calls"
+                return {
+                    "status_code": 200,
+                    "response_id": "response-1",
+                    "reasoning": "reason one",
+                    "content": "",
+                    "tool_calls": [call],
+                    "terminals": [terminal],
+                    "events": [{"at_ms": 1, "channel": "terminal", "kind": terminal}],
+                    "errors": [],
+                }
+            if capture_label.endswith("round2"):
+                call = {
+                    "id": "call-pwd",
+                    "name": "run_command",
+                    "arguments": {"command": matrix.PWD_COMMAND},
+                }
+                terminal = "tool_calls"
+                return {
+                    "status_code": 200,
+                    "response_id": "response-2",
+                    "reasoning": "reason two",
+                    "content": "",
+                    "tool_calls": [call],
+                    "terminals": [terminal],
+                    "events": [{"at_ms": 1, "channel": "terminal", "kind": terminal}],
+                    "errors": [],
+                }
+            terminal = "stop"
+            return {
+                "status_code": 200,
+                "response_id": "response-3",
+                "reasoning": "",
+                "content": "final",
+                "tool_calls": [],
+                "terminals": [terminal],
+                "events": [{"at_ms": 1, "channel": "terminal", "kind": terminal}],
+                "errors": [],
+            }
+
+    client = RecordingClient()
+    repo_root = Path(matrix.__file__).resolve().parents[2]
+    result = matrix.run_flow(
+        client,
+        base_label="direct",
+        protocol="chat",
+        mode="nonstream",
+        model="served-model",
+        repo_root=repo_root,
+        max_tokens=128,
+        enable_thinking=True,
+    )
+
+    assert [payload["enable_thinking"] for payload in client.payloads] == [
+        True,
+        True,
+        False,
+    ]
+    assert result["requests"][2]["enable_thinking"] is False
+
+
 def test_request_metadata_hashes_full_body_and_normalizes_only_tool_ids():
     base = {
         "model": "served-model",

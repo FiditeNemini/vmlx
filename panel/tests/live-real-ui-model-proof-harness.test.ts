@@ -29,6 +29,7 @@ import {
   correlateTerminalResponseToCacheExecution,
   cssEscapeIdentifier,
   expectedUiToolCallCount,
+  expectedRawMatrixRoutes,
   extractPersistedReasoningMathLinkage,
   isCacheRequestCorrelationVerified,
   isServerRequestCorrelationVerified,
@@ -3586,6 +3587,7 @@ describe("real UI model proof harness", () => {
   it("uses the same bundle-file-bound backend fingerprint as the API matrix", () => {
     const health = {
       model_name: "test-model",
+      loaded_model_name: "/private/models/test-model",
       runtime_provenance: {
         pid: 4321,
         server_module_sha256: sha,
@@ -3612,6 +3614,7 @@ describe("real UI model proof harness", () => {
       python_source_file_count: 10,
       python_source_read_error_count: 0,
       model_name: "test-model",
+      loaded_model_name: "/private/models/test-model",
       model_bundle_fingerprint_sha256: sha,
       model_bundle_files: modelBundleAttestation.files,
       cache_topology_fingerprint_sha256: sha,
@@ -3623,6 +3626,35 @@ describe("real UI model proof harness", () => {
       otherSha;
     expect(runtimeBindingFromHealth(changedHealth).fingerprint_sha256)
       .not.toBe(binding.fingerprint_sha256);
+
+    const changedLoadedModel = structuredClone(health);
+    changedLoadedModel.loaded_model_name = "/private/models/other-model";
+    expect(runtimeBindingFromHealth(changedLoadedModel).fingerprint_sha256)
+      .not.toBe(binding.fingerprint_sha256);
+  });
+
+  it("treats an effort-only visible reasoning selection as persisted On", () => {
+    const result = structuredClone(goodResult());
+    result.requestedReasoningEffort = "xhigh";
+    result.chatOverrides.enableThinking = true;
+    result.chatOverrides.reasoningEffort = "xhigh";
+    result.chatSettingsDom.reasoningMode = "On";
+    result.chatSettingsDom.reasoningEffort = "xhigh";
+
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+  });
+
+  it("includes nonstream recovery in the cancellation raw-capture contract", () => {
+    const contract = {
+      protocols: ["chat", "responses", "anthropic", "ollama"],
+      modes: ["stream", "nonstream"],
+    };
+    const routes = expectedRawMatrixRoutes(contract, true);
+
+    expect(routes).toHaveLength(72);
+    expect(routes).toContain("direct\0chat\0nonstream-recovery");
+    expect(routes).toContain("gateway\0ollama\0nonstream-recovery");
+    expect(new Set(routes).size).toBe(routes.length);
   });
 
   it("rejects settings not visibly persisted and stale route/model log records", () => {

@@ -2570,6 +2570,7 @@ export function runtimeBindingFromHealth(health) {
     python_source_file_count: runtime.python_source_file_count ?? null,
     python_source_read_error_count: runtime.python_source_read_error_count ?? null,
     model_name: String(health?.model_name || ''),
+    loaded_model_name: String(health?.loaded_model_name || ''),
     model_bundle_fingerprint_sha256:
       String(modelBundle.fingerprint_sha256 || ''),
     model_bundle_files:
@@ -4808,9 +4809,13 @@ export function validateGenerationDefaultsEvidence(result) {
   const expectedWire = result?.requestedWireApi === 'responses'
     ? 'responses'
     : 'completions'
-  const acceptableReasoningLabels = result?.requestedEnableThinking === true
+  const expectedPersistedThinking = result?.requestedEnableThinking === undefined
+    && result?.requestedReasoningEffort != null
+    ? true
+    : result?.requestedEnableThinking
+  const acceptableReasoningLabels = expectedPersistedThinking === true
     ? ['On', 'Reasoning']
-    : result?.requestedEnableThinking === false
+    : expectedPersistedThinking === false
       ? ['Off', 'Instruct']
       : ['Auto']
   if (String(dom?.wireApi || '') !== expectedWire) {
@@ -5770,6 +5775,36 @@ const pairedSafeCaptureHeaderNames = new Set([
   'transfer-encoding',
 ])
 
+export function expectedRawMatrixRoutes(contract, includeCancellation) {
+  const streamLabels = [
+    'stream-flow-round1',
+    'stream-flow-round2',
+    'stream-flow-round3',
+    ...(includeCancellation ? ['stream-abort', 'stream-recovery'] : []),
+  ]
+  const routes = []
+  for (const baseLabel of ['direct', 'gateway']) {
+    for (const protocol of contract.protocols) {
+      if (contract.modes.includes('stream')) {
+        for (const captureLabel of streamLabels) {
+          routes.push(`${baseLabel}\0${protocol}\0${captureLabel}`)
+        }
+      }
+      if (contract.modes.includes('nonstream')) {
+        for (const roundNumber of [1, 2, 3]) {
+          routes.push(
+            `${baseLabel}\0${protocol}\0nonstream-flow-round${roundNumber}`,
+          )
+        }
+        if (includeCancellation) {
+          routes.push(`${baseLabel}\0${protocol}\0nonstream-recovery`)
+        }
+      }
+    }
+  }
+  return routes
+}
+
 function parseSseObjects(raw, label) {
   const objects = []
   const frames = []
@@ -6709,11 +6744,15 @@ function healthIdentityMatchesUi(identity, uiBinding) {
     'python_source_file_count',
     'python_source_read_error_count',
     'model_name',
+    'loaded_model_name',
     'model_bundle_fingerprint_sha256',
     'model_bundle_files',
     'cache_topology_fingerprint_sha256',
     'fingerprint_sha256',
-  ].every((field) => canonicalJson(identity?.[field]) === canonicalJson(uiBinding?.[field]))
+  ].every((field) => (
+    canonicalJson(identity?.[field] ?? null)
+      === canonicalJson(uiBinding?.[field] ?? null)
+  ))
     && canonicalJson(identity?.runtime_source_hashes)
       === canonicalJson(uiBinding?.runtime_source_hashes)
 }
@@ -7182,29 +7221,7 @@ function validateRawMatrixCapture(value, result, contract) {
     failures.push('paired matrix raw capture manifest bytes/path/summary do not match')
   }
   const includeCancellation = value?.checks?.abort_recovery_skipped !== true
-  const streamLabels = [
-    'stream-flow-round1',
-    'stream-flow-round2',
-    'stream-flow-round3',
-    ...(includeCancellation ? ['stream-abort', 'stream-recovery'] : []),
-  ]
-  const expectedRoutes = []
-  for (const baseLabel of ['direct', 'gateway']) {
-    for (const protocol of contract.protocols) {
-      if (contract.modes.includes('stream')) {
-        for (const captureLabel of streamLabels) {
-          expectedRoutes.push(`${baseLabel}\0${protocol}\0${captureLabel}`)
-        }
-      }
-      if (contract.modes.includes('nonstream')) {
-        for (const roundNumber of [1, 2, 3]) {
-          expectedRoutes.push(
-            `${baseLabel}\0${protocol}\0nonstream-flow-round${roundNumber}`,
-          )
-        }
-      }
-    }
-  }
+  const expectedRoutes = expectedRawMatrixRoutes(contract, includeCancellation)
   const routes = Array.isArray(manifest?.routes) ? manifest.routes : []
   const actualRoutes = routes.map((route) => (
     `${route?.base_label || ''}\0${route?.protocol || ''}\0${route?.capture_label || ''}`
@@ -10100,6 +10117,14 @@ async function main() {
             : enableThinking === false
               ? ['Off', 'Instruct']
               : ['Auto'];
+          // Selecting a concrete effort calls updateThinkingMode(true,
+          // effort). An effort-only run therefore begins at Auto but is
+          // intentionally persisted and reopened as On.
+          const acceptablePersistedThinkingLabels = (
+            enableThinking === undefined && requestedReasoningEffort
+          )
+            ? ['On', 'Reasoning']
+            : acceptableThinkingLabels;
           // A family whose template never reads enable_thinking renders an
           // honesty NOTICE instead of the Auto/On/Off button group
           // (ChatSettings thinkingNotConfigurable — LFM2.5, MiniMax). Wait for
@@ -10110,7 +10135,7 @@ async function main() {
             .find((button) =>
               isVisible(button)
               && !button.disabled
-              && acceptableThinkingLabels.includes(
+              && acceptablePersistedThinkingLabels.includes(
                 (button.textContent || '').replace(/\\s+/g, ' ').trim()
               )
             ) || null;
@@ -10486,7 +10511,7 @@ async function main() {
             && visibleSamplingPersisted
             && visibleMaxTokensPersisted
             && chatSettingsDom.wireApi === desiredWire
-            && (acceptableThinkingLabels.includes(chatSettingsDom.reasoningMode)
+            && (acceptablePersistedThinkingLabels.includes(chatSettingsDom.reasoningMode)
               || (chatSettingsDom.thinkingNotice === true
                 && enableThinking === undefined
                 && !chatSettingsDom.reasoningMode))

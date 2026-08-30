@@ -4292,7 +4292,12 @@ def run_flow(
         instructions=final_prompt,
         previous_response_id=str(round2.get("response_id") or ""),
         max_tokens=max_tokens,
-        enable_thinking=enable_thinking,
+        # The final synthesis turn is intentionally direct. Besides proving
+        # the API can transition from reasoning/tool use back to a clean
+        # visible answer, this keeps private reasoning out of the final-only
+        # raw-channel contract. The paired-replay validator requires this
+        # exact On -> Off transition, so send the body it grades.
+        enable_thinking=False,
         second_tool_choice=second_tool_choice,
     )
     request_records.append(_request_public(3, request3, protocol=protocol))

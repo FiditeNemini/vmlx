@@ -3879,6 +3879,7 @@ describe("real UI model proof harness", () => {
       "--use-paged-cache",
       "--enable-block-disk-cache",
       "--block-disk-cache-max-percent",
+      "--native-mtp-depth-policy",
     ];
     result.serverCacheControls.commandLine = [
       "$ vmlx-serve model",

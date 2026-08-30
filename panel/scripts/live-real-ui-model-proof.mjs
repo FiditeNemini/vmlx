@@ -5186,8 +5186,12 @@ export function validateServerCacheEvidence(result) {
     const commandLinePercentMatch = String(evidence.commandLine || '').match(
       new RegExp(`(?:^|\\s)${escapedPercentFlag}(?:=|\\s+)([^\\s]+)`),
     )
-    const percentFlagValue = percentFlagIndex >= 0 && argv[percentFlagIndex + 1] != null
+    const argvPercentCandidate = percentFlagIndex >= 0
       ? argv[percentFlagIndex + 1]
+      : undefined
+    const percentFlagValue = argvPercentCandidate != null
+      && !String(argvPercentCandidate).startsWith('--')
+      ? argvPercentCandidate
       : commandLinePercentMatch?.[1]
     if (
       percentFlagIndex < 0

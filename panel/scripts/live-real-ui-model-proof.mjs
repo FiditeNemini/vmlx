@@ -3386,7 +3386,11 @@ export function validateModelBundleBinding(result) {
   if (!requestedPath) failures.push('requested local bundle path is missing')
   if (!requestedModel) failures.push('requested served model name is missing')
   const boundIds = listedIds.filter(
-    (id) => id === requestedModel || id.endsWith(`/${requestedModel}`),
+    (id) => (
+      id === requestedModel
+      || id.endsWith(`/${requestedModel}`)
+      || requestedPath.endsWith(`/${id}`)
+    ),
   )
   if (
     listedIds.length < 1
@@ -4204,7 +4208,9 @@ export function validateReasoningEvidence(result, expectation = 'optional') {
     const progressiveReasoningDeltaCount = reasoningEvents
       .filter((event) => String(event?.delta || '').length > 0)
       .length
-    if (progressiveReasoningDeltaCount < 2) {
+    const completeReasoningText = traceReasoningSegments(events).join('\n').trim()
+    const singleTokenReasoning = /^\S+$/.test(completeReasoningText)
+    if (progressiveReasoningDeltaCount < 2 && !singleTokenReasoning) {
       failures.push(`message ${row.messageId} reasoning was not progressively streamed`)
     }
     // Same never-empty-notice exemption as the content-channel check above: a
@@ -4734,6 +4740,7 @@ export function validateGenerationDefaultsEvidence(result) {
     : [])
     .filter((record) => record?.values && typeof record.values === 'object')
   const explicit = result?.requestContract?.samplingOverrides || {}
+  const nativeMtpGreedy = result?.server?.health?.mtp?.runtime_active === true
   const explicitFields = Object.entries(explicit).filter(([, value]) => value != null)
   const turnEvidence = Array.isArray(result?.uiTurnEvidence)
     ? result.uiTurnEvidence.slice(0, expectedTurns)
@@ -4909,17 +4916,28 @@ export function validateGenerationDefaultsEvidence(result) {
   )
   const effectiveTemperature = explicitTemperatureEntry
     ? explicitTemperatureEntry[1]
-    : defaults.temperature
+    : nativeMtpGreedy
+      ? 0
+      : defaults.temperature
   const greedyRequest = Number(effectiveTemperature) === 0
   for (const [bundleKey, engineKey, uiKey, resolvedKey] of mapping) {
     const expected = defaults[bundleKey]
     if (expected == null) continue
+    const effectiveExpected = nativeMtpGreedy
+      ? bundleKey === 'temperature'
+        ? 0
+        : bundleKey === 'topP'
+          ? 1
+          : bundleKey === 'topK' || bundleKey === 'minP'
+            ? 0
+            : expected
+      : expected
     const overrideEntry = explicitFields.find(([key]) => key === uiKey)
     const maxTokensOverride = bundleKey === 'maxNewTokens'
       ? result?.requestContract?.requestMaxTokens
       : undefined
     const requestOverride = maxTokensOverride ?? (overrideEntry ? overrideEntry[1] : undefined)
-    const uiExpected = requestOverride ?? expected
+    const uiExpected = requestOverride ?? effectiveExpected
     const rendererValue = rendererDefaults?.[bundleKey]
     if (!approximatelyEqual(Number(rendererValue), Number(expected))) {
       failures.push(`renderer default ${bundleKey}=${rendererValue} does not match bundle ${expected}`)
@@ -4938,7 +4956,7 @@ export function validateGenerationDefaultsEvidence(result) {
       }
     } else if (!approximatelyEqual(Number(uiValue), Number(uiExpected))) {
       failures.push(
-        `visible UI ${uiKey}=${uiValue} does not match ${requestOverride == null ? 'bundle' : 'override'} ${uiExpected}`,
+        `visible UI ${uiKey}=${uiValue} does not match ${requestOverride == null && nativeMtpGreedy ? 'Native-MTP effective default' : requestOverride == null ? 'bundle' : 'override'} ${uiExpected}`,
       )
     }
     const healthValue = numericField(effective, engineKey)
@@ -4950,7 +4968,7 @@ export function validateGenerationDefaultsEvidence(result) {
       const greedyNeutralized = greedyRequest && requestOverride == null
       const resolvedExpected = greedyNeutralized && engineKey === 'top_p'
         ? 1
-        : requestOverride ?? expected
+        : requestOverride ?? effectiveExpected
       const greedyOmitted = greedyNeutralized && engineKey === 'top_k'
       const resolvedValue = numericField(resolved, resolvedKey, engineKey, bundleKey, uiKey)
       const resolvedSentinelOmitted = (

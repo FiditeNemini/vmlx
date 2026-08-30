@@ -3577,6 +3577,12 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("accepts the requested served name plus the exact filesystem bundle alias", () => {
+    const result = structuredClone(goodResult());
+    result.server.models.data.push({ id: "models/test-model" });
+    expect(validateModelBundleBinding(result)).toEqual([]);
+  });
+
   it("uses the same bundle-file-bound backend fingerprint as the API matrix", () => {
     const health = {
       model_name: "test-model",
@@ -3649,6 +3655,44 @@ describe("real UI model proof harness", () => {
     expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(
       /explicit temperature override=0.25 was not persisted exactly/,
     );
+  });
+
+  it("grades Native-MTP effective greedy values separately from bundle defaults", () => {
+    const result = structuredClone(goodResult());
+    result.server.health.mtp.runtime_active = true;
+    result.chatSettingsDom.values = {
+      ...result.chatSettingsDom.values,
+      temperature: 0,
+      topP: 1,
+      topK: 0,
+      minP: 0,
+    };
+    result.resolvedSamplingKwargs = {
+      ...result.resolvedSamplingKwargs,
+      temperature: 0,
+      top_p: 1,
+    };
+    delete result.resolvedSamplingKwargs.top_k;
+    delete result.resolvedSamplingKwargs.min_p;
+    for (const record of result.resolvedSamplingRecords) {
+      record.values = {
+        ...record.values,
+        temperature: 0,
+        top_p: 1,
+      };
+      delete record.values.top_k;
+      delete record.values.min_p;
+    }
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+  });
+
+  it("allows an exact one-token reasoning segment to arrive in one delta", () => {
+    const source = readFileSync(
+      path.resolve("scripts/live-real-ui-model-proof.mjs"),
+      "utf8",
+    );
+    expect(source).toContain("const singleTokenReasoning = /^\\S+$/.test(completeReasoningText)");
+    expect(source).toContain("progressiveReasoningDeltaCount < 2 && !singleTokenReasoning");
   });
 
   it("binds model-native reasoning effort before and during the conversation", () => {

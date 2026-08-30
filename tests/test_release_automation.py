@@ -211,6 +211,9 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "VMLX_RELEASE_SCOPE: r20_production" in candidate
     assert "build-release-dmgs.sh all" in candidate
     assert "notarize-release-dmgs.sh" in candidate
+    assert 'export VMLX_R20_EXPECTED_SOURCE_COMMIT="$SOURCE_SHA"' in candidate
+    assert 'export VMLX_R20_EXPECTED_SOURCE_TREE="$SOURCE_TREE"' in candidate
+    assert 'export VMLX_R20_EXPECTED_PREFLIGHT_SHA256="$preflight_sha"' in candidate
     assert "jjang-ai/jangq" in candidate
     assert "private_evidence_root" in candidate
     assert "private_evidence_root }}" not in candidate.split("Upload immutable release candidate", 1)[1]

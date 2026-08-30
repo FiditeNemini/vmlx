@@ -196,8 +196,14 @@ jobs:
           export VMLX_R20_FINAL_NOTARY_MANIFEST="$final"
           panel/scripts/build-release-dmgs.sh all
           pre_sha="$(/usr/bin/shasum -a 256 "$pre" | /usr/bin/awk '{print $1}')"
+          preflight="$PWD/build/current-release-regression-manifest-pre-dmg-release-build.json"
+          test -f "$preflight"
+          preflight_sha="$(/usr/bin/shasum -a 256 "$preflight" | /usr/bin/awk '{print $1}')"
           export VMLX_R20_PRE_NOTARY_MANIFEST="$pre"
           export VMLX_R20_PRE_NOTARY_MANIFEST_SHA256="$pre_sha"
+          export VMLX_R20_EXPECTED_SOURCE_COMMIT="$SOURCE_SHA"
+          export VMLX_R20_EXPECTED_SOURCE_TREE="$SOURCE_TREE"
+          export VMLX_R20_EXPECTED_PREFLIGHT_SHA256="$preflight_sha"
           panel/scripts/notarize-release-dmgs.sh
           final_sha="$(/usr/bin/shasum -a 256 "$final" | /usr/bin/awk '{print $1}')"
           {

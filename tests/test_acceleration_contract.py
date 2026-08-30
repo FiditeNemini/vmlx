@@ -73,6 +73,23 @@ def test_glm_mhc_default_has_explicit_opt_out(monkeypatch):
     assert fused_glm5_mhc_requested() is False
 
 
+def test_glm_combined_kda_decode_candidate_is_opt_in(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+    from vmlx_engine.metal.kda_decode_fused import fused_kda_decode_requested
+
+    monkeypatch.delenv("VMLX_GLM5_FUSED_KDA_DECODE", raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["kda_decode_unit"]["requested"] is False
+    assert rows["kda_decode_unit"]["state"] == "disabled"
+    assert fused_kda_decode_requested() is False
+
+    monkeypatch.setenv("VMLX_GLM5_FUSED_KDA_DECODE", "1")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["kda_decode_unit"]["requested"] is True
+    assert rows["kda_decode_unit"]["state"] == "configured_unattested"
+    assert fused_kda_decode_requested() is True
+
+
 def test_qwen35_gdn_conv_candidate_is_family_scoped(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
 

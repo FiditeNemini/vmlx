@@ -64,6 +64,10 @@ from vmlx_engine.metal.glm5_hc_place_decode import (
     fused_glm5_hc_place_requested,
     glm5_hc_place_decode,
 )
+from vmlx_engine.metal.kda_decode_fused import (
+    fused_kda_decode_requested,
+    glm5_kda_decode,
+)
 from vmlx_engine.metal.kda_conv_decode import (
     fused_kda_conv_requested,
     glm5_kda_conv_decode,
@@ -630,6 +634,7 @@ class KDAAttention(nn.Module):
         self._fused_gated_norm = fused_gated_rmsnorm_requested()
         self._fused_kda_conv = fused_kda_conv_requested()
         self._fused_kda_step = fused_kda_step_requested()
+        self._fused_kda_decode = fused_kda_decode_requested()
 
     def prepare_runtime(self) -> bool:
         """Group q/k/v packed rows once and release superseded references."""
@@ -675,7 +680,9 @@ class KDAAttention(nn.Module):
         def run_segment(seg, cq0, ck0, cv0, s0):
             seg_t = seg.shape[1]
             q, k, v = self._project_qkv(seg)
-            fused_conv = glm5_kda_conv_decode(
+            g = self._gate(seg)
+            beta = mx.sigmoid(self.b_proj(seg).astype(mx.float32))
+            fused_decode = glm5_kda_decode(
                 q,
                 k,
                 v,
@@ -685,45 +692,62 @@ class KDAAttention(nn.Module):
                 self.q_conv1d,
                 self.k_conv1d,
                 self.v_conv1d,
-                enabled=self._fused_kda_conv,
+                g,
+                beta,
+                s0,
+                enabled=self._fused_kda_decode,
             )
-            if fused_conv is not None:
-                q, k, v, cq1, ck1, cv1 = fused_conv
+            if fused_decode is not None:
+                o, s1, cq1, ck1, cv1 = fused_decode
+                o = o[:, None]
             else:
-                q, cq1 = short_conv(q, self.q_conv1d, cq0)
-                k, ck1 = short_conv(k, self.k_conv1d, ck0)
-                v, cv1 = short_conv(v, self.v_conv1d, cv0)
-            q = l2norm(q.reshape(B, seg_t, H, K))
-            k = l2norm(k.reshape(B, seg_t, H, K))
-            v = v.reshape(B, seg_t, H, K)
-            g = self._gate(seg)
-            beta = mx.sigmoid(self.b_proj(seg).astype(mx.float32))
-            if seg_t == 1 and s0 is not None:
-                fused_step = glm5_kda_step_decode(
-                    q[:, 0],
-                    k[:, 0],
-                    v[:, 0],
-                    g[:, 0],
-                    beta[:, 0],
-                    s0,
-                    enabled=self._fused_kda_step,
+                fused_conv = glm5_kda_conv_decode(
+                    q,
+                    k,
+                    v,
+                    cq0,
+                    ck0,
+                    cv0,
+                    self.q_conv1d,
+                    self.k_conv1d,
+                    self.v_conv1d,
+                    enabled=self._fused_kda_conv,
                 )
-                if fused_step is not None:
-                    o, s1 = fused_step
+                if fused_conv is not None:
+                    q, k, v, cq1, ck1, cv1 = fused_conv
                 else:
-                    o, s1 = kda_step(
+                    q, cq1 = short_conv(q, self.q_conv1d, cq0)
+                    k, ck1 = short_conv(k, self.k_conv1d, ck0)
+                    v, cv1 = short_conv(v, self.v_conv1d, cv0)
+                q = l2norm(q.reshape(B, seg_t, H, K))
+                k = l2norm(k.reshape(B, seg_t, H, K))
+                v = v.reshape(B, seg_t, H, K)
+                if seg_t == 1 and s0 is not None:
+                    fused_step = glm5_kda_step_decode(
                         q[:, 0],
                         k[:, 0],
                         v[:, 0],
                         g[:, 0],
                         beta[:, 0],
                         s0,
+                        enabled=self._fused_kda_step,
                     )
-                o = o[:, None]
-            elif seg_t <= 64:
-                o, s1 = kda_recurrent(q, k, v, g, beta, s0)
-            else:
-                o, s1 = kda_chunked(q, k, v, g, beta, s0)
+                    if fused_step is not None:
+                        o, s1 = fused_step
+                    else:
+                        o, s1 = kda_step(
+                            q[:, 0],
+                            k[:, 0],
+                            v[:, 0],
+                            g[:, 0],
+                            beta[:, 0],
+                            s0,
+                        )
+                    o = o[:, None]
+                elif seg_t <= 64:
+                    o, s1 = kda_recurrent(q, k, v, g, beta, s0)
+                else:
+                    o, s1 = kda_chunked(q, k, v, g, beta, s0)
             gate = self.g_b_proj(self.g_a_proj(seg)).reshape(B, seg_t, H, K)
             gated = sigmoid_gated_rmsnorm_small_rows(
                 o,

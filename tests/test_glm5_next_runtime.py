@@ -666,6 +666,116 @@ class TestCacheAndForward:
             post, comb, out, residual, fused_decode=True
         ).shape == residual.shape
 
+    @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+    def test_combined_kda_decode_matches_stock(self, dtype, glm5):
+        from vmlx_engine.metal.kda_decode_fused import (
+            glm5_kda_decode,
+            glm5_kda_decode_status,
+        )
+
+        mx.random.seed(127)
+        heads, key_dim, value_dim, width = 4, 16, 16, 4
+        q = (mx.random.normal((1, 1, heads * key_dim)) * 0.1).astype(dtype)
+        k = (mx.random.normal(q.shape) * 0.1).astype(dtype)
+        v = (mx.random.normal((1, 1, heads * value_dim)) * 0.1).astype(dtype)
+        conv_shape = (1, width - 1, heads * key_dim)
+        q_state = (mx.random.normal(conv_shape) * 0.1).astype(dtype)
+        k_state = (mx.random.normal(conv_shape) * 0.1).astype(dtype)
+        v_state = (mx.random.normal(conv_shape) * 0.1).astype(dtype)
+        weight_shape = (heads * key_dim, width)
+        q_weight = (mx.random.normal(weight_shape) * 0.1).astype(dtype)
+        k_weight = (mx.random.normal(weight_shape) * 0.1).astype(dtype)
+        v_weight = (mx.random.normal(weight_shape) * 0.1).astype(dtype)
+        gate = (-mx.abs(mx.random.normal((1, 1, heads, key_dim)))).astype(
+            mx.float32
+        )
+        beta = mx.sigmoid(mx.random.normal((1, 1, heads))).astype(mx.float32)
+        state = (mx.random.normal((1, heads, key_dim, value_dim)) * 0.01).astype(
+            mx.float32
+        )
+
+        q_ref, q_next = glm5.short_conv(q, q_weight, q_state)
+        k_ref, k_next = glm5.short_conv(k, k_weight, k_state)
+        v_ref, v_next = glm5.short_conv(v, v_weight, v_state)
+        q_ref = glm5.l2norm(q_ref.reshape(1, 1, heads, key_dim))
+        k_ref = glm5.l2norm(k_ref.reshape(1, 1, heads, key_dim))
+        v_ref = v_ref.reshape(1, 1, heads, value_dim)
+        out_ref, state_ref = glm5.kda_step(
+            q_ref[:, 0],
+            k_ref[:, 0],
+            v_ref[:, 0],
+            gate[:, 0],
+            beta[:, 0],
+            state,
+        )
+
+        candidate = glm5_kda_decode(
+            q,
+            k,
+            v,
+            q_state,
+            k_state,
+            v_state,
+            q_weight,
+            k_weight,
+            v_weight,
+            gate,
+            beta,
+            state,
+            enabled=True,
+        )
+        assert candidate is not None
+        out, next_state, q_actual, k_actual, v_actual = candidate
+        mx.eval(
+            out_ref,
+            state_ref,
+            q_next,
+            k_next,
+            v_next,
+            out,
+            next_state,
+            q_actual,
+            k_actual,
+            v_actual,
+        )
+        assert glm5_kda_decode_status()["observed_calls"] == 1
+        assert mx.allclose(out, out_ref, rtol=2e-4, atol=2e-5)
+        state_max_abs = float(
+            mx.max(mx.abs(next_state - state_ref)).item()
+        )
+        # The SIMD reduction changes FP32 association relative to MLX's lazy
+        # reduction.  Bound the architecture-native state directly rather than
+        # using a relative tolerance that becomes meaningless near zero.
+        assert state_max_abs <= 2e-6, state_max_abs
+        assert mx.array_equal(q_actual, q_next)
+        assert mx.array_equal(k_actual, k_next)
+        assert mx.array_equal(v_actual, v_next)
+
+    def test_combined_kda_decode_refuses_prefill(self):
+        from vmlx_engine.metal.kda_decode_fused import glm5_kda_decode
+
+        q = mx.zeros((1, 2, 64), dtype=mx.bfloat16)
+        state = mx.zeros((1, 4, 16, 16), dtype=mx.float32)
+        conv = mx.zeros((1, 3, 64), dtype=mx.bfloat16)
+        weight = mx.zeros((64, 4), dtype=mx.bfloat16)
+        gate = mx.zeros((1, 2, 4, 16), dtype=mx.float32)
+        beta = mx.zeros((1, 2, 4), dtype=mx.float32)
+        assert glm5_kda_decode(
+            q,
+            q,
+            q,
+            conv,
+            conv,
+            conv,
+            weight,
+            weight,
+            weight,
+            gate,
+            beta,
+            state,
+            enabled=True,
+        ) is None
+
     def test_kda_quantized_qkv_group_is_exact_and_releases_sources(self, glm5):
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         attn = glm5.KDAAttention(args)

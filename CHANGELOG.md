@@ -4,6 +4,26 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.46] - 2026-08-30
+
+### Added
+- **Native GLM-5.3-Flash runtime.** vMLX now serves GLM-5.3-Flash text bundles through its owned `glm5_next` implementation, including KDA linear attention, DSA sparse indexing, mHC, affine MoE, native reasoning/tool parser aliases, native MTP attachment, and typed SSD prompt-cache state.
+- **Visible wired-memory guidance.** When a model is close to the effective Metal wired-memory limit, the app shows the measured model/limit comparison and the exact temporary `sysctl` recommendation while still allowing the user to continue.
+- **Peak benchmark profiles and acceleration telemetry.** The Server panel exposes repeatable best-case profiles plus request-exact MTP and fused-decode status instead of inferring acceleration from configuration alone.
+
+### Performance
+- **Adaptive Native MTP now protects the AR baseline.** Fixed-depth probes use their requested depth, reuse matched AR controls, warm kernels before measurement, expire losing observations, and activate a depth only when a validated profile or current measurement beats autoregressive decoding. Qwen3.8 Flash Next selects its proven depth-2 profile; unmeasured or slower GLM profiles stay on AR.
+- **Qwen and GLM decode paths use fewer Metal dispatches.** This release groups affine projections and adds source-gated fusions for Qwen QSA/GatedDeltaNet/PLE and GLM KDA/DSA/mHC/MoE components while retaining family-specific math and runtime telemetry.
+
+### Fixed
+- **Agentic coding API loops are release-gated across every supported protocol.** Chat Completions, Responses, Anthropic, and Ollama now have exact raw-capture coverage for streaming/non-streaming reasoning, required and explicit tool calls, tool-result continuation, direct final answers, malformed/cancelled requests, and replay through both direct and Electron gateway routes.
+- **Qwen3.8 Flash Next parser routing remains correct for previously mis-stamped bundles.** Engine detection, app launch arguments, and saved-session migration resolve the affected Flash-Next bundles to the native Qwen tool parser without changing unrelated Qwen families.
+- **MLLM streaming finalization no longer drops or duplicates terminal text.** Final detokenizer bytes and normalized suffixes are reconciled once across streaming rails.
+- **Adaptive MTP settings are applied at the request boundary.** App/UI selection, fixed depth controls, sampling compatibility, health telemetry, and the effective runtime policy now describe the same request.
+- **Busy request lifecycle health remains observable.** Gateway cancellation and exact backend ownership stay visible while long prefills or tool continuations are active.
+
+---
+
 ## [1.6.45] - 2026-08-28
 
 ### Added

@@ -378,6 +378,15 @@ def _merge_glm5_arrays_caches(caches, merged):
     if not caches:
         return merged
     batch_size = len(caches)
+    if batch_size == 1:
+        # GLM is deliberately scheduled one request at a time. Its cache
+        # arrays are functionally replaced on update, so a new typed wrapper
+        # can take ownership of the existing immutable boundary without a
+        # model-sized zeros+assignment copy before the final prompt token.
+        merged.cache = list(caches[0].cache)
+        merged.left_padding = getattr(caches[0], "left_padding", None)
+        merged.lengths = getattr(caches[0], "lengths", None)
+        return merged
     if all(cache.empty() for cache in caches):
         merged.left_padding = mx.array([0] * batch_size)
         return merged

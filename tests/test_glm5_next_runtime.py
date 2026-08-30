@@ -244,12 +244,23 @@ class TestCacheAndForward:
         tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8]]), cache=live)
         assert live[3].cache[glm5.MLA_POOL_KEYS] is None
         payload = [
-            clone_glm5_next_layer_cache(
-                layer,
-                copy_fn=lambda value: value + mx.zeros_like(value),
+            type(layer).from_state(
+                [
+                    None if value is None else value.astype(mx.bfloat16)
+                    for value in layer.state
+                ],
+                layer.meta_state,
             )
             for layer in live
         ]
+        mx.eval(
+            *[
+                value
+                for layer in payload
+                for value in layer.state
+                if value is not None
+            ]
+        )
         cache_dir = tmp_path / "glm5-l2"
         required = ("Glm5KDACache", "Glm5MLACache")
         writer = DiskCacheManager(
@@ -259,6 +270,12 @@ class TestCacheAndForward:
         )
         assert writer.store(list(range(9)), payload)
         writer.shutdown()
+
+        cache_file = next(cache_dir.glob("*.safetensors"))
+        raw_arrays, metadata = mx.load(str(cache_file), return_metadata=True)
+        bitcast = json.loads(metadata["1.bitcast_dtypes"])
+        assert bitcast
+        assert all(raw_arrays[key].dtype == mx.uint16 for key in bitcast)
 
         reader = DiskCacheManager(
             str(cache_dir),
@@ -271,7 +288,7 @@ class TestCacheAndForward:
             assert {type(layer).__name__ for layer in restored} == set(required)
             assert restored[3].offset == 8
             assert restored[3].cache[glm5.MLA_POOL_KEYS].shape[1] == 0
-            assert restored[0].cache[glm5.KDA_STATE].dtype == mx.float32
+            assert restored[0].cache[glm5.KDA_STATE].dtype == mx.bfloat16
             for expected_layer, restored_layer in zip(payload, restored):
                 assert restored_layer.meta_state == expected_layer.meta_state
                 for expected, actual in zip(
@@ -322,16 +339,22 @@ class TestCacheAndForward:
         assert remaining == []
         assert [type(layer) for layer in exact] == [type(layer) for layer in stored]
         assert exact[3].offset == stored[3].offset == 8
-        assert exact[0].cache[glm5.KDA_STATE] is not stored[0].cache[glm5.KDA_STATE]
+        assert exact[0] is not stored[0]
+        assert exact[3] is not stored[3]
+        assert exact[0].cache[glm5.KDA_STATE] is stored[0].cache[glm5.KDA_STATE]
+        assert exact[3].cache[glm5.MLA_KEYS] is stored[3].cache[glm5.MLA_KEYS]
 
         tiny_model(mx.array([[9]]), cache=exact)
         assert exact[3].offset == 9
         assert stored[3].offset == 8
+        assert exact[0].cache[glm5.KDA_STATE] is not stored[0].cache[glm5.KDA_STATE]
+        assert exact[3].cache[glm5.MLA_KEYS] is not stored[3].cache[glm5.MLA_KEYS]
 
         forward, remaining = prefix.fetch(tokens + [8])
         assert forward is not None
         assert remaining == [8]
         assert forward[3].offset == 8
+        assert forward[0].cache[glm5.KDA_STATE] is stored[0].cache[glm5.KDA_STATE]
 
         reverse, remaining = prefix.fetch(tokens[:-1])
         assert reverse is None
@@ -841,6 +864,22 @@ class TestNativeMTP:
         assert snapshot[0].cache[glm5.KDA_STATE] is not response.prompt_cache[0].cache[
             glm5.KDA_STATE
         ]
+        control = model.make_cache()
+        model(mx.array([[10, 11, 12]]), cache=control)
+        mx.eval(
+            *[
+                value
+                for layer in control
+                for value in layer.state
+                if value is not None
+            ]
+        )
+        for expected_layer, snapshot_layer in zip(control, snapshot):
+            for expected, actual in zip(expected_layer.state, snapshot_layer.state):
+                if expected is None:
+                    assert actual is None
+                else:
+                    assert bool(mx.array_equal(expected, actual).item())
         assert not hasattr(generator._generation_batch, "_vmlx_prompt_cache_snapshots")
         generator.close()
 

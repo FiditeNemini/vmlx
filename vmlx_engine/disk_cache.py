@@ -109,6 +109,7 @@ def _metadata_cache_classes(metadata: Optional[Dict[str, Any]]) -> List[str]:
 # flat metadata namespace it appears as "1.widened_dtypes" because
 # save_metadata is element 1 of [cache_info, save_metadata, cache_classes].
 _WIDENED_DTYPES_META_KEY = "widened_dtypes"
+_BITCAST_DTYPES_META_KEY = "bitcast_dtypes"
 
 
 def _metadata_widened_dtypes(metadata: Optional[Dict[str, Any]]) -> Dict[str, str]:
@@ -170,6 +171,51 @@ def _restore_widened_dtypes(
         ):
             continue
         if arr.dtype != target:
+            restored[key] = arr.astype(target)
+    return restored
+
+
+def _metadata_bitcast_dtypes(metadata: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Return arrays persisted as raw integer bits instead of widened floats."""
+
+    if not isinstance(metadata, dict):
+        return {}
+    raw = metadata.get(f"1.{_BITCAST_DTYPES_META_KEY}") or metadata.get(
+        _BITCAST_DTYPES_META_KEY
+    )
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        record = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("Disk cache bitcast-dtype record is malformed")
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {
+        key: dtype
+        for key, dtype in record.items()
+        if isinstance(key, str) and isinstance(dtype, str)
+    }
+
+
+def _restore_bitcast_dtypes(
+    raw_arrays: Dict[str, Any], file_metadata: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Reinterpret raw uint16 payloads as their exact original BF16 bits."""
+
+    record = _metadata_bitcast_dtypes(file_metadata)
+    if not record or not _HAS_MLX:
+        return raw_arrays
+    restored = dict(raw_arrays)
+    for key, dtype_name in record.items():
+        arr = restored.get(key)
+        target = getattr(mx, dtype_name, None)
+        if arr is None or not isinstance(arr, mx.array) or target is None:
+            continue
+        if arr.dtype == mx.uint16 and target == mx.bfloat16:
+            restored[key] = arr.view(mx.bfloat16)
+        elif arr.dtype != target:
             restored[key] = arr.astype(target)
     return restored
 
@@ -693,6 +739,9 @@ class DiskCacheManager:
                     # (update_and_fetch extends through mx.concatenate, which
                     # promotes bf16+f32 to f32). Old files carry no record and
                     # pass through unchanged.
+                    raw_arrays = _restore_bitcast_dtypes(
+                        raw_arrays, file_metadata
+                    )
                     raw_arrays = _restore_widened_dtypes(
                         raw_arrays, file_metadata
                     )
@@ -1123,6 +1172,23 @@ class DiskCacheManager:
                 )
                 return False
 
+            # GLM's expanded MLA state can consume most of the headroom left
+            # beside a 95GB model. Carry BF16 as exact uint16 bits (the same
+            # lossless contract as BlockDiskStore) instead of creating a full
+            # FP32 Metal widening image. Generic caches keep their established
+            # f32 widening format for backward compatibility.
+            glm_typed_payload = {
+                "Glm5KDACache",
+                "Glm5MLACache",
+            }.issubset(set(cache_classes))
+            bitcast_dtypes = {
+                key: "bfloat16"
+                for key, value in cache_data_flat.items()
+                if glm_typed_payload
+                and isinstance(value, mx.array)
+                and value.dtype == mx.bfloat16
+            }
+
             save_metadata = metadata or {}
             save_metadata["num_tokens"] = str(len(tokens))
             save_metadata["created_at"] = str(time.time())
@@ -1136,7 +1202,9 @@ class DiskCacheManager:
             widened_dtypes = {
                 k: "bfloat16"
                 for k, v in cache_data_flat.items()
-                if isinstance(v, mx.array) and v.dtype == mx.bfloat16
+                if isinstance(v, mx.array)
+                and v.dtype == mx.bfloat16
+                and k not in bitcast_dtypes
             }
             if widened_dtypes:
                 save_metadata[_WIDENED_DTYPES_META_KEY] = json.dumps(
@@ -1146,6 +1214,12 @@ class DiskCacheManager:
                 # Callers may hand in a reused metadata dict; never let a
                 # previous store's record describe this cache's arrays.
                 save_metadata.pop(_WIDENED_DTYPES_META_KEY, None)
+            if bitcast_dtypes:
+                save_metadata[_BITCAST_DTYPES_META_KEY] = json.dumps(
+                    bitcast_dtypes
+                )
+            else:
+                save_metadata.pop(_BITCAST_DTYPES_META_KEY, None)
 
             cache_metadata = [cache_info, save_metadata, cache_classes]
             cache_metadata_flat = dict(tree_flatten(cache_metadata))
@@ -1179,25 +1253,48 @@ class DiskCacheManager:
             # correctness is worth more than the disk.
             import numpy as np
             np_cache = {}
-            pending_arrays = []
-            # The widened keys were recorded in save_metadata above
-            # (_WIDENED_DTYPES_META_KEY); _fetch_impl casts them back on load,
-            # mirroring block_disk_store's per-tensor orig_dtype restore.
-            # Old files without the record still load, widened-but-exact.
-            arrays_to_eval = []
-            for k, v in cache_data_flat.items():
-                if isinstance(v, mx.array):
-                    arr = v.astype(mx.float32) if v.dtype == mx.bfloat16 else v
-                    arr = mx.contiguous(arr)
-                    pending_arrays.append((k, arr))
-                    arrays_to_eval.append(arr)
-                else:
-                    np_cache[k] = v
-            if arrays_to_eval:
-                mx.eval(*arrays_to_eval)
-            for k, arr in pending_arrays:
-                np_cache[k] = np.array(arr)
-            cache_data_flat = np_cache
+            if glm_typed_payload:
+                # Process one array at a time. ``np.asarray`` retains a
+                # read-only view whose base owns the evaluated MLX allocation
+                # until the background writer finishes; no aggregate Metal or
+                # host copy is created. GLM arrays are immutable after this
+                # prompt boundary because subsequent updates replace them.
+                for k, v in cache_data_flat.items():
+                    if not isinstance(v, mx.array):
+                        np_cache[k] = v
+                        continue
+                    materialized = mx.contiguous(v)
+                    mx.eval(materialized)
+                    if k in bitcast_dtypes:
+                        materialized = materialized.view(mx.uint16)
+                    view = np.asarray(materialized)
+                    if not view.flags.c_contiguous:
+                        raise ValueError(
+                            f"GLM cache tensor {k!r} is not C-contiguous"
+                        )
+                    view.setflags(write=False)
+                    np_cache[k] = view
+                cache_data_flat = np_cache
+            else:
+                pending_arrays = []
+                # The widened keys were recorded in save_metadata above
+                # (_WIDENED_DTYPES_META_KEY); _fetch_impl casts them back on load,
+                # mirroring block_disk_store's per-tensor orig_dtype restore.
+                # Old files without the record still load, widened-but-exact.
+                arrays_to_eval = []
+                for k, v in cache_data_flat.items():
+                    if isinstance(v, mx.array):
+                        arr = v.astype(mx.float32) if v.dtype == mx.bfloat16 else v
+                        arr = mx.contiguous(arr)
+                        pending_arrays.append((k, arr))
+                        arrays_to_eval.append(arr)
+                    else:
+                        np_cache[k] = v
+                if arrays_to_eval:
+                    mx.eval(*arrays_to_eval)
+                for k, arr in pending_arrays:
+                    np_cache[k] = np.array(arr)
+                cache_data_flat = np_cache
 
         except Exception as e:
             logger.warning(f"Failed to pre-serialize cache for disk: {e}")

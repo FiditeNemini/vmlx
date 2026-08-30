@@ -376,8 +376,6 @@ def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, li
         return {}
 
     try:
-        import mlx.core as mx
-
         from ...models.glm5_next.glm5_next import (
             clone_glm5_next_layer_cache,
         )
@@ -394,19 +392,15 @@ def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, li
             ):
                 continue
 
-            pending = []
-
-            def copy_array(value):
-                copied = value + mx.zeros_like(value)
-                pending.append(copied)
-                return copied
-
+            # MLX arrays are functionally replaced by GLM's KDA/MLA update
+            # methods. Preserve the old arrays in fresh typed wrappers rather
+            # than allocating a second model-sized Metal image. The final
+            # prompt token then installs new arrays into the live wrappers,
+            # leaving this exact N-1 object graph unchanged.
             cloned = [
-                clone_glm5_next_layer_cache(layer, copy_fn=copy_array)
+                clone_glm5_next_layer_cache(layer, copy_fn=lambda value: value)
                 for layer in extracted
             ]
-            if pending:
-                mx.eval(*pending)
             snapshots[int(prompt_batch.uids[index])] = cloned
         except Exception as exc:
             # Cache capture is an optimization. A copy failure must force a

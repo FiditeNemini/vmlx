@@ -73,6 +73,37 @@ def test_glm_mhc_default_has_explicit_opt_out(monkeypatch):
     assert fused_glm5_mhc_requested() is False
 
 
+def test_glm_mhc_verify_fusions_default_off_with_explicit_opt_in(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+    from vmlx_engine.metal.glm5_hc_place_decode import (
+        fused_glm5_hc_place_verify_requested,
+    )
+    from vmlx_engine.metal.glm5_mhc_decode import (
+        fused_glm5_mhc_verify_requested,
+    )
+
+    for name in (
+        "VMLX_GLM5_FUSED_MHC_VERIFY",
+        "VMLINUX_GLM5_FUSED_MHC_VERIFY",
+        "VMLX_GLM5_FUSED_HC_PLACE_VERIFY",
+        "VMLINUX_GLM5_FUSED_HC_PLACE_VERIFY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mhc_verify_transform"]["requested"] is False
+    assert rows["hc_place_verify"]["requested"] is False
+    assert fused_glm5_mhc_verify_requested() is False
+    assert fused_glm5_hc_place_verify_requested() is False
+
+    monkeypatch.setenv("VMLX_GLM5_FUSED_MHC_VERIFY", "1")
+    monkeypatch.setenv("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "1")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mhc_verify_transform"]["requested"] is True
+    assert rows["hc_place_verify"]["requested"] is True
+    assert fused_glm5_mhc_verify_requested() is True
+    assert fused_glm5_hc_place_verify_requested() is True
+
+
 def test_glm_vectorized_kda_verify_defaults_on_with_explicit_opt_out(
     monkeypatch,
 ):

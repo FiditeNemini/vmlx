@@ -598,6 +598,7 @@ class TestCacheAndForward:
             sink_eps=module.eps,
             iterations=module.iters,
             enabled=True,
+            verify_enabled=True,
         )
         assert candidate is not None
         assert glm5_mhc_status()["observed_calls"] == 1
@@ -632,6 +633,7 @@ class TestCacheAndForward:
             sink_eps=module.eps,
             iterations=module.iters,
             enabled=True,
+            verify_enabled=True,
         )
         assert candidate is not None
         mx.eval(*reference, *candidate)
@@ -660,6 +662,25 @@ class TestCacheAndForward:
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         module = glm5.HyperConnection(args)
         streams = mx.zeros((1, 5, args.hc_mult, args.hidden_size))
+        assert glm5_mhc_decode(
+            streams,
+            module.hc_fn,
+            module.hc_base,
+            module.hc_scale,
+            rms_eps=module.rms_eps,
+            sink_eps=module.eps,
+            iterations=module.iters,
+            enabled=True,
+        ) is None
+
+    def test_mhc_decode_verify_slab_defaults_to_stock(self, monkeypatch, glm5):
+        from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
+
+        monkeypatch.delenv("VMLX_GLM5_FUSED_MHC_VERIFY", raising=False)
+        monkeypatch.delenv("VMLINUX_GLM5_FUSED_MHC_VERIFY", raising=False)
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+        module = glm5.HyperConnection(args)
+        streams = mx.zeros((1, 4, args.hc_mult, args.hidden_size))
         assert glm5_mhc_decode(
             streams,
             module.hc_fn,
@@ -706,7 +727,10 @@ class TestCacheAndForward:
         assert max_abs / max_ref <= relative_limit
 
     @pytest.mark.parametrize("rows", [2, 3, 4])
-    def test_hc_place_decode_fusion_matches_mtp_verify_slabs(self, rows, glm5):
+    def test_hc_place_decode_fusion_matches_mtp_verify_slabs(
+        self, rows, monkeypatch, glm5
+    ):
+        monkeypatch.setenv("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "1")
         post = mx.sigmoid(mx.random.normal((1, rows, 4))).astype(mx.float32) * 2
         comb = mx.softmax(mx.random.normal((1, rows, 4, 4)), axis=-1).astype(
             mx.float32
@@ -721,6 +745,23 @@ class TestCacheAndForward:
         )
         mx.eval(reference, candidate)
         assert mx.allclose(candidate, reference, rtol=6e-3, atol=2e-3)
+
+    def test_hc_place_verify_slab_defaults_to_stock(self, monkeypatch, glm5):
+        from vmlx_engine.metal.glm5_hc_place_decode import (
+            glm5_hc_place_decode,
+        )
+
+        monkeypatch.delenv("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", raising=False)
+        monkeypatch.delenv(
+            "VMLINUX_GLM5_FUSED_HC_PLACE_VERIFY", raising=False
+        )
+        post = mx.ones((1, 4, 4), dtype=mx.float32)
+        comb = mx.ones((1, 4, 4, 4), dtype=mx.float32)
+        out = mx.zeros((1, 4, 64), dtype=mx.bfloat16)
+        residual = mx.zeros((1, 4, 4, 64), dtype=mx.bfloat16)
+        assert glm5_hc_place_decode(
+            post, comb, out, residual, enabled=True
+        ) is None
 
     def test_hc_place_decode_fusion_refuses_long_prefill(self, glm5):
         post = mx.ones((1, 5, 4), dtype=mx.float32)

@@ -191,6 +191,14 @@ def fused_glm5_mhc_requested() -> bool:
     return value not in {"", "0", "false", "off", "no"}
 
 
+def fused_glm5_mhc_verify_requested() -> bool:
+    value = os.environ.get(
+        "VMLINUX_GLM5_FUSED_MHC_VERIFY",
+        os.environ.get("VMLX_GLM5_FUSED_MHC_VERIFY", "0"),
+    ).strip().lower()
+    return value not in {"", "0", "false", "off", "no"}
+
+
 @lru_cache(maxsize=1)
 def _projection_kernel() -> Any:
     return mx.fast.metal_kernel(
@@ -230,6 +238,7 @@ def glm5_mhc_decode(
     sink_eps: float,
     iterations: int,
     enabled: bool | None = None,
+    verify_enabled: bool | None = None,
 ) -> tuple[mx.array, mx.array, mx.array] | None:
     """Return fused ``(post, comb, collapsed)`` or the stock-path sentinel."""
 
@@ -240,6 +249,11 @@ def glm5_mhc_decode(
     batch, rows, streams_count, hidden = (int(value) for value in streams.shape)
     if batch != 1 or not 1 <= rows <= 4 or streams_count != 4 or hidden <= 0:
         return None
+    if rows > 1:
+        if verify_enabled is None:
+            verify_enabled = fused_glm5_mhc_verify_requested()
+        if not verify_enabled:
+            return None
     mix_size = (2 + streams_count) * streams_count
     features = streams_count * hidden
     if tuple(hc_fn.shape) != (mix_size, features):
@@ -305,4 +319,9 @@ def glm5_mhc_status() -> dict[str, object]:
     }
 
 
-__all__ = ["fused_glm5_mhc_requested", "glm5_mhc_decode", "glm5_mhc_status"]
+__all__ = [
+    "fused_glm5_mhc_requested",
+    "fused_glm5_mhc_verify_requested",
+    "glm5_mhc_decode",
+    "glm5_mhc_status",
+]

@@ -282,12 +282,34 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 env=("VMLX_GLM5_FUSED_MHC",),
             ),
             _feature(
+                "mhc_verify_transform",
+                label="mHC multi-row speculative-verifier transform fusion",
+                kind="metal_kernel",
+                scopes=("mtp_verify",),
+                default=False,
+                env=(
+                    "VMLX_GLM5_FUSED_MHC_VERIFY",
+                    "VMLINUX_GLM5_FUSED_MHC_VERIFY",
+                ),
+            ),
+            _feature(
                 "hc_place",
                 label="hyper-connection placement fusion",
                 kind="metal_kernel",
                 scopes=("ar_decode", "mtp_decode"),
                 default=False,
                 env=("VMLX_GLM5_FUSED_HC_PLACE",),
+            ),
+            _feature(
+                "hc_place_verify",
+                label="multi-row speculative-verifier hyper-connection placement fusion",
+                kind="metal_kernel",
+                scopes=("mtp_verify",),
+                default=False,
+                env=(
+                    "VMLX_GLM5_FUSED_HC_PLACE_VERIFY",
+                    "VMLINUX_GLM5_FUSED_HC_PLACE_VERIFY",
+                ),
             ),
             _feature(
                 "dsa_sparse_score",

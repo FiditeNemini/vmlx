@@ -15,6 +15,14 @@ def fused_glm5_hc_place_requested() -> bool:
     return value not in {"", "0", "false", "off", "no"}
 
 
+def fused_glm5_hc_place_verify_requested() -> bool:
+    value = os.environ.get(
+        "VMLINUX_GLM5_FUSED_HC_PLACE_VERIFY",
+        os.environ.get("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "0"),
+    ).strip().lower()
+    return value not in {"", "0", "false", "off", "no"}
+
+
 @lru_cache(maxsize=16)
 def _kernel(streams: int, hidden: int, rows: int):
     source = f"""
@@ -51,6 +59,7 @@ def glm5_hc_place_decode(
     residual: mx.array,
     *,
     enabled: bool,
+    verify_enabled: bool | None = None,
 ) -> mx.array | None:
     """Return placed streams for the exact single-token shape or ``None``."""
 
@@ -59,6 +68,11 @@ def glm5_hc_place_decode(
     batch, rows, streams, hidden = (int(value) for value in residual.shape)
     if batch != 1 or not 1 <= rows <= 4 or streams != 4 or hidden <= 0:
         return None
+    if rows > 1:
+        if verify_enabled is None:
+            verify_enabled = fused_glm5_hc_place_verify_requested()
+        if not verify_enabled:
+            return None
     if tuple(post.shape) != (1, rows, streams):
         return None
     if tuple(comb.shape) != (1, rows, streams, streams):
@@ -95,6 +109,7 @@ def glm5_hc_place_status() -> dict[str, object]:
 
 __all__ = [
     "fused_glm5_hc_place_requested",
+    "fused_glm5_hc_place_verify_requested",
     "glm5_hc_place_decode",
     "glm5_hc_place_status",
 ]

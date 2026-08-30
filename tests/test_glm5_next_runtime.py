@@ -139,6 +139,26 @@ class TestCacheAndForward:
         assert extracted_mla.cache[glm5.MLA_KEYS].shape == (1, 1, 3, 4)
         assert extracted_mla.cache[glm5.MLA_PACKED].shape == (1, 3, 8)
 
+    def test_cache_merge_preserves_typed_batch_and_mla_kpool(self, tiny_model, glm5):
+        rows = []
+        for tokens in ([1, 2, 3, 4], [5, 6, 7, 8]):
+            cache = tiny_model.make_cache()
+            tiny_model(mx.array([tokens]), cache=cache)
+            rows.append(cache)
+
+        merged_kda = glm5.Glm5KDACache.merge([rows[0][0], rows[1][0]])
+        merged_mla = glm5.Glm5MLACache.merge([rows[0][3], rows[1][3]])
+        assert isinstance(merged_kda, glm5.Glm5KDACache)
+        assert isinstance(merged_mla, glm5.Glm5MLACache)
+        assert merged_kda.cache[glm5.KDA_STATE].shape[0] == 2
+        assert merged_mla.cache[glm5.MLA_KEYS].shape[0] == 2
+        assert merged_mla.kpool == rows[0][3].kpool == rows[1][3].kpool
+        assert merged_mla.extract(1).offset == rows[1][3].offset == 4
+
+        wrong_kpool = glm5.Glm5MLACache(kpool=merged_mla.kpool + 1)
+        with pytest.raises(ValueError, match="disagree on DSA kpool"):
+            glm5.Glm5MLACache.merge([rows[0][3], wrong_kpool])
+
     def test_typed_cache_clone_preserves_every_native_state_without_aliasing(
         self, tiny_model, glm5
     ):
@@ -782,6 +802,47 @@ class TestNativeMTP:
         assert draft_hidden.shape == (1, 1, 64)
         assert len(mtp_cache) == 1
         assert isinstance(mtp_cache[0], glm5.Glm5MLACache)
+
+    def test_mtp_batch_generator_carries_exact_n_minus_one_snapshot(
+        self, glm5
+    ):
+        """Native MTP uses mlx-lm BatchGenerator, not SingleBatchGenerator.
+
+        The final prompt token advances path-dependent KDA state, so the
+        reusable cache must be cloned before that token enters GenerationBatch
+        and must survive until the terminal generation response.
+        """
+        from mlx_lm.generate import BatchGenerator
+
+        from vmlx_engine.patches.mlx_lm_mtp import apply_mlx_lm_mtp_patch
+
+        assert apply_mlx_lm_mtp_patch() is True
+        model = self._active_model(glm5)
+        generator = BatchGenerator(model, max_tokens=1)
+        generator.insert([[10, 11, 12, 13]])
+
+        prompt_responses, generation_responses = generator.next()
+        assert prompt_responses and generation_responses == []
+        prompt_responses, generation_responses = generator.next()
+        assert prompt_responses[0].end_of_prompt is True
+        assert generation_responses == []
+
+        prompt_responses, generation_responses = generator.next()
+        assert prompt_responses == []
+        assert len(generation_responses) == 1
+        response = generation_responses[0]
+        assert response.finish_reason == "length"
+        snapshot = response.prompt_cache_snapshot
+        assert snapshot is not None
+        assert isinstance(snapshot[0], glm5.Glm5KDACache)
+        assert isinstance(snapshot[3], glm5.Glm5MLACache)
+        assert snapshot[3].offset == 3
+        assert response.prompt_cache[3].offset >= 4
+        assert snapshot[0].cache[glm5.KDA_STATE] is not response.prompt_cache[0].cache[
+            glm5.KDA_STATE
+        ]
+        assert not hasattr(generator._generation_batch, "_vmlx_prompt_cache_snapshots")
+        generator.close()
 
     def test_active_sanitize_remaps_appended_layer_to_mtp(self, glm5):
         model = self._active_model(glm5)

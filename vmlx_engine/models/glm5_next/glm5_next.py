@@ -156,6 +156,12 @@ class Glm5KDACache(ArraysCache):
         ]
         return extracted
 
+    @classmethod
+    def merge(cls, caches) -> "Glm5KDACache":
+        """Batch KDA rows without degrading to a generic ``ArraysCache``."""
+
+        return _merge_glm5_arrays_caches(caches, cls())
+
     @property
     def meta_state(self):
         return ("glm5_next_native_v1", "kda")
@@ -212,6 +218,15 @@ class Glm5MLACache(ArraysCache):
             for value in self.cache
         ]
         return extracted
+
+    @classmethod
+    def merge(cls, caches) -> "Glm5MLACache":
+        """Batch MLA/DSA rows while preserving the shared k-pool contract."""
+
+        kpools = {int(cache.kpool) for cache in caches}
+        if len(kpools) != 1:
+            raise ValueError("GLM MLA caches disagree on DSA kpool")
+        return _merge_glm5_arrays_caches(caches, cls(kpools.pop()))
 
     @property
     def state(self):
@@ -351,6 +366,40 @@ class Glm5MLACache(ArraysCache):
         rebuilt = cls(kpool)
         rebuilt.cache = values
         return rebuilt
+
+
+def _merge_glm5_arrays_caches(caches, merged):
+    """Typed equivalent of mlx-lm ``ArraysCache.merge``.
+
+    Upstream constructs the result as ``cls(n_state)``, which is invalid for
+    both GLM cache constructors and would also discard MLA's k-pool metadata.
+    """
+
+    if not caches:
+        return merged
+    batch_size = len(caches)
+    if all(cache.empty() for cache in caches):
+        merged.left_padding = mx.array([0] * batch_size)
+        return merged
+
+    for state_index in range(len(merged.cache)):
+        populated = [
+            cache.cache[state_index]
+            for cache in caches
+            if cache.cache[state_index] is not None
+        ]
+        if not populated:
+            continue
+        exemplar = populated[0]
+        shape = list(exemplar.shape)
+        shape[0] = batch_size
+        value = mx.zeros(shape, exemplar.dtype)
+        for batch_index, cache in enumerate(caches):
+            source = cache.cache[state_index]
+            if source is not None:
+                value[batch_index : batch_index + 1] = source
+        merged.cache[state_index] = value
+    return merged
 
 
 def clone_glm5_next_layer_cache(

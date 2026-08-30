@@ -19,6 +19,11 @@ active set of sequences in continuous batching. We patch:
   (accept) or confirmed position (reject), refilling the queue from the
   verify outputs.
 
+- ``BatchGenerator._next`` — for GLM-5.3's typed KDA/MLA cache only, preserve
+  the exact N-1 prompt boundary immediately before mlx-lm consumes the final
+  prompt token. The detached snapshot follows the request's generation
+  responses until the scheduler stores it in RAM/SSD at terminal completion.
+
 The throughput math (greedy, accept rate p):
   - Tokens per cycle: 1 + p (accept emits draft+bonus; reject emits verify_pred only)
   - Cost per cycle: 1× backbone (n+1-token verify) + 1× MTP head.
@@ -133,13 +138,13 @@ def _pbar(*arrays) -> None:
 # ---------------------------------------------------------------------------
 
 def apply() -> bool:
-    """Wrap ``GenerationBatch.__init__`` + ``GenerationBatch.next``."""
+    """Wrap the mlx-lm generation path with MTP and GLM cache support."""
     global _PATCHED
     if _PATCHED:
         return True
 
     try:
-        from mlx_lm.generate import GenerationBatch
+        from mlx_lm.generate import BatchGenerator, GenerationBatch
     except ImportError:
         logger.debug("mlx_lm.generate.GenerationBatch not importable")
         return False
@@ -152,6 +157,27 @@ def apply() -> bool:
     original_next = GenerationBatch.next
     original_filter = GenerationBatch.filter
     original_extend = GenerationBatch.extend
+    original_batch_generator_next = BatchGenerator._next
+    original_batch_generator_remove = BatchGenerator.remove
+
+    def attach_prompt_cache_snapshots(self, responses):
+        snapshots = getattr(self, "_vmlx_prompt_cache_snapshots", None)
+        if not snapshots:
+            return responses
+        for response in responses or ():
+            uid = getattr(response, "uid", None)
+            snapshot = snapshots.get(uid)
+            if snapshot is None:
+                continue
+            response.prompt_cache_snapshot = snapshot
+            if getattr(response, "finish_reason", None) is not None:
+                snapshots.pop(uid, None)
+        if not snapshots:
+            try:
+                delattr(self, "_vmlx_prompt_cache_snapshots")
+            except AttributeError:
+                pass
+        return responses
 
     def patched_init(self, *args, **kwargs):
         global _LAST_NATIVE_MTP_SKIP
@@ -211,7 +237,8 @@ def apply() -> bool:
             state = getattr(self, "_omlx_mtp_state", None)
             if state is not None:
                 try:
-                    return _mtp_next(self, state)
+                    responses = _mtp_next(self, state)
+                    return attach_prompt_cache_snapshots(self, responses)
                 except _MtpStepFallback as exc:
                     logger.debug(
                         "MTP next() fallback to standard step: %s", exc
@@ -239,7 +266,35 @@ def apply() -> bool:
                             delattr(self, "_omlx_mtp_state")
                         except AttributeError:
                             pass
-        return original_next(self, *args, **kwargs)
+        responses = original_next(self, *args, **kwargs)
+        return attach_prompt_cache_snapshots(self, responses)
+
+    def patched_batch_generator_next(self, *args, **kwargs):
+        snapshots = _capture_glm_prompt_boundary_snapshots(self)
+        result = original_batch_generator_next(self, *args, **kwargs)
+        if snapshots:
+            active = getattr(self, "_generation_batch", None)
+            if active is not None:
+                retained = getattr(active, "_vmlx_prompt_cache_snapshots", None)
+                if retained is None:
+                    retained = {}
+                    active._vmlx_prompt_cache_snapshots = retained
+                retained.update(snapshots)
+        return result
+
+    def patched_batch_generator_remove(self, uids, *args, **kwargs):
+        result = original_batch_generator_remove(self, uids, *args, **kwargs)
+        active = getattr(self, "_generation_batch", None)
+        snapshots = getattr(active, "_vmlx_prompt_cache_snapshots", None)
+        if snapshots:
+            for uid in uids:
+                snapshots.pop(uid, None)
+            if not snapshots:
+                try:
+                    delattr(active, "_vmlx_prompt_cache_snapshots")
+                except AttributeError:
+                    pass
+        return result
 
     def patched_extend(self, batch, *args, **kwargs):
         # ``BatchGenerator._next()`` builds a fresh single-sequence
@@ -291,8 +346,78 @@ def apply() -> bool:
     GenerationBatch.filter = patched_filter
     GenerationBatch.extend = patched_extend
     GenerationBatch._omlx_mtp_patched = True
+    BatchGenerator._next = patched_batch_generator_next
+    BatchGenerator.remove = patched_batch_generator_remove
+    BatchGenerator._vmlx_glm_prompt_snapshot_patched = True
     _PATCHED = True
     return True
+
+
+def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, list[Any]]:
+    """Clone GLM typed state for requests poised at their final prompt token.
+
+    mlx-lm deliberately splits the last prompt token into a one-token segment.
+    The next ``BatchGenerator._next`` call runs that token through the model
+    while constructing ``GenerationBatch``. GLM KDA state cannot be reversed,
+    so this is the only exact place to retain the reusable N-1 boundary.
+    """
+
+    processing = getattr(batch_generator, "_currently_processing", None) or ()
+    prompt_batch = getattr(batch_generator, "_prompt_batch", None)
+    if prompt_batch is None or not processing:
+        return {}
+
+    split = []
+    for index, sequence in enumerate(processing):
+        segments = sequence[0]
+        if len(segments) == 1 and len(segments[0]) == 1:
+            split.append(index)
+    if not split:
+        return {}
+
+    try:
+        import mlx.core as mx
+
+        from ...models.glm5_next.glm5_next import (
+            clone_glm5_next_layer_cache,
+        )
+    except Exception:
+        return {}
+
+    snapshots: dict[int, list[Any]] = {}
+    for index in split:
+        try:
+            extracted = prompt_batch.extract_cache(index)
+            if not extracted or not all(
+                type(layer).__name__ in {"Glm5KDACache", "Glm5MLACache"}
+                for layer in extracted
+            ):
+                continue
+
+            pending = []
+
+            def copy_array(value):
+                copied = value + mx.zeros_like(value)
+                pending.append(copied)
+                return copied
+
+            cloned = [
+                clone_glm5_next_layer_cache(layer, copy_fn=copy_array)
+                for layer in extracted
+            ]
+            if pending:
+                mx.eval(*pending)
+            snapshots[int(prompt_batch.uids[index])] = cloned
+        except Exception as exc:
+            # Cache capture is an optimization. A copy failure must force a
+            # clean miss on the next turn, never fail the current generation.
+            logger.warning(
+                "GLM exact prompt-boundary snapshot failed for uid=%s; "
+                "cache store will be skipped: %s",
+                prompt_batch.uids[index],
+                exc,
+            )
+    return snapshots
 
 
 def _model_has_mtp_module(model: Any) -> bool:

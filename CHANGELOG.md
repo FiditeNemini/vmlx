@@ -19,6 +19,7 @@ All notable changes to vMLX Engine will be documented in this file.
 - **Dedicated release runners may keep the Developer ID identity non-exportable.** Candidate CI validates the exact ShieldStack team identity in the login Keychain instead of requiring a PKCS#12 round trip.
 - **Candidate dependency setup rejects macOS's legacy system Python.** Release CI now creates its isolated environment from the documented Homebrew Python 3.11–3.14 range.
 - **Candidate Python provenance stays checkout-local.** Release CI now creates its CPython 3.13 environment with `uv`, preventing Homebrew framework resolution from escaping the candidate checkout's `.venv` provenance gate.
+- **Packaged engine sources no longer share hard links with the release checkout.** The Electron `afterPack` hook atomically detaches `extraResources` source files before signing, preserving the strict single-link provenance gate while keeping packaged bytes identical.
 
 ---
 

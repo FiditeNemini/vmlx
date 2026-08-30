@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -241,6 +242,38 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "Publish without a stored PyPI token" in publish
     assert "publish-pypi.yml -R jjang-ai/jangq" in publish
     assert "cmp repo-vmlx/latest.json repo-mlxstudio/latest.json" in publish
+
+
+def test_after_pack_detaches_engine_source_hardlinks(tmp_path):
+    source = tmp_path / "source.py"
+    packaged = tmp_path / "app" / "vmlx-engine-source" / "vmlx_engine" / "source.py"
+    packaged.parent.mkdir(parents=True)
+    source.write_bytes(b"release-source-bytes\n")
+    os.link(source, packaged)
+    assert source.stat().st_nlink == 2
+
+    script = ROOT / "panel/scripts/electron-builder-after-pack.cjs"
+    subprocess.run(
+        [
+            "/opt/homebrew/bin/node",
+            "-e",
+            (
+                "const hook=require(process.argv[1]);"
+                "const rows=hook.detachHardlinkedTree(process.argv[2]);"
+                "if(rows.length!==1) process.exit(9);"
+            ),
+            str(script),
+            str(tmp_path / "app" / "vmlx-engine-source"),
+        ],
+        check=True,
+    )
+
+    assert source.stat().st_nlink == 1
+    assert packaged.stat().st_nlink == 1
+    assert source.read_bytes() == packaged.read_bytes() == b"release-source-bytes\n"
+    packaged.write_bytes(b"packaged-copy-only\n")
+    assert source.read_bytes() == b"release-source-bytes\n"
+
 
 
 def test_unsigned_dev_escape_hatch_is_impossible_in_production():

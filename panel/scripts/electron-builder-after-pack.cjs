@@ -1,5 +1,14 @@
 const { spawnSync } = require('node:child_process')
-const { existsSync, readdirSync, rmSync } = require('node:fs')
+const {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} = require('node:fs')
 const { basename, dirname, join } = require('node:path')
 
 function walk(dir, out = []) {
@@ -60,6 +69,45 @@ function removeBundledWindowsLaunchers(files) {
   return launchers
 }
 
+function detachHardlinkedTree(root) {
+  if (!existsSync(root)) return []
+
+  const detached = []
+  let sequence = 0
+  for (const file of walk(root)) {
+    const before = lstatSync(file, { bigint: true })
+    if (!before.isFile() || before.nlink === 1n) continue
+
+    const bytes = readFileSync(file)
+    const mode = Number(before.mode & 0o7777n)
+    const temporary = join(
+      dirname(file),
+      `.${basename(file)}.vmlx-detach-${process.pid}-${sequence++}`,
+    )
+    try {
+      writeFileSync(temporary, bytes, { flag: 'wx', mode })
+      chmodSync(temporary, mode)
+      const copied = lstatSync(temporary, { bigint: true })
+      if (!copied.isFile() || copied.nlink !== 1n || copied.size !== before.size) {
+        throw new Error(`detached release resource is not a single-link copy: ${file}`)
+      }
+      if (!readFileSync(temporary).equals(bytes)) {
+        throw new Error(`detached release resource changed while copying: ${file}`)
+      }
+      renameSync(temporary, file)
+    } finally {
+      rmSync(temporary, { force: true })
+    }
+
+    const after = lstatSync(file, { bigint: true })
+    if (!after.isFile() || after.nlink !== 1n || after.size !== before.size) {
+      throw new Error(`packaged release resource stayed hard-linked: ${file}`)
+    }
+    detached.push(file)
+  }
+  return detached
+}
+
 async function afterPack(context) {
   const appOutDir = context && context.appOutDir
   const appName = context && context.packager && context.packager.appInfo
@@ -67,6 +115,20 @@ async function afterPack(context) {
     : 'vMLX'
   if (!appOutDir) {
     throw new Error('electron-builder afterPack hook missing appOutDir')
+  }
+
+  const packagedEngineSource = join(
+    appOutDir,
+    `${appName}.app`,
+    'Contents',
+    'Resources',
+    'vmlx-engine-source',
+  )
+  const detachedEngineFiles = detachHardlinkedTree(packagedEngineSource)
+  if (detachedEngineFiles.length > 0) {
+    console.log(
+      `[afterPack] detached ${detachedEngineFiles.length} hard-linked vMLX source files from the checkout`,
+    )
   }
 
   const bundledPython = join(
@@ -101,6 +163,7 @@ async function afterPack(context) {
 }
 
 module.exports = afterPack
+module.exports.detachHardlinkedTree = detachHardlinkedTree
 module.exports.removeBundledWindowsLaunchers = removeBundledWindowsLaunchers
 module.exports.isBundledPipDistlibWindowsLauncher = isBundledPipDistlibWindowsLauncher
 

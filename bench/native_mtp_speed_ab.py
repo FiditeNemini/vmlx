@@ -654,6 +654,8 @@ def cache_mode_cli_args(
     *,
     block_cache_dir: Path,
     block_cache_max_gb: float = 2.0,
+    prompt_cache_dir: Path | None = None,
+    prompt_cache_max_gb: float = 10.0,
     kv_cache_quantization: str = "auto",
 ) -> list[str]:
     if cache_mode == "off":
@@ -676,6 +678,16 @@ def cache_mode_cli_args(
             "--block-disk-cache-max-gb",
             str(float(block_cache_max_gb)),
         ]
+        if prompt_cache_dir is not None:
+            args.extend(
+                [
+                    "--enable-disk-cache",
+                    "--disk-cache-dir",
+                    str(prompt_cache_dir),
+                    "--disk-cache-max-gb",
+                    str(float(prompt_cache_max_gb)),
+                ]
+            )
     quant = (kv_cache_quantization or "auto").strip().lower()
     if quant not in {"auto", "none", "q4", "q8"}:
         raise ValueError(f"unknown kv cache quantization: {kv_cache_quantization}")
@@ -689,6 +701,17 @@ def block_cache_dir_for_row(
 ) -> Path:
     """Choose isolated benchmark storage or one explicit restart namespace."""
     return out_dir / ("shared_block_cache" if shared else f"{label}_block_cache")
+
+
+def prompt_cache_dir_for_row(
+    out_dir: Path, label: str, *, enabled: bool, shared: bool
+) -> Path | None:
+    """Choose the typed prompt-cache namespace used by path-dependent models."""
+    if not enabled:
+        return None
+    return out_dir / (
+        "shared_prompt_cache" if shared else f"{label}_prompt_cache"
+    )
 
 
 def chat_template_kwargs_for_enable_thinking(
@@ -737,6 +760,7 @@ def start_server(
     mtp_enabled: bool,
     cache_mode: str,
     block_cache_dir: Path,
+    prompt_cache_dir: Path | None,
     log_path: Path,
     max_num_seqs: int,
     load_timeout_s: float,
@@ -778,6 +802,8 @@ def start_server(
             cache_mode,
             block_cache_dir=block_cache_dir,
             block_cache_max_gb=args.block_disk_cache_max_gb,
+            prompt_cache_dir=prompt_cache_dir,
+            prompt_cache_max_gb=args.prompt_disk_cache_max_gb,
             kv_cache_quantization=getattr(args, "kv_cache_quantization", "q4"),
         )
     )
@@ -875,6 +901,12 @@ def run_row(
         label,
         shared=bool(args.shared_block_cache),
     )
+    prompt_cache_dir = prompt_cache_dir_for_row(
+        out_dir,
+        label,
+        enabled=bool(args.enable_prompt_disk_cache),
+        shared=bool(args.shared_prompt_cache),
+    )
     log_path = out_dir / f"{label}.server.log"
     proc, health_before = start_server(
         model_path=model_path,
@@ -883,6 +915,7 @@ def run_row(
         mtp_enabled=mtp_enabled,
         cache_mode=args.cache,
         block_cache_dir=block_cache_dir,
+        prompt_cache_dir=prompt_cache_dir,
         log_path=log_path,
         max_num_seqs=args.max_num_seqs,
         load_timeout_s=args.load_timeout_s,
@@ -981,6 +1014,29 @@ def main() -> int:
             "Use one block-cache directory across AR and MTP processes so "
             "the later row proves a real restart refault. The default keeps "
             "performance rows isolated."
+        ),
+    )
+    ap.add_argument(
+        "--enable-prompt-disk-cache",
+        action="store_true",
+        help=(
+            "Enable the separate typed prompt SSD cache used by path-dependent "
+            "architectures such as GLM KDA/DSA. Generic block L2 is intentionally "
+            "disabled for those models and does not substitute for this flag."
+        ),
+    )
+    ap.add_argument(
+        "--prompt-disk-cache-max-gb",
+        type=float,
+        default=10.0,
+        help="SSD budget for the typed prompt cache (default: 10).",
+    )
+    ap.add_argument(
+        "--shared-prompt-cache",
+        action="store_true",
+        help=(
+            "Use one typed prompt-cache directory across AR and MTP processes "
+            "so the later row can prove a real restart refault."
         ),
     )
     ap.add_argument("--max-num-seqs", type=int, default=2)
@@ -1097,6 +1153,9 @@ def main() -> int:
         "cache_mode": args.cache,
         "block_disk_cache_max_gb": args.block_disk_cache_max_gb,
         "shared_block_cache": args.shared_block_cache,
+        "enable_prompt_disk_cache": args.enable_prompt_disk_cache,
+        "prompt_disk_cache_max_gb": args.prompt_disk_cache_max_gb,
+        "shared_prompt_cache": args.shared_prompt_cache,
         "kv_cache_quantization": args.kv_cache_quantization,
         "enable_jit": args.enable_jit,
         "native_mtp_depth": explicit_single_depth,

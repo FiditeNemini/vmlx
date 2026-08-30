@@ -903,6 +903,24 @@ def test_cache_on_cli_args_accept_large_typed_state_budget(tmp_path):
     assert args[index + 1] == "8.0"
 
 
+def test_cache_on_cli_args_can_enable_separate_typed_prompt_l2(tmp_path):
+    mod = load_speed_ab_module()
+
+    args = mod.cache_mode_cli_args(
+        "on",
+        block_cache_dir=tmp_path / "blocks",
+        block_cache_max_gb=8.0,
+        prompt_cache_dir=tmp_path / "prompts",
+        prompt_cache_max_gb=8.0,
+        kv_cache_quantization="none",
+    )
+
+    assert "--enable-block-disk-cache" in args
+    assert "--enable-disk-cache" in args
+    assert args[args.index("--disk-cache-dir") + 1] == str(tmp_path / "prompts")
+    assert args[args.index("--disk-cache-max-gb") + 1] == "8.0"
+
+
 def test_shared_block_cache_uses_one_restart_namespace(tmp_path):
     mod = load_speed_ab_module()
 
@@ -918,6 +936,27 @@ def test_shared_block_cache_uses_one_restart_namespace(tmp_path):
 
     assert baseline == candidate == tmp_path / "shared_block_cache"
     assert isolated == tmp_path / "native_mtp_d2_block_cache"
+
+
+def test_shared_prompt_cache_uses_one_restart_namespace(tmp_path):
+    mod = load_speed_ab_module()
+
+    baseline = mod.prompt_cache_dir_for_row(
+        tmp_path, "baseline_no_mtp", enabled=True, shared=True
+    )
+    candidate = mod.prompt_cache_dir_for_row(
+        tmp_path, "native_mtp_d2", enabled=True, shared=True
+    )
+    isolated = mod.prompt_cache_dir_for_row(
+        tmp_path, "native_mtp_d2", enabled=True, shared=False
+    )
+    disabled = mod.prompt_cache_dir_for_row(
+        tmp_path, "native_mtp_d2", enabled=False, shared=True
+    )
+
+    assert baseline == candidate == tmp_path / "shared_prompt_cache"
+    assert isolated == tmp_path / "native_mtp_d2_prompt_cache"
+    assert disabled is None
 
 
 def test_chat_completion_body_sets_thinking_off_by_default():

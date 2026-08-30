@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression coverage for terminal MLLM streaming detokenizer flushes."""
 
+import asyncio
+
+from vmlx_engine.engine.batched import BatchedEngine, _reconcile_mllm_terminal_delta
 from vmlx_engine.mllm_batch_generator import MLLMBatchResponse
 from vmlx_engine.mllm_scheduler import MLLMRequest, MLLMScheduler
-from vmlx_engine.request import SamplingParams
+from vmlx_engine.request import RequestOutput, SamplingParams
 
 
 class _PendingTailDetokenizer:
@@ -97,3 +100,70 @@ def test_coalesced_terminal_flush_is_appended_to_burst_delta():
     assert len(outputs) == 1
     assert outputs[0].new_text == "A]"
     assert outputs[0].output_text == "A]"
+
+
+def test_terminal_reconciliation_appends_only_an_authoritative_suffix():
+    assert _reconcile_mllm_terminal_delta(
+        "assert value == [",
+        "",
+        "assert value == []",
+        finished=True,
+    ) == "]"
+    assert _reconcile_mllm_terminal_delta(
+        "assert value == [",
+        "]",
+        "assert value == []",
+        finished=True,
+    ) == "]"
+
+
+def test_terminal_reconciliation_never_rewrites_a_nonmonotonic_stream():
+    assert _reconcile_mllm_terminal_delta(
+        "already streamed",
+        " bytes",
+        "different final text",
+        finished=True,
+    ) == " bytes"
+
+
+class _TerminalSuffixScheduler:
+    async def add_request_async(self, **_kwargs):
+        return "terminal-suffix"
+
+    async def stream_outputs(self, _request_id):
+        yield RequestOutput(
+            request_id="terminal-suffix",
+            new_text="assert value == [",
+            output_text="",
+            finished=False,
+            finish_reason=None,
+        )
+        yield RequestOutput(
+            request_id="terminal-suffix",
+            new_text="",
+            output_text="assert value == []",
+            finished=True,
+            finish_reason="stop",
+        )
+
+
+def test_batched_mllm_stream_generate_reconciles_terminal_suffix():
+    engine = BatchedEngine.__new__(BatchedEngine)
+    engine._loaded = True
+    engine._is_mllm = True
+    engine._mllm_scheduler = _TerminalSuffixScheduler()
+
+    async def _collect():
+        return [
+            output
+            async for output in engine.stream_generate(
+                prompt="ignored",
+                max_tokens=8,
+                temperature=0,
+            )
+        ]
+
+    outputs = asyncio.run(_collect())
+    assert "".join(output.new_text for output in outputs) == "assert value == []"
+    assert outputs[-1].text == "assert value == []"
+    assert outputs[-1].finished is True

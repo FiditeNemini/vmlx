@@ -56,6 +56,30 @@ logger = logging.getLogger(__name__)
 _GEN_PROMPT_KEY_FAILURES: set[str] = set()
 
 
+def _reconcile_mllm_terminal_delta(
+    emitted_text: str,
+    delta_text: str | None,
+    output_text: str | None,
+    *,
+    finished: bool,
+) -> str:
+    """Append a terminal suffix omitted by incremental MLLM detokenization.
+
+    ``RequestOutput.output_text`` is the scheduler's authoritative final decode,
+    while ``new_text`` is the incremental transport.  Some tokenizers can expose
+    one fewer byte through the incremental view even though the terminal decode
+    is complete.  Reconcile only a strict append-only suffix: a non-monotonic
+    final decode is left untouched because an SSE stream cannot retract bytes.
+    """
+    delta = delta_text or ""
+    if not finished or not output_text:
+        return delta
+    streamed = emitted_text + delta
+    if output_text.startswith(streamed):
+        return delta + output_text[len(streamed) :]
+    return delta
+
+
 def _generation_prompt_cache_extra_key(
     *,
     prompt_with_generation: str,
@@ -2458,11 +2482,19 @@ class BatchedEngine(BaseEngine):
                 _vmlx_tool_choice=kwargs.get("tool_choice"),
             )
 
+            emitted_text = ""
             async for output in self._mllm_scheduler.stream_outputs(request_id):
                 _raise_prompt_too_long_from_output(output)
+                new_text = _reconcile_mllm_terminal_delta(
+                    emitted_text,
+                    output.new_text,
+                    output.output_text,
+                    finished=bool(output.finished),
+                )
+                emitted_text += new_text
                 yield GenerationOutput(
                     text=clean_output_text(output.output_text),
-                    new_text=output.new_text,
+                    new_text=new_text,
                     prompt_tokens=output.prompt_tokens,
                     completion_tokens=output.completion_tokens,
                     cached_tokens=getattr(output, "cached_tokens", 0),

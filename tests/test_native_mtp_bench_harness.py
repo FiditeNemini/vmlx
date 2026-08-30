@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -521,6 +522,22 @@ def test_effective_native_mtp_depth_prefers_health_when_unset():
     assert source == "vmlx_mtp_tuning.json:native_mtp.best_depth"
 
 
+def test_source_provenance_records_exact_tree_and_harness(tmp_path, monkeypatch):
+    mod = load_speed_ab_module()
+    monkeypatch.setattr(mod, "ROOT", ROOT)
+
+    provenance = mod.source_provenance(ROOT)
+
+    assert provenance["git_root"] == str(ROOT.resolve())
+    assert provenance["git_head"]
+    assert provenance["git_tree"]
+    assert provenance["harness_sha256"] == hashlib.sha256(
+        Path(mod.__file__).read_bytes()
+    ).hexdigest()
+    assert provenance["driver_python"]
+    assert provenance["server_python"]
+
+
 def test_parse_mtp_log_extracts_acceptance_and_timing_totals():
     mod = load_speed_ab_module()
     lines = [
@@ -564,6 +581,36 @@ def test_parse_mtp_log_extracts_acceptance_and_timing_totals():
     assert parsed["totals"]["timings_ms"]["verify"] == 3007.43
     assert parsed["totals"]["timings_ms"]["draft"] == 777.78
     assert parsed["totals"]["timings_ms"]["trace_phase_total"] == 3817.34
+
+
+def test_parse_mtp_log_extracts_text_batch_generator_totals():
+    mod = load_speed_ab_module()
+    lines = [
+        "INFO MTP[req-text] finish=length depth=3 tokens=1024 cycles=280 "
+        "full-accept=190/280 (67.9%) draft-tokens=760/840 (90.5%) "
+        "emits[init=2,draft=760,bonus=190,verify=72] "
+        "timing[backbone=21000.5ms mtp=8000.25ms sample=120.0ms cache=4.5ms]"
+    ]
+
+    parsed = mod.parse_mtp_log(lines)
+
+    request = parsed["requests"]["req-text"]
+    assert request["depth"] == 3
+    assert request["cycles"] == 280
+    assert request["full_accept_cycles"] == 190
+    assert request["accepted_tokens"] == 760
+    assert request["drafted_tokens"] == 840
+    assert request["acceptance_rate"] == 760 / 840
+    assert request["timings_ms"] == {
+        "verify": 21000.5,
+        "draft": 8000.25,
+        "sample": 120.0,
+        "cache": 4.5,
+    }
+    assert parsed["totals"]["cycles"] == 280
+    assert parsed["totals"]["timings_ms"]["verify"] == 21000.5
+    assert parsed["totals"]["timings_ms"]["draft"] == 8000.25
+    assert parsed["totals"]["timings_ms"]["trace_phase_total"] == 29125.25
 
 
 def test_hot_path_accounting_separates_wall_scheduler_and_trace_time():

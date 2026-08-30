@@ -34,6 +34,35 @@ DEFAULT_PROMPT = (
 )
 
 
+def source_provenance(root: Path = ROOT) -> dict[str, Any]:
+    """Bind every benchmark artifact to the exact Git tree and harness bytes."""
+
+    def git(*args: str) -> str | None:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(root), *args],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        return completed.stdout.strip()
+
+    status = git("status", "--porcelain=v1")
+    return {
+        "git_root": str(root.resolve()),
+        "git_head": git("rev-parse", "HEAD"),
+        "git_tree": git("rev-parse", "HEAD^{tree}"),
+        "git_branch": git("branch", "--show-current"),
+        "dirty_paths": status.splitlines() if status else [],
+        "harness_path": str(Path(__file__).resolve()),
+        "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "driver_python": str(Path(sys.executable).resolve()),
+        "server_python": str(PYTHON.resolve()),
+    }
+
+
 def request_json(
     method: str,
     url: str,
@@ -279,6 +308,17 @@ _MTP_DEPTH_RE = re.compile(
     r"forwards\[seed_main=(?P<seed>\d+),verify_main=(?P<verify>\d+),"
     r"replay_main=(?P<replay>\d+),mtp=(?P<mtp>\d+)\]"
 )
+_TEXT_MTP_FINISH_RE = re.compile(
+    r"(?<!MLLM )MTP\[(?P<request>[^\]]+)\] finish=(?P<finish>\S+) "
+    r"depth=(?P<depth>\d+) tokens=(?P<tokens>\d+) cycles=(?P<cycles>\d+) "
+    r"full-accept=(?P<full_accept>\d+)/(?P<cycle_denominator>\d+) "
+    r"\([0-9.]+%\) draft-tokens=(?P<accepted>\d+)/(?P<drafted>\d+) "
+    r"\([0-9.]+%\) emits\[init=(?P<init>\d+),draft=(?P<draft>\d+),"
+    r"bonus=(?P<bonus>\d+),verify=(?P<verify>\d+)\] "
+    r"timing\[backbone=(?P<backbone>[0-9.]+)ms "
+    r"mtp=(?P<mtp>[0-9.]+)ms sample=(?P<sample>[0-9.]+)ms "
+    r"cache=(?P<cache>[0-9.]+)ms\]"
+)
 
 
 def _float_map(body: str) -> dict[str, float]:
@@ -326,6 +366,44 @@ def _sum_float_maps(rows: list[dict[str, float]]) -> dict[str, float]:
 def parse_mtp_log(lines: list[str]) -> dict[str, Any]:
     requests: dict[str, dict[str, Any]] = {}
     for line in lines:
+        text_finish = _TEXT_MTP_FINISH_RE.search(line)
+        if text_finish:
+            request_id = text_finish.group("request")
+            accepted = int(text_finish.group("accepted"))
+            drafted = int(text_finish.group("drafted"))
+            cycles = int(text_finish.group("cycles"))
+            cycle_denominator = int(text_finish.group("cycle_denominator"))
+            if cycle_denominator != cycles:
+                raise ValueError(
+                    "text MTP full-accept denominator disagrees with cycles"
+                )
+            row = requests.setdefault(request_id, {})
+            row.update(
+                {
+                    "finish": text_finish.group("finish"),
+                    "depth": int(text_finish.group("depth")),
+                    "tokens": int(text_finish.group("tokens")),
+                    "cycles": cycles,
+                    "full_accept_cycles": int(text_finish.group("full_accept")),
+                    "accepted_tokens": accepted,
+                    "drafted_tokens": drafted,
+                    "acceptance_rate": accepted / drafted if drafted else None,
+                    "emits": {
+                        "init": int(text_finish.group("init")),
+                        "draft": int(text_finish.group("draft")),
+                        "bonus": int(text_finish.group("bonus")),
+                        "verify": int(text_finish.group("verify")),
+                    },
+                    "timings_ms": {
+                        "verify": float(text_finish.group("backbone")),
+                        "draft": float(text_finish.group("mtp")),
+                        "sample": float(text_finish.group("sample")),
+                        "cache": float(text_finish.group("cache")),
+                    },
+                }
+            )
+            continue
+
         finish = _MTP_FINISH_RE.search(line)
         if finish:
             request_id = finish.group("request")
@@ -960,7 +1038,9 @@ def run_row(
     full_log = log_lines(log_path)
     tail = full_log[-args.log_tail_lines:]
     mtp_lines = [
-        line for line in full_log if "MLLM MTP[" in line or "native MTP" in line
+        line
+        for line in full_log
+        if "MTP[" in line or "native MTP" in line
     ]
     result = {
         "label": label,
@@ -1148,6 +1228,7 @@ def main() -> int:
 
     result: dict[str, Any] = {
         "created_at": stamp,
+        "source_provenance": source_provenance(),
         "model_path": str(Path(args.model_path)),
         "served_name": args.served_name or Path(args.model_path).name.lower().replace("/", "-"),
         "cache_mode": args.cache,

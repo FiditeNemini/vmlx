@@ -5261,6 +5261,12 @@ def _native_mtp_maybe_choose_value_depth(
             "VMLINUX_NATIVE_MTP_VALUE_RAISE_MIN_ACCEPT",
             "VMLX_NATIVE_MTP_VALUE_RAISE_MIN_ACCEPT",
         ),
+        initial_probe_cycles=_native_mtp_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_VALUE_INITIAL_PROBE_CYCLES",
+            "VMLX_NATIVE_MTP_VALUE_INITIAL_PROBE_CYCLES",
+            minimum=2,
+        ),
     )
     state.stats.adaptive_depth_value = adaptive_value_snapshot(
         adaptive_value,

@@ -226,6 +226,7 @@ def choose_depth_by_value(
     probe_interval_cycles: int,
     hysteresis: float,
     raise_min_acceptance: float,
+    initial_probe_cycles: int = 48,
 ) -> NativeMTPDepthDecision | None:
     """Choose a neighbouring depth using rolling confirmed tokens per second.
 
@@ -241,6 +242,7 @@ def choose_depth_by_value(
     minimum_samples = max(2, int(minimum_samples))
     cooldown_cycles = max(minimum_samples, int(cooldown_cycles))
     probe_interval_cycles = max(cooldown_cycles, int(probe_interval_cycles))
+    initial_probe_cycles = max(minimum_samples, int(initial_probe_cycles))
     hysteresis = max(0.0, float(hysteresis))
 
     probe_origin = int(state.active_probe_origin or 0)
@@ -300,6 +302,14 @@ def choose_depth_by_value(
         state, current, minimum_samples=minimum_samples
     )
     if current_value is None:
+        return None
+    # The preserved MTP head cache starts cold after prompt prefill. The first
+    # few cycles systematically undervalue the configured/profile seed and
+    # previously made a validated D3 request fall to D2 at cycle 12, only to
+    # climb back to D3 at cycle 36. Accumulate one stable initial window before
+    # the first neighbor experiment; subsequent phase probes retain their
+    # normal cooldown/backoff behavior.
+    if not state.transitions and cycle < initial_probe_cycles:
         return None
     if cycle - int(state.last_change_cycle or 0) < cooldown_cycles:
         return None

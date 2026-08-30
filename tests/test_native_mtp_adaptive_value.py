@@ -46,6 +46,7 @@ def _choose(state, current, cycle, **overrides):
         "probe_interval_cycles": 48,
         "hysteresis": 0.05,
         "raise_min_acceptance": 0.88,
+        "initial_probe_cycles": 8,
     }
     kwargs.update(overrides)
     return choose_depth_by_value(state, **kwargs)
@@ -190,6 +191,17 @@ def test_cooldown_blocks_an_immediate_second_probe():
     _samples(state, 2, elapsed_ms=6.0, accepted=2)
 
     assert _choose(state, 2, 8) is None
+
+
+def test_initial_warmup_blocks_a_cold_head_neighbor_probe():
+    state = NativeMTPAdaptiveValueState()
+    _samples(state, 3, elapsed_ms=10.0, accepted=2)
+
+    assert _choose(state, 3, 12, initial_probe_cycles=48) is None
+    decision = _choose(state, 3, 48, initial_probe_cycles=48)
+    assert decision is not None
+    assert decision.target_depth == 2
+    assert decision.event == "probe_start"
 
 
 def test_after_d3_probe_d2_can_probe_d1_in_the_same_request():

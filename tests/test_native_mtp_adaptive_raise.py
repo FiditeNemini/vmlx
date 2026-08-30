@@ -248,6 +248,7 @@ class TestRollingValueIntegration:
         from vmlx_engine.native_mtp_adaptive import add_depth_cycle_sample
 
         monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_VALUE", "1")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_VALUE_INITIAL_PROBE_CYCLES", "8")
         state = gen.MLLMNativeMTPState(depth=2)
         state.stats.cycles = 12
         state.stats.drafted_by_depth = [12, 12, 0]

@@ -247,14 +247,6 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 env=("VMLX_GLM5_FUSED_MOE_PAIR",),
             ),
             _feature(
-                "kda_decode_unit",
-                label="combined KDA convolution and recurrent decode",
-                kind="metal_kernel",
-                scopes=("ar_decode", "mtp_decode"),
-                default=False,
-                env=("VMLX_GLM5_FUSED_KDA_DECODE",),
-            ),
-            _feature(
                 "kda_conv_state",
                 label="KDA q/k/v convolution and state fusion",
                 kind="metal_kernel",

@@ -256,6 +256,37 @@ def _validate_rotating_meta(meta: Any, *, label: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _validate_glm5_typed_state(
+    class_name: str,
+    state: Any,
+    meta: Any,
+    *,
+    label: str,
+) -> Tuple[bool, str]:
+    """Validate GLM's schema-tagged KDA/MLA state without numeric-meta guesses.
+
+    GLM cache metadata begins with ``glm5_next_native_v1`` rather than the
+    numeric offset used by generic ArraysCache/KVCache implementations. The
+    canonical cache constructors already own all shape, population, k-pool,
+    and offset invariants, so use them here instead of duplicating a second
+    schema that can drift.
+    """
+
+    if class_name not in {"Glm5KDACache", "Glm5MLACache"}:
+        return False, f"{label}: unsupported GLM typed class {class_name!r}"
+    try:
+        from .models.glm5_next.glm5_next import Glm5KDACache, Glm5MLACache
+
+        cache_class = {
+            "Glm5KDACache": Glm5KDACache,
+            "Glm5MLACache": Glm5MLACache,
+        }[class_name]
+        cache_class.from_state(state, meta)
+    except (TypeError, ValueError) as exc:
+        return False, f"{label}: {exc}"
+    return True, ""
+
+
 def _shape_nbytes(shape: list[int] | tuple[int, ...], bytes_per_elem: int) -> int:
     n = 1
     for dim in shape:
@@ -1221,6 +1252,15 @@ def _validate_live_single_cache(layer_cache: Any, *, layer_idx: int) -> Tuple[bo
             ok, reason = _validate_quant_meta(meta, label=f"layer {layer_idx}.meta")
             if not ok:
                 return False, reason, total
+        elif cls_name in {"Glm5KDACache", "Glm5MLACache"}:
+            ok, reason = _validate_glm5_typed_state(
+                cls_name,
+                state,
+                meta,
+                label=f"layer {layer_idx}.meta",
+            )
+            if not ok:
+                return False, reason, total
         elif "Rotating" in cls_name:
             ok, reason = _validate_rotating_meta(meta, label=f"layer {layer_idx}.meta")
             if not ok:
@@ -1298,6 +1338,17 @@ def _validate_live_single_cache(layer_cache: Any, *, layer_idx: int) -> Tuple[bo
             return False, reason, total
         total += nb
         meta = getattr(layer_cache, "meta_state", None)
+        cls_name = type(layer_cache).__name__
+        if cls_name in {"Glm5KDACache", "Glm5MLACache"}:
+            ok, reason = _validate_glm5_typed_state(
+                cls_name,
+                getattr(layer_cache, "state", None),
+                meta,
+                label=f"layer {layer_idx}.meta",
+            )
+            if not ok:
+                return False, reason, total
+            return True, "", total
         seq = _decode_meta_sequence(meta)
         if seq:
             ok, _, reason = _validate_int_range(

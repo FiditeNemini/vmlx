@@ -213,6 +213,53 @@ class TestCacheAndForward:
                 ("glm5_next_native_v1", "mla", "4", "4"),
             )
 
+    def test_live_validator_accepts_glm_typed_metadata_and_rejects_drift(
+        self, tiny_model, glm5
+    ):
+        """Generic live validation must delegate GLM's non-numeric meta schema."""
+        from vmlx_engine.cache_record_validator import validate_live_cache
+
+        live = tiny_model.make_cache()
+        tiny_model(mx.array([[1, 2, 3, 4]]), cache=live)
+        mx.eval(
+            *[
+                value
+                for layer in live
+                for value in layer.state
+                if value is not None
+            ]
+        )
+        ok, reason, nbytes = validate_live_cache(
+            live,
+            expected_num_layers=5,
+            source="test:glm5-native",
+        )
+        assert ok is True, reason
+        assert nbytes > 0
+
+        bad_kda = {
+            "class_name": "Glm5KDACache",
+            "state": live[0].state,
+            "meta_state": ("wrong_schema", "kda"),
+        }
+        ok, reason, _ = validate_live_cache([bad_kda], source="test:glm5-bad-kda")
+        assert ok is False
+        assert "typed schema" in reason
+
+        bad_mla = {
+            "class_name": "Glm5MLACache",
+            "state": live[3].state,
+            "meta_state": (
+                "glm5_next_native_v1",
+                "mla",
+                str(live[3].kpool),
+                str(live[3].offset + 1),
+            ),
+        }
+        ok, reason, _ = validate_live_cache([bad_mla], source="test:glm5-bad-mla")
+        assert ok is False
+        assert "lengths do not match" in reason
+
     def test_single_batch_snapshot_is_exact_n_minus_one(self, tiny_model, glm5):
         from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
 

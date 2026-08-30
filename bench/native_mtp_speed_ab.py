@@ -608,6 +608,15 @@ def select_best_depth(result: dict[str, Any]) -> dict[str, Any]:
                 }
             )
             continue
+        if baseline_tps is not None and float(tps) <= float(baseline_tps):
+            rejected.append(
+                {
+                    "depth": int(depth),
+                    "label": label,
+                    "reason": "not_faster_than_baseline",
+                }
+            )
+            continue
         candidates.append(
             {
                 "depth": int(depth),

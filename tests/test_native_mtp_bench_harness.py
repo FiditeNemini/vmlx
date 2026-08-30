@@ -794,6 +794,62 @@ def test_select_best_depth_rejects_nonequivalent_faster_row():
     ]
 
 
+def test_select_best_depth_rejects_equivalent_rows_slower_than_ar():
+    mod = load_speed_ab_module()
+    result = {
+        "output_equivalence": {
+            "comparisons": [
+                {
+                    "label": "native_mtp_d1",
+                    "full_text_equal": True,
+                    "mtp_tokens": 240,
+                    "baseline_tokens": 240,
+                },
+                {
+                    "label": "native_mtp_d2",
+                    "full_text_equal": True,
+                    "mtp_tokens": 240,
+                    "baseline_tokens": 240,
+                },
+            ]
+        },
+        "rows": [
+            {
+                "label": "baseline_no_mtp",
+                "native_mtp_depth": None,
+                "summary": {"mean_wall_tok_s": 20.686},
+            },
+            {
+                "label": "native_mtp_d1",
+                "native_mtp_depth": 1,
+                "summary": {"mean_wall_tok_s": 19.288},
+            },
+            {
+                "label": "native_mtp_d2",
+                "native_mtp_depth": 2,
+                "summary": {"mean_wall_tok_s": 16.682},
+            },
+        ],
+    }
+
+    selected = mod.select_best_depth(result)
+
+    assert selected["best_depth"] is None
+    assert selected["speedup_vs_baseline"] is None
+    assert selected["rejected_depths"] == [
+        {
+            "depth": 1,
+            "label": "native_mtp_d1",
+            "reason": "not_faster_than_baseline",
+        },
+        {
+            "depth": 2,
+            "label": "native_mtp_d2",
+            "reason": "not_faster_than_baseline",
+        },
+    ]
+
+
 def test_cache_on_cli_args_can_disable_storage_kv_quantization(tmp_path):
     mod = load_speed_ab_module()
 

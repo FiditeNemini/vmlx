@@ -7,6 +7,8 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+_OBSERVED = False
+
 
 def fused_kda_step_requested() -> bool:
     value = os.environ.get("VMLX_GLM5_FUSED_KDA_STEP", "0").strip().lower()
@@ -114,7 +116,22 @@ def glm5_kda_step_decode(
         output_shapes=[(1, heads, value_dim), tuple(state.shape)],
         output_dtypes=[mx.float32, mx.float32],
     )
+    global _OBSERVED
+    if not _OBSERVED:
+        _OBSERVED = True
     return output, next_state
 
 
-__all__ = ["fused_kda_step_requested", "glm5_kda_step_decode"]
+def glm5_kda_step_status() -> dict[str, object]:
+    return {
+        "installed": _OBSERVED,
+        "observed_calls": int(_OBSERVED),
+        "reason": None,
+    }
+
+
+__all__ = [
+    "fused_kda_step_requested",
+    "glm5_kda_step_decode",
+    "glm5_kda_step_status",
+]

@@ -1131,6 +1131,7 @@ class QSAIndexer(nn.Module):
         scores = sparse_index_scores_decode(
             q.astype(mx.float32),
             pooled.astype(mx.float32),
+            family="qwen4_exp",
             scale=self.head_dim**-0.5,
             enabled=self._fused_score_decode,
         )

@@ -310,13 +310,19 @@ def qwen4_affine_switchglu(
     # its exact shape.  Falling into the generic pair hook first would retain
     # stock down/reduction and silently defeat the larger measured win.
     if full_fused_eligible:
-        return _fused(switch, x, indices, scores), True
+        output = _fused(switch, x, indices, scores)
+        if not _STATUS.get("observed_calls"):
+            _STATUS["observed_calls"] = 1
+        return output, True
     activated, pair_fused = affine_moe_pair_activation(switch, x, indices)
     if pair_fused:
         selected = switch.down_proj(activated, indices).squeeze(-2)
         return (selected * scores[..., None]).sum(axis=-2), True
     if getattr(switch, _EXACT_OK_ATTR, False):
-        return _exact_gate_up_switchglu(switch, x, indices, scores), True
+        output = _exact_gate_up_switchglu(switch, x, indices, scores)
+        if not _STATUS.get("observed_calls"):
+            _STATUS["observed_calls"] = 1
+        return output, True
     if not getattr(switch, _OK_ATTR, False):
         routed = switch(x, indices)
         return (routed * scores[..., None]).sum(axis=-2), False

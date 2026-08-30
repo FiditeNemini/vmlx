@@ -11,6 +11,7 @@ _ENV = {
     "glm5_next": "VMLX_GLM5_FUSED_DSA_SCORE",
     "qwen4_exp": "VMLX_QWEN4_FUSED_QSA_SCORE",
 }
+_OBSERVED = {"glm5_next": False, "qwen4_exp": False}
 
 
 def fused_sparse_index_score_requested(family: str) -> bool:
@@ -73,12 +74,15 @@ def sparse_index_scores_decode(
     query: mx.array,
     pool_keys: mx.array,
     *,
+    family: str,
     scale: float,
     head_weights: mx.array | None = None,
     enabled: bool,
 ) -> mx.array | None:
     """Return ``[1,1,N]`` pool scores or the stock-path sentinel."""
 
+    if family not in _OBSERVED:
+        raise ValueError(f"unsupported sparse-index family {family}")
     if not enabled or query.ndim != 4 or pool_keys.ndim != 3:
         return None
     batch, rows, heads, head_dim = (int(value) for value in query.shape)
@@ -100,7 +104,7 @@ def sparse_index_scores_decode(
         weights = head_weights.reshape(heads)
         weighted = True
 
-    return _kernel(heads, head_dim)(
+    output = _kernel(heads, head_dim)(
         inputs=[query, pool_keys, weights, _scalar(float(scale))],
         template=[("POOLS", pools), ("WEIGHTED", weighted)],
         grid=(32 * pools, 1, 1),
@@ -108,9 +112,22 @@ def sparse_index_scores_decode(
         output_shapes=[(1, 1, pools)],
         output_dtypes=[mx.float32],
     )[0]
+    if not _OBSERVED[family]:
+        _OBSERVED[family] = True
+    return output
+
+
+def sparse_index_score_status(family: str) -> dict[str, object]:
+    observed = bool(_OBSERVED[family])
+    return {
+        "installed": observed,
+        "observed_calls": int(observed),
+        "reason": None,
+    }
 
 
 __all__ = [
     "fused_sparse_index_score_requested",
+    "sparse_index_score_status",
     "sparse_index_scores_decode",
 ]

@@ -28,6 +28,7 @@ import mlx.core as mx
 _MAX_ROWS = 8
 _KERNEL: Any | None = None
 _EPS_SCALARS: dict[float, mx.array] = {}
+_OBSERVED = False
 
 _HEADER = """
 #include <metal_stdlib>
@@ -116,7 +117,7 @@ def sigmoid_gated_rmsnorm_small_rows(
         return None
 
     flat_rows = rows * heads
-    return _kernel()(
+    output = _kernel()(
         inputs=[x, gate, weight, _eps_scalar(float(eps))],
         template=[("T", dtype), ("D", dims), ("ROWS", flat_rows)],
         grid=(32 * flat_rows, 1, 1),
@@ -124,9 +125,22 @@ def sigmoid_gated_rmsnorm_small_rows(
         output_shapes=[tuple(x.shape)],
         output_dtypes=[dtype],
     )[0]
+    global _OBSERVED
+    if not _OBSERVED:
+        _OBSERVED = True
+    return output
+
+
+def gated_rmsnorm_decode_status() -> dict[str, object]:
+    return {
+        "installed": _OBSERVED,
+        "observed_calls": int(_OBSERVED),
+        "reason": None,
+    }
 
 
 __all__ = [
     "fused_gated_rmsnorm_requested",
+    "gated_rmsnorm_decode_status",
     "sigmoid_gated_rmsnorm_small_rows",
 ]

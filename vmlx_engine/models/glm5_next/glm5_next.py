@@ -672,6 +672,7 @@ class Glm5NextIndexer(nn.Module):
             pool_scores = sparse_index_scores_decode(
                 q,
                 pool_keys,
+                family="glm5_next",
                 scale=self.scale,
                 head_weights=head_w,
                 enabled=self._fused_score_decode,

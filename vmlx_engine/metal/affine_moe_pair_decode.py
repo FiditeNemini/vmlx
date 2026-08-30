@@ -431,6 +431,7 @@ def affine_moe_pair_activation(
                 config.top_k,
             )
             _FIRST_FAST_CALL.add(config.family)
+            _STATUS.setdefault(config.family, {})["observed_calls"] = 1
         return output, True
     except Exception as exc:
         if hasattr(switch, _CONFIG_ATTR):

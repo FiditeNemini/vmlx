@@ -7,6 +7,8 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+_OBSERVED = False
+
 
 def fused_gdn_conv_requested() -> bool:
     value = os.environ.get("VMLX_QWEN4_FUSED_GDN_CONV", "0").strip().lower()
@@ -80,7 +82,22 @@ def qwen4_gdn_conv_decode(
         output_shapes=[tuple(state.shape), tuple(qkv.shape)],
         output_dtypes=[qkv.dtype, qkv.dtype],
     )
+    global _OBSERVED
+    if not _OBSERVED:
+        _OBSERVED = True
     return convolved, next_state
 
 
-__all__ = ["fused_gdn_conv_requested", "qwen4_gdn_conv_decode"]
+def qwen4_gdn_conv_status() -> dict[str, object]:
+    return {
+        "installed": _OBSERVED,
+        "observed_calls": int(_OBSERVED),
+        "reason": None,
+    }
+
+
+__all__ = [
+    "fused_gdn_conv_requested",
+    "qwen4_gdn_conv_decode",
+    "qwen4_gdn_conv_status",
+]

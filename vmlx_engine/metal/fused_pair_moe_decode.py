@@ -315,6 +315,8 @@ def install_dsv4_fused_pair_moe(model: Any) -> int:
                     scores.reshape(-1).astype(mx.float32),
                     x.dtype,
                 )
+                if not _LAST_STATUS.get("observed_calls"):
+                    _LAST_STATUS["observed_calls"] = 1
                 return out.reshape(1, 1, _K, _D)
             return original(self, x, inds, scores)
 

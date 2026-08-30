@@ -1506,6 +1506,7 @@ def test_qwen4_exp_gdn_decode_projection_fusion_is_bit_identical():
 @pytest.mark.parametrize("rows", [1, 4, 8])
 def test_small_row_sigmoid_gated_rmsnorm_matches_qwen_reference(dtype, rows):
     from vmlx_engine.metal.gated_rmsnorm_decode import (
+        gated_rmsnorm_decode_status,
         sigmoid_gated_rmsnorm_small_rows,
     )
 
@@ -1522,6 +1523,7 @@ def test_small_row_sigmoid_gated_rmsnorm_matches_qwen_reference(dtype, rows):
         x, gate, weight, 1e-6, output_dtype=dtype, enabled=True
     )
     assert candidate is not None
+    assert gated_rmsnorm_decode_status()["observed_calls"] == 1
     mx.eval(reference, candidate)
     np.testing.assert_allclose(
         np.asarray(candidate.astype(mx.float32)),
@@ -1560,7 +1562,10 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
 def test_qwen4_exp_gdn_conv_fusion_matches_stock(dtype):
-    from vmlx_engine.metal.gdn_conv_decode import qwen4_gdn_conv_decode
+    from vmlx_engine.metal.gdn_conv_decode import (
+        qwen4_gdn_conv_decode,
+        qwen4_gdn_conv_status,
+    )
 
     channels = 96
     kernel_size = 4
@@ -1593,6 +1598,7 @@ def test_qwen4_exp_gdn_conv_fusion_matches_stock(dtype):
         enabled=True,
     )
     assert candidate is not None
+    assert qwen4_gdn_conv_status()["observed_calls"] == 1
     candidate_conv, candidate_state = candidate
     mx.eval(reference_conv, reference_state, candidate_conv, candidate_state)
 
@@ -2004,7 +2010,10 @@ def test_qwen4_exp_ple_short_conv_uses_prepared_runtime_dtype(runtime_dtype):
 
 @pytest.mark.parametrize("runtime_dtype", [mx.float16, mx.bfloat16])
 def test_qwen4_exp_ple_fused_decode_conv_matches_stock(runtime_dtype):
-    from vmlx_engine.metal.ple_conv_decode import qwen4_ple_conv_decode
+    from vmlx_engine.metal.ple_conv_decode import (
+        qwen4_ple_conv_decode,
+        qwen4_ple_conv_status,
+    )
     from vmlx_engine.models.qwen4_exp.language import PLELayer
 
     ple = PLELayer(_tiny_args(), 0)
@@ -2033,6 +2042,7 @@ def test_qwen4_exp_ple_fused_decode_conv_matches_stock(runtime_dtype):
         enabled=True,
     )
     assert candidate is not None
+    assert qwen4_ple_conv_status()["observed_calls"] == 1
     mx.eval(reference_output, reference_state, *candidate)
     max_delta = float(
         mx.max(

@@ -23,6 +23,7 @@ import mlx.core as mx
 _PROJECTION_THREADS = 128
 _PROJECTION_SIMDGROUPS = _PROJECTION_THREADS // 32
 _EPILOGUE_THREADS = 256
+_OBSERVED = False
 
 _HEADER = """
 #include <metal_stdlib>
@@ -253,7 +254,7 @@ def glm5_mhc_decode(
         output_shapes=[(mix_size,)],
         output_dtypes=[mx.float32],
     )[0]
-    return tuple(
+    output = tuple(
         _epilogue_kernel()(
             inputs=[streams, mix, hc_base, hc_scale, _scalar(float(sink_eps))],
             template=[
@@ -273,6 +274,18 @@ def glm5_mhc_decode(
             output_dtypes=[mx.float32, mx.float32, streams.dtype],
         )
     )
+    global _OBSERVED
+    if not _OBSERVED:
+        _OBSERVED = True
+    return output
 
 
-__all__ = ["fused_glm5_mhc_requested", "glm5_mhc_decode"]
+def glm5_mhc_status() -> dict[str, object]:
+    return {
+        "installed": _OBSERVED,
+        "observed_calls": int(_OBSERVED),
+        "reason": None,
+    }
+
+
+__all__ = ["fused_glm5_mhc_requested", "glm5_mhc_decode", "glm5_mhc_status"]

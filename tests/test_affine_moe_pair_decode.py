@@ -84,6 +84,11 @@ def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
             switch, decode, decode_indices
         )
         assert used is True
+        from vmlx_engine.metal.affine_moe_pair_decode import (
+            affine_moe_pair_status,
+        )
+
+        assert affine_moe_pair_status("test_dispatch")["observed_calls"] == 1
         assert output.shape == (1, 1, 4, 1, 64)
 
         prefill = mx.ones((1, 2, 128), dtype=mx.float16)
@@ -159,6 +164,7 @@ def test_qwen_full_affine_moe_precedes_pair_only_candidate(monkeypatch):
     )
     assert used is True
     assert output is expected
+    assert full_moe.qwen4_affine_moe_status()["observed_calls"] == 1
 
 
 def test_qwen_full_affine_moe_accepts_standard_and_legacy_env(monkeypatch):

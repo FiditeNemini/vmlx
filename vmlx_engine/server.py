@@ -10430,7 +10430,11 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
     try:
         if family == "qwen4_exp":
             from .metal.affine_moe_pair_decode import affine_moe_pair_status
+            from .metal.gated_rmsnorm_decode import gated_rmsnorm_decode_status
+            from .metal.gdn_conv_decode import qwen4_gdn_conv_status
+            from .metal.ple_conv_decode import qwen4_ple_conv_status
             from .metal.qwen4_affine_moe_decode import qwen4_affine_moe_status
+            from .metal.sparse_index_score_decode import sparse_index_score_status
 
             runtime_features["affine_moe"] = {
                 **runtime_features.get("affine_moe", {}),
@@ -10440,13 +10444,33 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
                 **runtime_features.get("affine_moe_pair", {}),
                 **affine_moe_pair_status("qwen4_exp"),
             }
+            runtime_features["gdn_conv_state"] = qwen4_gdn_conv_status()
+            runtime_features["ple_conv_state"] = qwen4_ple_conv_status()
+            runtime_features["qsa_sparse_score"] = sparse_index_score_status(
+                "qwen4_exp"
+            )
+            runtime_features["gated_rmsnorm"] = gated_rmsnorm_decode_status()
         elif family == "glm5_next":
             from .metal.affine_moe_pair_decode import affine_moe_pair_status
+            from .metal.gated_rmsnorm_decode import gated_rmsnorm_decode_status
+            from .metal.glm5_hc_place_decode import glm5_hc_place_status
+            from .metal.glm5_mhc_decode import glm5_mhc_status
+            from .metal.kda_conv_decode import glm5_kda_conv_status
+            from .metal.kda_step_decode import glm5_kda_step_status
+            from .metal.sparse_index_score_decode import sparse_index_score_status
 
             runtime_features["affine_moe_pair"] = {
                 **runtime_features.get("affine_moe_pair", {}),
                 **affine_moe_pair_status("glm5_next"),
             }
+            runtime_features["kda_conv_state"] = glm5_kda_conv_status()
+            runtime_features["kda_recurrent_step"] = glm5_kda_step_status()
+            runtime_features["mhc_transform"] = glm5_mhc_status()
+            runtime_features["hc_place"] = glm5_hc_place_status()
+            runtime_features["dsa_sparse_score"] = sparse_index_score_status(
+                "glm5_next"
+            )
+            runtime_features["gated_rmsnorm"] = gated_rmsnorm_decode_status()
         elif family in {"qwen3_5", "qwen3_5_moe"}:
             from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_status
             from .models.qwen3_5_family.register import (

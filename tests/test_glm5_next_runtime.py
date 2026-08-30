@@ -98,8 +98,6 @@ class TestRegistration:
 
 class TestCacheAndForward:
     def test_cache_layout(self, tiny_model, glm5):
-        from mlx_lm.models.cache import ArraysCache
-
         cache = tiny_model.make_cache()
         kinds = [type(c) for c in cache]
         assert kinds == [glm5.Glm5KDACache, glm5.Glm5KDACache,
@@ -157,7 +155,10 @@ class TestCacheAndForward:
 
     @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
     def test_kda_qkv_conv_fusion_matches_stock(self, dtype):
-        from vmlx_engine.metal.kda_conv_decode import glm5_kda_conv_decode
+        from vmlx_engine.metal.kda_conv_decode import (
+            glm5_kda_conv_decode,
+            glm5_kda_conv_status,
+        )
         from vmlx_engine.models.glm5_next.kda import short_conv
 
         channels = 64
@@ -187,6 +188,7 @@ class TestCacheAndForward:
             enabled=True,
         )
         assert candidate is not None
+        assert glm5_kda_conv_status()["observed_calls"] == 1
         mx.eval(*candidate, *(value for pair in reference for value in pair))
         for index, (expected_out, expected_state) in enumerate(reference):
             actual_out = candidate[index]
@@ -214,7 +216,10 @@ class TestCacheAndForward:
 
     @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
     def test_kda_step_fusion_matches_stock(self, dtype):
-        from vmlx_engine.metal.kda_step_decode import glm5_kda_step_decode
+        from vmlx_engine.metal.kda_step_decode import (
+            glm5_kda_step_decode,
+            glm5_kda_step_status,
+        )
         from vmlx_engine.models.glm5_next.kda import kda_step
 
         heads, key_dim, value_dim = 4, 16, 16
@@ -246,6 +251,7 @@ class TestCacheAndForward:
             enabled=True,
         )
         assert candidate is not None
+        assert glm5_kda_step_status()["observed_calls"] == 1
         mx.eval(*reference, *candidate)
         assert mx.allclose(candidate[0], reference[0], rtol=2e-4, atol=2e-5)
         assert mx.allclose(candidate[1], reference[1], rtol=2e-4, atol=2e-5)
@@ -263,7 +269,10 @@ class TestCacheAndForward:
 
     @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
     def test_mhc_decode_fusion_matches_stock(self, dtype, glm5):
-        from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
+        from vmlx_engine.metal.glm5_mhc_decode import (
+            glm5_mhc_decode,
+            glm5_mhc_status,
+        )
 
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         module = glm5.HyperConnection(args)
@@ -288,6 +297,7 @@ class TestCacheAndForward:
             enabled=True,
         )
         assert candidate is not None
+        assert glm5_mhc_status()["observed_calls"] == 1
         mx.eval(*reference, *candidate)
         assert mx.allclose(candidate[0], reference[0], rtol=2e-4, atol=2e-5)
         assert mx.allclose(candidate[1], reference[1], rtol=2e-4, atol=2e-5)
@@ -323,6 +333,9 @@ class TestCacheAndForward:
         candidate = glm5.hc_place(
             post, comb, out, residual, fused_decode=True
         )
+        from vmlx_engine.metal.glm5_hc_place_decode import glm5_hc_place_status
+
+        assert glm5_hc_place_status()["observed_calls"] == 1
         mx.eval(reference, candidate)
         max_abs = float(
             mx.max(

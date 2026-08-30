@@ -2,6 +2,7 @@ import mlx.core as mx
 import pytest
 
 from vmlx_engine.metal.sparse_index_score_decode import (
+    sparse_index_score_status,
     sparse_index_scores_decode,
 )
 
@@ -33,11 +34,14 @@ def test_sparse_index_score_decode_matches_stock(heads, weighted):
     candidate = sparse_index_scores_decode(
         query,
         keys,
+        family="glm5_next" if weighted else "qwen4_exp",
         scale=head_dim**-0.5,
         head_weights=weights,
         enabled=True,
     )
     assert candidate is not None
+    family = "glm5_next" if weighted else "qwen4_exp"
+    assert sparse_index_score_status(family)["observed_calls"] == 1
     mx.eval(reference, candidate)
     max_abs = float(mx.max(mx.abs(candidate - reference)).item())
     max_ref = max(float(mx.max(mx.abs(reference)).item()), 1e-9)
@@ -55,5 +59,9 @@ def test_sparse_index_score_decode_refuses_non_decode_shape():
     query = mx.zeros((1, 2, 4, 128), dtype=mx.float32)
     keys = mx.zeros((1, 32, 128), dtype=mx.float32)
     assert sparse_index_scores_decode(
-        query, keys, scale=128**-0.5, enabled=True
+        query,
+        keys,
+        family="qwen4_exp",
+        scale=128**-0.5,
+        enabled=True,
     ) is None

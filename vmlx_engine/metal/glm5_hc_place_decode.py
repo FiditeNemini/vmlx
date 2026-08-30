@@ -7,6 +7,8 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+_OBSERVED = False
+
 
 def fused_glm5_hc_place_requested() -> bool:
     value = os.environ.get("VMLX_GLM5_FUSED_HC_PLACE", "0").strip().lower()
@@ -64,7 +66,7 @@ def glm5_hc_place_decode(
     if post.dtype != mx.float32 or comb.dtype != mx.float32:
         return None
 
-    return _kernel(streams, hidden)(
+    output = _kernel(streams, hidden)(
         inputs=[post, comb, block_out, residual],
         template=[("T", residual.dtype)],
         grid=(streams * hidden, 1, 1),
@@ -72,6 +74,22 @@ def glm5_hc_place_decode(
         output_shapes=[tuple(residual.shape)],
         output_dtypes=[residual.dtype],
     )[0]
+    global _OBSERVED
+    if not _OBSERVED:
+        _OBSERVED = True
+    return output
 
 
-__all__ = ["fused_glm5_hc_place_requested", "glm5_hc_place_decode"]
+def glm5_hc_place_status() -> dict[str, object]:
+    return {
+        "installed": _OBSERVED,
+        "observed_calls": int(_OBSERVED),
+        "reason": None,
+    }
+
+
+__all__ = [
+    "fused_glm5_hc_place_requested",
+    "glm5_hc_place_decode",
+    "glm5_hc_place_status",
+]

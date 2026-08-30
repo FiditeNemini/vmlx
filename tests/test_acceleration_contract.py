@@ -149,3 +149,23 @@ def test_server_acceleration_surface_embeds_family_contract(monkeypatch, tmp_pat
     assert family["schema"] == "vmlx-runtime-acceleration-v1"
     assert family["family"] == "glm5_next"
     assert _rows(family)["startup_warmup"]["state"] == "active_observed"
+
+
+def test_server_reports_observed_qwen_kernel_only_after_qualifying_call(
+    monkeypatch, tmp_path
+):
+    import vmlx_engine.server as server
+    from vmlx_engine.metal import gdn_conv_decode
+
+    (tmp_path / "config.json").write_text('{"model_type":"qwen4_exp"}')
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_GDN_CONV", "1")
+    monkeypatch.setattr(server, "_loaded_acceleration_attestation", lambda: None)
+    monkeypatch.setattr(gdn_conv_decode, "_OBSERVED", False)
+
+    before = server._family_acceleration_contract(str(tmp_path))
+    assert _rows(before)["gdn_conv_state"]["state"] == "configured_unattested"
+
+    monkeypatch.setattr(gdn_conv_decode, "_OBSERVED", True)
+    after = server._family_acceleration_contract(str(tmp_path))
+    assert _rows(after)["gdn_conv_state"]["state"] == "active_observed"
+    assert _rows(after)["gdn_conv_state"]["runtime"]["observed_calls"] == 1

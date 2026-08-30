@@ -7,8 +7,6 @@ against the stock gather_qmm op chain.
 
 import mlx.core as mx
 import mlx.nn as nn
-import pytest
-
 from vmlx_engine.metal import fused_pair_moe_decode as fpm
 
 D = 4096
@@ -113,6 +111,7 @@ def test_installs_and_matches_stock(monkeypatch):
     got = moe_cls._weighted_routed_experts(model.mlp, x, inds, scores).astype(
         mx.float32
     )
+    assert fpm.dsv4_fused_pair_moe_status()["observed_calls"] == 1
     mx.eval(ref, got)
     rel = float(mx.abs(got - ref).max()) / max(float(mx.abs(ref).max()), 1e-9)
     assert got.shape == ref.shape == (1, 1, K, D)

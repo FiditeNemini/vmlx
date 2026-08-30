@@ -56,6 +56,23 @@ def test_qwen4_affine_moe_pair_default_has_explicit_opt_out(monkeypatch):
     assert rows["affine_moe_pair"]["state"] == "disabled"
 
 
+def test_glm_mhc_default_has_explicit_opt_out(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+    from vmlx_engine.metal.glm5_mhc_decode import fused_glm5_mhc_requested
+
+    monkeypatch.delenv("VMLX_GLM5_FUSED_MHC", raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mhc_transform"]["requested"] is True
+    assert rows["mhc_transform"]["selection_source"] == "default"
+    assert fused_glm5_mhc_requested() is True
+
+    monkeypatch.setenv("VMLX_GLM5_FUSED_MHC", "0")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mhc_transform"]["requested"] is False
+    assert rows["mhc_transform"]["state"] == "disabled"
+    assert fused_glm5_mhc_requested() is False
+
+
 def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
 
@@ -76,10 +93,10 @@ def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     assert rows["startup_warmup"]["state"] == "active_observed"
     assert rows["kda_conv_state"]["state"] == "installed_unobserved"
     assert contract["summary"] == {
-        "requested": 4,
+        "requested": 5,
         "installed": 3,
         "observed": 1,
-        "source_only_or_unattested": 1,
+        "source_only_or_unattested": 2,
     }
 
 

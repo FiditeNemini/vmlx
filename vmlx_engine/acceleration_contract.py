@@ -235,7 +235,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 label="mHC decode transform fusion",
                 kind="metal_kernel",
                 scopes=("ar_decode", "mtp_decode"),
-                default=False,
+                default=True,
                 env=("VMLX_GLM5_FUSED_MHC",),
             ),
             _feature(

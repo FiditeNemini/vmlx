@@ -7,9 +7,11 @@ This diagnostic path evaluates the 24 projection rows as independent SIMD
 groups, then fuses every small-matrix operation and stream collapse into one
 epilogue dispatch. Prefill and unsupported layouts stay on stock MLX.
 
-``VMLX_GLM5_FUSED_MHC=1`` enables the candidate at model construction time.
-It stays disabled by default until an exact-bundle output/TPS A/B proves that
-the isolated win survives the complete decode graph.
+The candidate is enabled by default after exact-bundle output/TPS, syntax,
+native-MTP rollback, and terminal-finalization proof. Set
+``VMLX_GLM5_FUSED_MHC=0`` for an explicit stock-path rollback. Unsupported
+shapes, including prefill and multi-token MTP verification, still fall back to
+stock MLX automatically.
 """
 
 from __future__ import annotations
@@ -173,7 +175,7 @@ _EPILOGUE_SOURCE = """
 
 
 def fused_glm5_mhc_requested() -> bool:
-    value = os.environ.get("VMLX_GLM5_FUSED_MHC", "0").strip().lower()
+    value = os.environ.get("VMLX_GLM5_FUSED_MHC", "1").strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 
 

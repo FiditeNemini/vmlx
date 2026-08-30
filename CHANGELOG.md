@@ -16,6 +16,7 @@ All notable changes to vMLX Engine will be documented in this file.
 - **Signed-candidate Actions restore only hash-sealed retained evidence for the exact source SHA.** Clean GitHub checkouts no longer discard the current live/packaged receipts required by the production prepackage gate; the gate still revalidates those artifacts before building.
 - **Dedicated release runners can use a prevalidated notarytool Keychain profile.** Developer ID signing still uses an ephemeral per-run keychain, while the existing App Store Connect credential remains non-exportable in the runner's login Keychain.
 - **Candidate provenance validation runs on the runner's system Python.** The version check no longer assumes Python 3.11's `tomllib` before the workflow creates its isolated release environment.
+- **Dedicated release runners may keep the Developer ID identity non-exportable.** Candidate CI validates the exact ShieldStack team identity in the login Keychain instead of requiring a PKCS#12 round trip.
 
 ---
 

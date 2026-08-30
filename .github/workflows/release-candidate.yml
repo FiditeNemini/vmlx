@@ -122,6 +122,7 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
           APPLE_NOTARY_EXISTING_PROFILE: ${{ vars.APPLE_NOTARY_KEYCHAIN_PROFILE }}
+          APPLE_USE_EXISTING_SIGNING_IDENTITY: ${{ vars.APPLE_USE_EXISTING_SIGNING_IDENTITY }}
         run: .github/scripts/setup_apple_signing.sh install
 
       - name: Install isolated release dependencies

@@ -44,6 +44,11 @@ login Keychain, set the `apple-release-signing` environment variable
 creates and removes an ephemeral Developer ID signing keychain, but validates
 and uses the existing notary profile without exporting its private key.
 
+If that dedicated runner also owns the exact Developer ID Application identity,
+set `APPLE_USE_EXISTING_SIGNING_IDENTITY=1`. The workflow requires exactly one
+matching ShieldStack team identity and leaves it in the login Keychain; it does
+not export the private key or use the PKCS#12 secrets in that mode.
+
 ### Protected environments
 
 Create all four environments with Eric as a required reviewer. While Eric is

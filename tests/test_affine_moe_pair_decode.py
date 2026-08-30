@@ -8,6 +8,7 @@ from mlx_lm.models.switch_layers import SwiGLU, SwitchGLU
 from vmlx_engine.metal.affine_moe_pair_decode import (
     _CONFIG_ATTR,
     _PairConfig,
+    _requested,
     _run_pair,
     _run_weighted_down,
     affine_moe_pair_activation,
@@ -24,6 +25,18 @@ def _quantized_switch(*, bits: int, activation: nn.Module) -> SwitchGLU:
         projection.biases = projection.biases.astype(mx.float16)
     switch.eval()
     return switch
+
+
+def test_affine_moe_pair_family_defaults_and_explicit_overrides(monkeypatch):
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.delenv("VMLX_GLM5_FUSED_MOE_PAIR", raising=False)
+    assert _requested("qwen4_exp") is True
+    assert _requested("glm5_next") is False
+
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR", "0")
+    monkeypatch.setenv("VMLX_GLM5_FUSED_MOE_PAIR", "1")
+    assert _requested("qwen4_exp") is False
+    assert _requested("glm5_next") is True
 
 
 @pytest.mark.parametrize(

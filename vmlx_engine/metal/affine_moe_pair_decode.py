@@ -8,8 +8,10 @@ reduce all selected experts directly into the routed output; mixed q3 layers
 retain MLX down/reduction. No path duplicates the expert payload.
 
 Only source-audited production geometries are accepted.  Registration is
-atomic per family and disabled by default until exact-bundle live A/B proves a
-throughput win and acceptable output parity.
+atomic per family.  Qwen4-Exp is enabled by default after exact-bundle AR/MTP,
+Electron, Chat Completions, Responses, image, video, and tool-continuation
+proof; its environment flag remains an explicit opt-out.  GLM5-Next remains
+opt-in until its own equivalent gate is complete.
 """
 
 from __future__ import annotations
@@ -83,13 +85,21 @@ _FAMILY_CONTRACTS = {
     },
 }
 
+_DEFAULT_ENABLED = {
+    "qwen4_exp": True,
+    "glm5_next": False,
+}
+
 
 def _requested(family: str) -> bool:
     env = {
         "qwen4_exp": "VMLX_QWEN4_FUSED_MOE_PAIR",
         "glm5_next": "VMLX_GLM5_FUSED_MOE_PAIR",
     }[family]
-    value = os.environ.get(env, "0").strip().lower()
+    value = os.environ.get(env)
+    if value is None:
+        return _DEFAULT_ENABLED[family]
+    value = value.strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 
 

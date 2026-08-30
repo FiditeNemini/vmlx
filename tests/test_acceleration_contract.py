@@ -35,9 +35,25 @@ def test_qwen4_contract_never_calls_requested_kernel_installed(monkeypatch):
     assert rows["projection_groups"]["state"] == "configured_unattested"
     assert rows["gdn_conv_state"]["requested"] is True
     assert rows["gdn_conv_state"]["state"] == "configured_unattested"
+    assert rows["affine_moe_pair"]["requested"] is True
+    assert rows["affine_moe_pair"]["selection_source"] == "default"
     assert rows["affine_moe"]["requested"] is False
     assert rows["affine_moe"]["state"] == "disabled"
     assert contract["summary"]["installed"] == 0
+
+
+def test_qwen4_affine_moe_pair_default_has_explicit_opt_out(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+    rows = _rows(build_acceleration_contract("qwen4_exp"))
+    assert rows["affine_moe_pair"]["requested"] is True
+    assert rows["affine_moe_pair"]["state"] == "configured_unattested"
+
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR", "0")
+    rows = _rows(build_acceleration_contract("qwen4_exp"))
+    assert rows["affine_moe_pair"]["requested"] is False
+    assert rows["affine_moe_pair"]["state"] == "disabled"
 
 
 def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):

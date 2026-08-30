@@ -80,7 +80,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 label="affine MoE gate/up and weighted-down fusion",
                 kind="metal_kernel",
                 scopes=("ar_decode", "mtp_decode"),
-                default=False,
+                default=True,
                 env=("VMLX_QWEN4_FUSED_MOE_PAIR",),
             ),
             _feature(

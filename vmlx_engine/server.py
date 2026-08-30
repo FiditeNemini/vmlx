@@ -12834,6 +12834,66 @@ def _live_ssm_prefix_lookup(scheduler: Any) -> dict[str, Any] | None:
     return dict(lookup) if isinstance(lookup, dict) and lookup else None
 
 
+def _live_mllm_request_lifecycle_snapshot(
+    scheduler: Any,
+) -> dict[str, Any] | None:
+    """Read the MLLM request lifecycle without running heavy cache stats.
+
+    Busy ``/health`` responses intentionally reuse the last idle diagnostics
+    snapshot so polling cannot stall decode.  The MLLM scheduler already owns
+    a lock-protected, prompt-free view of collectors, waiting requests,
+    running requests, and terminal cleanup.  Rebuild only that small view so
+    the cached response never reports an in-flight gateway request as idle.
+    """
+    lock = getattr(scheduler, "_queue_lock", None)
+    output_queues = getattr(scheduler, "output_queues", None)
+    waiting = getattr(scheduler, "waiting", None)
+    running = getattr(scheduler, "running", None)
+    cleanup_event = getattr(scheduler, "_terminal_cleanup_complete", None)
+    if (
+        lock is None
+        or not isinstance(output_queues, dict)
+        or waiting is None
+        or not isinstance(running, dict)
+        or cleanup_event is None
+        or not callable(getattr(cleanup_event, "is_set", None))
+    ):
+        return None
+    try:
+        with lock:
+            collector_request_ids = sorted(output_queues)
+            waiting_request_ids = [
+                request.request_id for request in waiting
+            ]
+            running_request_ids = sorted(running)
+            lifecycle_stats = {
+                "engine_collector_count": len(collector_request_ids),
+                "engine_collector_request_ids": collector_request_ids,
+                "num_waiting": len(waiting_request_ids),
+                "waiting_request_ids": waiting_request_ids,
+                "num_running": len(running_request_ids),
+                "running_request_ids": running_request_ids,
+                "running_requests": [
+                    {
+                        "request_id": request_id,
+                        "status": getattr(
+                            getattr(running[request_id], "status", None),
+                            "name",
+                            str(getattr(running[request_id], "status", "")),
+                        ),
+                    }
+                    for request_id in running_request_ids
+                ],
+                "terminal_cleanup_pending": not cleanup_event.is_set(),
+            }
+    except Exception:
+        return None
+    return _request_lifecycle_health_snapshot(
+        lifecycle_stats,
+        lifecycle_stats,
+    )
+
+
 def _health_status_value() -> str:
     if _standby_state:
         return f"standby_{_standby_state}"  # "standby_soft" or "standby_deep"
@@ -12935,6 +12995,11 @@ async def health():
                 _companion_block["last_prefix_lookup"] = _live_lookup
             else:
                 _companion_block.pop("last_prefix_lookup", None)
+        _live_lifecycle = _live_mllm_request_lifecycle_snapshot(
+            scheduler_probe
+        )
+        if _live_lifecycle is not None:
+            result["request_lifecycle"] = _live_lifecycle
         result["health_gauges_cached"] = True
         result["wake_in_progress"] = _wake_in_progress
         result["load_progress"] = _lifecycle_progress.snapshot()

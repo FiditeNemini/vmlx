@@ -333,6 +333,48 @@ class TestHealthEndpoint:
         assert lifecycle["terminal_cleanup_pending"] is False
         assert "chatcmpl-route" not in json.dumps(lifecycle, sort_keys=True)
 
+    def test_live_mllm_lifecycle_snapshot_is_prompt_free_and_current(self):
+        """Busy health can attest MLLM ownership without heavy get_stats()."""
+        from vmlx_engine import server
+
+        cleanup = asyncio.Event()
+        scheduler = SimpleNamespace(
+            _queue_lock=threading.RLock(),
+            output_queues={"chatcmpl-live": object()},
+            waiting=[],
+            running={
+                "chatcmpl-live": SimpleNamespace(
+                    request_id="chatcmpl-live",
+                    status=SimpleNamespace(name="RUNNING"),
+                    prompt="must never appear",
+                )
+            },
+            _terminal_cleanup_complete=cleanup,
+        )
+
+        lifecycle = server._live_mllm_request_lifecycle_snapshot(scheduler)
+        request_hash = hashlib.sha256(b"chatcmpl-live").hexdigest()
+
+        assert lifecycle == {
+            "schema": "vmlx-request-lifecycle-v1",
+            "request_id_encoding": "sha256-utf8-lowerhex",
+            "available": True,
+            "engine_collector_count": 1,
+            "engine_collector_request_ids_sha256": [request_hash],
+            "scheduler_waiting_count": 0,
+            "scheduler_waiting_request_ids_sha256": [],
+            "scheduler_running_count": 1,
+            "scheduler_running_request_ids_sha256": [request_hash],
+            "scheduler_running_requests": [
+                {"request_id_sha256": request_hash, "status": "RUNNING"}
+            ],
+            "active_request_count": 1,
+            "active_request_ids_sha256": [request_hash],
+            "terminal_cleanup_pending": True,
+        }
+        assert "chatcmpl-live" not in json.dumps(lifecycle, sort_keys=True)
+        assert "must never appear" not in json.dumps(lifecycle, sort_keys=True)
+
     def test_health_mtp_route_is_registered(self):
         """MTP diagnostics should have a stable direct health route alias."""
         from vmlx_engine.server import app
@@ -1633,13 +1675,41 @@ class TestHealthBusySnapshot:
                 sched_stats_calls_after_idle = mock_scheduler.get_stats.call_count
                 assert server._health_snapshot_cache["result"] is not None
 
-                mock_scheduler.running = {"req-1": object()}
+                mock_scheduler._queue_lock = threading.RLock()
+                mock_scheduler.output_queues = {"req-1": object()}
+                mock_scheduler.waiting = []
+                mock_scheduler.running = {
+                    "req-1": SimpleNamespace(
+                        request_id="req-1",
+                        status=SimpleNamespace(name="RUNNING"),
+                    )
+                }
+                cleanup = asyncio.Event()
+                mock_scheduler._terminal_cleanup_complete = cleanup
                 busy_result = _run(server.health())
 
             assert busy_result["health_gauges_cached"] is True
             assert busy_result["status"] == "healthy"
             assert busy_result["scheduler"]["num_running"] == 1
             assert busy_result["scheduler"]["num_waiting"] == 0
+            request_hash = hashlib.sha256(b"req-1").hexdigest()
+            assert busy_result["request_lifecycle"] == {
+                "schema": "vmlx-request-lifecycle-v1",
+                "request_id_encoding": "sha256-utf8-lowerhex",
+                "available": True,
+                "engine_collector_count": 1,
+                "engine_collector_request_ids_sha256": [request_hash],
+                "scheduler_waiting_count": 0,
+                "scheduler_waiting_request_ids_sha256": [],
+                "scheduler_running_count": 1,
+                "scheduler_running_request_ids_sha256": [request_hash],
+                "scheduler_running_requests": [
+                    {"request_id_sha256": request_hash, "status": "RUNNING"}
+                ],
+                "active_request_count": 1,
+                "active_request_ids_sha256": [request_hash],
+                "terminal_cleanup_pending": True,
+            }
             # Heavy collectors must not have run again on the busy poll.
             assert (
                 mock_engine.get_stats.call_count

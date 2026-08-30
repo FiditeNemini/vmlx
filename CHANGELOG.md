@@ -4,6 +4,18 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.47] - 2026-08-30
+
+### Performance
+- **Qwen3.8 Flash Next starts adaptive native MTP from measured D3 when bundle evidence is absent or incomplete.** The request-local controller still compares wall value and may demote or restore depth; complete bundle tuning remains authoritative. Matched 4S and 4M sweeps selected D3 with byte-identical AR/MTP outputs and measured adaptive speedups of 2.19x and 1.81x respectively.
+- **Flash-Next primes its native MTP head from prompt history.** Cold prompts and exact restored-prefix tails reuse the already-computed pre-norm trunk state, including the engine's N-1 partial-terminal-block boundary, without introducing an unversioned SSD schema.
+
+### Fixed
+- **Incomplete native-MTP tuning records no longer pin a bundle to an unmeasured optimum.** A flat best-depth record above D1 must cover every supported depth through its declared ceiling. Complete D1/D2/D3 tuning, including Qwen3.8-27B's measured profile, remains authoritative.
+- **Dense Qwen3.5 prompt priming is fail-safe.** The implementation remains available for explicit measurement, but stays off by default because its matched 27B trials improved acceptance without a repeatable wall-time win.
+
+---
+
 ## [1.6.46] - 2026-08-30
 
 ### Added

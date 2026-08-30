@@ -4,7 +4,13 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [Unreleased]
+## [1.6.48] - 2026-08-30
+
+### Performance
+- **GLM-5.3 native MTP verification now batches affine KDA projections across the speculative slab.** The optimized verifier preserves sequential convolution and recurrent state, exact accepted-prefix rollback, and output bytes while using the stock MLX affine QMM/TensorOps/NAX path. Matched live measurements selected fixed D2 for the current GLM-5.3-Flash JANG MTP bundle; D3 remains slower for that bundle and is not forced globally.
+
+### Added
+- **Native-MTP and cache benchmarks can use stable prompts, exact depth arms, and typed prompt-SSD restart namespaces.** The harness records durable request identity and family-native cache restoration so speed claims remain attributable to AR, D1, D2, or D3 instead of mixed cache state.
 
 ### Fixed
 - **Hugging Face downloads no longer fail after transfer begins when the Hub client refreshes its progress bar.** The app's structured byte-progress adapter now implements the `refresh()` method required by current `huggingface_hub` download paths.

@@ -47,9 +47,128 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight-production:
+    name: Preflight cross-repository publication credentials
+    runs-on: ubuntu-latest
+    environment: production-release
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Select configured release credential
+        id: auth
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_APP_ID" && -n "$RELEASE_APP_PRIVATE_KEY" ]]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$RELEASE_PAT" ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            echo "Configure the release GitHub App or protected RELEASE_PAT before publication." >&2
+            exit 1
+          fi
+
+      - name: Mint preflight release-app credential
+        if: ${{ steps.auth.outputs.mode == 'app' }}
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: jjang-ai
+          repositories: |
+            vmlx
+            mlxstudio
+            jangq
+
+      - name: Prove required repository permissions
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          for repo in vmlx mlxstudio jangq; do
+            test "$(gh api "repos/jjang-ai/${repo}" --jq '.permissions.push')" = true
+          done
+          test "$(gh api repos/jjang-ai/jangq/actions/permissions --jq .enabled)" = true
+
+  preflight-pypi:
+    name: Preflight PyPI Trusted Publisher configuration
+    runs-on: ubuntu-latest
+    environment: pypi
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Require reviewed Trusted Publisher registration
+        env:
+          TRUSTED_PUBLISHER_CONFIGURED: ${{ vars.TRUSTED_PUBLISHER_CONFIGURED }}
+        run: |
+          set -euo pipefail
+          test "$TRUSTED_PUBLISHER_CONFIGURED" = true || {
+            echo "Register jjang-ai/vmlx publish-release.yml, environment pypi, as a PyPI Trusted Publisher." >&2
+            exit 1
+          }
+
+  preflight-website:
+    name: Preflight website deployment credentials
+    runs-on: ubuntu-latest
+    environment: website-release
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Prove website origin access before publication
+        if: ${{ inputs.deploy_website }}
+        env:
+          WEBSITE_SSH_PRIVATE_KEY: ${{ secrets.WEBSITE_SSH_PRIVATE_KEY }}
+          WEBSITE_SSH_HOST_KEY: ${{ vars.WEBSITE_SSH_HOST_KEY }}
+          WEBSITE_SSH_HOST: ${{ vars.WEBSITE_SSH_HOST }}
+          WEBSITE_SSH_USER: ${{ vars.WEBSITE_SSH_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$WEBSITE_SSH_PRIVATE_KEY"
+          test -n "$WEBSITE_SSH_HOST_KEY"
+          [[ "$WEBSITE_SSH_HOST" =~ ^[A-Za-z0-9.-]+$ ]]
+          [[ "$WEBSITE_SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]]
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$WEBSITE_SSH_PRIVATE_KEY" > "$HOME/.ssh/release_key"
+          printf '%s\n' "$WEBSITE_SSH_HOST_KEY" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/release_key" "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/release_key" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "${WEBSITE_SSH_USER}@${WEBSITE_SSH_HOST}" \
+            'test -w /var/www/mlx.studio/update && test -w /var/www/mlx.studio/download && test -w /var/backups/vmlx-releases'
+
+      - name: Validate optional Cloudflare configuration
+        if: ${{ inputs.deploy_website }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          MLX_STUDIO_ZONE_ID: ${{ vars.CLOUDFLARE_MLX_STUDIO_ZONE_ID }}
+          VMLX_NET_ZONE_ID: ${{ vars.CLOUDFLARE_VMLX_NET_ZONE_ID }}
+        run: |
+          set -euo pipefail
+          values=0
+          [[ -n "$CLOUDFLARE_API_TOKEN" ]] && values=$((values + 1))
+          [[ -n "$MLX_STUDIO_ZONE_ID" ]] && values=$((values + 1))
+          [[ -n "$VMLX_NET_ZONE_ID" ]] && values=$((values + 1))
+          if [[ "$values" -ne 0 && "$values" -ne 3 ]]; then
+            echo "Configure all Cloudflare values or leave all three unset." >&2
+            exit 1
+          fi
+          echo "cloudflare_configured=$([[ "$values" -eq 3 ]] && echo true || echo false)"
+
   validate:
     name: Validate immutable candidate and public heads
     if: ${{ !inputs.pypi_recovery }}
+    needs: [preflight-production, preflight-pypi, preflight-website]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -142,7 +261,24 @@ jobs:
       contents: write
 
     steps:
+      - name: Select release credential
+        id: auth
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_APP_ID" && -n "$RELEASE_APP_PRIVATE_KEY" ]]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$RELEASE_PAT" ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
       - name: Create narrowly scoped release-app token
+        if: ${{ steps.auth.outputs.mode == 'app' }}
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -163,7 +299,7 @@ jobs:
 
       - name: Stage and publish identical releases
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RELEASE_PAT }}
           TAG: v${{ inputs.version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -201,6 +337,12 @@ jobs:
       id-token: write
 
     steps:
+      - name: Check out immutable release helper
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
       - name: Download exact candidate artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -209,7 +351,16 @@ jobs:
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
 
+      - name: Check immutable PyPI version state
+        id: pypi-state
+        run: |
+          .github/scripts/release_metadata.py check-pypi \
+            --metadata candidate/release-info.json \
+            --version "${{ inputs.version }}" \
+            --github-output "$GITHUB_OUTPUT"
+
       - name: Publish without a stored PyPI token
+        if: ${{ steps.pypi-state.outputs.publish_required == 'true' }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           packages-dir: candidate/python-dist/
@@ -218,6 +369,7 @@ jobs:
   recover-pypi:
     name: Recover PyPI publication from exact GitHub release assets
     if: ${{ inputs.pypi_recovery }}
+    needs: [preflight-production, preflight-pypi, preflight-website]
     runs-on: ubuntu-latest
     environment: pypi
     timeout-minutes: 30
@@ -270,12 +422,17 @@ jobs:
               assert path.stat().st_size == artifact["bytes"], path
               assert hashlib.sha256(path.read_bytes()).hexdigest() == artifact["sha256"], path
           PY
-          if curl -fsS "https://pypi.org/pypi/vmlx/${VERSION_INPUT}/json" >/dev/null; then
-            echo "vmlx ${VERSION_INPUT} already exists on PyPI" >&2
-            exit 1
-          fi
+
+      - name: Check immutable PyPI version state
+        id: pypi-state
+        run: |
+          .github/scripts/release_metadata.py check-pypi \
+            --metadata candidate/release-info.json \
+            --version "${{ inputs.version }}" \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Publish exact release assets without a stored PyPI token
+        if: ${{ steps.pypi-state.outputs.publish_required == 'true' }}
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           packages-dir: candidate/python-dist/
@@ -283,7 +440,11 @@ jobs:
 
   update-manifests:
     name: Update byte-identical updater manifests
-    needs: [validate, publish-github, publish-pypi]
+    needs: [validate, publish-github, publish-pypi, recover-pypi]
+    if: >-
+      ${{ always() &&
+          ((!inputs.pypi_recovery && needs.publish-pypi.result == 'success') ||
+           (inputs.pypi_recovery && needs.recover-pypi.result == 'success')) }}
     runs-on: ubuntu-latest
     environment: production-release
     timeout-minutes: 30
@@ -292,7 +453,24 @@ jobs:
       contents: write
 
     steps:
+      - name: Select release credential
+        id: auth
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_APP_ID" && -n "$RELEASE_APP_PRIVATE_KEY" ]]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$RELEASE_PAT" ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
       - name: Create narrowly scoped release-app token
+        if: ${{ steps.auth.outputs.mode == 'app' }}
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -308,7 +486,7 @@ jobs:
         with:
           repository: jjang-ai/vmlx
           ref: main
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || secrets.RELEASE_PAT }}
           path: repo-vmlx
           fetch-depth: 0
 
@@ -317,7 +495,7 @@ jobs:
         with:
           repository: jjang-ai/mlxstudio
           ref: main
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || secrets.RELEASE_PAT }}
           path: repo-mlxstudio
           fetch-depth: 0
 
@@ -363,14 +541,31 @@ jobs:
 
   publish-jangq:
     name: Dispatch JANGQ's exact tagged publisher
-    if: ${{ inputs.publish_jangq }}
+    if: ${{ inputs.publish_jangq && !inputs.pypi_recovery }}
     needs: [validate, update-manifests]
     runs-on: ubuntu-latest
     environment: production-release
     timeout-minutes: 30
 
     steps:
+      - name: Select release credential
+        id: auth
+        env:
+          RELEASE_APP_ID: ${{ vars.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_APP_ID" && -n "$RELEASE_APP_PRIVATE_KEY" ]]; then
+            echo "mode=app" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$RELEASE_PAT" ]]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          else
+            exit 1
+          fi
+
       - name: Create narrowly scoped release-app token
+        if: ${{ steps.auth.outputs.mode == 'app' }}
         id: app-token
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         with:
@@ -381,7 +576,7 @@ jobs:
 
       - name: Dispatch and wait for JANGQ Trusted Publishing
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RELEASE_PAT }}
           JANGQ_TAG: ${{ inputs.jangq_tag }}
         run: |
           set -euo pipefail
@@ -465,7 +660,13 @@ jobs:
           VMLX_NET_ZONE_ID: ${{ vars.CLOUDFLARE_VMLX_NET_ZONE_ID }}
         run: |
           set -euo pipefail
+          if [[ -z "$CLOUDFLARE_API_TOKEN" && -z "$MLX_STUDIO_ZONE_ID" && -z "$VMLX_NET_ZONE_ID" ]]; then
+            echo "Cloudflare purge credentials are not configured; live verification uses cache-busting URLs."
+            exit 0
+          fi
           test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$MLX_STUDIO_ZONE_ID"
+          test -n "$VMLX_NET_ZONE_ID"
           purge() {
             local zone="$1"
             shift
@@ -484,15 +685,20 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          user_agent="Mozilla/5.0 vMLX-Release-Verification/${GITHUB_RUN_ID}"
           for url in \
             https://raw.githubusercontent.com/jjang-ai/vmlx/main/latest.json \
             https://raw.githubusercontent.com/jjang-ai/mlxstudio/main/latest.json \
             https://mlx.studio/update/latest.json \
             https://vmlx.net/update/latest.json; do
-            curl -fsSL --retry 6 --retry-delay 5 "$url" -o fetched.json
+            separator="?"
+            [[ "$url" == *\?* ]] && separator="&"
+            curl -A "$user_agent" -fsSL --retry 6 --retry-delay 5 \
+              "${url}${separator}release=${VERSION}&run=${GITHUB_RUN_ID}" -o fetched.json
             cmp website/published-latest.json fetched.json
           done
-          curl -fsSL --retry 6 --retry-delay 5 https://mlx.studio/download/ -o download.html
+          curl -A "$user_agent" -fsSL --retry 6 --retry-delay 5 \
+            "https://mlx.studio/download/?release=${VERSION}&run=${GITHUB_RUN_ID}" -o download.html
           grep -Fq "vMLX-${VERSION}-tahoe-arm64.dmg" download.html
           grep -Fq "vMLX-${VERSION}-sequoia-arm64.dmg" download.html
           grep -Fq "\"softwareVersion\": \"${VERSION}\"" download.html

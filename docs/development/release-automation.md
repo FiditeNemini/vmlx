@@ -86,6 +86,12 @@ Create a GitHub App installed only on `jjang-ai/vmlx`,
 Store the App ID as environment variable `RELEASE_APP_ID` and its private key
 as secret `RELEASE_APP_PRIVATE_KEY`. This avoids a broad personal access token.
 
+For emergency continuity while the App is being provisioned, the workflow also
+accepts `RELEASE_PAT` as a protected-environment secret. It must be a
+fine-grained credential limited to the three named repositories and removed as
+soon as the GitHub App is available. The publication preflight proves access to
+all required repositories before any public release is created.
+
 #### `pypi`
 
 Do not add a PyPI API token. Configure a PyPI Trusted Publisher for project
@@ -97,6 +103,11 @@ Repository: vmlx
 Workflow: publish-release.yml
 Environment: pypi
 ```
+
+After the publisher is registered and reviewed, set the `pypi` environment
+variable `TRUSTED_PUBLISHER_CONFIGURED=true`. The workflow refuses to create a
+GitHub release until this explicit setup receipt is present. PyPI remains the
+authority during publication; no API credential is stored by the workflow.
 
 The publish job has only `id-token: write` plus read permissions and uses the
 official PyPA publisher action pinned to an immutable commit.
@@ -111,7 +122,7 @@ workflow dispatches that owner and waits for it.
 Secrets:
 
 - `WEBSITE_SSH_PRIVATE_KEY`
-- `CLOUDFLARE_API_TOKEN`
+- `CLOUDFLARE_API_TOKEN` (optional when all Cloudflare values are omitted)
 
 Variables:
 
@@ -124,6 +135,10 @@ Variables:
 The SSH principal needs write permission to `/var/www/mlx.studio/update`,
 `/var/www/mlx.studio/download`, and `/var/backups/vmlx-releases`. Deployment is
 atomic and takes an outside-web-root backup before changing the two pages.
+The preflight proves that access before any GitHub or PyPI mutation. Configure
+all three Cloudflare values to enable an explicit purge, or leave all three
+unset; cache-busting, browser-compatible live verification is mandatory either
+way.
 
 ## Operating sequence
 
@@ -183,6 +198,13 @@ Publication across GitHub, PyPI, Git, and the website cannot be globally
 transactional. A later-stage failure must be treated as a partial public
 release and resumed at the failed owning surface; never rebuild different DMG
 bytes under the same version.
+
+`pypi_recovery=true` is the exact-byte continuation path after GitHub release
+publication. It verifies the public wheel and source archive when they already
+exist (and publishes only when absent), then resumes the byte-identical updater
+manifests and idempotent website deployment. A same-version mismatch on PyPI or
+the website fails closed. Re-running the website owner against an already exact
+version succeeds without creating another backup.
 
 ## Proof boundary
 

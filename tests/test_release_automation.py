@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import yaml
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,6 +129,22 @@ def test_release_metadata_round_trip_and_tahoe_default(tmp_path):
         "/v9.8.7/vMLX-9.8.7-sequoia-arm64.dmg"
     )
 
+    assert module.classify_pypi_release(release_info, None) == "missing"
+    pypi_payload = {
+        "urls": [
+            {
+                "filename": record["filename"],
+                "size": record["bytes"],
+                "digests": {"sha256": record["sha256"]},
+            }
+            for record in release_info["python_distributions"].values()
+        ]
+    }
+    assert module.classify_pypi_release(release_info, pypi_payload) == "exact"
+    pypi_payload["urls"][0]["size"] += 1
+    with pytest.raises(SystemExit, match="different artifact set"):
+        module.classify_pypi_release(release_info, pypi_payload)
+
 
 def test_website_deployer_backs_up_and_updates_both_flavors(tmp_path):
     site = tmp_path / "site"
@@ -180,6 +197,23 @@ def test_website_deployer_backs_up_and_updates_both_flavors(tmp_path):
     assert (backups / "vmlx-9.8.6-before-9.8.7/latest.json").is_file()
     assert json.loads((site / "update/latest.json").read_text()) == updater
 
+    # A resumed workflow must verify-and-skip the exact deployed version rather
+    # than fail because its versioned backup already exists.
+    subprocess.run(
+        [
+            sys.executable,
+            str(SITE_SCRIPT),
+            "--site-root",
+            str(site),
+            "--updater",
+            str(updater_path),
+            "--backup-root",
+            str(backups),
+        ],
+        check=True,
+    )
+    assert len(list(backups.iterdir())) == 1
+
 
 def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     workflow_dir = ROOT / ".github/workflows"
@@ -191,8 +225,13 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
         "dev-build.yml",
         "release-candidate.yml",
         "publish-release.yml",
+        "release-automation-ci.yml",
     }
     for name, (source, parsed) in files.items():
+        if name == "release-automation-ci.yml":
+            assert set(parsed["on"]) == {"push", "pull_request"}
+            assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in source
+            continue
         assert set(parsed["on"]) == {"workflow_dispatch"}, name
         assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in source
         assert "PYPI_API_TOKEN" not in source
@@ -245,6 +284,12 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "Publish without a stored PyPI token" in publish
     assert "publish-pypi.yml -R jjang-ai/jangq" in publish
     assert "cmp repo-vmlx/latest.json repo-mlxstudio/latest.json" in publish
+    assert "TRUSTED_PUBLISHER_CONFIGURED" in publish
+    assert "secrets.RELEASE_PAT" in publish
+    assert "release_metadata.py check-pypi" in publish
+    assert "publish_required == 'true'" in publish
+    assert "Mozilla/5.0 vMLX-Release-Verification" in publish
+    assert "Check out immutable release helper" in publish
 
 
 def test_after_pack_detaches_engine_source_hardlinks(tmp_path):

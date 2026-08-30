@@ -15,6 +15,8 @@ import json
 import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -312,6 +314,62 @@ def write_updater(args: argparse.Namespace) -> None:
     write_json(args.output, updater)
 
 
+def classify_pypi_release(
+    metadata: dict[str, Any], payload: dict[str, Any] | None
+) -> str:
+    """Return missing/exact and reject a conflicting immutable PyPI version."""
+
+    expected = {
+        record["filename"]: (record["bytes"], record["sha256"])
+        for record in metadata.get("python_distributions", {}).values()
+    }
+    if len(expected) != 2:
+        fail("release metadata must contain exactly one wheel and one source archive")
+    if payload is None:
+        return "missing"
+
+    actual = {
+        row.get("filename"): (
+            row.get("size"),
+            row.get("digests", {}).get("sha256"),
+        )
+        for row in payload.get("urls", [])
+    }
+    if actual != expected:
+        fail(
+            "PyPI version exists with a different artifact set: "
+            f"expected {sorted(expected)}, got {sorted(actual)}"
+        )
+    return "exact"
+
+
+def check_pypi(args: argparse.Namespace) -> None:
+    metadata = load_json(args.metadata)
+    version = require_version(args.version)
+    if metadata.get("version") != version:
+        fail("PyPI check version does not match release metadata")
+
+    url = f"https://pypi.org/pypi/vmlx/{version}/json"
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            fail(f"PyPI release query failed with HTTP {exc.code}")
+        payload = None
+    except (OSError, json.JSONDecodeError) as exc:
+        fail(f"PyPI release query failed: {exc}")
+
+    state = classify_pypi_release(metadata, payload)
+    publish_required = "true" if state == "missing" else "false"
+    output = args.github_output
+    if output is not None:
+        with output.open("a", encoding="utf-8") as handle:
+            handle.write(f"state={state}\n")
+            handle.write(f"publish_required={publish_required}\n")
+    print(f"PyPI vmlx {version}: {state}")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     sub = root.add_subparsers(dest="command", required=True)
@@ -345,6 +403,12 @@ def parser() -> argparse.ArgumentParser:
     updater.add_argument("--notes", type=Path, required=True)
     updater.add_argument("--output", type=Path, required=True)
     updater.set_defaults(func=write_updater)
+
+    pypi = sub.add_parser("check-pypi")
+    pypi.add_argument("--metadata", type=Path, required=True)
+    pypi.add_argument("--version", required=True)
+    pypi.add_argument("--github-output", type=Path)
+    pypi.set_defaults(func=check_pypi)
     return root
 
 

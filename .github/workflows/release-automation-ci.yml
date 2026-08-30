@@ -1,0 +1,31 @@
+name: Release automation CI
+
+on:
+  push:
+    paths:
+      - ".github/**"
+      - "docs/development/release-automation.md"
+      - "tests/test_release_automation.py"
+  pull_request:
+    paths:
+      - ".github/**"
+      - "docs/development/release-automation.md"
+      - "tests/test_release_automation.py"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install contract-test dependencies
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2 PyYAML==6.0.2
+      - name: Validate release automation contracts
+        run: >-
+          python -m pytest tests/test_release_automation.py -q
+          -k "release_metadata_round_trip or website_deployer or workflows_are_manual or release_automation_excludes"

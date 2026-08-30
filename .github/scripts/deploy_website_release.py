@@ -63,13 +63,34 @@ def main() -> int:
     if VERSION_RE.fullmatch(old_version) is None:
         raise SystemExit("ERROR: current download page version is invalid")
 
+    if old_version == version:
+        if not updater_target.is_file():
+            raise SystemExit("ERROR: current-version website is missing its updater")
+        current_updater = json.loads(updater_target.read_text(encoding="utf-8"))
+        if current_updater != updater:
+            raise SystemExit("ERROR: current-version website updater differs from candidate")
+        for entry in (tahoe, sequoia):
+            if entry["url"] not in html:
+                raise SystemExit(
+                    f"ERROR: current-version page is missing {entry['url']}"
+                )
+        print(f"Website release surfaces already match {version}")
+        return 0
+
     backup = args.backup_root.resolve() / f"vmlx-{old_version}-before-{version}"
     if backup.exists():
-        raise SystemExit(f"ERROR: release backup already exists: {backup}")
-    backup.mkdir(parents=True)
-    if updater_target.is_file():
-        shutil.copy2(updater_target, backup / "latest.json")
-    shutil.copy2(download_page, backup / "download-index.html")
+        backup_page = backup / "download-index.html"
+        backup_updater = backup / "latest.json"
+        if not backup_page.is_file() or backup_page.read_text(encoding="utf-8") != html:
+            raise SystemExit(f"ERROR: existing release backup is not reusable: {backup}")
+        if updater_target.is_file():
+            if not backup_updater.is_file() or backup_updater.read_bytes() != updater_target.read_bytes():
+                raise SystemExit(f"ERROR: existing updater backup is not reusable: {backup}")
+    else:
+        backup.mkdir(parents=True)
+        if updater_target.is_file():
+            shutil.copy2(updater_target, backup / "latest.json")
+        shutil.copy2(download_page, backup / "download-index.html")
 
     updated = html.replace(f"vMLX-{old_version}-", f"vMLX-{version}-")
     updated = updated.replace(f"/v{old_version}/", f"/v{version}/")

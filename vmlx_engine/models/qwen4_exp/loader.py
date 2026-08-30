@@ -797,13 +797,36 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     folded_zero_norms = fold_zero_centered_norm_offsets(model)
     projection_groups = prepare_quantized_projection_groups(model)
 
-    from vmlx_engine.metal.qwen4_affine_moe_decode import install_qwen4_affine_moe
+    from vmlx_engine.metal.qwen4_affine_moe_decode import (
+        install_qwen4_affine_moe,
+        qwen4_affine_moe_status,
+    )
     from vmlx_engine.metal.affine_moe_pair_decode import (
+        affine_moe_pair_status,
         install_affine_moe_pair_decode,
     )
+    from vmlx_engine.acceleration_contract import record_acceleration_attestation
 
     install_qwen4_affine_moe(model)
     install_affine_moe_pair_decode(model, family="qwen4_exp")
+    record_acceleration_attestation(
+        model,
+        "qwen4_exp",
+        {
+            "projection_groups": {
+                "installed": sum(int(value) for value in projection_groups.values()),
+                "groups": dict(projection_groups),
+            },
+            "hyper_connection_fusion": {
+                "installed": bool(fused_hyper or compiled_hyper),
+                "fused": fused_hyper,
+                "compiled": compiled_hyper,
+                "zero_norms_folded": folded_zero_norms,
+            },
+            "affine_moe": qwen4_affine_moe_status(),
+            "affine_moe_pair": affine_moe_pair_status("qwen4_exp"),
+        },
+    )
 
     _validate_ple_hash_buffers(model, ple_buffers)
     weight_map = json.loads(

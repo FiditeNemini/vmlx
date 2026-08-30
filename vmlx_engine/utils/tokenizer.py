@@ -101,16 +101,63 @@ def _warm_glm5_next_first_forward(model) -> None:
         raise RuntimeError(
             "GLM-5.3 runtime has no native cache factory for startup warmup"
         )
+    from ..acceleration_contract import record_acceleration_attestation
+
+    preparation = {}
     prepare = getattr(model, "prepare_acceleration", None)
     if callable(prepare):
-        status = prepare()
-        logger.info("GLM-5.3 acceleration preparation: %s", status)
+        preparation = prepare()
+        logger.info("GLM-5.3 acceleration preparation: %s", preparation)
+    if not isinstance(preparation, dict):
+        preparation = {}
+    projection_groups = sum(
+        int(preparation.get(key, 0) or 0)
+        for key in (
+            "base_kda_qkv_groups",
+            "base_dense_gate_up_groups",
+            "mtp_dense_gate_up_groups",
+        )
+    )
+    record_acceleration_attestation(
+        model,
+        "glm5_next",
+        {
+            "projection_groups": {
+                "installed": projection_groups,
+                "preparation": dict(preparation),
+            },
+            "affine_moe_pair": {
+                "installed": int(
+                    preparation.get("fused_moe_pair_modules", 0) or 0
+                ),
+                "reason": (
+                    None
+                    if int(preparation.get("fused_moe_pair_modules", 0) or 0) > 0
+                    else "not installed by load-time preparation"
+                ),
+            },
+            "dsa_pool_cache": {
+                "installed": True,
+                "observed_calls": 0,
+            },
+        },
+    )
     warmup_cache = make_cache()
     warmup_input = mx.array([[0]], dtype=mx.int32)
     output = model(warmup_input, cache=warmup_cache)
     mx.eval(output)
     if hasattr(mx, "synchronize"):
         mx.synchronize()
+    record_acceleration_attestation(
+        model,
+        "glm5_next",
+        {
+            "startup_warmup": {
+                "installed": True,
+                "observed_calls": 1,
+            }
+        },
+    )
     del output, warmup_input, warmup_cache
 
 

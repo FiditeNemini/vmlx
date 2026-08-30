@@ -10364,6 +10364,113 @@ def _host_supports_metal_na() -> dict:
     }
 
 
+def _loaded_acceleration_attestation() -> dict[str, Any] | None:
+    """Find loader-owned acceleration facts on the active model graph."""
+
+    from .acceleration_contract import find_acceleration_attestation
+
+    roots: list[Any] = []
+    if _engine is not None:
+        roots.append(_engine)
+    try:
+        scheduler = _get_scheduler()
+    except Exception:
+        scheduler = None
+    if scheduler is not None:
+        roots.append(scheduler)
+
+    candidates: list[Any] = []
+    pending = list(roots)
+    seen: set[int] = set()
+    while pending and len(candidates) < 24:
+        candidate = pending.pop(0)
+        if candidate is None or id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        candidates.append(candidate)
+        for name in (
+            "_model",
+            "model",
+            "language_model",
+            "_engine",
+            "engine",
+        ):
+            nested = _diagnostic_attr(candidate, name)
+            if nested is not None and id(nested) not in seen:
+                pending.append(nested)
+    return find_acceleration_attestation(candidates)
+
+
+def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
+    """Return configured and loader-attested acceleration without inference."""
+
+    from .acceleration_contract import (
+        acceleration_family_from_config,
+        build_acceleration_contract,
+        canonical_acceleration_family,
+    )
+
+    config = _read_bundle_json(bundle_path, "config.json")
+    family = acceleration_family_from_config(config)
+    recorded = _loaded_acceleration_attestation()
+    if family is None and isinstance(recorded, dict):
+        family = canonical_acceleration_family(recorded.get("family"))
+    if family is None:
+        current = _current_model_config()
+        family = canonical_acceleration_family(
+            getattr(current, "family_name", None) if current is not None else None
+        )
+
+    runtime = dict(recorded) if isinstance(recorded, dict) else {}
+    runtime_features = {
+        key: dict(value)
+        for key, value in runtime.get("features", {}).items()
+        if isinstance(value, dict)
+    }
+    try:
+        if family == "qwen4_exp":
+            from .metal.affine_moe_pair_decode import affine_moe_pair_status
+            from .metal.qwen4_affine_moe_decode import qwen4_affine_moe_status
+
+            runtime_features["affine_moe"] = {
+                **runtime_features.get("affine_moe", {}),
+                **qwen4_affine_moe_status(),
+            }
+            runtime_features["affine_moe_pair"] = {
+                **runtime_features.get("affine_moe_pair", {}),
+                **affine_moe_pair_status("qwen4_exp"),
+            }
+        elif family == "glm5_next":
+            from .metal.affine_moe_pair_decode import affine_moe_pair_status
+
+            runtime_features["affine_moe_pair"] = {
+                **runtime_features.get("affine_moe_pair", {}),
+                **affine_moe_pair_status("glm5_next"),
+            }
+        elif family in {"qwen3_5", "qwen3_5_moe"}:
+            from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_status
+            from .models.qwen3_5_family.register import (
+                qwen3_5_family_runtime_status,
+            )
+
+            runtime_features["vendored_hybrid_runtime"] = (
+                qwen3_5_family_runtime_status()
+            )
+            runtime_features["mtp_verify_qmm"] = native_mtp_verify_qmm_status()
+        elif family == "deepseek_v4":
+            from .metal.fused_pair_moe_decode import dsv4_fused_pair_moe_status
+
+            runtime_features["fused_moe_pair"] = {
+                **runtime_features.get("fused_moe_pair", {}),
+                **dsv4_fused_pair_moe_status(),
+            }
+    except Exception as exc:
+        runtime["status_collection_error"] = type(exc).__name__
+
+    runtime["features"] = runtime_features
+    return build_acceleration_contract(family, runtime)
+
+
 def _model_acceleration_status(bundle_path: str | None = None) -> dict:
     quantization = _model_quantization_status(bundle_path or _model_path)
     codec = quantization.get("codec")
@@ -10416,6 +10523,9 @@ def _model_acceleration_status(bundle_path: str | None = None) -> dict:
     }
     if codec == "turboquant_codebook":
         result["jangtq_acceleration"] = mpp_nax
+    result["family_runtime"] = _family_acceleration_contract(
+        bundle_path or _model_path
+    )
     return result
 
 

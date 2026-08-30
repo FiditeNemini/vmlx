@@ -24,6 +24,11 @@ from pathlib import Path
 logger = logging.getLogger("vmlx_engine")
 
 _REGISTERED = False
+_RUNTIME_STATUS = {
+    "installed": False,
+    "mode": None,
+    "reason": "not registered",
+}
 _VENDORED_DIR = Path(__file__).resolve().parent
 
 
@@ -100,6 +105,11 @@ def register_qwen3_5_family_runtime() -> bool:
     """
     global _REGISTERED
     if _REGISTERED:
+        _RUNTIME_STATUS.update(
+            installed=True,
+            mode="vmlx_vendor",
+            reason=None,
+        )
         return True
 
     # DFlash2 relies on mlx-vlm's current Qwen hybrid rollback contract. The
@@ -111,6 +121,11 @@ def register_qwen3_5_family_runtime() -> bool:
 
         if is_dflash2_enabled():
             logger.info("DFlash2 active: retaining upstream Qwen 3.5 VLM runtime")
+            _RUNTIME_STATUS.update(
+                installed=True,
+                mode="upstream_dflash2",
+                reason=None,
+            )
             return True
     except Exception:
         pass
@@ -119,13 +134,34 @@ def register_qwen3_5_family_runtime() -> bool:
     # from ..qwen3_5 (which will be looked up as mlx_vlm.models.qwen3_5).
     ok_base = _install_vendored_submodule("mlx_vlm.models.qwen3_5", "qwen3_5")
     if not ok_base:
+        _RUNTIME_STATUS.update(
+            installed=False,
+            mode=None,
+            reason="mlx-vlm base runtime unavailable",
+        )
         return False
     ok_moe = _install_vendored_submodule("mlx_vlm.models.qwen3_5_moe", "qwen3_5_moe")
     if not ok_moe:
+        _RUNTIME_STATUS.update(
+            installed=False,
+            mode=None,
+            reason="mlx-vlm MoE runtime unavailable",
+        )
         return False
 
     _REGISTERED = True
+    _RUNTIME_STATUS.update(
+        installed=True,
+        mode="vmlx_vendor",
+        reason=None,
+    )
     return True
+
+
+def qwen3_5_family_runtime_status() -> dict[str, object]:
+    """Return process runtime selection without claiming model execution."""
+
+    return dict(_RUNTIME_STATUS)
 
 
 def qwen3_5_family_runtime_available() -> bool:

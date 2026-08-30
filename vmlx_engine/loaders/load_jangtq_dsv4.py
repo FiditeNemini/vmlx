@@ -1455,6 +1455,12 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
     # Verify the native JANG DSV4 attention contract BEFORE the model gets
     # called for warmup/inference.
     _verify_dsv4_attention_contract()
+    acceleration_features: dict[str, dict[str, Any]] = {
+        "runtime_patch": {
+            "installed": True,
+            "reason": None,
+        }
+    }
 
     if _dsv4_uses_jangtq_hydration(model_path):
         from jang_tools.load_jangtq import load_jangtq_model
@@ -1469,6 +1475,18 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                 model_path, skip_params_eval=skip_params_eval
             )
         _audit_dsv4_switchglu_contract(model)
+        acceleration_features.update(
+            {
+                "affine_moe": {
+                    "installed": 0,
+                    "reason": "not applicable to JANGTQ hydration",
+                },
+                "fused_moe_pair": {
+                    "installed": 0,
+                    "reason": "not applicable to JANGTQ hydration",
+                },
+            }
+        )
     else:
         _log.info(
             "DSV4 affine/MXFP JANG bundle detected — using affine JANG "
@@ -1492,6 +1510,10 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                 model,
                 model_type="deepseek_v4",
             )
+            acceleration_features["affine_moe"] = {
+                "installed": installed,
+                "reason": None if installed > 0 else "stock SwitchGLU retained",
+            }
             if installed > 0:
                 _log.info(
                     "DSV4 affine MoE decode fast path installed for %d modules",
@@ -1502,6 +1524,13 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                     "DSV4 affine MoE decode fast path not installed; using stock SwitchGLU"
                 )
         except Exception as _affine_fastpath_err:
+            acceleration_features["affine_moe"] = {
+                "installed": 0,
+                "reason": (
+                    f"{type(_affine_fastpath_err).__name__}: "
+                    f"{_affine_fastpath_err}"
+                ),
+            }
             _log.warning(
                 "DSV4 affine MoE decode fast path unavailable (%s); using stock SwitchGLU",
                 _affine_fastpath_err,
@@ -1518,6 +1547,10 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
             )
 
             fused_pair = install_dsv4_fused_pair_moe(model)
+            acceleration_features["fused_moe_pair"] = {
+                **dsv4_fused_pair_moe_status(),
+                "installed": fused_pair,
+            }
             if fused_pair > 0:
                 _log.info(
                     "DSV4 fused pair-SwiGLU MoE decode installed for %d modules",
@@ -1530,6 +1563,12 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
                     dsv4_fused_pair_moe_status().get("reason"),
                 )
         except Exception as _pair_fastpath_err:
+            acceleration_features["fused_moe_pair"] = {
+                "installed": 0,
+                "reason": (
+                    f"{type(_pair_fastpath_err).__name__}: {_pair_fastpath_err}"
+                ),
+            }
             _log.warning(
                 "DSV4 fused pair-SwiGLU MoE decode unavailable (%s); "
                 "using stock SwitchGLU",
@@ -1540,26 +1579,45 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
     # to the exact instances validated by their installers. Neither fallback
     # replays the transformer against a mutable request cache.
     try:
-        from ..models.dsv4_lm_head_fastpath import install_dsv4_lm_head_fastpath
+        from ..models.dsv4_lm_head_fastpath import (
+            dsv4_lm_head_fastpath_status,
+            install_dsv4_lm_head_fastpath,
+        )
 
         if install_dsv4_lm_head_fastpath(model):
             _log.info("DSV4 exact lm_head fastpath installed")
+        acceleration_features["lm_head"] = dsv4_lm_head_fastpath_status(model)
     except Exception as _lm_head_err:
+        acceleration_features["lm_head"] = {
+            "installed": False,
+            "reason": f"{type(_lm_head_err).__name__}: {_lm_head_err}",
+        }
         _log.warning(
             "DSV4 exact lm_head fastpath unavailable: %s",
             _lm_head_err,
         )
 
     try:
-        from ..models.dsv4_rope_cache import install_dsv4_rope_cache
+        from ..models.dsv4_rope_cache import (
+            dsv4_rope_cache_status,
+            install_dsv4_rope_cache,
+        )
 
         rope_instances = install_dsv4_rope_cache(model)
+        acceleration_features["rope_cache"] = {
+            "installed": rope_instances,
+            **dsv4_rope_cache_status(model),
+        }
         if rope_instances:
             _log.info(
                 "DSV4 exact RoPE table sharing installed for %d instances",
                 rope_instances,
             )
     except Exception as _rope_cache_err:
+        acceleration_features["rope_cache"] = {
+            "installed": 0,
+            "reason": f"{type(_rope_cache_err).__name__}: {_rope_cache_err}",
+        }
         _log.warning("DSV4 exact RoPE table sharing unavailable: %s", _rope_cache_err)
 
     # 2026-05-03 (F17): install canonical-encoder shim on
@@ -1659,4 +1717,11 @@ def load_jangtq_dsv4_model(model_path: str, *, skip_params_eval: bool = True) ->
         except Exception:
             pass
 
+    from ..acceleration_contract import record_acceleration_attestation
+
+    record_acceleration_attestation(
+        model,
+        "deepseek_v4",
+        acceleration_features,
+    )
     return model, tokenizer

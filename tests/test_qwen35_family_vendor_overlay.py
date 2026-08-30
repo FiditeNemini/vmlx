@@ -44,6 +44,7 @@ def test_upstream_first_import_still_yields_fully_vendored_runtime():
     prefixes = ["mlx_vlm.models.qwen3_5", "mlx_vlm.models.qwen3_5_moe"]
     saved = _snapshot(prefixes)
     saved_flag = reg._REGISTERED
+    saved_status = reg.qwen3_5_family_runtime_status()
     try:
         # Simulate qwen4_exp importing upstream first.
         _restore(prefixes, {})
@@ -64,6 +65,13 @@ def test_upstream_first_import_still_yields_fully_vendored_runtime():
         assert str(VENDORED_DIR) in str(lang_mod.__file__), lang_mod.__file__
         assert pkg.LanguageModel.__module__.startswith("mlx_vlm.models.qwen3_5")
         assert sys.modules[pkg.LanguageModel.__module__] is lang_mod
+        assert reg.qwen3_5_family_runtime_status() == {
+            "installed": True,
+            "mode": "vmlx_vendor",
+            "reason": None,
+        }
     finally:
         reg._REGISTERED = saved_flag
+        reg._RUNTIME_STATUS.clear()
+        reg._RUNTIME_STATUS.update(saved_status)
         _restore(prefixes, saved)

@@ -177,7 +177,7 @@ jobs:
       - name: Build both production DMGs
         working-directory: vmlx
         env:
-          VMLX_RELEASE_SCOPE: production
+          VMLX_RELEASE_SCOPE: r20_production
           VMLX_R20_PRIVATE_EVIDENCE_ROOT: ${{ inputs.private_evidence_root }}
           VMLX_R20_EXPECTED_VERSION: ${{ inputs.version }}
           VMLX_JANG_TOOLS_SOURCE: ${{ github.workspace }}/jangq/jang-tools

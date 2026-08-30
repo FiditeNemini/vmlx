@@ -208,7 +208,7 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
 
     candidate = files["release-candidate.yml"][0]
     assert "environment: apple-release-signing" in candidate
-    assert "VMLX_RELEASE_SCOPE: production" in candidate
+    assert "VMLX_RELEASE_SCOPE: r20_production" in candidate
     assert "build-release-dmgs.sh all" in candidate
     assert "notarize-release-dmgs.sh" in candidate
     assert "jjang-ai/jangq" in candidate

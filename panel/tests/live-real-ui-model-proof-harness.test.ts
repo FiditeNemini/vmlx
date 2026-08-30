@@ -507,6 +507,12 @@ describe("generated CDP expression syntax", () => {
     expect(harnessSource).toContain(
       "current.getAttribute('data-vmlx-state') === 'saved'",
     );
+    expect(harnessSource).toContain(
+      'const nativeMtpGreedyUi = preloadHealthBefore?.mtp?.runtime_active === true;',
+    );
+    expect(harnessSource).toContain("'Top P': nativeMtpGreedyUi");
+    expect(harnessSource).toContain("'Top K': nativeMtpGreedyUi");
+    expect(harnessSource).toContain("'Min P': nativeMtpGreedyUi");
     expect(harnessSource).not.toContain(
       "(button.textContent || '').replace(/\\\\s+/g, ' ').trim() === 'Save'",
     );
@@ -3711,6 +3717,50 @@ describe("real UI model proof harness", () => {
     result.serverCacheControls.initialCacheControls.enableBlockDiskCache = false;
     expect(validateServerCacheEvidence(result).join("\n")).toMatch(
       /SSD\/L2 control was not visibly enabled/,
+    );
+  });
+
+  it("accepts a source-matched exact typed prompt-disk lane without generic block L2", () => {
+    const result = structuredClone(goodResult());
+    result.serverCacheControls.initialCacheControls = {
+      ...result.serverCacheControls.initialCacheControls,
+      usePagedCache: false,
+      enableDiskCache: true,
+      enableBlockDiskCache: false,
+      diskCachePresent: true,
+      blockDiskCachePresent: true,
+    };
+    result.serverCacheControls.argv = [
+      "--no-paged-cache",
+      "--enable-disk-cache",
+    ];
+    result.session.effective_config = {
+      ...result.session.effective_config,
+      usePagedCache: false,
+      enableDiskCache: true,
+      enableBlockDiskCache: false,
+    };
+    result.server.health.native_cache = {
+      family: "glm5_next",
+      schema: "glm5_next_native_v1",
+      schema_implemented: true,
+      prefix: true,
+      paged: false,
+      prompt_disk_l2_configured: true,
+      block_disk_l2_configured: false,
+      prompt_disk_l2: true,
+      block_disk_l2: false,
+      cache_store_policy: {
+        prompt_boundary: "exact_n_minus_one",
+        prompt_disk_l2: "typed_full_state",
+      },
+    };
+
+    expect(validateServerCacheEvidence(result)).toEqual([]);
+
+    result.serverCacheControls.argv.push("--enable-block-disk-cache");
+    expect(validateServerCacheEvidence(result).join("\n")).toMatch(
+      /generic block disk cache for an exact prompt-disk lane/,
     );
   });
 

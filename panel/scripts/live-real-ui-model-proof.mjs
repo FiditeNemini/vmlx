@@ -5083,31 +5083,68 @@ export function validateServerCacheEvidence(result) {
   const argv = Array.isArray(evidence.argv) ? evidence.argv.map(String) : []
   const visible = evidence.initialCacheControls || {}
   const nativeCache = health?.native_cache || {}
+  const promptDiskOnly = nativeCache.prompt_disk_l2_configured === true
+    && nativeCache.block_disk_l2_configured !== true
   const requestedBlockDiskPercent = result?.requestedBlockDiskCacheMaxPercent
   const expectedDsv4PoolQuant = result?.expectedDsv4PoolQuant
   if (evidence.runningSessionDrawer !== true) failures.push('cache controls were not inspected on the running session')
   if (evidence.controlScope !== 'running-session-toolbar') {
     failures.push('cache controls were not opened from the running-session toolbar')
   }
-  for (const field of ['enablePrefixCache', 'usePagedCache', 'enableBlockDiskCache']) {
+  for (const field of [
+    'enablePrefixCache',
+    'usePagedCache',
+    promptDiskOnly ? 'enableDiskCache' : 'enableBlockDiskCache',
+  ]) {
     if (typeof visible[field] !== 'boolean') {
       failures.push(`running-session visible cache control ${field} is missing`)
     }
   }
-  if (visible.enableBlockDiskCache !== true) failures.push('running-session SSD/L2 control was not visibly enabled')
   if (visible.enablePrefixCache !== config.enablePrefixCache) {
     failures.push('visible prefix-cache state does not match persisted session config')
   }
   if (visible.usePagedCache !== config.usePagedCache) {
     failures.push('visible paged-cache state does not match persisted session config')
   }
-  if (visible.enableBlockDiskCache !== config.enableBlockDiskCache) {
-    failures.push('visible SSD/L2 state does not match persisted session config')
+  if (promptDiskOnly) {
+    if (visible.enableDiskCache !== true) {
+      failures.push('running-session exact prompt SSD/L2 control was not visibly enabled')
+    }
+    if (visible.enableDiskCache !== config.enableDiskCache) {
+      failures.push('visible prompt SSD/L2 state does not match persisted session config')
+    }
+    if (visible.enableBlockDiskCache !== config.enableBlockDiskCache) {
+      failures.push('visible block SSD/L2 state does not match persisted session config')
+    }
+    if (config.enableDiskCache !== true) {
+      failures.push('persisted session config did not enable exact prompt disk cache')
+    }
+    if (config.enableBlockDiskCache !== false) {
+      failures.push('persisted session config enabled generic block disk cache for an exact prompt-disk lane')
+    }
+    if (!argv.includes('--enable-disk-cache')) failures.push('engine argv omitted --enable-disk-cache')
+    if (argv.includes('--enable-block-disk-cache')) {
+      failures.push('engine argv enabled generic block disk cache for an exact prompt-disk lane')
+    }
+    if (nativeCache.prompt_disk_l2 !== true) {
+      failures.push('/health did not report native_cache.prompt_disk_l2=true')
+    }
+    if (nativeCache.block_disk_l2 === true) {
+      failures.push('/health reported generic block disk L2 on an exact prompt-disk lane')
+    }
+  } else {
+    if (visible.enableBlockDiskCache !== true) failures.push('running-session SSD/L2 control was not visibly enabled')
+    if (visible.enableBlockDiskCache !== config.enableBlockDiskCache) {
+      failures.push('visible SSD/L2 state does not match persisted session config')
+    }
+    if (config.enableBlockDiskCache !== true) failures.push('persisted session config did not enable block disk cache')
+    if (!argv.includes('--enable-block-disk-cache')) failures.push('engine argv omitted --enable-block-disk-cache')
+    if (nativeCache.block_disk_l2 !== true) failures.push('/health did not report native_cache.block_disk_l2=true')
   }
-  if (config.enableBlockDiskCache !== true) failures.push('persisted session config did not enable block disk cache')
-  if (!argv.includes('--enable-block-disk-cache')) failures.push('engine argv omitted --enable-block-disk-cache')
-  if (health?.native_cache?.block_disk_l2 !== true) failures.push('/health did not report native_cache.block_disk_l2=true')
   if (requestedBlockDiskPercent != null) {
+    if (promptDiskOnly) {
+      failures.push('block-disk percentage was requested for an exact prompt-disk lane')
+    }
     if (!approximatelyEqual(
       Number(visible.blockDiskCacheMaxPercent),
       Number(requestedBlockDiskPercent),
@@ -5164,7 +5201,7 @@ export function validateServerCacheEvidence(result) {
     if (Boolean(nativeCache.paged) !== config.usePagedCache) {
       failures.push('/health native paged state does not match persisted session config')
     }
-    if (Boolean(nativeCache.block_disk_only) !== !config.usePagedCache) {
+    if (!promptDiskOnly && Boolean(nativeCache.block_disk_only) !== !config.usePagedCache) {
       failures.push('/health block-disk-only state does not match persisted paged-cache state')
     }
   }
@@ -10193,11 +10230,24 @@ async function main() {
               && current.disabled
               && current.getAttribute('data-vmlx-state') === 'saved';
           }, 'Chat Settings save completion');
+          // Native MTP is a product-level effective default, not a bundle
+          // stamp. When the source-matched engine says the native runtime is
+          // active, the visible Chat Settings contract is the enforced greedy
+          // tuple even if generation_config.json advertises sampled values.
+          const nativeMtpGreedyUi = preloadHealthBefore?.mtp?.runtime_active === true;
           const expectedUiValues = {
-            Temperature: samplingOverrides.temperature ?? independentBundleDefaults?.temperature,
-            'Top P': samplingOverrides.topP ?? independentBundleDefaults?.topP,
-            'Top K': samplingOverrides.topK ?? independentBundleDefaults?.topK,
-            'Min P': samplingOverrides.minP ?? independentBundleDefaults?.minP,
+            Temperature: nativeMtpGreedyUi
+              ? 0
+              : samplingOverrides.temperature ?? independentBundleDefaults?.temperature,
+            'Top P': nativeMtpGreedyUi
+              ? 1
+              : samplingOverrides.topP ?? independentBundleDefaults?.topP,
+            'Top K': nativeMtpGreedyUi
+              ? 0
+              : samplingOverrides.topK ?? independentBundleDefaults?.topK,
+            'Min P': nativeMtpGreedyUi
+              ? 0
+              : samplingOverrides.minP ?? independentBundleDefaults?.minP,
             'Repetition Penalty':
               samplingOverrides.repeatPenalty ?? independentBundleDefaults?.repeatPenalty,
           };
@@ -11387,6 +11437,7 @@ async function main() {
           };
           await clickSection('Prefix Cache');
           await clickSection('In-Memory Paged Cache');
+          await clickSection('Disk Cache');
           // MCP lives in its own collapsed section, so the first capture read
           // an unopened accordion and reported every MCP field absent. The
           // section's title is the i18n string 'Tool Integration (MCP)' — my
@@ -11432,6 +11483,7 @@ async function main() {
           const labelFor = (text) => [...(drawer?.querySelectorAll('label') || [])]
             .find((label) => (label.innerText || '').includes(text));
           const inputFor = (text) => labelFor(text)?.querySelector('input[type="checkbox"]');
+          const promptDiskInput = inputFor('Enable Disk Cache');
           const blockDiskInput = inputFor('Block Disk Cache (SSD / L2)');
           const pagedInput = inputFor('In-Memory Paged Cache (RAM)');
           const prefixInput = inputFor('Enable Prefix Cache')
@@ -11439,8 +11491,10 @@ async function main() {
           const initialCacheControls = {
             enablePrefixCache: !!prefixInput?.checked,
             usePagedCache: !!pagedInput?.checked,
+            enableDiskCache: !!promptDiskInput?.checked,
             enableBlockDiskCache: !!blockDiskInput?.checked,
             usePagedCacheDisabled: !!pagedInput?.disabled,
+            diskCachePresent: !!promptDiskInput,
             blockDiskCachePresent: !!blockDiskInput,
             blockDiskCacheMaxPercent: (() => {
               const setting = drawer?.querySelector(
@@ -11457,6 +11511,7 @@ async function main() {
             'DSV4 Native Composite Prefix Cache',
             'In-Memory Paged Cache (RAM)',
             'Block Disk Cache (SSD / L2)',
+            'Enable Disk Cache',
             'Stored Cache Quantization',
           ]
             .filter((label) => bodyText.includes(label));
@@ -11466,8 +11521,12 @@ async function main() {
           // /health native_cache, which is only available after this drawer
           // read. See the pagedCache parity block below.
           const verified = initialCacheControls.enablePrefixCache === true
-            && initialCacheControls.enableBlockDiskCache === true
-            && initialCacheControls.blockDiskCachePresent === true
+            && (
+              (initialCacheControls.enableBlockDiskCache === true
+                && initialCacheControls.blockDiskCachePresent === true)
+              || (initialCacheControls.enableDiskCache === true
+                && initialCacheControls.diskCachePresent === true)
+            )
             && !!prefixInput
             && !!pagedInput
             && (!expectPagedCacheLocked || initialCacheControls.usePagedCacheDisabled === true)
@@ -11481,6 +11540,7 @@ async function main() {
             runningSessionDrawer: true,
             controlScope: 'running-session-toolbar',
             visibleBlockDiskChecked: initialCacheControls.enableBlockDiskCache,
+            visiblePromptDiskChecked: initialCacheControls.enableDiskCache,
             cacheExpectRegex,
             expectPagedCacheLocked,
             expectPagedCache,
@@ -11736,8 +11796,23 @@ async function main() {
       const visiblePagedCache = (
         serverCacheControls.initialCacheControls?.usePagedCache === true
       )
+      const nativeCacheAfter = healthAfter?.native_cache || {}
+      const promptDiskOnly = nativeCacheAfter.prompt_disk_l2_configured === true
+        && nativeCacheAfter.block_disk_l2_configured !== true
+      const diskLaneVerified = promptDiskOnly
+        ? rendererResult.effectiveSessionConfig?.enableDiskCache === true
+          && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === false
+          && argv.includes('--enable-disk-cache')
+          && !argv.includes('--enable-block-disk-cache')
+          && nativeCacheAfter.prompt_disk_l2 === true
+          && nativeCacheAfter.block_disk_l2 !== true
+        : rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
+          && argv.includes('--enable-block-disk-cache')
+          && nativeCacheAfter.block_disk_l2 === true
       serverCacheControls = {
         ...serverCacheControls,
+        promptDiskOnly,
+        diskLaneVerified,
         pagedCacheExpected,
         pagedCacheExpectationSource: expectPagedCacheExplicit
           ? 'explicit_env'
@@ -11749,9 +11824,7 @@ async function main() {
       serverCacheControls.verified = (
         serverCacheControls.verified === true
         && serverCacheControls.pagedCacheParity === true
-        && rendererResult.effectiveSessionConfig?.enableBlockDiskCache === true
-        && argv.includes('--enable-block-disk-cache')
-        && healthAfter?.native_cache?.block_disk_l2 === true
+        && diskLaneVerified
       )
     }
     const visibleText = rendererResult.thirdAssistantContent

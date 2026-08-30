@@ -653,6 +653,7 @@ def cache_mode_cli_args(
     cache_mode: str,
     *,
     block_cache_dir: Path,
+    block_cache_max_gb: float = 2.0,
     kv_cache_quantization: str = "auto",
 ) -> list[str]:
     if cache_mode == "off":
@@ -673,7 +674,7 @@ def cache_mode_cli_args(
             "--block-disk-cache-dir",
             str(block_cache_dir),
             "--block-disk-cache-max-gb",
-            "2",
+            str(float(block_cache_max_gb)),
         ]
     quant = (kv_cache_quantization or "auto").strip().lower()
     if quant not in {"auto", "none", "q4", "q8"}:
@@ -681,6 +682,13 @@ def cache_mode_cli_args(
     if quant not in {"auto", "none"}:
         args.extend(["--kv-cache-quantization", quant])
     return args
+
+
+def block_cache_dir_for_row(
+    out_dir: Path, label: str, *, shared: bool
+) -> Path:
+    """Choose isolated benchmark storage or one explicit restart namespace."""
+    return out_dir / ("shared_block_cache" if shared else f"{label}_block_cache")
 
 
 def chat_template_kwargs_for_enable_thinking(
@@ -769,6 +777,7 @@ def start_server(
         cache_mode_cli_args(
             cache_mode,
             block_cache_dir=block_cache_dir,
+            block_cache_max_gb=args.block_disk_cache_max_gb,
             kv_cache_quantization=getattr(args, "kv_cache_quantization", "q4"),
         )
     )
@@ -861,7 +870,11 @@ def run_row(
 ) -> dict[str, Any]:
     model_path = Path(args.model_path)
     served_name = args.served_name or model_path.name.lower().replace("/", "-")
-    block_cache_dir = out_dir / f"{label}_block_cache"
+    block_cache_dir = block_cache_dir_for_row(
+        out_dir,
+        label,
+        shared=bool(args.shared_block_cache),
+    )
     log_path = out_dir / f"{label}.server.log"
     proc, health_before = start_server(
         model_path=model_path,
@@ -952,6 +965,24 @@ def main() -> int:
     ap.add_argument("--out", default=None)
     ap.add_argument("--port", type=int, default=8130)
     ap.add_argument("--cache", choices=["off", "on", "paged"], default="off")
+    ap.add_argument(
+        "--block-disk-cache-max-gb",
+        type=float,
+        default=2.0,
+        help=(
+            "SSD L2 budget for cache=on rows. Increase this for large typed "
+            "architecture-native states such as GLM KDA/DSA snapshots."
+        ),
+    )
+    ap.add_argument(
+        "--shared-block-cache",
+        action="store_true",
+        help=(
+            "Use one block-cache directory across AR and MTP processes so "
+            "the later row proves a real restart refault. The default keeps "
+            "performance rows isolated."
+        ),
+    )
     ap.add_argument("--max-num-seqs", type=int, default=2)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--repeats", type=int, default=3)
@@ -1064,6 +1095,8 @@ def main() -> int:
         "model_path": str(Path(args.model_path)),
         "served_name": args.served_name or Path(args.model_path).name.lower().replace("/", "-"),
         "cache_mode": args.cache,
+        "block_disk_cache_max_gb": args.block_disk_cache_max_gb,
+        "shared_block_cache": args.shared_block_cache,
         "kv_cache_quantization": args.kv_cache_quantization,
         "enable_jit": args.enable_jit,
         "native_mtp_depth": explicit_single_depth,

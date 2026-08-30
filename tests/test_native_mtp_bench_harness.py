@@ -889,6 +889,37 @@ def test_cache_on_cli_args_can_force_q4_storage_quantization(tmp_path):
     assert args[-2:] == ["--kv-cache-quantization", "q4"]
 
 
+def test_cache_on_cli_args_accept_large_typed_state_budget(tmp_path):
+    mod = load_speed_ab_module()
+
+    args = mod.cache_mode_cli_args(
+        "on",
+        block_cache_dir=tmp_path / "blocks",
+        block_cache_max_gb=8.0,
+        kv_cache_quantization="none",
+    )
+
+    index = args.index("--block-disk-cache-max-gb")
+    assert args[index + 1] == "8.0"
+
+
+def test_shared_block_cache_uses_one_restart_namespace(tmp_path):
+    mod = load_speed_ab_module()
+
+    baseline = mod.block_cache_dir_for_row(
+        tmp_path, "baseline_no_mtp", shared=True
+    )
+    candidate = mod.block_cache_dir_for_row(
+        tmp_path, "native_mtp_d2", shared=True
+    )
+    isolated = mod.block_cache_dir_for_row(
+        tmp_path, "native_mtp_d2", shared=False
+    )
+
+    assert baseline == candidate == tmp_path / "shared_block_cache"
+    assert isolated == tmp_path / "native_mtp_d2_block_cache"
+
+
 def test_chat_completion_body_sets_thinking_off_by_default():
     mod = load_speed_ab_module()
 

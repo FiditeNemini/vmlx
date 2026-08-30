@@ -20,7 +20,11 @@ import { buildMcpPolicyArgs } from '../../../../shared/mcpPolicy'
 import { resolveEffectiveReasoningParser } from '../../../../shared/reasoningParserAliases'
 import { resolveEffectiveToolParser } from '../../../../shared/toolParserAliases'
 import { buildToolLaunchArgs } from '../../../../shared/toolLaunchArgs'
-import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
+import {
+  isZayaCcaFamily,
+  normalizeDetectedFamilyName,
+  usesExactTypedPromptDiskCache,
+} from '../../../../shared/detectedFamilyNames'
 import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
@@ -285,7 +289,7 @@ function buildCommandPreview(
   const detectedFamily = normalizeDetectedFamilyName(detected?.family)
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const m3Active = detectedFamily === 'minimax_m3'
-  const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)
   const effectiveSmelt = !!(config as any).smelt && !dsv4Active
   // User explicitly toggled multimodal OFF (Force Off) — must beat detected VL.
   // Mirror buildArgs (sessions.ts): m3Active stands in for m3VlRoute since the
@@ -404,9 +408,9 @@ function buildCommandPreview(
     enablePrefixCache: config.enablePrefixCache !== false,
     usePagedCache: false,
     enableDiskCache: !!config.enableDiskCache,
-    enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
+    enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache,
     noMemoryAwareCache: !!config.noMemoryAwareCache,
-    forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active,
+    forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
     prefixCacheSize: config.prefixCacheSize,
     prefixCacheMaxBytes: config.prefixCacheMaxBytes,
     cacheMemoryMb: config.cacheMemoryMb,
@@ -739,7 +743,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (detected.family === 'openpangu_v2') {
+          } else if (usesExactTypedPromptDiskCache(detected.family)) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true

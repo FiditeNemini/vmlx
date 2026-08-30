@@ -20,7 +20,11 @@ import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId, describeDetectedToolParser } from '../../../../shared/toolParserAliases'
 import { shouldWarnDsv4TopP } from '../../../../shared/samplingParameterDomain'
 import { resolveEffectiveModelFamily } from '../../../../shared/dsv4Env'
-import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../../../../shared/detectedFamilyNames'
+import {
+  isZayaCcaFamily,
+  normalizeDetectedFamilyName,
+  usesExactTypedPromptDiskCache,
+} from '../../../../shared/detectedFamilyNames'
 import { computeEffectiveJit, isJitSuppressedByRuntime } from '../../../../shared/jitPolicy'
 import { isMixedSwaBundle } from '../../../../shared/storedKvQuantPolicy'
 export interface SessionConfig {
@@ -392,6 +396,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(normalizedDetectedFamily)
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
   const effectiveDistributedActive = !!config.distributedEnabled && !dsv4Active
@@ -454,7 +459,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
       m3Active ||
       dsv4Active) &&
     !zayaCcaActive &&
-    !openPanguExactTypedCache
+    !exactTypedPromptDiskCache
   const normalizedModelIdentity = (modelIdentity || '').toLowerCase()
   const bonsaiActive = normalizedModelIdentity.includes('bonsai')
   const qwenHybridTqActive = isMambaCache && (normalizedDetectedFamily || '').startsWith('qwen')
@@ -476,16 +481,16 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const cacheControlState = {
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
-    usePagedCache: openPanguExactTypedCache ? false : config.usePagedCache,
+    usePagedCache: exactTypedPromptDiskCache ? false : config.usePagedCache,
     enableDiskCache: dsv4Active ? false : config.enableDiskCache,
-    enableBlockDiskCache: openPanguExactTypedCache ? false : config.enableBlockDiskCache,
+    enableBlockDiskCache: exactTypedPromptDiskCache ? false : config.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }
   const cachePolicy = resolveCacheControlPolicy(cacheControlState)
   const effectiveUsePagedCache = cachePolicy.effectiveUsePagedCache
   const blockDiskOnly = cachePolicy.blockDiskCacheChecked && !effectiveUsePagedCache
-  const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache
+  const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || exactTypedPromptDiskCache
   const effectivePagedCacheBlockSize = dsv4Active ? DSV4_PAGED_CACHE_BLOCK_SIZE : config.pagedCacheBlockSize
   const pagedCacheUiState = pagedCacheControlsState(effectiveUsePagedCache, blockDiskOnly)
   // The shared module still owns the ARITHMETIC (and its English sentence, which
@@ -963,8 +968,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!dsv4Active && effectivePrefixCacheEnabled && (
           <>
             {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguMemoryAwareNote')} />}
-            <CheckField label={t('sessions.config.legacyEntryCountCache')} tooltip={t('sessions.config.legacyEntryCountCacheTooltip')} checked={openPanguExactTypedCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={openPanguExactTypedCache} />
-            {!dsv4Active && !openPanguExactTypedCache && config.noMemoryAwareCache ? (
+            <CheckField label={t('sessions.config.legacyEntryCountCache')} tooltip={t('sessions.config.legacyEntryCountCacheTooltip')} checked={exactTypedPromptDiskCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={exactTypedPromptDiskCache} />
+            {!dsv4Active && !exactTypedPromptDiskCache && config.noMemoryAwareCache ? (
               <>
                 <InfoNote text={t('sessions.config.legacyModeActiveNote')} />
                 <SliderField
@@ -1154,7 +1159,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           tooltip={t('sessions.config.blockDiskCacheTooltip')}
           checked={cachePolicy.blockDiskCacheChecked}
           onChange={v => applyCacheControlUpdates(cacheControlUpdatesForBlockDiskToggle(v, cacheControlState))}
-          disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache}
+          disabled={!cachePolicy.blockDiskCacheVisible || cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache}
         />
         {cachePolicy.blockDiskCacheChecked && (
           <>

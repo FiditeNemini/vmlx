@@ -16,6 +16,7 @@ import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
 } from '../../../../shared/sessionGenerationDefaults'
+import { usesExactTypedPromptDiskCache } from '../../../../shared/detectedFamilyNames'
 
 interface ModelInfo {
   path: string
@@ -239,7 +240,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (detected.family === 'openpangu_v2') {
+          } else if (usesExactTypedPromptDiskCache(detected.family)) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true

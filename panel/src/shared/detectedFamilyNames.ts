@@ -43,6 +43,8 @@ const ENGINE_FAMILY_TO_REGISTRY: Readonly<Record<string, string>> = Object.freez
   qwen3_next: 'qwen3-next',
   qwen4_exp: 'qwen4-exp',
   nemotron_h: 'nemotron-h',
+  glm5_next: 'glm5-next',
+  glm5_next_text: 'glm5-next',
 })
 
 export function normalizeDetectedFamilyName(family?: string): string | undefined {
@@ -58,4 +60,15 @@ export function normalizeDetectedFamilyName(family?: string): string | undefined
 export function isZayaCcaFamily(family?: string): boolean {
   const normalized = normalizeDetectedFamilyName(family)
   return normalized === 'zaya' || normalized === 'zaya1-vl'
+}
+
+/**
+ * Families whose architecture-native state is persisted as one exact typed
+ * N-1 prompt snapshot. Generic content-addressed block records cannot
+ * reconstruct their path-dependent recurrent/indexer state, so the product
+ * must select prompt-level disk L2 and keep block-disk L2 off.
+ */
+export function usesExactTypedPromptDiskCache(family?: string): boolean {
+  const normalized = normalizeDetectedFamilyName(family)
+  return normalized === 'openpangu_v2' || normalized === 'glm5-next'
 }

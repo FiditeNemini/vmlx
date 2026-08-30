@@ -93,7 +93,11 @@ import {
   SLOW_FAMILY_TIMEOUTS,
   resolveSlowFamilyTimeoutSeconds,
 } from '../shared/slowFamilyTimeouts'
-import { normalizeDetectedFamilyName, isZayaCcaFamily } from '../shared/detectedFamilyNames'
+import {
+  isZayaCcaFamily,
+  normalizeDetectedFamilyName,
+  usesExactTypedPromptDiskCache,
+} from '../shared/detectedFamilyNames'
 import { cacheTypeRequiresPaged } from '../shared/cacheTypeCapabilities'
 import {
   filterAdditionalArgs,
@@ -402,6 +406,39 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
       }
       if (config.enableJit !== false) {
         config.enableJit = false
+        changed = true
+      }
+    } else if (detectedFamily === 'glm5-next') {
+      // GLM-5.3's KDA recurrent/conv state plus MLA/DSA indexer state is
+      // persisted as one exact typed N-1 snapshot. The generic block store
+      // cannot represent that boundary. Migrate the old generic default pair
+      // while preserving an explicit all-off L2 choice.
+      const staleGenericDiskPair =
+        config.enableDiskCache !== true && config.enableBlockDiskCache === true
+      if (config.enablePrefixCache === undefined) {
+        config.enablePrefixCache = true
+        changed = true
+      }
+      if (config.usePagedCache !== false) {
+        config.usePagedCache = false
+        changed = true
+      }
+      if (staleGenericDiskPair || config.enableDiskCache === undefined) {
+        config.enableDiskCache = true
+        changed = true
+      }
+      if (staleGenericDiskPair || config.enableDiskCache === true) {
+        if (config.enableBlockDiskCache !== false) {
+          config.enableBlockDiskCache = false
+          changed = true
+        }
+      }
+      if (config.noMemoryAwareCache !== false) {
+        config.noMemoryAwareCache = false
+        changed = true
+      }
+      if (config.kvCacheQuantization !== 'auto') {
+        config.kvCacheQuantization = 'auto'
         changed = true
       }
     } else if (detectedFamily === 'openpangu_v2') {
@@ -833,17 +870,17 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
   )
   const dsv4Active = effectiveFamily === 'deepseek-v4'
-  const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)
   // In-RAM paged cache is OFF for EVERY family, DSV4 included. SSD block-disk
   // L2 is the only cache tier. Seeding a saved `true` here (even though the
   // launch choke point forces --no-paged-cache) would persist a config that
   // disagrees with what actually runs.
   const defaultUsePagedCache = false
-  // Every supported prefix-cache lane gets block SSD L2 by default, even when
-  // paged RAM is explicitly Off. openPangu is the path-dependent exact-snapshot
-  // exception and continues to use prompt-level typed L2.
-  const defaultEnableDiskCache = openPanguExactTypedCache
-  const defaultEnableBlockDiskCache = !openPanguExactTypedCache
+  // Every supported prefix-cache lane gets one SSD L2 by default. Exact
+  // path-dependent snapshot families use prompt-level typed L2 instead of
+  // generic content-addressed blocks.
+  const defaultEnableDiskCache = exactTypedPromptDiskCache
+  const defaultEnableBlockDiskCache = !exactTypedPromptDiskCache
   const mutable = config as Record<string, any>
   const staleV11Dsv4FailClosedCandidate =
     dsv4Active &&
@@ -862,8 +899,8 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
   if (mutable.prefixCacheMaxBytes === undefined) changed = setConfigValue(mutable, 'prefixCacheMaxBytes', 0) || changed
   if (mutable.cacheMemoryMb === undefined) changed = setConfigValue(mutable, 'cacheMemoryMb', 0) || changed
   if (mutable.cacheMemoryPercent === undefined) changed = setConfigValue(mutable, 'cacheMemoryPercent', 15) || changed
-  if (mutable.noMemoryAwareCache === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'noMemoryAwareCache', false) || changed
-  if (mutable.usePagedCache === undefined || openPanguExactTypedCache) changed = setConfigValue(mutable, 'usePagedCache', openPanguExactTypedCache ? false : defaultUsePagedCache) || changed
+  if (mutable.noMemoryAwareCache === undefined || exactTypedPromptDiskCache) changed = setConfigValue(mutable, 'noMemoryAwareCache', false) || changed
+  if (mutable.usePagedCache === undefined || exactTypedPromptDiskCache) changed = setConfigValue(mutable, 'usePagedCache', exactTypedPromptDiskCache ? false : defaultUsePagedCache) || changed
   if (mutable.enableDiskCache === undefined) changed = setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache) || changed
   if (mutable.diskCacheMaxGb === undefined) changed = setConfigValue(mutable, 'diskCacheMaxGb', 10) || changed
   if (mutable.pagedCacheBlockSize === undefined) changed = setConfigValue(mutable, 'pagedCacheBlockSize', dsv4Active ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64) || changed
@@ -945,9 +982,10 @@ function applySsdFirstCacheDefaults(
     config.usePagedCache = false
     changed = true
   }
-  // openPangu owns the separate exact prompt-L2 format. Apply the RAM-off
-  // normalization above, but do not rewrite its disk format below.
-  if (normalizeDetectedFamilyName(detectedFamily) === 'openpangu_v2') return changed
+  // Exact typed prompt-snapshot families own a separate prompt-L2 format.
+  // Apply the RAM-off normalization above, but do not rewrite their disk
+  // format into the generic block tier below.
+  if (usesExactTypedPromptDiskCache(detectedFamily)) return changed
   if (config.enableBlockDiskCache !== true) {
     // SSD-only is only cheap when the disk tier is actually on.
     config.enableBlockDiskCache = true
@@ -2780,6 +2818,28 @@ export class SessionManager extends EventEmitter {
                   ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
                   : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
             }
+          } else if (freshFamily === 'glm5-next') {
+            const staleGenericDiskPair =
+              config.enableDiskCache !== true && config.enableBlockDiskCache === true
+            const glmChanged =
+              config.enablePrefixCache === undefined ||
+              config.usePagedCache !== false ||
+              staleGenericDiskPair ||
+              config.noMemoryAwareCache !== false ||
+              config.kvCacheQuantization !== 'auto'
+            if (config.enablePrefixCache === undefined) config.enablePrefixCache = true
+            config.usePagedCache = false
+            if (staleGenericDiskPair || config.enableDiskCache === undefined) {
+              config.enableDiskCache = true
+            }
+            if (staleGenericDiskPair || config.enableDiskCache === true) {
+              config.enableBlockDiskCache = false
+            }
+            config.noMemoryAwareCache = false
+            config.kvCacheQuantization = 'auto'
+            if (glmChanged) {
+              this.pushLog(sessionId, '[INFO] GLM-5.3 detected; exact full-precision typed KDA/MLA/DSA prefix + prompt-L2 cache enabled, generic paged/block/TurboQuant cache codecs disabled')
+            }
           } else if (freshFamily === 'openpangu_v2') {
             const panguChanged =
               config.enablePrefixCache !== true ||
@@ -3826,7 +3886,7 @@ export class SessionManager extends EventEmitter {
           // typed exception and stays on prompt-level disk L2.
           // Paged RAM is OFF for every family, DSV4 included (SSD L2 only).
           usePagedCache: false,
-          enableDiskCache: detectedFamily === 'openpangu_v2',
+          enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily),
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           // Size the index to the generic capacity target, never the old flat
           // 1000. At the 64-token generic block, 1000 indexes only 63,936
@@ -3838,7 +3898,7 @@ export class SessionManager extends EventEmitter {
           maxCacheBlocks: detectedFamily === 'deepseek-v4'
             ? DSV4_MAX_CACHE_BLOCKS
             : indexBlocksForCapacity(64),
-          enableBlockDiskCache: detectedFamily !== 'openpangu_v2',
+          enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily),
           // No GB cap: adopted sessions get the percent budget like everyone
           // else. This used to hardcode 10 AND stamp the defaults version
           // current, so the GB->percent migration could never reach it.
@@ -4998,7 +5058,7 @@ export class SessionManager extends EventEmitter {
     // Prefix cache — requires --continuous-batching to take effect in vmlx-engine
     // Tool sessions benefit from prefix reuse, but an explicit user opt-out must
     // stay an opt-out; do not silently re-enable cache because tools are present.
-    const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
+    const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)
     const effectivePagedCacheBlockSize = dsv4Active
       ? DSV4_PAGED_CACHE_BLOCK_SIZE
       : config.pagedCacheBlockSize
@@ -5012,9 +5072,9 @@ export class SessionManager extends EventEmitter {
       // emits --no-paged-cache and never its positive counterpart.
       usePagedCache: false,
       enableDiskCache: !!config.enableDiskCache,
-      enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
+      enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache,
       noMemoryAwareCache: !!config.noMemoryAwareCache,
-      forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active,
+      forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
       prefixCacheSize: config.prefixCacheSize,
       prefixCacheMaxBytes: config.prefixCacheMaxBytes,
       cacheMemoryMb: config.cacheMemoryMb,

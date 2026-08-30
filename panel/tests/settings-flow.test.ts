@@ -26,6 +26,7 @@ import {
 } from '../src/shared/reasoningParserAliases'
 import { buildToolLaunchArgs } from '../src/shared/toolLaunchArgs'
 import { buildNativeMtpLaunchArgs } from '../src/shared/nativeMtpLaunchArgs'
+import { usesExactTypedPromptDiskCache } from '../src/shared/detectedFamilyNames'
 
 // ─── SessionConfig replica (from SessionConfigForm.tsx) ──────────────────────
 
@@ -447,15 +448,15 @@ function buildCommandPreview(
         supportsThinking: detected?.supportsThinking,
     })
 
-    const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'
+    const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)
     const cacheLaunch = buildCacheLaunchArgs({
         continuousBatching: cacheStackActive,
         enablePrefixCache: config.enablePrefixCache !== false,
         usePagedCache: false,
         enableDiskCache: !!config.enableDiskCache,
-        enableBlockDiskCache: openPanguExactTypedCache ? false : !!config.enableBlockDiskCache,
+        enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache,
         noMemoryAwareCache: !!config.noMemoryAwareCache,
-        forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active,
+        forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
         prefixCacheSize: config.prefixCacheSize,
         prefixCacheMaxBytes: config.prefixCacheMaxBytes,
         cacheMemoryMb: config.cacheMemoryMb,
@@ -1211,7 +1212,7 @@ describe('Disk Cache', () => {
         expect(source).toContain('cacheControlUpdatesForDiskToggle')
         expect(source).toContain('cacheControlUpdatesForPagedToggle')
         expect(source).toContain('cacheControlUpdatesForBlockDiskToggle')
-        expect(source).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache')
+        expect(source).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || exactTypedPromptDiskCache')
         expect(source).toContain('disabled={genericPagedCacheToggleDisabled}')
         expect(source).toContain('disabled={dsv4Active || cachePolicy.legacyDiskCacheDisabled}')
         expect(source).toContain('checked={cachePolicy.legacyDiskCacheChecked}')
@@ -2922,7 +2923,7 @@ describe('Default IP and New Settings', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const familyStart = source.indexOf("} else if (detectedFamily === 'openpangu_v2')")
         const familyBlock = source.slice(familyStart, source.indexOf('return changed', familyStart))
-        const launchStart = source.indexOf("const openPanguExactTypedCache = detectedFamily === 'openpangu_v2'", 3000)
+        const launchStart = source.indexOf('const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)', 3000)
         const launchBlock = source.slice(launchStart, source.indexOf('const prefixCacheOff', launchStart))
 
         expect(familyBlock).toContain('config.enablePrefixCache = true')
@@ -2931,7 +2932,7 @@ describe('Default IP and New Settings', () => {
         expect(familyBlock).toContain('config.enableBlockDiskCache = false')
         expect(familyBlock).toContain('config.noMemoryAwareCache = false')
         expect(familyBlock).toContain("config.kvCacheQuantization = 'auto'")
-        expect(launchBlock).toContain('openPanguExactTypedCache ? false')
+        expect(launchBlock).toContain('exactTypedPromptDiskCache ? false')
         expect(launchBlock).toContain('enableDiskCache: !!config.enableDiskCache')
 
         for (const file of [
@@ -2940,7 +2941,7 @@ describe('Default IP and New Settings', () => {
             'src/renderer/src/components/sessions/SessionSettings.tsx',
         ]) {
             const ui = readFileSync(file, 'utf8')
-            const start = ui.indexOf("detected.family === 'openpangu_v2'")
+            const start = ui.indexOf('usesExactTypedPromptDiskCache(detected.family)')
             const block = ui.slice(start, start + 450)
             expect(start, file).toBeGreaterThanOrEqual(0)
             expect(block, file).toContain('enablePrefixCache = true')
@@ -2956,10 +2957,44 @@ describe('Default IP and New Settings', () => {
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf8')
         expect(form).toContain("t('sessions.config.openPanguTypedCacheNote')")
         expect(enLocale).toContain('openPangu v2 uses exact typed N-1 prompt snapshots')
-        expect(form).toContain('disabled={openPanguExactTypedCache}')
+        expect(form).toContain('disabled={exactTypedPromptDiskCache}')
         expect(form).toContain("t('sessions.config.openPanguMemoryAwareNote')")
         expect(enLocale).toContain("Memory-aware mode is required for openPangu's non-aliasing typed cache clone")
-        expect(form).toContain('cachePolicy.blockDiskCacheDisabled || openPanguExactTypedCache')
+        expect(form).toContain('cachePolicy.blockDiskCacheDisabled || exactTypedPromptDiskCache')
+    })
+
+    it('GLM-5.3 selects exact typed prompt L2 across startup, reset, adoption, and launch', () => {
+        expect(usesExactTypedPromptDiskCache('glm5_next')).toBe(true)
+        expect(usesExactTypedPromptDiskCache('glm5_next_text')).toBe(true)
+        expect(usesExactTypedPromptDiskCache('glm5-next')).toBe(true)
+
+        const source = readFileSync('src/main/sessions.ts', 'utf8')
+        const familyStart = source.indexOf("} else if (detectedFamily === 'glm5-next')")
+        const familyBlock = source.slice(familyStart, source.indexOf("} else if (detectedFamily === 'openpangu_v2')", familyStart))
+        const freshStart = source.indexOf("} else if (freshFamily === 'glm5-next')")
+        const freshBlock = source.slice(freshStart, source.indexOf("} else if (freshFamily === 'openpangu_v2')", freshStart))
+
+        for (const block of [familyBlock, freshBlock]) {
+            expect(block).toContain('config.enablePrefixCache = true')
+            expect(block).toContain('config.usePagedCache = false')
+            expect(block).toContain('config.enableDiskCache = true')
+            expect(block).toContain('config.enableBlockDiskCache = false')
+            expect(block).toContain('config.noMemoryAwareCache = false')
+            expect(block).toContain("config.kvCacheQuantization = 'auto'")
+        }
+
+        expect(source).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily)')
+        expect(source).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily)')
+        expect(source).toContain('enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache')
+
+        for (const file of [
+            'src/renderer/src/components/sessions/CreateSession.tsx',
+            'src/renderer/src/components/sessions/ServerSettingsDrawer.tsx',
+            'src/renderer/src/components/sessions/SessionSettings.tsx',
+        ]) {
+            const ui = readFileSync(file, 'utf8')
+            expect(ui, file).toContain('usesExactTypedPromptDiskCache(detected.family)')
+        }
     })
 
     it('create-session fills missing cache settings before stamping incoming settings current', () => {
@@ -3007,7 +3042,7 @@ describe('Default IP and New Settings', () => {
         const helper = source.slice(start, end)
 
         expect(helper).toContain("setConfigValue(mutable, 'enablePrefixCache'")
-        expect(helper).toContain("setConfigValue(mutable, 'usePagedCache', openPanguExactTypedCache ? false : defaultUsePagedCache)")
+        expect(helper).toContain("setConfigValue(mutable, 'usePagedCache', exactTypedPromptDiskCache ? false : defaultUsePagedCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableDiskCache', defaultEnableDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'enableBlockDiskCache', defaultEnableBlockDiskCache)")
         expect(helper).toContain("setConfigValue(mutable, 'kvCacheQuantization', 'auto')")
@@ -3019,8 +3054,8 @@ describe('Default IP and New Settings', () => {
         expect(helper).toContain('const defaultUsePagedCache = false')
         expect(helper).not.toContain('dsv4Active ? true')
         expect(helper).not.toContain('detectedUsePaged')
-        expect(helper).toContain('const defaultEnableDiskCache = openPanguExactTypedCache')
-        expect(helper).toContain('const defaultEnableBlockDiskCache = !openPanguExactTypedCache')
+        expect(helper).toContain('const defaultEnableDiskCache = exactTypedPromptDiskCache')
+        expect(helper).toContain('const defaultEnableBlockDiskCache = !exactTypedPromptDiskCache')
     })
 
     it('v9 migrates only the pre-v9 stale impossible paged plus legacy-L2 tuple to block L2', () => {
@@ -3125,8 +3160,8 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('applyBundleStartupDefaults(defaultConfig', start)
         const block = source.slice(start, end)
 
-        expect(block).toContain("enableDiskCache: detectedFamily === 'openpangu_v2'")
-        expect(block).toContain("enableBlockDiskCache: detectedFamily !== 'openpangu_v2'")
+        expect(block).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily)')
+        expect(block).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily)')
     })
 
     it('reset persists paged RAM off, SSD L2, and force-text-only values explicitly', () => {
@@ -3868,7 +3903,7 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain('DSV4 Flash composite prefix cache is disabled')
         expect(form).not.toContain("dsv4Active ? applyDsv4CompositeCacheToggle(v) : applyCacheControlUpdates(cacheControlUpdatesForPagedToggle")
         expect(form).not.toContain("dsv4Active ? cacheControlUpdatesForDsv4BlockDiskToggle(v) : cacheControlUpdatesForBlockDiskToggle")
-        expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache')
+        expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || exactTypedPromptDiskCache')
         expect(form).toContain('disabled={genericPagedCacheToggleDisabled}')
         expect(form).toContain("t('sessions.config.blockSizeTooltipDsv4')")
         expect(
@@ -4003,7 +4038,7 @@ describe('JIT Toggle', () => {
             'utf-8',
         )
 
-        expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || openPanguExactTypedCache')
+        expect(form).toContain('const genericPagedCacheToggleDisabled = cachePolicy.pagedCacheDisabled || exactTypedPromptDiskCache')
         const enLocale = readFileSync('src/renderer/src/i18n/locales/en.json', 'utf-8')
         expect(form).toContain("t('sessions.config.m3NativeMsaNote')")
         expect(enLocale).toContain("MiniMax-M3's retained RAM tier is disabled")
@@ -4289,8 +4324,8 @@ describe('Feature Interaction', () => {
         const previewSource = readFileSync(resolve(__dirname, '../src/renderer/src/components/sessions/SessionSettings.tsx'), 'utf-8')
         const launchSource = readFileSync(resolve(__dirname, '../src/main/sessions.ts'), 'utf-8')
         const shared = readFileSync(resolve(__dirname, '../src/shared/cacheLaunchArgs.ts'), 'utf-8')
-        expect(previewSource).toContain('forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active')
-        expect(launchSource).toContain('forceMemoryAwareCache: openPanguExactTypedCache || dsv4Active')
+        expect(previewSource).toContain('forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active')
+        expect(launchSource).toContain('forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active')
         expect(shared).toContain("'--no-paged-cache'")
         expect(shared).not.toContain("args.push('--use-paged-cache')")
     })

@@ -73,6 +73,18 @@ def test_glm_mhc_default_has_explicit_opt_out(monkeypatch):
     assert fused_glm5_mhc_requested() is False
 
 
+def test_qwen35_gdn_conv_candidate_is_family_scoped(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+
+    monkeypatch.setenv("VMLX_QWEN35_FUSED_GDN_CONV", "1")
+    qwen35 = _rows(build_acceleration_contract("qwen3_5"))
+    qwen35_moe = _rows(build_acceleration_contract("qwen3_5_moe"))
+    qwen4 = _rows(build_acceleration_contract("qwen4_exp"))
+    assert qwen35["gdn_conv_state"]["requested"] is True
+    assert qwen35_moe["gdn_conv_state"]["requested"] is True
+    assert qwen4["gdn_conv_state"]["requested"] is False
+
+
 def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
 

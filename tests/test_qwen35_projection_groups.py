@@ -1,6 +1,7 @@
 import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
+import pytest
 
 
 def _qlinear(input_dims: int, output_dims: int) -> nn.QuantizedLinear:
@@ -94,6 +95,70 @@ def test_qwen35_gdn_input_projection_group_is_exact():
     _assert_exact(prefill_reference, prefill_candidate)
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_qwen35_gdn_conv_fusion_matches_stock(dtype):
+    from vmlx_engine.metal.gdn_conv_decode import (
+        qwen35_gdn_conv_decode,
+        qwen35_gdn_conv_status,
+    )
+
+    channels = 96
+    kernel_size = 4
+    conv = nn.Conv1d(
+        channels,
+        channels,
+        kernel_size=kernel_size,
+        groups=channels,
+        bias=False,
+    )
+    conv.weight = conv.weight.astype(dtype)
+    state = (
+        mx.arange((kernel_size - 1) * channels, dtype=mx.float32)
+        .reshape(1, kernel_size - 1, channels)
+        .astype(dtype)
+        / 127.0
+    )
+    token = (
+        mx.arange(channels, dtype=mx.float32).reshape(1, 1, channels)
+        .astype(dtype)
+        / 191.0
+    )
+    full = mx.concatenate([state, token], axis=1)
+    reference_conv = nn.silu(conv(full))
+    reference_state = mx.contiguous(full[:, -(kernel_size - 1) :, :])
+    candidate = qwen35_gdn_conv_decode(
+        token,
+        state,
+        conv.weight,
+        enabled=True,
+    )
+    assert candidate is not None
+    assert qwen35_gdn_conv_status()["observed_calls"] == 1
+    candidate_conv, candidate_state = candidate
+    mx.eval(reference_conv, reference_state, candidate_conv, candidate_state)
+    np.testing.assert_array_equal(
+        np.asarray(candidate_state.astype(mx.float32)),
+        np.asarray(reference_state.astype(mx.float32)),
+    )
+    np.testing.assert_allclose(
+        np.asarray(candidate_conv.astype(mx.float32)),
+        np.asarray(reference_conv.astype(mx.float32)),
+        rtol=8e-3,
+        atol=8e-3,
+    )
+
+
+def test_qwen35_gdn_conv_fusion_refuses_prefill():
+    from vmlx_engine.metal.gdn_conv_decode import qwen35_gdn_conv_decode
+
+    assert qwen35_gdn_conv_decode(
+        mx.zeros((1, 2, 64), dtype=mx.float16),
+        mx.zeros((1, 3, 64), dtype=mx.float16),
+        mx.zeros((64, 4, 1), dtype=mx.float16),
+        enabled=True,
+    ) is None
+
+
 def test_qwen35_projection_preparation_walks_backbone_and_draft_siblings():
     language = _language_module()
     gdn_type = language.Qwen3_5GatedDeltaNet
@@ -136,6 +201,19 @@ def test_qwen35_vlm_mtp_wrappers_consume_prepared_projection_groups():
     gdn_source = inspect.getsource(qwen35_vl._patch_gated_delta_net)
 
     assert 'getattr(self, "_project_inputs", None)' in gdn_source
+    assert "qwen35_gdn_conv_decode" in gdn_source
+    assert "lengths is None" in gdn_source
+
+
+def test_qwen35_text_mtp_wrapper_consumes_exact_decode_conv_candidate():
+    import inspect
+
+    from vmlx_engine.patches.mlx_lm_mtp import qwen35_model
+
+    gdn_source = inspect.getsource(qwen35_model._patch_gated_delta_net)
+
+    assert "qwen35_gdn_conv_decode" in gdn_source
+    assert "lengths is None" in gdn_source
 
 
 def test_generic_loader_prepares_acceleration_after_weight_hydration(

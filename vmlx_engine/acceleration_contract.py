@@ -144,6 +144,14 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 default=True,
             ),
             _feature(
+                "gdn_conv_state",
+                label="GDN K4 convolution and state-shift fusion",
+                kind="metal_kernel",
+                scopes=("ar_decode", "mtp_decode"),
+                default=False,
+                env=("VMLX_QWEN35_FUSED_GDN_CONV",),
+            ),
+            _feature(
                 "mtp_verify_qmm",
                 label="four-row native-MTP verifier QMM",
                 kind="metal_kernel",
@@ -170,6 +178,14 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 kind="runtime",
                 scopes=("prefill", "ar_decode", "mtp_decode"),
                 default=True,
+            ),
+            _feature(
+                "gdn_conv_state",
+                label="GDN K4 convolution and state-shift fusion",
+                kind="metal_kernel",
+                scopes=("ar_decode", "mtp_decode"),
+                default=False,
+                env=("VMLX_QWEN35_FUSED_GDN_CONV",),
             ),
             _feature(
                 "mtp_verify_qmm",

@@ -1,4 +1,9 @@
-"""Single-token Qwen GDN depthwise-convolution/state-shift fusion."""
+"""Single-token Qwen GDN depthwise-convolution/state-shift fusion.
+
+Qwen4-Exp and the vendored Qwen3.5 hybrid runtime share the exact K4
+depthwise-convolution/state layout, but keep separate selection flags and
+runtime telemetry so a proof on one family never enables or attests the other.
+"""
 
 from __future__ import annotations
 
@@ -8,10 +13,16 @@ from functools import lru_cache
 import mlx.core as mx
 
 _OBSERVED = False
+_QWEN35_OBSERVED = False
 
 
 def fused_gdn_conv_requested() -> bool:
     value = os.environ.get("VMLX_QWEN4_FUSED_GDN_CONV", "0").strip().lower()
+    return value not in {"", "0", "false", "off", "no"}
+
+
+def fused_qwen35_gdn_conv_requested() -> bool:
+    value = os.environ.get("VMLX_QWEN35_FUSED_GDN_CONV", "0").strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 
 
@@ -46,17 +57,15 @@ def _kernel(channels: int, kernel_size: int):
     )
 
 
-def qwen4_gdn_conv_decode(
+def _gdn_conv_decode(
     qkv: mx.array,
     state: mx.array,
     weight: mx.array,
     *,
-    enabled: bool | None = None,
+    enabled: bool,
 ) -> tuple[mx.array, mx.array] | None:
     """Return ``(silu(conv), next_state)`` for the exact AR decode shape."""
 
-    if enabled is None:
-        enabled = fused_gdn_conv_requested()
     if not enabled:
         return None
     if qkv.ndim != 3 or tuple(qkv.shape[:2]) != (1, 1):
@@ -82,10 +91,39 @@ def qwen4_gdn_conv_decode(
         output_shapes=[tuple(state.shape), tuple(qkv.shape)],
         output_dtypes=[qkv.dtype, qkv.dtype],
     )
-    global _OBSERVED
-    if not _OBSERVED:
-        _OBSERVED = True
     return convolved, next_state
+
+
+def qwen4_gdn_conv_decode(
+    qkv: mx.array,
+    state: mx.array,
+    weight: mx.array,
+    *,
+    enabled: bool | None = None,
+) -> tuple[mx.array, mx.array] | None:
+    if enabled is None:
+        enabled = fused_gdn_conv_requested()
+    result = _gdn_conv_decode(qkv, state, weight, enabled=enabled)
+    if result is not None:
+        global _OBSERVED
+        _OBSERVED = True
+    return result
+
+
+def qwen35_gdn_conv_decode(
+    qkv: mx.array,
+    state: mx.array,
+    weight: mx.array,
+    *,
+    enabled: bool | None = None,
+) -> tuple[mx.array, mx.array] | None:
+    if enabled is None:
+        enabled = fused_qwen35_gdn_conv_requested()
+    result = _gdn_conv_decode(qkv, state, weight, enabled=enabled)
+    if result is not None:
+        global _QWEN35_OBSERVED
+        _QWEN35_OBSERVED = True
+    return result
 
 
 def qwen4_gdn_conv_status() -> dict[str, object]:
@@ -96,8 +134,19 @@ def qwen4_gdn_conv_status() -> dict[str, object]:
     }
 
 
+def qwen35_gdn_conv_status() -> dict[str, object]:
+    return {
+        "installed": _QWEN35_OBSERVED,
+        "observed_calls": int(_QWEN35_OBSERVED),
+        "reason": None,
+    }
+
+
 __all__ = [
     "fused_gdn_conv_requested",
+    "fused_qwen35_gdn_conv_requested",
+    "qwen35_gdn_conv_decode",
+    "qwen35_gdn_conv_status",
     "qwen4_gdn_conv_decode",
     "qwen4_gdn_conv_status",
 ]

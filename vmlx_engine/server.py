@@ -10506,6 +10506,7 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             )
             runtime_features["gated_rmsnorm"] = gated_rmsnorm_decode_status()
         elif family in {"qwen3_5", "qwen3_5_moe"}:
+            from .metal.gdn_conv_decode import qwen35_gdn_conv_status
             from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_status
             from .models.qwen3_5_family.register import (
                 qwen3_5_family_runtime_status,
@@ -10514,6 +10515,7 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             runtime_features["vendored_hybrid_runtime"] = (
                 qwen3_5_family_runtime_status()
             )
+            runtime_features["gdn_conv_state"] = qwen35_gdn_conv_status()
             runtime_features["mtp_verify_qmm"] = native_mtp_verify_qmm_status()
         elif family == "deepseek_v4":
             from .metal.fused_pair_moe_decode import dsv4_fused_pair_moe_status

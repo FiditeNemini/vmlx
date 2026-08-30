@@ -53,6 +53,11 @@ from typing import Any, Optional
 
 import mlx.core as mx
 
+from vmlx_engine.metal.gdn_conv_decode import (
+    fused_qwen35_gdn_conv_requested,
+    qwen35_gdn_conv_decode,
+)
+
 logger = logging.getLogger(__name__)
 
 _PATCHED = False
@@ -260,15 +265,29 @@ def _patch_gated_delta_net(q35: Any) -> None:
         lengths=None,
     ):
         B, S_chunk = qkv_chunk.shape[:2]
-        conv_in = mx.concatenate([conv_state, qkv_chunk], axis=1)
-        n_keep = self.conv_kernel_size - 1
-        if lengths is not None:
-            ends = mx.clip(lengths, 0, S_chunk)
-            positions = (ends[:, None] + mx.arange(n_keep))[..., None]
-            new_conv_state = mx.take_along_axis(conv_in, positions, axis=1)
+        fused_conv = None
+        fused_enabled = getattr(self, "_fused_gdn_conv", None)
+        if fused_enabled is None:
+            fused_enabled = fused_qwen35_gdn_conv_requested()
+        if lengths is None and fused_enabled and not self.training:
+            fused_conv = qwen35_gdn_conv_decode(
+                qkv_chunk,
+                conv_state,
+                self.conv1d.weight,
+                enabled=True,
+            )
+        if fused_conv is not None:
+            conv_out, new_conv_state = fused_conv
         else:
-            new_conv_state = mx.contiguous(conv_in[:, -n_keep:])
-        conv_out = nn.silu(self.conv1d(conv_in))
+            conv_in = mx.concatenate([conv_state, qkv_chunk], axis=1)
+            n_keep = self.conv_kernel_size - 1
+            if lengths is not None:
+                ends = mx.clip(lengths, 0, S_chunk)
+                positions = (ends[:, None] + mx.arange(n_keep))[..., None]
+                new_conv_state = mx.take_along_axis(conv_in, positions, axis=1)
+            else:
+                new_conv_state = mx.contiguous(conv_in[:, -n_keep:])
+            conv_out = nn.silu(self.conv1d(conv_in))
 
         q, k, v = [
             t.reshape(B, S_chunk, h, d)

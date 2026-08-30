@@ -13,6 +13,7 @@ All notable changes to vMLX Engine will be documented in this file.
 ### Fixed
 - **Incomplete native-MTP tuning records no longer pin a bundle to an unmeasured optimum.** A flat best-depth record above D1 must cover every supported depth through its declared ceiling. Complete D1/D2/D3 tuning, including Qwen3.8-27B's measured profile, remains authoritative.
 - **Dense Qwen3.5 prompt priming is fail-safe.** The implementation remains available for explicit measurement, but stays off by default because its matched 27B trials improved acceptance without a repeatable wall-time win.
+- **Signed-candidate Actions restore only hash-sealed retained evidence for the exact source SHA.** Clean GitHub checkouts no longer discard the current live/packaged receipts required by the production prepackage gate; the gate still revalidates those artifacts before building.
 
 ---
 

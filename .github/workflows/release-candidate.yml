@@ -134,6 +134,42 @@ jobs:
           cd panel
           /opt/homebrew/bin/npm ci
 
+      - name: Restore exact-head retained prepackage evidence
+        working-directory: vmlx
+        env:
+          SOURCE_SHA_INPUT: ${{ inputs.source_sha }}
+          PRIVATE_EVIDENCE_ROOT: ${{ inputs.private_evidence_root }}
+        run: |
+          set -euo pipefail
+          sealed="$PRIVATE_EVIDENCE_ROOT/release-prepackage/$SOURCE_SHA_INPUT"
+          archive="$sealed/build.tar"
+          digest_file="$sealed/build.tar.sha256"
+          test -f "$archive"
+          test -f "$digest_file"
+          read -r expected_digest extra < "$digest_file"
+          test -z "${extra:-}"
+          [[ "$expected_digest" =~ ^[0-9a-f]{64}$ ]]
+          actual_digest="$(/usr/bin/shasum -a 256 "$archive" | /usr/bin/awk '{print $1}')"
+          test "$actual_digest" = "$expected_digest"
+          while IFS= read -r member; do
+            case "$member" in
+              build|build/*) ;;
+              *)
+                echo "Retained-evidence archive has an unsafe member: $member" >&2
+                exit 1
+                ;;
+            esac
+            case "/$member/" in
+              */../*)
+                echo "Retained-evidence archive traverses a parent: $member" >&2
+                exit 1
+                ;;
+            esac
+          done < <(/usr/bin/tar -tf "$archive")
+          test -z "$(/usr/bin/tar -tf "$archive" | /usr/bin/grep '^/' || true)"
+          /usr/bin/tar -xf "$archive"
+          test -d build
+
       - name: Build both production DMGs
         working-directory: vmlx
         env:

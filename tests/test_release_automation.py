@@ -230,10 +230,10 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     for name, (source, parsed) in files.items():
         if name == "release-automation-ci.yml":
             assert set(parsed["on"]) == {"push", "pull_request"}
-            assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in source
+            assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in source
             continue
         assert set(parsed["on"]) == {"workflow_dispatch"}, name
-        assert "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" in source
+        assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in source
         assert "PYPI_API_TOKEN" not in source
         assert "secrets.PYPI" not in source
         action_uses = re.findall(r"^\s*uses:\s*([^\s]+)\s*$", source, re.MULTILINE)
@@ -280,7 +280,7 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "environment: production-release" in publish
     assert "environment: pypi" in publish
     assert "id-token: write" in publish
-    assert "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in publish
+    assert "pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26" in publish
     assert "Publish without a stored PyPI token" in publish
     assert "publish-pypi.yml -R jjang-ai/jangq" in publish
     assert "cmp repo-vmlx/latest.json repo-mlxstudio/latest.json" in publish

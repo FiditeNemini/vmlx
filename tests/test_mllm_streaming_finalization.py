@@ -2,11 +2,19 @@
 """Regression coverage for terminal MLLM streaming detokenizer flushes."""
 
 import asyncio
+import json
+from types import SimpleNamespace
 
+import pytest
+
+from vmlx_engine.api.models import ChatCompletionRequest, Message, ResponsesRequest
 from vmlx_engine.engine.batched import BatchedEngine, _reconcile_mllm_terminal_delta
+from vmlx_engine.engine.base import GenerationOutput
 from vmlx_engine.mllm_batch_generator import MLLMBatchResponse
 from vmlx_engine.mllm_scheduler import MLLMRequest, MLLMScheduler
+from vmlx_engine.reasoning.qwen3_parser import Qwen3ReasoningParser
 from vmlx_engine.request import RequestOutput, SamplingParams
+from vmlx_engine.server import _terminal_visible_stream_suffix
 
 
 class _PendingTailDetokenizer:
@@ -176,3 +184,133 @@ def test_batched_mllm_stream_generate_reconciles_terminal_suffix():
     assert "".join(output.new_text for output in outputs) == "assert value == []"
     assert outputs[-1].text == "assert value == []"
     assert outputs[-1].finished is True
+
+
+def test_terminal_visible_stream_suffix_reconciles_qwen_content():
+    parser = Qwen3ReasoningParser()
+    parser.reset_state(think_in_prompt=False)
+
+    assert _terminal_visible_stream_suffix(
+        "assert value == []",
+        "assert value == [",
+        parser=parser,
+    ) == "]"
+
+
+def test_terminal_visible_stream_suffix_keeps_qwen_reasoning_private():
+    parser = Qwen3ReasoningParser()
+    parser.reset_state(think_in_prompt=False)
+
+    assert _terminal_visible_stream_suffix(
+        "<think>private</think>answer []",
+        "answer [",
+        parser=parser,
+    ) == "]"
+
+
+def test_terminal_visible_stream_suffix_never_rewrites_nonmonotonic_text():
+    assert _terminal_visible_stream_suffix(
+        "different final text",
+        "already streamed",
+    ) == ""
+
+
+class _TerminalVisibleSuffixEngine:
+    tokenizer = SimpleNamespace(has_thinking=False)
+
+    async def stream_chat(self, *, messages, **kwargs):
+        del messages, kwargs
+        yield GenerationOutput(
+            text="assert value == [",
+            new_text="assert value == [",
+            prompt_tokens=3,
+            completion_tokens=4,
+            finished=False,
+            finish_reason=None,
+        )
+        yield GenerationOutput(
+            text="assert value == []",
+            new_text="",
+            prompt_tokens=3,
+            completion_tokens=5,
+            finished=True,
+            finish_reason="stop",
+        )
+
+
+def _configure_terminal_suffix_server(monkeypatch):
+    import vmlx_engine.server as server
+
+    monkeypatch.setattr(server, "_default_timeout", 5.0)
+    monkeypatch.setattr(server, "_model_name", "qwen4-terminal-suffix")
+    monkeypatch.setattr(server, "_model_path", None)
+    monkeypatch.setattr(server, "_reasoning_parser", Qwen3ReasoningParser())
+    monkeypatch.setattr(server, "_tool_call_parser", None)
+    return server
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_terminal_visible_suffix(monkeypatch):
+    server = _configure_terminal_suffix_server(monkeypatch)
+    request = ChatCompletionRequest(
+        model="qwen4-terminal-suffix",
+        messages=[Message(role="user", content="return code")],
+        stream=True,
+        enable_thinking=False,
+    )
+
+    chunks = []
+    async for line in server.stream_chat_completion(
+        _TerminalVisibleSuffixEngine(),
+        [message.model_dump(exclude_none=True) for message in request.messages],
+        request,
+    ):
+        if line.startswith("data: ") and line.strip() != "data: [DONE]":
+            chunks.append(json.loads(line.removeprefix("data: ")))
+
+    assert "".join(
+        chunk["choices"][0]["delta"].get("content") or ""
+        for chunk in chunks
+        if chunk.get("choices")
+    ) == "assert value == []"
+    assert any(
+        chunk["choices"][0].get("finish_reason") == "stop"
+        for chunk in chunks
+        if chunk.get("choices")
+    )
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_emits_terminal_visible_suffix(monkeypatch):
+    server = _configure_terminal_suffix_server(monkeypatch)
+    request = ResponsesRequest(
+        model="qwen4-terminal-suffix",
+        input="return code",
+        stream=True,
+        enable_thinking=False,
+    )
+
+    events = []
+    async for chunk in server.stream_responses_api(
+        _TerminalVisibleSuffixEngine(),
+        [{"role": "user", "content": "return code"}],
+        request,
+    ):
+        for line in chunk.splitlines():
+            if line.startswith("data: "):
+                data = line.removeprefix("data: ")
+                if data != "[DONE]":
+                    events.append(json.loads(data))
+
+    deltas = "".join(
+        event.get("delta", "")
+        for event in events
+        if event.get("type") == "response.output_text.delta"
+    )
+    done = [
+        event.get("text", "")
+        for event in events
+        if event.get("type") == "response.output_text.done"
+    ]
+    assert deltas == "assert value == []"
+    assert done == ["assert value == []"]

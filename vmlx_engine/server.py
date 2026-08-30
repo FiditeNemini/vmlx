@@ -8029,6 +8029,40 @@ def _suppressed_tool_display_delta(
     return delta if delta else None
 
 
+def _terminal_visible_stream_suffix(
+    authoritative_text: str | None,
+    streamed_text: str,
+    *,
+    parser: Any | None = None,
+    request: ChatCompletionRequest | ResponsesRequest | None = None,
+    suppress_markup: bool = False,
+    tools_active: bool = False,
+) -> str:
+    """Return a missing terminal suffix from the authoritative final text.
+
+    Some MLLM detokenizers replace their last incremental decode segment when
+    ``finalize()`` runs.  The final ``GenerationOutput.text`` is complete,
+    but its terminal ``new_text`` can therefore be empty even though the
+    already-emitted, display-normalized API text is a strict prefix of the
+    final visible answer.  Reconcile at that first monotonic layer: never
+    rewrite bytes already sent and never expose reasoning or tool markup.
+    """
+    final_text = str(authoritative_text or "")
+    if not final_text:
+        return ""
+    if parser is not None:
+        _reasoning, content = parser.extract_reasoning(final_text)
+        final_text = content or ""
+    if tools_active and final_text:
+        final_text = _visible_prefix_before_unparsed_tool_markup(final_text)
+    if suppress_markup and final_text:
+        final_text = _clean_suppressed_tool_markup_for_display(final_text, request)
+    final_text = _finalize_visible_text_for_request(final_text, request)
+    if final_text.startswith(streamed_text):
+        return final_text[len(streamed_text) :]
+    return ""
+
+
 def _suppress_tool_parsing_when_no_tools(
     all_tools: list,
     tool_choice,
@@ -24586,26 +24620,28 @@ async def stream_chat_completion(
                     _tc_stop_complete_chunks = 0
 
             # Use reasoning parser if enabled
-            if request_parser and delta_text:
-                previous_text = (
-                    accumulated_text[: -len(delta_text)]
-                    if delta_text
-                    else accumulated_text
-                )
-                delta_msg = _extract_reasoning_stream_delta(
-                    request_parser,
-                    previous_text,
-                    accumulated_text,
-                    delta_text,
-                    finished=bool(output.finished),
-                )
+            if request_parser and (delta_text or output.finished):
+                if delta_text:
+                    previous_text = accumulated_text[: -len(delta_text)]
+                    delta_msg = _extract_reasoning_stream_delta(
+                        request_parser,
+                        previous_text,
+                        accumulated_text,
+                        delta_text,
+                        finished=bool(output.finished),
+                    )
+                else:
+                    delta_msg = ChatCompletionChunkDelta()
                 if delta_msg is None:
                     # Skip this chunk (e.g., <think> token itself)
-                    if suppress_reasoning:
-                        logger.debug(
-                            f"[reasoning-debug] parser returned None for delta={repr(delta_text[:50])}, suppress={suppress_reasoning}, think_in_prompt={effective_think_in_template}"
-                        )
-                    continue
+                    if output.finished:
+                        delta_msg = ChatCompletionChunkDelta()
+                    else:
+                        if suppress_reasoning:
+                            logger.debug(
+                                f"[reasoning-debug] parser returned None for delta={repr(delta_text[:50])}, suppress={suppress_reasoning}, think_in_prompt={effective_think_in_template}"
+                            )
+                        continue
 
                 # Post-parse cleaning for streaming deltas — strip any
                 # structural markers that survived the parser's split
@@ -24870,6 +24906,19 @@ async def stream_chat_completion(
                         streamed_content,
                     )
 
+                if output.finished and not tool_call_buffering:
+                    terminal_suffix = _terminal_visible_stream_suffix(
+                        getattr(output, "text", ""),
+                        streamed_content + (emit_content or ""),
+                        parser=request_parser,
+                        request=request,
+                        suppress_markup=_suppress_markup_display,
+                        tools_active=tool_call_active,
+                    )
+                    if terminal_suffix:
+                        emit_content = (emit_content or "") + terminal_suffix
+                        accumulated_content += terminal_suffix
+
                 # Skip chunks that have nothing to emit after conversion
                 if not emit_content and not emit_reasoning and not output.finished:
                     continue
@@ -25022,6 +25071,17 @@ async def stream_chat_completion(
                         safe_text_prefix,
                         streamed_content,
                     )
+
+                if output.finished and not tool_call_buffering:
+                    terminal_suffix = _terminal_visible_stream_suffix(
+                        getattr(output, "text", ""),
+                        streamed_content + (content or ""),
+                        request=request,
+                        suppress_markup=_suppress_markup_display,
+                        tools_active=tool_call_active,
+                    )
+                    if terminal_suffix:
+                        content = (content or "") + terminal_suffix
 
                 if content:
                     content_was_emitted = True
@@ -26802,8 +26862,9 @@ async def stream_responses_api(
             if getattr(output, "error", None):
                 raise RuntimeError(str(getattr(output, "error")))
 
-            if delta_text:
-                full_text += delta_text
+            if delta_text or output.finished:
+                if delta_text:
+                    full_text += delta_text
 
                 # Stop generation once the tool-call turn is complete (opt-in
                 # per parser) — mirrors stream_chat_completion. The
@@ -26875,19 +26936,25 @@ async def stream_responses_api(
                     previous_text = (
                         full_text[: -len(delta_text)] if delta_text else full_text
                     )
-                    delta_msg = _extract_reasoning_stream_delta(
-                        request_parser,
-                        previous_text,
-                        full_text,
-                        delta_text,
-                        finished=bool(output.finished),
-                    )
+                    if delta_text:
+                        delta_msg = _extract_reasoning_stream_delta(
+                            request_parser,
+                            previous_text,
+                            full_text,
+                            delta_text,
+                            finished=bool(output.finished),
+                        )
+                    else:
+                        delta_msg = ChatCompletionChunkDelta()
                     if delta_msg is None:
                         # Skip this chunk entirely (e.g., <think> token itself)
                         # Must use continue (not pass) to avoid falling through
                         # to token tracking and usage emission below.
-                        continue
-                    else:
+                        if output.finished:
+                            delta_msg = ChatCompletionChunkDelta()
+                        else:
+                            continue
+                    if delta_msg is not None:
                         # Post-parse cleaning — mirror the chat_completions
                         # streaming path so Responses API clients don't see
                         # residual `<channel|>` / `thought\n` / `<turn|>` etc.
@@ -27077,6 +27144,19 @@ async def stream_responses_api(
                                     streamed_text,
                                 )
 
+                            if output.finished and not tool_call_buffering:
+                                terminal_suffix = _terminal_visible_stream_suffix(
+                                    getattr(output, "text", ""),
+                                    streamed_text + (emit_content or ""),
+                                    parser=request_parser,
+                                    request=request,
+                                    suppress_markup=_suppress_markup_display,
+                                    tools_active=tool_call_active,
+                                )
+                                if terminal_suffix:
+                                    emit_content = (emit_content or "") + terminal_suffix
+                                    accumulated_content += terminal_suffix
+
                             # Emit reasoning as OpenAI Responses reasoning-summary events.
                             if emit_reasoning:
                                 streamed_reasoning_text += emit_reasoning
@@ -27160,6 +27240,17 @@ async def stream_responses_api(
                                 safe_text_prefix,
                                 streamed_text,
                             )
+
+                        if output.finished and not tool_call_buffering:
+                            terminal_suffix = _terminal_visible_stream_suffix(
+                                getattr(output, "text", ""),
+                                streamed_text + (content or ""),
+                                request=request,
+                                suppress_markup=_suppress_markup_display,
+                                tools_active=tool_call_active,
+                            )
+                            if terminal_suffix:
+                                content = (content or "") + terminal_suffix
 
                         if content:
                             if reasoning_item_started and not reasoning_item_finished:
@@ -27622,10 +27713,21 @@ async def stream_responses_api(
     else:
         # No tool calls — use content accumulated during streaming (reasoning already separated)
         _ans_tool_calls = None
-        display_text = cleaned_text or ""
+        # Once any output_text deltas were emitted, their monotonic accumulator
+        # owns the corresponding done event.  Re-cleaning raw/full_text can
+        # reintroduce a held partial marker or omit a detokenizer-finalized
+        # suffix, making Responses contradict its own delta stream.
+        display_text = streamed_text or cleaned_text or ""
         if request_parser:
-            # Reasoning was already emitted during streaming — use content-only text
-            if accumulated_content and not _suppress_markup_display:
+            # Reasoning was already emitted during streaming, so the monotonic
+            # content-only accumulator owns Responses finalization.  This is
+            # also where a terminal detokenizer suffix is reconciled.  The
+            # suppressed-markup cleanup below still applies before emission;
+            # preferring the raw incremental accumulator here made
+            # output_text.done one byte shorter than its own final delta stream.
+            if streamed_text:
+                display_text = streamed_text
+            elif accumulated_content and not _suppress_markup_display:
                 display_text = accumulated_content
             elif (
                 accumulated_reasoning

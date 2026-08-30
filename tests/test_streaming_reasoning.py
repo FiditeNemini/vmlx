@@ -820,8 +820,8 @@ class TestSSEStreamingFix:
         import vmlx_engine.server as server_mod
         source = inspect.getsource(server_mod.stream_chat_completion)
 
-        # Path 1: if request_parser and delta_text:
-        assert "if request_parser and delta_text:" in source
+        # Path 1: parser processes real deltas and terminal reconciliation.
+        assert "if request_parser and (delta_text or output.finished):" in source
         # Path 2: elif not request_parser:
         assert "elif not request_parser:" in source
         # Path 3: else: continue (parser active, no delta)

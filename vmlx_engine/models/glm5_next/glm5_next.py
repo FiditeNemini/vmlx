@@ -137,6 +137,24 @@ class Glm5KDACache(ArraysCache):
     def commit_speculative(self) -> None:
         self._speculative_states = None
 
+    def extract(self, idx: int) -> "Glm5KDACache":
+        """Extract one batch row without indexing valid empty state slots.
+
+        ``mlx_lm.ArraysCache.extract`` assumes every slot is an array and
+        returns a plain ``ArraysCache``.  GLM KDA slots are intentionally
+        populated lazily, so a terminal BatchGenerator response can still
+        contain ``None`` here.  Preserve both that state and the concrete
+        rollback-aware cache type when handing the finished request back to
+        the scheduler.
+        """
+
+        extracted = Glm5KDACache()
+        extracted.cache = [
+            value[idx : idx + 1] if value is not None else None
+            for value in self.cache
+        ]
+        return extracted
+
 
 class Glm5MLACache(ArraysCache):
     """Per-MLA-layer cache: expanded K/V plus the DSA indexer's packed
@@ -149,6 +167,16 @@ class Glm5MLACache(ArraysCache):
         if int(kpool) <= 0:
             raise ValueError("GLM DSA kpool must be positive")
         self.kpool = int(kpool)
+
+    def extract(self, idx: int) -> "Glm5MLACache":
+        """Extract one batch row while retaining MLA/DSA cache semantics."""
+
+        extracted = Glm5MLACache(self.kpool)
+        extracted.cache = [
+            value[idx : idx + 1] if value is not None else None
+            for value in self.cache
+        ]
+        return extracted
 
     @property
     def offset(self) -> int:

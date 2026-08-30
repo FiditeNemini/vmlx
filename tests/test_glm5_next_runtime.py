@@ -106,6 +106,39 @@ class TestCacheAndForward:
         assert len(cache[0].cache) == 4  # conv_q, conv_k, conv_v, S
         assert len(cache[3].cache) == 4  # keys, values, packed, DSA pool keys
 
+    def test_cache_extract_preserves_empty_slots_and_concrete_types(self, glm5):
+        """BatchGenerator's terminal epilogue extracts one request cache.
+
+        GLM mixed-state slots are populated lazily, so valid ``None`` values
+        must survive that extraction instead of reaching the upstream
+        ``ArraysCache.extract`` implementation, which blindly subscripts
+        every slot.  Keeping the concrete classes also preserves KDA rollback
+        and MLA/DSA metadata for the scheduler-owned result.
+        """
+
+        kda = glm5.Glm5KDACache()
+        kda.cache[glm5.KDA_CONV_Q] = mx.arange(12).reshape(2, 2, 3)
+        kda.cache[glm5.KDA_STATE] = mx.arange(16).reshape(2, 2, 2, 2)
+
+        extracted_kda = kda.extract(1)
+        assert isinstance(extracted_kda, glm5.Glm5KDACache)
+        assert extracted_kda.cache[glm5.KDA_CONV_K] is None
+        assert extracted_kda.cache[glm5.KDA_CONV_V] is None
+        assert extracted_kda.cache[glm5.KDA_CONV_Q].shape == (1, 2, 3)
+        assert extracted_kda.cache[glm5.KDA_STATE].shape == (1, 2, 2, 2)
+
+        mla = glm5.Glm5MLACache(kpool=7)
+        mla.cache[glm5.MLA_KEYS] = mx.arange(24).reshape(2, 1, 3, 4)
+        mla.cache[glm5.MLA_PACKED] = mx.arange(48).reshape(2, 3, 8)
+
+        extracted_mla = mla.extract(0)
+        assert isinstance(extracted_mla, glm5.Glm5MLACache)
+        assert extracted_mla.kpool == 7
+        assert extracted_mla.cache[glm5.MLA_VALUES] is None
+        assert extracted_mla.cache[glm5.MLA_POOL_KEYS] is None
+        assert extracted_mla.cache[glm5.MLA_KEYS].shape == (1, 1, 3, 4)
+        assert extracted_mla.cache[glm5.MLA_PACKED].shape == (1, 3, 8)
+
     def test_prefill_and_decode_shapes(self, tiny_model):
         cache = tiny_model.make_cache()
         out = tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7]]), cache=cache)

@@ -128,17 +128,32 @@ def test_dsv4_contract_preserves_production_defaults(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
 
     monkeypatch.delenv("VMLX_DSV4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.delenv("VMLX_DSV4_INDEXER_KERNEL", raising=False)
     monkeypatch.delenv("VMLX_DSV4_LM_HEAD_MODE", raising=False)
     monkeypatch.delenv("VMLX_DSV4_ROPE_CACHE", raising=False)
     contract = build_acceleration_contract("deepseek_v4")
     rows = _rows(contract)
 
     assert rows["runtime_patch"]["requested"] is True
+    assert rows["indexer_scores"]["requested"] is False
     assert rows["fused_moe_pair"]["requested"] is True
     assert rows["lm_head"]["selection"] == "qmm"
     assert rows["lm_head"]["requested"] is True
     assert rows["rope_cache"]["requested"] is True
     assert rows["affine_moe"]["requested"] is False
+
+
+def test_dsv4_indexer_candidate_is_prefill_only(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+
+    monkeypatch.setenv("VMLX_DSV4_INDEXER_KERNEL", "1")
+    rows = _rows(build_acceleration_contract("deepseek_v4"))
+
+    assert rows["indexer_scores"]["requested"] is True
+    assert rows["indexer_scores"]["scopes"] == ["prefill"]
+    assert "indexer_scores" not in _rows(
+        build_acceleration_contract("qwen4_exp")
+    )
 
 
 def test_model_attestation_merges_and_returns_a_copy():

@@ -308,6 +308,14 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 default=True,
             ),
             _feature(
+                "indexer_scores",
+                label="DSA/CSA prefill indexer score reduction",
+                kind="metal_kernel",
+                scopes=("prefill",),
+                default=False,
+                env=("VMLX_DSV4_INDEXER_KERNEL",),
+            ),
+            _feature(
                 "fused_moe_pair",
                 label="validated pair-SwiGLU MoE decode fusion",
                 kind="metal_kernel",

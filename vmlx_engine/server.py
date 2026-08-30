@@ -10522,8 +10522,19 @@ def _family_acceleration_contract(bundle_path: str | None) -> dict[str, Any]:
             runtime_features["gdn_gate_terms"] = qwen35_gdn_gate_terms_status()
             runtime_features["mtp_verify_qmm"] = native_mtp_verify_qmm_status()
         elif family == "deepseek_v4":
+            from jang_tools.dsv4.indexer_scores_kernel import (
+                fused_indexer_status,
+            )
+
             from .metal.fused_pair_moe_decode import dsv4_fused_pair_moe_status
 
+            indexer_status = fused_indexer_status()
+            runtime_features["indexer_scores"] = {
+                "installed": indexer_status.get("self_test") == "passed",
+                "observed_calls": int(indexer_status.get("calls", 0) or 0),
+                "reason": indexer_status.get("reason")
+                or indexer_status.get("declined"),
+            }
             runtime_features["fused_moe_pair"] = {
                 **runtime_features.get("fused_moe_pair", {}),
                 **dsv4_fused_pair_moe_status(),

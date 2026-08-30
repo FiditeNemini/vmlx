@@ -192,6 +192,18 @@ describe('buildRequestBody — Chat Completions API', () => {
         expect(body.repetition_penalty).toBeUndefined()
     })
 
+    it('applies the shared Native-MTP effective sampler at both live request boundaries', () => {
+        const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+        expect(source).toContain("applyEffectiveSessionGenerationDefaults")
+        expect(source).toContain('const effectiveSamplerOverrides = isRemote')
+        expect(source).toContain('chatSessionConfig,')
+        expect(source).toContain('chatNativeMtp,')
+        expect(source.match(/effectiveSamplerOverrides\?\.temperature/g)).toHaveLength(2)
+        expect(source.match(/effectiveSamplerOverrides\?\.topP/g)).toHaveLength(2)
+        expect(source.match(/effectiveSamplerOverrides\?\.topK/g)).toHaveLength(2)
+        expect(source.match(/effectiveSamplerOverrides\?\.minP/g)).toHaveLength(2)
+    })
+
     it('forwards explicit greedy MTP-compatible sampler values including neutral repeat penalty', () => {
         const body = buildRequestBody(
             'completions',

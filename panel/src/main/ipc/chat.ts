@@ -118,6 +118,7 @@ import {
   toolCapabilityNames,
 } from "../tool-capability-epoch";
 import { resolveSlowFamilyTimeoutSeconds } from '../../shared/slowFamilyTimeouts';
+import { applyEffectiveSessionGenerationDefaults } from '../../shared/effectiveGenerationDefaults';
 
 // Default connection config (fallback values)
 const DEFAULT_PORT = 8000;
@@ -1074,6 +1075,8 @@ export function registerChatHandlers(
       let supportsThinkingBudget: boolean | undefined;
       let supportsInstructMode: boolean | undefined;
       let supportedReasoningEfforts: ReasoningEffort[] | undefined;
+      let chatNativeMtp: RemoteDetectedConfig['nativeMtp'];
+      let chatSessionConfig: Record<string, unknown> = {};
       let sessionImageTokenBudget: number | undefined;
       // VLM video sampling (Qwen 3.6, Qwen3.5-VL, etc.) — forwarded as
       // video_fps / video_max_frames on the request body when present.
@@ -1115,6 +1118,7 @@ export function registerChatHandlers(
           sessionManager.touchSession(chatSession.id);
           try {
             const sessionConfig = JSON.parse(chatSession.config);
+            chatSessionConfig = sessionConfig;
             if (sessionConfig.timeout === 0) {
               // "No limit" — match the 86400s (24h) that sessions.ts sends via --timeout
               timeoutSeconds = 86400;
@@ -1142,6 +1146,7 @@ export function registerChatHandlers(
             supportsThinkingBudget = detected.supportsThinkingBudget;
             supportsInstructMode = detected.supportsInstructMode;
             supportedReasoningEfforts = detected.supportedReasoningEfforts;
+            chatNativeMtp = detected.nativeMtp;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
               chatDetectedFamily,
@@ -1604,6 +1609,19 @@ export function registerChatHandlers(
         ...(db.getChatOverrides(chatId) || {}),
         chatId,
       });
+      // Chat Settings displays Native-MTP's effective greedy tuple, but those
+      // controls are intentionally disabled and therefore are not persisted as
+      // synthetic per-chat overrides. Apply the same shared session policy at
+      // the actual request boundary so the visible contract and the Chat /
+      // Responses wire bodies cannot diverge. Remote providers retain their
+      // own sampling contract.
+      const effectiveSamplerOverrides = isRemote
+        ? overrides
+        : applyEffectiveSessionGenerationDefaults(
+            overrides,
+            chatSessionConfig,
+            chatNativeMtp,
+          );
       if (!isRemote && supportsInstructMode === false && overrides?.enableThinking === false) {
         throw new Error(
           "This model has no native Thinking Off/Instruct mode. Open Chat Settings and choose Auto or On.",
@@ -2297,26 +2315,29 @@ export function registerChatHandlers(
               model: modelName,
               input: inputMessages,
               instructions,
-              // Only send temperature/top_p when explicitly set in chat overrides.
-              // When omitted, the server resolves bundle metadata/family fallback.
-              ...(overrides?.temperature != null
-                ? { temperature: overrides.temperature }
+              // Native MTP contributes the product-enforced greedy tuple;
+              // otherwise only explicit chat overrides are sent and the
+              // server remains authoritative for bundle defaults.
+              ...(effectiveSamplerOverrides?.temperature != null
+                ? { temperature: effectiveSamplerOverrides.temperature }
                 : {}),
-              ...(overrides?.topP != null ? { top_p: overrides.topP } : {}),
+              ...(effectiveSamplerOverrides?.topP != null
+                ? { top_p: effectiveSamplerOverrides.topP }
+                : {}),
               ...(resolvedOutputBudget
                 ? { max_output_tokens: resolvedOutputBudget }
                 : {}),
               stream: true,
             };
             if (stopSequences) obj.stop = stopSequences;
-            const effectiveTopK = overrides?.topK;
+            const effectiveTopK = effectiveSamplerOverrides?.topK;
             // Zero is an explicit disable override. Omitting it would make the
             // engine re-inherit a non-zero bundle/default top_k.
             if (effectiveTopK != null) obj.top_k = effectiveTopK;
             // Explicit zero disables a non-zero bundle min_p default. Only an
             // absent override means inherit the model/server default.
-            if (overrides?.minP != null)
-              obj.min_p = overrides.minP;
+            if (effectiveSamplerOverrides?.minP != null)
+              obj.min_p = effectiveSamplerOverrides.minP;
             // Always send when explicitly set; 1.0 can be an intentional
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)
@@ -2377,23 +2398,24 @@ export function registerChatHandlers(
             const obj: Record<string, any> = {
               model: modelName,
               messages: requestMessages,
-              // Only send temperature/top_p when explicitly set in chat overrides.
-              // When omitted, the server resolves bundle metadata/family fallback.
-              ...(overrides?.temperature != null
-                ? { temperature: overrides.temperature }
+              // Same effective sampler contract as the Responses branch.
+              ...(effectiveSamplerOverrides?.temperature != null
+                ? { temperature: effectiveSamplerOverrides.temperature }
                 : {}),
-              ...(overrides?.topP != null ? { top_p: overrides.topP } : {}),
+              ...(effectiveSamplerOverrides?.topP != null
+                ? { top_p: effectiveSamplerOverrides.topP }
+                : {}),
               ...(resolvedOutputBudget ? { max_tokens: resolvedOutputBudget } : {}),
               stream: true,
               stream_options: { include_usage: true },
             };
             if (stopSequences) obj.stop = stopSequences;
-            const effectiveTopK = overrides?.topK;
+            const effectiveTopK = effectiveSamplerOverrides?.topK;
             // Preserve explicit Off across both wire APIs; only undefined means
             // inherit the current model/server default.
             if (effectiveTopK != null) obj.top_k = effectiveTopK;
-            if (overrides?.minP != null)
-              obj.min_p = overrides.minP;
+            if (effectiveSamplerOverrides?.minP != null)
+              obj.min_p = effectiveSamplerOverrides.minP;
             // Always send when explicitly set; 1.0 can be an intentional
             // per-chat override of a bundle repetition penalty.
             if (overrides?.repeatPenalty != null)

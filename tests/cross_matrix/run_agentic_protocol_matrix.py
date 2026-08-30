@@ -3654,6 +3654,36 @@ def _response_request_id_hashes(response_id: str) -> set[str]:
     }
 
 
+def _last_cache_execution_request_id_sha256(
+    health: dict[str, Any],
+) -> tuple[str | None, list[str]]:
+    """Return the durable admitted-request ID without retaining raw IDs.
+
+    A fully cached non-streaming replay can finish between two health polls.
+    The scheduler's last-cache-execution record is updated at admission for
+    misses as well as hits and remains visible after terminal cleanup, so it
+    closes that observation gap without treating a successful HTTP response as
+    proof by itself.  The raw request ID never enters the private artifact.
+    """
+
+    scheduler = health.get("scheduler")
+    if not isinstance(scheduler, dict):
+        return None, []
+    execution = scheduler.get("last_cache_execution")
+    if execution is None:
+        return None, []
+    if not isinstance(execution, dict):
+        return None, ["/health scheduler.last_cache_execution is invalid"]
+    request_id = execution.get("request_id")
+    if request_id is None:
+        return None, []
+    if not isinstance(request_id, str) or not request_id:
+        return None, [
+            "/health scheduler.last_cache_execution.request_id is invalid"
+        ]
+    return _sha256(request_id), []
+
+
 def _paired_gateway_lifecycle(
     action: Callable[[], dict[str, Any]],
     probe: Callable[[], dict[str, Any]],
@@ -3673,6 +3703,8 @@ def _paired_gateway_lifecycle(
     state = {
         "baseline_settled": False,
         "active_seen": False,
+        "durable_completion_seen": False,
+        "baseline_last_cache_execution_request_id_sha256": None,
         "final_idle_settled": False,
         "action_executed": False,
     }
@@ -3682,6 +3714,11 @@ def _paired_gateway_lifecycle(
         health = probe()
         identity, identity_failures = _health_identity(health)
         lifecycle, lifecycle_failures = _request_lifecycle_view(health)
+        (
+            last_cache_execution_request_id_sha256,
+            cache_execution_failures,
+        ) = _last_cache_execution_request_id_sha256(health)
+        lifecycle_failures = [*lifecycle_failures, *cache_execution_failures]
         fingerprint = identity.get("fingerprint_sha256")
         row = {
             "phase": phase,
@@ -3692,6 +3729,9 @@ def _paired_gateway_lifecycle(
             ),
             "identity_failures": identity_failures,
             "lifecycle_failures": lifecycle_failures,
+            "last_cache_execution_request_id_sha256": (
+                last_cache_execution_request_id_sha256
+            ),
             **lifecycle,
             # Compatibility aliases for readers of the original V5 artifact.
             "num_running": lifecycle.get("scheduler_running_count"),
@@ -3735,6 +3775,16 @@ def _paired_gateway_lifecycle(
         if active_ids and phase != "before":
             observed_action_request_ids.update(active_ids)
             state["active_seen"] = True
+        durable_id = row.get("last_cache_execution_request_id_sha256")
+        if (
+            phase != "before"
+            and isinstance(durable_id, str)
+            and durable_id
+            and durable_id
+            != state["baseline_last_cache_execution_request_id_sha256"]
+        ):
+            observed_action_request_ids.add(durable_id)
+            state["durable_completion_seen"] = True
         return True
 
     def poll() -> None:
@@ -3759,6 +3809,11 @@ def _paired_gateway_lifecycle(
                 idle_streak += 1
                 if idle_streak >= 2:
                     state["baseline_settled"] = True
+                    state[
+                        "baseline_last_cache_execution_request_id_sha256"
+                    ] = baseline.get(
+                        "last_cache_execution_request_id_sha256"
+                    )
                     ready.set()
                     break
             else:
@@ -3873,6 +3928,12 @@ def _paired_gateway_lifecycle(
         correlation_status = "missing_gateway_response_id"
         correlation_pass = False
         correlation_failures.append("gateway action did not return a response ID")
+    elif not observed_action_request_ids:
+        correlation_status = "unobserved_request_id"
+        correlation_pass = False
+        correlation_failures.append(
+            "gateway action produced no active or durable request ID evidence"
+        )
     elif foreign_request_ids:
         correlation_status = "foreign_request_ids"
         correlation_pass = False
@@ -3882,13 +3943,19 @@ def _paired_gateway_lifecycle(
     else:
         correlation_status = "matched"
         correlation_pass = True
-    if not state["active_seen"]:
-        failures.append("during: exclusive gateway activity was not observed")
+    action_evidence_seen = (
+        state["active_seen"] or state["durable_completion_seen"]
+    )
+    if not action_evidence_seen:
+        failures.append(
+            "during: exclusive gateway activity or durable completion "
+            "was not observed"
+        )
 
     bounded_complete = (
         not failures
         and state["baseline_settled"]
-        and state["active_seen"]
+        and action_evidence_seen
         and state["final_idle_settled"]
         and state["action_executed"]
         and bool(observed_action_request_ids)
@@ -3907,12 +3974,18 @@ def _paired_gateway_lifecycle(
         # The bounded observer remains useful even when a protocol cannot
         # expose enough response identity to prove ownership.
         "bounded_exclusive_idle_active_idle": bounded_complete,
+        "bounded_exclusive_idle_action_idle": bounded_complete,
         # Retain the original key as the strict request-owned verdict consumed
         # by the paired replay release gate.
         "exclusive_idle_active_idle": request_owned_complete,
         "request_owned_exclusive_idle_active_idle": request_owned_complete,
         "baseline_idle_settled": state["baseline_settled"],
         "gateway_activity_observed": state["active_seen"],
+        "durable_completion_observed": state["durable_completion_seen"],
+        "action_evidence_observed": action_evidence_seen,
+        "baseline_last_cache_execution_request_id_sha256": state[
+            "baseline_last_cache_execution_request_id_sha256"
+        ],
         "final_idle_settled": state["final_idle_settled"],
         "gateway_action_executed": state["action_executed"],
         "gateway_response_id_sha256": (
@@ -3942,8 +4015,9 @@ def run_paired_replay_discriminator(
     gateway_direct_health_probe: Callable[[], dict[str, Any]] | None,
     health_timeout_s: float = 5.0,
     # Cached tool-call replays can finish inside the old 25 ms sampling gap.
-    # Keep the gate strict (an active request must still be observed), but
-    # sample frequently enough to attest those short, real gateway requests.
+    # Poll frequently, while also accepting the scheduler's durable admitted-
+    # request ID when it changes from the settled baseline and matches the
+    # gateway response. A successful response alone never satisfies the gate.
     health_poll_interval_s: float = 0.005,
 ) -> dict[str, Any]:
     """Run one frozen-body direct A1 / gateway B / direct A2 discriminator."""

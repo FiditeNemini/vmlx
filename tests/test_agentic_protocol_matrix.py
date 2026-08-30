@@ -3134,6 +3134,7 @@ def _paired_replay(
         "cleanup": False,
         "gateway_started": False,
         "probe_count": 0,
+        "last_cache_execution_request_id": "response-a1",
     }
     if lifecycle in {"preexisting", "settling"}:
         activity.update(
@@ -3187,6 +3188,18 @@ def _paired_replay(
                     # The request completes between polls. The observer must
                     # not invent activity from the successful response alone.
                     pass
+                elif lifecycle == "fast_completed":
+                    # No active sample is observable, but the backend retains
+                    # the exact admitted request ID after terminal cleanup.
+                    with lock:
+                        activity["last_cache_execution_request_id"] = (
+                            backend_request_id
+                        )
+                elif lifecycle == "fast_foreign_completed":
+                    with lock:
+                        activity["last_cache_execution_request_id"] = (
+                            "foreign-request"
+                        )
                 elif lifecycle == "inactive":
                     time.sleep(0.04)
                 elif lifecycle == "non_atomic":
@@ -3230,7 +3243,12 @@ def _paired_replay(
                         running=[active_hash],
                     )
                     time.sleep(0.04)
-                if lifecycle not in {"inactive", "fast"}:
+                if lifecycle not in {
+                    "inactive",
+                    "fast",
+                    "fast_completed",
+                    "fast_foreign_completed",
+                }:
                     set_activity(collector=[active_hash], cleanup=True)
                     time.sleep(0.012)
                 set_activity()
@@ -3319,6 +3337,9 @@ def _paired_replay(
             running = list(activity["running"])
             cleanup = bool(activity["cleanup"])
             gateway_active = bool(collector or waiting or running)
+            last_cache_execution_request_id = activity[
+                "last_cache_execution_request_id"
+            ]
         active = sorted(set(collector) | set(waiting) | set(running))
         running_rows = [
             {"request_id_sha256": item, "status": "running"}
@@ -3352,7 +3373,13 @@ def _paired_replay(
         return {
             # These intentionally disagree with lifecycle v1. The observer
             # must not use cache-table or legacy scheduler counts.
-            "scheduler": {"num_running": 99},
+            "scheduler": {
+                "num_running": 99,
+                "last_cache_execution": {
+                    "request_id": last_cache_execution_request_id,
+                    "cache_outcome": "hit",
+                },
+            },
             "cache": {"scheduler_cache": {"active_requests": 99}},
             "request_lifecycle": result,
             "_gateway_active": gateway_active,
@@ -3577,11 +3604,48 @@ def test_paired_replay_rejects_fast_unsampled_gateway_action(monkeypatch):
     evidence = result["gateway_in_flight_direct_health"]
     assert evidence["gateway_action_executed"] is True
     assert evidence["gateway_activity_observed"] is False
+    assert evidence["durable_completion_observed"] is False
     assert evidence["observed_action_request_ids_sha256"] == []
+    assert evidence["request_id_correlation_status"] == "unobserved_request_id"
     assert any(
-        "exclusive gateway activity was not observed" in failure
+        "exclusive gateway activity or durable completion was not observed"
+        in failure
         for failure in evidence["failures"]
     )
+
+
+def test_paired_replay_accepts_correlated_fast_durable_completion(monkeypatch):
+    result, calls = _paired_replay(monkeypatch, lifecycle="fast_completed")
+
+    assert [row[0] for row in calls] == ["direct", "gateway", "direct"]
+    assert result["pass"] is True
+    evidence = result["gateway_in_flight_direct_health"]
+    assert evidence["gateway_activity_observed"] is False
+    assert evidence["durable_completion_observed"] is True
+    assert evidence["action_evidence_observed"] is True
+    assert evidence["request_id_correlation_status"] == "matched"
+    assert evidence["request_id_correlation_pass"] is True
+    assert evidence["observed_action_request_ids_sha256"] == [
+        matrix._sha256("response-b")
+    ]
+    assert evidence["foreign_request_ids_sha256"] == []
+
+
+def test_paired_replay_rejects_foreign_fast_durable_completion(monkeypatch):
+    result, _ = _paired_replay(
+        monkeypatch,
+        lifecycle="fast_foreign_completed",
+    )
+
+    assert result["pass"] is False
+    evidence = result["gateway_in_flight_direct_health"]
+    assert evidence["gateway_activity_observed"] is False
+    assert evidence["durable_completion_observed"] is True
+    assert evidence["request_id_correlation_status"] == "foreign_request_ids"
+    assert evidence["request_id_correlation_pass"] is False
+    assert evidence["foreign_request_ids_sha256"] == [
+        matrix._sha256("foreign-request")
+    ]
 
 
 def test_paired_replay_rejects_concurrent_and_foreign_lifecycle_ids(

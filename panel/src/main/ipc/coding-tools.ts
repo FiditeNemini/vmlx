@@ -262,6 +262,89 @@ const claudeCode: ToolConfig = {
 // ═══ Codex CLI ═══
 // Config: ~/.codex/config.toml — TOML format with [model_providers.NAME] sections
 const CODEX_TOML = join(homedir(), '.codex', 'config.toml')
+const CODEX_DEFAULTS_BEGIN = '# >>> MLX Studio managed Codex defaults'
+const CODEX_DEFAULTS_END = '# <<< MLX Studio managed Codex defaults'
+const CODEX_PREVIOUS_DEFAULTS = '# previous-defaults-base64: '
+
+function codexProviderKey(modelName: string): string {
+  return `MLXSTUDIO_${modelName.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase()}`
+}
+
+function tomlString(value: string): string {
+  // TOML basic strings accept the same escapes JSON.stringify emits for the
+  // model names and localhost URLs written here.
+  return JSON.stringify(value)
+}
+
+function removeCodexManagedDefaults(toml: string): {
+  toml: string
+  previousDefaults: string
+  activeProvider: string | null
+} {
+  const start = toml.indexOf(CODEX_DEFAULTS_BEGIN)
+  if (start < 0) return { toml, previousDefaults: '', activeProvider: null }
+  const endMarker = toml.indexOf(CODEX_DEFAULTS_END, start)
+  if (endMarker < 0) return { toml, previousDefaults: '', activeProvider: null }
+  const end = endMarker + CODEX_DEFAULTS_END.length
+  const block = toml.slice(start, end)
+  const previousMatch = block.match(/^# previous-defaults-base64: ([A-Za-z0-9+/=]*)$/m)
+  const providerMatch = block.match(/^model_provider\s*=\s*"([^"]+)"\s*$/m)
+  let previousDefaults = ''
+  if (previousMatch?.[1]) {
+    try { previousDefaults = Buffer.from(previousMatch[1], 'base64').toString('utf8') } catch {}
+  }
+  return {
+    toml: (toml.slice(0, start) + toml.slice(end)).replace(/^\s+/, ''),
+    previousDefaults,
+    activeProvider: providerMatch?.[1] || null,
+  }
+}
+
+function extractCodexTopLevelDefaults(toml: string): { toml: string; previousDefaults: string } {
+  const lines = toml.split('\n')
+  const kept: string[] = []
+  const previous: string[] = []
+  let inTopLevel = true
+  for (const line of lines) {
+    if (inTopLevel && /^\s*\[/.test(line)) inTopLevel = false
+    if (inTopLevel && /^\s*(model|model_provider|model_context_window)\s*=/.test(line)) {
+      previous.push(line)
+    } else {
+      kept.push(line)
+    }
+  }
+  return {
+    toml: kept.join('\n').replace(/^\s+/, ''),
+    previousDefaults: previous.join('\n'),
+  }
+}
+
+function codexManagedDefaults(
+  modelName: string,
+  providerKey: string,
+  contextWindow: number,
+  previousDefaults: string,
+): string {
+  const encodedPrevious = Buffer.from(previousDefaults, 'utf8').toString('base64')
+  return [
+    CODEX_DEFAULTS_BEGIN,
+    `${CODEX_PREVIOUS_DEFAULTS}${encodedPrevious}`,
+    `model = ${tomlString(modelName)}`,
+    `model_provider = ${tomlString(providerKey)}`,
+    `model_context_window = ${contextWindow}`,
+    CODEX_DEFAULTS_END,
+  ].join('\n')
+}
+
+function codexProviderSection(baseUrl: string, modelName: string, providerKey: string): string {
+  return [
+    `[model_providers.${providerKey}]`,
+    `name = ${tomlString(`MLX Studio (${modelName})`)}`,
+    `base_url = ${tomlString(`${baseUrl}/v1`)}`,
+    'wire_api = "responses"',
+  ].join('\n')
+}
+
 const codexCli: ToolConfig = {
   detect: () => commandExists('codex'),
   installCmd: 'npm',
@@ -288,14 +371,27 @@ const codexCli: ToolConfig = {
   },
   addEntry: (baseUrl, modelName, _port, limits) => {
     let toml = safeReadTOML(CODEX_TOML) || ''
-    const providerKey = `MLXSTUDIO_${modelName.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase()}`
+    const providerKey = codexProviderKey(modelName)
+    const managed = removeCodexManagedDefaults(toml)
+    const extracted = managed.previousDefaults
+      ? { toml: managed.toml, previousDefaults: managed.previousDefaults }
+      : extractCodexTopLevelDefaults(managed.toml)
+    toml = extracted.toml
     // Remove existing section if present
     const sectionPattern = new RegExp(`\\[model_providers\\.${providerKey}\\][\\s\\S]*?(?=\\n\\[|$)`, 'g')
     toml = toml.replace(sectionPattern, '').replace(/\n{3,}/g, '\n\n').trim()
-    // Append new section
-    const section = `\n\n[model_providers.${providerKey}]\nname = "MLX Studio (${modelName})"\nbase_url = "${baseUrl}/v1"\nwire_api = "responses"\nmax_context = ${limits.context}\n`
-    toml += section
-    safeWriteTOML(CODEX_TOML, toml)
+    // Codex requires model/model_provider/model_context_window at top level.
+    // The old integration wrote an unsupported max_context inside the
+    // provider table and never selected the provider, so a healthy vMLX curl
+    // could coexist with a Codex session that never contacted vMLX.
+    const defaults = codexManagedDefaults(
+      modelName,
+      providerKey,
+      limits.context,
+      extracted.previousDefaults,
+    )
+    const section = codexProviderSection(baseUrl, modelName, providerKey)
+    safeWriteTOML(CODEX_TOML, `${defaults}\n\n${toml ? `${toml}\n\n` : ''}${section}\n`)
   },
   removeEntry: (label) => {
     let toml = safeReadTOML(CODEX_TOML)
@@ -303,7 +399,11 @@ const codexCli: ToolConfig = {
     // Remove the [model_providers.LABEL] section
     const sectionPattern = new RegExp(`\\[model_providers\\.${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\][\\s\\S]*?(?=\\n\\[|$)`, 'g')
     toml = toml.replace(sectionPattern, '').replace(/\n{3,}/g, '\n\n').trim()
-    safeWriteTOML(CODEX_TOML, toml + '\n')
+    const managed = removeCodexManagedDefaults(toml)
+    if (managed.activeProvider === label) {
+      toml = `${managed.previousDefaults}${managed.previousDefaults && managed.toml ? '\n' : ''}${managed.toml}`
+    }
+    safeWriteTOML(CODEX_TOML, toml.trim() + '\n')
   },
 }
 
@@ -621,8 +721,11 @@ export function registerCodingToolHandlers(): void {
       'codex': {
         filePath: `${home}/.codex/config.toml`,
         language: 'toml',
-        snippet: `[model_providers.MLXSTUDIO_${modelName.replace(/[^a-zA-Z0-9_]/g, '_').toUpperCase()}]\nname = "MLX Studio (${modelName})"\nbase_url = "${baseUrl}/v1"\nwire_api = "responses"\nmax_context = ${limits.context}`,
-        notes: 'Append this section to the end of your config.toml. If the file doesn\'t exist, create ~/.codex/config.toml. Then run: codex --provider MLXSTUDIO_... Verify: codex --version',
+        snippet: (() => {
+          const providerKey = codexProviderKey(modelName)
+          return `model = ${tomlString(modelName)}\nmodel_provider = ${tomlString(providerKey)}\nmodel_context_window = ${limits.context}\n\n${codexProviderSection(baseUrl, modelName, providerKey)}`
+        })(),
+        notes: 'Merge the three top-level keys and provider section into config.toml; do not create duplicate top-level keys. Then run: codex. Verify first with: codex --strict-config doctor --json',
       },
       'opencode': {
         filePath: `${home}/.config/opencode/opencode.json`,

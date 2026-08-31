@@ -71,7 +71,10 @@ describe('coding tool config saving', () => {
     const model = 'JANGQ/Qwen3.6-27B-MXFP8-MTP'
 
     mkdirSync(join(home, '.codex'), { recursive: true })
-    writeFileSync(join(home, '.codex', 'config.toml'), 'profile = "existing"\n')
+    writeFileSync(
+      join(home, '.codex', 'config.toml'),
+      'model = "gpt-existing"\nmodel_provider = "openai-existing"\nmodel_context_window = 12345\n',
+    )
 
     for (const tool of ['claude-code', 'codex', 'opencode', 'openclaw']) {
       const result = await add!({}, tool, baseUrl, model, 8080)
@@ -88,7 +91,10 @@ describe('coding tool config saving', () => {
     expect(codex).toContain('[model_providers.MLXSTUDIO_JANGQ_QWEN3_6_27B_MXFP8_MTP]')
     expect(codex).toContain(`base_url = "${baseUrl}/v1"`)
     expect(codex).toContain('wire_api = "responses"')
-    expect(codex).toContain('max_context = 24576')
+    expect(codex).toContain(`model = "${model}"`)
+    expect(codex).toContain('model_provider = "MLXSTUDIO_JANGQ_QWEN3_6_27B_MXFP8_MTP"')
+    expect(codex).toContain('model_context_window = 24576')
+    expect(codex).not.toContain('max_context =')
     expect(existsSync(join(home, '.codex', 'config.toml.bak'))).toBe(true)
     expect(statMode(join(home, '.codex', 'config.toml'))).toBe(0o600)
 
@@ -109,11 +115,23 @@ describe('coding tool config saving', () => {
 
     const snippetResult = await snippets!({}, baseUrl, model, 8080)
     expect(snippetResult.codex.snippet).toContain('wire_api = "responses"')
-    expect(snippetResult.codex.snippet).toContain('max_context = 24576')
+    expect(snippetResult.codex.snippet).toContain(`model = "${model}"`)
+    expect(snippetResult.codex.snippet).toContain('model_provider = "MLXSTUDIO_JANGQ_QWEN3_6_27B_MXFP8_MTP"')
+    expect(snippetResult.codex.snippet).toContain('model_context_window = 24576')
+    expect(snippetResult.codex.snippet).not.toContain('max_context =')
     expect(snippetResult['claude-code'].snippet).toContain(model)
     expect(snippetResult.opencode.snippet).toContain('"output": 6144')
     expect(snippetResult.openclaw.snippet).toContain(`mlxstudio/${model}`)
     expect(snippetResult.openclaw.snippet).toContain('"maxTokens": 6144')
+
+    const remove = electronMock.handlers.get('tools:removeCodingToolConfig')
+    const removed = await remove!({}, 'codex', 'MLXSTUDIO_JANGQ_QWEN3_6_27B_MXFP8_MTP')
+    expect(removed).toEqual({ success: true })
+    const restoredCodex = readFileSync(join(home, '.codex', 'config.toml'), 'utf8')
+    expect(restoredCodex).toContain('model = "gpt-existing"')
+    expect(restoredCodex).toContain('model_provider = "openai-existing"')
+    expect(restoredCodex).toContain('model_context_window = 12345')
+    expect(restoredCodex).not.toContain('[model_providers.MLXSTUDIO_')
   })
 
   it('coding tool configs keep output limit separate from context fallback', async () => {
@@ -170,6 +188,34 @@ describe('coding tool config saving', () => {
     expect(snippetResult.openclaw.snippet).toContain('"contextWindow": 262144')
     expect(snippetResult.openclaw.snippet).toContain('"maxTokens": 4096')
     expect(snippetResult.openclaw.snippet).not.toContain('"maxTokens": 262144')
+  })
+
+  it('repairs the legacy provider-only Codex config emitted by MLX Studio', async () => {
+    const add = electronMock.handlers.get('tools:addCodingToolConfig')
+    expect(add).toBeTruthy()
+
+    const baseUrl = 'http://localhost:8080'
+    const model = 'JANGQ-AI/Qwen3.8-Flash-Next-JANG_4M'
+    const provider = 'MLXSTUDIO_JANGQ_AI_QWEN3_8_FLASH_NEXT_JANG_4M'
+    mkdirSync(join(home, '.codex'), { recursive: true })
+    writeFileSync(
+      join(home, '.codex', 'config.toml'),
+      `[model_providers.${provider}]\n` +
+        `name = "MLX Studio (${model})"\n` +
+        `base_url = "${baseUrl}/v1"\n` +
+        'wire_api = "responses"\n' +
+        'max_context = 32768\n',
+    )
+
+    const result = await add!({}, 'codex', baseUrl, model, 8080)
+    expect(result).toEqual({ success: true })
+    const repaired = readFileSync(join(home, '.codex', 'config.toml'), 'utf8')
+    expect(repaired.match(/^model\s*=/gm)).toHaveLength(1)
+    expect(repaired).toContain(`model = "${model}"`)
+    expect(repaired).toContain(`model_provider = "${provider}"`)
+    expect(repaired).toContain('model_context_window = 24576')
+    expect(repaired).not.toContain('max_context =')
+    expect(repaired.match(new RegExp(`\\[model_providers\\.${provider}\\]`, 'g'))).toHaveLength(1)
   })
 })
 

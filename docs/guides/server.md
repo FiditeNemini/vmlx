@@ -135,7 +135,10 @@ response = httpx.post("http://localhost:8000/v1/responses", json={
 ```toml
 model_provider = "vmlx"
 model = "your-model-name"
+model_context_window = 32768
+
 [model_providers.vmlx]
+name = "vMLX local server"
 base_url = "http://127.0.0.1:8000/v1"
 wire_api = "responses"
 ```

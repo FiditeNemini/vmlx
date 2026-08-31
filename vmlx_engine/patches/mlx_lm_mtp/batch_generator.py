@@ -1198,7 +1198,11 @@ def _post_init_mtp(gen_batch: Any) -> None:
             if prime_before_seam.get("active"):
                 state.stats.prompt_prime_source = "capture_discarded_at_seam"
             elif prime_before_seam.get("plan_armed"):
-                state.stats.prompt_prime_source = "armed_no_capture"
+                reason = str(
+                    (prime_before_seam.get("last") or {}).get("reason")
+                    or "unknown"
+                )
+                state.stats.prompt_prime_source = f"armed_no_capture:{reason}"
             else:
                 state.stats.prompt_prime_source = "not_armed"
     else:

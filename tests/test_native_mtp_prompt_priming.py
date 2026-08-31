@@ -143,6 +143,11 @@ def test_cold_prompt_is_folded_and_published_at_full_block_boundary():
         "active": True,
         "folded_pairs": 3,
         "window_exceeded": False,
+        "last": {
+            "reason": "captured",
+            "folded_pairs": 3,
+            "expected_offset": 4,
+        },
     }
 
     backbone[0].offset = 5  # the first ordinary decode/seed forward
@@ -335,6 +340,7 @@ def test_prime_stats_distinguishes_armed_plan_from_captured_context():
         "active": False,
         "folded_pairs": 0,
         "window_exceeded": False,
+        "last": {},
     }
     assert not prepare_prompt(
         host,
@@ -348,4 +354,9 @@ def test_prime_stats_distinguishes_armed_plan_from_captured_context():
         "active": False,
         "folded_pairs": 0,
         "window_exceeded": False,
+        "last": {
+            "reason": "armed",
+            "prompt_tokens": 3,
+            "cached_tokens": 0,
+        },
     }

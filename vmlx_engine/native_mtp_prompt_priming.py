@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 
 _CTX_ATTR = "_vmlx_native_mtp_prime_ctx"
 _PLAN_ATTR = "_vmlx_native_mtp_prime_plan"
+_LAST_ATTR = "_vmlx_native_mtp_prime_last"
+
+
+def _record(host: Any, reason: str, **detail: Any) -> None:
+    setattr(host, _LAST_ATTR, {"reason": reason, **detail})
 
 
 def priming_enabled() -> bool:
@@ -223,6 +228,10 @@ def prepare_prompt(
 ) -> bool:
     """Arm one exact prompt timeline and restore its MTP sidecar if present."""
     if not priming_enabled() or not _eligible(host):
+        _record(
+            host,
+            "prepare_disabled" if not priming_enabled() else "prepare_ineligible",
+        )
         drop_context(host)
         return False
 
@@ -241,6 +250,12 @@ def prepare_prompt(
         ),
     )
     setattr(host, _PLAN_ATTR, plan)
+    _record(
+        host,
+        "armed",
+        prompt_tokens=len(tokens),
+        cached_tokens=cached_tokens,
+    )
     if cached_tokens <= 0:
         return False
 
@@ -320,9 +335,14 @@ def _capture_boundary(ctx: _PrimeContext, hidden: Any, start: int, end: int) -> 
 
 def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) -> None:
     """Fold one contiguous Qwen prompt forward into the native MTP cache."""
-    if not priming_enabled() or not _eligible(host):
+    if not priming_enabled():
+        _record(host, "capture_disabled")
+        return
+    if not _eligible(host):
+        _record(host, "capture_ineligible")
         return
     if inputs is None or getattr(inputs, "ndim", 0) != 2 or inputs.shape[0] != 1:
+        _record(host, "capture_invalid_inputs")
         drop_context(host)
         return
     plan = getattr(host, _PLAN_ATTR, None)
@@ -331,19 +351,33 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
         return
     offset_after = _cache_offset(cache)
     if offset_after is None:
+        _record(host, "capture_unknown_cache_offset")
         drop_context(host)
         return
     seq_len = int(inputs.shape[1])
     start = offset_after - seq_len
     if isinstance(ctx, _PrimeContext) and ctx.expected_offset != start:
+        _record(
+            host,
+            "capture_noncontiguous_offset",
+            expected_offset=ctx.expected_offset,
+            actual_start=start,
+        )
         drop_context(host)
         return
     if isinstance(ctx, _PrimeContext) and ctx.window_exceeded:
+        _record(host, "capture_window_already_exceeded")
         ctx.expected_offset = offset_after
         return
     window = prime_window()
     folded_this_request = ctx.folded_this_request if isinstance(ctx, _PrimeContext) else 0
     if window and folded_this_request + seq_len > window:
+        _record(
+            host,
+            "capture_window_exceeded",
+            window=window,
+            attempted_pairs=folded_this_request + seq_len,
+        )
         setattr(
             host,
             _CTX_ATTR,
@@ -360,12 +394,15 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
         # QSA positions and attention history would begin at zero.  Stay on
         # the existing unprimed activation path instead.
         if start != 0:
+            _record(host, "capture_nonzero_start", actual_start=start)
             return
         if seq_len <= 1:
+            _record(host, "capture_single_token_start")
             return
         assert isinstance(plan, _PrimePlan)
         mtp_cache = host.make_mtp_cache()
         if not mtp_cache:
+            _record(host, "capture_empty_mtp_cache")
             return
         ctx = _PrimeContext(
             mtp_cache=mtp_cache,
@@ -402,6 +439,12 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
     ctx.folded_this_request += pairs
     ctx.pending_hidden = expanded_hidden[:, -1:]
     ctx.expected_offset = offset_after
+    _record(
+        host,
+        "captured",
+        folded_pairs=ctx.folded,
+        expected_offset=ctx.expected_offset,
+    )
     _capture_boundary(ctx, expanded_hidden, start, offset_after)
 
     arrays = [ctx.pending_hidden]
@@ -492,6 +535,7 @@ def prime_stats(host: Any) -> dict[str, Any]:
         "window_exceeded": bool(
             isinstance(ctx, _PrimeContext) and ctx.window_exceeded
         ),
+        "last": dict(getattr(host, _LAST_ATTR, {}) or {}),
     }
 
 

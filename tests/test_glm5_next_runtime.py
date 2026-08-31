@@ -1766,6 +1766,56 @@ class TestGlmHealthTruth:
         assert status["block_disk_l2"] is False
         assert status["cache_store_policy"]["prompt_boundary"] == "exact_n_minus_one"
 
+    def test_native_cache_health_reports_absorbed_runtime_schema(
+        self, tiny_model, glm5
+    ):
+        from types import SimpleNamespace
+
+        from vmlx_engine.server import _native_cache_status
+        from vmlx_engine.utils.cache_types import describe_runtime_cache_layout
+
+        absorbed_cache = [
+            glm5.Glm5KDACache()
+            if layer.is_linear
+            else glm5.Glm5MLACache(
+                tiny_model.args.index_kpool,
+                absorbed=True,
+            )
+            for layer in tiny_model.model.layers
+        ]
+        runtime_layout = describe_runtime_cache_layout(
+            absorbed_cache,
+            model=tiny_model,
+        )
+        scheduler = SimpleNamespace(
+            _model_type_for_runtime="glm5_next",
+            _uses_glm5_next_cache=True,
+            _glm5_next_cache_unsupported=False,
+            _prefix_cache_requested=True,
+            _prompt_disk_cache_requested=True,
+            _block_disk_cache_requested=False,
+            _runtime_cache_layout=runtime_layout,
+            config=SimpleNamespace(
+                enable_prefix_cache=True,
+                enable_disk_cache=True,
+                enable_block_disk_cache=False,
+            ),
+            memory_aware_cache=object(),
+            disk_cache=object(),
+            block_aware_cache=None,
+            paged_cache_manager=None,
+        )
+
+        status = _native_cache_status(scheduler, family="glm5_next")
+
+        assert status["schema"] == "glm5_next_native_v2"
+        assert status["cache_subtype"] == "glm5_next_native_v2"
+        assert "mla_latent" in status["components"]
+        assert "mla_kv" not in status["components"]
+        assert ["glm5_next_native_v2", "mla_absorbed"] in status[
+            "runtime_cache_slot_schema_tags"
+        ]
+
     def test_weight_index_counts_appended_glm_mtp_layer(self, tmp_path):
         from vmlx_engine.server import _bundle_weight_index_status
 

@@ -265,8 +265,8 @@ def _validate_glm5_typed_state(
 ) -> Tuple[bool, str]:
     """Validate GLM's schema-tagged KDA/MLA state without numeric-meta guesses.
 
-    GLM cache metadata begins with ``glm5_next_native_v1`` rather than the
-    numeric offset used by generic ArraysCache/KVCache implementations. The
+    GLM cache metadata begins with a typed ``glm5_next_native_v*`` tag rather
+    than the numeric offset used by generic ArraysCache/KVCache implementations. The
     canonical cache constructors already own all shape, population, k-pool,
     and offset invariants, so use them here instead of duplicating a second
     schema that can drift.

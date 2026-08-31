@@ -175,6 +175,7 @@ def describe_runtime_cache_layout(
 
     slots = list(cache or [])
     slot_types = []
+    slot_schema_tags = []
     slot_class_counts: Dict[str, int] = {}
     effective_class_counts: Dict[str, int] = {}
     attention_positions = []
@@ -228,6 +229,11 @@ def describe_runtime_cache_layout(
             slot_class_counts.get(top_level_class, 0) + 1
         )
         slot_types.append(_slot_label(slot))
+        meta = getattr(slot, "meta_state", None)
+        if isinstance(meta, (list, tuple)) and len(meta) >= 2:
+            slot_schema_tags.append([str(meta[0]), str(meta[1])])
+        else:
+            slot_schema_tags.append(None)
 
         leaf_names = _leaf_names(slot)
         for class_name in leaf_names:
@@ -268,6 +274,7 @@ def describe_runtime_cache_layout(
     result = {
         "layer_count": len(slots),
         "slot_types": slot_types,
+        "slot_schema_tags": slot_schema_tags,
         "slot_class_counts": slot_class_counts,
         "effective_class_counts": effective_class_counts,
         "attention_layer_indices": attention_positions,

@@ -11350,6 +11350,9 @@ def _native_cache_status(
             "runtime_cache_slot_types": list(
                 runtime_layout.get("slot_types", []) or []
             ),
+            "runtime_cache_slot_schema_tags": list(
+                runtime_layout.get("slot_schema_tags", []) or []
+            ),
             "runtime_cache_slot_class_counts": dict(
                 runtime_layout.get("slot_class_counts", {}) or {}
             ),
@@ -11604,22 +11607,35 @@ def _native_cache_status(
             getattr(scheduler, "_uses_glm5_next_cache", False)
             and not getattr(scheduler, "_glm5_next_cache_unsupported", False)
         )
+        runtime_schema_tags = list(
+            runtime_layout.get("slot_schema_tags", []) or []
+        )
+        absorbed_mla = any(
+            isinstance(tag, (list, tuple))
+            and tuple(tag[:2])
+            == ("glm5_next_native_v2", "mla_absorbed")
+            for tag in runtime_schema_tags
+        )
+        native_schema = (
+            "glm5_next_native_v2" if absorbed_mla else "glm5_next_native_v1"
+        )
+        native_components = [
+            "kda_conv_state",
+            "kda_recurrent_state",
+            "mla_latent" if absorbed_mla else "mla_kv",
+            "dsa_indexer_state",
+        ]
         memory_cache = getattr(scheduler, "memory_aware_cache", None)
         prompt_disk_cache = getattr(scheduler, "disk_cache", None)
         if not schema_implemented:
             return _with_runtime_layout(
                 {
                     "family": "glm5_next",
-                    "schema": "glm5_next_native_v1",
+                    "schema": native_schema,
                     "schema_implemented": False,
                     "cache_type": "native_mixed_state_fail_closed",
-                    "cache_subtype": "glm5_next_native_v1",
-                    "components": [
-                        "kda_conv_state",
-                        "kda_recurrent_state",
-                        "mla_kv",
-                        "dsa_indexer_state",
-                    ],
+                    "cache_subtype": native_schema,
+                    "components": native_components,
                     "reason": "typed_glm5_next_native_state_schema_not_implemented",
                     "cache_store_policy": {
                         "generic_prefix_restore": "unsupported",
@@ -11643,16 +11659,11 @@ def _native_cache_status(
         return _with_runtime_layout(
             {
                 "family": "glm5_next",
-                "schema": "glm5_next_native_v1",
+                "schema": native_schema,
                 "schema_implemented": True,
                 "cache_type": "native_mixed_state_exact_boundary",
-                "cache_subtype": "glm5_next_native_v1",
-                "components": [
-                    "kda_conv_state",
-                    "kda_recurrent_state",
-                    "mla_kv",
-                    "dsa_indexer_state",
-                ],
+                "cache_subtype": native_schema,
+                "components": native_components,
                 "reason": None,
                 "cache_store_policy": {
                     "prompt_boundary": "exact_n_minus_one",

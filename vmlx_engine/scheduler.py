@@ -821,7 +821,7 @@ class Scheduler:
             self.config.use_memory_aware_cache = True
             if self.config.enable_prefix_cache:
                 logger.info(
-                    "glm5_next_native_v1 exact prefix cache enabled: N-1 "
+                    "glm5_next exact typed prefix cache enabled: N-1 "
                     "snapshots round-trip KDA conv/recurrent and MLA/DSA state"
                 )
         if self._uses_openpangu_cache:

@@ -1554,7 +1554,7 @@ class TestRegistryDetection:
         conf = registry.lookup(str(tmp_path))
         assert conf.family_name == "glm5_next"
         assert conf.cache_type == "hybrid"
-        assert conf.cache_subtype == "glm5_next_native_v1"
+        assert conf.cache_subtype == "glm5_next_native_v2"
         assert conf.tool_parser == "glm47"
         assert conf.reasoning_parser == "deepseek_r1"
         assert conf.think_in_template is True

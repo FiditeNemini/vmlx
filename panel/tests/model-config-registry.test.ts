@@ -210,7 +210,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     expect(detectModelConfigFromDir(dir)).toMatchObject({
       family: 'glm5-next',
       cacheType: 'hybrid',
-      cacheSubtype: 'glm5_next_native_v1',
+      cacheSubtype: 'glm5_next_native_v2',
       toolParser: 'glm_xml_args',
       reasoningParser: 'glm_think_block',
       supportsThinking: true,
@@ -381,7 +381,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       depth: 1,
       depthSource: 'config.text_config.num_nextn_predict_layers',
       runtimeScope: 'text',
-      nativeCacheType: 'glm5_next_native_v1',
+      nativeCacheType: 'glm5_next_native_v2',
       requiresDeterministicSampling: false,
       defaultMode: 'off',
     })

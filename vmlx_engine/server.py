@@ -11571,7 +11571,7 @@ def _native_cache_status(
     if (
         family_name in {"glm5_next", "glm5_next_text"}
         or scheduler_family in {"glm5_next", "glm5_next_text"}
-        or cache_subtype == "glm5_next_native_v1"
+        or cache_subtype in {"glm5_next_native_v1", "glm5_next_native_v2"}
         or getattr(scheduler, "_glm5_next_cache_unsupported", False)
     ):
         # GLM's executable cache is a mixed, path-dependent structure: KDA

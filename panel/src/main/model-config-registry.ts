@@ -184,7 +184,7 @@ registerFamily('qwen3.5-moe', { cacheType: 'kv', toolParser: 'qwen', reasoningPa
 // native-MTP control even while the loaded engine advertised all three.
 registerFamily('glm5-next', {
   cacheType: 'hybrid',
-  cacheSubtype: 'glm5_next_native_v1',
+  cacheSubtype: 'glm5_next_native_v2',
   // Bundle-stamped ids are registered engine aliases: glm_xml_args -> the
   // glm47 arg_key/arg_value XML parser, glm_think_block -> the R1 <think>
   // rail parser. Template force-opens <think> in the assistant prefix.
@@ -203,7 +203,7 @@ registerFamily('glm5-next', {
   isMultimodal: false,
   architectureHints: {
     attentionArch: 'kda_mla_dsa',
-    cacheSchema: 'glm5_next_native_v1',
+    cacheSchema: 'glm5_next_native_v2',
     cachePrecision: 'full',
   },
   description: 'GLM-5.3-Flash (KDA + sparse-MLA/DSA + mHC MoE)',
@@ -1311,7 +1311,7 @@ function detectNativeMtpCapability(
       nativeCacheType: hy3
         ? 'plain_kv_v1'
         : glm5Next
-          ? 'glm5_next_native_v1'
+          ? 'glm5_next_native_v2'
           : 'hybrid_ssm_v1',
       requiresDeterministicSampling: false,
       // Keep the GLM MTP capability visible while making its unmodified Auto

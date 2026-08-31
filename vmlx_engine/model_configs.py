@@ -827,7 +827,7 @@ def register_all(registry=None):
             family_name="glm5_next",
             model_types=["glm5_next", "glm5_next_text"],
             cache_type="hybrid",
-            cache_subtype="glm5_next_native_v1",
+            cache_subtype="glm5_next_native_v2",
             eos_tokens=[
                 "<|endoftext|>",
                 "<|user|>",

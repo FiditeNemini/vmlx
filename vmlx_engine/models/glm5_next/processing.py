@@ -185,7 +185,10 @@ class Glm5NextProcessor(GlmOcrProcessor):
     @classmethod
     def from_pretrained(cls, model_path, **kwargs):
         kwargs.pop("trust_remote_code", None)
-        tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True, **kwargs)
+        use_fast = kwargs.pop("use_fast", True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path, use_fast=use_fast, **kwargs
+        )
         load_chat_template(tokenizer, model_path)
         config_path = Path(model_path) / "processor_config.json"
         processor_config = json.loads(config_path.read_text()) if config_path.exists() else {}

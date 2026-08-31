@@ -1732,6 +1732,51 @@ class TestVisionRuntime:
         assert glm_vlm.VisionModel is not None
         assert glm_vlm.ImageProcessor is not None
 
+    def test_processor_from_pretrained_forwards_use_fast_once(
+        self, tmp_path, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        from vmlx_engine.models.glm5_next import processing
+
+        calls = []
+        tokenizer = SimpleNamespace(
+            convert_tokens_to_ids=lambda token: {
+                "<|image|>": 100,
+                "<|video|>": 101,
+            }[token]
+        )
+
+        def fake_tokenizer_from_pretrained(model_path, **kwargs):
+            calls.append((model_path, kwargs))
+            return tokenizer
+
+        def fake_processor_init(
+            self, image_processor=None, tokenizer=None, **kwargs
+        ):
+            self.image_processor = image_processor
+            self.tokenizer = tokenizer
+
+        monkeypatch.setattr(
+            processing.AutoTokenizer,
+            "from_pretrained",
+            fake_tokenizer_from_pretrained,
+        )
+        monkeypatch.setattr(
+            processing.GlmOcrProcessor,
+            "__init__",
+            fake_processor_init,
+        )
+        monkeypatch.setattr(processing, "load_chat_template", lambda *args: None)
+
+        processor = processing.Glm5NextProcessor.from_pretrained(
+            tmp_path,
+            use_fast=False,
+        )
+
+        assert processor.tokenizer is tokenizer
+        assert calls == [(tmp_path, {"use_fast": False})]
+
     def test_jang_quantized_paths_cover_text_vision_and_native_mtp(self):
         from vmlx_engine.utils.jang_loader import _vlm_quant_module_path_candidates
 

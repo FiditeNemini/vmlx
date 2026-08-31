@@ -218,8 +218,9 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       supportedReasoningEfforts: ['low', 'high', 'max'],
       defaultReasoningEffort: 'max',
       usePagedCache: false,
-      isMultimodal: false,
+      isMultimodal: true,
     })
+    expect(detectModelConfigFromDir(dir).forceTextOnly).toBeUndefined()
   })
 
   it('keeps an explicit non-hermes Qwen4Exp tool_parser stamp authoritative', () => {
@@ -353,7 +354,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
     })
   })
 
-  it('detects the appended layer-N GLM MTP block and keeps its runtime text-only', () => {
+  it('detects the appended layer-N GLM MTP block for the native VL runtime', () => {
     const dir = makeModelDir({
       model_type: 'glm5_next',
       text_config: {
@@ -380,11 +381,13 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       supported: true,
       depth: 1,
       depthSource: 'config.text_config.num_nextn_predict_layers',
-      runtimeScope: 'text',
+      runtimeScope: 'text+vl',
       nativeCacheType: 'glm5_next_native_v2',
       requiresDeterministicSampling: false,
       defaultMode: 'off',
     })
+    expect(detected).toMatchObject({ isMultimodal: true })
+    expect(detected.forceTextOnly).toBeUndefined()
   })
 
   it('marks Qwen3.6 VL JANG bundles with indexed MTP tensors as native MTP capable', () => {

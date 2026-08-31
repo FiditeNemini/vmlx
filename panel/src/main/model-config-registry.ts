@@ -197,9 +197,9 @@ registerFamily('glm5-next', {
   defaultReasoningEffort: 'max',
   usePagedCache: false,
   enableAutoToolChoice: true,
-  // Vision tower ships in the bundle but the glm5_next VLM runtime is not
-  // implemented yet — the engine text-routes this family (is_mllm_model
-  // override) and drops visual weights at sanitize.
+  // Keep the family default text-only: artifact inspection below promotes an
+  // individual bundle only when its config actually declares media. The
+  // native GLM VLM runtime handles those image/video artifacts.
   isMultimodal: false,
   architectureHints: {
     attentionArch: 'kda_mla_dsa',
@@ -1297,11 +1297,8 @@ function detectNativeMtpCapability(
         tuningDepth?.source
         ?? declaredDrafts?.source
         ?? configuredMtp.source,
-      // The current vendored GLM runtime is text-routed even though the
-      // checkpoint also contains a vision tower. Do not advertise VL MTP
-      // until that tower is wired into the serving path.
       runtimeScope:
-        !glm5Next && configDeclaresMedia(parsedConfig) && hasVisionWeights
+        configDeclaresMedia(parsedConfig) && hasVisionWeights
           ? 'text+vl'
           : 'text',
       // Match the runtime schema string reported by /v1/capabilities
@@ -1749,15 +1746,6 @@ function applyJangCapabilities(
   if (zayaTypedCca) {
     next.usePagedCache = false
   }
-  if (next.family === 'glm5-next') {
-    // The bundle ships a vision tower, but the glm5_next VLM runtime is not
-    // implemented yet — the engine text-routes this family (is_mllm_model
-    // override) and drops visual weights at sanitize. Advertising
-    // multimodal here would render a media-attach UI that cannot work.
-    // Remove when the V-phase vision runtime lands.
-    next.isMultimodal = false
-    next.forceTextOnly = true
-  }
   return next
 }
 
@@ -1983,15 +1971,6 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
           }
           detected = applyLagunaVariantHint(detected, parsed, parsedJangConfig)
           detected = applyConfigMetadataOverrides(detected, parsed)
-          if (detected.family === 'glm5-next') {
-            // The bundle ships a vision tower, but the glm5_next VLM runtime
-            // is not implemented yet — the engine text-routes this family
-            // (is_mllm_model override) and drops visual weights at sanitize.
-            // Advertising multimodal would render a media-attach UI that
-            // cannot work. Remove when the V-phase vision runtime lands.
-            detected.isMultimodal = false
-            detected.forceTextOnly = true
-          }
           return detected
         }
       }

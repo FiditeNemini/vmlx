@@ -50,6 +50,7 @@ import {
   uniqueProofBasename,
   validateExactToolLoopEvidence,
   validateFinalPhaseStopEvidence,
+  validateMatrixFlow,
   validateGatewaySingleModelEvidence,
   validateAttachOnlyLifecycle,
   validateGenerationDefaultsEvidence,
@@ -4640,6 +4641,52 @@ describe("real UI model proof harness", () => {
       expect(validateFrozenChatParity(wrongBody).join("\n")).toMatch(
         /round 3 frozen paired replay is not bound to the transmitted Off flow body/,
       );
+
+      const thinkingOff = structuredClone(fixture.artifact.value);
+      thinkingOff.flows.direct.chat.nonstream.requests[1].enable_thinking = false;
+      thinkingOff.paired_replays.chat_nonstream_round2.request.enable_thinking = false;
+      expect(validateFrozenChatParity(thinkingOff)).toEqual([]);
+    } finally {
+      rmSync(fixture.directory, { recursive: true, force: true });
+    }
+  });
+
+  it("grades reasoning against the paired request instead of forcing it on", () => {
+    const result = goodResult();
+    const fixture = createValidPairedArtifact(result);
+    try {
+      const flow = structuredClone(
+        fixture.artifact.value.flows.direct.chat.stream,
+      );
+      for (let index = 0; index < 2; index += 1) {
+        flow.requests[index].enable_thinking = false;
+        flow.rounds[index].reasoning = "";
+        flow.rounds[index].reasoning_chars = 0;
+        flow.rounds[index].reasoning_sha256 = crypto
+          .createHash("sha256")
+          .update("")
+          .digest("hex");
+        flow.rounds[index].reasoning_delta_count = 0;
+        flow.rounds[index].events = flow.rounds[index].events.filter(
+          (event: Record<string, any>) => event.channel !== "reasoning",
+        );
+      }
+      expect(validateMatrixFlow(
+        flow,
+        "chat",
+        "stream",
+        "direct/chat/stream",
+        fixture.artifact.value.repo_root,
+      )).toEqual([]);
+
+      flow.requests[0].enable_thinking = true;
+      expect(validateMatrixFlow(
+        flow,
+        "chat",
+        "stream",
+        "direct/chat/stream",
+        fixture.artifact.value.repo_root,
+      ).join("\n")).toMatch(/requested reasoning but no tool round emitted it/);
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
     }

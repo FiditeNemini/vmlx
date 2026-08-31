@@ -12845,6 +12845,30 @@ def _live_ssm_prefix_lookup(scheduler: Any) -> dict[str, Any] | None:
     return dict(lookup) if isinstance(lookup, dict) and lookup else None
 
 
+def _live_batch_generator_request_records(
+    scheduler: Any,
+) -> dict[str, dict[str, Any] | None] | None:
+    """Read request-correlated MLLM records without assembling full stats."""
+    stats = getattr(
+        getattr(scheduler, "batch_generator", None),
+        "_stats",
+        None,
+    )
+    if stats is None:
+        return None
+    records: dict[str, dict[str, Any] | None] = {}
+    for attr in (
+        "last_cache_execution",
+        "last_native_mtp",
+        "last_native_mtp_skip",
+    ):
+        record = getattr(stats, attr, None)
+        records[attr] = (
+            dict(record) if isinstance(record, dict) and record else None
+        )
+    return records
+
+
 def _live_mllm_request_lifecycle_snapshot(
     scheduler: Any,
 ) -> dict[str, Any] | None:
@@ -12958,6 +12982,39 @@ async def health():
             _live_lce = _live_last_cache_execution(scheduler_probe)
             if _live_lce is not None:
                 sched_block["last_cache_execution"] = _live_lce
+            _live_generator_records = _live_batch_generator_request_records(
+                scheduler_probe
+            )
+            _generator_block = sched_block.get("batch_generator")
+            if (
+                isinstance(_generator_block, dict)
+                and _live_generator_records is not None
+            ):
+                _current_request_id = (
+                    _live_lce.get("request_id")
+                    if isinstance(_live_lce, dict)
+                    else None
+                )
+                _generator_lce = _live_generator_records.get(
+                    "last_cache_execution"
+                )
+                if _generator_lce is not None:
+                    _generator_block["last_cache_execution"] = _generator_lce
+                else:
+                    _generator_block.pop("last_cache_execution", None)
+                for _record_name in (
+                    "last_native_mtp",
+                    "last_native_mtp_skip",
+                ):
+                    _record = _live_generator_records.get(_record_name)
+                    if (
+                        isinstance(_record, dict)
+                        and _current_request_id
+                        and _record.get("request_id") == _current_request_id
+                    ):
+                        _generator_block[_record_name] = _record
+                    else:
+                        _generator_block.pop(_record_name, None)
         # Same staleness applies to the SSM companion prefix lookup the
         # cache-correlation gates read: overlay the live lookup when it is
         # BOUND to the live execution record, and drop the cached one when

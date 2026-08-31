@@ -8,9 +8,26 @@ overlays. Attribute-read-only discipline — nothing here may call get_stats."""
 from types import SimpleNamespace
 
 from vmlx_engine.server import (
+    _live_batch_generator_request_records,
     _live_last_cache_execution,
     _live_ssm_prefix_lookup,
 )
+
+
+def test_live_batch_generator_records_are_copied_without_get_stats():
+    records = {
+        "last_cache_execution": {"request_id": "r1"},
+        "last_native_mtp": {"request_id": "r1", "accepted_tokens": 3},
+        "last_native_mtp_skip": None,
+    }
+    stats = SimpleNamespace(**records)
+    scheduler = SimpleNamespace(
+        batch_generator=SimpleNamespace(_stats=stats)
+    )
+    observed = _live_batch_generator_request_records(scheduler)
+    assert observed == records
+    assert observed["last_native_mtp"] is not stats.last_native_mtp
+    assert _live_batch_generator_request_records(None) is None
 
 
 def test_live_lce_prefers_generator_record_then_admission():

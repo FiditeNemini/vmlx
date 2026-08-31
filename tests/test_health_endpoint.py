@@ -1686,12 +1686,32 @@ class TestHealthBusySnapshot:
                 }
                 cleanup = asyncio.Event()
                 mock_scheduler._terminal_cleanup_complete = cleanup
+                mock_scheduler.batch_generator = SimpleNamespace(
+                    _stats=SimpleNamespace(
+                        last_cache_execution={"request_id": "req-1"},
+                        last_native_mtp={
+                            "request_id": "req-1",
+                            "accepted_tokens": 7,
+                        },
+                        last_native_mtp_skip={
+                            "request_id": "prior-request",
+                            "reason": "stale",
+                        },
+                    )
+                )
                 busy_result = _run(server.health())
 
             assert busy_result["health_gauges_cached"] is True
             assert busy_result["status"] == "healthy"
             assert busy_result["scheduler"]["num_running"] == 1
             assert busy_result["scheduler"]["num_waiting"] == 0
+            assert busy_result["scheduler"]["batch_generator"] == {
+                "last_cache_execution": {"request_id": "req-1"},
+                "last_native_mtp": {
+                    "request_id": "req-1",
+                    "accepted_tokens": 7,
+                },
+            }
             request_hash = hashlib.sha256(b"req-1").hexdigest()
             assert busy_result["request_lifecycle"] == {
                 "schema": "vmlx-request-lifecycle-v1",

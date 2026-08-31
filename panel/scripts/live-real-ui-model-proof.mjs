@@ -6661,7 +6661,7 @@ function validateFlowRoundEvents(round, protocol, mode, roundIndex, label) {
   return failures
 }
 
-function validateMatrixFlow(flow, protocol, mode, label, repoRoot) {
+export function validateMatrixFlow(flow, protocol, mode, label, repoRoot) {
   const failures = []
   const requests = Array.isArray(flow?.requests) ? flow.requests : []
   const rounds = Array.isArray(flow?.rounds) ? flow.rounds : []
@@ -6739,11 +6739,19 @@ function validateMatrixFlow(flow, protocol, mode, label, repoRoot) {
       if (String(round?.content || '').trim()) {
         failures.push(`${roundLabel} tool round exposed visible answer prose`)
       }
-      if (!String(round?.reasoning_sha256 || '') || Number(round?.reasoning_chars) <= 0) {
-        failures.push(`${roundLabel} lacks a separate reasoning payload`)
+      const reasoningChars = Number(round?.reasoning_chars)
+      if (
+        reasoningChars > 0
+        && !String(round?.reasoning_sha256 || '')
+      ) {
+        failures.push(`${roundLabel} emitted reasoning without a separate payload hash`)
       }
-      if (mode === 'stream' && Number(round?.reasoning_delta_count) < 2) {
-        failures.push(`${roundLabel} reasoning was not progressively streamed`)
+      if (
+        reasoningChars > 0
+        && mode === 'stream'
+        && Number(round?.reasoning_delta_count) < 2
+      ) {
+        failures.push(`${roundLabel} emitted reasoning that was not progressively streamed`)
       }
     } else {
       if (calls.length) failures.push(`${roundLabel} final synthesis emitted a tool call`)
@@ -6827,21 +6835,18 @@ function validateMatrixFlow(flow, protocol, mode, label, repoRoot) {
   ) {
     failures.push(`${label} request3 does not retain the first tool turn`)
   }
-  const chain = [
-    Number(rounds[0]?.reasoning_chars) > 0 ? 'reasoning' : '',
-    rounds[0]?.tool_calls?.[0]?.name || '',
-    Number(rounds[1]?.reasoning_chars) > 0 ? 'reasoning' : '',
-    rounds[1]?.tool_calls?.[0]?.name || '',
-    String(rounds[2]?.content || '').trim() ? 'answer' : '',
-  ]
-  if (canonicalJson(chain) !== canonicalJson([
-    'reasoning',
-    'file_info',
-    'reasoning',
-    'run_command',
-    'answer',
-  ])) {
-    failures.push(`${label} does not prove reasoning→tool→reasoning→tool→answer`)
+  const reasoningRequested = requests.slice(0, 2).some(
+    (request) => request?.enable_thinking === true,
+  )
+  const reasoningObserved = rounds.slice(0, 2).some(
+    (round) => Number(round?.reasoning_chars) > 0,
+  )
+  // The producer's contract permits a thinking-enabled model to call one of
+  // the tools without a private chain, but requires at least one real
+  // reasoning rail across the tool loop. Thinking-off bodies must not be
+  // failed for truthfully omitting a reasoning channel.
+  if (reasoningRequested && !reasoningObserved) {
+    failures.push(`${label} requested reasoning but no tool round emitted it`)
   }
   return failures
 }
@@ -7490,7 +7495,7 @@ export function validateFrozenChatParity(value) {
     const flowRequest = value?.flows?.direct?.chat?.nonstream?.requests?.[stage - 1] || {}
     const hashes = request?.leg_body_sha256 || {}
     const expectedHash = request?.prepared_body_sha256
-    const expectedThinking = stage === 2
+    const expectedThinking = flowRequest?.enable_thinking
     if (
       replay?.schema !== 'vmlx-agentic-protocol-paired-replay-v1'
       || canonicalJson(replay?.target) !== canonicalJson({
@@ -7518,8 +7523,8 @@ export function validateFrozenChatParity(value) {
     if (
       request?.body_sha256 !== expectedHash
       || request?.body_sha256 !== flowRequest?.body_sha256
+      || typeof expectedThinking !== 'boolean'
       || request?.enable_thinking !== expectedThinking
-      || flowRequest?.enable_thinking !== expectedThinking
     ) {
       failures.push(
         `Chat nonstream round ${stage} frozen paired replay is not bound to the transmitted ${expectedThinking ? 'On' : 'Off'} flow body`,

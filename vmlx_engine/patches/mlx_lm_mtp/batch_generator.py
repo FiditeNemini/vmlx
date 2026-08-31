@@ -532,11 +532,11 @@ def _capture_glm_prompt_boundary_snapshots(batch_generator: Any) -> dict[int, li
                 boundary_callback(uid, extracted)
                 continue
 
-            # MLX arrays are functionally replaced by GLM's KDA/MLA update
-            # methods. Preserve the old arrays in fresh typed wrappers rather
-            # than allocating a second model-sized Metal image. The final
-            # prompt token then installs new arrays into the live wrappers,
-            # leaving this exact N-1 object graph unchanged.
+            # Preserve the old arrays in fresh typed wrappers rather than
+            # allocating a second cache image. KDA and legacy MLA replace
+            # arrays; compact MLA marks shared capacity lanes copy-on-write so
+            # the final prompt token detaches before updating them. In both
+            # representations this exact N-1 object graph remains unchanged.
             cloned = [
                 clone_glm5_next_layer_cache(layer, copy_fn=lambda value: value)
                 for layer in extracted

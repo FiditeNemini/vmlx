@@ -849,12 +849,11 @@ class MemoryAwarePrefixCache:
 
                     cloned = clone_glm5_next_layer_cache(
                         layer_cache,
-                        # GLM cache updates replace array objects rather than
-                        # mutate their contents. Fresh typed wrappers may
-                        # therefore share the immutable stored boundary: decode
-                        # installs new arrays into the fetched wrappers while
-                        # the L1 entry remains unchanged. Avoiding a second
-                        # expanded-MLA image is required beside a 95GB model.
+                        # GLM typed wrappers may share an exact stored boundary.
+                        # Compact-v2 marks those physical lanes shared and
+                        # detaches each one on its first later write; legacy-v1
+                        # still replaces arrays. Avoiding an eager second cache
+                        # image is required beside a roughly 95GB model.
                         copy_fn=lambda value: value,
                     )
                 except Exception as exc:

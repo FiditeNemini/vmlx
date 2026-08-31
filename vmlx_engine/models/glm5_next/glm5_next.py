@@ -126,6 +126,13 @@ MLA_LATENT_PACKED = 1  # DSA key + pool-gate history: [B, T, 2 * index_dim]
 MLA_LATENT_POOL_KEYS = 2  # completed pool-4 DSA keys
 MLA_LATENT_RESERVED = 3  # safetensors-stable reserved zero-length tensor
 
+# Compact MLA state grows in bounded blocks instead of rebuilding the complete
+# history for every decoded token.  2,048 is the architecture's dense/sparse
+# transition and the normal prefill quantum; the pool-key block is derived from
+# the bundle's k-pool ratio.  Unlike geometric doubling, block growth keeps the
+# spare allocation bounded beside a roughly 95GB model.
+_GLM5_MLA_CAPACITY_TOKENS = 2_048
+
 _LOG = logging.getLogger("vmlx_engine")
 _GLM5_MLA_PATHS_LOGGED: set[str] = set()
 
@@ -242,9 +249,11 @@ class Glm5MLACache(ArraysCache):
 
     The legacy representation stores expanded per-head K/V.  The experimental
     absorbed representation stores the shared normalized ``kv_a`` latent plus
-    the DSA indexer's packed history and completed pool keys.  Updates replace
-    arrays instead of mutating shared capacity so the scheduler's exact N-1
-    boundary snapshots remain isolated while decode continues.
+    the DSA indexer's packed history and completed pool keys.  Its physical
+    buffers grow in bounded blocks while ``cache`` and ``state`` expose only
+    the logical prefix.  Prompt-boundary wrappers use per-slot copy-on-write,
+    preserving exact N-1 snapshots even when decode or rollback reuses spare
+    capacity.
     """
 
     def __init__(self, kpool: int = 4, *, absorbed: bool | None = None):
@@ -255,6 +264,112 @@ class Glm5MLACache(ArraysCache):
         self.absorbed = (
             glm5_mla_absorb_enabled() if absorbed is None else bool(absorbed)
         )
+        self._capacity_buffers: list[mx.array | None] = [None] * 4
+        self._capacity_lengths = [0] * 4
+        self._capacity_shared = [False] * 4
+
+    @staticmethod
+    def _capacity_axis(slot: int) -> int:
+        if slot == MLA_LATENT:
+            return 2
+        if slot in {MLA_LATENT_PACKED, MLA_LATENT_POOL_KEYS}:
+            return 1
+        raise ValueError(f"GLM absorbed MLA slot {slot} has no sequence axis")
+
+    def _capacity_block(self, slot: int) -> int:
+        if slot == MLA_LATENT_POOL_KEYS:
+            return max(1, _GLM5_MLA_CAPACITY_TOKENS // int(self.kpool))
+        return _GLM5_MLA_CAPACITY_TOKENS
+
+    @staticmethod
+    def _logical_slice(value: mx.array, axis: int, length: int) -> mx.array:
+        slices = [slice(None)] * value.ndim
+        slices[axis] = slice(0, int(length))
+        return value[tuple(slices)]
+
+    def _reset_absorbed_capacity(self) -> None:
+        """Adopt current logical arrays as exact-fit physical buffers."""
+
+        self._capacity_buffers = [None] * 4
+        self._capacity_lengths = [0] * 4
+        self._capacity_shared = [False] * 4
+        if not self.absorbed:
+            return
+        for slot in (MLA_LATENT, MLA_LATENT_PACKED, MLA_LATENT_POOL_KEYS):
+            value = self.cache[slot]
+            if value is None or not getattr(value, "size", 0):
+                continue
+            axis = self._capacity_axis(slot)
+            self._capacity_buffers[slot] = value
+            self._capacity_lengths[slot] = int(value.shape[axis])
+
+    def _mark_absorbed_capacity_shared(self) -> None:
+        if not self.absorbed:
+            return
+        for slot in (MLA_LATENT, MLA_LATENT_PACKED, MLA_LATENT_POOL_KEYS):
+            if self._capacity_buffers[slot] is not None:
+                self._capacity_shared[slot] = True
+
+    def _append_absorbed_capacity(
+        self,
+        slot: int,
+        value: mx.array,
+    ) -> mx.array:
+        """Append to one logical state lane without per-token concatenation."""
+
+        axis = self._capacity_axis(slot)
+        count = int(value.shape[axis])
+        buffer = self._capacity_buffers[slot]
+        logical = int(self._capacity_lengths[slot])
+
+        if buffer is None:
+            self._capacity_buffers[slot] = value
+            self._capacity_lengths[slot] = count
+            self._capacity_shared[slot] = False
+            self.cache[slot] = value
+            return value
+        if count == 0:
+            return self.cache[slot]
+        if value.ndim != buffer.ndim:
+            raise ValueError("GLM absorbed MLA append rank differs from cache")
+        for dim, (current, incoming) in enumerate(zip(buffer.shape, value.shape)):
+            if dim != axis and int(current) != int(incoming):
+                raise ValueError("GLM absorbed MLA append shape differs from cache")
+
+        # An identity clone or extracted batch row can share the physical
+        # allocation with a retained prompt boundary.  Detach only the lane
+        # being written; mx.array(array) is a real copy in MLX 0.32.x.
+        if self._capacity_shared[slot]:
+            buffer = mx.array(self._logical_slice(buffer, axis, logical))
+            self._capacity_buffers[slot] = buffer
+            self._capacity_shared[slot] = False
+
+        needed = logical + count
+        capacity = int(buffer.shape[axis])
+        if needed > capacity:
+            block = self._capacity_block(slot)
+            capacity = ((needed + block - 1) // block) * block
+            shape = list(buffer.shape)
+            shape[axis] = capacity
+            grown = mx.zeros(shape, dtype=buffer.dtype)
+            if logical:
+                destination = [slice(None)] * grown.ndim
+                destination[axis] = slice(0, logical)
+                grown[tuple(destination)] = self._logical_slice(
+                    buffer,
+                    axis,
+                    logical,
+                )
+            buffer = grown
+            self._capacity_buffers[slot] = buffer
+
+        destination = [slice(None)] * buffer.ndim
+        destination[axis] = slice(logical, needed)
+        buffer[tuple(destination)] = value
+        self._capacity_lengths[slot] = needed
+        logical_view = self._logical_slice(buffer, axis, needed)
+        self.cache[slot] = logical_view
+        return logical_view
 
     def extract(self, idx: int) -> "Glm5MLACache":
         """Extract one batch row while retaining MLA/DSA cache semantics."""
@@ -264,6 +379,10 @@ class Glm5MLACache(ArraysCache):
             value[idx : idx + 1] if value is not None else None
             for value in self.cache
         ]
+        if self.absorbed:
+            extracted._reset_absorbed_capacity()
+            self._mark_absorbed_capacity_shared()
+            extracted._mark_absorbed_capacity_shared()
         return extracted
 
     @classmethod
@@ -276,10 +395,16 @@ class Glm5MLACache(ArraysCache):
         modes = {bool(cache.absorbed) for cache in caches}
         if len(modes) != 1:
             raise ValueError("GLM MLA caches disagree on absorbed representation")
-        return _merge_glm5_arrays_caches(
+        merged = _merge_glm5_arrays_caches(
             caches,
             cls(kpools.pop(), absorbed=modes.pop()),
         )
+        if merged.absorbed:
+            merged._reset_absorbed_capacity()
+            if len(caches) == 1:
+                caches[0]._mark_absorbed_capacity_shared()
+                merged._mark_absorbed_capacity_shared()
+        return merged
 
     @property
     def state(self):
@@ -325,6 +450,25 @@ class Glm5MLACache(ArraysCache):
     @state.setter
     def state(self, value):
         self.cache = list(value)
+        self._reset_absorbed_capacity()
+
+    def filter(self, batch_indices):
+        super().filter(batch_indices)
+        self._reset_absorbed_capacity()
+
+    def extend(self, other):
+        super().extend(other)
+        self._reset_absorbed_capacity()
+
+    @property
+    def nbytes(self):
+        if not self.absorbed:
+            return super().nbytes
+        return sum(
+            value.nbytes
+            for value in self._capacity_buffers
+            if value is not None
+        )
 
     @property
     def offset(self) -> int:
@@ -342,11 +486,7 @@ class Glm5MLACache(ArraysCache):
     def update_latent(self, latent: mx.array) -> mx.array:
         if not self.absorbed:
             raise ValueError("latent update requires absorbed GLM MLA cache")
-        existing = self.cache[MLA_LATENT]
-        if existing is not None:
-            latent = mx.concatenate([existing, latent], axis=2)
-        self.cache[MLA_LATENT] = latent
-        return latent
+        return self._append_absorbed_capacity(MLA_LATENT, latent)
 
     def update_kv(self, k: mx.array, v: mx.array):
         if self.absorbed:
@@ -360,6 +500,8 @@ class Glm5MLACache(ArraysCache):
 
     def update_packed(self, packed: mx.array) -> mx.array:
         slot = MLA_LATENT_PACKED if self.absorbed else MLA_PACKED
+        if self.absorbed:
+            return self._append_absorbed_capacity(slot, packed)
         if self.cache[slot] is not None:
             packed = mx.concatenate([self.cache[slot], packed], axis=1)
         self.cache[slot] = packed
@@ -367,6 +509,8 @@ class Glm5MLACache(ArraysCache):
 
     def update_pool_keys(self, pool_keys: mx.array) -> mx.array:
         slot = MLA_LATENT_POOL_KEYS if self.absorbed else MLA_POOL_KEYS
+        if self.absorbed:
+            return self._append_absorbed_capacity(slot, pool_keys)
         existing = self.cache[slot]
         if existing is not None:
             pool_keys = mx.concatenate([existing, pool_keys], axis=1)
@@ -382,15 +526,17 @@ class Glm5MLACache(ArraysCache):
             return 0
         keep = self.offset - n
         if self.absorbed:
-            self.cache[MLA_LATENT] = self.cache[MLA_LATENT][..., :keep, :]
-            self.cache[MLA_LATENT_PACKED] = self.cache[MLA_LATENT_PACKED][
-                :, :keep, :
-            ]
-            pool = self.pool_keys
-            if pool is not None:
-                self.cache[MLA_LATENT_POOL_KEYS] = pool[
-                    :, : keep // int(self.kpool), :
-                ]
+            for slot, length in (
+                (MLA_LATENT, keep),
+                (MLA_LATENT_PACKED, keep),
+                (MLA_LATENT_POOL_KEYS, keep // int(self.kpool)),
+            ):
+                buffer = self._capacity_buffers[slot]
+                if buffer is None:
+                    continue
+                axis = self._capacity_axis(slot)
+                self._capacity_lengths[slot] = int(length)
+                self.cache[slot] = self._logical_slice(buffer, axis, length)
             return n
         if self.cache[MLA_KEYS] is not None:
             self.cache[MLA_KEYS] = self.cache[MLA_KEYS][..., :keep, :]
@@ -486,7 +632,7 @@ class Glm5MLACache(ArraysCache):
             if getattr(reserved, "size", -1) != 0:
                 raise ValueError("GLM absorbed MLA reserved state must be empty")
             rebuilt = cls(kpool, absorbed=True)
-            rebuilt.cache = [
+            rebuilt.state = [
                 latent,
                 packed,
                 pool if int(pool.shape[1]) else None,
@@ -583,10 +729,21 @@ def clone_glm5_next_layer_cache(
 
     if type(source).__name__ not in {"Glm5KDACache", "Glm5MLACache"}:
         raise TypeError(f"unexpected GLM cache class: {type(source).__name__}")
+    source_state = list(source.state)
     copied_state = [
-        None if value is None else copy_fn(value) for value in source.state
+        None if value is None else copy_fn(value) for value in source_state
     ]
-    return type(source).from_state(copied_state, source.meta_state)
+    cloned = type(source).from_state(copied_state, source.meta_state)
+    if isinstance(source, Glm5MLACache) and source.absorbed:
+        shares_storage = any(
+            original is copied
+            for original, copied in zip(source_state, copied_state)
+            if original is not None
+        )
+        if shares_storage:
+            source._mark_absorbed_capacity_shared()
+            cloned._mark_absorbed_capacity_shared()
+    return cloned
 
 
 @dataclass

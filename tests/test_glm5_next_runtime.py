@@ -273,6 +273,133 @@ class TestCacheAndForward:
                 ("glm5_next_native_v2", "mla_absorbed", "4", "4"),
             )
 
+    def test_absorbed_mla_capacity_append_matches_concatenate_reference(
+        self, glm5
+    ):
+        """Decode appends reuse bounded buffers without changing logical bytes."""
+
+        cache = glm5.Glm5MLACache(kpool=4, absorbed=True)
+        latent_parts = [mx.arange(128).reshape(1, 1, 8, 16)]
+        packed_parts = [mx.arange(64).reshape(1, 8, 8)]
+        pool_parts = [mx.arange(8).reshape(1, 2, 4)]
+        cache.update_latent(latent_parts[0])
+        cache.update_packed(packed_parts[0])
+        cache.update_pool_keys(pool_parts[0])
+
+        # The first decode append grows to the bounded architecture block.
+        latent_parts.append(mx.full((1, 1, 4, 16), 901))
+        packed_parts.append(mx.full((1, 4, 8), 902))
+        pool_parts.append(mx.full((1, 1, 4), 903))
+        cache.update_latent(latent_parts[-1])
+        cache.update_packed(packed_parts[-1])
+        cache.update_pool_keys(pool_parts[-1])
+        latent_buffer = cache._capacity_buffers[glm5.MLA_LATENT]
+        packed_buffer = cache._capacity_buffers[glm5.MLA_LATENT_PACKED]
+        pool_buffer = cache._capacity_buffers[glm5.MLA_LATENT_POOL_KEYS]
+        assert latent_buffer.shape[2] == 2048
+        assert packed_buffer.shape[1] == 2048
+        assert pool_buffer.shape[1] == 512
+
+        # Further decode-sized appends stay in those same physical buffers.
+        for index, value in enumerate(range(904, 912), start=1):
+            latent = mx.full((1, 1, 1, 16), value)
+            packed = mx.full((1, 1, 8), value + 100)
+            latent_parts.append(latent)
+            packed_parts.append(packed)
+            cache.update_latent(latent)
+            cache.update_packed(packed)
+            if index % 4 == 0:
+                pool = mx.full((1, 1, 4), value + 200)
+                pool_parts.append(pool)
+                cache.update_pool_keys(pool)
+        assert cache._capacity_buffers[glm5.MLA_LATENT] is latent_buffer
+        assert cache._capacity_buffers[glm5.MLA_LATENT_PACKED] is packed_buffer
+
+        expected_latent = mx.concatenate(latent_parts, axis=2)
+        expected_packed = mx.concatenate(packed_parts, axis=1)
+        expected_pool = mx.concatenate(pool_parts, axis=1)
+        mx.eval(*cache.state, expected_latent, expected_packed, expected_pool)
+        assert bool(
+            mx.array_equal(cache.cache[glm5.MLA_LATENT], expected_latent).item()
+        )
+        assert bool(
+            mx.array_equal(
+                cache.cache[glm5.MLA_LATENT_PACKED], expected_packed
+            ).item()
+        )
+        assert bool(mx.array_equal(cache.pool_keys, expected_pool).item())
+        assert cache.offset == expected_latent.shape[2]
+
+        logical_nbytes = sum(value.nbytes for value in cache.state)
+        assert cache.nbytes > logical_nbytes
+
+    def test_absorbed_mla_identity_clone_is_copy_on_write_after_trim(
+        self, glm5
+    ):
+        """An N-1 wrapper may share bytes but never observe later tail writes."""
+
+        from vmlx_engine.models.glm5_next.glm5_next import (
+            clone_glm5_next_layer_cache,
+        )
+
+        cache = glm5.Glm5MLACache(kpool=4, absorbed=True)
+        cache.update_latent(mx.arange(160).reshape(1, 1, 10, 16))
+        cache.update_packed(mx.arange(80).reshape(1, 10, 8))
+        cache.update_pool_keys(mx.arange(8).reshape(1, 2, 4))
+        mx.eval(*cache.state)
+
+        boundary = clone_glm5_next_layer_cache(
+            cache,
+            copy_fn=lambda value: value,
+        )
+        boundary_state = [mx.array(value) for value in boundary.state]
+        mx.eval(*boundary_state)
+        assert (
+            cache._capacity_buffers[glm5.MLA_LATENT]
+            is boundary._capacity_buffers[glm5.MLA_LATENT]
+        )
+
+        cache.update_latent(mx.full((1, 1, 2, 16), 777))
+        cache.update_packed(mx.full((1, 2, 8), 778))
+        cache.update_pool_keys(mx.full((1, 1, 4), 779))
+        mx.eval(*cache.state)
+        assert (
+            cache._capacity_buffers[glm5.MLA_LATENT]
+            is not boundary._capacity_buffers[glm5.MLA_LATENT]
+        )
+        for expected, actual in zip(boundary_state, boundary.state):
+            assert bool(mx.array_equal(expected, actual).item())
+
+        # Reusing slots exposed by a rollback also detaches before writing.
+        assert boundary.trim(3) == 3
+        boundary.update_latent(mx.full((1, 1, 1, 16), 880))
+        boundary.update_packed(mx.full((1, 1, 8), 881))
+        mx.eval(*boundary.state)
+        assert boundary.offset == 8
+        assert cache.offset == 12
+        assert bool(
+            mx.array_equal(cache.cache[glm5.MLA_LATENT][..., :10, :], boundary_state[0]).item()
+        )
+
+    def test_absorbed_mla_persistence_excludes_spare_capacity(self, glm5):
+        cache = glm5.Glm5MLACache(kpool=4, absorbed=True)
+        cache.update_latent(mx.zeros((1, 1, 8, 16)))
+        cache.update_packed(mx.zeros((1, 8, 8)))
+        cache.update_pool_keys(mx.zeros((1, 2, 4)))
+        cache.update_latent(mx.ones((1, 1, 1, 16)))
+        cache.update_packed(mx.ones((1, 1, 8)))
+        mx.eval(*cache.state)
+
+        assert cache._capacity_buffers[glm5.MLA_LATENT].shape[2] == 2048
+        assert cache.state[glm5.MLA_LATENT].shape[2] == 9
+        restored = glm5.Glm5MLACache.from_state(cache.state, cache.meta_state)
+        assert restored.offset == 9
+        assert restored._capacity_buffers[glm5.MLA_LATENT].shape[2] == 9
+        assert restored._capacity_buffers[glm5.MLA_LATENT_PACKED].shape[1] == 9
+        assert restored._capacity_buffers[glm5.MLA_LATENT_POOL_KEYS].shape[1] == 2
+        for expected, actual in zip(cache.state, restored.state):
+            assert bool(mx.array_equal(expected, actual).item())
+
     def test_live_validator_accepts_glm_typed_metadata_and_rejects_drift(
         self, tiny_model, glm5
     ):

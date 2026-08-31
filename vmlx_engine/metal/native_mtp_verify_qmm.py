@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 _VERIFY_SCOPE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "vmlx_native_mtp_verify_qmm", default=False
 )
+_VERIFY_SCOPE_STATS: contextvars.ContextVar[dict[str, int] | None] = (
+    contextvars.ContextVar("vmlx_native_mtp_verify_qmm_stats", default=None)
+)
 _PATCH = {
     "installed": False,
     "kernel_enabled": False,
@@ -120,6 +123,9 @@ def install_native_mtp_verify_qmm() -> dict[str, object]:
             return original(self, x)
 
         _PATCH["calls"] = int(_PATCH["calls"]) + 1
+        scope_stats = _VERIFY_SCOPE_STATS.get()
+        if scope_stats is not None:
+            scope_stats["calls"] = int(scope_stats.get("calls", 0)) + 1
         y = verify_matmul(
             x,
             self["weight"],
@@ -161,12 +167,21 @@ def native_mtp_verify_qmm_status() -> dict[str, object]:
 
 
 @contextlib.contextmanager
-def native_mtp_verify_qmm_scope() -> Iterator[None]:
-    """Enable the custom q4 route only while building one target verify."""
+def native_mtp_verify_qmm_scope() -> Iterator[dict[str, int]]:
+    """Enable and count the custom q4 route for one target verify.
+
+    The dispatcher can be installed process-wide while a particular model's
+    projections remain ineligible (for example a q6 MTP head).  Returning a
+    request-local count keeps policy and telemetry tied to the path that
+    actually built this verify graph instead of the global installation flag.
+    """
 
     install_native_mtp_verify_qmm()
-    token = _VERIFY_SCOPE.set(native_mtp_verify_qmm_active())
+    scope_stats = {"calls": 0}
+    active_token = _VERIFY_SCOPE.set(native_mtp_verify_qmm_active())
+    stats_token = _VERIFY_SCOPE_STATS.set(scope_stats)
     try:
-        yield
+        yield scope_stats
     finally:
-        _VERIFY_SCOPE.reset(token)
+        _VERIFY_SCOPE_STATS.reset(stats_token)
+        _VERIFY_SCOPE.reset(active_token)

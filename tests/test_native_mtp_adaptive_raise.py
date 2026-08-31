@@ -22,6 +22,7 @@ class _Stats:
         self.accepted_by_depth = list(accepted_by_depth)
         self.cycles = cycles if cycles is not None else max(drafted_by_depth)
         self.mtp_forwards = self.cycles
+        self.verify_qmm_calls = 0
 
 
 class _State:
@@ -123,34 +124,39 @@ class TestHysteresis:
         assert state.depth == 2
         assert state.depth_ceiling == 3
 
-    def test_accelerated_depth_three_waits_for_a_real_sample(self, monkeypatch):
-        from vmlx_engine.metal import native_mtp_verify_qmm
-
-        monkeypatch.setattr(
-            native_mtp_verify_qmm,
-            "native_mtp_verify_qmm_active",
-            lambda: True,
-        )
+    def test_accelerated_depth_three_waits_for_a_real_sample(self):
         # The exact live cold window was 22/48 joint d3. The accelerated lane
         # waits for 128 drafts because the completed run recovered to 582/767.
         state = _State(3, [48, 48, 48], [45, 30, 22])
+        state.stats.verify_qmm_calls = 1
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 3
 
-    def test_accelerated_depth_three_uses_profitable_floor(self, monkeypatch):
-        from vmlx_engine.metal import native_mtp_verify_qmm
-
-        monkeypatch.setattr(
-            native_mtp_verify_qmm,
-            "native_mtp_verify_qmm_active",
-            lambda: True,
-        )
+    def test_accelerated_depth_three_uses_profitable_floor(self):
         # Representative 128-cycle window: joint d2=64.8%, joint d3=47.7%,
         # therefore conditional d3=73.5%. This remains profitable with the
         # four-row verifier while independently satisfying the D2 gate.
         state = _State(3, [128, 128, 128], [118, 83, 61])
+        state.stats.verify_qmm_calls = 1
         gen._native_mtp_maybe_adapt_depth("req", state)
         assert state.depth == 3
+
+    def test_installed_verifier_without_request_calls_keeps_stock_gate(
+        self, monkeypatch
+    ):
+        from vmlx_engine.metal import native_mtp_verify_qmm
+
+        monkeypatch.setattr(
+            native_mtp_verify_qmm,
+            "native_mtp_verify_qmm_active",
+            lambda: True,
+        )
+        # A q6 or otherwise ineligible artifact sees the installed dispatcher
+        # but records zero request-local accelerated calls. Its 47.7%
+        # conditional d3 rate must therefore use the conservative stock gate.
+        state = _State(3, [128, 128, 128], [118, 83, 61])
+        gen._native_mtp_maybe_adapt_depth("req", state)
+        assert state.depth == 2
 
     def test_ceiling_blocks_returning_to_a_failed_depth(self):
         """A depth demoted for poor acceptance is never retried."""

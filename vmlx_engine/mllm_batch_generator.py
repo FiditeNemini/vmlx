@@ -3861,6 +3861,10 @@ class MLLMNativeMTPStats:
     verify_main_forwards: int = 0
     replay_main_forwards: int = 0
     mtp_forwards: int = 0
+    # Calls actually routed through the optional four-row q4 verifier for this
+    # request.  A process-wide installed flag is insufficient because q6 and
+    # other ineligible artifact layouts correctly fall back to stock MLX.
+    verify_qmm_calls: int = 0
     # MLLM native MTP recreates the head cache after verifier rejection.
     # This deliberately does not claim to count every cache discard/reset.
     mtp_cache_recreated_on_rejects: int = 0
@@ -3941,6 +3945,10 @@ class MLLMNativeMTPStats:
                 "verify_main": int(self.verify_main_forwards),
                 "replay_main": int(self.replay_main_forwards),
                 "mtp": int(self.mtp_forwards),
+            },
+            "verify_qmm": {
+                "calls": int(self.verify_qmm_calls),
+                "accelerated": bool(self.verify_qmm_calls),
             },
             "timings_ms": timings,
             "cache_lifecycle": native_mtp_cache_lifecycle_snapshot(
@@ -5519,12 +5527,10 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
     if target >= 3:
         drafted_d3 = int(state.stats.drafted_by_depth[2]) if len(state.stats.drafted_by_depth) > 2 else 0
         rate_d3 = _native_mtp_depth_rate(state.stats, 3)
-        try:
-            from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_active
-
-            accelerated_d3 = native_mtp_verify_qmm_active()
-        except Exception:
-            accelerated_d3 = False
+        # Use only request-local proof that an eligible projection actually
+        # took the optional verifier.  The dispatcher may be installed while
+        # this artifact (notably a q6 MTP head) falls back on every call.
+        accelerated_d3 = int(getattr(state.stats, "verify_qmm_calls", 0)) > 0
         min_d3 = _native_mtp_env_float(
             0.65 if accelerated_d3 else 0.85,
             "VMLINUX_NATIVE_MTP_D3_MIN_ACCEPT",
@@ -14557,13 +14563,16 @@ class MLLMBatchGenerator:
             verify_kwargs["n_confirmed"] = 1
         from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_scope
 
-        with native_mtp_verify_qmm_scope():
+        with native_mtp_verify_qmm_scope() as verify_qmm_scope_stats:
             output = self.language_model(
                 inputs[None, :],
                 cache=cache,
                 return_hidden=True,
                 **verify_kwargs,
             )
+        state.stats.verify_qmm_calls += int(
+            verify_qmm_scope_stats.get("calls", 0)
+        )
         if isinstance(output, tuple):
             logits, hidden = output
         elif hasattr(output, "logits") and hasattr(output, "hidden_states"):

@@ -596,7 +596,7 @@ jobs:
 
   deploy-website:
     name: Deploy and verify website updater surfaces
-    if: ${{ inputs.deploy_website }}
+    if: ${{ always() && inputs.deploy_website && needs.update-manifests.result == 'success' }}
     needs: [validate, update-manifests]
     runs-on: ubuntu-latest
     environment: website-release

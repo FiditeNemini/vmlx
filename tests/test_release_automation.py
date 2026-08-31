@@ -282,6 +282,7 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "id-token: write" in publish
     assert "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in publish
     assert "Publish without a stored PyPI token" in publish
+    assert "always() && inputs.deploy_website && needs.update-manifests.result == 'success'" in publish
     assert "publish-pypi.yml -R jjang-ai/jangq" in publish
     assert "cmp repo-vmlx/latest.json repo-mlxstudio/latest.json" in publish
     assert "TRUSTED_PUBLISHER_CONFIGURED" in publish

@@ -10485,11 +10485,20 @@ async function main() {
               && current.disabled
               && current.getAttribute('data-vmlx-state') === 'saved';
           }, 'Chat Settings save completion');
-          // Native MTP is a product-level effective default, not a bundle
-          // stamp. When the source-matched engine says the native runtime is
-          // active, the visible Chat Settings contract is the enforced greedy
-          // tuple even if generation_config.json advertises sampled values.
-          const nativeMtpGreedyUi = preloadHealthBefore?.mtp?.runtime_active === true;
+          // Auto can run native MTP with the bundle/request distribution via
+          // stochastic verification. Only the explicit Deterministic mode
+          // pins the visible Chat Settings tuple to greedy values.
+          const persistedNativeMtpMode = nativeMtpSelection?.persistedMode
+            ?? (() => {
+              try {
+                return JSON.parse(sessionBeforeStart?.config || '{}').nativeMtpMode;
+              } catch (_) {
+                return null;
+              }
+            })();
+          const nativeMtpGreedyUi =
+            preloadHealthBefore?.mtp?.runtime_active === true
+            && persistedNativeMtpMode === 'deterministic';
           const expectedUiValues = {
             Temperature: nativeMtpGreedyUi
               ? 0

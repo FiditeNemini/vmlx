@@ -509,8 +509,9 @@ describe("generated CDP expression syntax", () => {
       "current.getAttribute('data-vmlx-state') === 'saved'",
     );
     expect(harnessSource).toContain(
-      'const nativeMtpGreedyUi = preloadHealthBefore?.mtp?.runtime_active === true;',
+      'const persistedNativeMtpMode = nativeMtpSelection?.persistedMode',
     );
+    expect(harnessSource).toContain("&& persistedNativeMtpMode === 'deterministic';");
     expect(harnessSource).toContain("'Top P': nativeMtpGreedyUi");
     expect(harnessSource).toContain("'Top K': nativeMtpGreedyUi");
     expect(harnessSource).toContain("'Min P': nativeMtpGreedyUi");

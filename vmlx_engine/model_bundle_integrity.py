@@ -474,7 +474,13 @@ def check_model_bundle(
                 and cached.get("fingerprint") == fingerprint
                 and cached.get("status") == "ok"
             ):
-                return {**cached, "cache_hit": True}
+                historical_repairs = list(cached.get("repairs") or [])
+                return {
+                    **cached,
+                    "cache_hit": True,
+                    "repairs": [],
+                    "historical_repairs": historical_repairs,
+                }
 
         result = _scan_bundle(root, repair=repair)
         result.update(

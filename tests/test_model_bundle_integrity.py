@@ -94,6 +94,8 @@ def test_standard_shard_index_is_regenerated_atomically_once(tmp_path):
     assert index["metadata"]["total_size"] == 8
     assert not list(root.glob("*.tmp"))
     assert second["cache_hit"] is True
+    assert second["repairs"] == []
+    assert second["historical_repairs"] == ["model.safetensors.index.json"]
 
 
 def test_nested_diffusers_shards_receive_their_own_atomic_index(tmp_path):

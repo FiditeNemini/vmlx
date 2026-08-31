@@ -2278,7 +2278,10 @@ class TestNativeMtpAutodetect:
         ).item()
         assert mx.array_equal(disabled["model.norm.weight"], final_norm).item()
 
-    def test_mllm_generator_runs_vmlx_owned_native_mtp_decode_loop(self, monkeypatch):
+    @pytest.mark.parametrize("vlm_output", [False, True])
+    def test_mllm_generator_runs_vmlx_owned_native_mtp_decode_loop(
+        self, monkeypatch, vlm_output
+    ):
         import mlx.core as mx
 
         from vmlx_engine.mllm_batch_generator import (
@@ -2340,6 +2343,11 @@ class TestNativeMtpAutodetect:
                 logits = logits_for(targets)
                 if return_hidden:
                     hidden = mx.ones((1, len(targets), 4), dtype=mx.float32)
+                    if vlm_output:
+                        return SimpleNamespace(
+                            logits=logits,
+                            hidden_states=[hidden],
+                        )
                     return logits, hidden
                 return logits
 

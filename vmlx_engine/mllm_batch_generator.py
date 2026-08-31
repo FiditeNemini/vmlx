@@ -4060,6 +4060,19 @@ def _native_mtp_sampler_is_greedy(sampler: Callable[[mx.array], mx.array]) -> bo
     return bool(getattr(sampler, "_vmlx_is_greedy", False))
 
 
+def _native_mtp_hidden_tensor(hidden_states: Any) -> Any:
+    """Return the final hidden tensor from text or VLM output contracts."""
+
+    if isinstance(hidden_states, (list, tuple)):
+        hidden_states = next(
+            (item for item in reversed(hidden_states) if item is not None),
+            None,
+        )
+    if hidden_states is None:
+        raise RuntimeError("native MTP forward returned no hidden states")
+    return hidden_states
+
+
 def _native_mtp_draft_margin_threshold() -> float:
     """Logit gap below which the draft chain stops extending. 0 disables.
 
@@ -14136,7 +14149,8 @@ class MLLMBatchGenerator:
         if isinstance(mtp_output, tuple):
             mtp_logits, mtp_hidden = mtp_output
         elif hasattr(mtp_output, "logits") and hasattr(mtp_output, "hidden_states"):
-            mtp_logits, mtp_hidden = mtp_output.logits, mtp_output.hidden_states
+            mtp_logits = mtp_output.logits
+            mtp_hidden = _native_mtp_hidden_tensor(mtp_output.hidden_states)
         else:
             mtp_logits, mtp_hidden = mtp_output, None
         final_logits = mtp_logits[:, -1, :]
@@ -14406,7 +14420,8 @@ class MLLMBatchGenerator:
         if isinstance(output, tuple):
             logits, hidden = output
         elif hasattr(output, "logits") and hasattr(output, "hidden_states"):
-            logits, hidden = output.logits, output.hidden_states
+            logits = output.logits
+            hidden = _native_mtp_hidden_tensor(output.hidden_states)
         else:
             logger.debug("Native MTP seed skipped: model did not return hidden states")
             return False
@@ -14502,7 +14517,7 @@ class MLLMBatchGenerator:
         if isinstance(output, tuple):
             _logits, hidden = output
         elif hasattr(output, "hidden_states"):
-            hidden = output.hidden_states
+            hidden = _native_mtp_hidden_tensor(output.hidden_states)
         else:
             raise RuntimeError("native MTP replay did not return hidden states")
         return hidden[:, -1:, :]
@@ -14552,7 +14567,8 @@ class MLLMBatchGenerator:
         if isinstance(output, tuple):
             logits, hidden = output
         elif hasattr(output, "logits") and hasattr(output, "hidden_states"):
-            logits, hidden = output.logits, output.hidden_states
+            logits = output.logits
+            hidden = _native_mtp_hidden_tensor(output.hidden_states)
         else:
             raise RuntimeError("native MTP verify did not return hidden states")
         _native_mtp_async_eval(logits, hidden)

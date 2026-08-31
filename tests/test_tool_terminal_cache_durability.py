@@ -253,6 +253,32 @@ def test_qwen4_specific_contract_is_render_only_and_append_only():
     assert rendered[-1]["content"].startswith(original[-1]["content"])
     assert "must be file_info" in rendered[-1]["content"]
 
+    continuation = [
+        *original,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "file_info",
+                        "arguments": {"path": "panel/package.json"},
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "size=5.3 KB"},
+        {"role": "user", "content": "Now run pwd."},
+    ]
+    rerendered = BatchedEngine._append_latest_user_tool_contract(
+        continuation,
+        "run_command",
+    )
+    assert rerendered[1]["content"] == rendered[1]["content"]
+    assert "must be run_command" in rerendered[-1]["content"]
+    assert continuation[1]["content"] == original[1]["content"]
+
 
 @pytest.mark.asyncio
 async def test_qwen4_specific_choice_keeps_catalog_but_restricts_parser(

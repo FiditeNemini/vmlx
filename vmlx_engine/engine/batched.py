@@ -449,33 +449,58 @@ class BatchedEngine(BaseEngine):
         messages: list[dict[str, Any]],
         tool_name: str | None,
     ) -> list[dict[str, Any]]:
-        """Place a specific-tool contract at the append-only user suffix.
+        """Place specific-tool contracts at reproducible user suffixes.
 
         Qwen3.8 Flash-Next receives the full, stable tool catalog in its opening
         system prompt. The selected function remains a current-turn detail, so
-        it belongs on the latest user message instead of rewriting that catalog.
-        This copy is render-only; API history remains caller-owned.
+        it belongs on the owning user message instead of rewriting that catalog.
+        Historical choices are reconstructed from the following assistant
+        ``tool_calls`` so the same user turn renders identically on the next API
+        request. This copy is render-only; API history remains caller-owned.
         """
         if not tool_name:
             return messages
         rendered = [dict(message) for message in messages]
-        reminder = (
-            "Current turn API contract: call exactly one native tool before any "
-            f"prose, and that tool must be {tool_name}. Historical tool results "
-            "do not satisfy this current-turn requirement."
-        )
-        for message in reversed(rendered):
-            if message.get("role") != "user":
+
+        def _assistant_tool_name(message: dict[str, Any]) -> str | None:
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                name = function.get("name") if isinstance(function, dict) else None
+                if isinstance(name, str) and name:
+                    return name
+            return None
+
+        choices_by_user: dict[int, str] = {}
+        latest_user_index: int | None = None
+        for index, message in enumerate(rendered):
+            role = message.get("role")
+            if role == "user":
+                latest_user_index = index
                 continue
+            if role != "assistant" or latest_user_index is None:
+                continue
+            historical_name = _assistant_tool_name(message)
+            if historical_name:
+                choices_by_user[latest_user_index] = historical_name
+        if latest_user_index is not None:
+            choices_by_user[latest_user_index] = tool_name
+
+        for index, selected_name in choices_by_user.items():
+            message = rendered[index]
+            reminder = (
+                "Current turn API contract: call exactly one native tool before "
+                f"any prose, and that tool must be {selected_name}. Historical "
+                "tool results do not satisfy this current-turn requirement."
+            )
             content = message.get("content")
             if isinstance(content, str):
                 message["content"] = content.rstrip() + "\n\n" + reminder
-                return rendered
-            if isinstance(content, list):
+            elif isinstance(content, list):
                 parts = list(content)
                 parts.append({"type": "text", "text": reminder})
                 message["content"] = parts
-                return rendered
         return rendered
 
     def _m3_vl_active(

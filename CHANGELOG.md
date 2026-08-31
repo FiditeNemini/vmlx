@@ -4,6 +4,20 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.49] - 2026-08-31
+
+### Performance
+- **Qwen3.8 Flash Next fixed-depth MTP keeps the selected D3 path active through real tool loops and long ordinary chat.** Request-local sampling, prompt-history priming, affine MoE projection pairing, and exact depth telemetry now stay aligned instead of silently falling back to a different policy. The release proof preserves stochastic sampling, tool-result continuation, hybrid cache restoration, and fixed depth 3 on the same live session.
+
+### Added
+- **Every production inference loader now preflights the resolved local model bundle before constructing weights.** The shared gate recursively covers base, MTP, vision, audio, nested Diffusers, JANG affine, and JANGTQ safetensors without requiring optional model configuration files. Valid safetensors payload offsets are preserved; only objectively reconstructible standard weight-index defects are repaired through a locked, fsynced, atomic replacement.
+
+### Fixed
+- **Incomplete or corrupt local model artifacts fail closed before allocation.** Active downloads, missing indexed shards, malformed headers, invalid present signature JSON, and failed index repairs can no longer reach a partial model load. Hub identifiers are checked after their one authoritative snapshot resolution, while unchanged local bundles use an external fingerprinted integrity stamp.
+- **Agentic API behavior remains source-matched across direct and Electron-gateway routes.** Chat Completions, Responses, Anthropic, and Ollama stream/non-stream tool calls, tool-result continuation, cancellation recovery, reasoning separation, and raw capture pass against the same Qwen3.8 Flash Next fixed-D3 engine used by the real Electron proof.
+
+---
+
 ## [1.6.48] - 2026-08-30
 
 ### Performance

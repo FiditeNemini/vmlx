@@ -2,13 +2,32 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 from argparse import Namespace
+from pathlib import Path
 
 import pytest
 
 
 class _StopServe(RuntimeError):
     pass
+
+
+def _write_minimal_safetensors(path: Path) -> None:
+    """Give CLI policy fixtures a real loadable bundle boundary."""
+
+    header = json.dumps(
+        {
+            "weight": {
+                "dtype": "F32",
+                "shape": [1],
+                "data_offsets": [0, 4],
+            }
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    header += b" " * ((8 - len(header) % 8) % 8)
+    path.write_bytes(struct.pack("<Q", len(header)) + header + struct.pack("<f", 1.0))
 
 
 @pytest.fixture(autouse=True)
@@ -110,7 +129,12 @@ def _serve_args(model_path: str, *, kv_cache_quantization):
 
 def _run_serve_until_uvicorn(monkeypatch, args):
     import uvicorn
+
     from vmlx_engine import cli, server
+
+    model_root = Path(args.model)
+    if model_root.is_dir() and not any(model_root.rglob("*.safetensors")):
+        _write_minimal_safetensors(model_root / "model.safetensors")
 
     # Other endpoint tests may have already driven the global FastAPI app
     # through TestClient, which materializes Starlette's middleware stack.

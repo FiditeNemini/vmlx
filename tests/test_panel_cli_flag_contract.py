@@ -738,7 +738,8 @@ def test_native_mtp_auto_preserves_sampling_and_deterministic_is_explicit() -> N
 
     assert "buildNativeMtpLaunchArgs" in sessions
     assert "--native-mtp-sampling-policy" in shared
-    assert "input.mode === 'deterministic' ? 'greedy-only' : 'compatible-only'" in shared
+    assert "const mode = resolveNativeMtpMode(input)" in shared
+    assert "mode === 'deterministic' ? 'greedy-only' : 'compatible-only'" in shared
     assert "'greedy-only'" in shared
     assert "'compatible-only'" in shared
     # off must still disable the runtime outright

@@ -95,12 +95,13 @@ class EngineCore:
         self._stream_states: Dict[str, RequestStreamState] = {}
         self._finished_events: Dict[str, asyncio.Event] = {}
 
-        # Terminal output must reach API/UI consumers before potentially slow
-        # cache persistence, but the next request must not perform prefix
-        # lookup until that persistence completes.  The engine loop clears
-        # this gate before dispatching a finished output and reopens it after
-        # paged/TQ/SSM cleanup.  This keeps streaming responsive without
-        # allowing a same-prefix request to observe a partially-written cache.
+        # Non-terminal deltas reach API/UI consumers immediately.  The engine
+        # loop queues the finished output before potentially slow cache
+        # persistence, then reopens this gate after paged/TQ/SSM/native cleanup.
+        # Public stream consumers hold that finished output at the gate so a
+        # completed tool call cannot be executed before its turn is durable;
+        # the same gate also prevents the next request from performing prefix
+        # lookup against a partially-written cache.
         self._terminal_cleanup_complete = asyncio.Event()
         self._terminal_cleanup_complete.set()
 
@@ -124,11 +125,11 @@ class EngineCore:
 
     async def stop(self) -> None:
         """Stop the engine loop and flush caches."""
-        # A terminal output is intentionally dispatched before its prefix/TQ/SSM
-        # cleanup so the client can paint the final delta without waiting on
-        # persistence.  Do not cancel that cleanup when the user immediately
-        # stops/restarts the model after seeing the answer.  The same event gates
-        # next-turn admission; it is also the durability boundary for shutdown.
+        # A terminal output is queued internally before its prefix/TQ/SSM
+        # cleanup, but public stream consumers hold it behind the persistence
+        # gate. Do not cancel that cleanup when the user immediately
+        # stops/restarts the model after seeing the answer. The same event gates
+        # terminal visibility, next-turn admission, and shutdown durability.
         if self._task and not self._terminal_cleanup_complete.is_set():
             logger.info("Waiting for terminal cache cleanup before engine stop")
             try:
@@ -291,11 +292,12 @@ class EngineCore:
                         await asyncio.sleep(0)
 
                     # Cache/TQ/SSM persistence for a long prompt can take
-                    # seconds. The terminal token is already in the collector;
-                    # only now perform cleanup, on the same model worker when
-                    # one exists, before admitting the next scheduler step.
-                    # This preserves cache ownership while preventing the final
-                    # visible delta from being held behind disk persistence.
+                    # seconds. The terminal object is already in the collector;
+                    # public stream consumers hold it on
+                    # _terminal_cleanup_complete while cleanup runs on the same
+                    # model worker. Non-terminal deltas remain low-latency, but
+                    # tool completion and the next request cannot race a
+                    # partially-written cache.
                     if finished_ids:
                         if not outputs:
                             await asyncio.sleep(0)
@@ -678,6 +680,31 @@ class EngineCore:
                         output = collector.get_nowait()
                         if output is None:
                             output = await collector.get()
+
+                    if output.finished:
+                        # The scheduler intentionally queues the terminal object
+                        # before synchronous prefix/TQ/SSM/native persistence so
+                        # its model-thread ownership is not lost.  Do not expose
+                        # that object to Chat/Responses/Electron until the
+                        # existing cleanup fence is durable: clients commonly
+                        # execute a parsed tool as soon as finish_reason or
+                        # response.completed arrives.
+                        _durability_wait_started = time.perf_counter()
+                        _durability_was_pending = (
+                            not self._terminal_cleanup_complete.is_set()
+                        )
+                        await self._terminal_cleanup_complete.wait()
+                        if _durability_was_pending:
+                            logger.info(
+                                "Terminal durability barrier: request=%s "
+                                "wait_ms=%.3f cache_persisted=true",
+                                request_id,
+                                (
+                                    time.perf_counter()
+                                    - _durability_wait_started
+                                )
+                                * 1000.0,
+                            )
 
                     yield output
 

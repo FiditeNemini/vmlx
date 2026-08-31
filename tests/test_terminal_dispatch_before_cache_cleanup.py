@@ -1,4 +1,4 @@
-"""Terminal streaming must not wait behind synchronous cache persistence."""
+"""Internal terminal dispatch is early; public terminal visibility is durable."""
 
 from __future__ import annotations
 
@@ -227,6 +227,61 @@ async def test_llm_request_admission_waits_for_terminal_cache_cleanup() -> None:
     assert await pending == "next"
     assert added == ["next"]
     assert pending_admissions == set()
+
+
+@pytest.mark.asyncio
+async def test_llm_stream_holds_terminal_until_cache_cleanup() -> None:
+    engine = EngineCore.__new__(EngineCore)
+    engine._terminal_cleanup_complete = asyncio.Event()
+
+    class _Collector:
+        def __init__(self) -> None:
+            self._items = [RequestOutput(request_id="req", finished=True)]
+
+        def get_nowait(self):
+            return self._items.pop(0) if self._items else None
+
+        async def get(self):
+            raise AssertionError("terminal object was already queued")
+
+    engine._output_collectors = {"req": _Collector()}
+    engine._stream_states = {}
+    engine._finished_events = {}
+    engine.scheduler = SimpleNamespace(
+        get_request=lambda _request_id: None,
+        abort_request=lambda _request_id: None,
+    )
+
+    stream = engine.stream_outputs("req")
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert not pending.done()
+
+    engine._terminal_cleanup_complete.set()
+    output = await pending
+    assert output.finished is True
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mllm_stream_holds_terminal_until_cache_cleanup() -> None:
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._terminal_cleanup_complete = asyncio.Event()
+    scheduler.output_queues = {"req": asyncio.Queue()}
+    scheduler.running = {}
+    scheduler.output_queues["req"].put_nowait(
+        RequestOutput(request_id="req", finished=True)
+    )
+
+    stream = scheduler.stream_outputs("req")
+    pending = asyncio.create_task(anext(stream))
+    await asyncio.sleep(0)
+    assert not pending.done()
+
+    scheduler._terminal_cleanup_complete.set()
+    output = await pending
+    assert output.finished is True
+    await stream.aclose()
 
 
 def test_llm_pending_admission_parks_idle_tasks_before_scheduler_lookup() -> None:

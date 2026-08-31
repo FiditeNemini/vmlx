@@ -5323,6 +5323,27 @@ class MLLMScheduler:
                 output = await output_queue.get()
                 if output is None:
                     break
+                if output.finished:
+                    # Match EngineCore: image/video/audio and hybrid MLLM tool
+                    # turns must not publish their terminal event until typed,
+                    # paged, SSM-companion, and disk cleanup is durable. Token
+                    # deltas before this object remain fully streaming.
+                    _durability_wait_started = time.perf_counter()
+                    _durability_was_pending = (
+                        not self._terminal_cleanup_complete.is_set()
+                    )
+                    await self._terminal_cleanup_complete.wait()
+                    if _durability_was_pending:
+                        logger.info(
+                            "Terminal durability barrier: request=%s "
+                            "wait_ms=%.3f cache_persisted=true",
+                            request_id,
+                            (
+                                time.perf_counter()
+                                - _durability_wait_started
+                            )
+                            * 1000.0,
+                        )
                 yield output
         finally:
             # Cleanup queue — runs on normal exit AND GeneratorExit (client disconnect)

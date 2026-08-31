@@ -1018,6 +1018,7 @@ class TestNativeMTP:
                 completion_batch_size=1,
                 prefill_batch_size=1,
             )
+            assert type(generator._prompt_batch.model).__name__ == "Model"
             prompt = [3, 5, 7, 11, 13, 17, 19]
             generator.insert([prompt])
             state = None
@@ -1032,6 +1033,9 @@ class TestNativeMTP:
             assert state.stats.prompt_prime_source == "cold_prompt"
             assert state.stats.prompt_primed_pairs == len(prompt)
             assert state.stats.mtp_head_cache_policy == "glm_aligned"
+            # The proxy is scoped to PromptProcessingBatch.prompt(); the
+            # generation batch retains the real model and its native MTP API.
+            assert generator._generation_batch.model is model
         finally:
             if generator is not None:
                 generator.close()

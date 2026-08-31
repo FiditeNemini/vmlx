@@ -144,7 +144,11 @@ def apply() -> bool:
         return True
 
     try:
-        from mlx_lm.generate import BatchGenerator, GenerationBatch
+        from mlx_lm.generate import (
+            BatchGenerator,
+            GenerationBatch,
+            PromptProcessingBatch,
+        )
     except ImportError:
         logger.debug("mlx_lm.generate.GenerationBatch not importable")
         return False
@@ -160,6 +164,47 @@ def apply() -> bool:
     original_batch_generator_next = BatchGenerator._next
     original_batch_generator_remove = BatchGenerator.remove
     original_batch_generator_make_batch = BatchGenerator._make_batch
+    original_prompt_processing_prompt = PromptProcessingBatch.prompt
+
+    class _GlmPromptCaptureProxy:
+        """Expose GLM prompt hiddens at mlx-lm's owning prefill seam."""
+
+        def __init__(self, model):
+            self._model = model
+
+        def __getattr__(self, name):
+            return getattr(self._model, name)
+
+        def __call__(self, inputs, *args, **kwargs):
+            from ...native_mtp_prompt_priming import capture_prefill
+
+            call_kwargs = dict(kwargs)
+            call_kwargs["return_hidden"] = True
+            result = self._model(inputs, *args, **call_kwargs)
+            if not isinstance(result, tuple) or len(result) != 2:
+                raise RuntimeError(
+                    "armed GLM prompt priming requires (logits, hidden)"
+                )
+            logits, hidden = result
+            capture_prefill(
+                self._model,
+                inputs,
+                hidden,
+                call_kwargs.get("cache"),
+            )
+            return logits
+
+    def patched_prompt_processing_prompt(self, tokens):
+        from ...native_mtp_prompt_priming import capture_requested
+
+        model = getattr(self, "model", None)
+        if not _glm_prompt_priming_enabled(model) or not capture_requested(model):
+            return original_prompt_processing_prompt(self, tokens)
+        self.model = _GlmPromptCaptureProxy(model)
+        try:
+            return original_prompt_processing_prompt(self, tokens)
+        finally:
+            self.model = model
 
     def attach_prompt_cache_snapshots(self, responses):
         snapshots = getattr(self, "_vmlx_prompt_cache_snapshots", None)
@@ -392,6 +437,7 @@ def apply() -> bool:
     BatchGenerator._next = patched_batch_generator_next
     BatchGenerator.remove = patched_batch_generator_remove
     BatchGenerator._make_batch = patched_batch_generator_make_batch
+    PromptProcessingBatch.prompt = patched_prompt_processing_prompt
     BatchGenerator._vmlx_glm_prompt_snapshot_patched = True
     _PATCHED = True
     return True

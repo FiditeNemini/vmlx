@@ -2169,13 +2169,19 @@ def tool_schemas(protocol: str, names: Iterable[str]) -> list[dict[str, Any]]:
 
 
 def tool_choice(
-    protocol: str, mode: str, stage: int, second_tool_choice: str = "auto"
+    protocol: str,
+    mode: str,
+    stage: int,
+    second_tool_choice: str = "auto",
+    first_tool_choice: str = "current",
 ) -> Any:
     """Return native choice for tool stage 1/2 or final stage 3."""
     if protocol == "ollama":
         return None
     if stage == 3:
         return {"type": "none"} if protocol == "anthropic" else "none"
+    if stage == 1 and first_tool_choice == "auto":
+        return {"type": "auto"} if protocol == "anthropic" else "auto"
     if stage == 1 and mode == "stream":
         if protocol == "chat":
             return {"type": "function", "function": {"name": "file_info"}}
@@ -4124,6 +4130,7 @@ def build_request(
     max_tokens: int = 512,
     enable_thinking: bool = True,
     second_tool_choice: str = "auto",
+    first_tool_choice: str = "current",
 ) -> dict[str, Any]:
     stream = mode == "stream"
     common = _request_common(model, max_tokens, enable_thinking)
@@ -4136,7 +4143,9 @@ def build_request(
             "stream": stream,
             "max_tokens": max_tokens,
             "tools": tool_schemas(protocol, names),
-            "tool_choice": tool_choice(protocol, mode, stage, second_tool_choice),
+            "tool_choice": tool_choice(
+                protocol, mode, stage, second_tool_choice, first_tool_choice
+            ),
         }
         if stream:
             body["stream_options"] = {"include_usage": True}
@@ -4150,7 +4159,9 @@ def build_request(
             "store": True,
             "max_output_tokens": max_tokens,
             "tools": tool_schemas(protocol, names),
-            "tool_choice": tool_choice(protocol, mode, stage, second_tool_choice),
+            "tool_choice": tool_choice(
+                protocol, mode, stage, second_tool_choice, first_tool_choice
+            ),
         }
         if previous_response_id:
             body["previous_response_id"] = previous_response_id
@@ -4162,7 +4173,9 @@ def build_request(
             "stream": stream,
             "max_tokens": max_tokens,
             "tools": tool_schemas(protocol, names),
-            "tool_choice": tool_choice(protocol, mode, stage, second_tool_choice),
+            "tool_choice": tool_choice(
+                protocol, mode, stage, second_tool_choice, first_tool_choice
+            ),
         }
     if protocol == "ollama":
         body = {
@@ -4263,6 +4276,7 @@ def run_flow(
     max_tokens: int,
     enable_thinking: bool,
     second_tool_choice: str = "explicit",
+    first_tool_choice: str = "current",
 ) -> dict[str, Any]:
     first_prompt = first_tool_instruction(protocol, mode)
     second_prompt = (
@@ -4285,6 +4299,7 @@ def run_flow(
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
+        first_tool_choice=first_tool_choice,
     )
     request_records = [_request_public(1, request1, protocol=protocol)]
     round1 = client.send(
@@ -4324,6 +4339,7 @@ def run_flow(
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
+        first_tool_choice=first_tool_choice,
     )
     request_records.append(_request_public(2, request2, protocol=protocol))
     round2 = client.send(
@@ -4373,6 +4389,7 @@ def run_flow(
         # exact On -> Off transition, so send the body it grades.
         enable_thinking=False,
         second_tool_choice=second_tool_choice,
+        first_tool_choice=first_tool_choice,
     )
     request_records.append(_request_public(3, request3, protocol=protocol))
     round3 = client.send(
@@ -5529,6 +5546,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         "bases": bases,
         "protocols": protocols,
         "modes": modes,
+        "first_tool_choice": args.first_tool_choice,
         "second_tool_choice": args.second_tool_choice,
         "backend_identity_fingerprint_sha256": None,
         "identity": {
@@ -5626,6 +5644,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                         max_tokens=args.max_output_tokens,
                         enable_thinking=args.enable_thinking,
                         second_tool_choice=args.second_tool_choice,
+                        first_tool_choice=args.first_tool_choice,
                     )
                     flow_replay_payloads = flow.pop(
                         "_paired_replay_payloads", {}
@@ -5949,6 +5968,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disconnect-delay-ms", type=int, default=1000)
     parser.add_argument(
         "--enable-thinking", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--first-tool-choice",
+        choices=("current", "auto"),
+        default="current",
+        help=(
+            "Tool-choice policy for the first tool turn. 'current' preserves "
+            "the historical explicit-stream/required-nonstream contract; "
+            "'auto' enables an append-only auto-to-auto cache proof."
+        ),
     )
     parser.add_argument(
         "--second-tool-choice",

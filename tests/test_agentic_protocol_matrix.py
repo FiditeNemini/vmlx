@@ -1462,6 +1462,11 @@ def test_build_request_uses_native_tool_choice_shapes_without_hosts():
         "type": "tool",
         "name": "run_command",
     }
+    assert matrix.tool_choice("chat", "stream", 1, "auto", "auto") == "auto"
+    assert matrix.tool_choice("responses", "stream", 1, "auto", "auto") == "auto"
+    assert matrix.tool_choice("anthropic", "stream", 1, "auto", "auto") == {
+        "type": "auto"
+    }
 
 
 def test_import_safe_parser_requires_caller_supplied_model_and_base(tmp_path: Path):

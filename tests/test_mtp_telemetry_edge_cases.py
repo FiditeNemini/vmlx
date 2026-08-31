@@ -210,6 +210,14 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypa
     stats.restore_ms = 3.0
     stats.replay_ms = 22.0
     stats.materialize_ms = 4.0
+    stats.draft_head_calls = 31
+    stats.draft_head = {
+        "configured": True,
+        "available": True,
+        "source_bits": 8,
+        "draft_bits": 4,
+        "calls": 900,
+    }
     stats.mtp_cache_recreated_on_rejects = 4
     stats.mtp_head_cache = {
         "layers": 1,
@@ -223,7 +231,6 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypa
         "length_min": 9,
         "length_max": 9,
     }
-
     snapshot = stats.to_dict(
         request_id="req-test",
         finish_reason="length",
@@ -249,6 +256,8 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypa
         "replay_main": 4,
         "mtp": 31,
     }
+    assert snapshot["draft_head"]["calls"] == 31
+    assert snapshot["draft_head"]["active_observed"] is True
     assert snapshot["timings_ms"]["total"] == pytest.approx(200.0)
     assert snapshot["timings_ms"]["avg_cycle"] == pytest.approx(20.0)
     assert snapshot["cache_lifecycle"] == {
@@ -258,6 +267,22 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypa
     }
     assert snapshot["profiled_phase_timing"] is False
     assert snapshot["fallback_reason"] == "d3_acceptance=0.429<min=0.850"
+
+
+def test_native_mtp_draft_head_telemetry_records_only_request_delta():
+    from vmlx_engine.mllm_batch_generator import (
+        MLLMNativeMTPStats,
+        _record_native_mtp_draft_head_delta,
+    )
+
+    stats = MLLMNativeMTPStats()
+    before = {"calls": 700, "available": True, "source_bits": 8}
+    after = {"calls": 703, "available": True, "source_bits": 8}
+    _record_native_mtp_draft_head_delta(stats, before, after)
+    _record_native_mtp_draft_head_delta(stats, after, {**after, "calls": 702})
+
+    assert stats.draft_head_calls == 3
+    assert stats.draft_head["calls"] == 702
 
 
 def test_mllm_native_mtp_stats_identify_synchronized_phase_timing(monkeypatch):

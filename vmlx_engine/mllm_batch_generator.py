@@ -3865,6 +3865,11 @@ class MLLMNativeMTPStats:
     # request.  A process-wide installed flag is insufficient because q6 and
     # other ineligible artifact layouts correctly fall back to stock MLX.
     verify_qmm_calls: int = 0
+    # Calls actually routed through an optional proposal-only head for this
+    # request. The loaded model exposes a cumulative counter; draft-chain
+    # boundaries below record only the request-local delta.
+    draft_head_calls: int = 0
+    draft_head: Dict[str, Any] = field(default_factory=dict)
     # MLLM native MTP recreates the head cache after verifier rejection.
     # This deliberately does not claim to count every cache discard/reset.
     mtp_cache_recreated_on_rejects: int = 0
@@ -3920,6 +3925,11 @@ class MLLMNativeMTPStats:
             )
             depth_rates[label] = _rate(accepted, drafted)
 
+        draft_head = dict(self.draft_head)
+        if draft_head:
+            draft_head["calls"] = int(self.draft_head_calls)
+            draft_head["active_observed"] = bool(self.draft_head_calls)
+
         return {
             "request_id": request_id,
             "finish_reason": finish_reason,
@@ -3950,6 +3960,7 @@ class MLLMNativeMTPStats:
                 "calls": int(self.verify_qmm_calls),
                 "accelerated": bool(self.verify_qmm_calls),
             },
+            "draft_head": draft_head,
             "timings_ms": timings,
             "cache_lifecycle": native_mtp_cache_lifecycle_snapshot(
                 head_cache=self.mtp_head_cache,
@@ -3974,6 +3985,30 @@ class MLLMNativeMTPStats:
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
         }
+
+
+def _native_mtp_draft_head_status(language_model: Any) -> Dict[str, Any]:
+    getter = getattr(language_model, "mtp_draft_head_status", None)
+    if not callable(getter):
+        return {}
+    try:
+        status = getter()
+    except Exception:  # noqa: BLE001 - telemetry must never break generation
+        return {}
+    return dict(status) if isinstance(status, dict) else {}
+
+
+def _record_native_mtp_draft_head_delta(
+    stats: MLLMNativeMTPStats,
+    before: Dict[str, Any],
+    after: Dict[str, Any],
+) -> None:
+    if not after:
+        return
+    before_calls = int(before.get("calls", 0) or 0)
+    after_calls = int(after.get("calls", 0) or 0)
+    stats.draft_head_calls += max(0, after_calls - before_calls)
+    stats.draft_head = dict(after)
 
 
 @dataclass
@@ -14175,6 +14210,11 @@ class MLLMBatchGenerator:
         stats: Optional[MLLMNativeMTPStats] = None,
     ) -> Tuple[List[mx.array], List[mx.array], List[int]]:
         trace_t0 = _native_mtp_trace_start() if stats is not None else 0.0
+        draft_head_before = (
+            _native_mtp_draft_head_status(self.language_model)
+            if stats is not None
+            else {}
+        )
         drafts: List[mx.array] = []
         draft_lps: List[mx.array] = []
         current_hidden = hidden_state
@@ -14227,6 +14267,11 @@ class MLLMBatchGenerator:
         _native_mtp_async_eval(*drafts)
         if stats is not None:
             _native_mtp_trace_stop(stats, "draft_ms", trace_t0)
+            _record_native_mtp_draft_head_delta(
+                stats,
+                draft_head_before,
+                _native_mtp_draft_head_status(self.language_model),
+            )
         return drafts, draft_lps, []
 
     def _observe_native_mtp_profile(
@@ -14453,6 +14498,7 @@ class MLLMBatchGenerator:
                 if int(getattr(request, "_cached_tokens", 0) or 0) > 0
                 else "cold_prompt"
             )
+        draft_head_before = _native_mtp_draft_head_status(self.language_model)
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
             request,
             hidden[:, -1:, :],
@@ -14487,6 +14533,11 @@ class MLLMBatchGenerator:
             )
         state.stats.seed_main_forwards += seed_main_forwards
         state.stats.mtp_forwards += len(drafts)
+        _record_native_mtp_draft_head_delta(
+            state.stats,
+            draft_head_before,
+            _native_mtp_draft_head_status(self.language_model),
+        )
         if first_logprobs:
             first_lp = first_logprobs[0]
         elif _native_mtp_sampler_accepts_logits(sampler):

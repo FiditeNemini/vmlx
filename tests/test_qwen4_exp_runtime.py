@@ -1129,6 +1129,70 @@ def test_qwen4_exp_native_mtp_runtime_is_detected_from_the_attached_head():
     assert model_has_native_mtp_runtime(model) is True
 
 
+def _quantize_qwen4_lm_head(model, *, bits: int):
+    model.lm_head = model.lm_head.to_quantized(group_size=64, bits=bits)
+    mx.eval(model.lm_head.weight, model.lm_head.scales, model.lm_head.biases)
+
+
+def test_qwen4_exp_mtp_draft_head_is_default_off_and_keeps_target_head(monkeypatch):
+    monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=8)
+    target_head = model.lm_head
+
+    status = model.prepare_mtp_draft_head()
+    assert status["configured"] is False
+    assert status["reason"] == "disabled"
+    assert model.lm_head is target_head
+
+
+def test_qwen4_exp_mtp_draft_head_q4_is_proposal_only_and_observable(monkeypatch):
+    monkeypatch.setenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", "4")
+    model = LanguageModel(_tiny_args())
+    _randomize(model)
+    _quantize_qwen4_lm_head(model, bits=8)
+    target_head = model.lm_head
+    ids = mx.array([[3, 5, 7, 11, 13, 17]], dtype=mx.int32)
+    target_before = _logits(model, ids)
+
+    status = model.prepare_mtp_draft_head()
+    assert status["available"] is True
+    assert status["source_bits"] == 8
+    assert status["draft_bits"] == 4
+    assert status["group_size"] == 64
+    assert status["calls"] == 0
+    assert model.lm_head is target_head
+    assert not any("draft_head" in name for name, _module in model.named_modules())
+
+    _main_logits, hidden = model(ids, cache=model.make_cache(), return_hidden=True)
+    proposal_logits = model.mtp_forward(
+        hidden[:, -1:, :],
+        mx.array([[19]], dtype=mx.int32),
+        model.make_mtp_cache(),
+    )
+    target_after = _logits(model, ids)
+    mx.eval(target_before, target_after, proposal_logits)
+    np.testing.assert_array_equal(np.asarray(target_after), np.asarray(target_before))
+    assert proposal_logits.shape == (1, 1, model.args.vocab_size)
+    status = model.mtp_draft_head_status()
+    assert status["active_observed"] is True
+    assert status["calls"] == 1
+
+
+def test_qwen4_exp_mtp_draft_head_rejects_unsupported_source_layout(monkeypatch):
+    monkeypatch.setenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", "4")
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=6)
+
+    first = model.prepare_mtp_draft_head()
+    second = model.prepare_mtp_draft_head()
+    assert first == second
+    assert first["available"] is False
+    assert first["source_bits"] == 6
+    assert first["reason"] == "unsupported_source_layout"
+
+
 def test_qwen4_exp_mtp_fusion_preserves_distinct_hyper_connection_branches():
     from vmlx_engine.models.qwen4_exp.language import MTPModule
 

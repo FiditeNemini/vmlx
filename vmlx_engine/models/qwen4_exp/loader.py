@@ -796,6 +796,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     compiled_hyper = compile_hyper_connections(model)
     folded_zero_norms = fold_zero_centered_norm_offsets(model)
     projection_groups = prepare_quantized_projection_groups(model)
+    draft_head_status = model.language_model.prepare_mtp_draft_head()
 
     from vmlx_engine.metal.qwen4_affine_moe_decode import (
         install_qwen4_affine_moe,
@@ -825,6 +826,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
             },
             "affine_moe": qwen4_affine_moe_status(),
             "affine_moe_pair": affine_moe_pair_status("qwen4_exp"),
+            "mtp_draft_head": draft_head_status,
         },
     )
 
@@ -876,7 +878,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     logger.info(
         "Loaded qwen4_exp with SSD-backed PLE (%s shards, MTP=%s, "
         "hyper_fused=%s, hyper_compiled=%s, hyper_dtype_normalized=%s/%s, "
-        "zero_norms_folded=%s, projection_groups=%s, runtime_compute_dtype=%s, runtime_dtype_casts=%s, "
+        "zero_norms_folded=%s, projection_groups=%s, mtp_draft_head=%s, runtime_compute_dtype=%s, runtime_dtype_casts=%s, "
         "runtime_dtype_mismatches=%s, ple_storage_dtype=%s, "
         "ple_output_dtype=%s, ple_random_access_advised=%s/%s)",
         model_config.text_config.split_ngram_parts,
@@ -887,6 +889,7 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
         normalized_hyper[1],
         folded_zero_norms,
         projection_groups,
+        draft_head_status,
         str(runtime_dtype) if runtime_dtype is not None else "checkpoint",
         (runtime_dtype_summary or {}).get("cast", 0),
         runtime_dtype_mismatches,

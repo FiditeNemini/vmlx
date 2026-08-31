@@ -77,6 +77,53 @@ logger = logging.getLogger(__name__)
 _HYPER_SPLIT_INDICES = {}
 
 
+def _mtp_draft_head_request() -> tuple[Optional[int], str]:
+    """Return the explicitly requested proposal-head width and its status."""
+
+    raw = os.environ.get(
+        "VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS",
+        os.environ.get("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", "0"),
+    ).strip().lower()
+    if raw in {"", "0", "false", "no", "off", "none"}:
+        return None, "disabled"
+    try:
+        bits = int(raw)
+    except (TypeError, ValueError):
+        return None, f"invalid_requested_bits:{raw}"
+    if bits != 4:
+        return None, f"unsupported_requested_bits:{bits}"
+    return bits, "not_built"
+
+
+class _MTPDraftHeadState:
+    """Non-module holder so a proposal copy never enters checkpoint traversal."""
+
+    def __init__(self):
+        self.requested_bits, self.reason = _mtp_draft_head_request()
+        self.attempted = False
+        self.head = None
+        self.source_bits = None
+        self.group_size = None
+        self.mode = None
+        self.build_ms = 0.0
+        self.calls = 0
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "configured": self.requested_bits is not None,
+            "requested_bits": self.requested_bits,
+            "source_bits": self.source_bits,
+            "draft_bits": self.requested_bits if self.head is not None else None,
+            "group_size": self.group_size,
+            "mode": self.mode,
+            "available": self.head is not None,
+            "active_observed": self.calls > 0,
+            "calls": int(self.calls),
+            "build_ms": float(self.build_ms),
+            "reason": self.reason,
+        }
+
+
 def _layer_profile_enabled(input_ids: Optional[mx.array]) -> bool:
     """Enable an explicit one-token fence after each Qwen4 phase.
 
@@ -1637,6 +1684,89 @@ class LanguageModel(nn.Module):
             self.mtp = MTPModule(args)
         if not args.tie_word_embeddings:
             self.lm_head = nn.Linear(args.hidden_size, args.vocab_size, bias=False)
+        self._mtp_draft_head_state = _MTPDraftHeadState()
+
+    def prepare_mtp_draft_head(self) -> Dict[str, Any]:
+        """Build an opt-in lower-bit head used only for MTP proposals.
+
+        The target/full-model path always retains ``self.lm_head``. Exact
+        speculative correction therefore continues to verify against the
+        checkpoint-owned head; this copy can only change proposal cost.
+        """
+
+        state = self._mtp_draft_head_state
+        if state.attempted or state.requested_bits is None:
+            return state.status()
+        state.attempted = True
+        source = getattr(self, "lm_head", None)
+        state.source_bits = getattr(source, "bits", None)
+        state.group_size = getattr(source, "group_size", None)
+        state.mode = getattr(source, "mode", None)
+        if not isinstance(source, nn.QuantizedLinear):
+            state.reason = "unsupported_source_type"
+            return state.status()
+        if (
+            state.source_bits != 8
+            or state.group_size != 64
+            or state.mode != "affine"
+        ):
+            state.reason = "unsupported_source_layout"
+            return state.status()
+
+        started = time.perf_counter()
+        try:
+            dense = mx.dequantize(
+                source.weight,
+                source.scales,
+                source.biases,
+                group_size=source.group_size,
+                bits=source.bits,
+                mode=source.mode,
+            )
+            weight, scales, biases = mx.quantize(
+                dense,
+                group_size=source.group_size,
+                bits=state.requested_bits,
+                mode=source.mode,
+            )
+            # Construct only a tiny shell, then replace all generated arrays.
+            # The real output/input geometry lives in the quantized tensors.
+            proposal = nn.QuantizedLinear(
+                64,
+                64,
+                bias=False,
+                group_size=source.group_size,
+                bits=state.requested_bits,
+                mode=source.mode,
+            )
+            proposal.weight = weight
+            proposal.scales = scales
+            proposal.biases = biases
+            mx.eval(proposal.weight, proposal.scales, proposal.biases)
+            state.head = proposal
+            state.reason = "ready"
+            state.build_ms = (time.perf_counter() - started) * 1000.0
+            logger.info(
+                "qwen4_exp MTP proposal head ready: q%d/g%d -> q%d/g%d "
+                "build_ms=%.2f",
+                source.bits,
+                source.group_size,
+                state.requested_bits,
+                source.group_size,
+                state.build_ms,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional path must fail closed
+            state.head = None
+            state.reason = f"build_failed:{type(exc).__name__}"
+            state.build_ms = (time.perf_counter() - started) * 1000.0
+            logger.warning(
+                "qwen4_exp MTP proposal head disabled after build failure: %s",
+                exc,
+            )
+        return state.status()
+
+    def mtp_draft_head_status(self) -> Dict[str, Any]:
+        return self._mtp_draft_head_state.status()
 
     def __call__(
         self,
@@ -1740,7 +1870,13 @@ class LanguageModel(nn.Module):
         if self.args.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(mtp_hidden)
         else:
-            logits = self.lm_head(mtp_hidden)
+            state = self._mtp_draft_head_state
+            if state.requested_bits is not None and not state.attempted:
+                self.prepare_mtp_draft_head()
+            head = state.head if state.head is not None else self.lm_head
+            logits = head(mtp_hidden)
+            if state.head is not None:
+                state.calls += 1
         return (logits, expanded_hidden) if return_hidden else logits
 
     def make_mtp_cache(self):

@@ -2913,6 +2913,38 @@ class MLLMScheduler:
             logger.debug(f"MLLM idle rederive tick failed: {_rd_err}")
             return True
 
+    def request_graceful_stop(self, request_id: str) -> bool:
+        """Ask an active generator row to finish through normal cleanup.
+
+        Unlike ``abort_request()``, this preserves the request until a real
+        finished response carries its prompt-boundary cache into
+        ``_cleanup_finished()``.  Used by API parsers after a complete native
+        tool call has been recognized but the model has not emitted EOS.
+        """
+        with self._queue_lock:
+            request = self.running.get(request_id)
+            uid = self.request_id_to_uid.get(request_id)
+            if (
+                request is None
+                or uid is None
+                or RequestStatus.is_finished(request.status)
+            ):
+                return False
+        generator = self.batch_generator
+        stop = getattr(generator, "request_graceful_stop", None)
+        if not callable(stop):
+            return False
+        with self._batch_lock:
+            accepted = bool(stop(uid))
+        if accepted:
+            logger.info(
+                "Graceful parser stop requested for %s (uid=%s); "
+                "draining to cache-persisted terminal",
+                request_id,
+                uid,
+            )
+        return accepted
+
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""
         return len(self.waiting)

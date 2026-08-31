@@ -7196,6 +7196,30 @@ class MLLMBatchGenerator:
             r for r in self.unprocessed_requests if r.uid not in uid_set
         ]
 
+    def request_graceful_stop(self, uid: int) -> bool:
+        """Finish one active row on its next materialized decode step.
+
+        API tool parsers may know that a native call is complete before the
+        model emits EOS.  Removing that row is an abort and deliberately drops
+        its prompt cache.  Marking it here instead lets ``_next()`` produce the
+        normal finished response, including native-MTP rollback and the exact
+        prompt-boundary cache handed to scheduler cleanup.
+
+        The caller owns ``MLLMScheduler._batch_lock``.  A row that has not yet
+        entered the active batch cannot have emitted a parseable tool call, so
+        it is intentionally not searched in ``unprocessed_requests``.
+        """
+        batch = self.active_batch
+        if batch is None:
+            return False
+        for index, active_uid in enumerate(batch.uids):
+            if int(active_uid) != int(uid):
+                continue
+            request = batch.requests[index]
+            request._vmlx_graceful_stop_requested = True
+            return True
+        return False
+
     def _preprocess_request(self, request: MLLMBatchRequest) -> None:
         """
         Preprocess a single MLLM request (vision encoding).
@@ -15577,7 +15601,15 @@ class MLLMBatchGenerator:
             finish_reason = None
             cache_fn = None
 
-            if token in self.stop_tokens:
+            if getattr(req, "_vmlx_graceful_stop_requested", False):
+                # The token computed by this step stays internal to the engine:
+                # the API parser already retained the complete native tool-call
+                # prefix and drains until this real terminal.  Treat the row as
+                # a normal stop so cache extraction, MTP rollback, scheduler
+                # cleanup and the durability barrier all run unchanged.
+                finish_reason = "stop"
+                end_idx.append(i)
+            elif token in self.stop_tokens:
                 finish_reason = "stop"
                 end_idx.append(i)
             elif num_tok >= max_tok:

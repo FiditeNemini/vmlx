@@ -444,6 +444,40 @@ class BatchedEngine(BaseEngine):
         except Exception:
             return None
 
+    @staticmethod
+    def _append_latest_user_tool_contract(
+        messages: list[dict[str, Any]],
+        tool_name: str | None,
+    ) -> list[dict[str, Any]]:
+        """Place a specific-tool contract at the append-only user suffix.
+
+        Qwen3.8 Flash-Next receives the full, stable tool catalog in its opening
+        system prompt. The selected function remains a current-turn detail, so
+        it belongs on the latest user message instead of rewriting that catalog.
+        This copy is render-only; API history remains caller-owned.
+        """
+        if not tool_name:
+            return messages
+        rendered = [dict(message) for message in messages]
+        reminder = (
+            "Current turn API contract: call exactly one native tool before any "
+            f"prose, and that tool must be {tool_name}. Historical tool results "
+            "do not satisfy this current-turn requirement."
+        )
+        for message in reversed(rendered):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                message["content"] = content.rstrip() + "\n\n" + reminder
+                return rendered
+            if isinstance(content, list):
+                parts = list(content)
+                parts.append({"type": "text", "text": reminder})
+                message["content"] = parts
+                return rendered
+        return rendered
+
     def _m3_vl_active(
         self,
         images: list | None,
@@ -2636,6 +2670,11 @@ class BatchedEngine(BaseEngine):
         if not self._loaded:
             await self.start()
 
+        messages = self._append_latest_user_tool_contract(
+            messages,
+            kwargs.pop("_vmlx_qwen4_specific_tool_name", None),
+        )
+
         messages = self._video_frame_fallback_messages(
             messages,
             video_fps=kwargs.get("video_fps"),
@@ -2815,6 +2854,11 @@ class BatchedEngine(BaseEngine):
         """
         if not self._loaded:
             await self.start()
+
+        messages = self._append_latest_user_tool_contract(
+            messages,
+            kwargs.pop("_vmlx_qwen4_specific_tool_name", None),
+        )
 
         messages = self._video_frame_fallback_messages(
             messages,
@@ -3035,6 +3079,12 @@ class BatchedEngine(BaseEngine):
             return self._mllm_scheduler.abort_request(request_id)
         elif self._engine:
             return await self._engine.abort_request(request_id)
+        return False
+
+    async def request_graceful_stop(self, request_id: str) -> bool:
+        """Stop after parser completion without discarding cache ownership."""
+        if self._mllm_scheduler:
+            return self._mllm_scheduler.request_graceful_stop(request_id)
         return False
 
     def request_progress(self, request_id: str) -> int | None:

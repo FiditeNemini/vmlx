@@ -2780,6 +2780,18 @@ def _is_loaded_dsv4_model(model: str = "") -> bool:
         return False
 
 
+def _is_loaded_qwen4_exp_model(model: str = "") -> bool:
+    """Return whether the loaded bundle is Qwen3.8 Flash-Next/qwen4_exp."""
+    try:
+        from .model_config_registry import get_model_config_registry
+
+        key = _model_path or _model_name or model or ""
+        cfg = get_model_config_registry().lookup(key)
+        return getattr(cfg, "family_name", "") == "qwen4_exp"
+    except Exception:
+        return False
+
+
 def _is_loaded_mimo_v2_model(model: str = "") -> bool:
     """Return whether the current loaded model resolves to the MiMo V2 family."""
     try:
@@ -4921,6 +4933,16 @@ def _filter_tools_for_specific_choice(
         return tools
     filtered = [tool for tool in tools if _tool_definition_name(tool) == target_name]
     return filtered
+
+
+def _specific_tool_choice_name(tool_choice: Any) -> str | None:
+    """Return the explicitly selected function name, if any."""
+    if not isinstance(tool_choice, dict):
+        return None
+    function = tool_choice.get("function")
+    target_name = function.get("name") if isinstance(function, dict) else None
+    target_name = target_name or tool_choice.get("name")
+    return target_name if isinstance(target_name, str) and target_name else None
 
 
 def _request_tools_for_generation_prompt(request: Any) -> list[Any]:
@@ -19451,7 +19473,12 @@ async def create_chat_completion(
     _tool_choice = request.tool_choice
     if _tool_choice is not None:
         chat_kwargs["tool_choice"] = _tool_choice
-    if _is_required_tool_choice(_tool_choice):
+    _qwen4_specific_tool_name = _specific_tool_choice_name(_tool_choice)
+    _qwen4_stable_tool_catalog = bool(
+        _qwen4_specific_tool_name
+        and _is_loaded_qwen4_exp_model(request.model or "")
+    )
+    if _is_required_tool_choice(_tool_choice) and not _qwen4_stable_tool_catalog:
         # The official top-level API contract overrides any conflicting nested
         # template value.
         _ct_kwargs["tool_choice"] = _tool_choice
@@ -19520,7 +19547,8 @@ async def create_chat_completion(
         if _mcp_manager is not None:
             mcp_tools = _mcp_manager.get_all_tools_openai(policy=_mcp_policy)
             mcp_tools = _drop_colliding_mcp_tools(mcp_tools, request.tools)
-            mcp_tools = _filter_tools_for_specific_choice(mcp_tools, _tool_choice)
+            if not _qwen4_stable_tool_catalog:
+                mcp_tools = _filter_tools_for_specific_choice(mcp_tools, _tool_choice)
             all_tools.extend(mcp_tools)
             if mcp_tools:
                 logger.debug(f"Added {len(mcp_tools)} MCP tools")
@@ -19528,7 +19556,7 @@ async def create_chat_completion(
         # Add user-provided tools
         if request.tools:
             # If tool_choice is a specific tool dict, filter to only that tool
-            if isinstance(_tool_choice, dict):
+            if isinstance(_tool_choice, dict) and not _qwen4_stable_tool_catalog:
                 target_name = _tool_choice.get("function", {}).get(
                     "name"
                 ) or _tool_choice.get("name")
@@ -19551,16 +19579,25 @@ async def create_chat_completion(
                 all_tools.extend(request.tools)
             logger.debug(f"Added {len(all_tools)} tools (tool_choice={_tool_choice})")
 
+    parser_tools = (
+        _filter_tools_for_specific_choice(all_tools, _tool_choice)
+        if _qwen4_stable_tool_catalog
+        else all_tools
+    )
     if not _suppress_tools:
         _suppress_tools = _suppress_tool_parsing_when_no_tools(
-            all_tools, _tool_choice, "Chat Completions"
+            parser_tools, _tool_choice, "Chat Completions"
         )
-    _attach_effective_tools_for_tool_parsing(request, all_tools)
+    _attach_effective_tools_for_tool_parsing(request, parser_tools)
 
     # Pass merged tools to engine (normalize all to template format)
     if all_tools:
         chat_kwargs["tools"] = convert_tools_for_template(all_tools)
         chat_kwargs["_vmlx_tools_present"] = True
+        if _qwen4_stable_tool_catalog:
+            chat_kwargs["_vmlx_qwen4_specific_tool_name"] = (
+                _qwen4_specific_tool_name
+            )
 
     # Inject Harmony analysis prefix for GPT-OSS models when thinking is enabled.
     # The suffix replaces the template's generation prompt (<|start|>assistant<|message|>)
@@ -22655,7 +22692,12 @@ async def create_response(
     _tool_choice = request.tool_choice
     if _tool_choice is not None:
         chat_kwargs["tool_choice"] = _tool_choice
-    if _is_required_tool_choice(_tool_choice):
+    _qwen4_specific_tool_name = _specific_tool_choice_name(_tool_choice)
+    _qwen4_stable_tool_catalog = bool(
+        _qwen4_specific_tool_name
+        and _is_loaded_qwen4_exp_model(request.model or "")
+    )
+    if _is_required_tool_choice(_tool_choice) and not _qwen4_stable_tool_catalog:
         # The official top-level API contract overrides any conflicting nested
         # template value.
         _ct_kwargs["tool_choice"] = _tool_choice
@@ -22730,7 +22772,8 @@ async def create_response(
         if _mcp_manager is not None:
             mcp_tools = _mcp_manager.get_all_tools_openai(policy=_mcp_policy)
             mcp_tools = _drop_colliding_mcp_tools(mcp_tools, request.tools)
-            mcp_tools = _filter_tools_for_specific_choice(mcp_tools, _tool_choice)
+            if not _qwen4_stable_tool_catalog:
+                mcp_tools = _filter_tools_for_specific_choice(mcp_tools, _tool_choice)
             all_tools.extend(mcp_tools)
             if mcp_tools:
                 logger.debug(f"Added {len(mcp_tools)} MCP tools")
@@ -22758,13 +22801,21 @@ async def create_response(
                 if "function" in tool:
                     td = ToolDefinition(**tool)
                     # Filter to specific tool if tool_choice is a dict
-                    if target_name and td.function.get("name") != target_name:
+                    if (
+                        target_name
+                        and not _qwen4_stable_tool_catalog
+                        and td.function.get("name") != target_name
+                    ):
                         continue
                     all_tools.append(td)
                 # Responses API flat format: {"type": "function", "name": "...", "parameters": {...}}
                 elif "name" in tool:
                     # Filter to specific tool if tool_choice is a dict
-                    if target_name and tool.get("name") != target_name:
+                    if (
+                        target_name
+                        and not _qwen4_stable_tool_catalog
+                        and tool.get("name") != target_name
+                    ):
                         continue
                     flat = ResponsesToolDefinition(**tool)
                     all_tools.append(
@@ -22772,16 +22823,25 @@ async def create_response(
                     )
             logger.debug(f"Added {len(all_tools)} tools (tool_choice={_tool_choice})")
 
+    parser_tools = (
+        _filter_tools_for_specific_choice(all_tools, _tool_choice)
+        if _qwen4_stable_tool_catalog
+        else all_tools
+    )
     if not _suppress_tools:
         _suppress_tools = _suppress_tool_parsing_when_no_tools(
-            all_tools, _tool_choice, "Responses API"
+            parser_tools, _tool_choice, "Responses API"
         )
-    _attach_effective_tools_for_tool_parsing(request, all_tools)
+    _attach_effective_tools_for_tool_parsing(request, parser_tools)
 
     # Pass merged tools to engine
     if all_tools:
         chat_kwargs["tools"] = convert_tools_for_template(all_tools)
         chat_kwargs["_vmlx_tools_present"] = True
+        if _qwen4_stable_tool_catalog:
+            chat_kwargs["_vmlx_qwen4_specific_tool_name"] = (
+                _qwen4_specific_tool_name
+            )
     elif not _suppress_tools and _is_dsv4_resp_msgs and any(
         isinstance(m, dict) and m.get("role") == "tool" for m in messages
     ):
@@ -24204,6 +24264,28 @@ async def _terminal_finish_guard(
             yield sse
 
 
+async def _request_tool_parser_graceful_stop(engine: Any, request_id: str) -> bool:
+    """Stop a parsed tool turn through the engine's cacheable finish path.
+
+    Returning ``False`` tells the caller to retain the legacy abort fallback.
+    The supported MLLM path emits one final internal decode step, publishes a
+    real finished object, persists KV/native companion/SSD state, and releases
+    that object through the existing terminal durability barrier.
+    """
+    stop = getattr(engine, "request_graceful_stop", None)
+    if not callable(stop):
+        return False
+    try:
+        return bool(await stop(request_id))
+    except Exception:
+        logger.warning(
+            "Graceful parser stop failed for %s; falling back to abort",
+            request_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def stream_chat_completion(
     engine: BaseEngine,
     messages: list,
@@ -24479,6 +24561,7 @@ async def stream_chat_completion(
     accumulated_reasoning = ""  # Track reasoning text for fallback
     accumulated_content = ""  # Track content-only text for tool call marker detection
     _early_stopped_tool_text: str | None = None
+    _draining_tool_parser_stop = False
     streamed_content = (
         ""  # Track content actually yielded to client (for post-stream dedup)
     )
@@ -24742,6 +24825,15 @@ async def stream_chat_completion(
                 cache_detail = _detail
             if getattr(output, "error", None):
                 raise RuntimeError(str(getattr(output, "error")))
+
+            if _draining_tool_parser_stop:
+                # The parsed native call is already frozen in
+                # _early_stopped_tool_text.  Suppress the generator's internal
+                # drain token(s), but do not leave the iterator until its real
+                # terminal has crossed the cache-persistence barrier.
+                if output.finished:
+                    break
+                continue
             chunk_logprobs = None
             if request.logprobs:
                 raw_logprobs = getattr(output, "logprobs", None) or []
@@ -24786,8 +24878,6 @@ async def stream_chat_completion(
                             _tc_stop_complete_chunks,
                             type(_tc_stop_parser).__name__,
                         )
-                        if hasattr(engine, "abort_request"):
-                            await engine.abort_request(response_id)
                         # Drop the post-call rambling so it neither leaks to
                         # the client as content nor steers the post-stream
                         # parse to the wrong channel.
@@ -24816,6 +24906,13 @@ async def stream_chat_completion(
                                 )
                             )
                             accumulated_content = ""
+                        if await _request_tool_parser_graceful_stop(
+                            engine, response_id
+                        ):
+                            _draining_tool_parser_stop = True
+                            continue
+                        if hasattr(engine, "abort_request"):
+                            await engine.abort_request(response_id)
                         break
                 else:
                     _tc_stop_complete_chunks = 0
@@ -26739,6 +26836,7 @@ async def stream_responses_api(
     accumulated_content = ""  # Content-only text for tool call marker detection
     accumulated_reasoning = ""  # Reasoning text for fallback
     _early_stopped_tool_text: str | None = None
+    _draining_tool_parser_stop = False
     streamed_reasoning_text = ""  # Tool-safe reasoning already sent to the client
     content_was_emitted = False
     reasoning_was_streamed = False  # Whether reasoning was sent to client as deltas
@@ -27063,6 +27161,13 @@ async def stream_responses_api(
             if getattr(output, "error", None):
                 raise RuntimeError(str(getattr(output, "error")))
 
+            if _draining_tool_parser_stop:
+                # See Chat Completions: wait for the real engine terminal and
+                # its durability barrier while withholding internal drain text.
+                if output.finished:
+                    break
+                continue
+
             if delta_text or output.finished:
                 if delta_text:
                     full_text += delta_text
@@ -27097,8 +27202,6 @@ async def stream_responses_api(
                                 _tc_stop_complete_chunks,
                                 type(_tc_stop_parser).__name__,
                             )
-                            if hasattr(engine, "abort_request"):
-                                await engine.abort_request(response_id)
                             # Drop the post-call rambling so it neither leaks
                             # to the client nor steers the post-stream parse
                             # to the wrong channel.
@@ -27128,6 +27231,13 @@ async def stream_responses_api(
                                     )
                                 )
                                 accumulated_content = ""
+                            if await _request_tool_parser_graceful_stop(
+                                engine, response_id
+                            ):
+                                _draining_tool_parser_stop = True
+                                continue
+                            if hasattr(engine, "abort_request"):
+                                await engine.abort_request(response_id)
                             break
                     else:
                         _tc_stop_complete_chunks = 0

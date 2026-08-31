@@ -6286,6 +6286,33 @@ describe("native MTP surface / engine parity", () => {
     expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
   });
 
+  it("accepts sampled Auto with a visibly selected and persisted fixed D3 runtime", () => {
+    const result: any = mtpBundleResult();
+    result.requestContract = {
+      nativeMtpMode: "auto",
+      nativeMtpDepth: 3,
+    };
+    result.nativeMtpSelection = {
+      requested: true,
+      requestedMode: "auto",
+      requestedDepth: 3,
+      selectedMode: "auto",
+      selectedDepthPolicy: "fixed",
+      selectedDepth: 3,
+      persistedMode: "auto",
+      persistedDepthOverride: true,
+      persistedDepth: 3,
+    };
+    result.serverCacheControls.nativeMtpControl.selectedMode = "auto";
+    result.effectiveSessionConfig = {
+      nativeMtpMode: "auto",
+      nativeMtpDepthOverride: true,
+      nativeMtpDepth: 3,
+    };
+    result.server.health.mtp.effective_depth = 3;
+    expect(validateNativeMtpSurfaceParity(result)).toEqual([]);
+  });
+
   it("rejects a fixed D2 request that silently runs adaptive D1", () => {
     const result: any = mtpBundleResult();
     result.requestContract = {

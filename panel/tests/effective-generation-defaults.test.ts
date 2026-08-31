@@ -26,30 +26,23 @@ describe('effective session generation defaults', () => {
     })
   })
 
-  // 2026-08-17 BEHAVIOUR CHANGE — these two used to assert that `auto` and a
-  // missing mode PRESERVED the bundle's sampling. That is exactly what made
-  // native MTP never run: MTP decodes multi-token only on GREEDY requests, and
-  // MTP bundles ship temperature 1.0, so the default session silently disabled
-  // the headline feature. Measured live: dots3-note at 21.9 t/s with the mode
-  // selector reading "Auto". A bundle with MTP heads now decodes greedily
-  // unless the user explicitly turns MTP OFF.
-  it('pins greedy for an MTP bundle when the session has no explicit MTP mode', () => {
+  it('preserves bundle sampling when the session has no explicit MTP mode', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       '{}',
       { supported: true },
-    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
+    )).toEqual(bundleDefaults)
   })
 
-  it.each(['auto', 'deterministic'])('pins greedy for an MTP bundle in mode %s', mode => {
+  it('preserves bundle sampling for Auto MTP', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
-      { nativeMtpMode: mode },
+      { nativeMtpMode: 'auto' },
       { supported: true },
-    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
+    )).toEqual(bundleDefaults)
   })
 
-  it('OFF is the only mode that preserves the bundle sampling', () => {
+  it('preserves bundle sampling when MTP is Off', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       { nativeMtpMode: 'off' },
@@ -68,7 +61,7 @@ describe('effective session generation defaults', () => {
       bundleDefaults,
       { nativeMtpMode: 'auto', nativeMtpDepthOverride: true },
       { supported: true, defaultMode: 'off' },
-    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
+    )).toEqual(bundleDefaults)
   })
 
   it('does not change a non-MTP model or malformed stored config', () => {

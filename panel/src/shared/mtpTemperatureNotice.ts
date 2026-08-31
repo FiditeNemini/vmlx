@@ -1,20 +1,14 @@
 /**
- * Why the temperature box must explain itself when a model has native MTP.
+ * Explain how the selected native-MTP mode affects sampling.
  *
- * 2026-08-17, Eric: "IF MTP IS TURNED ON IT SHOULD SHOW IN CHAT SETTINGS THE
- * TEMP SET TO 0 AND TELL USERS WHY" / "IF SET TO AUTO AND MODEL HAS MTP IT
- * PROPERLY LETS THEM KNOW IN THE CHAT SETTINGS IN THE TEMP BOX AREA AND THAT IT
- * IS DUE TO MTP BEING ON".
- *
- * The measured app policy is greedy native MTP. Auto detects an MTP-capable
- * bundle and pins its effective sampling to greedy; Deterministic does the
- * same explicitly. Off is the only mode that restores bundle sampling.
+ * Auto preserves the bundle/request distribution and uses exact stochastic
+ * speculative verification. Deterministic intentionally pins greedy values.
+ * Off preserves sampling too, but disables native MTP entirely.
  *
  * Three states worth surfacing, all keyed on the model ACTUALLY having MTP:
- *  - `pinned`   MTP is on: sampling is forced greedy, and the 0 in the box is a
- *               consequence of MTP, not a user choice.
- *  - `active`   reserved for a future sampled-MTP UI mode.
- *  - `inactive` a stale/nonzero UI value would contradict the MTP-on contract.
+ *  - `pinned`   Deterministic mode forces greedy sampling.
+ *  - `active`   Auto mode is using the displayed sampling temperature.
+ *  - `inactive` a stale nonzero value contradicts Deterministic mode.
  */
 
 export type MtpTemperatureNoticeKind = 'pinned' | 'active' | 'inactive'
@@ -62,11 +56,14 @@ export function resolveMtpTemperatureNotice(
   if (!input.nativeMtpSupported) return null
 
   const mode = typeof input.mode === 'string' && input.mode ? input.mode : 'auto'
-  // Explicitly disabled by the user: their choice, not a surprise.
+  // Explicitly disabled by the user: temperature is unrelated to MTP.
   if (mode === 'off') return null
 
   const temperature = input.temperature
   if (temperature == null) return null
-  if (temperature > 0) return { kind: 'inactive', temperature }
-  return { kind: 'pinned' }
+  if (mode === 'deterministic') {
+    if (temperature > 0) return { kind: 'inactive', temperature }
+    return { kind: 'pinned' }
+  }
+  return { kind: 'active', temperature }
 }

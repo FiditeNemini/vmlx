@@ -552,9 +552,9 @@ if (
 ) {
   throw new Error('Real UI Native MTP depth must be an integer from 1 through 3')
 }
-if (nativeMtpDepthOverride != null && nativeMtpModeOverride !== 'deterministic') {
+if (nativeMtpDepthOverride != null && nativeMtpModeOverride === 'off') {
   throw new Error(
-    'Real UI fixed Native MTP depth requires deterministic mode',
+    'Real UI fixed Native MTP depth cannot be combined with MTP Off',
   )
 }
 const blockDiskCacheMaxPercentOverride = envNumber(

@@ -6,10 +6,6 @@ import {
   resolveMtpTemperatureNotice,
 } from '../src/shared/mtpTemperatureNotice'
 
-/**
- * The app's MTP-on contract enforces its measured greedy fast path. Off is the
- * explicit route back to bundle sampling.
- */
 describe('MTP temperature disclosure', () => {
   it('says nothing when the bundle has no MTP heads', () => {
     expect(
@@ -26,19 +22,25 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'pinned' })
   })
 
-  it('flags a stale nonzero temperature as contradicting MTP-on policy', () => {
+  it('describes sampled Auto MTP as active', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 1 }),
-    ).toEqual({ kind: 'inactive', temperature: 1 })
+    ).toEqual({ kind: 'active', temperature: 1 })
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0.01 }),
-    ).toEqual({ kind: 'inactive', temperature: 0.01 })
+    ).toEqual({ kind: 'active', temperature: 0.01 })
   })
 
-  it('explains that Auto temperature 0 is pinned by MTP', () => {
+  it('keeps greedy Auto distinct from a deterministic pin', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0 }),
-    ).toEqual({ kind: 'pinned' })
+    ).toEqual({ kind: 'active', temperature: 0 })
+  })
+
+  it('flags a stale nonzero temperature in deterministic mode', () => {
+    expect(
+      resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'deterministic', temperature: 1 }),
+    ).toEqual({ kind: 'inactive', temperature: 1 })
   })
 
   it('stays silent when the user explicitly turned MTP off', () => {
@@ -62,7 +64,7 @@ describe('MTP temperature disclosure', () => {
     )
     expect(source).toContain('resolveMtpTemperatureNotice(')
     expect(source).toContain('data-testid="mtp-temperature-notice"')
-    expect(source).toContain("const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode !== 'off'")
+    expect(source).toContain("const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'")
     expect(source).toContain('disabled={mtpGreedyEnforced}')
     expect(source).toContain('const displayedTemperature = mtpGreedyEnforced')
     expect(source).toContain('const displayedTopP = mtpGreedyEnforced')
@@ -87,7 +89,7 @@ describe('MTP temperature disclosure', () => {
     const settings = en.chat.settings
     expect(settings.mtpTempPinned).toMatch(/MTP/)
     expect(settings.mtpTempPinned).toMatch(/greedy/i)
-    expect(settings.mtpTempPinned).toMatch(/Off/)
-    expect(settings.mtpTempActive).toMatch(/temperature 0/i)
+    expect(settings.mtpTempPinned).toMatch(/Auto/)
+    expect(settings.mtpTempActive).toMatch(/stochastic/i)
   })
 })

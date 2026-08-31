@@ -177,7 +177,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     modelDefaultMode: detectedNativeMtpDefaultMode,
     depthOverride: nativeMtpConfig.nativeMtpDepthOverride === true,
   })
-  const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode !== 'off'
+  const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'
   const displayedTemperature = mtpGreedyEnforced
     ? 0
     : displayedOverrides.temperature ?? displayedModelDefaults.temperature
@@ -773,9 +773,8 @@ function statusToneClass(status: string): string {
                 help={t('chat.settings.temperatureHelp')}
               />
             )}
-            {/* MTP-on uses the measured greedy fast path. The four sampler
-                controls render the enforced values and remain disabled; Off
-                restores the saved/bundle sampling controls. */}
+            {/* Deterministic MTP pins the measured greedy path. Auto preserves
+                the saved/bundle sampling controls and uses stochastic verify. */}
             {mtpTemperatureNotice && (
               <p
                 data-testid="mtp-temperature-notice"

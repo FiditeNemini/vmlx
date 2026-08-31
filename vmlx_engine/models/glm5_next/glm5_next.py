@@ -36,6 +36,7 @@ Created by Jinho Jang (eric@jangq.ai) — 2026-08-29.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -115,6 +116,32 @@ MLA_KEYS = 0
 MLA_VALUES = 1
 MLA_PACKED = 2  # indexer packed history: [B, T, head_dim(k) + head_dim(gate)]
 MLA_POOL_KEYS = 3  # completed DSA k-pools: [B, floor(T / kpool), head_dim]
+
+# Absorbed Glm5MLACache slot layout.  Keeping the same concrete cache class
+# lets the scheduler's typed prompt-cache ownership remain unchanged while the
+# schema tag below prevents an expanded-v1 SSD record from being mistaken for
+# an absorbed-v2 record.
+MLA_LATENT = 0  # shared normalized kv_a latent: [B, 1, T, kv_lora_rank]
+MLA_LATENT_PACKED = 1  # DSA key + pool-gate history: [B, T, 2 * index_dim]
+MLA_LATENT_POOL_KEYS = 2  # completed pool-4 DSA keys
+MLA_LATENT_RESERVED = 3  # safetensors-stable reserved zero-length tensor
+
+_LOG = logging.getLogger("vmlx_engine")
+_GLM5_MLA_PATHS_LOGGED: set[str] = set()
+
+
+def glm5_mla_absorb_enabled() -> bool:
+    """Return whether the experimental compact MLA cache is requested.
+
+    This stays opt-in until the exact source commit has paired served API/UI
+    speed, coherence, tool-continuation, and SSD-refault receipts.  It is a
+    representation change, not a generic family default.
+    """
+
+    return os.environ.get(
+        "VMLINUX_GLM5_MLA_ABSORB",
+        os.environ.get("VMLX_GLM5_MLA_ABSORB", "0"),
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class Glm5KDACache(ArraysCache):
@@ -209,21 +236,28 @@ class Glm5KDACache(ArraysCache):
 
 
 class Glm5MLACache(ArraysCache):
-    """Per-MLA-layer cache: expanded K/V plus the DSA indexer's packed
-    per-token history (index key + kpool gate scores) and completed compressed
-    pool keys. ArraysCache-shaped so the engine's generic hybrid handling
-    recognizes it (prefix caching is fail-closed for this family regardless)."""
+    """Typed MLA/DSA cache with materialized-v1 and absorbed-v2 schemas.
 
-    def __init__(self, kpool: int = 4):
+    The legacy representation stores expanded per-head K/V.  The experimental
+    absorbed representation stores the shared normalized ``kv_a`` latent plus
+    the DSA indexer's packed history and completed pool keys.  Updates replace
+    arrays instead of mutating shared capacity so the scheduler's exact N-1
+    boundary snapshots remain isolated while decode continues.
+    """
+
+    def __init__(self, kpool: int = 4, *, absorbed: bool | None = None):
         super().__init__(4)
         if int(kpool) <= 0:
             raise ValueError("GLM DSA kpool must be positive")
         self.kpool = int(kpool)
+        self.absorbed = (
+            glm5_mla_absorb_enabled() if absorbed is None else bool(absorbed)
+        )
 
     def extract(self, idx: int) -> "Glm5MLACache":
         """Extract one batch row while retaining MLA/DSA cache semantics."""
 
-        extracted = Glm5MLACache(self.kpool)
+        extracted = Glm5MLACache(self.kpool, absorbed=self.absorbed)
         extracted.cache = [
             value[idx : idx + 1] if value is not None else None
             for value in self.cache
@@ -237,7 +271,13 @@ class Glm5MLACache(ArraysCache):
         kpools = {int(cache.kpool) for cache in caches}
         if len(kpools) != 1:
             raise ValueError("GLM MLA caches disagree on DSA kpool")
-        return _merge_glm5_arrays_caches(caches, cls(kpools.pop()))
+        modes = {bool(cache.absorbed) for cache in caches}
+        if len(modes) != 1:
+            raise ValueError("GLM MLA caches disagree on absorbed representation")
+        return _merge_glm5_arrays_caches(
+            caches,
+            cls(kpools.pop(), absorbed=modes.pop()),
+        )
 
     @property
     def state(self):
@@ -251,6 +291,22 @@ class Glm5MLACache(ArraysCache):
         """
 
         values = list(self.cache)
+        if self.absorbed:
+            latent = values[MLA_LATENT]
+            if latent is None:
+                empty = mx.zeros((0,), dtype=mx.bfloat16)
+                return [empty, empty, empty, empty]
+            packed = values[MLA_LATENT_PACKED]
+            if packed is None:
+                raise ValueError("GLM absorbed MLA cache is missing DSA history")
+            pool = values[MLA_LATENT_POOL_KEYS]
+            if pool is None:
+                pool = mx.zeros(
+                    (int(latent.shape[0]), 0, int(packed.shape[-1]) // 2),
+                    dtype=packed.dtype,
+                )
+            reserved = mx.zeros((0,), dtype=latent.dtype)
+            return [latent, packed, pool, reserved]
         packed = values[MLA_PACKED]
         if packed is not None and values[MLA_POOL_KEYS] is None:
             packed_width = int(packed.shape[-1])
@@ -270,10 +326,29 @@ class Glm5MLACache(ArraysCache):
 
     @property
     def offset(self) -> int:
-        k = self.cache[MLA_KEYS]
-        return 0 if k is None else int(k.shape[2])
+        first = self.cache[MLA_LATENT if self.absorbed else MLA_KEYS]
+        if first is None or getattr(first, "size", 0) == 0:
+            return 0
+        return int(first.shape[2])
+
+    @property
+    def pool_keys(self) -> mx.array | None:
+        slot = MLA_LATENT_POOL_KEYS if self.absorbed else MLA_POOL_KEYS
+        value = self.cache[slot]
+        return value if value is not None and getattr(value, "size", 0) else None
+
+    def update_latent(self, latent: mx.array) -> mx.array:
+        if not self.absorbed:
+            raise ValueError("latent update requires absorbed GLM MLA cache")
+        existing = self.cache[MLA_LATENT]
+        if existing is not None:
+            latent = mx.concatenate([existing, latent], axis=2)
+        self.cache[MLA_LATENT] = latent
+        return latent
 
     def update_kv(self, k: mx.array, v: mx.array):
+        if self.absorbed:
+            raise ValueError("expanded KV update requires materialized GLM MLA cache")
         if self.cache[MLA_KEYS] is not None:
             k = mx.concatenate([self.cache[MLA_KEYS], k], axis=2)
             v = mx.concatenate([self.cache[MLA_VALUES], v], axis=2)
@@ -282,16 +357,18 @@ class Glm5MLACache(ArraysCache):
         return k, v
 
     def update_packed(self, packed: mx.array) -> mx.array:
-        if self.cache[MLA_PACKED] is not None:
-            packed = mx.concatenate([self.cache[MLA_PACKED], packed], axis=1)
-        self.cache[MLA_PACKED] = packed
+        slot = MLA_LATENT_PACKED if self.absorbed else MLA_PACKED
+        if self.cache[slot] is not None:
+            packed = mx.concatenate([self.cache[slot], packed], axis=1)
+        self.cache[slot] = packed
         return packed
 
     def update_pool_keys(self, pool_keys: mx.array) -> mx.array:
-        existing = self.cache[MLA_POOL_KEYS]
+        slot = MLA_LATENT_POOL_KEYS if self.absorbed else MLA_POOL_KEYS
+        existing = self.cache[slot]
         if existing is not None:
             pool_keys = mx.concatenate([existing, pool_keys], axis=1)
-        self.cache[MLA_POOL_KEYS] = pool_keys
+        self.cache[slot] = pool_keys
         return pool_keys
 
     def is_trimmable(self) -> bool:
@@ -302,6 +379,17 @@ class Glm5MLACache(ArraysCache):
         if n == 0:
             return 0
         keep = self.offset - n
+        if self.absorbed:
+            self.cache[MLA_LATENT] = self.cache[MLA_LATENT][..., :keep, :]
+            self.cache[MLA_LATENT_PACKED] = self.cache[MLA_LATENT_PACKED][
+                :, :keep, :
+            ]
+            pool = self.pool_keys
+            if pool is not None:
+                self.cache[MLA_LATENT_POOL_KEYS] = pool[
+                    :, : keep // int(self.kpool), :
+                ]
+            return n
         if self.cache[MLA_KEYS] is not None:
             self.cache[MLA_KEYS] = self.cache[MLA_KEYS][..., :keep, :]
             self.cache[MLA_VALUES] = self.cache[MLA_VALUES][..., :keep, :]
@@ -318,6 +406,13 @@ class Glm5MLACache(ArraysCache):
 
     @property
     def meta_state(self):
+        if self.absorbed:
+            return (
+                "glm5_next_native_v2",
+                "mla_absorbed",
+                str(self.kpool),
+                str(self.offset),
+            )
         return (
             "glm5_next_native_v1",
             "mla",
@@ -329,14 +424,23 @@ class Glm5MLACache(ArraysCache):
     def meta_state(self, value):
         # Validation and constructor invariants are owned by from_state().
         meta = tuple(value or ())
-        if len(meta) != 4 or meta[:2] != ("glm5_next_native_v1", "mla"):
+        if len(meta) != 4 or meta[:2] not in {
+            ("glm5_next_native_v1", "mla"),
+            ("glm5_next_native_v2", "mla_absorbed"),
+        }:
             raise ValueError("GLM MLA cache metadata is missing its typed schema")
+        self.absorbed = meta[:2] == ("glm5_next_native_v2", "mla_absorbed")
 
     @classmethod
     def from_state(cls, state, meta_state) -> "Glm5MLACache":
         meta = tuple(meta_state or ())
-        if len(meta) != 4 or meta[:2] != ("glm5_next_native_v1", "mla"):
+        valid_prefixes = {
+            ("glm5_next_native_v1", "mla"),
+            ("glm5_next_native_v2", "mla_absorbed"),
+        }
+        if len(meta) != 4 or meta[:2] not in valid_prefixes:
             raise ValueError("GLM MLA cache metadata is missing its typed schema")
+        absorbed = meta[:2] == ("glm5_next_native_v2", "mla_absorbed")
         try:
             kpool = int(meta[2])
             expected_offset = int(meta[3])
@@ -347,6 +451,46 @@ class Glm5MLACache(ArraysCache):
         values = list(state or ())
         if len(values) != 4:
             raise ValueError("GLM MLA cache must contain exactly four state arrays")
+        if absorbed:
+            latent, packed, pool, reserved = values
+            if expected_offset == 0:
+                if any(getattr(value, "size", 0) for value in values):
+                    raise ValueError(
+                        "GLM absorbed MLA empty cache carries populated state"
+                    )
+                return cls(kpool, absorbed=True)
+            if getattr(latent, "ndim", -1) != 4 or int(latent.shape[1]) != 1:
+                raise ValueError("GLM absorbed MLA latent must be [B,1,T,R]")
+            if getattr(packed, "ndim", -1) != 3:
+                raise ValueError("GLM absorbed MLA DSA history must be rank 3")
+            if int(packed.shape[-1]) <= 0 or int(packed.shape[-1]) % 2:
+                raise ValueError("GLM absorbed MLA DSA width must be positive and even")
+            lengths = (int(latent.shape[2]), int(packed.shape[1]))
+            if lengths != (expected_offset, expected_offset):
+                raise ValueError(
+                    "GLM absorbed MLA latent/index lengths do not match typed offset"
+                )
+            if int(latent.shape[0]) != int(packed.shape[0]):
+                raise ValueError("GLM absorbed MLA state arrays disagree on batch size")
+            if getattr(pool, "ndim", -1) != 3:
+                raise ValueError("GLM absorbed MLA pool keys must be rank 3")
+            expected_pool_length = expected_offset // kpool
+            if int(pool.shape[1]) not in (0, expected_pool_length):
+                raise ValueError(
+                    "GLM absorbed MLA pool length is neither absent nor offset/kpool"
+                )
+            if int(pool.shape[0]) != int(latent.shape[0]):
+                raise ValueError("GLM absorbed MLA pool keys disagree on batch size")
+            if getattr(reserved, "size", -1) != 0:
+                raise ValueError("GLM absorbed MLA reserved state must be empty")
+            rebuilt = cls(kpool, absorbed=True)
+            rebuilt.cache = [
+                latent,
+                packed,
+                pool if int(pool.shape[1]) else None,
+                None,
+            ]
+            return rebuilt
         populated = [value is not None for value in values]
         if any(populated) and not all(populated[:3]):
             raise ValueError("GLM MLA cache is missing KV or packed index state")
@@ -374,7 +518,7 @@ class Glm5MLACache(ArraysCache):
                     )
         elif expected_offset != 0:
             raise ValueError("GLM MLA empty cache cannot carry a non-zero offset")
-        rebuilt = cls(kpool)
+        rebuilt = cls(kpool, absorbed=False)
         rebuilt.cache = values
         return rebuilt
 
@@ -394,7 +538,7 @@ def _merge_glm5_arrays_caches(caches, merged):
         # arrays are functionally replaced on update, so a new typed wrapper
         # can take ownership of the existing immutable boundary without a
         # model-sized zeros+assignment copy before the final prompt token.
-        merged.cache = list(caches[0].cache)
+        merged.state = list(caches[0].state)
         merged.left_padding = getattr(caches[0], "left_padding", None)
         merged.lengths = getattr(caches[0], "lengths", None)
         return merged
@@ -404,9 +548,10 @@ def _merge_glm5_arrays_caches(caches, merged):
 
     for state_index in range(len(merged.cache)):
         populated = [
-            cache.cache[state_index]
+            cache.state[state_index]
             for cache in caches
-            if cache.cache[state_index] is not None
+            if cache.state[state_index] is not None
+            and getattr(cache.state[state_index], "size", 0)
         ]
         if not populated:
             continue
@@ -415,8 +560,8 @@ def _merge_glm5_arrays_caches(caches, merged):
         shape[0] = batch_size
         value = mx.zeros(shape, exemplar.dtype)
         for batch_index, cache in enumerate(caches):
-            source = cache.cache[state_index]
-            if source is not None:
+            source = cache.state[state_index]
+            if source is not None and getattr(source, "size", 0):
                 value[batch_index : batch_index + 1] = source
         merged.cache[state_index] = value
     return merged
@@ -925,7 +1070,7 @@ class Glm5NextIndexer(nn.Module):
         """Append only newly completed DSA pools to the typed MLA cache."""
 
         complete = int(packed.shape[1]) // self.kpool
-        existing = cache.cache[MLA_POOL_KEYS]
+        existing = cache.pool_keys
         cached = 0 if existing is None else int(existing.shape[1])
         if cached > complete:
             raise ValueError("DSA pool cache is ahead of packed token history")
@@ -1023,6 +1168,8 @@ class MLAAttention(nn.Module):
     builds an additive visibility mask.
     """
 
+    gather_element_budget = 268_435_456
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         d = args.hidden_size
@@ -1039,18 +1186,268 @@ class MLAAttention(nn.Module):
         self.o_proj = nn.Linear(self.n_heads * self.vd, d, bias=False)
         self.indexer = Glm5NextIndexer(args)
         self.scale = self.qk ** -0.5
+        # Absorbed per-head kv_b factors, hydrated lazily after quantization.
+        # They are derived runtime state rather than checkpoint parameters.
+        self._w_kb_nope: mx.array | None = None
+        self._w_kb_v: mx.array | None = None
+
+    def _kb_factors(self) -> tuple[mx.array, mx.array]:
+        """Return dequantized per-head K/V factors for absorbed MLA."""
+
+        if self._w_kb_nope is None:
+            w = self.kv_b_proj.weight
+            quantized = hasattr(self.kv_b_proj, "scales")
+            if quantized:
+                w = mx.dequantize(
+                    w,
+                    self.kv_b_proj.scales,
+                    getattr(self.kv_b_proj, "biases", None),
+                    group_size=self.kv_b_proj.group_size,
+                    bits=self.kv_b_proj.bits,
+                    mode=getattr(self.kv_b_proj, "mode", "affine"),
+                )
+            w = w.reshape(
+                self.n_heads,
+                self.qk + self.vd,
+                -1,
+            ).astype(mx.bfloat16 if quantized else w.dtype)
+            self._w_kb_nope = w[:, : self.qk, :]
+            self._w_kb_v = w[:, self.qk :, :]
+            mx.eval(self._w_kb_nope, self._w_kb_v)
+        return self._w_kb_nope, self._w_kb_v
+
+    def _gather_absorbed_attention(
+        self,
+        queries: mx.array,
+        latent: mx.array,
+        indices: mx.array,
+        valid: mx.array,
+        *,
+        past: int,
+    ) -> mx.array:
+        """Attend to each query's selected latent rows without dense masks."""
+
+        B, n_heads, S, rank = queries.shape
+        K = int(indices.shape[-1])
+        flat_latent = latent[:, 0]
+        total = int(flat_latent.shape[1])
+        tile = max(
+            1,
+            min(S, self.gather_element_budget // max(K * rank, 1)),
+        )
+        outputs = []
+        for start in range(0, S, tile):
+            stop = min(start + tile, S)
+            rows = stop - start
+            idx = indices[:, start:stop]
+            valid_rows = valid[:, start:stop]
+            safe = mx.where(valid_rows, idx, mx.zeros_like(idx))
+            if B == 1:
+                gathered = mx.take(
+                    flat_latent[0], safe.reshape(rows * K), axis=0
+                )
+            else:
+                shifted = (
+                    safe.reshape(B, rows * K)
+                    + (mx.arange(B, dtype=safe.dtype) * total)[:, None]
+                ).reshape(B * rows * K)
+                gathered = mx.take(
+                    flat_latent.reshape(B * total, rank), shifted, axis=0
+                )
+            keys = gathered.reshape(B * rows, 1, K, rank)
+            q = (
+                queries[:, :, start:stop]
+                .transpose(0, 2, 1, 3)
+                .reshape(B * rows, 1, n_heads, rank)
+            )
+            q_pos = (past + mx.arange(start, stop))[None, :, None]
+            allowed = valid_rows & (idx <= q_pos)
+            bias = mx.where(
+                allowed,
+                mx.array(0.0, dtype=mx.float32),
+                mx.array(-mx.inf, dtype=mx.float32),
+            ).reshape(B * rows, 1, 1, K)
+            if S == 1:
+                attended = mx.fast.scaled_dot_product_attention(
+                    q.astype(mx.float32),
+                    keys.astype(mx.float32),
+                    keys.astype(mx.float32),
+                    scale=self.scale,
+                    mask=bias,
+                ).astype(queries.dtype)
+            else:
+                attended = mx.fast.scaled_dot_product_attention(
+                    q,
+                    keys,
+                    keys,
+                    scale=self.scale,
+                    mask=bias.astype(queries.dtype),
+                )
+            outputs.append(
+                attended.reshape(B, rows, n_heads, rank).transpose(0, 2, 1, 3)
+            )
+        return outputs[0] if len(outputs) == 1 else mx.concatenate(outputs, axis=2)
+
+    def _materialized_from_latent_attention(
+        self,
+        q: mx.array,
+        latent: mx.array,
+    ) -> mx.array:
+        """Use compact persisted state with the faster dense-prefill algebra.
+
+        Absorption makes decode cheaper, but for a multi-token dense prefill it
+        widens both attention operands from qk/v head dimensions to the latent
+        rank.  Re-expanding the fetched latent once keeps the persisted/SSD
+        representation compact while retaining the existing prefill kernel.
+        """
+
+        B, _, T, _ = q.shape
+        total = int(latent.shape[2])
+        kv = self.kv_b_proj(latent[:, 0])
+        kv = kv.reshape(
+            B,
+            total,
+            self.n_heads,
+            self.qk + self.vd,
+        ).transpose(0, 2, 1, 3)
+        keys, values = mx.split(kv, [self.qk], axis=-1)
+        attended = mx.fast.scaled_dot_product_attention(
+            q,
+            keys,
+            values,
+            scale=self.scale,
+            mask="causal",
+        )
+        values = attended.transpose(0, 2, 1, 3).reshape(
+            B, T, self.n_heads * self.vd
+        )
+        return self.o_proj(values)
+
+    @staticmethod
+    def _log_mla_path_once(path: str, *, query_tokens: int, total: int) -> None:
+        if path in _GLM5_MLA_PATHS_LOGGED:
+            return
+        _GLM5_MLA_PATHS_LOGGED.add(path)
+        _LOG.info(
+            "glm5_next MLA path: %s (query_tokens=%d total_tokens=%d)",
+            path,
+            query_tokens,
+            total,
+        )
+
+    def _absorbed_attention(
+        self,
+        x: mx.array,
+        q: mx.array,
+        q_resid: mx.array,
+        latent_now: mx.array,
+        packed_now: mx.array,
+        cache: Glm5MLACache | None,
+    ) -> mx.array:
+        """Run pure-NoPE MLA against the shared latent cache."""
+
+        B, T, _ = x.shape
+        past = cache.offset if cache is not None else 0
+        latent = latent_now[:, None]
+        packed = packed_now
+        if cache is not None:
+            latent = cache.update_latent(latent)
+            packed = cache.update_packed(packed)
+
+        total = int(latent.shape[2])
+        if T > 1 and total <= self.index_topk:
+            self._log_mla_path_once(
+                "compact-cache/materialized-dense-prefill",
+                query_tokens=T,
+                total=total,
+            )
+            return self._materialized_from_latent_attention(q, latent)
+
+        w_k, w_v = self._kb_factors()
+        q_eff = mx.matmul(q, w_k[None].astype(q.dtype))
+        if total <= self.index_topk:
+            self._log_mla_path_once(
+                "absorbed-dense-decode",
+                query_tokens=T,
+                total=total,
+            )
+            if T == 1:
+                attended = mx.fast.scaled_dot_product_attention(
+                    q_eff.astype(mx.float32),
+                    latent.astype(mx.float32),
+                    latent.astype(mx.float32),
+                    scale=self.scale,
+                ).astype(q.dtype)
+            else:
+                attended = mx.fast.scaled_dot_product_attention(
+                    q_eff,
+                    latent,
+                    latent,
+                    scale=self.scale,
+                    mask="causal",
+                )
+        else:
+            self._log_mla_path_once(
+                "absorbed-sparse-dsa",
+                query_tokens=T,
+                total=total,
+            )
+            q_positions = past + mx.arange(T)
+            pool_keys = (
+                self.indexer.update_pool_cache(cache, packed)
+                if cache is not None
+                else None
+            )
+            indices, valid = self.indexer.topk_indices(
+                x,
+                q_resid,
+                packed,
+                q_positions,
+                pool_keys=pool_keys,
+            )
+            attended = self._gather_absorbed_attention(
+                q_eff,
+                latent,
+                indices,
+                valid,
+                past=past,
+            )
+        values = mx.matmul(
+            attended,
+            w_v[None].swapaxes(-1, -2).astype(attended.dtype),
+        )
+        values = values.transpose(0, 2, 1, 3).reshape(
+            B, T, self.n_heads * self.vd
+        )
+        return self.o_proj(values)
 
     def __call__(self, x: mx.array, cache: Optional[Glm5MLACache] = None):
         B, T, _ = x.shape
         q_resid = self.q_a_layernorm(self.q_a_proj(x))
         q = self.q_b_proj(q_resid)
         q = q.reshape(B, T, self.n_heads, self.qk).transpose(0, 2, 1, 3)
-        kv = self.kv_b_proj(self.kv_a_layernorm(self.kv_a_proj_with_mqa(x)))
+        latent = self.kv_a_layernorm(self.kv_a_proj_with_mqa(x))
+        packed = self.indexer.packed_states(x)
+        absorbed = (
+            cache.absorbed
+            if isinstance(cache, Glm5MLACache)
+            else glm5_mla_absorb_enabled()
+        )
+        if absorbed:
+            return self._absorbed_attention(
+                x,
+                q,
+                q_resid,
+                latent,
+                packed,
+                cache,
+            )
+
+        kv = self.kv_b_proj(latent)
         kv = kv.reshape(B, T, self.n_heads, self.qk + self.vd).transpose(0, 2, 1, 3)
         k, v = mx.split(kv, [self.qk], axis=-1)
 
         offset = 0
-        packed = self.indexer.packed_states(x)
         if cache is not None:
             offset = cache.offset
             k, v = cache.update_kv(k, v)

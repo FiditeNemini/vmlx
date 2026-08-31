@@ -213,6 +213,53 @@ class TestCacheAndForward:
                 ("glm5_next_native_v1", "mla", "4", "4"),
             )
 
+    def test_absorbed_mla_cache_schema_trim_and_clone_are_isolated(self, glm5):
+        from vmlx_engine.models.glm5_next.glm5_next import (
+            clone_glm5_next_layer_cache,
+        )
+
+        cache = glm5.Glm5MLACache(kpool=4, absorbed=True)
+        cache.update_latent(mx.arange(160).reshape(1, 1, 10, 16))
+        cache.update_packed(mx.arange(80).reshape(1, 10, 8))
+        cache.update_pool_keys(mx.arange(8).reshape(1, 2, 4))
+        mx.eval(*cache.state)
+
+        clone = clone_glm5_next_layer_cache(
+            cache,
+            copy_fn=lambda value: value + mx.zeros_like(value),
+        )
+        assert clone.absorbed is True
+        assert clone.meta_state == (
+            "glm5_next_native_v2",
+            "mla_absorbed",
+            "4",
+            "10",
+        )
+        assert clone.offset == 10
+
+        cache.update_latent(mx.zeros((1, 1, 2, 16)))
+        cache.update_packed(mx.zeros((1, 2, 8)))
+        cache.update_pool_keys(mx.zeros((1, 1, 4)))
+        assert cache.offset == 12
+        assert clone.offset == 10
+        assert clone.pool_keys.shape == (1, 2, 4)
+
+        assert cache.trim(3) == 3
+        assert cache.offset == 9
+        assert cache.cache[glm5.MLA_LATENT_PACKED].shape[1] == 9
+        assert cache.pool_keys.shape[1] == 2
+
+        with pytest.raises(ValueError, match="latent must be"):
+            glm5.Glm5MLACache.from_state(
+                [
+                    mx.zeros((1, 2, 4, 8)),
+                    mx.zeros((1, 2, 4, 8)),
+                    mx.zeros((1, 4, 8)),
+                    mx.zeros((1, 1, 8)),
+                ],
+                ("glm5_next_native_v2", "mla_absorbed", "4", "4"),
+            )
+
     def test_live_validator_accepts_glm_typed_metadata_and_rejects_drift(
         self, tiny_model, glm5
     ):
@@ -351,6 +398,66 @@ class TestCacheAndForward:
         finally:
             reader.shutdown()
 
+    def test_absorbed_mla_disk_roundtrip_preserves_v2_state(
+        self, tiny_model, glm5, tmp_path
+    ):
+        from vmlx_engine.disk_cache import DiskCacheManager
+
+        live = [
+            glm5.Glm5KDACache()
+            if layer.is_linear
+            else glm5.Glm5MLACache(
+                tiny_model.args.index_kpool,
+                absorbed=True,
+            )
+            for layer in tiny_model.model.layers
+        ]
+        tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8]]), cache=live)
+        mx.eval(
+            *[
+                value
+                for layer in live
+                for value in layer.state
+                if value is not None
+            ]
+        )
+        assert live[3].meta_state[:2] == (
+            "glm5_next_native_v2",
+            "mla_absorbed",
+        )
+        assert live[3].offset == 8
+
+        cache_dir = tmp_path / "glm5-absorbed-l2"
+        required = ("Glm5KDACache", "Glm5MLACache")
+        writer = DiskCacheManager(
+            str(cache_dir),
+            expected_num_layers=5,
+            required_cache_classes=required,
+        )
+        cache_tokens = list(range(9))
+        assert writer.store(cache_tokens, live)
+        assert writer.flush_pending_writes(cache_tokens) is True
+        writer.shutdown()
+
+        reader = DiskCacheManager(
+            str(cache_dir),
+            expected_num_layers=5,
+            required_cache_classes=required,
+        )
+        try:
+            restored = reader.fetch(cache_tokens)
+            assert restored is not None
+            restored_mla = restored[3]
+            assert restored_mla.absorbed is True
+            assert restored_mla.meta_state == live[3].meta_state
+            for expected, actual in zip(live[3].state, restored_mla.state):
+                assert actual.shape == expected.shape
+                assert actual.dtype == expected.dtype
+                if expected.size:
+                    assert bool(mx.array_equal(expected, actual).item())
+        finally:
+            reader.shutdown()
+
     def test_disk_cache_refuses_incomplete_typed_glm_payload(
         self, glm5, tmp_path
     ):
@@ -418,6 +525,65 @@ class TestCacheAndForward:
         # KDA state is fp32 and fixed-shape after decode
         assert cache[0].cache[3].dtype == mx.float32
         assert cache[0].cache[3].shape == (1, 4, 16, 16)
+
+    @pytest.mark.parametrize("sparse", [False, True])
+    def test_absorbed_mla_matches_materialized_prefill_and_decode(
+        self, tiny_model, glm5, sparse
+    ):
+        attention = tiny_model.model.layers[3].self_attn
+        old_attention_topk = attention.index_topk
+        old_indexer_topk = attention.indexer.topk
+        if sparse:
+            attention.index_topk = 4
+            attention.indexer.topk = 4
+
+        def make_cache(absorbed):
+            return [
+                glm5.Glm5KDACache()
+                if layer.is_linear
+                else glm5.Glm5MLACache(
+                    tiny_model.args.index_kpool,
+                    absorbed=absorbed,
+                )
+                for layer in tiny_model.model.layers
+            ]
+
+        try:
+            tokens = mx.array([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]])
+            materialized = make_cache(False)
+            absorbed = make_cache(True)
+            materialized_logits = tiny_model(tokens, cache=materialized)
+            absorbed_logits = tiny_model(tokens, cache=absorbed)
+            materialized_decode = tiny_model(
+                mx.array([[13]]), cache=materialized
+            )
+            absorbed_decode = tiny_model(mx.array([[13]]), cache=absorbed)
+            mx.eval(
+                materialized_logits,
+                absorbed_logits,
+                materialized_decode,
+                absorbed_decode,
+            )
+
+            assert float(mx.max(mx.abs(
+                materialized_logits - absorbed_logits
+            ))) < 0.005
+            assert int(mx.argmax(materialized_logits[0, -1])) == int(
+                mx.argmax(absorbed_logits[0, -1])
+            )
+            assert float(mx.max(mx.abs(
+                materialized_decode - absorbed_decode
+            ))) < 0.005
+            assert int(mx.argmax(materialized_decode[0, -1])) == int(
+                mx.argmax(absorbed_decode[0, -1])
+            )
+            assert materialized[3].offset == absorbed[3].offset == 13
+            if sparse:
+                assert materialized[3].pool_keys.shape == (1, 3, 128)
+                assert absorbed[3].pool_keys.shape == (1, 3, 128)
+        finally:
+            attention.index_topk = old_attention_topk
+            attention.indexer.topk = old_indexer_topk
 
     def test_mla_pool_cache_trim_keeps_only_complete_pools(self, glm5):
         cache = glm5.Glm5MLACache(kpool=4)

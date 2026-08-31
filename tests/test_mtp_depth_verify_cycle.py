@@ -261,6 +261,109 @@ class TestMtpDepthGreedyIdentity:
             "target": 2,
         }
 
+    def test_text_cost_fallback_is_measured_and_explicit_for_fixed_depth(
+        self, monkeypatch
+    ):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _MtpState,
+            _text_mtp_maybe_cost_fallback,
+        )
+
+        state = _MtpState(depth=3, depth_ceiling=3, adaptive_enabled=False)
+        state.stats.cycles = 8
+        state.stats.draft_tokens_accepted = 8
+        state.stats.backbone_ms = 320.0
+        monkeypatch.delenv("VMLINUX_NATIVE_MTP_COST_FALLBACK", raising=False)
+        monkeypatch.delenv("VMLX_NATIVE_MTP_COST_FALLBACK", raising=False)
+
+        # Fixed D3 is an exact UI/user selection. The default adaptive runtime
+        # gate must never override it.
+        assert not _text_mtp_maybe_cost_fallback("fixed", state, now=10.0)
+        assert state.ar_fallback_pending is False
+
+        # The benchmark/research switch supplies its matched AR calibration
+        # explicitly and is therefore allowed to terminate a fixed arm.
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_FALLBACK", "1")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_AR_STEP_MS", "10")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_RATIO_THRESHOLD", "1.0")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_MIN_CYCLES", "8")
+        assert _text_mtp_maybe_cost_fallback("fixed", state, now=10.0)
+        assert state.ar_fallback_pending is True
+        assert state.stats.fallback_cost_ratio == pytest.approx(2.0)
+        assert "calibrated_cost" in (state.ar_fallback_reason or "")
+
+    def test_text_runtime_cost_gate_only_owns_active_adaptive_requests(
+        self, monkeypatch
+    ):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _MtpState,
+            _text_mtp_maybe_cost_fallback,
+        )
+
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES", "8")
+        monkeypatch.setenv("VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN", "1.25")
+        state = _MtpState(
+            depth=1,
+            depth_ceiling=3,
+            adaptive_enabled=True,
+            ar_step_ms=10.0,
+            cycle_span_start=1.0,
+        )
+        state.stats.cycles = 8
+        state.stats.draft_tokens_accepted = 8
+        assert _text_mtp_maybe_cost_fallback("adaptive", state, now=1.3)
+        assert state.stats.fallback_cost_ratio == pytest.approx(1.875)
+        assert "runtime_cost" in (state.ar_fallback_reason or "")
+
+    def test_text_cost_fallback_drains_verified_queue_then_matches_ar(
+        self, monkeypatch
+    ):
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            native_mtp_stats_snapshot,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        prompt = [3, 5, 7, 11, 13]
+        max_tokens = 24
+        previous = is_mtp_active()
+        try:
+            set_mtp_active(False)
+            baseline = _run_generation(
+                _build_model(attach_mtp=False), prompt, max_tokens
+            )
+
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_DEPTH", "3")
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_FALLBACK", "1")
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_AR_STEP_MS", "0.0001")
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_RATIO_THRESHOLD", "1")
+            monkeypatch.setenv("VMLINUX_NATIVE_MTP_COST_MIN_CYCLES", "1")
+            set_mtp_active(True)
+            batch = _make_batch(
+                _build_model(attach_mtp=True), prompt, max_tokens
+            )
+            got = []
+            while len(got) < max_tokens:
+                responses = batch.next()
+                if not responses:
+                    break
+                got.extend(int(response.token) for response in responses)
+                if responses[-1].finish_reason is not None:
+                    break
+
+            assert got == baseline
+            assert getattr(batch, "_omlx_mtp_state", None) is None
+            receipt = native_mtp_stats_snapshot()["last_native_mtp"]
+            assert receipt["finish_reason"] == "fallback_to_ar"
+            assert "calibrated_cost" in receipt["fallback_reason"]
+        finally:
+            set_mtp_active(previous)
+
     def test_cache_length_tracks_emitted_tokens_exactly(self, monkeypatch):
         """Rollback must leave the KV cache exactly at the confirmed prefix.
 

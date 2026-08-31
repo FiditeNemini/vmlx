@@ -330,6 +330,18 @@ def apply() -> bool:
             if state is not None:
                 try:
                     responses = _mtp_next(self, state)
+                    if (
+                        state.ar_fallback_pending
+                        and not state.queue
+                        and getattr(self, "_omlx_mtp_state", None) is state
+                        and responses
+                        and responses[0].finish_reason is None
+                    ):
+                        _prepare_mtp_ar_handoff(
+                            self,
+                            state,
+                            responses[0].logprobs,
+                        )
                     return attach_prompt_cache_snapshots(self, responses)
                 except _MtpStepFallback as exc:
                     logger.debug(
@@ -645,6 +657,10 @@ class _MtpStats:
     prompt_prime_source: str = "unprimed"
     mtp_head_cache: dict = field(default_factory=dict)
     adaptive_depth_value: dict = field(default_factory=dict)
+    fallback_reason: Optional[str] = None
+    fallback_cost_ratio: Optional[float] = None
+    fallback_mtp_ms_per_token: Optional[float] = None
+    fallback_ar_step_ms: Optional[float] = None
 
 
 @dataclass
@@ -687,6 +703,14 @@ class _MtpState:
     adaptive_value: NativeMTPAdaptiveValueState = field(
         default_factory=NativeMTPAdaptiveValueState
     )
+    # A cost decision never discards a verified cycle mid-flight. It stops
+    # drafting, drains the cycle's already-verified emit queue, then primes
+    # the stock GenerationBatch pipeline from ``next_main`` at the exact AR
+    # cache/token frontier.
+    ar_fallback_pending: bool = False
+    ar_fallback_reason: Optional[str] = None
+    ar_step_ms: float = 0.0
+    cycle_span_start: float = 0.0
 
     # Accept-rate / throughput counters. Surfaced via logger.info on finish.
     stats: _MtpStats = field(default_factory=_MtpStats)
@@ -760,7 +784,12 @@ def _native_mtp_payload(
         ),
         "profiled_phase_timing": bool(_MTP_PROFILE),
         "published_at": time.time(),
-        "fallback_reason": None,
+        "fallback_reason": stats.fallback_reason,
+        "fallback_cost": {
+            "cost_ratio": stats.fallback_cost_ratio,
+            "mtp_ms_per_token": stats.fallback_mtp_ms_per_token,
+            "ar_step_ms": stats.fallback_ar_step_ms,
+        },
     }
 
 
@@ -1020,6 +1049,147 @@ def _adaptive_env_float(default: float, *names: str) -> float:
         return float(default)
 
 
+def _adaptive_env_flag(default: bool, *names: str) -> bool:
+    raw = next((os.environ.get(name) for name in names if name in os.environ), None)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _text_mtp_timing_total_ms(stats: _MtpStats) -> float:
+    return (
+        float(stats.backbone_ms)
+        + float(stats.mtp_head_ms)
+        + float(stats.sample_ms)
+        + float(stats.cache_ops_ms)
+    )
+
+
+def _text_mtp_confirmed_tokens_from_cycles(stats: _MtpStats) -> int:
+    # Each completed verify cycle confirms one correction/bonus token plus
+    # its accepted draft prefix. Init emits are intentionally excluded: they
+    # belong to the seed bridge, not the repeated speculative cycle cost.
+    return max(0, int(stats.cycles)) + max(0, int(stats.draft_tokens_accepted))
+
+
+def _text_mtp_cost_ratio(
+    stats: _MtpStats,
+    ar_step_ms: float,
+    *,
+    elapsed_ms: Optional[float] = None,
+) -> Optional[Tuple[float, float]]:
+    if ar_step_ms <= 0.0:
+        return None
+    mtp_ms = (
+        float(elapsed_ms)
+        if elapsed_ms is not None and float(elapsed_ms) > 0.0
+        else _text_mtp_timing_total_ms(stats)
+    )
+    confirmed = _text_mtp_confirmed_tokens_from_cycles(stats)
+    if mtp_ms <= 0.0 or confirmed <= 0:
+        return None
+    mtp_ms_per_token = mtp_ms / confirmed
+    return mtp_ms_per_token / ar_step_ms, mtp_ms_per_token
+
+
+def _text_mtp_maybe_cost_fallback(
+    request_id: str,
+    state: _MtpState,
+    *,
+    now: float,
+) -> bool:
+    """Mark a measured MTP -> AR handoff without breaking fixed-depth UI.
+
+    An explicit calibrated cost experiment may override any depth policy.
+    Otherwise the runtime gate applies only to an already-active adaptive
+    request. Fixed D1/D2/D3 remains an exact user selection.
+    """
+
+    explicit = _adaptive_env_flag(
+        False,
+        "VMLINUX_NATIVE_MTP_COST_FALLBACK",
+        "VMLX_NATIVE_MTP_COST_FALLBACK",
+    )
+    runtime_adaptive = state.adaptive_enabled and _adaptive_env_flag(
+        True,
+        "VMLINUX_NATIVE_MTP_RUNTIME_COST_GATE",
+        "VMLX_NATIVE_MTP_RUNTIME_COST_GATE",
+    )
+    if state.ar_fallback_pending or not (explicit or runtime_adaptive):
+        return False
+
+    if explicit:
+        ar_step_ms = _adaptive_env_float(
+            0.0,
+            "VMLINUX_NATIVE_MTP_AR_STEP_MS",
+            "VMLX_NATIVE_MTP_AR_STEP_MS",
+            "VMLINUX_NATIVE_MTP_COST_AR_STEP_MS",
+            "VMLX_NATIVE_MTP_COST_AR_STEP_MS",
+        )
+        threshold = _adaptive_env_float(
+            1.0,
+            "VMLINUX_NATIVE_MTP_COST_RATIO_THRESHOLD",
+            "VMLX_NATIVE_MTP_COST_RATIO_THRESHOLD",
+        )
+        minimum_cycles = _adaptive_env_int(
+            8,
+            "VMLINUX_NATIVE_MTP_COST_MIN_CYCLES",
+            "VMLX_NATIVE_MTP_COST_MIN_CYCLES",
+            minimum=1,
+        )
+        elapsed_ms = None
+        reason_prefix = "calibrated_cost"
+    else:
+        ar_step_ms = float(state.ar_step_ms or 0.0)
+        threshold = _adaptive_env_float(
+            1.25,
+            "VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+            "VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+        )
+        minimum_cycles = _adaptive_env_int(
+            48,
+            "VMLINUX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES",
+            "VMLX_NATIVE_MTP_RUNTIME_COST_MIN_CYCLES",
+            minimum=8,
+        )
+        elapsed_ms = (
+            max(0.0, (float(now) - float(state.cycle_span_start)) * 1000.0)
+            if state.cycle_span_start > 0.0
+            else None
+        )
+        reason_prefix = "runtime_cost"
+
+    if int(state.stats.cycles) < minimum_cycles:
+        return False
+    ratio_and_cost = _text_mtp_cost_ratio(
+        state.stats,
+        ar_step_ms,
+        elapsed_ms=elapsed_ms,
+    )
+    if ratio_and_cost is None:
+        return False
+    ratio, mtp_ms_per_token = ratio_and_cost
+    if ratio < threshold:
+        return False
+
+    state.ar_fallback_pending = True
+    state.ar_fallback_reason = (
+        f"{reason_prefix} cost_ratio={ratio:.3f}>=threshold={threshold:.3f} "
+        f"mtp_ms_per_token={mtp_ms_per_token:.2f} ar_step_ms={ar_step_ms:.2f}"
+    )
+    state.stats.fallback_reason = state.ar_fallback_reason
+    state.stats.fallback_cost_ratio = ratio
+    state.stats.fallback_mtp_ms_per_token = mtp_ms_per_token
+    state.stats.fallback_ar_step_ms = ar_step_ms
+    logger.info(
+        "MTP[%s] adaptive runtime -> AR after cycles=%d: %s",
+        request_id,
+        state.stats.cycles,
+        state.ar_fallback_reason,
+    )
+    return True
+
+
 def _adaptive_value_min_samples() -> int:
     return _adaptive_env_int(
         8,
@@ -1240,7 +1410,10 @@ def _post_init_mtp(gen_batch: Any) -> None:
     else:
         prev_buf = None
 
-    # 1-token backbone forward at main_tok with hidden state.
+    # 1-token backbone forward at main_tok with hidden state. This is a real
+    # AR-shaped step at the request's actual context length, so its completed
+    # wall time is the adaptive cost gate's local baseline.
+    seed_step_t0 = time.perf_counter()
     with mx.stream(_get_generation_stream()):
         logits, hidden = gen_batch.model(
             main_tok[:, None], cache=gen_batch.prompt_cache, return_hidden=True
@@ -1252,8 +1425,10 @@ def _post_init_mtp(gen_batch: Any) -> None:
     next_main_tok = sampler(next_main_lp)  # (1,)
 
     mx.eval(main_tok, next_main_tok)
+    seed_step_ms = (time.perf_counter() - seed_step_t0) * 1000.0
 
     state = _MtpState()
+    state.ar_step_ms = seed_step_ms
     if _glm_prompt_priming_enabled(gen_batch.model):
         from ...native_mtp_prompt_priming import prime_stats, take_primed
 
@@ -1312,6 +1487,75 @@ def _post_init_mtp(gen_batch: Any) -> None:
 # next() dispatch
 # ---------------------------------------------------------------------------
 
+def _mtp_ar_handoff_ready(gen_batch: Any, state: _MtpState) -> Tuple[bool, str]:
+    """Check the stock-AR boundary after the last verified emit drains."""
+    if state.queue:
+        return False, "pending_queue"
+    if state.next_main is None:
+        return False, "missing_next_main"
+    try:
+        next_id = int(state.next_main.tolist()[0])
+    except Exception:
+        return False, "invalid_next_main"
+    tokens = getattr(gen_batch, "tokens", None) or []
+    if not tokens or not tokens[0]:
+        return False, "missing_visible_token"
+    if next_id != int(tokens[0][-1]):
+        return False, "next_main_mismatch"
+    for layer in getattr(gen_batch, "prompt_cache", ()):
+        if getattr(layer, "rollback_state", None) is not None:
+            return False, "pending_rollback_state"
+    return True, "ready"
+
+
+def _prepare_mtp_ar_handoff(
+    gen_batch: Any,
+    state: _MtpState,
+    last_logprobs: Any,
+) -> None:
+    """Prime stock ``GenerationBatch.next`` without re-emitting a token.
+
+    The verified queue's last correction/bonus is already visible, but has
+    not entered the backbone cache. Stock ``_step`` normally consumes and
+    returns that same token. Temporarily remove its MTP-side history append,
+    run the stock step once to consume/reappend it and prepare the following
+    sample, then discard MTP state. The next public ``next()`` therefore emits
+    the following AR token exactly once.
+    """
+    ready, reason = _mtp_ar_handoff_ready(gen_batch, state)
+    if not ready:
+        raise RuntimeError(f"native MTP AR fallback unsafe: {reason}")
+
+    visible_id = int(gen_batch.tokens[0].pop())
+    gen_batch._next_tokens = _ensure_uint32(state.next_main)
+    gen_batch._next_logprobs = [last_logprobs]
+    try:
+        consumed, _ = gen_batch._step()
+    except Exception:
+        # The cache may already have advanced, so silent recovery is unsafe.
+        if not gen_batch.tokens[0] or int(gen_batch.tokens[0][-1]) != visible_id:
+            gen_batch.tokens[0].append(visible_id)
+        raise
+    if list(consumed) != [visible_id]:
+        raise RuntimeError(
+            "native MTP AR fallback consumed the wrong boundary token: "
+            f"expected={visible_id} actual={list(consumed)}"
+        )
+
+    _log_mtp_stats(
+        gen_batch.uids[0] if gen_batch.uids else "?",
+        state.stats,
+        "fallback_to_ar",
+        state.mtp_cache,
+    )
+    if getattr(gen_batch, "_omlx_mtp_state", None) is state:
+        delattr(gen_batch, "_omlx_mtp_state")
+    logger.info(
+        "MTP[%s] fallback to AR after verified queue drain: %s",
+        gen_batch.uids[0] if gen_batch.uids else "?",
+        state.ar_fallback_reason or "adaptive runtime cost",
+    )
+
 def _mtp_next(gen_batch: Any, state: _MtpState) -> Any:
     """Emit one token; run a verify cycle if the queue is empty."""
     if state.queue:
@@ -1319,6 +1563,8 @@ def _mtp_next(gen_batch: Any, state: _MtpState) -> Any:
         _bump_emit_stat(state, source)
         return _emit_response(gen_batch, token_id, logprobs_1d, state.stats)
 
+    if state.stats.cycles == 0 and state.cycle_span_start <= 0.0:
+        state.cycle_span_start = time.perf_counter()
     _run_verify_cycle(gen_batch, state)
     if not state.queue:
         # Verify cycle should always populate the queue with at least the
@@ -1610,6 +1856,20 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     # --- new draft chain from the last confirmed position ---
     emit_tok = mx.array([emit_id], dtype=mx.uint32)
     state.next_main = emit_tok
+    if _text_mtp_maybe_cost_fallback(
+        str(gen_batch.uids[0]) if gen_batch.uids else "?",
+        state,
+        now=time.perf_counter(),
+    ):
+        # No speculative work may outlive the decision. The main cache is at
+        # the verified frontier and the queue contains only confirmed tokens;
+        # the stock AR pipeline is primed only after that queue drains.
+        state.draft_toks = []
+        state.draft_lps = []
+        state.draft_accept_lps = []
+        state.draft_ids = []
+        state.head_chain_pairs = 0
+        return
     _adaptive_arm_cycle(state, now=time.perf_counter())
     if _glm_aligned_head_cache_enabled(gen_batch):
         state.stats.mtp_head_cache_policy = "glm_aligned"

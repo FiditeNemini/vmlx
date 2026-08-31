@@ -192,6 +192,11 @@ TOOL_DESCRIPTIONS = {
     "run_command": "Run the one allowed read-only command in the repository.",
 }
 
+STABLE_RESPONSES_INSTRUCTIONS = (
+    "Act as a coding agent. Follow the current user input, use only the supplied "
+    "tools, never fabricate tool results, and continue from real function outputs."
+)
+
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
@@ -4277,6 +4282,7 @@ def run_flow(
     enable_thinking: bool,
     second_tool_choice: str = "explicit",
     first_tool_choice: str = "current",
+    stable_responses_instructions: bool = False,
 ) -> dict[str, Any]:
     first_prompt = first_tool_instruction(protocol, mode)
     second_prompt = (
@@ -4288,6 +4294,11 @@ def run_flow(
         initial_history = first_prompt
     else:
         initial_history = [{"role": "user", "content": first_prompt}]
+    first_request_instructions = (
+        STABLE_RESPONSES_INSTRUCTIONS
+        if protocol == "responses" and stable_responses_instructions
+        else first_prompt
+    )
 
     request1 = build_request(
         protocol,
@@ -4295,7 +4306,7 @@ def run_flow(
         mode,
         1,
         history=initial_history,
-        instructions=first_prompt,
+        instructions=first_request_instructions,
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
         second_tool_choice=second_tool_choice,
@@ -4334,7 +4345,11 @@ def run_flow(
         mode,
         2,
         history=history2,
-        instructions=second_prompt,
+        instructions=(
+            STABLE_RESPONSES_INSTRUCTIONS
+            if protocol == "responses" and stable_responses_instructions
+            else second_prompt
+        ),
         previous_response_id=str(round1.get("response_id") or ""),
         max_tokens=max_tokens,
         enable_thinking=enable_thinking,
@@ -4379,7 +4394,11 @@ def run_flow(
         mode,
         3,
         history=history3,
-        instructions=final_prompt,
+        instructions=(
+            STABLE_RESPONSES_INSTRUCTIONS
+            if protocol == "responses" and stable_responses_instructions
+            else final_prompt
+        ),
         previous_response_id=str(round2.get("response_id") or ""),
         max_tokens=max_tokens,
         # The final synthesis turn is intentionally direct. Besides proving
@@ -5548,6 +5567,7 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
         "modes": modes,
         "first_tool_choice": args.first_tool_choice,
         "second_tool_choice": args.second_tool_choice,
+        "stable_responses_instructions": args.stable_responses_instructions,
         "backend_identity_fingerprint_sha256": None,
         "identity": {
             "source": {
@@ -5645,6 +5665,9 @@ def run_matrix(args: argparse.Namespace) -> dict[str, Any]:
                         enable_thinking=args.enable_thinking,
                         second_tool_choice=args.second_tool_choice,
                         first_tool_choice=args.first_tool_choice,
+                        stable_responses_instructions=(
+                            args.stable_responses_instructions
+                        ),
                     )
                     flow_replay_payloads = flow.pop(
                         "_paired_replay_payloads", {}
@@ -5968,6 +5991,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disconnect-delay-ms", type=int, default=1000)
     parser.add_argument(
         "--enable-thinking", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument(
+        "--stable-responses-instructions",
+        action="store_true",
+        help=(
+            "Keep the Responses developer instructions constant across the "
+            "agent loop so appended input/tool results remain prefix-cacheable."
+        ),
     )
     parser.add_argument(
         "--first-tool-choice",

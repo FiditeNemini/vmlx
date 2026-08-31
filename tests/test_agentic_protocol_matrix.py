@@ -1288,6 +1288,71 @@ def test_agentic_flow_turns_thinking_off_for_final_synthesis():
     assert result["requests"][2]["enable_thinking"] is False
 
 
+def test_responses_agentic_flow_can_keep_developer_instructions_stable():
+    class RecordingClient:
+        def __init__(self):
+            self.payloads = []
+
+        def send(self, protocol, payload, stream, *, capture_label):
+            assert protocol == "responses"
+            assert stream is True
+            self.payloads.append(copy.deepcopy(payload))
+            if capture_label.endswith("round1"):
+                call = {
+                    "id": "call-file",
+                    "name": "file_info",
+                    "arguments": {"path": matrix.FILE_INFO_PATH},
+                }
+                content = ""
+            elif capture_label.endswith("round2"):
+                call = {
+                    "id": "call-pwd",
+                    "name": "run_command",
+                    "arguments": {"command": matrix.PWD_COMMAND},
+                }
+                content = ""
+            else:
+                call = None
+                content = "final"
+            return {
+                "status_code": 200,
+                "response_id": f"resp-{len(self.payloads)}",
+                "reasoning": "reason" if call else "",
+                "content": content,
+                "tool_calls": [call] if call else [],
+                "terminals": ["response.completed"],
+                "events": [
+                    {
+                        "at_ms": 1,
+                        "channel": "terminal",
+                        "kind": "response.completed",
+                    }
+                ],
+                "errors": [],
+            }
+
+    client = RecordingClient()
+    repo_root = Path(matrix.__file__).resolve().parents[2]
+    matrix.run_flow(
+        client,
+        base_label="direct",
+        protocol="responses",
+        mode="stream",
+        model="served-model",
+        repo_root=repo_root,
+        max_tokens=128,
+        enable_thinking=True,
+        first_tool_choice="auto",
+        second_tool_choice="auto",
+        stable_responses_instructions=True,
+    )
+
+    assert {payload["instructions"] for payload in client.payloads} == {
+        matrix.STABLE_RESPONSES_INSTRUCTIONS
+    }
+    assert client.payloads[0]["input"] != client.payloads[1]["input"]
+
+
 def test_request_metadata_hashes_full_body_and_normalizes_only_tool_ids():
     base = {
         "model": "served-model",

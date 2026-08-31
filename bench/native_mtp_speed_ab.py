@@ -262,6 +262,10 @@ def load_reused_baseline(
         "warmup": args.warmup,
         "enable_thinking": args.enable_thinking,
         "prompt": args.prompt,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "seed": args.seed,
     }
     actual = dict(payload)
     if "model_path" in actual:
@@ -813,6 +817,10 @@ def build_chat_completion_body(
     repeat_index: int,
     disable_prompt_reuse: bool,
     enable_thinking: str,
+    temperature: float = 0.0,
+    top_p: float | None = None,
+    top_k: int | None = None,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     content_prompt = prompt
     if disable_prompt_reuse:
@@ -821,9 +829,15 @@ def build_chat_completion_body(
         "model": model,
         "messages": [{"role": "user", "content": content_prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        "temperature": float(temperature),
         "stream": False,
     }
+    if top_p is not None:
+        body["top_p"] = float(top_p)
+    if top_k is not None:
+        body["top_k"] = int(top_k)
+    if seed is not None:
+        body["seed"] = int(seed)
     chat_template_kwargs = chat_template_kwargs_for_enable_thinking(enable_thinking)
     if chat_template_kwargs is not None:
         body["chat_template_kwargs"] = chat_template_kwargs
@@ -914,6 +928,10 @@ def run_generation(
     repeat_index: int,
     disable_prompt_reuse: bool,
     enable_thinking: str,
+    temperature: float,
+    top_p: float | None,
+    top_k: int | None,
+    seed: int | None,
 ) -> dict[str, Any]:
     body = build_chat_completion_body(
         model=model,
@@ -922,6 +940,10 @@ def run_generation(
         repeat_index=repeat_index,
         disable_prompt_reuse=disable_prompt_reuse,
         enable_thinking=enable_thinking,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        seed=seed,
     )
     resp, elapsed = request_json("POST", f"{base_url}/v1/chat/completions", body)
     choice = (resp.get("choices") or [{}])[0]
@@ -1013,6 +1035,10 @@ def run_row(
                 repeat_index=-(i + 1),
                 disable_prompt_reuse=args.disable_prompt_reuse,
                 enable_thinking=args.enable_thinking,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                seed=args.seed,
             )
         for i in range(args.repeats):
             rows.append(
@@ -1024,6 +1050,10 @@ def run_row(
                     repeat_index=i,
                     disable_prompt_reuse=args.disable_prompt_reuse,
                     enable_thinking=args.enable_thinking,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    top_k=args.top_k,
+                    seed=args.seed,
                 )
             )
         health_after, _ = request_json("GET", f"{base_url}/health", timeout=30.0)
@@ -1123,6 +1153,20 @@ def main() -> int:
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--warmup", type=int, default=1)
+    ap.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Request sampling temperature (default: deterministic).",
+    )
+    ap.add_argument("--top-p", type=float, default=None)
+    ap.add_argument("--top-k", type=int, default=None)
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional fixed request seed for matched AR/depth comparisons.",
+    )
     ap.add_argument(
         "--kv-cache-quantization",
         choices=["auto", "none", "q4", "q8"],
@@ -1257,6 +1301,10 @@ def main() -> int:
         "repeats": args.repeats,
         "warmup": args.warmup,
         "enable_thinking": args.enable_thinking,
+        "temperature": args.temperature,
+        "top_p": args.top_p,
+        "top_k": args.top_k,
+        "seed": args.seed,
         "prompt": args.prompt,
         "max_num_seqs": args.max_num_seqs,
         "disable_prompt_reuse": args.disable_prompt_reuse,

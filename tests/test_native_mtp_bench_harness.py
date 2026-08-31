@@ -225,6 +225,10 @@ def test_load_reused_baseline_requires_matching_contract(tmp_path):
         "warmup": 1,
         "enable_thinking": "off",
         "prompt": "same prompt",
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "seed": 424242,
         "rows": [{
             "label": "baseline_no_mtp",
             "mtp_enabled": False,
@@ -244,6 +248,10 @@ def test_load_reused_baseline_requires_matching_contract(tmp_path):
         warmup=1,
         enable_thinking="off",
         prompt="same prompt",
+        temperature=1.0,
+        top_p=0.95,
+        top_k=20,
+        seed=424242,
     )
 
     row, source = mod.load_reused_baseline(str(artifact), args=args)
@@ -259,6 +267,15 @@ def test_load_reused_baseline_requires_matching_contract(tmp_path):
         assert "contract mismatch" in str(exc)
     else:
         raise AssertionError("mismatched baseline contract was accepted")
+
+    args.prompt = "same prompt"
+    args.seed = 7
+    try:
+        mod.load_reused_baseline(str(artifact), args=args)
+    except ValueError as exc:
+        assert "contract mismatch" in str(exc)
+    else:
+        raise AssertionError("mismatched sampling contract was accepted")
 
 
 def test_build_native_mtp_env_sets_cost_fallback_calibration():
@@ -1049,6 +1066,28 @@ def test_chat_completion_body_auto_omits_template_override():
     )
 
     assert "chat_template_kwargs" not in body
+
+
+def test_chat_completion_body_records_exact_sampled_controls():
+    mod = load_speed_ab_module()
+
+    body = mod.build_chat_completion_body(
+        model="qwen38",
+        prompt="ordinary prose",
+        max_tokens=192,
+        repeat_index=0,
+        disable_prompt_reuse=False,
+        enable_thinking="off",
+        temperature=1.0,
+        top_p=0.95,
+        top_k=20,
+        seed=424242,
+    )
+
+    assert body["temperature"] == 1.0
+    assert body["top_p"] == 0.95
+    assert body["top_k"] == 20
+    assert body["seed"] == 424242
 
 
 def test_real_logit_policy_sweep_uses_cached_pair_helper(monkeypatch):

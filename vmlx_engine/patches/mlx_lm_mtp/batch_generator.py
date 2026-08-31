@@ -159,6 +159,7 @@ def apply() -> bool:
     original_extend = GenerationBatch.extend
     original_batch_generator_next = BatchGenerator._next
     original_batch_generator_remove = BatchGenerator.remove
+    original_batch_generator_make_batch = BatchGenerator._make_batch
 
     def attach_prompt_cache_snapshots(self, responses):
         snapshots = getattr(self, "_vmlx_prompt_cache_snapshots", None)
@@ -302,6 +303,28 @@ def apply() -> bool:
                 retained.update(snapshots)
         return result
 
+    def patched_batch_generator_make_batch(self, n, *args, **kwargs):
+        batch = original_batch_generator_make_batch(self, n, *args, **kwargs)
+        if n != 1 or not _glm_prompt_priming_enabled(batch.model):
+            return batch
+        from ...native_mtp_prompt_priming import prepare_prompt
+
+        processing = getattr(self, "_currently_processing", None) or []
+        if not processing or not getattr(batch, "uids", None):
+            return batch
+        segments = processing[-1][0]
+        prior_tokens = list((getattr(batch, "tokens", None) or [[]])[-1])
+        remaining = [int(tok) for segment in segments for tok in segment]
+        prompt_tokens = prior_tokens + remaining
+        prepare_prompt(
+            batch.model,
+            request_id=f"text:{batch.uids[-1]}",
+            prompt_tokens=prompt_tokens,
+            cached_tokens=len(prior_tokens),
+            prefix_cache=None,
+        )
+        return batch
+
     def patched_batch_generator_remove(self, uids, *args, **kwargs):
         result = original_batch_generator_remove(self, uids, *args, **kwargs)
         active = getattr(self, "_generation_batch", None)
@@ -368,6 +391,7 @@ def apply() -> bool:
     GenerationBatch._omlx_mtp_patched = True
     BatchGenerator._next = patched_batch_generator_next
     BatchGenerator.remove = patched_batch_generator_remove
+    BatchGenerator._make_batch = patched_batch_generator_make_batch
     BatchGenerator._vmlx_glm_prompt_snapshot_patched = True
     _PATCHED = True
     return True
@@ -545,6 +569,8 @@ class _MtpStats:
     mtp_cache_recreated_on_rejects: int = 0
     mtp_cache_retained_on_rejects: int = 0
     mtp_head_cache_policy: str = "loose"
+    prompt_primed_pairs: int = 0
+    prompt_prime_source: str = "unprimed"
     mtp_head_cache: dict = field(default_factory=dict)
     adaptive_depth_value: dict = field(default_factory=dict)
 
@@ -627,6 +653,10 @@ def _native_mtp_payload(
         "depth_ceiling": int(stats.depth_ceiling or 1),
         "depth_policy": str(stats.depth_policy or "fixed"),
         "mtp_head_cache_policy": str(stats.mtp_head_cache_policy or "loose"),
+        "prompt_priming": {
+            "source": str(stats.prompt_prime_source or "unprimed"),
+            "folded_pairs": int(stats.prompt_primed_pairs or 0),
+        },
         "cycles": int(stats.cycles),
         "accepts": int(stats.accepts),
         "rejects": int(stats.rejects),
@@ -1056,6 +1086,22 @@ def _glm_aligned_head_cache_enabled(gen_batch: Any) -> bool:
     return value not in {"", "0", "false", "off", "no"}
 
 
+def _glm_prompt_priming_enabled(model: Any) -> bool:
+    inner = getattr(model, "language_model", model)
+    model_type = getattr(inner, "model_type", None)
+    if model_type is None:
+        config = getattr(inner, "config", None)
+        if isinstance(config, dict):
+            model_type = config.get("model_type")
+    if str(model_type or "") != "glm5_next":
+        return False
+    value = os.environ.get(
+        "VMLINUX_GLM5_MTP_PROMPT_PRIMING",
+        os.environ.get("VMLX_GLM5_MTP_PROMPT_PRIMING", "0"),
+    ).strip().lower()
+    return value not in {"", "0", "false", "off", "no"}
+
+
 def _trim_glm_head_chain(state: "_MtpState") -> bool:
     """Trim only the unverified recursive pairs from GLM's MTP cache."""
 
@@ -1136,7 +1182,19 @@ def _post_init_mtp(gen_batch: Any) -> None:
     mx.eval(main_tok, next_main_tok)
 
     state = _MtpState()
-    state.mtp_cache = gen_batch.model.make_mtp_cache()
+    if _glm_prompt_priming_enabled(gen_batch.model):
+        from ...native_mtp_prompt_priming import take_primed
+
+        primed = take_primed(
+            gen_batch.model, gen_batch.prompt_cache, main_tok
+        )
+    else:
+        primed = None
+    if primed is None:
+        state.mtp_cache = gen_batch.model.make_mtp_cache()
+    else:
+        state.mtp_cache, state.stats.prompt_primed_pairs = primed
+        state.stats.prompt_prime_source = "cold_prompt"
     state.depth_ceiling = _effective_depth(gen_batch)
     state.adaptive_enabled = _adaptive_depth_enabled()
     state.depth = 1 if state.adaptive_enabled else state.depth_ceiling

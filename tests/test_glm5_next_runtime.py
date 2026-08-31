@@ -984,6 +984,54 @@ class TestNativeMTP:
         assert len(mtp_cache) == 1
         assert isinstance(mtp_cache[0], glm5.Glm5MLACache)
 
+    def test_text_prompt_priming_folds_glm_history_once(
+        self, glm5, monkeypatch
+    ):
+        from mlx_lm.generate import BatchGenerator
+
+        from vmlx_engine.patches.mlx_lm_mtp import (
+            apply_mlx_lm_mtp_patch,
+            is_mtp_active,
+            set_mtp_active,
+        )
+
+        assert apply_mlx_lm_mtp_patch() is True
+        monkeypatch.setenv("VMLX_GLM5_MTP_PROMPT_PRIMING", "1")
+        monkeypatch.setenv("VMLX_GLM5_ALIGNED_MTP_HEAD_CACHE", "1")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        previous = is_mtp_active()
+        generator = None
+        try:
+            set_mtp_active(True)
+            model = glm5.Model(glm5.ModelArgs.from_dict(TINY_CFG))
+            model.eval()
+            mx.eval(model.parameters())
+            generator = BatchGenerator(
+                model,
+                max_tokens=8,
+                completion_batch_size=1,
+                prefill_batch_size=1,
+            )
+            prompt = [3, 5, 7, 11, 13, 17, 19]
+            generator.insert([prompt])
+            state = None
+            for _ in range(4):
+                generator.next()
+                state = getattr(
+                    generator._generation_batch, "_omlx_mtp_state", None
+                )
+                if state is not None:
+                    break
+            assert state is not None
+            assert state.stats.prompt_prime_source == "cold_prompt"
+            assert state.stats.prompt_primed_pairs == len(prompt)
+            assert state.stats.mtp_head_cache_policy == "glm_aligned"
+        finally:
+            if generator is not None:
+                generator.close()
+            set_mtp_active(previous)
+
     def test_vectorized_verify_generation_matches_ar_at_all_depths(
         self, glm5, monkeypatch
     ):

@@ -119,6 +119,21 @@ def test_glm_aligned_mtp_head_cache_is_exact_opt_in(monkeypatch):
     assert rows["aligned_mtp_head_cache"]["state"] == "configured_unattested"
 
 
+def test_glm_mtp_prompt_priming_is_exact_opt_in(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+
+    monkeypatch.delenv("VMLX_GLM5_MTP_PROMPT_PRIMING", raising=False)
+    monkeypatch.delenv("VMLINUX_GLM5_MTP_PROMPT_PRIMING", raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mtp_prompt_priming"]["requested"] is False
+    assert rows["mtp_prompt_priming"]["state"] == "disabled"
+
+    monkeypatch.setenv("VMLX_GLM5_MTP_PROMPT_PRIMING", "1")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mtp_prompt_priming"]["requested"] is True
+    assert rows["mtp_prompt_priming"]["state"] == "configured_unattested"
+
+
 def test_glm_vectorized_kda_verify_defaults_on_with_explicit_opt_out(
     monkeypatch,
 ):

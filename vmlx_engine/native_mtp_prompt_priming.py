@@ -153,7 +153,14 @@ def _clone_cache(cache: list[Any]) -> list[Any]:
             if isinstance(value, mx.array):
                 setattr(clone, attr, value + 0)
             elif isinstance(value, list):
-                setattr(clone, attr, list(value))
+                setattr(
+                    clone,
+                    attr,
+                    [
+                        item + 0 if isinstance(item, mx.array) else item
+                        for item in value
+                    ],
+                )
         return clone
 
     return [clone_entry(entry) for entry in cache]
@@ -198,6 +205,8 @@ def _snapshot_arrays(snapshot: NativeMTPPrefixSnapshot) -> list[Any]:
         for value in vars(entry).values():
             if isinstance(value, mx.array):
                 arrays.append(value)
+            elif isinstance(value, (list, tuple)):
+                arrays.extend(item for item in value if isinstance(item, mx.array))
     return arrays
 
 
@@ -397,10 +406,11 @@ def capture_prefill(host: Any, inputs: Any, expanded_hidden: Any, cache: Any) ->
 
     arrays = [ctx.pending_hidden]
     for entry in _flat_entries(ctx.mtp_cache):
-        for name in ("keys", "values", "idx_keys"):
-            value = getattr(entry, name, None)
+        for value in vars(entry).values():
             if isinstance(value, mx.array):
                 arrays.append(value)
+            elif isinstance(value, (list, tuple)):
+                arrays.extend(item for item in value if isinstance(item, mx.array))
     mx.async_eval(*arrays)
 
 

@@ -261,6 +261,17 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 ),
             ),
             _feature(
+                "mtp_prompt_priming",
+                label="GLM MTP-head prompt-history priming",
+                kind="state_algorithm",
+                scopes=("prefill", "mtp_decode"),
+                default=False,
+                env=(
+                    "VMLX_GLM5_MTP_PROMPT_PRIMING",
+                    "VMLINUX_GLM5_MTP_PROMPT_PRIMING",
+                ),
+            ),
+            _feature(
                 "affine_moe_pair",
                 label="affine MoE gate/up and weighted-down fusion",
                 kind="metal_kernel",

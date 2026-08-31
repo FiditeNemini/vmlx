@@ -1331,6 +1331,10 @@ class Model(nn.Module):
 
         if args.num_nextn_predict_layers > 0 and is_mtp_active():
             self.mtp = Glm5NextMTP(args)
+        self._mtp_prompt_priming = hasattr(self, "mtp") and os.environ.get(
+            "VMLINUX_GLM5_MTP_PROMPT_PRIMING",
+            os.environ.get("VMLX_GLM5_MTP_PROMPT_PRIMING", "0"),
+        ).strip().lower() not in {"", "0", "false", "off", "no"}
 
     def __call__(
         self,
@@ -1347,6 +1351,14 @@ class Model(nn.Module):
             n_confirmed=n_confirmed,
             return_pre_norm=True,
         )
+        if self._mtp_prompt_priming and not return_hidden:
+            from vmlx_engine.native_mtp_prompt_priming import (
+                capture_prefill,
+                capture_requested,
+            )
+
+            if capture_requested(self):
+                capture_prefill(self, inputs, hidden, cache)
         if not return_logits:
             return hidden
         logits = self.lm_head(self.model.norm(hidden))

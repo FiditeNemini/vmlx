@@ -710,6 +710,22 @@ class TestGlmAlignedHeadCache:
         _Batch.model.model_type = "qwen4_exp"
         assert _glm_aligned_head_cache_enabled(_Batch()) is False
 
+    def test_prompt_priming_gate_is_exact_family_and_default_off(
+        self, monkeypatch
+    ):
+        from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
+            _glm_prompt_priming_enabled,
+        )
+
+        monkeypatch.delenv("VMLX_GLM5_MTP_PROMPT_PRIMING", raising=False)
+        monkeypatch.delenv("VMLINUX_GLM5_MTP_PROMPT_PRIMING", raising=False)
+        glm = type("Model", (), {"model_type": "glm5_next"})()
+        qwen = type("Model", (), {"model_type": "qwen4_exp"})()
+        assert _glm_prompt_priming_enabled(glm) is False
+        monkeypatch.setenv("VMLX_GLM5_MTP_PROMPT_PRIMING", "1")
+        assert _glm_prompt_priming_enabled(glm) is True
+        assert _glm_prompt_priming_enabled(qwen) is False
+
     def test_trim_removes_only_unverified_chain_pairs(self):
         from vmlx_engine.patches.mlx_lm_mtp.batch_generator import (
             _MtpState,

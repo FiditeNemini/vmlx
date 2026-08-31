@@ -131,16 +131,18 @@ _GLM5_MLA_PATHS_LOGGED: set[str] = set()
 
 
 def glm5_mla_absorb_enabled() -> bool:
-    """Return whether the experimental compact MLA cache is requested.
+    """Return whether the compact MLA cache is enabled.
 
-    This stays opt-in until the exact source commit has paired served API/UI
-    speed, coherence, tool-continuation, and SSD-refault receipts.  It is a
-    representation change, not a generic family default.
+    Compact v2 is the GLM-5.3 default after an exact 5,268-token live A/B:
+    expanded v1 retained 3.826 GiB per prompt and approached the wired limit,
+    while v2 retained 261 MiB and preserved correct tool/cache/refault
+    behaviour.  Keep an explicit environment opt-out for diagnostics and
+    numerical comparisons with the legacy expanded representation.
     """
 
     return os.environ.get(
         "VMLINUX_GLM5_MLA_ABSORB",
-        os.environ.get("VMLX_GLM5_MLA_ABSORB", "0"),
+        os.environ.get("VMLX_GLM5_MLA_ABSORB", "1"),
     ).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -538,7 +540,12 @@ def _merge_glm5_arrays_caches(caches, merged):
         # arrays are functionally replaced on update, so a new typed wrapper
         # can take ownership of the existing immutable boundary without a
         # model-sized zeros+assignment copy before the final prompt token.
-        merged.state = list(caches[0].state)
+        # ``state`` is the safetensors serialization view.  An empty absorbed
+        # cache encodes its absent slots as rank-1 zero-length tensors there;
+        # feeding those sentinels back into the live cache makes the first
+        # latent update try to concatenate rank 1 with rank 4.  Runtime merge
+        # owns the raw cache slots, never the persistence representation.
+        merged.cache = list(caches[0].cache)
         merged.left_padding = getattr(caches[0], "left_padding", None)
         merged.lengths = getattr(caches[0], "lengths", None)
         return merged
@@ -548,10 +555,10 @@ def _merge_glm5_arrays_caches(caches, merged):
 
     for state_index in range(len(merged.cache)):
         populated = [
-            cache.state[state_index]
+            cache.cache[state_index]
             for cache in caches
-            if cache.state[state_index] is not None
-            and getattr(cache.state[state_index], "size", 0)
+            if cache.cache[state_index] is not None
+            and getattr(cache.cache[state_index], "size", 0)
         ]
         if not populated:
             continue
@@ -560,7 +567,7 @@ def _merge_glm5_arrays_caches(caches, merged):
         shape[0] = batch_size
         value = mx.zeros(shape, exemplar.dtype)
         for batch_index, cache in enumerate(caches):
-            source = cache.state[state_index]
+            source = cache.cache[state_index]
             if source is not None and getattr(source, "size", 0):
                 value[batch_index : batch_index + 1] = source
         merged.cache[state_index] = value

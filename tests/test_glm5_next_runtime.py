@@ -85,6 +85,19 @@ class TestRegistration:
         assert args.num_nextn_predict_layers == 1
         assert args.index_share_for_mtp_iteration is True
 
+    def test_compact_mla_defaults_on_with_explicit_legacy_opt_out(
+        self, glm5, monkeypatch
+    ):
+        monkeypatch.delenv("VMLINUX_GLM5_MLA_ABSORB", raising=False)
+        monkeypatch.delenv("VMLX_GLM5_MLA_ABSORB", raising=False)
+        assert glm5.glm5_mla_absorb_enabled() is True
+
+        monkeypatch.setenv("VMLX_GLM5_MLA_ABSORB", "0")
+        assert glm5.glm5_mla_absorb_enabled() is False
+
+        monkeypatch.setenv("VMLINUX_GLM5_MLA_ABSORB", "true")
+        assert glm5.glm5_mla_absorb_enabled() is True
+
     def test_rejects_rope_and_grouped_router(self, glm5):
         bad = json.loads(json.dumps(TINY_CFG))
         bad["text_config"]["qk_rope_head_dim"] = 64
@@ -296,12 +309,7 @@ class TestCacheAndForward:
         bad_mla = {
             "class_name": "Glm5MLACache",
             "state": live[3].state,
-            "meta_state": (
-                "glm5_next_native_v1",
-                "mla",
-                str(live[3].kpool),
-                str(live[3].offset + 1),
-            ),
+            "meta_state": (*live[3].meta_state[:3], str(live[3].offset + 1)),
         }
         ok, reason, _ = validate_live_cache([bad_mla], source="test:glm5-bad-mla")
         assert ok is False
@@ -334,7 +342,17 @@ class TestCacheAndForward:
             clone_glm5_next_layer_cache,
         )
 
-        live = tiny_model.make_cache()
+        # This row owns the legacy materialized-v1 safetensors contract; the
+        # following row independently owns compact-v2 persistence.
+        live = [
+            glm5.Glm5KDACache()
+            if layer.is_linear
+            else glm5.Glm5MLACache(
+                tiny_model.args.index_kpool,
+                absorbed=False,
+            )
+            for layer in tiny_model.model.layers
+        ]
         tiny_model(mx.array([[1, 2, 3, 4, 5, 6, 7, 8]]), cache=live)
         assert live[3].cache[glm5.MLA_POOL_KEYS] is None
         payload = [
@@ -586,7 +604,7 @@ class TestCacheAndForward:
             attention.indexer.topk = old_indexer_topk
 
     def test_mla_pool_cache_trim_keeps_only_complete_pools(self, glm5):
-        cache = glm5.Glm5MLACache(kpool=4)
+        cache = glm5.Glm5MLACache(kpool=4, absorbed=False)
         cache.cache[glm5.MLA_KEYS] = mx.zeros((1, 2, 10, 8))
         cache.cache[glm5.MLA_VALUES] = mx.zeros((1, 2, 10, 8))
         cache.cache[glm5.MLA_PACKED] = mx.zeros((1, 10, 16))
@@ -1007,6 +1025,18 @@ class TestCacheAndForward:
 class TestSparseDSA:
     """The sparse path's two oracles: full-budget sparse ≡ dense, and
     causality (a query's logits are invariant to future-token changes)."""
+
+    @pytest.fixture(autouse=True)
+    def _materialized_sparse_oracle(self, monkeypatch):
+        """Keep these gathered-K/V oracles on their owning legacy route.
+
+        Compact-v2 dense/sparse prefill and decode equivalence is covered by
+        ``test_absorbed_mla_matches_materialized_prefill_and_decode``.  This
+        class intentionally pins the independent materialized implementation.
+        """
+
+        monkeypatch.delenv("VMLINUX_GLM5_MLA_ABSORB", raising=False)
+        monkeypatch.setenv("VMLX_GLM5_MLA_ABSORB", "0")
 
     def _model(self, glm5, index_topk):
         cfg = json.loads(json.dumps(TINY_CFG))

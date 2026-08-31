@@ -228,7 +228,33 @@ def apply() -> bool:
     def patched_init(self, *args, **kwargs):
         global _LAST_NATIVE_MTP_SKIP
 
-        original_init(self, *args, **kwargs)
+        # PromptProcessingBatch.generate() hands the final prompt token to
+        # GenerationBatch.__init__, whose standard _step() owns that forward.
+        # Capture it at the same owner so the primed head history reaches the
+        # exact prompt boundary before _post_init_mtp advances the sampled
+        # main token. Without this proxy, a 22-token prompt stopped at offset
+        # 21 and was correctly rejected when the backbone arrived at 23.
+        init_args = list(args)
+        init_kwargs = dict(kwargs)
+        init_model = (
+            init_kwargs.get("model")
+            if "model" in init_kwargs
+            else (init_args[0] if init_args else None)
+        )
+        capture_final_prompt = False
+        if init_model is not None and _glm_prompt_priming_enabled(init_model):
+            from ...native_mtp_prompt_priming import capture_requested
+
+            capture_final_prompt = capture_requested(init_model)
+        if capture_final_prompt:
+            proxy = _GlmPromptCaptureProxy(init_model)
+            if "model" in init_kwargs:
+                init_kwargs["model"] = proxy
+            else:
+                init_args[0] = proxy
+        original_init(self, *init_args, **init_kwargs)
+        if capture_final_prompt:
+            self.model = init_model
         if _MTP_BYPASS:
             return  # head stays loaded; decode via the standard step
         if _is_mtp_eligible(self):

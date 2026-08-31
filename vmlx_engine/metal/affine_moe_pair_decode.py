@@ -421,7 +421,7 @@ def affine_moe_pair_activation(
     if config is None or bool(getattr(switch, "training", False)):
         return None, False
     reason = None
-    if x.dtype != mx.float16:
+    if x.dtype not in (mx.float16, mx.bfloat16):
         reason = f"activation_dtype={x.dtype}"
     elif x.ndim not in (2, 3) or int(x.size) != int(x.shape[-1]):
         reason = f"non_decode_shape={tuple(x.shape)}"

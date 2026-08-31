@@ -46,12 +46,18 @@ def test_affine_moe_pair_family_defaults_and_explicit_overrides(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("bits", "activation", "clamp_limit", "metadata_dtype"),
+    (
+        "bits",
+        "activation",
+        "clamp_limit",
+        "metadata_dtype",
+        "activation_dtype",
+    ),
     [
-        (2, SwiGLU(), None, mx.float16),
-        (4, SwiGLU(), None, mx.float16),
-        (2, ClampedSwiGLU(10.0), 10.0, mx.float16),
-        (2, ClampedSwiGLU(10.0), 10.0, mx.bfloat16),
+        (2, SwiGLU(), None, mx.float16, mx.float16),
+        (4, SwiGLU(), None, mx.float16, mx.float16),
+        (2, ClampedSwiGLU(10.0), 10.0, mx.float16, mx.float16),
+        (2, ClampedSwiGLU(10.0), 10.0, mx.bfloat16, mx.bfloat16),
     ],
 )
 def test_affine_moe_pair_kernel_matches_stock_activation(
@@ -59,13 +65,14 @@ def test_affine_moe_pair_kernel_matches_stock_activation(
     activation,
     clamp_limit,
     metadata_dtype,
+    activation_dtype,
 ):
     switch = _quantized_switch(
         bits=bits,
         activation=activation,
         metadata_dtype=metadata_dtype,
     )
-    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(mx.float16)
+    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(activation_dtype)
     indices = mx.array([0, 2, 5, 7], dtype=mx.uint32).reshape(1, 1, 4)
     expanded = mx.expand_dims(x, (-2, -3))
     reference = switch.activation(
@@ -85,8 +92,11 @@ def test_affine_moe_pair_kernel_matches_stock_activation(
     mx.eval(reference, candidate)
 
     assert candidate.shape == reference.shape
-    atol = 2.5e-4 if metadata_dtype == mx.bfloat16 else 3.1e-5
-    rtol = 6e-3 if metadata_dtype == mx.bfloat16 else 2e-3
+    uses_bf16 = (
+        metadata_dtype == mx.bfloat16 or activation_dtype == mx.bfloat16
+    )
+    atol = 2.5e-4 if uses_bf16 else 3.1e-5
+    rtol = 6e-3 if uses_bf16 else 2e-3
     assert mx.allclose(candidate, reference, atol=atol, rtol=rtol)
 
 
@@ -109,8 +119,15 @@ def test_affine_moe_pair_registration_accepts_supported_metadata_dtypes(
     )
 
 
-def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
-    switch = _quantized_switch(bits=2, activation=SwiGLU())
+@pytest.mark.parametrize("activation_dtype", [mx.float16, mx.bfloat16])
+def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill(
+    activation_dtype,
+):
+    switch = _quantized_switch(
+        bits=2,
+        activation=SwiGLU(),
+        metadata_dtype=activation_dtype,
+    )
     config = _PairConfig(
         family="test_dispatch",
         hidden=128,
@@ -122,7 +139,7 @@ def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
     )
     setattr(switch, _CONFIG_ATTR, config)
     try:
-        decode = mx.ones((1, 1, 128), dtype=mx.float16)
+        decode = mx.ones((1, 1, 128), dtype=activation_dtype)
         decode_indices = mx.array([0, 1, 2, 3], dtype=mx.uint32).reshape(
             1, 1, 4
         )
@@ -137,7 +154,7 @@ def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
         assert affine_moe_pair_status("test_dispatch")["observed_calls"] == 1
         assert output.shape == (1, 1, 4, 1, 64)
 
-        prefill = mx.ones((1, 2, 128), dtype=mx.float16)
+        prefill = mx.ones((1, 2, 128), dtype=activation_dtype)
         prefill_indices = mx.zeros((1, 2, 4), dtype=mx.uint32)
         output, used = affine_moe_pair_activation(
             switch, prefill, prefill_indices
@@ -148,8 +165,15 @@ def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():
         delattr(switch, _CONFIG_ATTR)
 
 
-def test_affine_moe_weighted_down_matches_stock_route_reduction():
-    switch = _quantized_switch(bits=2, activation=ClampedSwiGLU(10.0))
+@pytest.mark.parametrize("activation_dtype", [mx.float16, mx.bfloat16])
+def test_affine_moe_weighted_down_matches_stock_route_reduction(
+    activation_dtype,
+):
+    switch = _quantized_switch(
+        bits=2,
+        activation=ClampedSwiGLU(10.0),
+        metadata_dtype=activation_dtype,
+    )
     config = _PairConfig(
         family="test_full_glm",
         hidden=128,
@@ -160,7 +184,7 @@ def test_affine_moe_weighted_down_matches_stock_route_reduction():
         clamp_limit=10.0,
         fuse_down=True,
     )
-    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(mx.float16)
+    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(activation_dtype)
     indices = mx.array([0, 2, 5, 7], dtype=mx.uint32).reshape(1, 1, 4)
     scores = mx.array([0.1, 0.2, 0.3, 0.4], dtype=mx.float32).reshape(
         1, 1, 4
@@ -175,7 +199,9 @@ def test_affine_moe_weighted_down_matches_stock_route_reduction():
     )
     mx.eval(reference, candidate)
     assert candidate.shape == reference.shape
-    assert mx.allclose(candidate, reference, atol=6.2e-5, rtol=3e-3)
+    atol = 5e-4 if activation_dtype == mx.bfloat16 else 6.2e-5
+    rtol = 8e-3 if activation_dtype == mx.bfloat16 else 3e-3
+    assert mx.allclose(candidate, reference, atol=atol, rtol=rtol)
 
     setattr(switch, _CONFIG_ATTR, config)
     try:
@@ -184,7 +210,7 @@ def test_affine_moe_weighted_down_matches_stock_route_reduction():
         )
         assert used is True
         mx.eval(routed)
-        assert mx.allclose(routed, reference, atol=6.2e-5, rtol=3e-3)
+        assert mx.allclose(routed, reference, atol=atol, rtol=rtol)
     finally:
         delattr(switch, _CONFIG_ATTR)
 

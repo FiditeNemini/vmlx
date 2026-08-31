@@ -8,7 +8,9 @@ reduce all selected experts directly into the routed output; mixed q3 layers
 retain MLX down/reduction. No path duplicates the expert payload.
 
 Only source-audited production geometries are accepted.  Registration is
-atomic per family.  Qwen4-Exp is enabled by default after exact-bundle AR/MTP,
+independent per routed layer so mixed affine artifacts retain stock MLX only
+for the layers whose gate/up layout is ineligible.  Qwen4-Exp is enabled by
+default after exact-bundle AR/MTP,
 Electron, Chat Completions, Responses, image, video, and tool-continuation
 proof; its environment flag remains an explicit opt-out.  GLM5-Next remains
 opt-in until its own equivalent gate is complete.
@@ -497,7 +499,7 @@ def affine_moe_routed_output(
 
 
 def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
-    """Register every compatible SwitchGLU atomically for one model family."""
+    """Register each compatible SwitchGLU while preserving exact fallbacks."""
 
     if family not in _FAMILY_CONTRACTS:
         raise ValueError(f"unsupported affine MoE pair family {family}")
@@ -515,37 +517,51 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
         _STATUS[family] = {"installed": 0, "reason": "no SwitchGLU modules"}
         return 0
     accepted: list[tuple[Any, _PairConfig]] = []
-    rejected: list[str] = []
+    rejected: list[tuple[Any, str]] = []
     for module in modules:
         try:
             accepted.append((module, _switch_config(module, family)))
         except (AttributeError, TypeError, ValueError) as exc:
-            rejected.append(str(exc))
-    if rejected:
-        for module in modules:
-            if hasattr(module, _CONFIG_ATTR):
-                delattr(module, _CONFIG_ATTR)
+            rejected.append((module, str(exc)))
+    for module, _reason in rejected:
+        # A loader may be re-run on an already prepared model. Never leave a
+        # stale fast-path marker on a layer whose current layout is ineligible.
+        if hasattr(module, _CONFIG_ATTR):
+            delattr(module, _CONFIG_ATTR)
+    if not accepted:
+        reasons = [reason for _module, reason in rejected]
         _STATUS[family] = {
             "installed": 0,
-            "reason": f"incompatible modules: {rejected[:3]}",
+            "eligible_modules": 0,
+            "fallback_modules": len(rejected),
+            "total_modules": len(modules),
+            "reason": f"incompatible modules: {reasons[:3]}",
+            "fallback_reasons": reasons[:3],
         }
         return 0
     for module, config in accepted:
         setattr(module, _CONFIG_ATTR, config)
     layouts = sorted({(config.bits, config.group_size) for _, config in accepted})
     full_down_modules = sum(config.fuse_down for _, config in accepted)
+    fallback_reasons = [reason for _module, reason in rejected]
     _STATUS[family] = {
         "installed": len(accepted),
-        "reason": None,
+        "eligible_modules": len(accepted),
+        "fallback_modules": len(rejected),
+        "total_modules": len(modules),
+        "reason": None if not rejected else "partial_layout_fallback",
+        "fallback_reasons": fallback_reasons[:3],
         "layouts": layouts,
         "full_down_modules": full_down_modules,
     }
     logger.info(
-        "%s affine MoE pair fusion registered for %d modules; layouts=%s; "
-        "full_down=%d",
+        "%s affine MoE pair fusion registered for %d/%d modules; layouts=%s; "
+        "fallback=%d; full_down=%d",
         family,
         len(accepted),
+        len(modules),
         layouts,
+        len(rejected),
         full_down_modules,
     )
     return len(accepted)

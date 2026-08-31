@@ -6,6 +6,7 @@ import pytest
 from mlx_lm.models.switch_layers import SwiGLU, SwitchGLU
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
+    _FAMILY_CONTRACTS,
     _CONFIG_ATTR,
     _PairConfig,
     _projection_reason,
@@ -13,7 +14,9 @@ from vmlx_engine.metal.affine_moe_pair_decode import (
     _run_pair,
     _run_weighted_down,
     affine_moe_pair_activation,
+    affine_moe_pair_status,
     affine_moe_routed_output,
+    install_affine_moe_pair_decode,
 )
 from vmlx_engine.models.glm5_next.glm5_next import ClampedSwiGLU
 
@@ -43,6 +46,44 @@ def test_affine_moe_pair_family_defaults_and_explicit_overrides(monkeypatch):
     monkeypatch.setenv("VMLX_GLM5_FUSED_MOE_PAIR", "1")
     assert _requested("qwen4_exp") is False
     assert _requested("glm5_next") is True
+
+
+def test_mixed_layout_registration_keeps_compatible_layers_on_fast_path(
+    monkeypatch,
+):
+    compatible = _quantized_switch(bits=2, activation=SwiGLU())
+    fallback = _quantized_switch(bits=3, activation=SwiGLU())
+
+    class _MixedModel:
+        def named_modules(self):
+            return [("compatible", compatible), ("fallback", fallback)]
+
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS,
+        "qwen4_exp",
+        {
+            "hidden": 128,
+            "intermediate": 64,
+            "top_k": 4,
+            "layouts": {(2, 32), (4, 32)},
+            "clamp_limit": None,
+        },
+    )
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+
+    installed = install_affine_moe_pair_decode(
+        _MixedModel(), family="qwen4_exp"
+    )
+    status = affine_moe_pair_status("qwen4_exp")
+
+    assert installed == 1
+    assert hasattr(compatible, _CONFIG_ATTR)
+    assert not hasattr(fallback, _CONFIG_ATTR)
+    assert status["eligible_modules"] == 1
+    assert status["fallback_modules"] == 1
+    assert status["total_modules"] == 2
+    assert status["reason"] == "partial_layout_fallback"
+    assert status["layouts"] == [(2, 32)]
 
 
 @pytest.mark.parametrize(

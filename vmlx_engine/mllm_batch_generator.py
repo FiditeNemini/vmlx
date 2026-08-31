@@ -3871,6 +3871,10 @@ class MLLMNativeMTPStats:
     profile_key_label: str = ""
     prompt_primed_pairs: int = 0
     prompt_prime_source: str = "unprimed"
+    stochastic_distribution_cycles: int = 0
+    stochastic_ratio_checks: int = 0
+    stochastic_ratio_accepts: int = 0
+    stochastic_residual_corrections: int = 0
 
     def to_dict(
         self,
@@ -3950,6 +3954,14 @@ class MLLMNativeMTPStats:
             "prompt_priming": {
                 "source": self.prompt_prime_source,
                 "folded_pairs": int(self.prompt_primed_pairs),
+            },
+            "stochastic_verify": {
+                "distribution_cycles": int(self.stochastic_distribution_cycles),
+                "ratio_checks": int(self.stochastic_ratio_checks),
+                "ratio_accepts": int(self.stochastic_ratio_accepts),
+                "residual_corrections": int(
+                    self.stochastic_residual_corrections
+                ),
             },
             "profiled_phase_timing": _native_mtp_trace_enabled(),
             "fallback_reason": fallback_reason,
@@ -4044,6 +4056,10 @@ def _native_mtp_sampler_accepts_logits(sampler: Callable[[mx.array], mx.array]) 
     return bool(getattr(sampler, "_vmlx_accepts_logits", False))
 
 
+def _native_mtp_sampler_is_greedy(sampler: Callable[[mx.array], mx.array]) -> bool:
+    return bool(getattr(sampler, "_vmlx_is_greedy", False))
+
+
 def _native_mtp_draft_margin_threshold() -> float:
     """Logit gap below which the draft chain stops extending. 0 disables.
 
@@ -4095,7 +4111,9 @@ def _native_mtp_sample_one(
 ) -> Tuple[mx.array, Optional[mx.array]]:
     if _native_mtp_sampler_accepts_logits(sampler):
         token = _native_mtp_ensure_uint32(sampler(logits_2d))
-        return token, None
+        if _native_mtp_sampler_is_greedy(sampler):
+            return token, None
+        return token, _native_mtp_logprobs(logits_2d).squeeze(0)
     logprobs = _native_mtp_logprobs(logits_2d)
     token = _native_mtp_ensure_uint32(sampler(logprobs))
     return token, logprobs.squeeze(0)
@@ -4117,10 +4135,22 @@ def _native_mtp_sample_rows(
     """
     if _native_mtp_sampler_accepts_logits(sampler):
         sampled = _native_mtp_ensure_uint32(sampler(logits_2d))
-        mx.eval(sampled, *also_eval)
+        normalized = (
+            None
+            if _native_mtp_sampler_is_greedy(sampler)
+            else _native_mtp_logprobs(logits_2d)
+        )
+        if normalized is None:
+            mx.eval(sampled, *also_eval)
+        else:
+            mx.eval(sampled, normalized, *also_eval)
         sampled_ids = [int(value) for value in sampled.tolist()]
         rows = int(sampled.shape[0])
-        return [sampled[i : i + 1] for i in range(rows)], [None] * rows, sampled_ids
+        if normalized is None:
+            logprobs = [None] * rows
+        else:
+            logprobs = [normalized[i] for i in range(rows)]
+        return [sampled[i : i + 1] for i in range(rows)], logprobs, sampled_ids
     logprobs = _native_mtp_logprobs(logits_2d)
     sampled = _native_mtp_ensure_uint32(sampler(logprobs))
     mx.eval(sampled, *also_eval)
@@ -4420,6 +4450,7 @@ def _native_mtp_accepted_count(
     draft_lps: List[Optional[mx.array]],
     target_lps: List[Optional[mx.array]],
     sampler: Optional[Callable[[mx.array], mx.array]] = None,
+    telemetry: Optional[Dict[str, int]] = None,
 ) -> int:
     """Count leading accepted drafts for one MTP verify cycle.
 
@@ -4435,7 +4466,41 @@ def _native_mtp_accepted_count(
         target_lps,
         stochastic=_NATIVE_MTP_STOCHASTIC_ACCEPT,
         sampler=sampler,
+        telemetry=telemetry,
     )
+
+
+def _native_mtp_rejection_correction(
+    target_token: mx.array,
+    target_id: int,
+    target_lp: Optional[mx.array],
+    draft_lp: Optional[mx.array],
+    sampler: Callable[[mx.array], mx.array],
+) -> Tuple[mx.array, int]:
+    """Return the verifier correction after one rejected proposal.
+
+    Greedy verification emits the verifier token directly.  Stochastic
+    verification must instead draw from the positive target-minus-proposal
+    residual; otherwise a rejection changes the target distribution.
+    """
+
+    if (
+        not _NATIVE_MTP_STOCHASTIC_ACCEPT
+        or target_lp is None
+        or draft_lp is None
+    ):
+        return target_token, int(target_id)
+
+    from .native_mtp_acceptance import accept_lp_for, residual_sample
+
+    target_accept_lp = accept_lp_for(sampler, target_lp)
+    draft_accept_lp = accept_lp_for(sampler, draft_lp)
+    correction_id, _ = residual_sample(
+        target_accept_lp,
+        draft_accept_lp,
+        sampler=sampler,
+    )
+    return mx.array([correction_id], dtype=mx.uint32), correction_id
 
 
 def _sample_mllm_prefill_logits(
@@ -5063,6 +5128,16 @@ def _native_mtp_log_stats(
             stats.verify_main_forwards,
             stats.replay_main_forwards,
             stats.mtp_forwards,
+        )
+    if stats.stochastic_distribution_cycles:
+        logger.info(
+            "MLLM MTP[%s] stochastic_verify[cycles=%d,ratio_checks=%d,"
+            "ratio_accepts=%d,residual_corrections=%d]",
+            request_id,
+            stats.stochastic_distribution_cycles,
+            stats.stochastic_ratio_checks,
+            stats.stochastic_ratio_accepts,
+            stats.stochastic_residual_corrections,
         )
     total_ms = (
         stats.verify_ms
@@ -14290,6 +14365,18 @@ class MLLMBatchGenerator:
                 return False
 
         sampler = self._make_request_sampler(request)
+        logger.info(
+            "MLLM native MTP sampler contract request=%s request_temp=%s "
+            "request_top_p=%s request_top_k=%s accepts_logits=%s greedy=%s "
+            "distribution=%s",
+            request.request_id,
+            getattr(request, "temperature", None),
+            getattr(request, "top_p", None),
+            getattr(request, "top_k", None),
+            _native_mtp_sampler_accepts_logits(sampler),
+            _native_mtp_sampler_is_greedy(sampler),
+            bool(getattr(sampler, "_vmlx_acceptance_logprobs", None)),
+        )
         seed_main_forwards = 1
         _seed_t0 = time.perf_counter()
         output = self.language_model(
@@ -14569,7 +14656,7 @@ class MLLMBatchGenerator:
         fused_decision = (
             _NATIVE_MTP_FUSED_SYNC
             and bool(state.drafts)
-            and _native_mtp_sampler_accepts_logits(sampler)
+            and _native_mtp_sampler_is_greedy(sampler)
         )
         precomputed_accepted = None
         if fused_decision:
@@ -14591,6 +14678,7 @@ class MLLMBatchGenerator:
             target_tokens, target_lps, target_ids = _native_mtp_sample_rows(
                 logits[:, -(depth + 1) :, :].reshape(depth + 1, -1),
                 sampler,
+                also_eval=(tuple(state.drafts) if _NATIVE_MTP_FUSED_SYNC else ()),
             )
             _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
             trace_t0 = _native_mtp_trace_start()
@@ -14616,12 +14704,24 @@ class MLLMBatchGenerator:
             # Decided on device in the bundle above; no host-side comparison.
             accepted = precomputed_accepted
         else:
+            decision_telemetry: Dict[str, int] = {}
+            if any(lp is not None for lp in state.draft_lps[:depth]) and any(
+                lp is not None for lp in target_lps[:depth]
+            ):
+                state.stats.stochastic_distribution_cycles += 1
             accepted = _native_mtp_accepted_count(
                 state.draft_ids,
                 target_ids,
                 state.draft_lps,
                 target_lps,
                 sampler,
+                telemetry=decision_telemetry,
+            )
+            state.stats.stochastic_ratio_checks += int(
+                decision_telemetry.get("ratio_checks", 0)
+            )
+            state.stats.stochastic_ratio_accepts += int(
+                decision_telemetry.get("ratio_accepts", 0)
             )
 
         state.stats.cycles += 1
@@ -14766,6 +14866,20 @@ class MLLMBatchGenerator:
             state.queue.append((draft_id, draft_lp, "draft"))
         correction = target_tokens[accepted]
         correction_id = int(target_ids[accepted])
+        if accepted < len(state.draft_lps) and accepted < len(target_lps):
+            if (
+                _NATIVE_MTP_STOCHASTIC_ACCEPT
+                and state.draft_lps[accepted] is not None
+                and target_lps[accepted] is not None
+            ):
+                state.stats.stochastic_residual_corrections += 1
+            correction, correction_id = _native_mtp_rejection_correction(
+                correction,
+                correction_id,
+                target_lps[accepted],
+                state.draft_lps[accepted],
+                sampler,
+            )
         state.queue.append((correction_id, target_lps[accepted], "verify"))
         if not skipped_replay:
             confirmed_tokens = [state.next_main] + accepted_drafts

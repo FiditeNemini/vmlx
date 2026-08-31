@@ -142,6 +142,67 @@ class TestStochasticArm:
         target = mx.array([0.0, 0.0])
         assert _accepted([1], [0], draft_lps=[draft], target_lps=[target]) == 0
 
+    def test_request_local_uniform_owns_the_acceptance_draw(self):
+        class _Sampler:
+            temp = 1.0
+            top_p = 1.0
+            min_p = 0.0
+            top_k = 0
+
+            def __init__(self):
+                self.draws = 0
+
+            def _vmlx_random_uniform(self):
+                self.draws += 1
+                return 0.99
+
+        sampler = _Sampler()
+        from vmlx_engine.native_mtp_acceptance import accepted_count
+
+        accepted = accepted_count(
+            [1],
+            [2],
+            [_lp({1: 0.8, 2: 0.2})],
+            [_lp({1: 0.2, 2: 0.8})],
+            stochastic=True,
+            sampler=sampler,
+        )
+        assert accepted == 0
+        assert sampler.draws == 1
+
+    def test_residual_correction_excludes_proposal_only_mass(self):
+        from vmlx_engine.native_mtp_acceptance import residual_sample
+
+        # q puts all useful mass on token 0 while p puts its surplus on token
+        # 1.  The positive residual therefore has exactly one possible draw.
+        target = _lp({0: 0.1, 1: 0.9})
+        draft = _lp({0: 0.9, 1: 0.1})
+        token, returned = residual_sample(target, draft)
+        assert token == 1
+        assert bool(mx.array_equal(returned, target))
+
+    def test_mllm_rejection_uses_residual_not_independent_target_draw(self):
+        from vmlx_engine.mllm_batch_generator import (
+            _native_mtp_rejection_correction,
+        )
+
+        class _Sampler:
+            temp = 1.0
+            top_p = 1.0
+            min_p = 0.0
+            top_k = 0
+
+        original = mx.array([0], dtype=mx.uint32)
+        correction, correction_id = _native_mtp_rejection_correction(
+            original,
+            0,
+            _lp({0: 0.1, 1: 0.9}),
+            _lp({0: 0.9, 1: 0.1}),
+            _Sampler(),
+        )
+        assert correction_id == 1
+        assert int(correction.item()) == 1
+
 
 class TestBothSchedulersShareOneRule:
     """The MLLM path and the text path must not drift apart.

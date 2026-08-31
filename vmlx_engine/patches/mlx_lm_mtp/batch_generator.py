@@ -2071,20 +2071,9 @@ def _residual_sample(
 
     Returns ``(token_id_int, verify_lp_1d)``.
     """
-    import mlx.core as mx
+    from ...native_mtp_acceptance import residual_sample
 
-    p_target = mx.exp(verify_lp_2d.squeeze(0))
-    p_draft = mx.exp(draft_lp_1d)
-    residual = mx.maximum(p_target - p_draft, 0.0)
-    # Keep z in graph; mx.where switches to the target distribution when
-    # the residual mass is zero. ``categorical`` treats log(0) = -inf as
-    # p=0 so no safety epsilon is needed.
-    z = residual.sum(keepdims=True)
-    dist = mx.where(z > 0, residual, p_target)
-    logits = mx.log(dist).reshape(1, -1)
-    categorical = getattr(sampler, "_vmlx_categorical", None)
-    sample = categorical(logits) if categorical is not None else mx.random.categorical(logits)
-    return int(sample.item()), verify_lp_2d.squeeze(0)
+    return residual_sample(verify_lp_2d, draft_lp_1d, sampler=sampler)
 
 
 # ---------------------------------------------------------------------------

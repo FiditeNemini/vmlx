@@ -37,10 +37,16 @@ def accept_lp_for(sampler: Optional[Callable[[Any], Any]], lp: Any) -> Any:
     """
     if sampler is None:
         return lp
+    exact_contract = getattr(sampler, "_vmlx_acceptance_logprobs", None)
+    if exact_contract is not None:
+        return exact_contract(lp)
     try:
         from omlx.utils.sampling import apply_min_p, apply_top_k, apply_top_p
     except Exception:
-        return lp
+        try:
+            from mlx_lm.sample_utils import apply_min_p, apply_top_k, apply_top_p
+        except Exception:
+            return lp
 
     temp = float(getattr(sampler, "temp", 0.0) or 0.0)
     if temp == 0.0:
@@ -81,6 +87,7 @@ def accepted_count(
     stochastic: bool,
     sampler: Optional[Callable[[Any], Any]] = None,
     filtered: bool = False,
+    telemetry: Optional[dict[str, int]] = None,
 ) -> int:
     """Count leading accepted drafts for one verify cycle.
 
@@ -109,6 +116,8 @@ def accepted_count(
         if not filtered:
             target_lp = accept_lp_for(sampler, target_lp)
             draft_lp = accept_lp_for(sampler, draft_lp)
+        if telemetry is not None:
+            telemetry["ratio_checks"] = int(telemetry.get("ratio_checks", 0)) + 1
         # MLX does not raise on an out-of-range index, so a short or ragged row
         # would silently read as log_ratio 0.0 and ACCEPT the draft.  Check the
         # width explicitly rather than relying on an exception.
@@ -127,8 +136,48 @@ def accepted_count(
             # been drawn from this distribution, so the ratio is meaningless.
             break
         if log_ratio < 0.0:
-            draw = float(mx.random.uniform(shape=(1,)).item())
+            uniform = getattr(sampler, "_vmlx_random_uniform", None)
+            draw = (
+                float(uniform())
+                if uniform is not None
+                else float(mx.random.uniform(shape=(1,)).item())
+            )
             if draw <= 0.0 or math.log(draw) > log_ratio:
                 break
+        if telemetry is not None:
+            telemetry["ratio_accepts"] = int(
+                telemetry.get("ratio_accepts", 0)
+            ) + 1
         accepted += 1
     return accepted
+
+
+def residual_sample(
+    target_lp: Any,
+    draft_lp: Any,
+    *,
+    sampler: Optional[Callable[[Any], Any]] = None,
+) -> tuple[int, Any]:
+    """Sample the exact correction distribution after a rejected draft.
+
+    ``target_lp`` and ``draft_lp`` must already describe the filtered
+    distributions used by their samplers.  Sampling from ``max(p-q, 0)`` is
+    the correction that preserves the target marginal; reusing an independent
+    target draw after rejection does not.
+    """
+
+    target_2d = target_lp.reshape(1, -1) if target_lp.ndim == 1 else target_lp
+    draft_1d = draft_lp.reshape(-1)
+    p_target = mx.exp(target_2d.squeeze(0))
+    p_draft = mx.exp(draft_1d)
+    residual = mx.maximum(p_target - p_draft, 0.0)
+    mass = residual.sum(keepdims=True)
+    distribution = mx.where(mass > 0, residual, p_target)
+    logits = mx.log(distribution).reshape(1, -1)
+    categorical = getattr(sampler, "_vmlx_categorical", None)
+    sample = (
+        categorical(logits)
+        if categorical is not None
+        else mx.random.categorical(logits)
+    )
+    return int(sample.item()), target_2d.squeeze(0)

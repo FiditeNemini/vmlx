@@ -31,6 +31,79 @@ class _SamplerWrapper:
         return getattr(self._sampler, name)
 
 
+def _stamp_sampling_contract(
+    sampler: Callable[[mx.array], mx.array],
+    *,
+    temp: float,
+    top_p: float,
+    min_p: float,
+    top_k: int,
+) -> Callable[[mx.array], mx.array]:
+    """Publish the distribution contract consumed by speculative verify.
+
+    Compact samplers consume raw logits, but speculative acceptance still
+    needs to reconstruct the exact filtered distribution they sampled.  Keep
+    that metadata on every sampler instead of inferring it from whether the
+    callable consumes logits or log-probabilities.
+    """
+
+    sampler.temp = float(temp or 0.0)
+    sampler.top_p = float(top_p or 0.0)
+    sampler.min_p = float(min_p or 0.0)
+    sampler.top_k = int(top_k or 0)
+    return sampler
+
+
+def _compact_top_k_acceptance_logprobs(
+    logprobs: mx.array,
+    *,
+    temp: float,
+    top_p: float,
+    top_k: int,
+) -> mx.array:
+    """Rebuild the exact full-vocabulary distribution of compact top-k.
+
+    The sampler selects top-k first, applies its nucleus cutoff against the
+    original full-distribution mass, temperature-scales the surviving compact
+    rows, and only then normalizes through categorical sampling.  Speculative
+    acceptance and residual correction need that same distribution, expanded
+    back to the original vocabulary indices.
+    """
+
+    vocab_size = int(logprobs.shape[-1])
+    k = min(int(top_k), vocab_size)
+    top_indices = mx.argpartition(-logprobs, kth=k - 1, axis=-1)[..., :k]
+    top_values = mx.take_along_axis(logprobs, top_indices, axis=-1)
+    order = mx.argsort(-top_values, axis=-1)
+    top_values = mx.take_along_axis(top_values, order, axis=-1)
+    top_indices = mx.take_along_axis(top_indices, order, axis=-1)
+    if 0.0 < float(top_p) < 1.0:
+        probabilities = mx.exp(top_values)
+        cumulative = mx.cumsum(probabilities, axis=-1)
+        keep = (cumulative - probabilities) < float(top_p)
+        top_values = mx.where(keep, top_values, -float("inf"))
+    scaled = top_values * (1.0 / float(temp))
+    compact = scaled - mx.logsumexp(scaled, axis=-1, keepdims=True)
+    full = mx.full(logprobs.shape, -float("inf"), dtype=logprobs.dtype)
+    return mx.put_along_axis(full, top_indices, compact, axis=-1)
+
+
+def _stamp_compact_top_k_contract(
+    sampler: Callable[[mx.array], mx.array],
+    *,
+    temp: float,
+    top_p: float,
+    top_k: int,
+) -> Callable[[mx.array], mx.array]:
+    sampler._vmlx_acceptance_logprobs = partial(
+        _compact_top_k_acceptance_logprobs,
+        temp=float(temp),
+        top_p=float(top_p or 0.0),
+        top_k=int(top_k),
+    )
+    return sampler
+
+
 def make_sampler(
     *,
     temp: float = 0.0,
@@ -50,42 +123,82 @@ def make_sampler(
     """
 
     if float(temp or 0.0) == 0.0:
-        return _SamplerWrapper(
-            lambda x: mx.argmax(x, axis=-1),
-            accepts_logits=True,
-            is_greedy=True,
+        return _stamp_sampling_contract(
+            _SamplerWrapper(
+                lambda x: mx.argmax(x, axis=-1),
+                accepts_logits=True,
+                is_greedy=True,
+            ),
+            temp=0.0,
+            top_p=top_p,
+            min_p=min_p,
+            top_k=top_k,
         )
 
     if seed is not None:
         if int(top_k or 0) > 0 and float(min_p or 0.0) == 0.0:
-            return _SamplerWrapper(
-                _make_seeded_compact_top_k_sampler(
-                    temp=float(temp),
-                    top_p=float(top_p or 0.0),
-                    top_k=int(top_k),
-                    seed=int(seed),
+            return _stamp_sampling_contract(
+                _stamp_compact_top_k_contract(
+                    _SamplerWrapper(
+                        _make_seeded_compact_top_k_sampler(
+                            temp=float(temp),
+                            top_p=float(top_p or 0.0),
+                            top_k=int(top_k),
+                            seed=int(seed),
+                        ),
+                        accepts_logits=True,
+                    ),
+                    temp=temp,
+                    top_p=top_p,
+                    top_k=top_k,
                 ),
-                accepts_logits=True,
+                temp=temp,
+                top_p=top_p,
+                min_p=min_p,
+                top_k=top_k,
             )
-        return _make_seeded_logprob_sampler(
-            temp=float(temp),
-            top_p=float(top_p or 0.0),
-            min_p=float(min_p or 0.0),
-            top_k=int(top_k or 0),
-            seed=int(seed),
+        return _stamp_sampling_contract(
+            _make_seeded_logprob_sampler(
+                temp=float(temp),
+                top_p=float(top_p or 0.0),
+                min_p=float(min_p or 0.0),
+                top_k=int(top_k or 0),
+                seed=int(seed),
+            ),
+            temp=temp,
+            top_p=top_p,
+            min_p=min_p,
+            top_k=top_k,
         )
 
     if int(top_k or 0) > 0 and float(min_p or 0.0) == 0.0:
-        return _SamplerWrapper(
-            _make_compact_top_k_sampler(
-                temp=float(temp),
-                top_p=float(top_p or 0.0),
-                top_k=int(top_k),
+        return _stamp_sampling_contract(
+            _stamp_compact_top_k_contract(
+                _SamplerWrapper(
+                    _make_compact_top_k_sampler(
+                        temp=float(temp),
+                        top_p=float(top_p or 0.0),
+                        top_k=int(top_k),
+                    ),
+                    accepts_logits=True,
+                ),
+                temp=temp,
+                top_p=top_p,
+                top_k=top_k,
             ),
-            accepts_logits=True,
+            temp=temp,
+            top_p=top_p,
+            min_p=min_p,
+            top_k=top_k,
         )
 
-    return _mlx_make_sampler(temp=temp, top_p=top_p, min_p=min_p, top_k=top_k)
+    return _stamp_sampling_contract(
+        _mlx_make_sampler(temp=temp, top_p=top_p, min_p=min_p, top_k=top_k),
+        temp=temp,
+        top_p=top_p,
+        min_p=min_p,
+        top_k=top_k,
+    )
 
 
 def make_minimax_m3_sampler(

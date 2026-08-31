@@ -2934,6 +2934,7 @@ class TestNativeMtpAutodetect:
             return mx.argmax(logits, axis=-1).astype(mx.uint32)
 
         greedy_sampler._vmlx_accepts_logits = True
+        greedy_sampler._vmlx_is_greedy = True
         generator._make_request_sampler = lambda _req: greedy_sampler
 
         first_token = mx.array([2], dtype=mx.uint32)
@@ -3003,12 +3004,38 @@ class TestNativeMtpAutodetect:
             return mx.argmax(rows, axis=-1).astype(mx.uint32)
 
         greedy._vmlx_accepts_logits = True
+        greedy._vmlx_is_greedy = True
 
         tokens, logprobs, token_ids = _native_mtp_sample_rows(logits, greedy)
 
         assert [int(token.tolist()[0]) for token in tokens] == [1, 0, 2]
         assert logprobs == [None, None, None]
         assert token_ids == [1, 0, 2]
+
+    def test_compact_stochastic_logits_sampler_keeps_acceptance_rows(self):
+        import mlx.core as mx
+
+        from vmlx_engine.mllm_batch_generator import _native_mtp_sample_rows
+
+        logits = mx.array([[0.0, 4.0, 1.0], [3.0, 1.0, 0.0]])
+
+        def compact(rows):
+            return mx.argmax(rows, axis=-1).astype(mx.uint32)
+
+        compact._vmlx_accepts_logits = True
+        compact._vmlx_is_greedy = False
+        compact.temp = 1.0
+        compact.top_p = 1.0
+        compact.min_p = 0.0
+        compact.top_k = 2
+
+        tokens, logprobs, token_ids = _native_mtp_sample_rows(logits, compact)
+
+        assert token_ids == [1, 0]
+        assert [int(token.item()) for token in tokens] == [1, 0]
+        assert all(row is not None for row in logprobs)
+        for row in logprobs:
+            assert bool(mx.allclose(mx.exp(row).sum(), mx.array(1.0)))
 
     def test_mllm_native_mtp_enables_sampled_requests_with_stochastic_verify(
         self, monkeypatch

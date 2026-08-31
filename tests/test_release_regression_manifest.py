@@ -13806,6 +13806,34 @@ def test_release_regression_manifest_rejects_incomplete_current_tool_call_matrix
     ]
 
 
+def test_release_regression_manifest_accepts_only_declared_dsv4_live_tool_deferral():
+    from tests.cross_matrix.release_regression_manifest import (
+        _current_tool_call_matrix_state_is_acceptable,
+    )
+
+    dsv4_live_check = "live_default_cache_dsv4_tool_loop_artifact_present"
+    matrix = {
+        "status": "open",
+        "missing_markers": [],
+        "open_proof_gaps": ["live_default_cache_dsv4_tool_loop"],
+        "failed_checks": [dsv4_live_check],
+        "missing_expected_checks": [],
+    }
+
+    assert _current_tool_call_matrix_state_is_acceptable(matrix) is True
+
+    for key, value in (
+        ("status", "fail"),
+        ("missing_markers", ["panel max tool iterations caps tool loops"]),
+        ("open_proof_gaps", ["some_other_live_gap"]),
+        ("failed_checks", ["panel_max_tool_iterations_caps_tool_loops"]),
+        ("missing_expected_checks", ["schema_valid_dsml_tool_call_preserved"]),
+    ):
+        changed = dict(matrix)
+        changed[key] = value
+        assert _current_tool_call_matrix_state_is_acceptable(changed) is False
+
+
 def test_release_regression_manifest_rejects_incomplete_current_native_mtp_matrix(tmp_path):
     mtp_artifact = CURRENT_POST_BUDGET_EDGE_ARTIFACTS["native-mtp-d3-effect-policy"]
     for artifact in CURRENT_POST_BUDGET_EDGE_ARTIFACTS.values():

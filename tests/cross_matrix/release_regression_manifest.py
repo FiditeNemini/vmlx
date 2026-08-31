@@ -2498,11 +2498,8 @@ def validate_current_proof_sweep_artifacts(root: Path) -> dict[str, Any]:
         and not reasoning_template_matrix["failed_checks"]
         and not reasoning_template_matrix["missing_expected_checks"]
     )
-    tool_call_matrix_ok = (
-        tool_call_matrix["status"] == "pass"
-        and not tool_call_matrix["missing_markers"]
-        and not tool_call_matrix["failed_checks"]
-        and not tool_call_matrix["missing_expected_checks"]
+    tool_call_matrix_ok = _current_tool_call_matrix_state_is_acceptable(
+        tool_call_matrix
     )
     panel_tool_security_matrix_ok = (
         panel_tool_security_matrix["status"] == "pass"
@@ -8761,6 +8758,7 @@ def _validate_current_tool_call_matrix_artifact(root: Path) -> dict[str, Any]:
         "status": "missing",
         "checks": {},
         "missing_markers": [],
+        "open_proof_gaps": [],
         "failed_checks": list(EXPECTED_CURRENT_TOOL_CALL_CHECKS),
         "missing_expected_checks": list(EXPECTED_CURRENT_TOOL_CALL_CHECKS),
     }
@@ -8789,11 +8787,45 @@ def _validate_current_tool_call_matrix_artifact(root: Path) -> dict[str, Any]:
             "status": str(payload.get("status")),
             "checks": checks,
             "missing_markers": [str(item) for item in payload.get("missing_markers", [])],
+            "open_proof_gaps": [
+                str(item) for item in payload.get("open_proof_gaps", [])
+            ],
             "failed_checks": failed_checks,
             "missing_expected_checks": missing_expected_checks,
         }
     )
     return result
+
+
+def _current_tool_call_matrix_state_is_acceptable(matrix: dict[str, Any]) -> bool:
+    """Keep source/tool gates strict while honoring the declared DSV4 deferral.
+
+    The DSV4 live write-file receipt is a model-family row, not a source-only
+    parser/security check. A checkpoint may defer only that exact absent live
+    artifact when DSV4 is already declared out of release scope. Any other
+    failed check, marker gap, or proof gap remains release-blocking.
+    """
+
+    if (
+        matrix.get("status") == "pass"
+        and not matrix.get("missing_markers")
+        and not matrix.get("failed_checks")
+        and not matrix.get("missing_expected_checks")
+    ):
+        return True
+
+    dsv4_live_artifact_check = (
+        "live_default_cache_dsv4_tool_loop_artifact_present"
+    )
+    return (
+        "dsv4" in DEFERRED_RELEASE_FAMILIES
+        and matrix.get("status") == "open"
+        and matrix.get("open_proof_gaps")
+        == ["live_default_cache_dsv4_tool_loop"]
+        and not matrix.get("missing_markers")
+        and matrix.get("failed_checks") == [dsv4_live_artifact_check]
+        and not matrix.get("missing_expected_checks")
+    )
 
 
 def _validate_current_panel_tool_security_matrix_artifact(root: Path) -> dict[str, Any]:

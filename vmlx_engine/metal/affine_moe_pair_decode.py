@@ -122,10 +122,19 @@ def _projection_reason(projection: Any, *, hidden: int, intermediate: int) -> st
         return f"output_dims={projection.output_dims}"
     if projection.weight.dtype != mx.uint32:
         return f"weight_dtype={projection.weight.dtype}"
-    if projection.scales.dtype != mx.float16:
+    metadata_dtypes = (mx.float16, mx.bfloat16)
+    if projection.scales.dtype not in metadata_dtypes:
         return f"scale_dtype={projection.scales.dtype}"
-    if projection.biases is None or projection.biases.dtype != mx.float16:
+    if (
+        projection.biases is None
+        or projection.biases.dtype not in metadata_dtypes
+    ):
         return f"bias_dtype={getattr(projection.biases, 'dtype', None)}"
+    if projection.biases.dtype != projection.scales.dtype:
+        return (
+            "affine metadata dtypes differ: "
+            f"scales={projection.scales.dtype} biases={projection.biases.dtype}"
+        )
     if "bias" in projection:
         return "post-matmul bias is unsupported"
     if projection.weight.ndim != 3 or projection.scales.ndim != 3:

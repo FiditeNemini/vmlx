@@ -8,6 +8,7 @@ from mlx_lm.models.switch_layers import SwiGLU, SwitchGLU
 from vmlx_engine.metal.affine_moe_pair_decode import (
     _CONFIG_ATTR,
     _PairConfig,
+    _projection_reason,
     _requested,
     _run_pair,
     _run_weighted_down,
@@ -17,12 +18,17 @@ from vmlx_engine.metal.affine_moe_pair_decode import (
 from vmlx_engine.models.glm5_next.glm5_next import ClampedSwiGLU
 
 
-def _quantized_switch(*, bits: int, activation: nn.Module) -> SwitchGLU:
+def _quantized_switch(
+    *,
+    bits: int,
+    activation: nn.Module,
+    metadata_dtype=mx.float16,
+) -> SwitchGLU:
     switch = SwitchGLU(128, 64, 8, activation=activation, bias=False)
     nn.quantize(switch, bits=bits, group_size=32, mode="affine")
     for projection in (switch.gate_proj, switch.up_proj, switch.down_proj):
-        projection.scales = projection.scales.astype(mx.float16)
-        projection.biases = projection.biases.astype(mx.float16)
+        projection.scales = projection.scales.astype(metadata_dtype)
+        projection.biases = projection.biases.astype(metadata_dtype)
     switch.eval()
     return switch
 
@@ -40,19 +46,25 @@ def test_affine_moe_pair_family_defaults_and_explicit_overrides(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("bits", "activation", "clamp_limit"),
+    ("bits", "activation", "clamp_limit", "metadata_dtype"),
     [
-        (2, SwiGLU(), None),
-        (4, SwiGLU(), None),
-        (2, ClampedSwiGLU(10.0), 10.0),
+        (2, SwiGLU(), None, mx.float16),
+        (4, SwiGLU(), None, mx.float16),
+        (2, ClampedSwiGLU(10.0), 10.0, mx.float16),
+        (2, ClampedSwiGLU(10.0), 10.0, mx.bfloat16),
     ],
 )
 def test_affine_moe_pair_kernel_matches_stock_activation(
     bits,
     activation,
     clamp_limit,
+    metadata_dtype,
 ):
-    switch = _quantized_switch(bits=bits, activation=activation)
+    switch = _quantized_switch(
+        bits=bits,
+        activation=activation,
+        metadata_dtype=metadata_dtype,
+    )
     x = (mx.random.normal((1, 1, 128)) * 0.2).astype(mx.float16)
     indices = mx.array([0, 2, 5, 7], dtype=mx.uint32).reshape(1, 1, 4)
     expanded = mx.expand_dims(x, (-2, -3))
@@ -73,7 +85,28 @@ def test_affine_moe_pair_kernel_matches_stock_activation(
     mx.eval(reference, candidate)
 
     assert candidate.shape == reference.shape
-    assert mx.allclose(candidate, reference, atol=3.1e-5, rtol=2e-3)
+    atol = 2.5e-4 if metadata_dtype == mx.bfloat16 else 3.1e-5
+    rtol = 6e-3 if metadata_dtype == mx.bfloat16 else 2e-3
+    assert mx.allclose(candidate, reference, atol=atol, rtol=rtol)
+
+
+@pytest.mark.parametrize("metadata_dtype", [mx.float16, mx.bfloat16])
+def test_affine_moe_pair_registration_accepts_supported_metadata_dtypes(
+    metadata_dtype,
+):
+    switch = _quantized_switch(
+        bits=2,
+        activation=ClampedSwiGLU(10.0),
+        metadata_dtype=metadata_dtype,
+    )
+    assert (
+        _projection_reason(
+            switch.gate_proj,
+            hidden=128,
+            intermediate=64,
+        )
+        is None
+    )
 
 
 def test_affine_moe_pair_registration_owns_decode_and_falls_back_for_prefill():

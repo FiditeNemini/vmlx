@@ -484,7 +484,9 @@ def take_primed(host: Any, backbone_cache: Any, main_token: Any) -> Optional[tup
 
 def prime_stats(host: Any) -> dict[str, Any]:
     ctx = getattr(host, _CTX_ATTR, None)
+    plan = getattr(host, _PLAN_ATTR, None)
     return {
+        "plan_armed": isinstance(plan, _PrimePlan),
         "active": isinstance(ctx, _PrimeContext) and not ctx.window_exceeded,
         "folded_pairs": int(ctx.folded) if isinstance(ctx, _PrimeContext) else 0,
         "window_exceeded": bool(

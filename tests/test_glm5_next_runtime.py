@@ -1004,9 +1004,14 @@ class TestNativeMTP:
         generator = None
         try:
             set_mtp_active(True)
+            # Construct before the request policy is enabled. The request plan,
+            # not a stale model-construction snapshot of the environment, owns
+            # whether prompt capture runs.
+            monkeypatch.delenv("VMLX_GLM5_MTP_PROMPT_PRIMING", raising=False)
             model = glm5.Model(glm5.ModelArgs.from_dict(TINY_CFG))
             model.eval()
             mx.eval(model.parameters())
+            monkeypatch.setenv("VMLX_GLM5_MTP_PROMPT_PRIMING", "1")
             generator = BatchGenerator(
                 model,
                 max_tokens=8,

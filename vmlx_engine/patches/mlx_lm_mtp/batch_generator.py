@@ -1183,15 +1183,24 @@ def _post_init_mtp(gen_batch: Any) -> None:
 
     state = _MtpState()
     if _glm_prompt_priming_enabled(gen_batch.model):
-        from ...native_mtp_prompt_priming import take_primed
+        from ...native_mtp_prompt_priming import prime_stats, take_primed
 
+        prime_before_seam = prime_stats(gen_batch.model)
         primed = take_primed(
             gen_batch.model, gen_batch.prompt_cache, main_tok
         )
     else:
+        prime_before_seam = None
         primed = None
     if primed is None:
         state.mtp_cache = gen_batch.model.make_mtp_cache()
+        if prime_before_seam is not None:
+            if prime_before_seam.get("active"):
+                state.stats.prompt_prime_source = "capture_discarded_at_seam"
+            elif prime_before_seam.get("plan_armed"):
+                state.stats.prompt_prime_source = "armed_no_capture"
+            else:
+                state.stats.prompt_prime_source = "not_armed"
     else:
         state.mtp_cache, state.stats.prompt_primed_pairs = primed
         state.stats.prompt_prime_source = "cold_prompt"

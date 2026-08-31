@@ -139,6 +139,7 @@ def test_cold_prompt_is_folded_and_published_at_full_block_boundary():
     )
     assert host.calls == [[2, 3, 4]]
     assert prime_stats(host) == {
+        "plan_armed": True,
         "active": True,
         "folded_pairs": 3,
         "window_exceeded": False,
@@ -324,4 +325,27 @@ def test_native_mtp_stats_expose_prompt_priming_provenance():
     assert payload["prompt_priming"] == {
         "source": "restored_prefix_and_tail",
         "folded_pairs": 127,
+    }
+
+
+def test_prime_stats_distinguishes_armed_plan_from_captured_context():
+    host = _Host()
+    assert prime_stats(host) == {
+        "plan_armed": False,
+        "active": False,
+        "folded_pairs": 0,
+        "window_exceeded": False,
+    }
+    assert not prepare_prompt(
+        host,
+        request_id="armed-only",
+        prompt_tokens=[1, 2, 3],
+        cached_tokens=0,
+        prefix_cache=None,
+    )
+    assert prime_stats(host) == {
+        "plan_armed": True,
+        "active": False,
+        "folded_pairs": 0,
+        "window_exceeded": False,
     }

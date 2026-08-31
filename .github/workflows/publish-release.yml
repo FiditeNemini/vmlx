@@ -361,7 +361,7 @@ jobs:
 
       - name: Publish without a stored PyPI token
         if: ${{ steps.pypi-state.outputs.publish_required == 'true' }}
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           packages-dir: candidate/python-dist/
           verbose: true
@@ -433,7 +433,7 @@ jobs:
 
       - name: Publish exact release assets without a stored PyPI token
         if: ${{ steps.pypi-state.outputs.publish_required == 'true' }}
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
         with:
           packages-dir: candidate/python-dist/
           verbose: true

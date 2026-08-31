@@ -284,7 +284,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 label="KDA q/k/v convolution and state fusion",
                 kind="metal_kernel",
                 scopes=("ar_decode", "mtp_decode"),
-                default=False,
+                default=True,
                 env=("VMLX_GLM5_FUSED_KDA_CONV",),
             ),
             _feature(
@@ -292,7 +292,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 label="KDA recurrent-state update fusion",
                 kind="metal_kernel",
                 scopes=("ar_decode", "mtp_decode"),
-                default=False,
+                default=True,
                 env=("VMLX_GLM5_FUSED_KDA_STEP",),
             ),
             _feature(

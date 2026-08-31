@@ -73,6 +73,32 @@ def test_glm_mhc_default_has_explicit_opt_out(monkeypatch):
     assert fused_glm5_mhc_requested() is False
 
 
+def test_glm_kda_decode_defaults_have_explicit_opt_out(monkeypatch):
+    from vmlx_engine.acceleration_contract import build_acceleration_contract
+    from vmlx_engine.metal.kda_conv_decode import fused_kda_conv_requested
+    from vmlx_engine.metal.kda_step_decode import fused_kda_step_requested
+
+    for name in ("VMLX_GLM5_FUSED_KDA_CONV", "VMLX_GLM5_FUSED_KDA_STEP"):
+        monkeypatch.delenv(name, raising=False)
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["kda_conv_state"]["requested"] is True
+    assert rows["kda_conv_state"]["selection_source"] == "default"
+    assert rows["kda_recurrent_step"]["requested"] is True
+    assert rows["kda_recurrent_step"]["selection_source"] == "default"
+    assert fused_kda_conv_requested() is True
+    assert fused_kda_step_requested() is True
+
+    monkeypatch.setenv("VMLX_GLM5_FUSED_KDA_CONV", "0")
+    monkeypatch.setenv("VMLX_GLM5_FUSED_KDA_STEP", "0")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["kda_conv_state"]["requested"] is False
+    assert rows["kda_conv_state"]["state"] == "disabled"
+    assert rows["kda_recurrent_step"]["requested"] is False
+    assert rows["kda_recurrent_step"]["state"] == "disabled"
+    assert fused_kda_conv_requested() is False
+    assert fused_kda_step_requested() is False
+
+
 def test_glm_mhc_verify_fusions_default_off_with_explicit_opt_in(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
     from vmlx_engine.metal.glm5_hc_place_decode import (
@@ -195,10 +221,10 @@ def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     assert rows["startup_warmup"]["state"] == "active_observed"
     assert rows["kda_conv_state"]["state"] == "installed_unobserved"
     assert contract["summary"] == {
-        "requested": 6,
+        "requested": 7,
         "installed": 3,
         "observed": 1,
-        "source_only_or_unattested": 3,
+        "source_only_or_unattested": 4,
     }
 
 

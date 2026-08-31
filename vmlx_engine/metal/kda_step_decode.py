@@ -1,4 +1,9 @@
-"""Single-dispatch GLM KDA recurrent update for batch-one decode."""
+"""Single-dispatch GLM KDA recurrent update for batch-one decode.
+
+The production GLM decode geometry is enabled by default after full-model
+throughput and output-equivalence qualification.  Set
+``VMLX_GLM5_FUSED_KDA_STEP=0`` for an explicit stock-path rollback.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +16,7 @@ _OBSERVED = False
 
 
 def fused_kda_step_requested() -> bool:
-    value = os.environ.get("VMLX_GLM5_FUSED_KDA_STEP", "0").strip().lower()
+    value = os.environ.get("VMLX_GLM5_FUSED_KDA_STEP", "1").strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 
 

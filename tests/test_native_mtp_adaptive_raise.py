@@ -49,9 +49,55 @@ def _clean_env(monkeypatch):
         "VMLX_NATIVE_MTP_COST_FALLBACK",
         "VMLINUX_NATIVE_MTP_ADAPTIVE_VALUE",
         "VMLX_NATIVE_MTP_ADAPTIVE_VALUE",
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        "VMLINUX_NATIVE_MTP_DEPTH",
+        "VMLX_NATIVE_MTP_DEPTH",
+        "VMLINUX_NATIVE_MTP_DRAFT_MARGIN",
+        "VMLX_NATIVE_MTP_DRAFT_MARGIN",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_VALUE", "0")
+
+
+class TestFixedDepthConfidenceGate:
+    def test_fixed_d3_uses_measured_margin_default(self, monkeypatch):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        assert gen._native_mtp_draft_margin_threshold("qwen4_exp") == pytest.approx(
+            1.0
+        )
+
+    def test_adaptive_and_fixed_d2_keep_margin_disabled(self, monkeypatch):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "1")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        assert gen._native_mtp_draft_margin_threshold("qwen4_exp") == pytest.approx(
+            0.0
+        )
+
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "2")
+        assert gen._native_mtp_draft_margin_threshold("qwen4_exp") == pytest.approx(
+            0.0
+        )
+
+    def test_unmeasured_families_keep_margin_disabled(self, monkeypatch):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        assert gen._native_mtp_draft_margin_threshold("glm5_next") == pytest.approx(
+            0.0
+        )
+        assert gen._native_mtp_draft_margin_threshold("qwen3_5") == pytest.approx(
+            0.0
+        )
+
+    def test_explicit_margin_still_overrides_fixed_d3_default(self, monkeypatch):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DRAFT_MARGIN", "0.25")
+        assert gen._native_mtp_draft_margin_threshold("glm5_next") == pytest.approx(
+            0.25
+        )
 
 
 class TestRaises:

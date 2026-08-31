@@ -3943,6 +3943,7 @@ class MLLMNativeMTPStats:
             "verify_emits": int(self.verify_emits),
             "drafted_tokens": int(self.drafted_tokens),
             "accepted_tokens": int(self.accepted_tokens),
+            "margin_truncated_cycles": int(self.margin_truncated_cycles),
             "acceptance_rate": _rate(
                 int(self.accepted_tokens),
                 int(self.drafted_tokens),
@@ -4116,7 +4117,34 @@ def _native_mtp_hidden_tensor(hidden_states: Any) -> Any:
     return hidden_states
 
 
-def _native_mtp_draft_margin_threshold() -> float:
+def _native_mtp_default_draft_margin_threshold(model_type: Optional[str]) -> float:
+    """Use the measured confidence gate only for Qwen4 fixed-D3.
+
+    Fixed D3 remains the configured ceiling, but a low-confidence first
+    proposal must not force two more draft-head forwards.  The same 1.0 gap
+    gate beat AR on sampled-prose A/Bs for Qwen4 JANG_6S and JANG_4M.
+    Adaptive mode has its own value controller and regressed when composed
+    with this gate, so its default remains disabled.
+    """
+
+    if str(model_type or "").lower() != "qwen4_exp":
+        return 0.0
+
+    adaptive = _native_mtp_env_flag(
+        True,
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
+        "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH",
+    )
+    depth = _native_mtp_env_int(
+        3,
+        "VMLINUX_NATIVE_MTP_DEPTH",
+        "VMLX_NATIVE_MTP_DEPTH",
+        minimum=1,
+    )
+    return 1.0 if not adaptive and depth >= 3 else 0.0
+
+
+def _native_mtp_draft_margin_threshold(model_type: Optional[str] = None) -> float:
     """Logit gap below which the draft chain stops extending. 0 disables.
 
     Speculative decoding pays for a draft whether or not it is accepted. On
@@ -4135,17 +4163,18 @@ def _native_mtp_draft_margin_threshold() -> float:
     raw = os.environ.get("VMLINUX_NATIVE_MTP_DRAFT_MARGIN") or os.environ.get(
         "VMLX_NATIVE_MTP_DRAFT_MARGIN"
     )
+    default = _native_mtp_default_draft_margin_threshold(model_type)
     if raw is None:
-        return _NATIVE_MTP_DRAFT_MARGIN_DEFAULT
+        return default
     try:
         value = float(raw)
     except (TypeError, ValueError):
         logger.warning(
             "Ignoring invalid native-MTP draft margin %r; using %.2f",
             raw,
-            _NATIVE_MTP_DRAFT_MARGIN_DEFAULT,
+            default,
         )
-        return _NATIVE_MTP_DRAFT_MARGIN_DEFAULT
+        return default
     return max(0.0, value)
 
 
@@ -4339,11 +4368,6 @@ _NATIVE_MTP_FUSED_SYNC = os.environ.get(
 # 391 -> 0, output byte-correct), and it changes MTP's economics - a rejected
 # cycle costs the same as an accepted one, so the profitability floor drops
 # from ~0.68 to roughly the draft cost (~6%).
-# Default OFF until measured per family. A gate that trims the chain on a
-# model whose head is confident everywhere would cost a sync per cycle and buy
-# nothing, so this ships inert and is switched on by measurement.
-_NATIVE_MTP_DRAFT_MARGIN_DEFAULT = 0.0
-
 _NATIVE_MTP_SKIP_REPLAY = os.environ.get(
     "VMLX_MTP_SKIP_REPLAY", "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
@@ -14226,7 +14250,9 @@ class MLLMBatchGenerator:
         # up to two further head forwards plus a wider verify, which is the
         # trade that actually pays on a low-acceptance position.
         margin_threshold = (
-            _native_mtp_draft_margin_threshold() if total_depth > 1 else 0.0
+            _native_mtp_draft_margin_threshold(getattr(self, "_model_type", None))
+            if total_depth > 1
+            else 0.0
         )
         for level in range(total_depth):
             if stats is not None:
@@ -14426,15 +14452,23 @@ class MLLMBatchGenerator:
             store = getattr(self, "_native_mtp_profiles", None)
             if store is None:
                 store = self._native_mtp_profiles = NativeMTPProfileStore()
+            sampled_profile = request_profile_key[0] == "sampled"
             depth, profile_seed = store.start_depth(
                 request_profile_key,
                 configured_depth=depth,
                 capability_ceiling=_native_mtp_depth_ceiling_for_request(request),
-                tuning_validated="vmlx_mtp_tuning" in depth_source,
+                # Legacy tuning sidecars describe one benchmark-wide winner,
+                # not a sampler/context/tool profile. A greedy counting/code
+                # result must not auto-enable MTP for sampled prose. A profile
+                # learned in this process still takes precedence in the store.
+                tuning_validated=(
+                    "vmlx_mtp_tuning" in depth_source and not sampled_profile
+                ),
                 unseen_start_depth=(
                     depth
                     if str(getattr(self, "_model_type", "") or "").lower()
                     == "qwen4_exp"
+                    and not sampled_profile
                     else None
                 ),
                 unseen_start_source="qwen4_exp_measured_cold_start",

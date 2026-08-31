@@ -351,6 +351,23 @@ class TestSeedPathIntegration:
         assert state.depth == 3
         assert state.stats.profile_seed == "qwen4_exp_measured_cold_start_d3"
 
+    def test_qwen4_sampled_profile_does_not_trust_coarse_tuning(self, monkeypatch):
+        from vmlx_engine import native_mtp
+
+        generator, req, first_token = self._build_generator(monkeypatch)
+        generator._model_type = "qwen4_exp"
+        req.temperature = 1.0
+        monkeypatch.setattr(
+            native_mtp,
+            "native_mtp_effective_depth",
+            lambda: (2, "vmlx_mtp_tuning.json:best_depth"),
+        )
+
+        assert generator._seed_native_mtp_from_prefill(
+            req, [object()], first_token, [None]
+        ) is False
+        assert not hasattr(req, "_native_mtp_state")
+
     def test_batch_request_tool_metadata_separates_adaptive_profile(self, monkeypatch):
         generator, req, first_token = self._build_generator(monkeypatch)
         req.extra_kwargs = {

@@ -197,6 +197,7 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypa
     stats.rejects = 4
     stats.drafted_tokens = 27
     stats.accepted_tokens = 21
+    stats.margin_truncated_cycles = 3
     stats.accepted_by_depth = [10, 8, 3]
     stats.drafted_by_depth = [10, 10, 7]
     stats.seed_main_forwards = 1
@@ -244,6 +245,7 @@ def test_native_mtp_stats_snapshot_exposes_acceptance_depth_and_timings(monkeypa
     assert snapshot["cycles"] == 10
     assert snapshot["accepted_tokens"] == 21
     assert snapshot["drafted_tokens"] == 27
+    assert snapshot["margin_truncated_cycles"] == 3
     assert snapshot["acceptance_rate"] == pytest.approx(21 / 27)
     assert snapshot["depth_acceptance_rates"] == {
         "d1": pytest.approx(1.0),

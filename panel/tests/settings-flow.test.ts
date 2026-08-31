@@ -541,6 +541,7 @@ function buildCommandPreview(
             configuredDepth: config.nativeMtpDepth,
             depthOverride: config.nativeMtpDepthOverride === true,
             mode,
+            modelDefaultMode: detected.nativeMtp.defaultMode,
             externalSpeculativeActive: compatibleExternalSpeculative,
         }))
     }
@@ -1827,6 +1828,26 @@ describe('Native MTP', () => {
 
         expect(getFlagValue(out, '--native-mtp-depth')).toBe('3')
         expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('fixed')
+    })
+
+    it('defaults GLM Auto to AR but keeps an explicit fixed depth selectable', () => {
+        const glmDetected: DetectedConfig = {
+            ...qwenMtpDetected,
+            family: 'glm5-next',
+            nativeMtp: {
+                ...qwenMtpDetected.nativeMtp!,
+                runtimeScope: 'text',
+                defaultMode: 'off',
+            },
+        }
+        expect(hasFlag(preview({}, glmDetected), '--disable-native-mtp')).toBe(true)
+
+        const explicit = preview({
+            nativeMtpDepth: 3,
+            nativeMtpDepthOverride: true,
+        }, glmDetected)
+        expect(hasFlag(explicit, '--disable-native-mtp')).toBe(false)
+        expect(getFlagValue(explicit, '--native-mtp-depth')).toBe('3')
     })
 
     it('lets users disable native MTP without leaving deterministic sampling overrides behind', () => {

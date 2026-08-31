@@ -383,6 +383,7 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       runtimeScope: 'text',
       nativeCacheType: 'glm5_next_native_v1',
       requiresDeterministicSampling: false,
+      defaultMode: 'off',
     })
   })
 

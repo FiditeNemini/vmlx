@@ -5267,6 +5267,7 @@ export class SessionManager extends EventEmitter {
         configuredDepth: (config as any).nativeMtpDepth,
         depthOverride: (config as any).nativeMtpDepthOverride === true,
         mode,
+        modelDefaultMode: nativeMtp.defaultMode,
         externalSpeculativeActive: compatibleExternalSpeculative,
       }))
       // Auto emits `compatible-only`; Deterministic emits `greedy-only`.

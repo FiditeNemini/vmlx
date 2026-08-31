@@ -6,7 +6,23 @@ export interface NativeMtpLaunchPolicyInput {
   configuredDepth?: number
   depthOverride?: boolean
   mode?: 'auto' | 'deterministic' | 'off'
+  modelDefaultMode?: 'auto' | 'off'
   externalSpeculativeActive?: boolean
+}
+
+export function resolveNativeMtpMode(
+  input: Pick<NativeMtpLaunchPolicyInput, 'mode' | 'modelDefaultMode' | 'depthOverride'>,
+): 'auto' | 'deterministic' | 'off' {
+  const configured = input.mode || 'auto'
+  // GLM-5.3 is measured slower under its current verifier, so its bundle-level
+  // Auto policy is AR. A fixed D1-D3 selection is an explicit opt-in and must
+  // remain available for measurement/tuning.
+  if (
+    configured === 'auto'
+    && input.modelDefaultMode === 'off'
+    && input.depthOverride !== true
+  ) return 'off'
+  return configured
 }
 
 /** One source of truth for Electron preview and the process launcher. */
@@ -14,13 +30,14 @@ export function buildNativeMtpLaunchArgs(
   input: NativeMtpLaunchPolicyInput,
 ): string[] {
   if (!input.supported) return []
-  if (input.mode === 'off' || input.externalSpeculativeActive) {
+  const mode = resolveNativeMtpMode(input)
+  if (mode === 'off' || input.externalSpeculativeActive) {
     return ['--disable-native-mtp']
   }
 
   const samplingArgs = [
     '--native-mtp-sampling-policy',
-    input.mode === 'deterministic' ? 'greedy-only' : 'compatible-only',
+    mode === 'deterministic' ? 'greedy-only' : 'compatible-only',
   ]
   if (input.depthOverride !== true) {
     // Adaptive policy: emit NO explicit depth. --native-mtp-depth becomes

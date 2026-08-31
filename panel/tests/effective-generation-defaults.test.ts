@@ -57,6 +57,20 @@ describe('effective session generation defaults', () => {
     )).toEqual(bundleDefaults)
   })
 
+  it('preserves GLM bundle sampling in model-default Auto but pins an explicit depth', () => {
+    expect(applyEffectiveSessionGenerationDefaults(
+      bundleDefaults,
+      { nativeMtpMode: 'auto' },
+      { supported: true, defaultMode: 'off' },
+    )).toEqual(bundleDefaults)
+
+    expect(applyEffectiveSessionGenerationDefaults(
+      bundleDefaults,
+      { nativeMtpMode: 'auto', nativeMtpDepthOverride: true },
+      { supported: true, defaultMode: 'off' },
+    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
+  })
+
   it('does not change a non-MTP model or malformed stored config', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,

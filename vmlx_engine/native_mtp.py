@@ -583,6 +583,41 @@ def _env_disabled(*names: str) -> bool:
     return any(os.environ.get(name, "") in _DISABLE_ENV_VALUES for name in names)
 
 
+def _native_mtp_explicitly_requested() -> bool:
+    """Return whether the operator explicitly opted into native MTP.
+
+    Most supported families retain the historical auto-on runtime policy. A
+    GLM-5.3 bundle is the measured exception: its verifier is currently slower
+    than AR on first-turn and sustained decode, so an unset environment must
+    not silently activate it. An explicit enable/force flag or a valid fixed
+    D1-D3 selection remains an opt-in for diagnostics and future tuning.
+    """
+    if _env_enabled(
+        "VMLINUX_NATIVE_MTP",
+        "VMLX_NATIVE_MTP",
+        "VMLINUX_NATIVE_MTP_FORCE",
+        "VMLX_NATIVE_MTP_FORCE",
+    ):
+        return True
+    for name in ("VMLINUX_NATIVE_MTP_DEPTH", "VMLX_NATIVE_MTP_DEPTH"):
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            if 1 <= int(raw) <= 3:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _runtime_default_enabled_for_family(family: str | None) -> bool:
+    """Resolve the family default without changing explicit MTP controls."""
+    if _normalize_family(family) != "glm5_next":
+        return True
+    return _native_mtp_explicitly_requested()
+
+
 def _runtime_validation_block_reason(
     bundle_path: str | Path | None,
     jang_cfg: dict[str, Any],
@@ -891,6 +926,7 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         artifact_available and _normalize_family(family) in _RUNTIME_SUPPORTED_FAMILIES
     )
     runtime_env_enabled = _runtime_enabled_by_env()
+    runtime_family_default_enabled = _runtime_default_enabled_for_family(family)
     runtime_validation_block_reason = (
         _runtime_validation_block_reason(bundle_path, jang_cfg, family)
         if runtime_supported
@@ -899,6 +935,7 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     runtime_available = bool(
         runtime_supported
         and runtime_env_enabled
+        and runtime_family_default_enabled
         and runtime_validation_block_reason is None
     )
     effective_depth, effective_depth_source = native_mtp_effective_depth(bundle_path)
@@ -963,6 +1000,13 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         runtime_reason = (
             "VMLINUX_NATIVE_MTP/VMLX_NATIVE_MTP disables native MTP runtime"
         )
+    elif artifact_available and runtime_supported and not runtime_family_default_enabled:
+        status = "runtime_disabled"
+        runtime_reason = (
+            "glm5_next defaults to autoregressive decode because its native "
+            "MTP verifier has not beaten AR; explicitly select D1-D3 or set "
+            "VMLX_NATIVE_MTP=1 to opt into MTP"
+        )
     elif artifact_available and runtime_supported and runtime_validation_block_reason:
         status = "runtime_validation_blocked"
         runtime_reason = runtime_validation_block_reason
@@ -1009,6 +1053,9 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
         "cache_type": cache_type,
         "runtime_supported": runtime_supported,
         "runtime_available": runtime_available,
+        "runtime_default_mode": (
+            "off" if _normalize_family(family) == "glm5_next" else "auto"
+        ),
         "runtime_active": False,
         "runtime_validation_blocked": bool(runtime_validation_block_reason),
         "effective_depth": effective_depth if runtime_available else None,

@@ -117,6 +117,23 @@ describe('remote model capability hydration', () => {
     })
   })
 
+  it('keeps a default-off GLM runtime selectable without calling it active', () => {
+    expect(detectedConfigFromRemoteCapabilities({
+      family: 'glm5_next',
+      mtp: {
+        runtime_supported: true,
+        runtime_available: false,
+        runtime_default_mode: 'off',
+        runtime_reason: 'glm5_next defaults to autoregressive decode',
+      },
+    })).toMatchObject({
+      nativeMtp: {
+        supported: true,
+        defaultMode: 'off',
+      },
+    })
+  })
+
   it('keeps missing capability fields absent', () => {
     expect(detectedConfigFromRemoteCapabilities({ family: 'custom_family' })).toEqual({
       family: 'custom_family',

@@ -32,6 +32,7 @@ import {
   parseSessionNativeMtpMode,
   resolveMtpTemperatureNotice,
 } from '../../../../shared/mtpTemperatureNotice'
+import { resolveNativeMtpMode } from '../../../../shared/nativeMtpLaunchArgs'
 
 interface ChatProfile {
   id: string
@@ -128,6 +129,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   // reasoning_strength, so Auto/On were byte-identical — a dead control.
   const [detectedHonorsEnableThinking, setDetectedHonorsEnableThinking] = useState<boolean | undefined>(undefined)
   const [detectedNativeMtpSupported, setDetectedNativeMtpSupported] = useState<boolean | undefined>(undefined)
+  const [detectedNativeMtpDefaultMode, setDetectedNativeMtpDefaultMode] = useState<'auto' | 'off' | undefined>(undefined)
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
   const loadRequestRef = useRef(0)
@@ -162,7 +164,19 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   // Only families whose template reads the kwarg get the Auto/On control.
   const enableThinkingHonored = detectedHonorsEnableThinking !== false
   const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined
-  const nativeMtpMode = parseSessionNativeMtpMode(session.config)
+  const nativeMtpConfig = (() => {
+    try {
+      const parsed = session.config ? JSON.parse(session.config) : {}
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  })()
+  const nativeMtpMode = resolveNativeMtpMode({
+    mode: parseSessionNativeMtpMode(nativeMtpConfig) as 'auto' | 'deterministic' | 'off',
+    modelDefaultMode: detectedNativeMtpDefaultMode,
+    depthOverride: nativeMtpConfig.nativeMtpDepthOverride === true,
+  })
   const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode !== 'off'
   const displayedTemperature = mtpGreedyEnforced
     ? 0
@@ -249,6 +263,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     setDetectedDefaultReasoningEffort(undefined)
     setThinkingBudgetSupported(undefined)
     setSupportsThinkingBudget(undefined)
+    setDetectedNativeMtpDefaultMode(undefined)
 
     void loadChatSettingsHydration<ChatOverrides>(session.config, {
       overrides: () => window.api.chat.getOverrides(chatId) as Promise<ChatOverrides | null>,
@@ -270,6 +285,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
       setDetectedSupportsInstructMode(detected?.supportsInstructMode)
       setDetectedHonorsEnableThinking(detected?.honorsEnableThinking)
       setDetectedNativeMtpSupported((detected as any)?.nativeMtp?.supported === true)
+      setDetectedNativeMtpDefaultMode((detected as any)?.nativeMtp?.defaultMode)
       setDetectedReasoningEfforts(detected?.supportedReasoningEfforts)
       setDetectedDefaultReasoningEffort(detected?.defaultReasoningEffort)
       setSupportsThinkingBudget(detected?.supportsThinkingBudget)

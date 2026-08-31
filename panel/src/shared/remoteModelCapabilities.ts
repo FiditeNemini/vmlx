@@ -46,6 +46,7 @@ export interface RemoteDetectedConfig {
     runtimeScope?: 'text' | 'text+vl'
     nativeCacheType?: string
     requiresDeterministicSampling?: boolean
+    defaultMode?: 'auto' | 'off'
     blockedReason?: string
   }
   description?: string
@@ -237,7 +238,16 @@ export function detectedConfigFromRemoteCapabilities(
   }
   if (mtpPayload) {
     const nativeMtp: NonNullable<RemoteDetectedConfig['nativeMtp']> = {}
-    const mtpSupported = explicitBoolean(mtp.runtime_available, mtp.runtime_supported)
+    // Capability and activation are different axes. GLM deliberately reports
+    // runtime_supported=true, runtime_available=false when its family default
+    // is AR; treating the latter as capability false hides the explicit D1-D3
+    // controls from remote/API-attached sessions. A validation block remains
+    // an actual unavailable runtime and keeps its reason visible.
+    const runtimeSupported = explicitBoolean(mtp.runtime_supported)
+    const runtimeAvailable = explicitBoolean(mtp.runtime_available)
+    const mtpSupported = mtp.runtime_validation_blocked === true
+      ? false
+      : runtimeSupported ?? runtimeAvailable
     if (mtpSupported != null) nativeMtp.supported = mtpSupported
     const mtpDepth = positiveInteger(mtp.effective_depth)
     if (mtpDepth != null) nativeMtp.depth = mtpDepth
@@ -249,6 +259,10 @@ export function detectedConfigFromRemoteCapabilities(
     }
     if (typeof mtp.requires_deterministic_sampling === 'boolean') {
       nativeMtp.requiresDeterministicSampling = mtp.requires_deterministic_sampling
+    }
+    const defaultMode = nonEmptyString(mtp.runtime_default_mode)
+    if (defaultMode === 'auto' || defaultMode === 'off') {
+      nativeMtp.defaultMode = defaultMode
     }
     if (mtpSupported === false) {
       const blockedReason = nonEmptyString(mtp.runtime_reason)

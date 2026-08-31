@@ -1320,13 +1320,14 @@ class TestNativeMTP:
         monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
         assert _effective_depth(SimpleNamespace(prompt_cache=model.make_cache())) == 3
 
-    def test_bundle_inspection_marks_appended_layer_runtime_ready(
+    def test_bundle_inspection_marks_appended_layer_runtime_ready_when_explicit(
         self, tmp_path, monkeypatch
     ):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
 
         monkeypatch.delenv("VMLINUX_NATIVE_MTP", raising=False)
         monkeypatch.delenv("VMLX_NATIVE_MTP", raising=False)
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
         (tmp_path / "config.json").write_text(json.dumps(TINY_CFG))
         (tmp_path / "model.safetensors.index.json").write_text(
             json.dumps(
@@ -1342,6 +1343,7 @@ class TestNativeMTP:
         assert status["artifact_available"] is True
         assert status["runtime_supported"] is True
         assert status["runtime_available"] is True
+        assert status["runtime_default_mode"] == "off"
         assert status["index_mtp_layer_count"] == 1
         assert status["status"] == "native_runtime_ready"
 

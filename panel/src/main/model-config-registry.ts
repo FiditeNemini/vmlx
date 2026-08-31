@@ -135,6 +135,7 @@ export interface DetectedConfig {
     runtimeScope: 'text' | 'text+vl'
     nativeCacheType: string
     requiresDeterministicSampling: boolean
+    defaultMode?: 'auto' | 'off'
     blockedReason?: string
   }
   description: string
@@ -1313,6 +1314,10 @@ function detectNativeMtpCapability(
           ? 'glm5_next_native_v1'
           : 'hybrid_ssm_v1',
       requiresDeterministicSampling: false,
+      // Keep the GLM MTP capability visible while making its unmodified Auto
+      // path AR. Live measurements show the current GLM verifier loses to AR;
+      // a fixed D1-D3 selection remains an explicit opt-in.
+      defaultMode: glm5Next ? 'off' : 'auto',
     }
   } catch {
     return undefined

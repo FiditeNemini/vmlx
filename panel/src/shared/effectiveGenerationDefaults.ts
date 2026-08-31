@@ -1,3 +1,5 @@
+import { resolveNativeMtpMode } from './nativeMtpLaunchArgs'
+
 export interface GenerationDefaultsLike {
   temperature?: number
   topP?: number
@@ -10,6 +12,7 @@ export interface GenerationDefaultsLike {
 
 interface NativeMtpDetection {
   supported?: boolean
+  defaultMode?: 'auto' | 'off'
 }
 
 function sessionConfigObject(config: string | Record<string, unknown> | undefined): Record<string, unknown> {
@@ -37,10 +40,10 @@ function sessionConfigObject(config: string | Record<string, unknown> | undefine
  * Eric: "if it has mtp it sets temp to 0 and lets user know in the chat
  * settings bar temp area and shows also in the mtp server settings".
  *
- * So a bundle that actually carries MTP heads now decodes greedily unless the
- * user turns MTP OFF. `off` is the only mode that preserves bundle sampling —
- * an explicit choice, not a silent default. Chat Settings must show the pinned
- * 0 and say MTP is the reason (see mtpTemperatureNotice).
+ * So a bundle that carries MTP heads normally decodes greedily unless the user
+ * turns MTP OFF. A measured family may declare ``defaultMode: off``; for that
+ * family Auto is ordinary AR and a fixed D1-D3 selection is the explicit MTP
+ * opt-in. Chat Settings must show the same effective policy as launch.
  */
 export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefaultsLike>(
   defaults: T,
@@ -48,9 +51,14 @@ export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefa
   nativeMtp: NativeMtpDetection | undefined,
 ): T {
   const config = sessionConfigObject(sessionConfig)
-  const mode = typeof config.nativeMtpMode === 'string'
-    ? config.nativeMtpMode
+  const configuredMode = typeof config.nativeMtpMode === 'string'
+    ? config.nativeMtpMode as 'auto' | 'deterministic' | 'off'
     : 'auto'
+  const mode = resolveNativeMtpMode({
+    mode: configuredMode,
+    modelDefaultMode: nativeMtp?.defaultMode,
+    depthOverride: config.nativeMtpDepthOverride === true,
+  })
   // No MTP heads -> MTP has no say over sampling.
   if (nativeMtp?.supported !== true) return defaults
   // The user explicitly disabled MTP: honour the bundle's sampling.

@@ -982,6 +982,7 @@
       "nativeMtpBlockedFallback": "Native MTP weights were detected, but this bundle has not passed the runtime compatibility gate. Autoregressive decode remains active.",
       "nativeMtpHint": "Uses the model's own preserved MTP heads and measured model-local depth when present, falling back to depth 1 when the bundle declares none.",
       "nativeMtpAutoNote": "Auto preserves explicit API/chat and bundle sampling. Greedy requests use identity verification; sampled requests use rejection-sampling verification when supported. History-dependent penalties fall back to ordinary autoregressive decode and the Performance panel reports why.",
+      "nativeMtpDefaultOffNote": "Auto uses ordinary autoregressive decode for this model because its current MTP verifier has not beaten AR. Choose a fixed D1-D3 depth to opt into MTP explicitly.",
       "nativeMtpDeterministicNote": "Explicit deterministic mode enforces greedy sampling for every API/chat request. Depth is controlled separately below. Choose Off if per-request sampled values must remain authoritative.",
       "nativeMtpMode": "Native MTP Mode",
       "nativeMtpModeTooltip": "Auto preserves request and bundle sampling and uses compatible MTP verification. Deterministic explicitly enforces greedy sampling. Off disables the in-model MTP runtime.",

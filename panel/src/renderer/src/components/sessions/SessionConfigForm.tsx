@@ -314,6 +314,7 @@ interface SessionConfigFormProps {
     runtimeScope?: string
     nativeCacheType?: string
     requiresDeterministicSampling?: boolean
+    defaultMode?: 'auto' | 'off'
     blockedReason?: string
   }
   /** Model type — image models show minimal settings */
@@ -1723,7 +1724,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {nativeMtpSupported && (
           <>
         <PerformanceHint text={t('sessions.config.nativeMtpHint')} />
-        {nativeMtpMode === 'auto' && (
+        {nativeMtpMode === 'auto' && detectedNativeMtp?.defaultMode === 'off' && (
+          <InfoNote text={t('sessions.config.nativeMtpDefaultOffNote')} />
+        )}
+        {nativeMtpMode === 'auto' && detectedNativeMtp?.defaultMode !== 'off' && (
           <InfoNote text={t('sessions.config.nativeMtpAutoNote')} />
         )}
         {nativeMtpMode === 'deterministic' && (

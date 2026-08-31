@@ -294,12 +294,24 @@ def _write_glm5_next_mtp_bundle(path):
 
 
 class TestGlm5NextMtpDetection:
-    def test_glm5_next_mtp_block_reports_native_runtime_ready(self, tmp_path):
+    def test_glm5_next_mtp_defaults_to_ar_but_explicit_depth_enables_runtime(
+        self, tmp_path, monkeypatch
+    ):
         """The MTP layer-45 tensors must be COUNTED (glm5_next stores them
         under model.layers.N, not `mtp.`), so health honestly reports
-        weights-present and the wired draft/verify runtime is selectable."""
+        weights-present while the measured-slower verifier defaults to AR.
+        An explicit fixed D1-D3 selection keeps the runtime selectable."""
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
 
+        for name in (
+            "VMLINUX_NATIVE_MTP",
+            "VMLX_NATIVE_MTP",
+            "VMLINUX_NATIVE_MTP_FORCE",
+            "VMLX_NATIVE_MTP_FORCE",
+            "VMLINUX_NATIVE_MTP_DEPTH",
+            "VMLX_NATIVE_MTP_DEPTH",
+        ):
+            monkeypatch.delenv(name, raising=False)
         _write_glm5_next_mtp_bundle(tmp_path)
         status = inspect_native_mtp_bundle(str(tmp_path))
 
@@ -307,14 +319,21 @@ class TestGlm5NextMtpDetection:
         assert status["mtp_tensor_count"] == 4  # the four model.layers.45.* keys
         assert status["runtime_mtp_mode"] == "preserved_enabled"
         assert status["runtime_supported"] is True
-        assert status["runtime_available"] is True
+        assert status["runtime_available"] is False
         assert status["runtime_active"] is False
-        assert status["status"] == "native_runtime_ready"
+        assert status["runtime_default_mode"] == "off"
+        assert status["status"] == "runtime_disabled"
         assert status["runtime_scope"] == "text"
         assert status["has_vision_config"] is True
         assert status["has_vision_weights"] is True
         assert status["vl_runtime_available"] is False
-        assert "visual tower is not wired" in status["runtime_reason"]
+        assert "defaults to autoregressive" in status["runtime_reason"]
+
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH", "3")
+        explicit = inspect_native_mtp_bundle(str(tmp_path))
+        assert explicit["runtime_available"] is True
+        assert explicit["status"] == "native_runtime_ready"
+        assert explicit["effective_depth"] == 3
 
     def test_glm5_next_ar_bundle_reports_mtp_dropped(self, tmp_path):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle
@@ -336,6 +355,7 @@ class TestGlm5NextMtpDetection:
         assert status["mtp_tensor_count"] == 0
         assert status["runtime_active"] is False
         assert status["runtime_mtp_mode"] == "none"
+        assert status["runtime_default_mode"] == "off"
 
 
 class TestNativeMtpAutodetect:

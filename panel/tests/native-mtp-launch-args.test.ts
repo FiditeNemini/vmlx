@@ -71,6 +71,29 @@ describe('native MTP launch args', () => {
     })).toEqual(['--disable-native-mtp'])
   })
 
+  it('defaults only GLM Auto to AR while preserving explicit fixed D1-D3', () => {
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      mode: 'auto',
+      modelDefaultMode: 'off',
+    })).toEqual(['--disable-native-mtp'])
+
+    expect(buildNativeMtpLaunchArgs({
+      supported: true,
+      mode: 'auto',
+      modelDefaultMode: 'off',
+      configuredDepth: 3,
+      depthOverride: true,
+    })).toEqual([
+      '--native-mtp-depth',
+      '3',
+      '--native-mtp-depth-policy',
+      'fixed',
+      '--native-mtp-sampling-policy',
+      'compatible-only',
+    ])
+  })
+
   it('emits nothing for unsupported bundles', () => {
     expect(buildNativeMtpLaunchArgs({ supported: false, mode: 'auto' })).toEqual([])
   })

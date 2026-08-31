@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { mkdirSync, writeFileSync, existsSync, unlinkSync, readdirSync, rmdirSync, readFileSync } from 'fs'
 import { sessionManager } from '../sessions'
 import { db } from '../database'
-import { getImageModel, resolveImageModelFromDirectoryName, resolveImageModelRepo } from '../../shared/imageModels'
+import { getImageModel, resolveImageModelArtifact, resolveImageModelFromDirectoryName } from '../../shared/imageModels'
 import {
   beginImageGeneration,
   classifyImageGenerationError,
@@ -35,12 +35,15 @@ let startServerChain: Promise<any> = Promise.resolve()
 function findDownloadedImageModelPath(modelName: string, quantize: number): { localPath: string; modelId: string; repoId?: string } | null {
   const modelDef = resolveImageModelFromDirectoryName(modelName) || getImageModel(modelName)
   const modelId = modelDef?.id || modelName
-  const repoId = resolveImageModelRepo(modelId, quantize)
+  const artifact = resolveImageModelArtifact(modelId, quantize)
+  const repoId = artifact?.repoId
   const repoName = repoId?.split('/').pop()
   if (!repoName) return null
 
   for (const base of [join(homedir(), '.mlxstudio', 'models', 'image'), join(homedir(), '.mlxstudio', 'models', 'xcreates')]) {
-    const candidate = join(base, repoName)
+    const candidate = artifact?.subfolder
+      ? join(base, repoName, artifact.subfolder)
+      : join(base, repoName)
     if (existsSync(candidate)) {
       return { localPath: candidate, modelId, repoId: repoId || undefined }
     }

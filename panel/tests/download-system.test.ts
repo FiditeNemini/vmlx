@@ -38,8 +38,7 @@ describe('Download System', () => {
 
     it('resolveImageModelRepo falls back to closest quantize', async () => {
       const { resolveImageModelRepo } = await import('../src/shared/imageModels')
-      // Qwen only has quantize=0
-      expect(resolveImageModelRepo('qwen-image-edit', 4)).toBe('Qwen/Qwen-Image-Edit')
+      expect(resolveImageModelRepo('qwen-image-edit', 4)).toBe('fcreait/Qwen-Image-Edit-mflux')
     })
 
     it('getDefaultSteps returns correct steps per model', async () => {
@@ -69,12 +68,17 @@ describe('Download System', () => {
       expect(getImageModelEncoderType('flux2-klein-9b')).toBe('single')
     })
 
-    it('Qwen Image Edit is full precision only', async () => {
-      const { getImageModel } = await import('../src/shared/imageModels')
+    it('Qwen Image Edit exposes the q4 subfolder artifact', async () => {
+      const { getImageModel, resolveImageModelArtifact } = await import('../src/shared/imageModels')
       const qwen = getImageModel('qwen-image-edit')
       expect(qwen).toBeDefined()
-      expect(qwen!.quantizeOptions).toEqual([0])
+      expect(qwen!.quantizeOptions).toEqual([4, 0])
       expect(qwen!.category).toBe('edit')
+      expect(resolveImageModelArtifact('qwen-image-edit', 4)).toEqual({
+        repoId: 'fcreait/Qwen-Image-Edit-mflux',
+        quantize: 4,
+        subfolder: 'q4',
+      })
     })
   })
 

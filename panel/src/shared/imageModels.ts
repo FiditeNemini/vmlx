@@ -34,6 +34,8 @@ export interface ImageModelDef {
   quantizeOptions: number[]
   /** Maps quantize level -> HuggingFace repo ID for downloading */
   repoMap: Record<number, string>
+  /** Optional path within the HuggingFace repo containing this quantization. */
+  repoSubfolderMap?: Record<number, string>
   /** RAM tier hint for the UI */
   tier?: 'small' | 'medium' | 'large'
   /**
@@ -194,9 +196,13 @@ export const IMAGE_MODELS: ImageModelDef[] = [
     steps: 28,
     guidance: 4.0,
     size: '~54 GB',
-    quantizeOptions: [0],
+    quantizeOptions: [4, 0],
     repoMap: {
+      4: 'fcreait/Qwen-Image-Edit-mflux',
       0: 'Qwen/Qwen-Image-Edit',
+    },
+    repoSubfolderMap: {
+      4: 'q4',
     },
     tier: 'large',
     mfluxClass: 'QwenImageEdit',
@@ -357,12 +363,28 @@ export function getDefaultGuidance(modelId: string): number {
  * Exact match first, then closest available quantization.
  */
 export function resolveImageModelRepo(modelName: string, quantize: number): string | null {
+  return resolveImageModelArtifact(modelName, quantize)?.repoId ?? null
+}
+
+export interface ImageModelArtifact {
+  repoId: string
+  quantize: number
+  subfolder?: string
+}
+
+/** Resolve the exact repository payload used for one image quantization. */
+export function resolveImageModelArtifact(modelName: string, quantize: number): ImageModelArtifact | null {
   const model = getImageModel(modelName)
   if (!model) return null
   const repos = model.repoMap
-  // Exact match first
-  if (repos[quantize]) return repos[quantize]
-  // Fall back to closest quantization level
-  const available = Object.keys(repos).map(Number).sort((a, b) => Math.abs(a - quantize) - Math.abs(b - quantize))
-  return repos[available[0]] || null
+  const available = Object.keys(repos).map(Number)
+  if (available.length === 0) return null
+  const selected = repos[quantize] != null
+    ? quantize
+    : available.sort((a, b) => Math.abs(a - quantize) - Math.abs(b - quantize))[0]
+  return {
+    repoId: repos[selected],
+    quantize: selected,
+    subfolder: model.repoSubfolderMap?.[selected],
+  }
 }

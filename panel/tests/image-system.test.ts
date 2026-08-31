@@ -111,7 +111,7 @@ const NAMED_MODELS = [
   { id: 'z-image-turbo', name: 'Z-Image Turbo', steps: 4, category: 'generate' as const, quantizeOptions: [4, 8, 0] },
   { id: 'flux2-klein-4b', name: 'Flux Klein 4B', steps: 20, category: 'generate' as const, quantizeOptions: [8, 0] },
   { id: 'flux2-klein-9b', name: 'Flux Klein 9B', steps: 20, category: 'generate' as const, quantizeOptions: [0] },
-  { id: 'qwen-image-edit', name: 'Qwen Image Edit', steps: 28, category: 'edit' as const, quantizeOptions: [0] },
+  { id: 'qwen-image-edit', name: 'Qwen Image Edit', steps: 28, category: 'edit' as const, quantizeOptions: [4, 0] },
 ]
 
 // Re-implement from models.ts
@@ -139,6 +139,7 @@ const IMAGE_MODEL_REPOS: Record<string, Record<number, string>> = {
     0: 'black-forest-labs/FLUX.2-klein-9B',
   },
   'qwen-image-edit': {
+    4: 'fcreait/Qwen-Image-Edit-mflux',
     0: 'Qwen/Qwen-Image-Edit',
   },
 }

@@ -127,15 +127,18 @@ describe("image model autodetection path", () => {
     expect(src).toContain('PYTHONNOUSERSITE: "1"');
     expect(src).toContain("PYTHONPATH: undefined");
     expect(src).toContain(
-      '["-B", "-s", "-u", "-c", script, job.repoId, job.modelDir, hfEndpoint]',
+      '["-B", "-s", "-u", "-c", script, job.repoId, downloadDir, hfEndpoint, repoSubfolder]',
     );
+    expect(src).toContain('files = [f for f in files if f.rfilename.startswith(prefix)]');
+    expect(src).toContain('const markerFile = join(job.modelDir, ".vmlx-downloading")');
   });
 
   it("image startServer falls back to existing downloaded repo directories before failing", () => {
     const src = readFileSync(IMAGE_TS, "utf-8");
     expect(src).toContain("findDownloadedImageModelPath");
     expect(src).toContain("Registered existing downloaded image model");
-    expect(src).toContain("resolveImageModelRepo(modelId, quantize)");
+    expect(src).toContain("resolveImageModelArtifact(modelId, quantize)");
+    expect(src).toContain("join(base, repoName, artifact.subfolder)");
     expect(src).toContain("db.setImageModelPath(discovered.modelId, quantize || 0, discovered.localPath, discovered.repoId)");
   });
 

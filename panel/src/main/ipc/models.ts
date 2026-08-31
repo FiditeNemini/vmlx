@@ -20,6 +20,7 @@ import { getBundledPythonPath } from "../engine-manager";
 import {
   getImageModelEncoderType,
   IMAGE_MODELS,
+  resolveImageModelArtifact,
   resolveImageModelRepo as _resolveImageModelRepo,
 } from "../../shared/imageModels";
 import { formatJangQuantizationLabel } from "../../shared/jangQuantization";
@@ -733,6 +734,7 @@ function checkImageModelLocal(
   missing?: string[];
 } {
   const repoId = resolveImageModelRepo(modelName, quantize);
+  const artifact = resolveImageModelArtifact(modelName, quantize);
   const encoderType = getImageModelEncoderType(modelName);
 
   const validateCandidate = (localPath: string, candidateRepoId?: string) => {
@@ -783,7 +785,9 @@ function checkImageModelLocal(
   const repoName = repoId?.split("/").pop();
   if (repoName) {
     for (const baseDir of getModelDirectories("image")) {
-      const candidate = join(baseDir, repoName);
+      const candidate = artifact?.subfolder
+        ? join(baseDir, repoName, artifact.subfolder)
+        : join(baseDir, repoName);
       if (!existsSync(candidate)) continue;
       const result = validateCandidate(candidate, repoId || undefined);
       if (result.available) {
@@ -1491,6 +1495,7 @@ export function registerModelHandlers(): void {
       "repo_id = sys.argv[1]",
       "local_dir = sys.argv[2]",
       "endpoint = sys.argv[3] or None",
+      'repo_subfolder = sys.argv[4].strip("/") or None',
       'token = os.environ.get("HF_TOKEN") or None',
       "",
       "# Shared state for per-byte progress tracking",
@@ -1544,6 +1549,9 @@ export function registerModelHandlers(): void {
       "    api = HfApi(endpoint=active_endpoint)",
       "    tree = list(api.list_repo_tree(repo_id, token=active_token, recursive=True))",
       '    files = [f for f in tree if hasattr(f, "rfilename") and not f.rfilename.startswith(".")]',
+      '    if repo_subfolder:',
+      '        prefix = repo_subfolder + "/"',
+      '        files = [f for f in files if f.rfilename.startswith(prefix)]',
       '    total_bytes = sum(getattr(f, "size", 0) or 0 for f in files)',
       "    downloaded_bytes = 0",
       "    total_files = len(files)",
@@ -1604,10 +1612,19 @@ export function registerModelHandlers(): void {
     ].join("\n");
 
     // Write marker file
+    const artifact = job.imageModelName != null && job.imageQuantize != null
+      ? resolveImageModelArtifact(job.imageModelName, job.imageQuantize)
+      : null;
+    const repoSubfolder = artifact?.subfolder || "";
+    const downloadDir = repoSubfolder ? join(job.modelDir, "..") : job.modelDir;
     const markerFile = join(job.modelDir, ".vmlx-downloading");
     try {
       await mkdir(job.modelDir, { recursive: true });
-      await writeFile(markerFile, `${job.repoId}\n${Date.now()}`, "utf-8");
+      await writeFile(
+        markerFile,
+        `${job.repoId}\n${Date.now()}\n${job.imageModelName || ""}\n${job.imageQuantize ?? ""}`,
+        "utf-8",
+      );
     } catch (_) {
       /* dir may already exist */
     }
@@ -1634,7 +1651,7 @@ export function registerModelHandlers(): void {
 
     const proc = spawn(
       pythonPath,
-      ["-B", "-s", "-u", "-c", script, job.repoId, job.modelDir, hfEndpoint],
+      ["-B", "-s", "-u", "-c", script, job.repoId, downloadDir, hfEndpoint, repoSubfolder],
       {
         stdio: ["pipe", "pipe", "pipe"],
         env: downloadEnv,
@@ -1983,7 +2000,7 @@ export function registerModelHandlers(): void {
               try {
                 await access(markerPath);
                 const content = await readFile(markerPath, "utf-8");
-                const [repoId, tsStr] = content.split("\n");
+                const [repoId, tsStr, imageModelName, imageQuantizeStr] = content.split("\n");
                 const ts = parseInt(tsStr, 10);
                 if (repoId && !isNaN(ts)) {
                   // Auto-resume interrupted downloads (app was closed mid-download)
@@ -2000,6 +2017,10 @@ export function registerModelHandlers(): void {
                       id: `resume-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                       repoId,
                       modelDir,
+                      imageModelName: imageModelName || undefined,
+                      imageQuantize: imageQuantizeStr === "" || imageQuantizeStr == null
+                        ? undefined
+                        : Number(imageQuantizeStr),
                       status: "queued",
                     });
                   }
@@ -2730,6 +2751,7 @@ export function registerModelHandlers(): void {
     "models:downloadImageModel",
     async (_, modelName: string, quantize: number = 4) => {
       const repoId = resolveImageModelRepo(modelName, quantize);
+      const artifact = resolveImageModelArtifact(modelName, quantize);
       if (!repoId) {
         throw new Error(
           `No known HuggingFace repository for image model: ${modelName} at ${quantize}-bit`,
@@ -2771,7 +2793,9 @@ export function registerModelHandlers(): void {
       const id = `dl_${++jobIdCounter}_${Date.now()}`;
       const imageModelsDir = join(homedir(), ".mlxstudio", "models", "image");
       const repoName = repoId.split("/").pop() || repoId;
-      const modelDir = join(imageModelsDir, repoName);
+      const modelDir = artifact?.subfolder
+        ? join(imageModelsDir, repoName, artifact.subfolder)
+        : join(imageModelsDir, repoName);
 
       const job: DownloadJob = {
         id,

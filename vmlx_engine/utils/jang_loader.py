@@ -2335,6 +2335,57 @@ def _find_config_path(model_path: str | Path) -> Optional[Path]:
     return None
 
 
+def _embedded_jang_config(model_path: str | Path) -> dict | None:
+    """Return embedded JANG codec metadata without mutating the bundle.
+
+    Some current artifacts keep the complete codec contract in
+    ``config.json["jang_config"]`` rather than duplicating it into a sidecar.
+    This helper is intentionally separate from :func:`is_jang_model`: GLM text
+    loads use the registered stock-affine hydration path, while its VLM wrapper
+    needs the JANG VLM hydrator's mixed-bit module-path remapping.
+    """
+    config_path = Path(model_path) / "config.json"
+    if not config_path.is_file():
+        return None
+    try:
+        config = json.loads(config_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    for key in ("jang_config", "jang"):
+        embedded = config.get(key)
+        if embedded is None:
+            continue
+        if not isinstance(embedded, dict):
+            raise ValueError(f"config.json[{key!r}] must contain an object")
+        return embedded
+    return None
+
+
+def is_glm5_next_embedded_jang_vlm(model_path: str | Path) -> bool:
+    """Whether GLM's VLM wrapper requires mixed-bit JANG hydration."""
+    path = Path(model_path)
+    config = _read_hf_config(path)
+    model_types = {
+        str(config.get("model_type") or "").strip().lower(),
+        str((config.get("text_config") or {}).get("model_type") or "")
+        .strip()
+        .lower(),
+    }
+    if not model_types.intersection({"glm5_next", "glm5_next_text"}):
+        return False
+    try:
+        embedded = _embedded_jang_config(path)
+    except ValueError:
+        # Route malformed GLM codec metadata to the owning loader so it emits
+        # an actionable validation error rather than falling through to a
+        # shape mismatch in stock mlx-vlm.
+        return True
+    if not isinstance(embedded, dict):
+        return False
+    fmt = str(embedded.get("format") or "").strip().lower().replace("_", "-")
+    return fmt == "jang-v2"
+
+
 def _resolve_local_path(model_path: str | Path) -> Path:
     """Resolve a model path or HuggingFace model ID to a local directory.
 
@@ -5127,10 +5178,16 @@ def load_jang_vlm_model(
     # One-time JANG audio fix: ensure gemma4 audio bundles keep embedders fp16.
     _ensure_gemma4_jang_audio_multimodal_flag(path)
     config_path = _find_config_path(path)
-    if not config_path:
-        raise FileNotFoundError(f"No JANG config found in {path}")
-
-    jang_cfg = json.loads(config_path.read_text())
+    if config_path:
+        jang_cfg = json.loads(config_path.read_text())
+        config_source = config_path.name
+        embedded_config = False
+    else:
+        jang_cfg = _embedded_jang_config(path)
+        if jang_cfg is None:
+            raise FileNotFoundError(f"No JANG config found in {path}")
+        config_source = "config.json['jang_config']"
+        embedded_config = True
     _ensure_zaya_runtime_supported(path, jang_cfg)
     _ensure_jang_family_runtime_supported(path, _read_hf_config(path))
     # Modern JANG writers emit {"version": 2, "weight_format": "...", ...} and
@@ -5138,6 +5195,9 @@ def load_jang_vlm_model(
     # in addition to the {"format": "jang"|"jjqf"|"mxq"} legacy envelope.
     fmt = jang_cfg.get("format")
     weight_format = jang_cfg.get("weight_format")
+    normalized_fmt = str(fmt or "").strip().lower().replace("_", "-")
+    if normalized_fmt == "jang-v2":
+        fmt = "jang-v2"
     if not fmt and weight_format in JANG_WEIGHT_FORMAT_VALUES:
         fmt = weight_format
     if not fmt and weight_format in JANG_FORMAT_VALUES:
@@ -5167,14 +5227,18 @@ def load_jang_vlm_model(
         )
 
     # v2: instant load
-    if _is_v2_model(path):
-        logger.info(f"JANG v2 VLM detected — loading via mmap (instant)")
+    if (embedded_config and fmt == "jang-v2") or _is_v2_model(path):
+        logger.info("JANG v2 VLM detected — loading via mmap (instant)")
         return _load_jang_v2_vlm(
             path, jang_cfg, skip_eval=skip_eval, filter_expert_keys=filter_expert_keys
         )
 
     # v1: repack path (legacy)
-    logger.info(f"JANG v1 VLM detected — repacking (this takes a few minutes)")
+    if embedded_config:
+        raise ValueError(
+            f"Embedded JANG metadata from {config_source} must declare JANG v2"
+        )
+    logger.info("JANG v1 VLM detected — repacking (this takes a few minutes)")
     return _load_jang_v1_vlm(path, jang_cfg, config_path)
 
 

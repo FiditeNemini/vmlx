@@ -4562,8 +4562,13 @@ class MLXMultimodalLM:
             raise
 
         # JANG VL models: use JANG loader (handles mixed-precision + mlx-vlm sanitization)
-        from ..utils.jang_loader import is_jang_model
-        if is_jang_model(resolved_name):
+        from ..utils.jang_loader import (
+            is_glm5_next_embedded_jang_vlm,
+            is_jang_model,
+        )
+        if is_jang_model(resolved_name) or is_glm5_next_embedded_jang_vlm(
+            resolved_name
+        ):
             logger.info(f"Loading JANG VL model: {self.model_name}")
             from ..utils.jang_loader import load_jang_vlm_model
             from mlx_vlm.utils import load_config

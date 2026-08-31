@@ -45,6 +45,30 @@ class TestJangDetection:
         from vmlx_engine.utils.jang_loader import is_jang_model
         assert is_jang_model("/this/does/not/exist") is False
 
+    def test_glm_embedded_jang_vlm_detection_does_not_change_text_detection(
+        self, tmp_path
+    ):
+        from vmlx_engine.utils.jang_loader import (
+            is_glm5_next_embedded_jang_vlm,
+            is_jang_model,
+        )
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "glm5_next",
+                    "jang_config": {
+                        "format": "jang_v2",
+                        "bit_map": {"model.embed_tokens": {"bits": 6}},
+                    },
+                }
+            )
+        )
+
+        assert is_jang_model(tmp_path) is False
+        assert is_glm5_next_embedded_jang_vlm(tmp_path) is True
+        assert not (tmp_path / "jang_config.json").exists()
+
     def test_v2_bundle_has_tq_packed_uses_index_not_first_shard_only(self, tmp_path):
         from vmlx_engine.utils.jang_loader import _v2_bundle_has_tq_packed
 
@@ -285,6 +309,44 @@ class TestJangDetection:
         )
 
         assert jang_loader.load_jang_vlm_model(tmp_path, skip_eval=True) is expected
+
+    def test_load_jang_vlm_model_accepts_embedded_glm_jang_v2(
+        self, tmp_path, monkeypatch
+    ):
+        from vmlx_engine.utils import jang_loader
+
+        embedded = {
+            "format": "jang_v2",
+            "family": "glm5_next",
+            "bit_map": {"model.embed_tokens": {"bits": 6, "group_size": 64}},
+        }
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "glm5_next",
+                    "jang_config": embedded,
+                }
+            )
+        )
+        expected = (object(), object())
+        captured = {}
+
+        def fake_load(path, jang_cfg, **kwargs):
+            captured.update(path=path, jang_cfg=jang_cfg, kwargs=kwargs)
+            return expected
+
+        monkeypatch.setattr(jang_loader, "_load_jang_v2_vlm", fake_load)
+        monkeypatch.setattr(
+            jang_loader,
+            "_ensure_jang_family_runtime_supported",
+            lambda path, config: None,
+        )
+
+        assert jang_loader.load_jang_vlm_model(tmp_path, skip_eval=True) is expected
+        assert captured["path"] == tmp_path
+        assert captured["jang_cfg"] == embedded
+        assert captured["kwargs"]["skip_eval"] is True
+        assert not (tmp_path / "jang_config.json").exists()
 
     def test_gemma4_moe_mxfp_experts_split_to_switch_glu_quantized_sidecars(self):
         import mlx.core as mx

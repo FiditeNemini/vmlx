@@ -373,33 +373,13 @@ def check_and_inject_fallback_tools(
         and "</tools>" in instruction_prompt
         and all(name in instruction_prompt for name in tool_names)
     )
-    # A post-call continuation is different from a fresh auto-tool turn: it
-    # needs the explicit no-repeat instruction below, so it must not take the
-    # native-template fast path.
-    _qwen_has_post_user_tool_activity = False
-    if is_qwen_native_tool_prompt:
-        _qwen_messages = list(messages or [])
-        if (
-            len(_qwen_messages) >= 2
-            and isinstance(_qwen_messages[-1], dict)
-            and _qwen_messages[-1].get("role") == "user"
-            and isinstance(_qwen_messages[-2], dict)
-            and _qwen_messages[-2].get("role") == "tool"
-        ):
-            # A protocol adapter may flatten one native user block containing
-            # tool_result + follow-up text into adjacent OpenAI messages:
-            # tool(result), user(follow-up).  That is still post-tool activity;
-            # do not take the native-template fast path and skip the required
-            # continuation scaffold.
-            _qwen_has_post_user_tool_activity = True
-        for _message in reversed(messages or []):
-            if not isinstance(_message, dict):
-                continue
-            if _message.get("role") == "user":
-                break
-            if _message.get("role") == "tool" or _message.get("tool_calls"):
-                _qwen_has_post_user_tool_activity = True
-                break
+    # A source-owned Qwen schema remains authoritative after tool results.
+    # Replacing it only on continuation turns moves the opening system bytes,
+    # so an otherwise append-only agent transcript cannot restore its exact
+    # KV + GDN/SSM prefix from RAM or SSD.  The native template already renders
+    # assistant tool calls and tool-result history; keep that stable catalog
+    # and let the current user turn express whether another tool is wanted.
+    # ``tool_choice=required`` still takes the stronger fallback below.
     _zaya_has_concrete_tool_examples = (
         is_zaya_native_tool_prompt
         # Zaya's shipped scaffold may contain parser-shaped examples for every
@@ -603,7 +583,6 @@ def check_and_inject_fallback_tools(
             or (
                 _qwen_has_native_tool_schema
                 and not tool_choice_required
-                and not _qwen_has_post_user_tool_activity
             )
         )
         and (not is_zaya_native_tool_prompt or _zaya_has_concrete_tool_examples)

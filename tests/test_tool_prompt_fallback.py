@@ -319,12 +319,10 @@ def test_qwen_tool_result_continuation_prevents_duplicate_execution():
         tool_parser_id="qwen",
     )
 
-    assert "run_command" in injected
-    assert "already ran" in injected
-    assert "Do not emit another <tool_call>" in injected
-    assert "<function=run_command>" not in injected
-    assert f"<parameter=command>\n{command}\n</parameter>" not in injected
-    assert "Tool: read_file" not in injected
+    # The source-owned Qwen schema and native assistant/tool transcript are
+    # sufficient. Replacing the stable opening schema after the tool result
+    # would invalidate every later prefix-cache block in a growing agent loop.
+    assert injected == _qwen_prompt()
 
 
 def test_qwen_tool_result_continuation_allows_explicit_remaining_tool():
@@ -362,11 +360,7 @@ def test_qwen_tool_result_continuation_allows_explicit_remaining_tool():
         tool_parser_id="qwen",
     )
 
-    assert "Native multi-tool continuation" in injected
-    assert "Completed tool(s): read_file" in injected
-    assert "remaining tool(s): run_command" in injected
-    assert "<function=run_command>" in injected
-    assert "Do not emit another <tool_call>" not in injected
+    assert injected == _qwen_prompt()
 
 
 def test_qwen_tool_result_then_followup_user_keeps_multi_tool_continuation():
@@ -405,10 +399,7 @@ def test_qwen_tool_result_then_followup_user_keeps_multi_tool_continuation():
         tool_parser_id="qwen",
     )
 
-    assert "Native multi-tool continuation" in injected
-    assert "Completed tool(s): read_file" in injected
-    assert "remaining tool(s): run_command" in injected
-    assert "<function=run_command>" in injected
+    assert injected == _qwen_prompt()
 
 
 def test_qwen_new_user_after_visible_assistant_answer_does_not_reuse_tool_state():

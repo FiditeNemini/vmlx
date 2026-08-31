@@ -77,6 +77,10 @@ def _register_local_mlx_vlm_runtime_if_needed(model_path: str | Path) -> None:
         from .qwen4_exp.register import register_qwen4_exp_runtime
 
         register_qwen4_exp_runtime()
+    if model_type == "glm5_next":
+        from .glm5_next.register import register_glm5_next_vlm_runtime
+
+        register_glm5_next_vlm_runtime()
 
 
 def _register_step3p7_mlx_vlm_runtime() -> None:

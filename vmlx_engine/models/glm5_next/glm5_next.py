@@ -1849,12 +1849,18 @@ class Glm5NextModel(nn.Module):
 
     def __call__(
         self,
-        input_ids: mx.array,
+        input_ids: mx.array | None = None,
         cache=None,
         n_confirmed: int = 0,
         return_pre_norm: bool = False,
+        inputs_embeds: mx.array | None = None,
     ):
-        x = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            if input_ids is None:
+                raise ValueError("glm5_next requires input_ids or inputs_embeds")
+            x = self.embed_tokens(input_ids)
+        else:
+            x = inputs_embeds
         offset = 0
         if cache is not None:
             for c in cache:
@@ -1895,11 +1901,12 @@ class Model(nn.Module):
 
     def __call__(
         self,
-        inputs: mx.array,
+        inputs: mx.array | None = None,
         cache=None,
         return_hidden: bool = False,
         return_logits: bool = True,
         n_confirmed: int = 0,
+        inputs_embeds: mx.array | None = None,
         **kwargs,
     ):
         hidden = self.model(
@@ -1907,6 +1914,7 @@ class Model(nn.Module):
             cache=cache,
             n_confirmed=n_confirmed,
             return_pre_norm=True,
+            inputs_embeds=inputs_embeds,
         )
         if not return_hidden:
             from vmlx_engine.native_mtp_prompt_priming import (

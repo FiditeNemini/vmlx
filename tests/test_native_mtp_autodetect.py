@@ -323,7 +323,7 @@ class TestGlm5NextMtpDetection:
         assert status["runtime_active"] is False
         assert status["runtime_default_mode"] == "off"
         assert status["status"] == "runtime_disabled"
-        assert status["runtime_scope"] == "text"
+        assert status["runtime_scope"] == "text+vl"
         assert status["has_vision_config"] is True
         assert status["has_vision_weights"] is True
         assert status["vl_runtime_available"] is False
@@ -334,6 +334,7 @@ class TestGlm5NextMtpDetection:
         assert explicit["runtime_available"] is True
         assert explicit["status"] == "native_runtime_ready"
         assert explicit["effective_depth"] == 3
+        assert explicit["vl_runtime_available"] is True
 
     def test_glm5_next_ar_bundle_reports_mtp_dropped(self, tmp_path):
         from vmlx_engine.native_mtp import inspect_native_mtp_bundle

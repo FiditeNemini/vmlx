@@ -14,7 +14,10 @@ import random
 import mlx.core as mx
 import pytest
 
-from vmlx_engine.models.glm5_next.register import register_glm5_next_runtime
+from vmlx_engine.models.glm5_next.register import (
+    register_glm5_next_runtime,
+    register_glm5_next_vlm_runtime,
+)
 
 
 TINY_CFG = {
@@ -64,7 +67,17 @@ def glm5():
 
 @pytest.fixture(scope="module")
 def tiny_model(glm5):
-    model = glm5.Model(glm5.ModelArgs.from_dict(TINY_CFG))
+    from vmlx_engine.patches.mlx_lm_mtp import (
+        is_mtp_active,
+        set_mtp_active,
+    )
+
+    previous = is_mtp_active()
+    set_mtp_active(False)
+    try:
+        model = glm5.Model(glm5.ModelArgs.from_dict(TINY_CFG))
+    finally:
+        set_mtp_active(previous)
     mx.eval(model.parameters())
     return model
 
@@ -1695,6 +1708,121 @@ class TestRegistryDetection:
         (tmp_path / "config.json").write_text(json.dumps(cfg))
         assert is_mllm_model(str(tmp_path)) is False
         assert is_mllm_model(str(tmp_path), force_mllm=True) is False
+
+    def test_indexed_visual_bundle_routes_mllm(self, tmp_path):
+        from vmlx_engine.api.utils import is_mllm_model
+
+        cfg = json.loads(json.dumps(TINY_CFG))
+        cfg["vision_config"] = {"model_type": "glm5_next_vision"}
+        (tmp_path / "config.json").write_text(json.dumps(cfg))
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {"weight_map": {"visual.patch_embed.proj.weight": "model-1.safetensors"}}
+            )
+        )
+        assert is_mllm_model(str(tmp_path)) is True
+
+
+class TestVisionRuntime:
+    def test_registers_under_mlx_vlm_namespace(self):
+        assert register_glm5_next_vlm_runtime() is True
+        import mlx_vlm.models.glm5_next as glm_vlm
+
+        assert glm_vlm.Model is not None
+        assert glm_vlm.VisionModel is not None
+        assert glm_vlm.ImageProcessor is not None
+
+    def test_jang_quantized_paths_cover_text_vision_and_native_mtp(self):
+        from vmlx_engine.utils.jang_loader import _vlm_quant_module_path_candidates
+
+        assert "model.layers.3.self_attn.q_a_proj" in _vlm_quant_module_path_candidates(
+            "language_model.model.layers.3.self_attn.q_a_proj", "glm5_next"
+        )
+        assert "visual.blocks.0.attn.qkv" in _vlm_quant_module_path_candidates(
+            "vision_tower.blocks.0.attn.qkv", "glm5_next"
+        )
+        assert "model.layers.45.self_attn.q_a_proj" in _vlm_quant_module_path_candidates(
+            "language_model.mtp.self_attn.q_a_proj", "glm5_next"
+        )
+
+    def test_image_processor_emits_exact_patch_contract(self):
+        import numpy as np
+
+        from vmlx_engine.models.glm5_next.processing import Glm5NextImageProcessor
+
+        processor = Glm5NextImageProcessor(
+            patch_size=14,
+            temporal_patch_size=2,
+            merge_size=2,
+            min_image_tokens=1,
+            max_image_tokens=16,
+        )
+        result = processor(np.zeros((28, 28, 3), dtype=np.uint8))
+        assert result["pixel_values"].shape == (4, 3 * 2 * 14 * 14)
+        assert result["image_grid_thw"].tolist() == [[1, 2, 2]]
+
+    def test_tiny_vision_features_replace_only_image_placeholders(self):
+        from vmlx_engine.models.glm5_next.config import ModelConfig, VisionConfig
+        from vmlx_engine.models.glm5_next.glm5_next import ModelArgs
+        from vmlx_engine.models.glm5_next.vlm import Model
+
+        text = ModelArgs.from_dict(TINY_CFG)
+        vision = VisionConfig(
+            depth=1,
+            hidden_size=64,
+            intermediate_size=96,
+            num_heads=4,
+            patch_size=2,
+            image_size=4,
+            out_hidden_size=64,
+            projection_intermediate_size=128,
+            spatial_merge_size=1,
+            temporal_patch_size=2,
+        )
+        config = ModelConfig(
+            text_config=text,
+            vision_config=vision,
+            image_token_id=500,
+            video_token_id=501,
+        )
+        model = Model(config)
+        mx.eval(model.parameters())
+        input_ids = mx.array([[500, 500, 500, 500, 7]])
+        pixel_values = mx.zeros((4, 3 * 2 * 2 * 2))
+        result = model.get_input_embeddings(
+            input_ids,
+            pixel_values=pixel_values,
+            image_grid_thw=mx.array([[1, 2, 2]]),
+        )
+        assert result.inputs_embeds.shape == (1, 5, 64)
+
+        with pytest.raises(ValueError, match="placeholders disagree"):
+            model.get_input_embeddings(
+                mx.array([[500, 7]]),
+                pixel_values=pixel_values,
+                image_grid_thw=mx.array([[1, 2, 2]]),
+            )
+
+    def test_sanitize_keeps_visual_and_native_mtp_weights(self, monkeypatch):
+        from vmlx_engine.models.glm5_next.config import ModelConfig, VisionConfig
+        from vmlx_engine.models.glm5_next.glm5_next import ModelArgs
+        from vmlx_engine.models.glm5_next.vlm import Model
+        from vmlx_engine.patches import mlx_lm_mtp
+
+        monkeypatch.setattr(mlx_lm_mtp, "is_mtp_active", lambda: True)
+        text = ModelArgs.from_dict(TINY_CFG)
+        config = ModelConfig(text_config=text, vision_config=VisionConfig(depth=0))
+        model = Model(config)
+        weights = model.sanitize(
+            {
+                "visual.patch_embed.proj.bias": mx.zeros((1024,)),
+                "model.layers.5.enorm.weight": mx.zeros((64,)),
+                "model.embed_tokens.weight": mx.zeros((512, 64)),
+            }
+        )
+        assert "vision_tower.patch_embed.proj.bias" in weights
+        assert "language_model.mtp.enorm.weight" in weights
+        assert "language_model.model.embed_tokens.weight" in weights
 
 
 class TestPublicLoaderMtpHandoff:

@@ -951,12 +951,14 @@ def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:
     cache_type = capabilities.get("cache_type") if isinstance(capabilities, dict) else None
 
     normalized_family = _normalize_family(family)
-    # The current vendored glm5_next implementation is the text runtime.  The
-    # source bundle can legitimately contain a visual tower, but its loader
-    # filters those weights and no GLM image/video bridge is wired yet.  Keep
-    # artifact capability separate from executable capability so /health does
-    # not advertise a VL path that cannot run.
-    text_only_runtime = normalized_family == "glm5_next"
+    text_only_runtime = False
+    if normalized_family == "glm5_next":
+        try:
+            from .models.glm5_next.register import glm5_next_vlm_runtime_available
+
+            text_only_runtime = not glm5_next_vlm_runtime_available()
+        except Exception:
+            text_only_runtime = True
     vl_runtime_available = bool(
         runtime_available
         and has_vision

@@ -591,13 +591,9 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
     except Exception:
         pass
 
-    # GLM-5.3-Flash (glm5_next): always route through the text engine for now.
-    # The bundle ships a vision tower, but the vMLX VLM runtime for this
-    # family is not implemented yet — the source-owned text runtime
-    # (mlx_lm.models.glm5_next, vendored) drops visual weights at sanitize.
-    # Letting force_mllm push it into generic mlx_vlm would fail at load
-    # (no glm5_next mlx_vlm class). Remove this block when the V-phase
-    # vision runtime lands.
+    # GLM-5.3 uses one top-level model type for text and multimodal bundles.
+    # Route to mlx-vlm only when both the config and the checkpoint index prove
+    # that a visual tower is present; otherwise preserve the existing text lane.
     try:
         _cfg_p_glm = os.path.join(local_path, "config.json")
         if os.path.isfile(_cfg_p_glm):
@@ -605,19 +601,37 @@ def is_mllm_model(model_name: str, force_mllm: bool = False, force_text_only: bo
             _top_glm = str(_cfg_glm.get("model_type") or "")
             _txt_glm = str((_cfg_glm.get("text_config") or {}).get("model_type") or "")
             if "glm5_next" in _top_glm or "glm5_next" in _txt_glm:
-                if force_mllm:
-                    _logger.warning(
-                        "is_mllm_model(%s): glm5_next overrides force_mllm — "
-                        "the glm5_next VLM runtime is not implemented; routing "
-                        "through the source-owned text runtime",
-                        model_name,
+                _index_path = os.path.join(
+                    local_path, "model.safetensors.index.json"
+                )
+                _vision_config = bool(_cfg_glm.get("vision_config"))
+                _vision_weights = False
+                if os.path.isfile(_index_path):
+                    _weight_map = json.loads(open(_index_path).read()).get(
+                        "weight_map", {}
                     )
-                else:
+                    _vision_weights = any(
+                        str(key).startswith(("visual.", "model.visual."))
+                        for key in _weight_map
+                    )
+                from ..models.glm5_next.register import (
+                    glm5_next_vlm_runtime_available,
+                )
+
+                if _vision_config and _vision_weights and glm5_next_vlm_runtime_available():
                     _logger.info(
-                        "is_mllm_model(%s): tier=glm5_next_text_route "
-                        "result=False (vision phase not implemented yet)",
+                        "is_mllm_model(%s): tier=glm5_next_indexed_visual "
+                        "result=True",
                         model_name,
                     )
+                    return True
+                _logger.info(
+                    "is_mllm_model(%s): tier=glm5_next_text_route result=False "
+                    "(vision_config=%s vision_weights=%s)",
+                    model_name,
+                    _vision_config,
+                    _vision_weights,
+                )
                 return False
     except Exception:
         pass

@@ -13,15 +13,18 @@ Created by Jinho Jang (eric@jangq.ai).
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
 import importlib.util
 import logging
 import sys
+import types
 from pathlib import Path
 
 logger = logging.getLogger("vmlx_engine")
 
 _REGISTERED = False
 _PACKAGE = "mlx_lm.models.glm5_next"
+_VLM_PACKAGE = "mlx_vlm.models.glm5_next"
 _VENDORED = Path(__file__).resolve().parent / "glm5_next.py"
 
 
@@ -66,4 +69,56 @@ def register_glm5_next_runtime() -> bool:
     _register_prompt_cache_classes()
     _REGISTERED = True
     logger.info("Registered vendored glm5_next runtime (%s)", _VENDORED)
+    return True
+
+
+def glm5_next_vlm_runtime_available() -> bool:
+    try:
+        return importlib.util.find_spec("mlx_vlm.models") is not None
+    except Exception:
+        return False
+
+
+def register_glm5_next_vlm_runtime() -> bool:
+    """Expose the source-owned vision wrapper to mlx-vlm's normal dispatcher."""
+
+    register_glm5_next_runtime()
+    if _VLM_PACKAGE in sys.modules:
+        return True
+    try:
+        parent = importlib.import_module("mlx_vlm.models")
+    except ImportError:
+        return False
+
+    from .config import ModelConfig, TextConfig, VisionConfig
+    from .processing import Glm5NextImageProcessor, Glm5NextProcessor
+    from .vision import VisionModel
+    from .vlm import LanguageModel, Model
+
+    module = types.ModuleType(_VLM_PACKAGE)
+    exports = {
+        "Model": Model,
+        "ModelConfig": ModelConfig,
+        "TextConfig": TextConfig,
+        "VisionConfig": VisionConfig,
+        "LanguageModel": LanguageModel,
+        "VisionModel": VisionModel,
+        "ImageProcessor": Glm5NextImageProcessor,
+        "Processor": Glm5NextProcessor,
+    }
+    for name, value in exports.items():
+        setattr(module, name, value)
+    module.__all__ = sorted(exports)
+    module.__file__ = str(Path(__file__).resolve())
+    module.__package__ = _VLM_PACKAGE
+    module.__path__ = []
+    module.__spec__ = importlib.machinery.ModuleSpec(
+        _VLM_PACKAGE,
+        loader=None,
+        origin=module.__file__,
+        is_package=True,
+    )
+    sys.modules[_VLM_PACKAGE] = module
+    parent.glm5_next = module
+    logger.info("Registered source-owned glm5_next MLX-VLM runtime")
     return True

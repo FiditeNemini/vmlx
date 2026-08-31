@@ -616,6 +616,19 @@ def test_tight_memory_glm_crossing_prefill_step_uses_split_oom_escape(
     }
     generator._tight_memory_prefill_drain = True
     request.input_ids = mx.arange(2200, dtype=mx.int32)[None, :]
+    captured_boundaries = []
+    monkeypatch.setattr(
+        generator,
+        "_ssm_capture_boundaries_for",
+        lambda request, seq_len, has_images, boundary: [2199],
+    )
+    monkeypatch.setattr(
+        generator,
+        "_maybe_capture_clean_ssm_boundary",
+        lambda request, cache, tokens, boundary: captured_boundaries.append(
+            boundary
+        ),
+    )
 
     with caplog.at_level(
         logging.INFO, logger="vmlx_engine.mllm_batch_generator"
@@ -631,6 +644,7 @@ def test_tight_memory_glm_crossing_prefill_step_uses_split_oom_escape(
         {"tokens": 151, "return_logits": False},
         {"tokens": 1, "return_logits": True},
     ]
+    assert captured_boundaries == [2199]
     assert "Hybrid prefill path=chunked family=glm5_next_text" in caplog.text
     assert "tight-memory GLM prefill exceeds the configured split step" in caplog.text
 

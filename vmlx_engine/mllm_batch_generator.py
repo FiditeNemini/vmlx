@@ -9786,25 +9786,47 @@ class MLLMBatchGenerator:
                             or input_ids[0].tolist()
                         )
                         processed = 0
-                        for capture_boundary in ssm_boundaries:
-                            if capture_boundary > processed:
+
+                        def _advance_split_prefix(target: int) -> None:
+                            """Advance to an exact SSM boundary in bounded spans.
+
+                            The old boundary branch submitted
+                            ``input_ids[:, processed:target]`` in one call.
+                            That silently defeated the tight-memory chunk size
+                            whenever the template's clean boundary covered most
+                            of the prompt (GLM live receipt: 2,864 tokens in one
+                            call despite a 1,024-token projected step).  Chunk
+                            toward the boundary, then snapshot only after the
+                            exact target has materialized.
+                            """
+                            nonlocal processed
+                            while processed < target:
+                                prefix_end = min(
+                                    target,
+                                    processed + _tight_text_prefill_step_size,
+                                )
                                 _call_lm_prefix_without_logits(
                                     lm,
-                                    input_ids[:, processed:capture_boundary],
-                                    _lm_kwargs_for(processed, capture_boundary),
+                                    input_ids[:, processed:prefix_end],
+                                    _lm_kwargs_for(processed, prefix_end),
                                 )
                                 _materialize_prefill_cache_state(cache)
-                                processed = capture_boundary
+                                processed = prefix_end
+                                if (
+                                    _tight_text_prefill_step_size
+                                    < self.prefill_step_size
+                                    and not prefill_keep_alloc_enabled()
+                                ):
+                                    mx.clear_cache()
+
+                        for capture_boundary in ssm_boundaries:
+                            if capture_boundary > processed:
+                                _advance_split_prefix(capture_boundary)
                             self._maybe_capture_clean_ssm_boundary(
                                 request, cache, all_tokens, capture_boundary
                             )
                         if final_start > processed:
-                            _call_lm_prefix_without_logits(
-                                lm,
-                                input_ids[:, processed:final_start],
-                                _lm_kwargs_for(processed, final_start),
-                            )
-                            _materialize_prefill_cache_state(cache)
+                            _advance_split_prefix(final_start)
                     elif final_start > 0:
                         _processed_prefix = 0
                         while _processed_prefix < final_start:

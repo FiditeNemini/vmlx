@@ -3538,7 +3538,6 @@ def _install_jangtq_wired_limit_from_sysctl() -> None:
 def main():
     _check_macos_compat()
     _check_no_duplicate_mlx()
-    _install_jangtq_wired_limit_from_sysctl()
     parser = argparse.ArgumentParser(
         description="vmlx-engine: Apple Silicon MLX backend for vLLM",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -4717,6 +4716,13 @@ Examples:
                 f"See mlxstudio#76.\n"
             )
         raise
+
+    # ``bundle-check`` is deliberately header-only and machine-readable. Do
+    # not import MLX or emit the runtime wired-limit banner before its JSON.
+    # Every model-running command retains the existing initialization before
+    # dispatch.
+    if args.command != "bundle-check":
+        _install_jangtq_wired_limit_from_sysctl()
 
     # ONE place where the GB/percent budget becomes a number. Every consumer
     # downstream — both scheduler config builders, the startup summary, the DSV4

@@ -234,3 +234,35 @@ def test_direct_serve_preflight_skips_remote_ids_and_checks_local_dirs(
     monkeypatch.setattr(integrity, "check_model_bundle", fake_check)
     cli._preflight_local_model_bundle(str(root))
     assert seen == [(root, True, True)]
+
+
+def test_bundle_check_json_does_not_initialize_runtime_or_prefix_logs(
+    tmp_path, monkeypatch, capsys
+):
+    from vmlx_engine import cli
+
+    root = tmp_path / "model"
+    _write_safetensors(
+        root / "model.safetensors",
+        [("a", "F32", [1], struct.pack("<f", 1.0))],
+    )
+    monkeypatch.setenv("VMLX_MODEL_INTEGRITY_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(cli, "_check_macos_compat", lambda: None)
+    monkeypatch.setattr(cli, "_check_no_duplicate_mlx", lambda: None)
+    runtime_initializations = []
+    monkeypatch.setattr(
+        cli,
+        "_install_jangtq_wired_limit_from_sysctl",
+        lambda: runtime_initializations.append(True),
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["vmlx-engine", "bundle-check", str(root), "--json"]
+    )
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["status"] == "ok"
+    assert output.lstrip().startswith("{")
+    assert runtime_initializations == []

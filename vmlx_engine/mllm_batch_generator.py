@@ -9478,6 +9478,36 @@ class MLLMBatchGenerator:
                 self.language_model, _hybrid_text_model_type
             )
         )
+        # GLM-5.3's one-shot prefill peak is not described by the quadratic
+        # attention-score estimate above.  Its KDA/DSA/MoE forward can exhaust
+        # the remaining Metal working set on a modest agentic prompt even when
+        # ``heads * seq_len**2 * 2`` is well below the generic 8 GiB guard.
+        #
+        # Live M5 Max receipt (glm5_next, 95.8 GiB resident, 15.2 GiB free):
+        # a 2,867-token Electron tool prompt stayed on the one-shot lane,
+        # peaked at 110,751 MiB, and failed before its first token.  The
+        # generator had already classified the process as tight-memory and the
+        # configured 2,048-token split-prefill step was available, but the
+        # hybrid default blocked that path.  Treat crossing the configured
+        # step as the GLM-specific OOM escape hatch in this measured regime.
+        # This does not flip the normal hybrid default and does not affect
+        # Qwen/GDN or other families.  The existing global auto-chunk kill
+        # switch remains an exact operator override.
+        _glm_tight_memory_requires_split = (
+            _hybrid_blocks_chunk
+            and not has_media_payload
+            and _hybrid_text_model_type in {"glm5_next", "glm5_next_text"}
+            and bool(getattr(self, "_tight_memory_prefill_drain", False))
+            and seq_len > int(self.prefill_step_size)
+            and os.environ.get("VMLX_DISABLE_HYBRID_AUTO_CHUNK")
+            not in ("1", "true", "True", "yes", "on")
+        )
+        if _glm_tight_memory_requires_split:
+            _hybrid_blocks_chunk = False
+            _hybrid_path_reason = (
+                "tight-memory GLM prefill exceeds the configured split step "
+                "(OOM escape hatch)"
+            )
         if (
             _hybrid_blocks_chunk
             and not has_media_payload

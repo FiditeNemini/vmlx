@@ -599,6 +599,69 @@ def test_unknown_family_defaults_to_one_shot_lane(monkeypatch, caplog):
     assert "Hybrid prefill path=one-shot family=unknown" in caplog.text
 
 
+def test_tight_memory_glm_crossing_prefill_step_uses_split_oom_escape(
+    monkeypatch, caplog
+):
+    """GLM's measured one-shot peak is not captured by heads*seq^2.
+
+    A tight-memory GLM prompt that crosses the configured prefill step must
+    reach the existing prefix-without-logits split lane.  Keep this family
+    scoped: Qwen's default answer-byte gate is a separate contract.
+    """
+    _clear_hybrid_env(monkeypatch)
+    generator, model, request = _make_gate_fixture(with_proven_config=False)
+    model.config = {
+        "model_type": "glm5_next",
+        "text_config": {"model_type": "glm5_next_text"},
+    }
+    generator._tight_memory_prefill_drain = True
+    request.input_ids = mx.arange(2200, dtype=mx.int32)[None, :]
+
+    with caplog.at_level(
+        logging.INFO, logger="vmlx_engine.mllm_batch_generator"
+    ):
+        output = generator._run_vision_encoding_inner(
+            request, cache=model.language_model.make_cache()
+        )
+
+    assert output.shape == (1, 1, 8)
+    assert model.language_model.calls == [
+        {"tokens": 1024, "return_logits": False},
+        {"tokens": 1024, "return_logits": False},
+        {"tokens": 151, "return_logits": False},
+        {"tokens": 1, "return_logits": True},
+    ]
+    assert "Hybrid prefill path=chunked family=glm5_next_text" in caplog.text
+    assert "tight-memory GLM prefill exceeds the configured split step" in caplog.text
+
+
+def test_tight_memory_glm_split_escape_respects_global_kill_switch(
+    monkeypatch, caplog
+):
+    _clear_hybrid_env(monkeypatch)
+    monkeypatch.setenv("VMLX_DISABLE_HYBRID_AUTO_CHUNK", "1")
+    generator, model, request = _make_gate_fixture(with_proven_config=False)
+    model.config = {
+        "model_type": "glm5_next",
+        "text_config": {"model_type": "glm5_next_text"},
+    }
+    generator._tight_memory_prefill_drain = True
+    request.input_ids = mx.arange(2200, dtype=mx.int32)[None, :]
+
+    with caplog.at_level(
+        logging.INFO, logger="vmlx_engine.mllm_batch_generator"
+    ):
+        output = generator._run_vision_encoding_inner(
+            request, cache=model.language_model.make_cache()
+        )
+
+    assert output.shape == (1, 2200, 8)
+    assert model.language_model.calls == [
+        {"tokens": 2200, "return_logits": True},
+    ]
+    assert "Hybrid prefill path=one-shot family=glm5_next_text" in caplog.text
+
+
 def test_env_zero_forces_one_shot_even_for_proven_family(monkeypatch, caplog):
     _clear_hybrid_env(monkeypatch)
     monkeypatch.setenv("VMLX_ALLOW_HYBRID_CHUNKED_PREFILL", "0")

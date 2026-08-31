@@ -2924,11 +2924,25 @@ class MLLMScheduler:
         with self._queue_lock:
             request = self.running.get(request_id)
             uid = self.request_id_to_uid.get(request_id)
+            collector_present = request_id in getattr(self, "output_queues", {})
             if (
                 request is None
                 or uid is None
                 or RequestStatus.is_finished(request.status)
             ):
+                # The model worker can finish a burst and detach its active row
+                # before the async API consumer reaches the already-queued tool
+                # bytes.  A live collector means the natural terminal is still
+                # owned by stream_outputs(); drain it instead of converting
+                # this harmless race into abort_request(), which discards the
+                # cache-bearing finish response before scheduler cleanup.
+                if collector_present:
+                    logger.info(
+                        "Graceful parser stop for %s is already terminalizing; "
+                        "draining the owned output collector",
+                        request_id,
+                    )
+                    return True
                 return False
         generator = self.batch_generator
         stop = getattr(generator, "request_graceful_stop", None)
@@ -2943,7 +2957,15 @@ class MLLMScheduler:
                 request_id,
                 uid,
             )
-        return accepted
+            return True
+        if collector_present:
+            logger.info(
+                "Graceful parser stop for %s found no active generator row; "
+                "draining the owned terminal collector",
+                request_id,
+            )
+            return True
+        return False
 
     def get_num_waiting(self) -> int:
         """Get number of waiting requests."""

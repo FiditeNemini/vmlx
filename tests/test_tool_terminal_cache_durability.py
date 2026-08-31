@@ -236,6 +236,34 @@ def test_mllm_scheduler_graceful_stop_keeps_request_owned():
     assert request.status == RequestStatus.RUNNING
 
 
+def test_mllm_scheduler_graceful_stop_drains_terminalizing_collector():
+    """A detached generator row with an owned output queue must not abort."""
+    import threading
+
+    from vmlx_engine.mllm_scheduler import MLLMScheduler
+    from vmlx_engine.request import RequestStatus
+
+    class _Generator:
+        def request_graceful_stop(self, _uid):
+            return False
+
+    scheduler = MLLMScheduler.__new__(MLLMScheduler)
+    scheduler._queue_lock = threading.Lock()
+    scheduler._batch_lock = threading.Lock()
+    request = SimpleNamespace(status=RequestStatus.RUNNING)
+    scheduler.running = {"req-terminalizing": request}
+    scheduler.request_id_to_uid = {"req-terminalizing": 23}
+    scheduler.output_queues = {"req-terminalizing": asyncio.Queue()}
+    scheduler.batch_generator = _Generator()
+
+    assert scheduler.request_graceful_stop("req-terminalizing") is True
+    assert scheduler.running["req-terminalizing"] is request
+    assert request.status == RequestStatus.RUNNING
+
+    request.status = RequestStatus.FINISHED_STOPPED
+    assert scheduler.request_graceful_stop("req-terminalizing") is True
+
+
 def test_qwen4_specific_contract_is_render_only_and_append_only():
     from vmlx_engine.engine.batched import BatchedEngine
 

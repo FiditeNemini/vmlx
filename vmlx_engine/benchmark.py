@@ -790,6 +790,7 @@ def run_mllm_benchmark(
     """
     from mlx_vlm import load
     from mlx_vlm.utils import load_config
+    from vmlx_engine.model_bundle_integrity import prepare_model_bundle_for_load
     from vmlx_engine.optimizations import detect_hardware
 
     # Detect hardware
@@ -835,8 +836,12 @@ def run_mllm_benchmark(
     # Load model
     print(f"Loading MLLM model: {model_name}...")
     load_start = time.perf_counter()
-    model, processor = load(model_name)
-    config = load_config(model_name)
+    resolved, _integrity_report = prepare_model_bundle_for_load(
+        model_name,
+        allow_download=True,
+    )
+    model, processor = load(resolved)
+    config = load_config(resolved)
     load_time = time.perf_counter() - load_start
     print(f"Model loaded in {load_time:.2f}s\n")
 

@@ -347,12 +347,9 @@ def _repair_standard_indexes(
                 {"metadata": {"total_size": total_size}, "weight_map": expected},
             )
         except OSError as exc:
-            if index_path.exists():
-                raise BundleIntegrityError(
-                    f"{relative}: inconsistent index could not be atomically repaired: {exc}"
-                ) from exc
-            warnings.append(f"{relative}: missing index could not be created: {exc}")
-            continue
+            raise BundleIntegrityError(
+                f"{relative}: shard index could not be atomically repaired: {exc}"
+            ) from exc
         repairs.append(relative)
     return repairs, warnings
 
@@ -400,7 +397,7 @@ def _scan_bundle(root: Path, *, repair: bool) -> dict[str, Any]:
             f"{root}: download is incomplete ({relative} is still present)"
         )
 
-    for config_name in ("config.json", "model_index.json", "jang_config.json"):
+    for config_name in sorted(_SIGNATURE_NAMES - {".vmlx-downloading"}):
         path = root / config_name
         if path.exists():
             _read_json_object(path, str(path))
@@ -495,4 +492,49 @@ def check_model_bundle(
         return result
 
 
-__all__ = ["BundleIntegrityError", "SCHEMA", "check_model_bundle"]
+def prepare_model_bundle_for_load(
+    model: str | os.PathLike[str],
+    *,
+    allow_download: bool,
+) -> tuple[str, dict[str, Any]]:
+    """Resolve one model to local storage and run the load-time integrity gate.
+
+    Runtime loaders call this immediately before constructing model objects. A
+    local directory is never downloaded. A Hugging Face identifier is resolved
+    with ``snapshot_download`` only in loaders that already support remote IDs;
+    image loaders pass ``allow_download=False`` because their product contract
+    is local-only.
+
+    No configuration file is required. The checker discovers every nested
+    safetensors file, including separate MTP heads and vision/audio towers.
+    """
+
+    requested = Path(model).expanduser()
+    if requested.is_dir():
+        resolved = requested
+    else:
+        if requested.is_absolute():
+            raise BundleIntegrityError(f"model bundle does not exist: {requested}")
+        if not allow_download:
+            raise BundleIntegrityError(
+                f"model bundle is not a local directory: {requested}"
+            )
+        try:
+            from huggingface_hub import snapshot_download
+
+            resolved = Path(snapshot_download(str(model)))
+        except Exception as exc:
+            raise BundleIntegrityError(
+                f"could not resolve model bundle {model!s} to local storage: {exc}"
+            ) from exc
+
+    report = check_model_bundle(resolved, repair=True, use_cache=True)
+    return str(resolved.resolve()), report
+
+
+__all__ = [
+    "BundleIntegrityError",
+    "SCHEMA",
+    "check_model_bundle",
+    "prepare_model_bundle_for_load",
+]

@@ -63,6 +63,15 @@ def _fake_pil_image():
     return img
 
 
+def _write_valid_fake_safetensors(path: Path) -> None:
+    """Create the smallest real shard accepted by the load-time preflight."""
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_file({"weight": np.array([1], dtype=np.int8)}, str(path))
+
+
 # ===========================================================================
 # 1. SUPPORTED_MODELS dict
 # ===========================================================================
@@ -700,8 +709,7 @@ class TestLoadEditModel:
 
     def test_qwen_import_path(self, tmp_path):
         """load_edit_model('qwen-image-edit') imports QwenImageEdit."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -721,8 +729,7 @@ class TestLoadEditModel:
 
     def test_kontext_import_path(self, tmp_path):
         """load_edit_model('flux-kontext') imports Flux1Kontext with resolved name."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -741,8 +748,7 @@ class TestLoadEditModel:
 
     def test_fill_import_path(self, tmp_path):
         """load_edit_model('fill') imports Flux1Fill with resolved name."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -957,8 +963,7 @@ class TestLoadMethod:
     def test_mflux_not_installed_raises(self, tmp_path):
         from vmlx_engine.image_gen import ImageGenEngine
         engine = ImageGenEngine()
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
 
         with patch.dict(sys.modules, {"mflux": None, "mflux.models": None,
                                        "mflux.models.common": None,
@@ -970,10 +975,8 @@ class TestLoadMethod:
     def test_alias_resolution_flux_schnell(self, tmp_path):
         """load('flux-schnell') should resolve to 'schnell' internally."""
         # Create mock model directory so local path check passes
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
-        (tmp_path / "text_encoder_2").mkdir()
-        (tmp_path / "text_encoder_2" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
+        _write_valid_fake_safetensors(tmp_path / "text_encoder_2" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -992,8 +995,7 @@ class TestLoadMethod:
 
     def test_zimage_model_uses_zimage_class(self, tmp_path):
         """load('z-image-turbo') should use ZImage class, not Flux1."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -1018,8 +1020,7 @@ class TestLoadMethod:
     def test_served_alias_uses_model_path_for_mflux_class_detection(self, tmp_path):
         """A custom served/display name must not hide the local mflux family."""
         model_dir = tmp_path / "Z-Image-Turbo-mflux-4bit"
-        (model_dir / "transformer").mkdir(parents=True)
-        (model_dir / "transformer" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(model_dir / "transformer" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -1042,10 +1043,8 @@ class TestLoadMethod:
 
     def test_flux_model_uses_flux1_class(self, tmp_path):
         """load('dev') should use Flux1 class, not ZImage."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
-        (tmp_path / "text_encoder_2").mkdir()
-        (tmp_path / "text_encoder_2" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
+        _write_valid_fake_safetensors(tmp_path / "text_encoder_2" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -1068,10 +1067,8 @@ class TestLoadMethod:
 
     def test_load_passes_lora_paths_and_scales_when_supported(self, tmp_path):
         """vmlx serve LoRA flags must reach mflux model constructors."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
-        (tmp_path / "text_encoder_2").mkdir()
-        (tmp_path / "text_encoder_2" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
+        _write_valid_fake_safetensors(tmp_path / "text_encoder_2" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mock_config = MagicMock()
@@ -1121,10 +1118,8 @@ class TestLoadMethod:
 
     def test_load_rejects_requested_lora_when_constructor_does_not_support_it(self, tmp_path):
         """Requested LoRA must not be silently discarded for unsupported classes."""
-        (tmp_path / "transformer").mkdir()
-        (tmp_path / "transformer" / "0.safetensors").write_bytes(b"fake")
-        (tmp_path / "text_encoder_2").mkdir()
-        (tmp_path / "text_encoder_2" / "0.safetensors").write_bytes(b"fake")
+        _write_valid_fake_safetensors(tmp_path / "transformer" / "0.safetensors")
+        _write_valid_fake_safetensors(tmp_path / "text_encoder_2" / "0.safetensors")
 
         mocks = _mock_mflux_modules()
         mocks["mlx_lm"] = MagicMock()

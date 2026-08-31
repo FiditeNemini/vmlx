@@ -178,6 +178,12 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
     start_time = time.time()
 
     try:
+        from .model_bundle_integrity import prepare_model_bundle_for_load
+
+        resolved_draft, _integrity_report = prepare_model_bundle_for_load(
+            config.model,
+            allow_download=True,
+        )
         if _is_dflash2_model(config.model):
             import dflash.model_mlx as dflash_runtime
             import mlx.core as mx
@@ -191,10 +197,10 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
             apply_mlx_vlm_mtp_patch()
 
             original_download = dflash_runtime.snapshot_download
-            if Path(config.model).expanduser().is_dir():
+            if Path(resolved_draft).is_dir():
                 dflash_runtime.snapshot_download = lambda model_id, **_kwargs: model_id
             try:
-                draft_model = dflash_runtime.load_draft(config.model)
+                draft_model = dflash_runtime.load_draft(resolved_draft)
             finally:
                 dflash_runtime.snapshot_download = original_download
             nn.quantize(draft_model, group_size=64, bits=4)
@@ -209,7 +215,7 @@ def load_draft_model(config: SpeculativeConfig) -> tuple[Any, Any]:
             from mlx_lm import load as mlx_lm_load
 
             draft_model, draft_tokenizer = mlx_lm_load(
-                config.model,
+                resolved_draft,
                 tokenizer_config={"trust_remote_code": True},
             )
             _spec_kind = "standard"

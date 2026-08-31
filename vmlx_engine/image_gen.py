@@ -503,6 +503,16 @@ class ImageGenEngine:
                 f"Download the model first from the Image tab."
             )
 
+        # Programmatic ImageGenEngine users can bypass the CLI/Electron
+        # preflight. Repeat the same stamped, header-only gate at the owning
+        # loader boundary before mflux constructs or materializes any weights.
+        from .model_bundle_integrity import prepare_model_bundle_for_load
+
+        model_path, _integrity_report = prepare_model_bundle_for_load(
+            model_path,
+            allow_download=False,
+        )
+
         try:
             from mflux.models.common.config.model_config import ModelConfig
         except ImportError:

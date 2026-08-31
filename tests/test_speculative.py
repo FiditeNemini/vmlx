@@ -121,7 +121,13 @@ class TestGlobalState(unittest.TestCase):
         config = SpeculativeConfig(model="mock-model")
 
         # Patch mlx_lm.load (imported locally inside load_draft_model)
-        with patch("mlx_lm.load", return_value=(mock_model, mock_tokenizer)):
+        with (
+            patch(
+                "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+                return_value=("/tmp/mock-model", {"status": "ok"}),
+            ),
+            patch("mlx_lm.load", return_value=(mock_model, mock_tokenizer)),
+        ):
             model, tokenizer = spec.load_draft_model(config)
 
         self.assertTrue(spec.is_speculative_enabled())
@@ -439,7 +445,13 @@ class TestLoadDraftModelErrors(unittest.TestCase):
         mock_tokenizer = MagicMock()
         config = SpeculativeConfig(model="mock-model")
 
-        with patch("mlx_lm.load", return_value=(mock_model, mock_tokenizer)):
+        with (
+            patch(
+                "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+                return_value=("/tmp/mock-model", {"status": "ok"}),
+            ),
+            patch("mlx_lm.load", return_value=(mock_model, mock_tokenizer)),
+        ):
             model, tokenizer = spec.load_draft_model(config)
 
         self.assertIs(model, mock_model)
@@ -917,11 +929,23 @@ class TestEdgeCases(unittest.TestCase):
         config1 = SpeculativeConfig(model="draft1")
         config2 = SpeculativeConfig(model="draft2")
 
-        with patch("mlx_lm.load", return_value=(mock_model1, MagicMock())):
+        with (
+            patch(
+                "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+                return_value=("/tmp/draft1", {"status": "ok"}),
+            ),
+            patch("mlx_lm.load", return_value=(mock_model1, MagicMock())),
+        ):
             spec.load_draft_model(config1)
         self.assertIs(spec.get_draft_model(), mock_model1)
 
-        with patch("mlx_lm.load", return_value=(mock_model2, MagicMock())):
+        with (
+            patch(
+                "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+                return_value=("/tmp/draft2", {"status": "ok"}),
+            ),
+            patch("mlx_lm.load", return_value=(mock_model2, MagicMock())),
+        ):
             spec.load_draft_model(config2)
         self.assertIs(spec.get_draft_model(), mock_model2)
 

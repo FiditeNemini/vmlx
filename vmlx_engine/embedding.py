@@ -34,10 +34,15 @@ class EmbeddingEngine:
     def load(self) -> None:
         """Load the embedding model and tokenizer."""
         from mlx_embeddings import load
+        from .model_bundle_integrity import prepare_model_bundle_for_load
 
         logger.info(f"Loading embedding model: {self.model_name}")
         start = time.perf_counter()
-        self._model, self._tokenizer = load(self.model_name)
+        resolved, _integrity_report = prepare_model_bundle_for_load(
+            self.model_name,
+            allow_download=True,
+        )
+        self._model, self._tokenizer = load(resolved)
         elapsed = time.perf_counter() - start
         logger.info(f"Embedding model loaded in {elapsed:.2f}s: {self.model_name}")
 

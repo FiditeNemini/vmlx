@@ -1,4 +1,7 @@
 def test_jangtq_mxtq_vlm_envelope_is_accepted(tmp_path, monkeypatch):
+    import numpy as np
+    from safetensors.numpy import save_file
+
     from vmlx_engine.utils import jang_loader
 
     model_dir = tmp_path / "vl-jangtq"
@@ -8,6 +11,10 @@ def test_jangtq_mxtq_vlm_envelope_is_accepted(tmp_path, monkeypatch):
         '"mxtq_bits":{"routed_expert":2}}'
     )
     (model_dir / "config.json").write_text('{"model_type":"qwen2_vl"}')
+    save_file(
+        {"weight": np.array([1], dtype=np.int8)},
+        str(model_dir / "model.safetensors"),
+    )
 
     sentinel = object()
     monkeypatch.setattr(jang_loader, "_is_v2_model", lambda path: True)
@@ -27,6 +34,9 @@ def test_jangtq_mxtq_vlm_envelope_is_accepted(tmp_path, monkeypatch):
 
 
 def test_jangtq_format_only_vlm_envelope_is_accepted(tmp_path, monkeypatch):
+    import numpy as np
+    from safetensors.numpy import save_file
+
     from vmlx_engine.utils import jang_loader
 
     model_dir = tmp_path / "vl-jangtq-format-only"
@@ -36,6 +46,10 @@ def test_jangtq_format_only_vlm_envelope_is_accepted(tmp_path, monkeypatch):
         '"tq_layout":"prestacked_switch_mlp"}'
     )
     (model_dir / "config.json").write_text('{"model_type":"mimo_v2"}')
+    save_file(
+        {"weight": np.array([1], dtype=np.int8)},
+        str(model_dir / "model.safetensors"),
+    )
 
     sentinel = object()
     monkeypatch.setattr(jang_loader, "_is_v2_model", lambda path: True)

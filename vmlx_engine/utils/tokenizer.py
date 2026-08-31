@@ -1210,11 +1210,15 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
     _smelt = getattr(_server_module, "_smelt_enabled", False)
     _smelt_pct = getattr(_server_module, "_smelt_experts", 50)
 
-    # Resolve HuggingFace repo IDs to local paths so that JANG detection
-    # (which checks for jang_config.json on disk) works for remote models.
-    from ..api.utils import resolve_to_local_path
+    # Resolve/download before constructing any model object, then validate all
+    # nested weight shards. This is config-independent and therefore covers
+    # JANG affine, JANGTQ, appended MTP heads, and config-poor bundles alike.
+    from ..model_bundle_integrity import prepare_model_bundle_for_load
 
-    local_model_path = resolve_to_local_path(model_name)
+    local_model_path, _integrity_report = prepare_model_bundle_for_load(
+        model_name,
+        allow_download=True,
+    )
     if local_model_path != model_name:
         logger.info(f"Resolved HF model to: {local_model_path}")
 
@@ -1512,7 +1516,7 @@ def load_model_with_fallback(model_name: str, tokenizer_config: dict = None, ski
 
     try:
         model, tokenizer = load(
-            model_name,
+            local_model_path,
             tokenizer_config=tokenizer_config,
             model_config=_glm5_next_model_config_override,
             lazy=False,

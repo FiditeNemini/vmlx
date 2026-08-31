@@ -102,14 +102,19 @@ class MLXModelRunner:
 
         try:
             from mlx_lm import load
+            from .model_bundle_integrity import prepare_model_bundle_for_load
 
             model_name = self.model_config.model
 
             logger.info(f"Loading model with mlx-lm: {model_name}")
             start_time = time.time()
 
-            self.model, self.tokenizer = load(
+            resolved, _integrity_report = prepare_model_bundle_for_load(
                 model_name,
+                allow_download=True,
+            )
+            self.model, self.tokenizer = load(
+                resolved,
                 tokenizer_config={
                     "trust_remote_code": self.model_config.trust_remote_code,
                 },

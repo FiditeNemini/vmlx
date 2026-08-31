@@ -5174,7 +5174,13 @@ def load_jang_vlm_model(
     Returns:
         Tuple of (model, processor) compatible with mlx-vlm.generate()
     """
-    path = Path(model_path)
+    from ..model_bundle_integrity import prepare_model_bundle_for_load
+
+    resolved_path, _integrity_report = prepare_model_bundle_for_load(
+        model_path,
+        allow_download=True,
+    )
+    path = Path(resolved_path)
     # One-time JANG audio fix: ensure gemma4 audio bundles keep embedders fp16.
     _ensure_gemma4_jang_audio_multimodal_flag(path)
     config_path = _find_config_path(path)
@@ -5264,7 +5270,13 @@ def load_jang_model(
     Returns:
         Tuple of (model, tokenizer) compatible with mlx-lm
     """
-    path = _resolve_local_path(model_path)
+    from ..model_bundle_integrity import prepare_model_bundle_for_load
+
+    resolved_path, _integrity_report = prepare_model_bundle_for_load(
+        model_path,
+        allow_download=True,
+    )
+    path = Path(resolved_path)
     config_path = _find_config_path(path)
     if not config_path:
         raise FileNotFoundError(f"No JANG config found in {path}")

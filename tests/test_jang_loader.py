@@ -7,6 +7,16 @@ from pathlib import Path
 class TestJangDetection:
     """Verify is_jang_model detects config files correctly."""
 
+    @pytest.fixture(autouse=True)
+    def _valid_weight_shard(self, tmp_path):
+        import numpy as np
+        from safetensors.numpy import save_file
+
+        save_file(
+            {"weight": np.array([1], dtype=np.int8)},
+            str(tmp_path / "model.safetensors"),
+        )
+
     def test_detects_jang_config(self, tmp_path):
         from vmlx_engine.utils.jang_loader import is_jang_model
         (tmp_path / "jang_config.json").write_text("{}")

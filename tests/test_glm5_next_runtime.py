@@ -1874,6 +1874,8 @@ class TestPublicLoaderMtpHandoff:
     @staticmethod
     def _prepare_loader(monkeypatch, tmp_path, *, mtp_status, model):
         import mlx_lm
+        import numpy as np
+        from safetensors.numpy import save_file
 
         from vmlx_engine import mlx_memory, native_mtp
         from vmlx_engine.models.glm5_next import register as glm_register
@@ -1894,6 +1896,10 @@ class TestPublicLoaderMtpHandoff:
             },
         }
         (tmp_path / "config.json").write_text(json.dumps(cfg))
+        save_file(
+            {"weight": np.array([1], dtype=np.int8)},
+            str(tmp_path / "model.safetensors"),
+        )
 
         events = []
         load_kwargs = {}

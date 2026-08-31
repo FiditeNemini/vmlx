@@ -4469,10 +4469,15 @@ class MLXMultimodalLM:
         if self._loaded:
             return
 
-        # Resolve HF repo IDs (e.g. "Org/Model") to local cache paths so that
-        # file-based checks (jang_config.json, config.json) find the files.
-        from ..api.utils import resolve_to_local_path
-        resolved_name = resolve_to_local_path(self.model_name)
+        # Resolve/download before constructing any model object, then validate
+        # every nested shard. No config file is required, so separate native
+        # MTP and vision/audio weights are covered by the same load boundary.
+        from ..model_bundle_integrity import prepare_model_bundle_for_load
+
+        resolved_name, _integrity_report = prepare_model_bundle_for_load(
+            self.model_name,
+            allow_download=True,
+        )
         _register_local_mlx_vlm_runtime_if_needed(resolved_name)
 
         def _finalize_loaded_model() -> None:
@@ -4606,7 +4611,7 @@ class MLXMultimodalLM:
             import warnings
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", message=".*torchvision.*", category=UserWarning)
-                self.model, self.processor = load(self.model_name)
+                self.model, self.processor = load(resolved_name)
             if _is_mimo_v2_runtime_object_or_name(self.model, resolved_name):
                 try:
                     from ..utils.jang_loader import (
@@ -4621,7 +4626,7 @@ class MLXMultimodalLM:
                         "MiMo-V2 media-enabled load could not bind preserved "
                         f"visual/audio tensors: {_mimo_media_err}"
                     ) from _mimo_media_err
-            self.config = load_config(self.model_name)
+            self.config = load_config(resolved_name)
             if str((self.config or {}).get("model_type", "")).lower() == "zaya1_vl":
                 from ..utils.jang_loader import _build_vlm_processor
 

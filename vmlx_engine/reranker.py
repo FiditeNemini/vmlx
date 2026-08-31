@@ -89,6 +89,13 @@ class Reranker:
             return
 
         import mlx.core as mx
+        from .model_bundle_integrity import prepare_model_bundle_for_load
+
+        resolved, _integrity_report = prepare_model_bundle_for_load(
+            self.model_path,
+            allow_download=True,
+        )
+        self.model_path = resolved
 
         # 1. Check for late-interaction model (jina-reranker-v3 style)
         if self._is_late_interaction_model(self.model_path):

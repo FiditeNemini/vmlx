@@ -10,6 +10,7 @@ import pytest
 from vmlx_engine.model_bundle_integrity import (
     BundleIntegrityError,
     check_model_bundle,
+    prepare_model_bundle_for_load,
 )
 
 
@@ -119,6 +120,113 @@ def test_nested_diffusers_shards_receive_their_own_atomic_index(tmp_path):
     assert result["repairs"] == [
         "transformer/diffusion_pytorch_model.safetensors.index.json"
     ]
+
+
+def test_configless_bundle_scans_nested_base_mtp_and_vision_shards(tmp_path):
+    root = tmp_path / "configless-jang"
+    _write_safetensors(
+        root / "model.safetensors",
+        [("model.layers.0.weight", "I8", [1], b"\x01")],
+    )
+    _write_safetensors(
+        root / "mtp" / "draft.safetensors",
+        [("mtp.layers.0.weight", "I8", [1], b"\x02")],
+    )
+    _write_safetensors(
+        root / "vision" / "tower.safetensors",
+        [("visual.patch_embed.weight", "F16", [1], struct.pack("<e", 1.0))],
+    )
+
+    result = check_model_bundle(root, cache_dir=tmp_path / "cache")
+
+    assert result["status"] == "ok"
+    assert result["shards"] == 3
+    assert result["tensors"] == 3
+
+
+def test_loader_preflight_resolves_hub_id_then_checks_snapshot(tmp_path, monkeypatch):
+    root = tmp_path / "hub-snapshot-without-config"
+    _write_safetensors(
+        root / "weights.safetensors",
+        [("weight", "F32", [1], struct.pack("<f", 1.0))],
+    )
+    downloads = []
+
+    def fake_download(repo_id):
+        downloads.append(repo_id)
+        return str(root)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", fake_download)
+    monkeypatch.setenv(
+        "VMLX_MODEL_INTEGRITY_CACHE_DIR", str(tmp_path / "integrity-cache")
+    )
+
+    resolved, report = prepare_model_bundle_for_load(
+        "org/configless-jang",
+        allow_download=True,
+    )
+
+    assert resolved == str(root.resolve())
+    assert report["status"] == "ok"
+    assert report["shards"] == 1
+    assert downloads == ["org/configless-jang"]
+
+
+def test_loader_preflight_never_downloads_local_bundle(tmp_path, monkeypatch):
+    root = tmp_path / "local"
+    _write_safetensors(
+        root / "weights.safetensors",
+        [("weight", "I8", [1], b"\x01")],
+    )
+    monkeypatch.setenv(
+        "VMLX_MODEL_INTEGRITY_CACHE_DIR", str(tmp_path / "integrity-cache")
+    )
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        lambda _repo: pytest.fail("local bundle must not download"),
+    )
+
+    resolved, report = prepare_model_bundle_for_load(root, allow_download=True)
+
+    assert resolved == str(root.resolve())
+    assert report["status"] == "ok"
+
+
+def test_atomic_index_repair_failure_blocks_load(tmp_path, monkeypatch):
+    import vmlx_engine.model_bundle_integrity as integrity
+
+    root = tmp_path / "model"
+    _write_safetensors(
+        root / "model-00001-of-00001.safetensors",
+        [("weight", "I8", [1], b"\x01")],
+    )
+    original = integrity._atomic_json_write
+
+    def fail_index_only(path, value):
+        if path.parent == root:
+            raise OSError("read-only bundle")
+        return original(path, value)
+
+    monkeypatch.setattr(integrity, "_atomic_json_write", fail_index_only)
+
+    with pytest.raises(BundleIntegrityError, match="could not be atomically repaired"):
+        check_model_bundle(root, cache_dir=tmp_path / "cache")
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["config.json", "generation_config.json", "jang_config.json", "processor_config.json"],
+)
+def test_present_bundle_config_must_be_valid_json(tmp_path, name):
+    root = tmp_path / "model"
+    _write_safetensors(
+        root / "weights.safetensors",
+        [("weight", "I8", [1], b"\x01")],
+    )
+    (root / name).write_text("not-json", encoding="utf-8")
+
+    with pytest.raises(BundleIntegrityError, match="is not valid JSON"):
+        check_model_bundle(root, cache_dir=tmp_path / "cache")
 
 
 def test_inconsistent_standard_index_is_repaired_from_complete_shards(tmp_path):

@@ -4178,6 +4178,53 @@ class MLLMScheduler:
                                                     None,
                                                 ),
                                             }
+                                            if os.environ.get("VMLX_CACHE_HASH_DEBUG") == "1":
+                                                _debug_block_size = max(
+                                                    1,
+                                                    int(
+                                                        getattr(
+                                                            self.block_aware_cache,
+                                                            "block_size",
+                                                            64,
+                                                        )
+                                                        or 64
+                                                    ),
+                                                )
+                                                _debug_blocks = [
+                                                    "%d:%s"
+                                                    % (
+                                                        _off,
+                                                        hashlib.sha256(
+                                                            repr(
+                                                                truncated_tokens[
+                                                                    _off : _off
+                                                                    + _debug_block_size
+                                                                ]
+                                                            ).encode()
+                                                        ).hexdigest()[:12],
+                                                    )
+                                                    for _off in range(
+                                                        0,
+                                                        len(truncated_tokens),
+                                                        _debug_block_size,
+                                                    )
+                                                ]
+                                                _debug_side_key = hashlib.sha256(
+                                                    repr(
+                                                        _paged_store_kwargs[
+                                                            "cache_extra_keys"
+                                                        ]
+                                                    ).encode()
+                                                ).hexdigest()[:12]
+                                                logger.info(
+                                                    "mm-store-debug BLOCKS req=%s "
+                                                    "n=%d block_size=%d side_key=%s %s",
+                                                    request_id,
+                                                    len(truncated_tokens),
+                                                    _debug_block_size,
+                                                    _debug_side_key,
+                                                    " ".join(_debug_blocks),
+                                                )
                                             if (
                                                 self._is_hybrid
                                                 and not self._uses_zaya_cache

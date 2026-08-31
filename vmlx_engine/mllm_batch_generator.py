@@ -11572,6 +11572,38 @@ class MLLMBatchGenerator:
                                 "mm-restore-debug SEGMENTS req=%s n=%d %s",
                                 req.request_id, len(_tl), " ".join(_segs),
                             )
+                            _block_size = max(
+                                1,
+                                int(
+                                    getattr(
+                                        self.block_aware_cache,
+                                        "block_size",
+                                        64,
+                                    )
+                                    or 64
+                                ),
+                            )
+                            _block_digests = [
+                                "%d:%s"
+                                % (
+                                    _off,
+                                    hashlib.sha256(
+                                        repr(_tl[_off : _off + _block_size]).encode()
+                                    ).hexdigest()[:12],
+                                )
+                                for _off in range(0, len(_tl), _block_size)
+                            ]
+                            _side_key_digest = hashlib.sha256(
+                                repr(_cache_extra_keys).encode()
+                            ).hexdigest()[:12]
+                            logger.info(
+                                "mm-restore-debug BLOCKS req=%s block_size=%d "
+                                "side_key=%s %s",
+                                req.request_id,
+                                _block_size,
+                                _side_key_digest,
+                                " ".join(_block_digests),
+                            )
                             logger.info(
                                 "mm-restore-debug FETCHED req=%s block_table=%s "
                                 "num_tokens=%s prompt_tokens=%d media_allowed=%s",

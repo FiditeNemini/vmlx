@@ -351,6 +351,37 @@ class TestSeedPathIntegration:
         assert state.depth == 3
         assert state.stats.profile_seed == "qwen4_exp_measured_cold_start_d3"
 
+    def test_batch_request_tool_metadata_separates_adaptive_profile(self, monkeypatch):
+        generator, req, first_token = self._build_generator(monkeypatch)
+        req.extra_kwargs = {
+            "_vmlx_tools_present": True,
+            "_vmlx_template_tools": [
+                {"type": "function", "function": {"name": "run_command"}}
+            ],
+            "tool_choice": "auto",
+        }
+
+        assert generator._seed_native_mtp_from_prefill(
+            req, [object()], first_token, [None]
+        ) is False
+        store = generator._native_mtp_profiles
+        from vmlx_engine.native_mtp_profile import profile_key as pk
+        tool_key = pk(
+            temperature=0.0,
+            restored_prefix=False,
+            prompt_tokens=2,
+            has_tools=True,
+        )
+        _observe_profitable(store, tool_key, depth=2, value=45.0, ar=30.0)
+
+        assert generator._seed_native_mtp_from_prefill(
+            req, [object()], first_token, [None]
+        ) is True
+        state = req._native_mtp_state
+        assert state.depth == 2
+        assert state.stats.profile_seed == "profile_validated_d2"
+        assert state.stats.profile_key_label == "greedy|False|short|True"
+
 
 class TestStateIntegration:
     def test_stats_report_profile_fields(self):

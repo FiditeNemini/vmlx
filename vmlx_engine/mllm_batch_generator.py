@@ -5864,6 +5864,25 @@ def _native_mtp_ar_fallback_ready(
     return True, "ready"
 
 
+def _native_mtp_request_has_tools(request: "MLLMBatchRequest") -> bool:
+    """Return the effective tool-presence bit carried by the batch request.
+
+    ``MLLMBatchRequest`` intentionally keeps render/decode policy in
+    ``extra_kwargs`` rather than exposing the public API model's ``tools``
+    attribute.  Adaptive MTP profile keys must read that preserved contract;
+    otherwise tool-heavy and no-tool workloads train the same session profile.
+    """
+
+    extra = getattr(request, "extra_kwargs", None) or {}
+    return bool(
+        extra.get("_vmlx_tools_present")
+        or extra.get("_vmlx_template_tools")
+        or extra.get("tools")
+        or extra.get("_vmlx_tool_choice")
+        or extra.get("tool_choice")
+    )
+
+
 @dataclass
 class MLLMBatchRequest:
     """
@@ -14334,7 +14353,7 @@ class MLLMBatchGenerator:
                     if getattr(request, "input_ids", None) is not None
                     else 0
                 ),
-                has_tools=bool(getattr(request, "tools", None)),
+                has_tools=_native_mtp_request_has_tools(request),
             )
             # Lazy fallback: some fixtures build the generator via __new__
             # and never run __init__ (same class of construction the

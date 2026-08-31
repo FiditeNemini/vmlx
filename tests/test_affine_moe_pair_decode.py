@@ -6,8 +6,8 @@ import pytest
 from mlx_lm.models.switch_layers import SwiGLU, SwitchGLU
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
-    _FAMILY_CONTRACTS,
     _CONFIG_ATTR,
+    _FAMILY_CONTRACTS,
     _PairConfig,
     _projection_reason,
     _requested,
@@ -48,7 +48,7 @@ def test_affine_moe_pair_family_defaults_and_explicit_overrides(monkeypatch):
     assert _requested("glm5_next") is True
 
 
-def test_mixed_layout_registration_keeps_compatible_layers_on_fast_path(
+def test_mixed_layout_registration_keeps_entire_stack_on_stock_path(
     monkeypatch,
 ):
     compatible = _quantized_switch(bits=2, activation=SwiGLU())
@@ -76,14 +76,14 @@ def test_mixed_layout_registration_keeps_compatible_layers_on_fast_path(
     )
     status = affine_moe_pair_status("qwen4_exp")
 
-    assert installed == 1
-    assert hasattr(compatible, _CONFIG_ATTR)
+    assert installed == 0
+    assert not hasattr(compatible, _CONFIG_ATTR)
     assert not hasattr(fallback, _CONFIG_ATTR)
     assert status["eligible_modules"] == 1
     assert status["fallback_modules"] == 1
     assert status["total_modules"] == 2
-    assert status["reason"] == "partial_layout_fallback"
-    assert status["layouts"] == [(2, 32)]
+    assert status["reason"] == "mixed_layout_atomic_fallback"
+    assert status["layouts"] == []
 
 
 @pytest.mark.parametrize(

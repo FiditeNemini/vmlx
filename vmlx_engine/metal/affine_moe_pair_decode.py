@@ -7,10 +7,10 @@ rows with one Metal dispatch. Compatible GLM q2/g128 down projections also
 reduce all selected experts directly into the routed output; mixed q3 layers
 retain MLX down/reduction. No path duplicates the expert payload.
 
-Only source-audited production geometries are accepted.  Registration is
-independent per routed layer so mixed affine artifacts retain stock MLX only
-for the layers whose gate/up layout is ineligible.  Qwen4-Exp is enabled by
-default after exact-bundle AR/MTP,
+Only source-audited production geometries are accepted. Registration is atomic
+per family: mixed affine artifacts retain stock MLX for the whole routed stack
+instead of interleaving a few custom layers with stock decode. Qwen4-Exp is
+enabled by default after exact-bundle AR/MTP,
 Electron, Chat Completions, Responses, image, video, and tool-continuation
 proof; its environment flag remains an explicit opt-out.  GLM5-Next remains
 opt-in until its own equivalent gate is complete.
@@ -499,7 +499,7 @@ def affine_moe_routed_output(
 
 
 def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
-    """Register each compatible SwitchGLU while preserving exact fallbacks."""
+    """Register an entirely compatible SwitchGLU stack or keep stock MLX."""
 
     if family not in _FAMILY_CONTRACTS:
         raise ValueError(f"unsupported affine MoE pair family {family}")
@@ -523,11 +523,34 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
             accepted.append((module, _switch_config(module, family)))
         except (AttributeError, TypeError, ValueError) as exc:
             rejected.append((module, str(exc)))
-    for module, _reason in rejected:
-        # A loader may be re-run on an already prepared model. Never leave a
-        # stale fast-path marker on a layer whose current layout is ineligible.
-        if hasattr(module, _CONFIG_ATTR):
-            delattr(module, _CONFIG_ATTR)
+    if rejected:
+        # Mixing a handful of custom routed layers into an otherwise stock
+        # decode loop regresses the production Qwen4 mixed-bit artifacts. A
+        # loader may also be re-run on an already prepared model, so clear any
+        # stale markers from every module before retaining the atomic fallback.
+        reasons = [reason for _module, reason in rejected]
+        for module in modules:
+            if hasattr(module, _CONFIG_ATTR):
+                delattr(module, _CONFIG_ATTR)
+        _STATUS[family] = {
+            "installed": 0,
+            "eligible_modules": len(accepted),
+            "fallback_modules": len(rejected),
+            "total_modules": len(modules),
+            "reason": "mixed_layout_atomic_fallback",
+            "fallback_reasons": reasons[:3],
+            "layouts": [],
+            "full_down_modules": 0,
+        }
+        logger.info(
+            "%s affine MoE pair fusion kept stock path for mixed stack: "
+            "eligible=%d fallback=%d total=%d",
+            family,
+            len(accepted),
+            len(rejected),
+            len(modules),
+        )
+        return 0
     if not accepted:
         reasons = [reason for _module, reason in rejected]
         _STATUS[family] = {

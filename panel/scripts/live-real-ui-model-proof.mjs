@@ -6581,7 +6581,12 @@ function assistantToolLinkPresent(
   ))
 }
 
-function validateRawChannelOrder(parsed, roundIndex, label) {
+export function validateRawChannelOrder(
+  parsed,
+  roundIndex,
+  label,
+  reasoningRequested = false,
+) {
   const failures = []
   const channels = Array.isArray(parsed?.orderedChannels)
     ? parsed.orderedChannels
@@ -6607,11 +6612,16 @@ function validateRawChannelOrder(parsed, roundIndex, label) {
       if (nonterminal[index] === 'reasoning') reasoningIndexes.push(index)
       if (nonterminal[index] === 'tool') toolIndexes.push(index)
     }
+    const reasoningOrderInvalid = reasoningIndexes.length === 0
+      ? reasoningRequested
+      : (
+          reasoningIndexes.length < 2
+          || Math.max(...reasoningIndexes) > Math.min(...toolIndexes)
+        )
     if (
-      reasoningIndexes.length < 2
+      reasoningOrderInvalid
       || toolIndexes.length < 1
       || nonterminal.some((channel) => channel === 'content')
-      || Math.max(...reasoningIndexes) > Math.min(...toolIndexes)
       || nonterminal.some((channel) => (
         !['reasoning', 'tool'].includes(String(channel))
       ))
@@ -7447,7 +7457,12 @@ function validateRawMatrixCapture(value, result, contract) {
       continue
     }
     if (mode === 'stream') {
-      failures.push(...validateRawChannelOrder(parsed, roundIndex, label))
+      failures.push(...validateRawChannelOrder(
+        parsed,
+        roundIndex,
+        label,
+        request?.enable_thinking === true,
+      ))
     }
     if (
       parsed.postTerminalEvents !== 0

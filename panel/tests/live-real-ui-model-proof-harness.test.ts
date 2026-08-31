@@ -58,6 +58,7 @@ import {
   validateModelBundleBinding,
   validateOwnedRunIntent,
   validatePairedApiEvidence,
+  validateRawChannelOrder,
   validateOwnedReuseSessionAttestation,
   validateOwnedUiReleaseSentinel,
   validateReasoningEvidence,
@@ -4690,6 +4691,45 @@ describe("real UI model proof harness", () => {
     } finally {
       rmSync(fixture.directory, { recursive: true, force: true });
     }
+  });
+
+  it("grades raw tool-stream reasoning order against the request mode", () => {
+    const thinkingOff = {
+      orderedChannels: ["tool", "terminal:tool_calls"],
+    };
+    expect(validateRawChannelOrder(
+      thinkingOff,
+      0,
+      "direct/chat/stream-flow-round1",
+      false,
+    )).toEqual([]);
+    expect(validateRawChannelOrder(
+      thinkingOff,
+      0,
+      "direct/chat/stream-flow-round1",
+      true,
+    ).join("\n")).toMatch(/progressive reasoning/);
+
+    const thinkingOn = {
+      orderedChannels: [
+        "reasoning",
+        "reasoning",
+        "tool",
+        "terminal:tool_calls",
+      ],
+    };
+    expect(validateRawChannelOrder(
+      thinkingOn,
+      0,
+      "direct/chat/stream-flow-round1",
+      true,
+    )).toEqual([]);
+    expect(validateRawChannelOrder(
+      thinkingOn,
+      0,
+      "direct/chat/stream-flow-round1",
+      false,
+    )).toEqual([]);
   });
 
   it("does not promote a phase-0 store profile to cache-hit or tool-loop proof", () => {

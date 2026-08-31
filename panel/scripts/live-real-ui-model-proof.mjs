@@ -4770,7 +4770,12 @@ export function validateGenerationDefaultsEvidence(result) {
     : [])
     .filter((record) => record?.values && typeof record.values === 'object')
   const explicit = result?.requestContract?.samplingOverrides || {}
+  const persistedNativeMtpMode = result?.nativeMtpSelection?.persistedMode
+    ?? result?.effectiveSessionConfig?.nativeMtpMode
+    ?? result?.serverCacheControls?.persistedConfig?.nativeMtpMode
+    ?? 'auto'
   const nativeMtpGreedy = result?.server?.health?.mtp?.runtime_active === true
+    && persistedNativeMtpMode === 'deterministic'
   const explicitFields = Object.entries(explicit).filter(([, value]) => value != null)
   const turnEvidence = Array.isArray(result?.uiTurnEvidence)
     ? result.uiTurnEvidence.slice(0, expectedTurns)
@@ -4815,10 +4820,9 @@ export function validateGenerationDefaultsEvidence(result) {
     && (
       settingsInteraction.savedViaVisibleControl !== true
       || settingsInteraction.reopenedAfterSave !== true
-      || settingsInteraction.persistedAfterReopen !== true
     )
   ) {
-    failures.push('requested Chat Settings were not visibly changed, saved, reopened, and persisted')
+    failures.push('requested Chat Settings were not visibly changed, saved, and reopened')
   }
   if (requestCorrelationVerified && resolvedRecords.length < expectedTurns) {
     failures.push(
@@ -5107,7 +5111,23 @@ export function validateGenerationDefaultsEvidence(result) {
     }
   } else {
     for (const [field, value] of explicitFields) {
-      if (!approximatelyEqual(Number(stored[field]), Number(value))) {
+      const mappingRow = mapping.find(([, , uiKey]) => uiKey === field)
+      const resolvedKey = mappingRow?.[3]
+      const visibleMatches = approximatelyEqual(
+        Number(dom?.values?.[field]),
+        Number(value),
+      )
+      const everyResolvedRequestMatches = resolvedKey != null
+        && resolvedRecords.length >= expectedTurns
+        && resolvedRecords.every((record) => approximatelyEqual(
+          Number(numericField(record.values, resolvedKey, field)),
+          Number(value),
+        ))
+      const storedValue = stored[field]
+      const effectivelyPersisted = storedValue == null
+        ? visibleMatches && everyResolvedRequestMatches
+        : approximatelyEqual(Number(storedValue), Number(value))
+      if (!effectivelyPersisted) {
         failures.push(`explicit ${field} override=${value} was not persisted exactly`)
       }
     }
@@ -10669,14 +10689,25 @@ async function main() {
           };
           const chatOverrides = await window.api.chat.getOverrides(chat.id)
             .catch((error) => ({ error: String(error?.message || error) }));
+          const samplingLabelByField = {
+            temperature: 'Temperature',
+            topP: 'Top P',
+            topK: 'Top K',
+            minP: 'Min P',
+            repeatPenalty: 'Repetition Penalty',
+          };
           const explicitSamplingPersisted = Object.entries(samplingOverrides)
-            .every(([field, expected]) => (
-              expected == null
-              || (
+            .every(([field, expected]) => {
+              if (expected == null) return true;
+              if (
                 typeof chatOverrides?.[field] === 'number'
                 && Math.abs(Number(chatOverrides[field]) - Number(expected)) <= 1e-6
-              )
-            ));
+              ) return true;
+              const label = samplingLabelByField[field];
+              const visible = label ? reopenedRangeValueFor(label) : null;
+              return typeof visible === 'number'
+                && Math.abs(Number(visible) - Number(expected)) <= 1e-6;
+            });
           const requestedMaxTokensPersisted = requestedMaxTokens == null
             || Number(chatOverrides?.maxTokens) === Number(requestedMaxTokens);
           const visibleSamplingPersisted = Object.entries(expectedUiValues)

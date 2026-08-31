@@ -3670,12 +3670,19 @@ describe("real UI model proof harness", () => {
 
   it("rejects settings not visibly persisted and stale route/model log records", () => {
     const result = structuredClone(goodResult());
-    result.chatSettingsInteraction.persistedAfterReopen = false;
+    result.chatSettingsInteraction.reopenedAfterSave = false;
     result.resolvedSamplingRecords[1].model = "stale-model";
     result.resolvedSamplingRecords[2].message_id = "wrong-message";
     expect(validateGenerationDefaultsEvidence(result).join("\n")).toMatch(
-      /visibly changed, saved, reopened, and persisted|route\/model|server-emitted request\/message correlation/,
+      /visibly changed, saved, and reopened|route\/model|server-emitted request\/message correlation/,
     );
+  });
+
+  it("uses concrete reopened and request evidence instead of the aggregate persistence bit", () => {
+    const result = structuredClone(goodResult());
+    result.chatSettingsInteraction.persistedAfterReopen = false;
+
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
   });
 
   it("distinguishes inherited defaults from explicit visible per-chat overrides", () => {
@@ -3700,9 +3707,34 @@ describe("real UI model proof harness", () => {
     );
   });
 
+  it("accepts a redundant explicit sampler value through visible and resolved persistence", () => {
+    const result = structuredClone(goodResult());
+    result.requestContract.samplingOverrides = {
+      temperature: result.bundleGenerationContract.defaults.temperature,
+      topP: result.bundleGenerationContract.defaults.topP,
+      topK: result.bundleGenerationContract.defaults.topK,
+    };
+    delete result.chatOverrides.temperature;
+    delete result.chatOverrides.topP;
+    delete result.chatOverrides.topK;
+
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+  });
+
+  it("keeps sampled Auto defaults when the native MTP runtime is active", () => {
+    const result = structuredClone(goodResult());
+    result.server.health.mtp.runtime_active = true;
+    result.nativeMtpSelection = { persistedMode: "auto" };
+    result.effectiveSessionConfig = { nativeMtpMode: "auto" };
+
+    expect(validateGenerationDefaultsEvidence(result)).toEqual([]);
+  });
+
   it("grades Native-MTP effective greedy values separately from bundle defaults", () => {
     const result = structuredClone(goodResult());
     result.server.health.mtp.runtime_active = true;
+    result.nativeMtpSelection = { persistedMode: "deterministic" };
+    result.effectiveSessionConfig = { nativeMtpMode: "deterministic" };
     result.chatSettingsDom.values = {
       ...result.chatSettingsDom.values,
       temperature: 0,

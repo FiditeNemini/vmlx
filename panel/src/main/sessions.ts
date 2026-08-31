@@ -74,6 +74,7 @@ import {
   normalizeBackendStderrChunk,
 } from './backend-stderr'
 import { validateJangBundleMetadataForLaunch } from './model-bundle-validation'
+import { runModelBundleIntegrityPreflight } from './model-bundle-integrity'
 
 export type { ServerConfig, DetectedProcess } from './server'
 import type { ServerConfig, DetectedProcess } from './server'
@@ -2305,7 +2306,7 @@ export class SessionManager extends EventEmitter {
    * `_startSessionInner` repeats the same shared validation immediately before
    * spawn so filesystem changes between preflight and launch still fail closed.
    */
-  preflightSessionStart(sessionId: string): void {
+  async preflightSessionStart(sessionId: string): Promise<void> {
     const session = db.getSession(sessionId)
     if (!session) throw new Error(`Session ${sessionId} not found`)
     if (session.type === 'remote') return
@@ -2314,10 +2315,23 @@ export class SessionManager extends EventEmitter {
     config.modelPath = session.modelPath
     config.host = session.host
     config.port = session.port
-    if (!this.findEnginePath()) {
+    const engine = this.findEnginePath()
+    if (!engine) {
       throw new Error('vmlx-engine not found. Please install it first.')
     }
     this.validateLocalSessionTarget(sessionId, session, config)
+    if (existsSync(config.modelPath)) {
+      const report = await runModelBundleIntegrityPreflight(engine, config.modelPath)
+      const source = report.cache_hit ? 'one-time stamp' : 'fresh header scan'
+      console.log(
+        `[SESSIONS] bundle integrity OK for ${sessionId}: ${source}, ` +
+        `${report.shards} shards, ${report.tensors} tensors, ` +
+        `${report.misaligned_tensors} compatible legacy-alignment tensors`,
+      )
+      for (const repaired of report.repairs) {
+        console.log(`[SESSIONS] bundle integrity atomically repaired ${repaired}`)
+      }
+    }
   }
 
   private validateLocalSessionTarget(
@@ -2461,7 +2475,7 @@ export class SessionManager extends EventEmitter {
       if (isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) {
         // Validate before unloading the current model. Without this ordering a
         // stale/malformed target can strand the user with zero loaded models.
-        this.preflightSessionStart(sessionId)
+        await this.preflightSessionStart(sessionId)
         // Single-model mode is a RAM/process contract, not just a DB-state
         // contract. A prior Electron crash, gateway restart, or stale session
         // row can leave a healthy vmlx-engine alive while its DB row says
@@ -2545,7 +2559,7 @@ export class SessionManager extends EventEmitter {
     options: { preserveActiveTarget?: boolean } = {},
   ): Promise<boolean> {
     if (!isGatewaySettingEnabled(db.getSetting(GATEWAY_SINGLE_MODEL_MODE_KEY))) return false
-    this.preflightSessionStart(targetSessionId)
+    await this.preflightSessionStart(targetSessionId)
     await this.stopDetectedLocalEnginesForSingleModel(targetSessionId)
     if (options.preserveActiveTarget) {
       return this.adoptDetectedTargetProcessForStart(targetSessionId)

@@ -830,6 +830,40 @@ def _runtime_is_mllm(args) -> bool:
         return False
 
 
+def _preflight_local_model_bundle(model: str) -> dict | None:
+    """Run the shared header-only integrity gate for a local bundle.
+
+    Hugging Face identifiers are intentionally left to the resolver.  Local
+    directories are checked before either text or image weights are loaded, so
+    direct CLI users receive the same one-time repair/fail-closed contract as
+    Electron sessions.
+    """
+
+    from pathlib import Path
+
+    path = Path(model).expanduser()
+    if not path.is_dir():
+        return None
+    from .model_bundle_integrity import BundleIntegrityError, check_model_bundle
+
+    try:
+        report = check_model_bundle(path, repair=True, use_cache=True)
+    except BundleIntegrityError as exc:
+        raise SystemExit(
+            "Error: local model bundle integrity check failed before load: "
+            f"{exc}. Repair or re-download the affected files."
+        ) from exc
+    if not report.get("cache_hit"):
+        print(
+            "Model bundle integrity: OK "
+            f"({report['shards']} shards, {report['tensors']} tensors, "
+            f"{report['misaligned_tensors']} compatible legacy-alignment tensors)"
+        )
+    for repaired in report.get("repairs", []):
+        print(f"Model bundle integrity: atomically repaired {repaired}")
+    return report
+
+
 def _cache_stack_summary_lines(
     args, *, dsv4_model: bool = False, mllm_model: bool = False
 ) -> list[str]:
@@ -1518,6 +1552,11 @@ def serve_command(args):
     import json as _json
     model_dir = Path(args.model)
     _is_image = False
+
+    # Header-only and cacheable: this does not allocate model tensors. It runs
+    # before either text or image loading and is repeated independently by the
+    # Electron preflight so a direct CLI launch cannot bypass bundle integrity.
+    _preflight_local_model_bundle(args.model)
 
     # Named mflux models (not filesystem paths) — detect by known names
     # Keep in sync with SUPPORTED_MODELS + EDIT_MODELS in image_gen.py
@@ -4632,6 +4671,21 @@ Examples:
         help="Skip inference smoke test",
     )
 
+    bundle_check_parser = subparsers.add_parser(
+        "bundle-check",
+        help="Validate a local model bundle and atomically repair safe index defects",
+    )
+    bundle_check_parser.add_argument("model", type=str, help="Local model directory")
+    bundle_check_parser.add_argument(
+        "--no-repair", action="store_true", help="Report repairable index defects"
+    )
+    bundle_check_parser.add_argument(
+        "--no-cache", action="store_true", help="Ignore the one-time integrity stamp"
+    )
+    bundle_check_parser.add_argument(
+        "--json", action="store_true", help="Print one machine-readable JSON object"
+    )
+
     # mlxstudio#76: parse_args() exits with code 2 on unrecognized args,
     # which is opaque to end users running via the panel's process spawner.
     # When a user's vmlx-engine binary is shadowed by an older install on
@@ -4700,6 +4754,9 @@ Examples:
     elif args.command == "doctor":
         from .commands.doctor import doctor_command
         doctor_command(args)
+    elif args.command == "bundle-check":
+        from .commands.bundle_check import bundle_check_command
+        bundle_check_command(args)
     else:
         parser.print_help()
         sys.exit(1)

@@ -1111,7 +1111,7 @@ export class ApiGateway extends EventEmitter {
           // vmlx_engine in a fresh Python process, which otherwise adds seconds
           // of fixed latency to every gateway request even though no process is
           // being launched. Single Model enforcement still runs below.
-          sessionManager.preflightSessionStart(target.id);
+          await sessionManager.preflightSessionStart(target.id);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           console.error(

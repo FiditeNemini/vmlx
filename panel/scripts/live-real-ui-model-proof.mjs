@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFile, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
-import { createServer } from 'node:http'
+import { createServer, get as httpGet } from 'node:http'
 import net from 'node:net'
 import {
   chmodSync,
@@ -2661,16 +2661,36 @@ async function freePortExcluding(excluded) {
   throw new Error('Unable to allocate a distinct loopback port')
 }
 
-async function requestJson(url, timeoutMs = 1000) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const res = await fetch(url, { signal: controller.signal })
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-    return await res.json()
-  } finally {
-    clearTimeout(timer)
-  }
+export async function requestJson(url, timeoutMs = 1000) {
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (callback, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      callback(value)
+    }
+    const request = httpGet(url, { headers: { Connection: 'close' } }, (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
+      response.on('error', (error) => finish(reject, error))
+      response.on('end', () => {
+        if (response.statusCode == null || response.statusCode < 200 || response.statusCode >= 300) {
+          finish(reject, new Error(`${response.statusCode || 0} ${response.statusMessage || ''}`.trim()))
+          return
+        }
+        try {
+          finish(resolve, JSON.parse(Buffer.concat(chunks).toString('utf8')))
+        } catch (error) {
+          finish(reject, error)
+        }
+      })
+    })
+    const timer = setTimeout(() => {
+      request.destroy(new Error(`Timed out requesting ${url} after ${timeoutMs}ms`))
+    }, timeoutMs)
+    request.on('error', (error) => finish(reject, error))
+  })
 }
 
 function isSocketDisconnectError(error) {

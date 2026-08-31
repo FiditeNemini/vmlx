@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { createServer } from "node:http";
 import {
   chmodSync,
   linkSync,
@@ -41,6 +42,7 @@ import {
   parseResolvedSamplingKwargs,
   privateCacheAttestationSessionArgs,
   readPrivateExternalJson,
+  requestJson,
   releasePrimarySharedPrefix,
   reattestRequiredScreenshot,
   runPostSentinelWorkWithCleanup,
@@ -279,6 +281,27 @@ describe("proof-owned Electron launch isolation", () => {
     expect(() => parseOptionalPort("8080.5", "gateway")).toThrow(
       /integer from 1 to 65535/,
     );
+  });
+
+  it("bounds a CDP peer that accepts a socket but never returns headers", async () => {
+    const server = createServer(() => {});
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new Error("test server did not expose a TCP port");
+    }
+    const started = Date.now();
+    try {
+      await expect(
+        requestJson(`http://127.0.0.1:${address.port}/json/list`, 40),
+      ).rejects.toThrow(/Timed out requesting/);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 
   it("starts both app variants with explicit isolated ownership", () => {

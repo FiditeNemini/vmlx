@@ -4,6 +4,13 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.51] - 2026-08-31
+
+### Fixed
+- **Native MTP detection includes supplemental weight shards omitted from the base Hugging Face index.** The Server panel and Python runtime now discover preserved MTP heads in split layouts such as Qwen3.8-27B, restoring the Native MTP controls and effective runtime status without loading tensor payloads. Unreadable MTP-labeled supplements fail closed, while unrelated custom sidecars do not invalidate an otherwise sound index.
+
+---
+
 ## [1.6.50] - 2026-08-31
 
 ### Performance

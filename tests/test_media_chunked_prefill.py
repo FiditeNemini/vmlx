@@ -291,6 +291,49 @@ class TestMediaForwardFallbacks:
         assert events.count("eval") == 1
         assert events[-3:] == ["last-token-slice", "eval", "clear-cache"]
 
+    def test_final_chunk_unwraps_language_model_output_before_slicing(
+        self, monkeypatch
+    ):
+        """VLM language forwards return a wrapper whose logits are sliceable."""
+        from types import SimpleNamespace
+
+        import vmlx_engine.mllm_batch_generator as mllm
+
+        events = []
+
+        class _LazyLogits:
+            def __getitem__(self, item):
+                events.append("last-token-slice")
+                return self
+
+        class _WrappedLM:
+            def __call__(self, inputs, inputs_embeds=None, cache=None):
+                return SimpleNamespace(logits=_LazyLogits())
+
+        gen = self._gen(_OneShotModel([]), _WrappedLM())
+        gen.model.get_input_embeddings = lambda ids, **kw: SimpleNamespace(
+            inputs_embeds=_FakeIds(9000)
+        )
+        gen._media_placeholder_token_ids = lambda: set()
+        gen._media_prefill_chunk_tokens = lambda seq_len: 4096
+        monkeypatch.setattr(mllm.mx, "eval", lambda value: events.append("eval"))
+        monkeypatch.setattr(
+            mllm.mx, "clear_cache", lambda: events.append("clear-cache")
+        )
+
+        result = gen._media_forward(
+            SimpleNamespace(request_id="media-wrapped-logits"),
+            _FakeIds(9000),
+            9000,
+            [object()],
+            {},
+        )
+
+        assert isinstance(result, _LazyLogits)
+        assert events.count("last-token-slice") == 1
+        assert events.count("eval") == 1
+        assert events[-3:] == ["last-token-slice", "eval", "clear-cache"]
+
 
 class _FakeIds:
     """Minimal stand-in for an mx.array of token ids."""

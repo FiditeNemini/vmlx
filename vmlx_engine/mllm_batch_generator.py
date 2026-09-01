@@ -11246,9 +11246,12 @@ class MLLMBatchGenerator:
                 # by the pending graph; the later prefill-stage
                 # mx.eval(last_logits) then failed with
                 # kIOGPUCommandBufferCallbackErrorInvalidResource on a real
-                # Qwen3.8 VL image turn.  Evaluating the one-token slice avoids
-                # materializing a chunk-sized (B, T, vocab) logits tensor.
-                output = output[:, -1:, :]
+                # Qwen3.8 VL image turn.  Language models may return either a
+                # raw tensor or LanguageModelOutput; the caller consumes only
+                # logits in both cases, so unwrap before slicing.  Evaluating
+                # the one-token slice avoids materializing a chunk-sized
+                # (B, T, vocab) logits tensor.
+                output = getattr(output, "logits", output)[:, -1:, :]
                 mx.eval(output)
             try:
                 mx.clear_cache()

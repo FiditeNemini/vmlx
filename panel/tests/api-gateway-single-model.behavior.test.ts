@@ -570,6 +570,10 @@ describe("ApiGateway single-model mode behavior", () => {
       target.id,
       previous.id,
     ]);
+    expect(sessionManagerMock.startSession.mock.calls.map((call) => call[1])).toEqual([
+      { launchOrigin: "gateway" },
+      { launchOrigin: "gateway" },
+    ]);
   });
 
   it("uses the timeout code only when the JIT deadline is actually exhausted", async () => {
@@ -610,7 +614,9 @@ describe("ApiGateway single-model mode behavior", () => {
     expect(result.code).toBe("model_load_timeout");
     expect(result.message).toContain("failed to load within 120s");
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith(previous.id);
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith(previous.id);
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith(previous.id, {
+      launchOrigin: "gateway",
+    });
   });
 
   it("writes each streamed gateway response chunk once and treats EPIPE as disconnect", async () => {
@@ -935,7 +941,9 @@ describe("ApiGateway single-model mode behavior", () => {
 
     expect(response.status).toBe(200);
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith("other");
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target");
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target", {
+      launchOrigin: "gateway",
+    });
     expect(sessionManagerMock.touchSession).toHaveBeenCalledWith("target");
     expect(backend.paths).toEqual(["/v1/chat/completions"]);
     expect(backend.bodies[0]).toEqual(requestBody);
@@ -1190,7 +1198,9 @@ describe("ApiGateway single-model mode behavior", () => {
 
     expect(response.status).toBe(200);
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith("other");
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target");
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target", {
+      launchOrigin: "gateway",
+    });
     expect(sessionManagerMock.touchSession).toHaveBeenCalledWith("target");
     expect(backend.paths).toEqual(["/v1/responses"]);
     expect(backend.bodies[0]).toEqual(requestBody);
@@ -1278,7 +1288,9 @@ describe("ApiGateway single-model mode behavior", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith("other");
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target");
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target", {
+      launchOrigin: "gateway",
+    });
     expect(sessionManagerMock.touchSession).toHaveBeenCalledWith("target");
     expect(backend.paths).toEqual(["/v1/responses"]);
     expect(backend.bodies[0]).toEqual(requestBody);

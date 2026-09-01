@@ -2434,7 +2434,13 @@ export class SessionManager extends EventEmitter {
     return isImageSession
   }
 
-  async startSession(sessionId: string, options?: { restartGeneration?: number }): Promise<void> {
+  async startSession(
+    sessionId: string,
+    options?: {
+      restartGeneration?: number
+      launchOrigin?: 'manual' | 'gateway'
+    },
+  ): Promise<void> {
     // Captured at request entry: if an explicit Stop advances the epoch while
     // this start waits (gateway transition queue, session lock), the start is
     // superseded and must not spawn. Stop wins.
@@ -2507,7 +2513,7 @@ export class SessionManager extends EventEmitter {
       // Serialize start/stop operations per session to prevent races.
       await this.withSessionLock(sessionId, () => {
         assertNotSuperseded()
-        return this._startSessionInner(sessionId)
+        return this._startSessionInner(sessionId, options)
       })
     }
 
@@ -2654,7 +2660,10 @@ export class SessionManager extends EventEmitter {
     return true
   }
 
-  private async _startSessionInner(sessionId: string): Promise<void> {
+  private async _startSessionInner(
+    sessionId: string,
+    options?: { launchOrigin?: 'manual' | 'gateway' },
+  ): Promise<void> {
     const session = db.getSession(sessionId)
     if (!session) throw new Error(`Session ${sessionId} not found`)
     // Fresh log buffer per run — stop retains the previous buffer for
@@ -3027,10 +3036,12 @@ export class SessionManager extends EventEmitter {
       // one (the variant was deleted from its type on 2026-08-17). Preflight
       // advises; it never refuses.
       // Wired-limit recommendation (Eric, 2026-08-29): compare the model's
-      // resident footprint to the user's EFFECTIVE Metal wired limit and show
-      // a visible popup with the exact sysctl command when the load would
-      // brush or exceed it. ADVISORY ONLY — the load proceeds regardless and
-      // the dialog is not awaited (never gates or delays the start).
+      // resident footprint to the user's EFFECTIVE Metal wired limit. Manual
+      // UI starts show the exact sysctl command and explicitly wait for the
+      // user's choice. API-gateway JIT starts must stay non-interactive: an
+      // application-modal dialog blocks Electron's gateway and prevents the
+      // engine child from spawning until someone clicks Continue. The warning
+      // remains in the session log for those headless/API starts.
       try {
         let wiredLimitMb = 0
         try {
@@ -3043,17 +3054,18 @@ export class SessionManager extends EventEmitter {
           const logLine = `${wiredPreflight.message} ${wiredPreflight.detail.replace(/\n+/g, ' ')}`
           console.warn(`[SESSION] ${logLine}`)
           this.emit('session:log', { sessionId, data: `⚠️  ${logLine}\n` })
-          void dialog.showMessageBox({
-            type: 'warning',
-            title: 'Metal wired-memory limit recommendation',
-            message: wiredPreflight.message,
-            detail: wiredPreflight.detail,
-            buttons: ['Copy Command', 'Continue'],
-            defaultId: 0,
-            cancelId: 1,
-          }).then((result) => {
+          if (options?.launchOrigin !== 'gateway') {
+            const result = await dialog.showMessageBox({
+              type: 'warning',
+              title: 'Metal wired-memory limit recommendation',
+              message: wiredPreflight.message,
+              detail: wiredPreflight.detail,
+              buttons: ['Copy Command', 'Continue'],
+              defaultId: 0,
+              cancelId: 1,
+            })
             if (result.response === 0) clipboard.writeText(wiredPreflight.command)
-          }).catch(() => { /* headless/test environments have no dialog */ })
+          }
         }
       } catch { /* advisory-only path must never break a launch */ }
       const memoryPreflight = classifyLargeModelMemoryPreflight({ modelSizeBytes, availableBytes, totalBytes })

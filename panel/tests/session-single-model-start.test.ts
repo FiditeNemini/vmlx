@@ -29,7 +29,7 @@ describe('manual session single-model enforcement', () => {
 
   it('serializes UI starts and unloads every other local engine before launch', () => {
     const source = readFileSync('src/main/sessions.ts', 'utf8')
-    const start = source.indexOf('async startSession(sessionId: string')
+    const start = source.indexOf('async startSession(')
     const end = source.indexOf('private async _startSessionInner', start)
     const block = source.slice(start, end)
 
@@ -44,13 +44,27 @@ describe('manual session single-model enforcement', () => {
     expect(block).toContain("['running', 'loading', 'standby'].includes(other.status)")
     expect(block).toContain('await this.stopSession(other.id)')
     expect(block.indexOf('await this.stopDetectedLocalEnginesForSingleModel(sessionId)')).toBeLessThan(
-      block.indexOf('this._startSessionInner(sessionId)'),
+      block.indexOf('this._startSessionInner(sessionId, options)'),
     )
     expect(block.indexOf('await this.stopSession(other.id)')).toBeLessThan(
-      block.indexOf('this._startSessionInner(sessionId)'),
+      block.indexOf('this._startSessionInner(sessionId, options)'),
     )
     expect(block).toContain('const previous = this.singleModelStartTransitionPending.catch')
     expect(block).toContain('this.singleModelStartTransitionPending = previous.then')
+  })
+
+  it('keeps wired-limit dialogs interactive for UI starts but non-blocking for gateway JIT', () => {
+    const source = readFileSync('src/main/sessions.ts', 'utf8')
+    const start = source.indexOf('private async _startSessionInner(')
+    const end = source.indexOf('// Never kill arbitrary processes by port', start)
+    const block = source.slice(start, end)
+
+    expect(block).toContain("options?.launchOrigin !== 'gateway'")
+    expect(block).toContain('await dialog.showMessageBox({')
+    expect(block.indexOf("options?.launchOrigin !== 'gateway'")).toBeLessThan(
+      block.indexOf('await dialog.showMessageBox({'),
+    )
+    expect(block).toContain('this.emit(\'session:log\'')
   })
 
   it('kills detected stale engines, not only sessions whose DB status is running', () => {

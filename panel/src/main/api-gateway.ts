@@ -1084,7 +1084,9 @@ export class ApiGateway extends EventEmitter {
       console.warn(
         `[gateway] target ${failedTargetId} failed to load; restoring displaced session ${candidate.id}`,
       );
-      await sessionManager.startSession(candidate.id);
+      await sessionManager.startSession(candidate.id, {
+        launchOrigin: "gateway",
+      });
       console.log(
         `[gateway] restored displaced session ${candidate.id} after target ${failedTargetId} failed`,
       );
@@ -1189,7 +1191,9 @@ export class ApiGateway extends EventEmitter {
         }
       } else {
         // Session process not running — start it
-        await sessionManager.startSession(sessionId);
+        await sessionManager.startSession(sessionId, {
+          launchOrigin: "gateway",
+        });
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

@@ -998,7 +998,9 @@ describe("Ollama gateway request translation behavior", () => {
 
     expect(response.status).toBe(200);
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith("other");
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target");
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target", {
+      launchOrigin: "gateway",
+    });
     expect(sessionManagerMock.touchSession).toHaveBeenCalledWith("target");
     expect(backend.paths).toEqual(["/v1/chat/completions"]);
     expect(backend.bodies[0].model).toBe("target-alias");
@@ -1074,7 +1076,9 @@ describe("Ollama gateway request translation behavior", () => {
 
     expect(response.status).toBe(200);
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith("other");
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target");
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target", {
+      launchOrigin: "gateway",
+    });
     expect(backend.paths).toEqual(["/v1/chat/completions"]);
     expect(chunks.map((chunk) => chunk.message.content)).toEqual([
       "hel",
@@ -1274,7 +1278,9 @@ describe("Ollama gateway request translation behavior", () => {
 
     expect(response.status).toBe(200);
     expect(sessionManagerMock.stopSession).toHaveBeenCalledWith("other");
-    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target");
+    expect(sessionManagerMock.startSession).toHaveBeenCalledWith("target", {
+      launchOrigin: "gateway",
+    });
     expect(sessionManagerMock.touchSession).toHaveBeenCalledWith("target");
     expect(backend.paths).toEqual(["/v1/chat/completions"]);
     expect(backend.bodies[0].model).toBe("target-alias");

@@ -651,6 +651,68 @@ class TestNativeMtpAutodetect:
         assert status["vl_runtime_available"] is True
         assert status["issues"] == []
 
+    def test_native_mtp_detection_merges_unindexed_supplemental_shard(self, tmp_path):
+        import numpy as np
+        from safetensors.numpy import save_file
+
+        from vmlx_engine.server import _model_mtp_status
+
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "qwen3_5",
+                    "text_config": {
+                        "model_type": "qwen3_5_text",
+                        "num_hidden_layers": 64,
+                        "mtp_num_hidden_layers": 1,
+                    },
+                }
+            )
+        )
+        (tmp_path / "jang_config.json").write_text(
+            json.dumps(
+                {
+                    "format": "jang",
+                    "runtime": {"bundle_has_mtp": True, "mtp_layers": 1},
+                    "mtp": {
+                        "kept": True,
+                        "enabled": True,
+                        "num_layers": 1,
+                        "tensor_count": 31,
+                    },
+                    "capabilities": {"family": "qwen3_5", "cache_type": "hybrid"},
+                }
+            )
+        )
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "model.embed_tokens.weight": "model-00001-of-00004.safetensors"
+                    }
+                }
+            )
+        )
+        save_file(
+            {
+                "mtp.fc.weight": np.zeros((1, 1), dtype=np.float16),
+                "mtp.layers.0.self_attn.q_proj.weight": np.zeros(
+                    (1, 1), dtype=np.float16
+                ),
+                "mtp.norm.weight": np.zeros((1,), dtype=np.float16),
+            },
+            str(tmp_path / "model-mtp-of-00005.safetensors"),
+        )
+
+        status = _model_mtp_status(str(tmp_path))
+
+        assert status["index_has_mtp_tensors"] is True
+        assert status["index_mtp_layer_count"] == 1
+        assert status["mtp_tensor_count"] == 3
+        assert status["artifact_available"] is True
+        assert status["runtime_available"] is True
+        assert status["issues"] == []
+
     def test_vl_runtime_requires_real_vision_tensors(self, tmp_path):
         from vmlx_engine.server import _model_mtp_status
 

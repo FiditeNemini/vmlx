@@ -7,8 +7,8 @@
  * Users can always override auto-detected values via Server Settings UI.
  */
 
-import { readFileSync, existsSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readdirSync, readSync, statSync } from 'fs'
+import { basename, join } from 'path'
 import { homedir } from 'os'
 import { formatJangQuantizationLabel } from '../shared/jangQuantization'
 import {
@@ -17,6 +17,82 @@ import {
   type ReasoningEffort,
 } from '../shared/reasoningEffortPolicy'
 import { familySupportsThinkingBudget } from '../shared/thinkingBudgetFamilies'
+
+const MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
+
+/** Read tensor names without materializing a safetensors payload. */
+function readSafetensorsHeaderKeys(filePath: string): string[] | undefined {
+  let fd: number | undefined
+  try {
+    fd = openSync(filePath, 'r')
+    const prefix = Buffer.alloc(8)
+    if (readSync(fd, prefix, 0, prefix.length, 0) !== prefix.length) return undefined
+    const rawHeaderBytes = prefix.readBigUInt64LE(0)
+    if (
+      rawHeaderBytes <= 0n ||
+      rawHeaderBytes > BigInt(MAX_SAFETENSORS_HEADER_BYTES) ||
+      rawHeaderBytes > BigInt(Number.MAX_SAFE_INTEGER)
+    ) return undefined
+    const headerBytes = Number(rawHeaderBytes)
+    if (8 + headerBytes > fstatSync(fd).size) return undefined
+    const buffer = Buffer.allocUnsafe(headerBytes)
+    let offset = 0
+    while (offset < headerBytes) {
+      const count = readSync(fd, buffer, offset, headerBytes - offset, 8 + offset)
+      if (count <= 0) return undefined
+      offset += count
+    }
+    const header = JSON.parse(buffer.toString('utf8').trim())
+    if (!header || typeof header !== 'object' || Array.isArray(header)) return undefined
+    return Object.keys(header).filter(key => key !== '__metadata__')
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) closeSync(fd)
+  }
+}
+
+/**
+ * Return artifact tensor names, including supplemental shards omitted from
+ * the Hugging Face weight index. Qwen3.8-27B ships its MTP head this way.
+ */
+function bundleArtifactWeightKeys(modelPath: string): string[] | undefined {
+  const keys = new Set<string>()
+  const indexedFiles = new Set<string>()
+  const indexPath = join(modelPath, 'model.safetensors.index.json')
+  if (existsSync(indexPath)) {
+    try {
+      const index = JSON.parse(readFileSync(indexPath, 'utf-8'))
+      const weightMap = index?.weight_map
+      if (!weightMap || typeof weightMap !== 'object' || Array.isArray(weightMap)) {
+        return undefined
+      }
+      for (const [key, rawFile] of Object.entries(weightMap)) {
+        keys.add(String(key))
+        if (typeof rawFile === 'string') indexedFiles.add(basename(rawFile))
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  try {
+    for (const name of readdirSync(modelPath).filter(name => name.endsWith('.safetensors')).sort()) {
+      if (indexedFiles.has(name)) continue
+      const supplementalKeys = readSafetensorsHeaderKeys(join(modelPath, name))
+      if (supplementalKeys === undefined) {
+        // Fail closed for an unreadable file that explicitly advertises MTP.
+        // Unrelated custom sidecars do not erase a sound base-index result.
+        if (name.toLowerCase().includes('mtp')) return undefined
+        continue
+      }
+      for (const key of supplementalKeys) keys.add(key)
+    }
+  } catch {
+    return undefined
+  }
+  return [...keys]
+}
 
 /**
  * Resolve an HF repo id (e.g. `mlx-community/gemma-4-e2b-it-4bit`) to the
@@ -908,17 +984,10 @@ function affineJangRuntimeHasVerifiedVision(jangCfg: any): boolean {
 }
 
 function modelIndexHasVisionWeights(modelPath: string): boolean {
-  try {
-    const raw = readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf-8')
-    const index = JSON.parse(raw)
-    const weightMap = index?.weight_map
-    if (!weightMap || typeof weightMap !== 'object') return false
-    return Object.keys(weightMap).some(key =>
-      /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
-    )
-  } catch {
-    return false
-  }
+  const keys = bundleArtifactWeightKeys(modelPath)
+  return keys?.some(key =>
+    /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
+  ) === true
 }
 
 /**
@@ -1010,20 +1079,13 @@ function qwenNativeMtpVlArtifactReady(
     return false
   }
 
-  try {
-    const raw = readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf-8')
-    const index = JSON.parse(raw)
-    const weightMap = index?.weight_map
-    if (!weightMap || typeof weightMap !== 'object') return false
-    const keys = Object.keys(weightMap)
-    const hasMtp = keys.some(key => /(^|\.)mtp(\.|$)/.test(key))
-    const hasVision = keys.some(key =>
-      /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
-    )
-    return hasMtp && hasVision
-  } catch {
-    return false
-  }
+  const keys = bundleArtifactWeightKeys(modelPath)
+  if (!keys) return false
+  const hasMtp = keys.some(key => /(^|\.)mtp(\.|$)/.test(key))
+  const hasVision = keys.some(key =>
+    /(^|\.)(vision_tower|vision_model|visual|patch_embed|multi_modal_projector|mm_projector|image_newline)(\.|$)/.test(key),
+  )
+  return hasMtp && hasVision
 }
 
 function configuredNativeMtpLayers(parsedConfig: any, jangCfg: any): { layers: number; source: string } {
@@ -1252,11 +1314,8 @@ function detectNativeMtpCapability(
   if (configuredMtp.layers <= 0) return undefined
 
   try {
-    const raw = readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf-8')
-    const index = JSON.parse(raw)
-    const weightMap = index?.weight_map
-    if (!weightMap || typeof weightMap !== 'object') return undefined
-    const keys = Object.keys(weightMap)
+    const keys = bundleArtifactWeightKeys(modelPath)
+    if (!keys) return undefined
     const baseLayerCount = Number(
       parsedConfig?.text_config?.num_hidden_layers
       ?? parsedConfig?.num_hidden_layers,

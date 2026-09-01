@@ -116,7 +116,44 @@ def _bundle_weight_keys(
         return [], "index", error
     weight_map = index.get("weight_map") if isinstance(index, dict) else None
     if isinstance(weight_map, dict):
-        return [str(key) for key in weight_map], "index", None
+        keys = [str(key) for key in weight_map]
+        indexed_files = {
+            Path(str(filename)).name
+            for filename in weight_map.values()
+            if isinstance(filename, str)
+        }
+        try:
+            from safetensors import safe_open
+        except Exception as exc:
+            return keys, "index", f"safetensors header reader unavailable: {exc}"
+
+        supplemental_count = 0
+        errors: list[str] = []
+        try:
+            paths = sorted(Path(bundle_path).glob("*.safetensors"))
+        except Exception as exc:
+            return keys, "index", f"safetensors files could not be listed: {exc}"
+        for shard in paths:
+            if shard.name in indexed_files:
+                continue
+            try:
+                with safe_open(str(shard), framework="numpy") as handle:
+                    supplemental_keys = [str(key) for key in handle.keys()]
+                if supplemental_keys:
+                    keys.extend(supplemental_keys)
+                    supplemental_count += 1
+            except Exception as exc:
+                # An unreadable file advertised as MTP must fail closed.
+                # Unrelated custom sidecars do not invalidate a sound index.
+                if "mtp" in shard.name.lower():
+                    errors.append(f"{shard.name}: {exc}")
+        if errors:
+            return keys, "index+supplemental_safetensors", (
+                "supplemental MTP safetensors header read failed: " + "; ".join(errors)
+            )
+        return list(dict.fromkeys(keys)), (
+            "index+supplemental_safetensors" if supplemental_count else "index"
+        ), None
     if index is not None and not isinstance(weight_map, dict):
         return [], "index", "model.safetensors.index.json has no weight_map object"
 

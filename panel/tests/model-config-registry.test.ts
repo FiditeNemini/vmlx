@@ -16,6 +16,17 @@ function makeModelDir(config: Record<string, unknown>, jangConfig?: Record<strin
   return dir
 }
 
+function writeSafetensorsHeader(path: string, tensors: Record<string, { dtype: string; shape: number[]; data_offsets: number[] }>): void {
+  const rawHeader = Buffer.from(JSON.stringify(tensors), 'utf8')
+  const headerBytes = Math.ceil(rawHeader.length / 8) * 8
+  const endOffset = Math.max(0, ...Object.values(tensors).map(tensor => tensor.data_offsets[1] ?? 0))
+  const contents = Buffer.alloc(8 + headerBytes + endOffset, 0)
+  contents.writeBigUInt64LE(BigInt(headerBytes), 0)
+  rawHeader.copy(contents, 8)
+  contents.fill(0x20, 8 + rawHeader.length, 8 + headerBytes)
+  writeFileSync(path, contents)
+}
+
 afterEach(() => {
   while (createdDirs.length > 0) {
     const dir = createdDirs.pop()
@@ -436,6 +447,45 @@ describe('detectModelConfigFromDir JANG multimodal detection', () => {
       depthSource: 'jang_config.runtime.mtp_layers',
       runtimeScope: 'text+vl',
       requiresDeterministicSampling: false,
+    })
+  })
+
+  it('detects Qwen3.8-27B MTP tensors in a supplemental shard omitted from the base index', () => {
+    const dir = makeModelDir(
+      {
+        model_type: 'qwen3_5',
+        text_config: {
+          model_type: 'qwen3_5_text',
+          num_hidden_layers: 64,
+          mtp_num_hidden_layers: 1,
+        },
+      },
+      {
+        format: 'jang',
+        runtime: { bundle_has_mtp: true, mtp_layers: 1 },
+        mtp: { kept: true, enabled: true, num_layers: 1, tensor_count: 31 },
+        capabilities: { family: 'qwen3_5', cache_type: 'hybrid' },
+      },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({
+      weight_map: {
+        'model.embed_tokens.weight': 'model-00001-of-00004.safetensors',
+      },
+    }))
+    writeSafetensorsHeader(join(dir, 'model-mtp-of-00005.safetensors'), {
+      'mtp.fc.weight': { dtype: 'F16', shape: [1], data_offsets: [0, 2] },
+      'mtp.layers.0.self_attn.q_proj.weight': { dtype: 'F16', shape: [1], data_offsets: [2, 4] },
+      'mtp.norm.weight': { dtype: 'F16', shape: [1], data_offsets: [4, 6] },
+    })
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({
+      native_mtp: { best_depth: 2, validated: true, output_equivalent: true },
+    }))
+
+    expect(detectModelConfigFromDir(dir).nativeMtp).toMatchObject({
+      supported: true,
+      depth: 2,
+      depthSource: 'vmlx_mtp_tuning.json:native_mtp.best_depth',
+      nativeCacheType: 'hybrid_ssm_v1',
     })
   })
 

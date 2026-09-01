@@ -4,6 +4,18 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.50] - 2026-08-31
+
+### Performance
+- **Qwen3.8 Flash Next now selects routed-MoE fusion atomically for mixed-bit bundles.** Fully compatible JANG 2L and 4M stacks retain the fused affine path, while mixed-layout 4S and 6S stacks keep the faster stock MLX decode path instead of interleaving a small number of custom layers. Exact fixed-D3 measurements restored 4S from 74.8 to 87.5 tok/s and 6S from 75.4 to 82.9 tok/s while preserving 100% draft acceptance.
+- **GLM-5.3 Flash decode and tight-memory prefill use their qualified native paths by default.** KDA decode fusions remain shape-gated, and memory-pressure prefill chunks now stop at recurrent-state boundaries rather than splitting through an unfinished SSM transition.
+
+### Fixed
+- **Tool terminals are published only after the parsed assistant turn is durable.** Chat Completions and Responses tool loops persist the exact KV and architecture-native companion boundary before the terminal event can trigger the next harness step.
+- **Tool contracts remain stable across growing multi-turn histories.** The engine reconstructs the effective tool schema at the owning request boundary and drains terminalizing requests without converting a normal tool completion into an abort.
+
+---
+
 ## [1.6.49] - 2026-08-31
 
 ### Performance

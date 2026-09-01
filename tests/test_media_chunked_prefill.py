@@ -247,6 +247,50 @@ class TestMediaForwardFallbacks:
         assert self._run(gen) == "out"
         assert calls == ["one-shot"]
 
+    def test_final_chunk_logits_are_realized_before_transients_clear(
+        self, monkeypatch
+    ):
+        """The returned final logits must not reference a cleared Metal resource."""
+        from types import SimpleNamespace
+
+        import vmlx_engine.mllm_batch_generator as mllm
+
+        events = []
+
+        class _LazyLogits:
+            def __getitem__(self, item):
+                events.append("last-token-slice")
+                return self
+
+        class _ChunkableLM:
+            def __call__(self, inputs, inputs_embeds=None, cache=None):
+                events.append("forward")
+                return _LazyLogits()
+
+        gen = self._gen(_OneShotModel([]), _ChunkableLM())
+        gen.model.get_input_embeddings = lambda ids, **kw: SimpleNamespace(
+            inputs_embeds=_FakeIds(9000)
+        )
+        gen._media_placeholder_token_ids = lambda: set()
+        gen._media_prefill_chunk_tokens = lambda seq_len: 4096
+        monkeypatch.setattr(mllm.mx, "eval", lambda value: events.append("eval"))
+        monkeypatch.setattr(
+            mllm.mx, "clear_cache", lambda: events.append("clear-cache")
+        )
+
+        result = gen._media_forward(
+            SimpleNamespace(request_id="media-last-logits"),
+            _FakeIds(9000),
+            9000,
+            [object()],
+            {},
+        )
+
+        assert isinstance(result, _LazyLogits)
+        assert events.count("forward") == 3
+        assert events.count("eval") == 1
+        assert events[-3:] == ["last-token-slice", "eval", "clear-cache"]
+
 
 class _FakeIds:
     """Minimal stand-in for an mx.array of token ids."""

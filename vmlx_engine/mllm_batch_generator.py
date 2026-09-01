@@ -11238,6 +11238,18 @@ class MLLMBatchGenerator:
             if image_mask is not None and "image_mask" in lm_names:
                 call_kwargs["image_mask"] = image_mask[:, start:end]
             output = lm(input_ids[:, start:end], **call_kwargs)
+            if end == seq_len and output is not None:
+                # The final chunk is the only logits payload the caller uses.
+                # Keep just that token and realize it before clearing MLX's
+                # transient Metal cache.  Leaving the final forward lazy and
+                # calling mx.clear_cache() first invalidated a resource owned
+                # by the pending graph; the later prefill-stage
+                # mx.eval(last_logits) then failed with
+                # kIOGPUCommandBufferCallbackErrorInvalidResource on a real
+                # Qwen3.8 VL image turn.  Evaluating the one-token slice avoids
+                # materializing a chunk-sized (B, T, vocab) logits tensor.
+                output = output[:, -1:, :]
+                mx.eval(output)
             try:
                 mx.clear_cache()
             except Exception:

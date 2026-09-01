@@ -411,6 +411,38 @@ def test_installed_runner_health_binding_uses_manifest_attested_python(
         bundle["model_name"],
     ) == []
 
+    # Electron starts the backend through the fixed in-app `python3` symlink,
+    # while the proof producer binds the same binary through its canonical
+    # versioned path. Both exact paths are accepted; neither broadens the
+    # trust boundary beyond the manifest-hashed packaged interpreter.
+    health["runtime_provenance"][
+        "python_executable_fingerprint_sha256"
+    ] = runner["installed_runtime"][
+        "packaged_python_invocation_fingerprint_sha256"
+    ]
+    identity, failures = matrix._health_identity(health)
+    assert failures == []
+    assert matrix._validate_health_source_binding(
+        identity,
+        source,
+        runner,
+        bundle,
+        bundle["model_name"],
+    ) == []
+
+    health["runtime_provenance"][
+        "python_executable_fingerprint_sha256"
+    ] = matrix._sha256("/private/tmp/foreign-python")
+    identity, failures = matrix._health_identity(health)
+    assert failures == []
+    assert matrix._validate_health_source_binding(
+        identity,
+        source,
+        runner,
+        bundle,
+        bundle["model_name"],
+    ) == ["observed backend Python executable does not match the proof runner"]
+
 
 @pytest.mark.parametrize(
     ("failure_mode", "expected"),

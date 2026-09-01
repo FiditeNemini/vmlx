@@ -482,6 +482,21 @@ def _observe_installed_runtime(
     app_root = _installed_app_root_from_python(requested_executable)
     canonical_executable = requested_executable.resolve(strict=True)
     invoked_fingerprint = _sha256(str(canonical_executable))
+    # Electron launches the packaged interpreter through the stable `python3`
+    # path, while CPython may report the canonical versioned target (for
+    # example `python3.12`) to the proof producer. Both invocation spellings
+    # resolve to the same manifest-hashed executable; retain the exact pair so
+    # health can attest the app-owned launcher without accepting arbitrary
+    # interpreters from the same prefix.
+    packaged_invocation_path = (
+        app_root / INSTALLED_BUNDLED_PYTHON_RELATIVE_PATH
+    ).absolute()
+    if packaged_invocation_path.resolve(strict=True) != canonical_executable:
+        raise ValueError(
+            "installed app exact bundled-Python invocation does not resolve "
+            "to the manifest-attested runner"
+        )
+    packaged_invocation_fingerprint = _sha256(str(packaged_invocation_path))
     if (
         invoked_fingerprint
         != manifest["bundled_python_executable_fingerprint_sha256"]
@@ -603,6 +618,10 @@ def _observe_installed_runtime(
         "app_path": str(app_root),
         "invoked_python_path": str(canonical_executable),
         "invoked_python_fingerprint_sha256": invoked_fingerprint,
+        "packaged_python_invocation_path": str(packaged_invocation_path),
+        "packaged_python_invocation_fingerprint_sha256": (
+            packaged_invocation_fingerprint
+        ),
         "python_prefix_path": str(
             canonical_executable.parent.parent.resolve(strict=True)
         ),
@@ -670,7 +689,14 @@ def observe_runner_environment(
         "installed-runtime" if installed_runtime is not None else "source-checkout-venv"
     )
     installed_python_invocation_fingerprints = (
-        [installed_runtime["invoked_python_fingerprint_sha256"]]
+        sorted(
+            {
+                installed_runtime["invoked_python_fingerprint_sha256"],
+                installed_runtime[
+                    "packaged_python_invocation_fingerprint_sha256"
+                ],
+            }
+        )
         if installed_runtime is not None
         else []
     )
@@ -5075,9 +5101,30 @@ def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
         accepted_python_fingerprints = runner.get(
             "accepted_python_invocation_fingerprints_sha256"
         )
+        installed_runtime = runner.get("installed_runtime")
+        expected_installed_python_fingerprints = (
+            sorted(
+                {
+                    installed_runtime.get(
+                        "invoked_python_fingerprint_sha256"
+                    ),
+                    installed_runtime.get(
+                        "packaged_python_invocation_fingerprint_sha256"
+                    ),
+                }
+            )
+            if isinstance(installed_runtime, dict)
+            else []
+        )
         if (
             not isinstance(installed_python_fingerprints, list)
-            or len(installed_python_fingerprints) != 1
+            or len(installed_python_fingerprints) != 2
+            or any(
+                not _valid_sha256(fingerprint)
+                for fingerprint in installed_python_fingerprints
+            )
+            or installed_python_fingerprints
+            != expected_installed_python_fingerprints
             or installed_python_fingerprints
             != accepted_python_fingerprints
             or runner.get("python_executable_fingerprint_sha256")
@@ -5086,7 +5133,6 @@ def _runner_environment_failures(runner: dict[str, Any]) -> list[str]:
             failures.append(
                 "installed proof runner Python invocation binding is invalid"
             )
-        installed_runtime = runner.get("installed_runtime")
         if not isinstance(installed_runtime, dict):
             failures.append("installed proof runner release attestation is missing")
         else:

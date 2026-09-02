@@ -4490,6 +4490,28 @@ class MLXMultimodalLM:
                 log=logger,
             )
             _set_vlm_inference_mode(self.model)
+            # The text route runs the model's post-hydration acceleration hook
+            # (projection grouping, fused-MoE registration) after inference
+            # mode is set; the mllm route never did, so a VL GLM-5.3 session
+            # served ungrouped with zero fused-MoE modules while the phase
+            # display still said "restoring_acceleration". Inference mode is
+            # already set above (fusion refuses training-mode modules), and
+            # this worker owns the MLX stream. A failure must stay loud but
+            # must not turn a loadable VL model into a startup failure.
+            prepare = getattr(self.model, "prepare_acceleration", None)
+            if callable(prepare):
+                try:
+                    preparation = prepare()
+                    logger.info(
+                        "Post-hydration acceleration preparation (mllm): %s",
+                        preparation,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "mllm acceleration preparation failed; serving "
+                        "ungrouped/unfused: %s",
+                        exc,
+                    )
             self._loaded = True
 
         # Install mlx_vlm registry patches (gemma4 + kimi_k25) on THIS thread

@@ -4,6 +4,24 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.52] - 2026-09-02
+
+### Fixed
+- **Concurrent batch requests to Qwen3.8-Flash-Next no longer crash.** The QSA sparse-attention layers keep a native index lane that the generic continuous-batching cache promotion discarded, so the first co-batched decode step aborted with `'BatchKVCache' object has no attribute 'update_index'`. A specialized batch cache preserves the sparse index through merge, extract, filter, extend, trim, and finalize. Single (non-batched) requests were unaffected, which is why one-at-a-time calls worked while concurrent load failed.
+- **Native MTP restores greedy startup defaults for every enabled mode.** Auto had regressed to keeping the bundle's sampled temperature as the default, so app-managed MTP sessions (Qwen3.8-27B, Flash-Next) silently ran stochastic decoding. Enabling MTP now pins temperature 0 / top_p 1 as the startup default for chat and API alike; an explicit per-request temperature still wins. Chat Settings displays the pinned default.
+- **GLM-5.3-Flash stops replaying prior-turn reasoning into the prompt.** The template's `clear_thinking` defaulted false, re-embedding each earlier turn's full reasoning and growing the prompt until it tripped the prefill guard. It now defaults to the flat-history contract; explicit callers still override.
+- **External-drive model bundles load past macOS AppleDouble sidecars.** `._`-prefixed metadata files on exFAT/FAT volumes are no longer mistaken for safetensors shards.
+- **Honest launch-memory estimate for the SSD-backed PLE.** Qwen3.8-Flash-Next keeps its quantized PLE table on SSD; the resident estimate now accounts for that, and the Metal wired-limit recommendation is advisory-only (never blocks the launch).
+
+### Added
+- **codex 0.150 compatibility.** The gateway model list carries an additive `models` field for codex's model-manager alongside the standard `data`. codex must be configured with `wire_api = "responses"` (it no longer supports the chat wire).
+- **Opt-in BF16 DSA indexer state for GLM-5.3-Flash** (`VMLX_GLM5_DSA_BF16`, default off).
+
+### Changed
+- **GLM-5.3-Flash speculative-verification hyper-connection transforms are fused by default**, and the multimodal load path now runs the post-hydration acceleration hook.
+
+---
+
 ## [1.6.51] - 2026-08-31
 
 ### Fixed

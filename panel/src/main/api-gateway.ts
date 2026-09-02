@@ -1406,7 +1406,13 @@ export class ApiGateway extends EventEmitter {
       }
     }
 
-    this.sendJson(res, 200, { object: "list", data: models });
+    // `data` is the OpenAI-standard field every client reads. `models` is an
+    // additive mirror: codex 0.150's model-manager deserializes the list
+    // expecting a top-level `models` array and logs a refresh error against a
+    // pure `data` body ("missing field `models`"). The extra key is ignored by
+    // standard OpenAI clients, so this satisfies codex without changing the
+    // contract anyone else depends on.
+    this.sendJson(res, 200, { object: "list", data: models, models });
   }
 
   // ═══════════════════════════════════════════════════════════════

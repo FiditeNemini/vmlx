@@ -5447,6 +5447,7 @@ class MLXMultimodalLM:
             # rejects them too.
             fallback_kwargs = dict(template_kwargs)
             fallback_kwargs.pop("enable_thinking", None)
+            fallback_kwargs.pop("clear_thinking", None)
             try:
                 formatted_prompt = get_chat_template(
                     self.processor,

@@ -64,3 +64,42 @@ export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefa
     minP: 0,
   }
 }
+
+/**
+ * Apply MTP sampling policy to a chat's PER-REQUEST overrides.
+ *
+ * This is deliberately different from the display resolver above. The
+ * engine's deterministic-defaults policy (Auto) pins only the STARTUP
+ * DEFAULTS — an explicit request temperature wins — so the request path
+ * must forward the user's explicit overrides untouched in Auto and Off.
+ * Deterministic launches greedy-only, where the engine ignores request
+ * sampling anyway; pinning here keeps the transcript honest about what ran.
+ * Clobbering Auto overrides at this layer (which the display resolver
+ * legitimately does for the "fresh chat" view) would silently override
+ * explicit user intent — measured as chat temperature being forced to 0
+ * even after the user set a nonzero value with Auto MTP.
+ */
+export function applyMtpSamplerOverrides<T extends GenerationDefaultsLike>(
+  overrides: T,
+  sessionConfig: string | Record<string, unknown> | undefined,
+  nativeMtp: NativeMtpDetection | undefined,
+): T {
+  const config = sessionConfigObject(sessionConfig)
+  const configuredMode = typeof config.nativeMtpMode === 'string'
+    ? config.nativeMtpMode as 'auto' | 'deterministic' | 'off'
+    : 'auto'
+  const mode = resolveNativeMtpMode({
+    mode: configuredMode,
+    modelDefaultMode: nativeMtp?.defaultMode,
+    depthOverride: config.nativeMtpDepthOverride === true,
+  })
+  if (nativeMtp?.supported !== true) return overrides
+  if (mode !== 'deterministic') return overrides
+  return {
+    ...overrides,
+    temperature: 0,
+    topP: 1,
+    topK: 0,
+    minP: 0,
+  }
+}

@@ -3055,7 +3055,13 @@ export class SessionManager extends EventEmitter {
           console.warn(`[SESSION] ${logLine}`)
           this.emit('session:log', { sessionId, data: `⚠️  ${logLine}\n` })
           if (options?.launchOrigin !== 'gateway') {
-            const result = await dialog.showMessageBox({
+            // Advisory only: never await this dialog. Awaiting made the
+            // application-modal sheet gate the engine spawn (and freeze the
+            // whole window for automation) until someone clicked Continue -
+            // the launch proceeded only after dismissal. The recommendation
+            // stays visible while the load runs; Copy still works.
+            const command = wiredPreflight.command
+            void dialog.showMessageBox({
               type: 'warning',
               title: 'Metal wired-memory limit recommendation',
               message: wiredPreflight.message,
@@ -3063,8 +3069,9 @@ export class SessionManager extends EventEmitter {
               buttons: ['Copy Command', 'Continue'],
               defaultId: 0,
               cancelId: 1,
-            })
-            if (result.response === 0) clipboard.writeText(wiredPreflight.command)
+            }).then((result) => {
+              if (result.response === 0) clipboard.writeText(command)
+            }).catch(() => { /* advisory-only path must never break a launch */ })
           }
         }
       } catch { /* advisory-only path must never break a launch */ }

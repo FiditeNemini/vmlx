@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { applyEffectiveSessionGenerationDefaults } from '../src/shared/effectiveGenerationDefaults'
+import { applyEffectiveSessionGenerationDefaults, applyMtpSamplerOverrides } from '../src/shared/effectiveGenerationDefaults'
 
 const bundleDefaults = {
   temperature: 1,
@@ -70,5 +70,37 @@ describe('effective session generation defaults', () => {
       '{bad json',
       { supported: false },
     )).toEqual(bundleDefaults)
+  })
+})
+
+describe('applyMtpSamplerOverrides (per-request path)', () => {
+
+  it('preserves an explicit chat override in Auto — engine kwargs win', () => {
+    const out = applyMtpSamplerOverrides(
+      { temperature: 0.7, topP: 0.9 },
+      { nativeMtpMode: 'auto' },
+      { supported: true },
+    )
+    expect(out.temperature).toBe(0.7)
+    expect(out.topP).toBe(0.9)
+  })
+
+  it('pins greedy for Deterministic, where the engine is greedy-only anyway', () => {
+    const out = applyMtpSamplerOverrides(
+      { temperature: 0.7 },
+      { nativeMtpMode: 'deterministic' },
+      { supported: true },
+    )
+    expect(out.temperature).toBe(0)
+    expect(out.topP).toBe(1)
+  })
+
+  it('leaves non-MTP models and Off mode untouched', () => {
+    expect(applyMtpSamplerOverrides(
+      { temperature: 0.5 }, {}, { supported: false },
+    ).temperature).toBe(0.5)
+    expect(applyMtpSamplerOverrides(
+      { temperature: 0.5 }, { nativeMtpMode: 'off' }, { supported: true },
+    ).temperature).toBe(0.5)
   })
 })

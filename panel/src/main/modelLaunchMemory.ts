@@ -73,6 +73,17 @@ export function launchResidentProfileForModelType(modelType: string): LaunchResi
   if (type.startsWith('minimax_m3')) {
     return { ratio: 0.85, admissionRatio: 0.8, streamsWeights: true }
   }
+  // Qwen3.8-Flash-Next (qwen4_exp): the quantized PLE n-gram table stays on
+  // SSD behind a row-addressable reader and is never resident. Measured live
+  // (2026-09-02, /health active vs bundle bytes): JANG_2L 47.1/65 GB = 0.72×,
+  // JANG_4S 54.0/72 GB = 0.75×. Counting the full bundle put a ~96 GB 4M at
+  // an estimated 105 GB, which tripped the wired-limit recommendation dialog
+  // (and its modal blocked the launch flow) for a model that actually fits
+  // with room to spare. 0.85 keeps warning margin over the measurement;
+  // refusal keys nearer the measured value.
+  if (type.startsWith('qwen4_exp')) {
+    return { ratio: 0.85, admissionRatio: 0.78, streamsWeights: true }
+  }
   // Ordinary loads COPY weights into dirty Metal buffers, so file size IS the
   // residency. Nothing to discount.
   return { ratio: 1.0, admissionRatio: 1.0, streamsWeights: false }

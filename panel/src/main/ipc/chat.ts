@@ -118,7 +118,7 @@ import {
   toolCapabilityNames,
 } from "../tool-capability-epoch";
 import { resolveSlowFamilyTimeoutSeconds } from '../../shared/slowFamilyTimeouts';
-import { applyEffectiveSessionGenerationDefaults } from '../../shared/effectiveGenerationDefaults';
+import { applyMtpSamplerOverrides } from '../../shared/effectiveGenerationDefaults';
 
 // Default connection config (fallback values)
 const DEFAULT_PORT = 8000;
@@ -1617,7 +1617,7 @@ export function registerChatHandlers(
       // own sampling contract.
       const effectiveSamplerOverrides = isRemote
         ? overrides
-        : applyEffectiveSessionGenerationDefaults(
+        : applyMtpSamplerOverrides(
             overrides,
             chatSessionConfig,
             chatNativeMtp,

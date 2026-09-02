@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { join, resolve } from 'path'
 import { tmpdir } from 'os'
 import { describe, expect, it } from 'vitest'
+import { classifyWiredLimitPreflight } from '../src/shared/metalWiredLimit'
 import {
   MODEL_LAUNCH_FIXED_OVERHEAD_BYTES,
   estimateModelFileBytes,
@@ -317,5 +318,29 @@ describe('an unidentifiable model still yields a usable estimate', () => {
     expect(unsafeModelLaunchReason(admission, 100 * GB, {})).toBeNull()
     expect(unsafeModelLaunchReason(admission, 10 * GB, {})).toContain('GB')
     expect(unsafeModelLaunchReason(admission, 10 * GB, {})).not.toContain('NaN')
+  })
+})
+
+describe('qwen4_exp SSD-backed PLE residency profile', () => {
+  it('discounts the SSD-resident PLE from the launch estimate', () => {
+    const profile = launchResidentProfileForModelType('qwen4_exp')
+    expect(profile.streamsWeights).toBe(true)
+    expect(profile.ratio).toBe(0.85)
+    expect(profile.admissionRatio).toBe(0.78)
+    expect(profile.admissionRatio).toBeLessThanOrEqual(profile.ratio)
+  })
+
+  it('keeps a real 4M-sized bundle under the wired-limit recommendation', () => {
+    // 96 GiB bundle on a 128 GB box with an ~111 GB wired limit: counting the
+    // whole bundle (105 GB estimate + 6 GB overhead) tripped the modal; the
+    // measured PLE discount keeps it clearly below the limit.
+    const fileBytes = 103.1e9
+    const estimated = Math.round(fileBytes * 0.85) + MODEL_LAUNCH_FIXED_OVERHEAD_BYTES
+    const preflight = classifyWiredLimitPreflight({
+      modelSizeBytes: estimated,
+      wiredLimitMb: 111000,
+      totalBytes: 137e9,
+    })
+    expect(preflight.action).toBe('ok')
   })
 })

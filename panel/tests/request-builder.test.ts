@@ -194,7 +194,7 @@ describe('buildRequestBody — Chat Completions API', () => {
 
     it('applies the shared Native-MTP effective sampler at both live request boundaries', () => {
         const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
-        expect(source).toContain("applyEffectiveSessionGenerationDefaults")
+        expect(source).toContain("applyMtpSamplerOverrides")
         expect(source).toContain('const effectiveSamplerOverrides = isRemote')
         expect(source).toContain('chatSessionConfig,')
         expect(source).toContain('chatNativeMtp,')

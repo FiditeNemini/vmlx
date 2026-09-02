@@ -1,20 +1,22 @@
-"""Load-boundary affine metadata dtype normalization.
+"""Load-boundary affine metadata dtype harmonisation.
 
 The JANG affine ABI stores scales/biases as FP16. On a BF16-activation family
 (GLM-5.3 Flash) MLX promotes FP16+BF16 quantized matmuls to FP32, which both
 widens the whole activation path and disqualifies every FP16/BF16-only fused
-decode kernel. The normalizer casts affine metadata to the resolved compute
-dtype at load; these tests pin the promotion mechanism itself, the cast, and
-the guards that keep non-affine and FP16-contract families untouched.
+decode kernel. ``mlx_memory.harmonize_quant_metadata_dtypes`` is the single
+owning correction, invoked on both production load routes (text
+``utils/tokenizer.py`` and mllm ``models/mllm.py``). These tests pin the
+promotion mechanism itself, the cast, and the anchor/declaration gates that
+keep FP16-compute families (Step-3.7 shape) and undeclared bundles untouched.
 """
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from vmlx_engine.utils.affine_metadata import normalize_affine_metadata_dtype
+from vmlx_engine.mlx_memory import harmonize_quant_metadata_dtypes
 
 
-def _quantized_model(metadata_dtype=mx.float16):
+def _quantized_model(metadata_dtype=mx.float16, anchor_dtype=mx.bfloat16):
     model = nn.Sequential(
         nn.Linear(128, 64, bias=False),
         nn.Linear(64, 128, bias=False),
@@ -23,12 +25,15 @@ def _quantized_model(metadata_dtype=mx.float16):
     for layer in model.layers:
         layer.scales = layer.scales.astype(metadata_dtype)
         layer.biases = layer.biases.astype(metadata_dtype)
+    # Non-metadata compute anchors deciding the harmonisation verdict.
+    model.norm_a = mx.ones((128,), dtype=anchor_dtype)
+    model.norm_b = mx.ones((128,), dtype=anchor_dtype)
     model.eval()
     return model
 
 
 def test_fp16_metadata_with_bf16_activation_promotes_to_fp32():
-    """The mechanism this normalizer exists for: without the cast, MLX
+    """The mechanism the harmoniser exists for: without the cast, MLX
     promotes the quantized matmul output to FP32."""
 
     model = _quantized_model(mx.float16)
@@ -36,13 +41,16 @@ def test_fp16_metadata_with_bf16_activation_promotes_to_fp32():
     assert model.layers[0](x).dtype == mx.float32
 
 
-def test_normalize_casts_fp16_metadata_to_bf16_and_narrows_output():
-    model = _quantized_model(mx.float16)
+def test_harmonize_casts_eligible_metadata_and_narrows_output():
+    model = _quantized_model(mx.float16, anchor_dtype=mx.bfloat16)
     x = mx.random.normal((1, 128)).astype(mx.bfloat16)
     reference = model(x.astype(mx.float32))
 
-    changed = normalize_affine_metadata_dtype(model, mx.bfloat16)
-    assert changed == 2
+    summary = harmonize_quant_metadata_dtypes(
+        model, declared_dtype="bfloat16"
+    )
+    assert summary["eligible"] == 4
+    assert summary["cast"] == 4
     for layer in model.layers:
         assert layer.scales.dtype == mx.bfloat16
         assert layer.biases.dtype == mx.bfloat16
@@ -60,31 +68,29 @@ def test_normalize_casts_fp16_metadata_to_bf16_and_narrows_output():
     assert max_abs / max_ref <= 3e-2
 
 
-def test_normalize_is_a_noop_for_matching_or_fp16_contract():
-    model = _quantized_model(mx.float16)
-    assert normalize_affine_metadata_dtype(model, mx.float16) == 0
-    assert model.layers[0].scales.dtype == mx.float16
+def test_harmonize_refuses_f16_anchor_dominant_models():
+    """Step-3.7 shape: BF16 declared but F16 anchors dominate — casting the
+    metadata would CREATE the promotion, so the gate must refuse."""
 
-    model_bf16 = _quantized_model(mx.bfloat16)
-    assert normalize_affine_metadata_dtype(model_bf16, mx.bfloat16) == 0
-
-
-def test_normalize_refuses_non_sixteen_bit_targets_and_non_affine_modes():
-    model = _quantized_model(mx.float16)
-    assert normalize_affine_metadata_dtype(model, mx.float32) == 0
-    assert model.layers[0].scales.dtype == mx.float16
-
-    model.layers[0].mode = "mxfp4"
-    assert normalize_affine_metadata_dtype(model, mx.bfloat16) == 1
-    assert model.layers[0].scales.dtype == mx.float16
-    assert model.layers[1].scales.dtype == mx.bfloat16
-
-
-def test_normalize_skips_integer_metadata():
-    model = _quantized_model(mx.float16)
-    model.layers[0].scales = mx.ones_like(model.layers[0].scales).astype(
-        mx.uint8
+    model = _quantized_model(mx.float16, anchor_dtype=mx.float16)
+    summary = harmonize_quant_metadata_dtypes(
+        model, declared_dtype="bfloat16"
     )
-    assert normalize_affine_metadata_dtype(model, mx.bfloat16) == 1
-    assert model.layers[0].scales.dtype == mx.uint8
-    assert model.layers[1].scales.dtype == mx.bfloat16
+    assert summary["cast"] == 0
+    assert model.layers[0].scales.dtype == mx.float16
+
+
+def test_harmonize_refuses_undeclared_bundle_dtype():
+    model = _quantized_model(mx.float16, anchor_dtype=mx.bfloat16)
+    summary = harmonize_quant_metadata_dtypes(model, declared_dtype=None)
+    assert summary["cast"] == 0
+    assert model.layers[0].scales.dtype == mx.float16
+
+
+def test_harmonize_is_noop_when_metadata_already_matches():
+    model = _quantized_model(mx.bfloat16, anchor_dtype=mx.bfloat16)
+    summary = harmonize_quant_metadata_dtypes(
+        model, declared_dtype="bfloat16"
+    )
+    assert summary["eligible"] == 0
+    assert summary["cast"] == 0

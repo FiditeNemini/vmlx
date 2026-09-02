@@ -53,7 +53,6 @@ from vmlx_engine.metal.affine_moe_pair_decode import (
     affine_moe_routed_output,
     install_affine_moe_pair_decode,
 )
-from vmlx_engine.utils.affine_metadata import normalize_affine_metadata_dtype
 
 from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
@@ -1959,20 +1958,15 @@ class Model(nn.Module):
         )
 
     def prepare_acceleration(self) -> dict[str, int]:
-        """Install exact launch-reduction groups after checkpoint hydration."""
+        """Install exact launch-reduction groups after checkpoint hydration.
 
-        # GLM-5.3 activations follow the checkpoint's BF16 contract while the
-        # JANG affine ABI stores scales/biases as FP16. MLX promotes FP16+BF16
-        # to FP32, so every quantized matmul would emit FP32 activations and
-        # disqualify the FP16/BF16-only fused decode kernels installed below.
-        # Normalize the metadata first so grouping and fused-MoE registration
-        # observe the final dtypes.
-        compute_dtype = self.model.norm.weight.dtype
-        affine_metadata_modules = 0
-        if compute_dtype == mx.bfloat16:
-            affine_metadata_modules = normalize_affine_metadata_dtype(
-                self, compute_dtype
-            )
+        Metadata dtype correctness (FP16 affine scales/biases vs BF16
+        activations promoting every quantized matmul to FP32) is owned by the
+        load boundary: the JANG loaders resolve the compute dtype and
+        ``mlx_memory.maybe_harmonize_quant_metadata_dtypes`` runs on both
+        production routes before this hook, so grouping and fused-MoE
+        registration below already observe the final dtypes.
+        """
 
         fused_moe_pair_modules = install_affine_moe_pair_decode(
             self, family="glm5_next"
@@ -1995,7 +1989,6 @@ class Model(nn.Module):
             mtp_dense_gate_up_groups = 1
         mx.clear_cache()
         return {
-            "affine_metadata_modules": affine_metadata_modules,
             "base_kda_qkv_groups": base_kda_groups,
             "base_dense_gate_up_groups": base_dense_gate_up_groups,
             "mtp_dense_gate_up_groups": mtp_dense_gate_up_groups,

@@ -376,3 +376,32 @@ def test_bundle_check_json_does_not_initialize_runtime_or_prefix_logs(
     assert report["status"] == "ok"
     assert output.lstrip().startswith("{")
     assert runtime_initializations == []
+
+
+def test_appledouble_sidecars_are_ignored_by_scan_and_fingerprint(tmp_path):
+    """macOS writes "._name.safetensors" AppleDouble metadata next to real
+    shards on external exFAT/FAT volumes; they must never be parsed as
+    shards, indexes, or fingerprint inputs (reproduced live on an external
+    drive: the sidecar's fake header length failed the whole load)."""
+
+    root = tmp_path / "model"
+    root.mkdir()
+    _config(root)
+    _write_safetensors(
+        root / "model.safetensors",
+        [("weight", "F32", [2], struct.pack("<2f", 1.0, 2.0))],
+    )
+    # Realistic AppleDouble prefix: not a safetensors container at all.
+    (root / "._model.safetensors").write_bytes(
+        b"\x00\x05\x16\x07" + b"\x00" * 60
+    )
+    (root / "._model.safetensors.index.json").write_bytes(b"\x00\x05\x16\x07")
+    cache = tmp_path / "cache"
+
+    report = check_model_bundle(root, cache_dir=cache)
+    assert report["status"] == "ok"
+    assert report["shards"] == 1
+
+    # The sidecar must not participate in the cache fingerprint either.
+    (root / "._model.safetensors").write_bytes(b"\x00\x05\x16\x07changed")
+    assert check_model_bundle(root, cache_dir=cache)["cache_hit"] is True

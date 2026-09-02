@@ -321,7 +321,11 @@ def inspect_model(model_path: str) -> ModelInfo:
             raise FileNotFoundError(f"Invalid JSON in {config_path}: {e}") from e
 
     # Collect weight files
-    weight_files = sorted([f.name for f in path.glob("*.safetensors")])
+    weight_files = sorted(
+        f.name
+        for f in path.glob("*.safetensors")
+        if not f.name.startswith("._")
+    )
     total_size = sum((path / f).stat().st_size for f in weight_files)
     total_size_gb = total_size / (1024**3)
 

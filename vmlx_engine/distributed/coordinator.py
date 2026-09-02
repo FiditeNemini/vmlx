@@ -644,5 +644,6 @@ def _estimate_model_size_gb(model_path: str) -> float:
     total = sum(
         os.path.getsize(f)
         for f in glob.glob(f"{model_path}/*.safetensors")
+        if not os.path.basename(f).startswith("._")
     )
     return total / (1024 ** 3)

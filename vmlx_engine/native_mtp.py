@@ -130,7 +130,11 @@ def _bundle_weight_keys(
         supplemental_count = 0
         errors: list[str] = []
         try:
-            paths = sorted(Path(bundle_path).glob("*.safetensors"))
+            paths = sorted(
+                p
+                for p in Path(bundle_path).glob("*.safetensors")
+                if not p.name.startswith("._")
+            )
         except Exception as exc:
             return keys, "index", f"safetensors files could not be listed: {exc}"
         for shard in paths:
@@ -165,7 +169,11 @@ def _bundle_weight_keys(
     keys: list[str] = []
     errors: list[str] = []
     try:
-        paths = sorted(Path(bundle_path).glob("*.safetensors"))
+        paths = sorted(
+            p
+            for p in Path(bundle_path).glob("*.safetensors")
+            if not p.name.startswith("._")
+        )
     except Exception as exc:
         return [], "safetensors", f"safetensors files could not be listed: {exc}"
     for shard in paths:

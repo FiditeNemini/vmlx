@@ -262,8 +262,15 @@ def _read_safetensors_header(file_path: Path) -> Tuple[int, dict]:
 
 
 def _get_safetensors_files(model_path: Path) -> List[Path]:
-    """Return all *.safetensors files in *model_path*, sorted by name."""
-    files = sorted(model_path.glob("*.safetensors"))
+    """Return all *.safetensors files in *model_path*, sorted by name.
+
+    macOS AppleDouble sidecars ("._name.safetensors") on external volumes
+    are metadata, not weights, and are excluded.
+    """
+    files = sorted(
+        f for f in model_path.glob("*.safetensors")
+        if not f.name.startswith("._")
+    )
     if not files:
         raise FileNotFoundError(f"No .safetensors files found in {model_path}")
     return files

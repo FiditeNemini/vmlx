@@ -75,6 +75,9 @@ def _relevant_files(root: Path) -> list[Path]:
         if not path.is_file():
             continue
         name = path.name
+        if name.startswith("._"):
+            # AppleDouble metadata sidecars on external volumes.
+            continue
         if (
             name in _SIGNATURE_NAMES
             or name.endswith(".safetensors")
@@ -358,6 +361,8 @@ def _validate_indexes(
     root: Path, headers: dict[Path, dict[str, Any]]
 ) -> None:
     for index_path in sorted(root.rglob("*.safetensors.index.json")):
+        if index_path.name.startswith("._"):
+            continue
         weight_map = _index_weight_map(index_path)
         referenced: dict[Path, set[str]] = {}
         for key, filename in weight_map.items():
@@ -402,7 +407,14 @@ def _scan_bundle(root: Path, *, repair: bool) -> dict[str, Any]:
         if path.exists():
             _read_json_object(path, str(path))
 
-    shard_paths = sorted(root.rglob("*.safetensors"))
+    # macOS writes AppleDouble sidecars ("._name.safetensors") next to real
+    # shards on external exFAT/FAT volumes; they are resource-fork metadata,
+    # not weights, and must never participate in shard discovery.
+    shard_paths = sorted(
+        path
+        for path in root.rglob("*.safetensors")
+        if not path.name.startswith("._")
+    )
     if not shard_paths:
         raise BundleIntegrityError(f"{root}: no safetensors weight files found")
     _validate_standard_shard_sets(shard_paths, root)

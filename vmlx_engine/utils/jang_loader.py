@@ -4934,10 +4934,15 @@ def _get_v2_weight_files(path: Path) -> list[Path]:
         index = json.loads(index_path.read_text())
         return [path / sf for sf in sorted(set(index["weight_map"].values()))]
 
-    # Fallback: glob for standard safetensors
+    # Fallback: glob for standard safetensors. Filter macOS AppleDouble
+    # sidecars ("._name.safetensors") written next to real shards on
+    # external exFAT/FAT volumes; they are metadata, not weights.
     files = sorted(path.glob("model-*.safetensors"))
     if not files:
-        files = sorted(path.glob("*.safetensors"))
+        files = sorted(
+            f for f in path.glob("*.safetensors")
+            if not f.name.startswith("._")
+        )
     return files
 
 

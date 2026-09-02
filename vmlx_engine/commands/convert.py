@@ -132,7 +132,10 @@ def convert_command(args: argparse.Namespace) -> None:
     model_dir = Path(model_path)
     if model_dir.is_dir():
         gguf_files = list(model_dir.glob("*.gguf")) + list(model_dir.glob("*.gguf.part"))
-        safetensors_files = list(model_dir.glob("*.safetensors"))
+        safetensors_files = [
+            f for f in model_dir.glob("*.safetensors")
+            if not f.name.startswith("._")
+        ]
         if gguf_files and not safetensors_files:
             print(f"\nError: This model is in GGUF format, which cannot be converted by vmlx-engine.")
             print(f"  Found: {', '.join(f.name for f in gguf_files[:3])}")

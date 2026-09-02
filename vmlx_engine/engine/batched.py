@@ -31,6 +31,7 @@ from ..errors import (
 )
 from ..model_config_registry import get_model_config_registry
 from ..utils.chat_template_kwargs import (
+    model_type_of,
     build_chat_template_kwargs,
     ensure_thinking_off_sentinel,
 )
@@ -1955,6 +1956,7 @@ class BatchedEngine(BaseEngine):
                     extra=extra_template_kwargs,
                     tokenize=False,
                     add_generation_prompt=not skip_generation_prompt,
+                    model_type=model_type_of(self._model),
                 )
                 if tools:
                     tpl_kwargs["tools"] = tools
@@ -2220,6 +2222,7 @@ class BatchedEngine(BaseEngine):
                 extra=extra_template_kwargs,
                 tokenize=False,
                 add_generation_prompt=not skip_generation_prompt,
+                model_type=model_type_of(self._model),
             )
             if tools:
                 template_kwargs["tools"] = tools

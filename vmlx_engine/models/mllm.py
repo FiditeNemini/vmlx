@@ -5420,6 +5420,16 @@ class MLXMultimodalLM:
             template_kwargs["enable_thinking"] = enable_thinking
         if tools:
             template_kwargs["tools"] = tools
+        if model_type.startswith("glm5"):
+            # GLM's chat template defines ``clear_thinking`` and defaults it
+            # to FALSE, which replays every prior assistant turn's full
+            # reasoning into the prompt (measured live: ~3k tokens of growth
+            # per turn, until the prefill admission guard rejected the
+            # conversation outright). ``true`` keeps reasoning only for
+            # assistant messages after the last user turn — the current
+            # tool-call chain — which is the flat-history serving contract.
+            # setdefault so an explicit caller value always wins.
+            template_kwargs.setdefault("clear_thinking", True)
         if model_type == "mimo_v2":
             chat_messages = self._normalize_mimo_audio_messages_for_template(chat_messages)
 

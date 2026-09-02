@@ -15,6 +15,14 @@ from typing import Any
 RESERVED_CHAT_TEMPLATE_KWARGS = frozenset(("tokenize", "add_generation_prompt"))
 
 
+def model_type_of(model: Any) -> str:
+    """Best-effort ``model_type`` from a loaded model's config (dict or obj)."""
+    config = getattr(model, "config", None)
+    if isinstance(config, Mapping):
+        return str(config.get("model_type", "") or "")
+    return str(getattr(config, "model_type", "") or "")
+
+
 def build_chat_template_kwargs(
     *,
     enable_thinking: bool | None,
@@ -22,6 +30,7 @@ def build_chat_template_kwargs(
     tokenize: bool = False,
     add_generation_prompt: bool = True,
     include_thinking_alias: bool = True,
+    model_type: str | None = None,
 ) -> dict[str, Any]:
     """Return safe kwargs for tokenizer/processor ``apply_chat_template``.
 
@@ -57,6 +66,14 @@ def build_chat_template_kwargs(
         and "thinking" not in kwargs
     ):
         kwargs["thinking"] = bool(kwargs["enable_thinking"])
+
+    # GLM-style templates define ``clear_thinking`` and default it to FALSE,
+    # which replays every prior assistant turn's full reasoning into the
+    # rendered prompt while keeping the current tool-chain's reasoning either
+    # way. Serve the flat-history contract by default; the setdefault runs
+    # after the ``extra`` merge, so an explicit caller value always wins.
+    if model_type and model_type.lower().startswith("glm5"):
+        kwargs.setdefault("clear_thinking", True)
 
     return kwargs
 

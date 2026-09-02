@@ -20,6 +20,7 @@ from ..errors import PromptTooLongError
 from ..mlx_memory import clear_mlx_memory_cache
 from ..model_config_registry import get_model_config_registry
 from ..utils.chat_template_kwargs import (
+    model_type_of,
     build_chat_template_kwargs,
     ensure_thinking_off_sentinel,
 )
@@ -885,6 +886,7 @@ class SimpleEngine(BaseEngine):
                         extra=extra_ct_kwargs,
                         tokenize=False,
                         add_generation_prompt=not skip_gen_prompt,
+                        model_type=model_type_of(self._model),
                     )
                     if template_tools:
                         tpl_kwargs["tools"] = template_tools
@@ -1177,6 +1179,7 @@ class SimpleEngine(BaseEngine):
                 extra=extra_ct_kwargs,
                 tokenize=False,
                 add_generation_prompt=not skip_gen_prompt,
+                model_type=model_type_of(self._model),
             )
             if template_tools:
                 template_kwargs["tools"] = template_tools

@@ -29,12 +29,14 @@ function sessionConfigObject(config: string | Record<string, unknown> | undefine
 /**
  * Apply the effective sampling a session will really use, given native MTP.
  *
- * Auto launches the engine's compatible sampling policy, which preserves the
- * bundle/request distribution and uses stochastic speculative verification
- * when temperature is nonzero. Deterministic is the explicit greedy-only
- * policy. Chat Settings must display the same distinction as the launcher;
- * coercing Auto to greedy here would silently override the bundle contract
- * even though the engine can verify sampled proposals exactly.
+ * Any enabled native-MTP mode pins the engine's STARTUP DEFAULTS to greedy:
+ * Auto launches with the deterministic-defaults policy (temperature 0,
+ * top_p 1, top_k dropped as defaults; an explicit per-request temperature in
+ * API kwargs or chat overrides still wins), and Deterministic launches with
+ * hard greedy-only. Chat Settings must display the same pinned defaults the
+ * engine resolves, or a fresh chat would show the bundle's sampled
+ * temperature while actually running greedy. Off preserves the bundle
+ * distribution and uses AR.
  */
 export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefaultsLike>(
   defaults: T,
@@ -52,9 +54,8 @@ export function applyEffectiveSessionGenerationDefaults<T extends GenerationDefa
   })
   // No MTP heads -> MTP has no say over sampling.
   if (nativeMtp?.supported !== true) return defaults
-  // Auto and Off both preserve the bundle/request sampling distribution. Auto
-  // still runs native MTP through rejection-sampling verification; Off uses AR.
-  if (mode !== 'deterministic') return defaults
+  // Off preserves the bundle/request sampling distribution and uses AR.
+  if (mode === 'off') return defaults
   return {
     ...defaults,
     temperature: 0,

@@ -26,20 +26,20 @@ describe('effective session generation defaults', () => {
     })
   })
 
-  it('preserves bundle sampling when the session has no explicit MTP mode', () => {
+  it('pins greedy startup defaults when the session has no explicit MTP mode (Auto)', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       '{}',
       { supported: true },
-    )).toEqual(bundleDefaults)
+    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
   })
 
-  it('preserves bundle sampling for Auto MTP', () => {
+  it('pins greedy startup defaults for Auto MTP (deterministic-defaults launch)', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       { nativeMtpMode: 'auto' },
       { supported: true },
-    )).toEqual(bundleDefaults)
+    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
   })
 
   it('preserves bundle sampling when MTP is Off', () => {
@@ -50,7 +50,7 @@ describe('effective session generation defaults', () => {
     )).toEqual(bundleDefaults)
   })
 
-  it('preserves GLM bundle sampling in model-default Auto but pins an explicit depth', () => {
+  it('preserves GLM bundle sampling in model-default-off Auto but pins when a depth override enables MTP', () => {
     expect(applyEffectiveSessionGenerationDefaults(
       bundleDefaults,
       { nativeMtpMode: 'auto' },
@@ -61,7 +61,7 @@ describe('effective session generation defaults', () => {
       bundleDefaults,
       { nativeMtpMode: 'auto', nativeMtpDepthOverride: true },
       { supported: true, defaultMode: 'off' },
-    )).toEqual(bundleDefaults)
+    )).toEqual({ ...bundleDefaults, temperature: 0, topP: 1, topK: 0, minP: 0 })
   })
 
   it('does not change a non-MTP model or malformed stored config', () => {

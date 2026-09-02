@@ -73,14 +73,12 @@ class _PairConfig:
 _FAMILY_CONTRACTS = {
     "qwen4_exp": {
         "hidden": 2560,
-        "intermediate": 640,
         "top_k": 10,
         "layouts": {(2, 64), (4, 64)},
         "clamp_limit": None,
     },
     "glm5_next": {
         "hidden": 4096,
-        "intermediate": 2048,
         "top_k": 8,
         "layouts": {(2, 128)},
         "clamp_limit": 10.0,
@@ -155,7 +153,19 @@ def _projection_reason(projection: Any, *, hidden: int, intermediate: int) -> st
 def _switch_config(switch: Any, family: str) -> _PairConfig:
     contract = _FAMILY_CONTRACTS[family]
     hidden = int(contract["hidden"])
-    intermediate = int(contract["intermediate"])
+    # The routed intermediate width is read from the live module rather than a
+    # per-family constant: OUT-sharded (tensor-parallel) exports legally narrow
+    # gate/up output_dims, and both kernels are generated from the validated
+    # geometry. The real contract is the invariant between the projections:
+    # gate.out == up.out == down.in, and down.out == gate.in == hidden.
+    intermediate = int(getattr(switch.gate_proj, "output_dims", 0))
+    up_out = int(getattr(switch.up_proj, "output_dims", 0))
+    down_in = int(getattr(switch.down_proj, "input_dims", 0))
+    if intermediate <= 0 or up_out != intermediate or down_in != intermediate:
+        raise ValueError(
+            "gate/up/down intermediate geometry mismatch: "
+            f"gate={intermediate} up={up_out} down_in={down_in}"
+        )
     gate_reason = _projection_reason(
         switch.gate_proj,
         hidden=hidden,

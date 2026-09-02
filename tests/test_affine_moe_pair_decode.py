@@ -108,6 +108,7 @@ def test_affine_moe_pair_kernel_matches_stock_activation(
     metadata_dtype,
     activation_dtype,
 ):
+    mx.random.seed(2026)
     switch = _quantized_switch(
         bits=bits,
         activation=activation,
@@ -291,3 +292,91 @@ def test_qwen_full_affine_moe_accepts_standard_and_legacy_env(monkeypatch):
     monkeypatch.setenv("VMLX_QWEN4_AFFINE_MOE", "1")
     monkeypatch.setenv("VMLINUX_QWEN4_AFFINE_MOE", "0")
     assert full_moe._enabled() is True
+
+
+def test_switch_config_derives_intermediate_from_sharded_projections(
+    monkeypatch,
+):
+    """An OUT-sharded export halves gate/up output_dims; the registration
+    contract is the cross-projection invariant, not a hardcoded width."""
+
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS,
+        "glm5_next",
+        {
+            "hidden": 128,
+            "top_k": 4,
+            "layouts": {(2, 32)},
+            "clamp_limit": 10.0,
+        },
+    )
+    monkeypatch.setenv("VMLX_GLM5_FUSED_MOE_PAIR", "1")
+    switch = SwitchGLU(128, 32, 8, activation=ClampedSwiGLU(10.0), bias=False)
+    nn.quantize(switch, bits=2, group_size=32, mode="affine")
+    for projection in (switch.gate_proj, switch.up_proj, switch.down_proj):
+        projection.scales = projection.scales.astype(mx.float16)
+        projection.biases = projection.biases.astype(mx.float16)
+    switch.eval()
+
+    class _Model:
+        def named_modules(self):
+            return [("layers.0.mlp.switch_mlp", switch)]
+
+    installed = install_affine_moe_pair_decode(_Model(), family="glm5_next")
+    assert installed == 1
+    config = getattr(switch, _CONFIG_ATTR)
+    try:
+        assert config.hidden == 128
+        assert config.intermediate == 32
+        x = (mx.random.normal((1, 1, 128)) * 0.2).astype(mx.float16)
+        indices = mx.array([0, 2, 5, 7], dtype=mx.uint32).reshape(1, 1, 4)
+        output, used = affine_moe_pair_activation(switch, x, indices)
+        assert used is True
+        assert output.shape == (1, 1, 4, 1, 32)
+        expanded = mx.expand_dims(x, (-2, -3))
+        reference = switch.activation(
+            switch.up_proj(expanded, indices),
+            switch.gate_proj(expanded, indices),
+        )
+        mx.eval(output, reference)
+        assert mx.allclose(output, reference, atol=2.5e-4, rtol=6e-3)
+    finally:
+        delattr(switch, _CONFIG_ATTR)
+
+
+def test_switch_config_rejects_cross_projection_geometry_mismatch(
+    monkeypatch,
+):
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS,
+        "glm5_next",
+        {
+            "hidden": 128,
+            "top_k": 4,
+            "layouts": {(2, 32)},
+            "clamp_limit": 10.0,
+        },
+    )
+    monkeypatch.setenv("VMLX_GLM5_FUSED_MOE_PAIR", "1")
+    switch = SwitchGLU(128, 32, 8, activation=ClampedSwiGLU(10.0), bias=False)
+    other = SwitchGLU(128, 64, 8, activation=ClampedSwiGLU(10.0), bias=False)
+    nn.quantize(switch, bits=2, group_size=32, mode="affine")
+    nn.quantize(other, bits=2, group_size=32, mode="affine")
+    switch.up_proj = other.up_proj
+    for projection in (switch.gate_proj, switch.up_proj, switch.down_proj):
+        projection.scales = projection.scales.astype(mx.float16)
+        projection.biases = projection.biases.astype(mx.float16)
+    switch.eval()
+
+    class _Model:
+        def named_modules(self):
+            return [("layers.0.mlp.switch_mlp", switch)]
+
+    installed = install_affine_moe_pair_decode(_Model(), family="glm5_next")
+    assert installed == 0
+    assert not hasattr(switch, _CONFIG_ATTR)
+    status = affine_moe_pair_status("glm5_next")
+    assert any(
+        "intermediate geometry mismatch" in reason
+        for reason in status["fallback_reasons"]
+    )

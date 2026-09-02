@@ -935,6 +935,10 @@ class TestCacheAndForward:
     def test_mhc_decode_fusion_matches_mtp_verify_slabs(self, rows, glm5):
         from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
 
+        # Seed: the fused-vs-stock tolerance is tight enough that unseeded
+        # inputs made this order-dependent across the suite (passed 3/3 in
+        # isolation, failed only after other tests advanced the global RNG).
+        mx.random.seed(1733 + rows)
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         module = glm5.HyperConnection(args)
         module.hc_fn = (mx.random.normal(module.hc_fn.shape) * 0.01).astype(

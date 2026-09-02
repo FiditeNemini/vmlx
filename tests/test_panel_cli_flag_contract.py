@@ -726,8 +726,16 @@ def test_mm3_and_gemma_live_stress_harnesses_gate_actual_launch_argv() -> None:
     assert "cfg.usePagedCache === false" in gemma
     assert "cfg.kvCacheQuantization === 'auto'" in gemma
 
-def test_native_mtp_auto_preserves_sampling_and_deterministic_is_explicit() -> None:
-    """Auto must not silently rewrite API/chat sampling to greedy."""
+def test_native_mtp_auto_pins_greedy_startup_defaults_and_deterministic_is_hard() -> None:
+    """Enabled native MTP pins greedy STARTUP DEFAULTS for every mode.
+
+    2026-09-02: 7972082c had switched Auto to compatible-only, which kept the
+    bundle's sampled temperature as the default — so 27B/Flash-Next app
+    sessions silently ran stochastic MTP at nonzero temperature. Restored
+    contract: Auto launches deterministic-defaults (greedy defaults, explicit
+    request kwargs still win) and Deterministic launches hard greedy-only. Off
+    disables the runtime outright.
+    """
 
     sessions = (ROOT / "panel" / "src" / "main" / "sessions.ts").read_text(
         encoding="utf-8"
@@ -739,9 +747,14 @@ def test_native_mtp_auto_preserves_sampling_and_deterministic_is_explicit() -> N
     assert "buildNativeMtpLaunchArgs" in sessions
     assert "--native-mtp-sampling-policy" in shared
     assert "const mode = resolveNativeMtpMode(input)" in shared
-    assert "mode === 'deterministic' ? 'greedy-only' : 'compatible-only'" in shared
+    assert (
+        "mode === 'deterministic' ? 'greedy-only' : 'deterministic-defaults'"
+        in shared
+    )
     assert "'greedy-only'" in shared
-    assert "'compatible-only'" in shared
+    assert "'deterministic-defaults'" in shared
+    # Auto must NOT emit compatible-only any more (that was the regression).
+    assert "'compatible-only'" not in shared
     # off must still disable the runtime outright
     assert "return ['--disable-native-mtp']" in shared
 

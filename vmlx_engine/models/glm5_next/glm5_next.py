@@ -1162,6 +1162,19 @@ class KDAAttention(nn.Module):
 
 
 # ---------------------------------------------------------------- DSA ------
+def _dsa_bf16_state_requested() -> bool:
+    """BF16 DSA indexer state/scoring (VMLX_GLM5_DSA_BF16, default off).
+
+    Halves the pooled-key cache footprint and scores pools in the packed
+    cache's own 16-bit dtype instead of casting the full history to FP32
+    every step. Internal layer-norm/gate math stays FP32; only the stored
+    state and the score contraction narrow. Default-off until the retrieval
+    gate (needle across the index_topk boundary) passes live per bundle.
+    """
+    value = os.environ.get("VMLX_GLM5_DSA_BF16", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 class Glm5NextIndexer(nn.Module):
     """DSA indexer with k-pool compression (port of Glm5NextTextIndexer).
 
@@ -1193,6 +1206,9 @@ class Glm5NextIndexer(nn.Module):
         self._fused_score_decode = fused_sparse_index_score_requested(
             "glm5_next"
         )
+        self._state_dtype = (
+            mx.bfloat16 if _dsa_bf16_state_requested() else mx.float32
+        )
 
     def packed_states(self, x: mx.array) -> mx.array:
         """Per-token indexer state: [B, T, head_dim(k) + head_dim(gate)]."""
@@ -1203,7 +1219,7 @@ class Glm5NextIndexer(nn.Module):
             1e-6,
         )
         gate = x.astype(mx.float32) @ self.index_kpool_compress_gate.astype(mx.float32).T
-        return mx.concatenate([k, gate], axis=-1)
+        return mx.concatenate([k, gate], axis=-1).astype(self._state_dtype)
 
     def compress_pool_keys(self, packed: mx.array) -> mx.array:
         """Compress one or more complete raw k-pools exactly once."""
@@ -1215,7 +1231,7 @@ class Glm5NextIndexer(nn.Module):
             raise ValueError("DSA packed-state width differs from indexer contract")
         n_pools = T // self.kpool
         if n_pools == 0:
-            return mx.zeros((B, 0, self.head_dim), dtype=mx.float32)
+            return mx.zeros((B, 0, self.head_dim), dtype=self._state_dtype)
         keys, gates = mx.split(
             packed.astype(mx.float32), [self.head_dim], axis=-1
         )
@@ -1224,7 +1240,9 @@ class Glm5NextIndexer(nn.Module):
         logits = gates + self.index_kpool_compress_ape.astype(mx.float32)[
             None, None
         ]
-        return mx.sum(mx.softmax(logits, axis=2) * keys, axis=2)
+        return mx.sum(mx.softmax(logits, axis=2) * keys, axis=2).astype(
+            self._state_dtype
+        )
 
     def update_pool_cache(
         self,
@@ -1259,8 +1277,10 @@ class Glm5NextIndexer(nn.Module):
         P = self.kpool
         n_pools = T // P  # complete pools only; the tail covers the remainder
 
-        q = self.wq_b(q_resid).reshape(B, S, self.n_heads, self.head_dim).astype(mx.float32)
-        head_w = (self.weights_proj(x).astype(mx.float32)
+        q = self.wq_b(q_resid).reshape(B, S, self.n_heads, self.head_dim).astype(
+            self._state_dtype
+        )
+        head_w = (self.weights_proj(x).astype(self._state_dtype)
                   * (self.n_heads ** -0.5))                    # [B, S, H]
 
         if n_pools > 0:

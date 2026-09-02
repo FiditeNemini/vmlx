@@ -342,6 +342,14 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 env=("VMLX_GLM5_FUSED_DSA_SCORE",),
             ),
             _feature(
+                "dsa_bf16_state",
+                label="DSA indexer BF16 state and scoring",
+                kind="dtype_policy",
+                scopes=("prefill", "ar_decode", "mtp_decode"),
+                default=False,
+                env=("VMLX_GLM5_DSA_BF16",),
+            ),
+            _feature(
                 "gated_rmsnorm",
                 label="small-row gated RMSNorm fusion",
                 kind="metal_kernel",

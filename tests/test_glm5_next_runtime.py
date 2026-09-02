@@ -2202,3 +2202,33 @@ class TestGlmHealthTruth:
 
         assert status is not None
         assert status["mtp_tensor_count"] == 4
+
+
+class TestDsaBf16State:
+    def test_default_stays_fp32_and_env_narrows_state(self, monkeypatch, glm5):
+        args = glm5.ModelArgs.from_dict(TINY_CFG)
+
+        monkeypatch.delenv("VMLX_GLM5_DSA_BF16", raising=False)
+        indexer = glm5.Glm5NextIndexer(args)
+        x = mx.random.normal((1, 8, args.hidden_size)).astype(mx.bfloat16)
+        packed = indexer.packed_states(x)
+        assert packed.dtype == mx.float32
+        pools = indexer.compress_pool_keys(
+            packed[:, : (8 // args.index_kpool) * args.index_kpool, :]
+        )
+        assert pools.dtype == mx.float32
+
+        monkeypatch.setenv("VMLX_GLM5_DSA_BF16", "1")
+        narrow = glm5.Glm5NextIndexer(args)
+        narrow.update(indexer.parameters())
+        packed16 = narrow.packed_states(x)
+        assert packed16.dtype == mx.bfloat16
+        pools16 = narrow.compress_pool_keys(
+            packed16[:, : (8 // args.index_kpool) * args.index_kpool, :]
+        )
+        assert pools16.dtype == mx.bfloat16
+        # Same math, narrowed storage: values agree within bf16 rounding.
+        mx.eval(pools, pools16)
+        assert mx.allclose(
+            pools16.astype(mx.float32), pools, rtol=2e-2, atol=2e-2
+        )

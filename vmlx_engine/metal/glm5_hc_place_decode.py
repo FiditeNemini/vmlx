@@ -16,9 +16,13 @@ def fused_glm5_hc_place_requested() -> bool:
 
 
 def fused_glm5_hc_place_verify_requested() -> bool:
+    # Default on so native-MTP verification slabs (2-4 rows) stay fused when
+    # the base hc_place path is enabled. ``VMLX_GLM5_FUSED_HC_PLACE_VERIFY=0``
+    # is the explicit stock-path rollback; the VMLINUX-prefixed name is a
+    # retained legacy alias.
     value = os.environ.get(
         "VMLINUX_GLM5_FUSED_HC_PLACE_VERIFY",
-        os.environ.get("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "0"),
+        os.environ.get("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "1"),
     ).strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 

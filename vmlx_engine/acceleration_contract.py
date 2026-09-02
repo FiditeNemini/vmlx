@@ -308,7 +308,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 label="mHC multi-row speculative-verifier transform fusion",
                 kind="metal_kernel",
                 scopes=("mtp_verify",),
-                default=False,
+                default=True,
                 env=(
                     "VMLX_GLM5_FUSED_MHC_VERIFY",
                     "VMLINUX_GLM5_FUSED_MHC_VERIFY",
@@ -327,7 +327,7 @@ _FAMILIES: dict[str, dict[str, Any]] = {
                 label="multi-row speculative-verifier hyper-connection placement fusion",
                 kind="metal_kernel",
                 scopes=("mtp_verify",),
-                default=False,
+                default=True,
                 env=(
                     "VMLX_GLM5_FUSED_HC_PLACE_VERIFY",
                     "VMLINUX_GLM5_FUSED_HC_PLACE_VERIFY",

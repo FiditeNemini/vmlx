@@ -11,9 +11,10 @@ The same per-token transform also handles the 2-4 row slabs produced by
 native-MTP D1-D3 verification. Longer prefill and unsupported layouts stay on
 stock MLX. The candidate is enabled by default after exact-bundle output/TPS,
 syntax, native-MTP rollback, and terminal-finalization proof. Set
-``VMLX_GLM5_FUSED_MHC=0`` for an explicit stock-path rollback. Unsupported
-shapes, including prefill and multi-token MTP verification, still fall back to
-stock MLX automatically.
+``VMLX_GLM5_FUSED_MHC=0`` for an explicit stock-path rollback and
+``VMLX_GLM5_FUSED_MHC_VERIFY=0`` to keep only the 2-4 row native-MTP
+verification slabs on stock MLX. Unsupported shapes, including prefill,
+still fall back to stock MLX automatically.
 """
 
 from __future__ import annotations
@@ -192,9 +193,13 @@ def fused_glm5_mhc_requested() -> bool:
 
 
 def fused_glm5_mhc_verify_requested() -> bool:
+    # Default on: without this, every native-MTP verification forward
+    # (2-4 row slabs) drops all 90 per-layer mHC calls to the stock graph.
+    # ``VMLX_GLM5_FUSED_MHC_VERIFY=0`` is the explicit stock-path rollback;
+    # the VMLINUX-prefixed name is a retained legacy alias.
     value = os.environ.get(
         "VMLINUX_GLM5_FUSED_MHC_VERIFY",
-        os.environ.get("VMLX_GLM5_FUSED_MHC_VERIFY", "0"),
+        os.environ.get("VMLX_GLM5_FUSED_MHC_VERIFY", "1"),
     ).strip().lower()
     return value not in {"", "0", "false", "off", "no"}
 

@@ -99,7 +99,7 @@ def test_glm_kda_decode_defaults_have_explicit_opt_out(monkeypatch):
     assert fused_kda_step_requested() is False
 
 
-def test_glm_mhc_verify_fusions_default_off_with_explicit_opt_in(monkeypatch):
+def test_glm_mhc_verify_fusions_default_on_with_explicit_opt_out(monkeypatch):
     from vmlx_engine.acceleration_contract import build_acceleration_contract
     from vmlx_engine.metal.glm5_hc_place_decode import (
         fused_glm5_hc_place_verify_requested,
@@ -116,18 +116,18 @@ def test_glm_mhc_verify_fusions_default_off_with_explicit_opt_in(monkeypatch):
     ):
         monkeypatch.delenv(name, raising=False)
     rows = _rows(build_acceleration_contract("glm5_next"))
-    assert rows["mhc_verify_transform"]["requested"] is False
-    assert rows["hc_place_verify"]["requested"] is False
-    assert fused_glm5_mhc_verify_requested() is False
-    assert fused_glm5_hc_place_verify_requested() is False
-
-    monkeypatch.setenv("VMLX_GLM5_FUSED_MHC_VERIFY", "1")
-    monkeypatch.setenv("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "1")
-    rows = _rows(build_acceleration_contract("glm5_next"))
     assert rows["mhc_verify_transform"]["requested"] is True
     assert rows["hc_place_verify"]["requested"] is True
     assert fused_glm5_mhc_verify_requested() is True
     assert fused_glm5_hc_place_verify_requested() is True
+
+    monkeypatch.setenv("VMLX_GLM5_FUSED_MHC_VERIFY", "0")
+    monkeypatch.setenv("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "0")
+    rows = _rows(build_acceleration_contract("glm5_next"))
+    assert rows["mhc_verify_transform"]["requested"] is False
+    assert rows["hc_place_verify"]["requested"] is False
+    assert fused_glm5_mhc_verify_requested() is False
+    assert fused_glm5_hc_place_verify_requested() is False
 
 
 def test_glm_aligned_mtp_head_cache_is_exact_opt_in(monkeypatch):
@@ -221,10 +221,10 @@ def test_runtime_attestation_distinguishes_installed_from_observed(monkeypatch):
     assert rows["startup_warmup"]["state"] == "active_observed"
     assert rows["kda_conv_state"]["state"] == "installed_unobserved"
     assert contract["summary"] == {
-        "requested": 7,
+        "requested": 9,
         "installed": 3,
         "observed": 1,
-        "source_only_or_unattested": 4,
+        "source_only_or_unattested": 6,
     }
 
 

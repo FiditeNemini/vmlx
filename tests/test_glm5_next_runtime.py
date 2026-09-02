@@ -997,7 +997,9 @@ class TestCacheAndForward:
             enabled=True,
         ) is None
 
-    def test_mhc_decode_verify_slab_defaults_to_stock(self, monkeypatch, glm5):
+    def test_mhc_decode_verify_slab_defaults_to_fused_with_opt_out(
+        self, monkeypatch, glm5
+    ):
         from vmlx_engine.metal.glm5_mhc_decode import glm5_mhc_decode
 
         monkeypatch.delenv("VMLX_GLM5_FUSED_MHC_VERIFY", raising=False)
@@ -1005,15 +1007,27 @@ class TestCacheAndForward:
         args = glm5.ModelArgs.from_dict(TINY_CFG)
         module = glm5.HyperConnection(args)
         streams = mx.zeros((1, 4, args.hc_mult, args.hidden_size))
+        kwargs = dict(
+            rms_eps=module.rms_eps,
+            sink_eps=module.eps,
+            iterations=module.iters,
+            enabled=True,
+        )
         assert glm5_mhc_decode(
             streams,
             module.hc_fn,
             module.hc_base,
             module.hc_scale,
-            rms_eps=module.rms_eps,
-            sink_eps=module.eps,
-            iterations=module.iters,
-            enabled=True,
+            **kwargs,
+        ) is not None
+
+        monkeypatch.setenv("VMLX_GLM5_FUSED_MHC_VERIFY", "0")
+        assert glm5_mhc_decode(
+            streams,
+            module.hc_fn,
+            module.hc_base,
+            module.hc_scale,
+            **kwargs,
         ) is None
 
     @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
@@ -1070,7 +1084,9 @@ class TestCacheAndForward:
         mx.eval(reference, candidate)
         assert mx.allclose(candidate, reference, rtol=6e-3, atol=2e-3)
 
-    def test_hc_place_verify_slab_defaults_to_stock(self, monkeypatch, glm5):
+    def test_hc_place_verify_slab_defaults_to_fused_with_opt_out(
+        self, monkeypatch, glm5
+    ):
         from vmlx_engine.metal.glm5_hc_place_decode import (
             glm5_hc_place_decode,
         )
@@ -1083,6 +1099,11 @@ class TestCacheAndForward:
         comb = mx.ones((1, 4, 4, 4), dtype=mx.float32)
         out = mx.zeros((1, 4, 64), dtype=mx.bfloat16)
         residual = mx.zeros((1, 4, 4, 64), dtype=mx.bfloat16)
+        assert glm5_hc_place_decode(
+            post, comb, out, residual, enabled=True
+        ) is not None
+
+        monkeypatch.setenv("VMLX_GLM5_FUSED_HC_PLACE_VERIFY", "0")
         assert glm5_hc_place_decode(
             post, comb, out, residual, enabled=True
         ) is None

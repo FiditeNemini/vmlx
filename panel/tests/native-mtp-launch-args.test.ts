@@ -19,7 +19,7 @@ describe('native MTP launch args', () => {
       '--native-mtp-depth-policy',
       'adaptive',
       '--native-mtp-sampling-policy',
-      'compatible-only',
+      'deterministic-defaults',
     ])
   })
 
@@ -49,7 +49,7 @@ describe('native MTP launch args', () => {
     ])
   })
 
-  it('preserves sampled requests in Auto and makes greedy an explicit mode', () => {
+  it('pins greedy startup defaults in Auto and hard greedy-only in Deterministic', () => {
     expect(buildNativeMtpLaunchArgs({
       supported: true,
       detectedDepth: 1,
@@ -59,7 +59,7 @@ describe('native MTP launch args', () => {
       supported: true,
       detectedDepth: 1,
       mode: 'auto',
-    })).toContain('compatible-only')
+    })).toContain('deterministic-defaults')
   })
 
   it('disables native MTP when an external drafter owns the decode step', () => {
@@ -90,7 +90,7 @@ describe('native MTP launch args', () => {
       '--native-mtp-depth-policy',
       'fixed',
       '--native-mtp-sampling-policy',
-      'compatible-only',
+      'deterministic-defaults',
     ])
   })
 

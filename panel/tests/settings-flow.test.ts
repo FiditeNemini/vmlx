@@ -1804,7 +1804,7 @@ describe('Native MTP', () => {
         },
     }
 
-    it('defaults native-MTP bundles to adaptive sampler-compatible Auto mode', () => {
+    it('defaults native-MTP bundles to adaptive Auto with greedy startup defaults', () => {
         const out = preview({}, qwenMtpDetected)
 
         // Auto mode must NOT pass an explicit depth: the flag becomes the
@@ -1815,7 +1815,7 @@ describe('Native MTP', () => {
         // itself contains "--native-mtp-depth".
         expect(hasFlag(out, '--native-mtp-depth ')).toBe(false)
         expect(getFlagValue(out, '--native-mtp-depth-policy')).toBe('adaptive')
-        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('compatible-only')
+        expect(getFlagValue(out, '--native-mtp-sampling-policy')).toBe('deterministic-defaults')
         expect(hasFlag(out, '--default-temperature')).toBe(false)
         expect(hasFlag(out, '--default-top-p')).toBe(false)
         expect(hasFlag(out, '--default-top-k')).toBe(false)

@@ -35,9 +35,17 @@ export function buildNativeMtpLaunchArgs(
     return ['--disable-native-mtp']
   }
 
+  // Native MTP enabled in Server settings pins the STARTUP DEFAULTS to
+  // greedy (temperature 0, top_p 1, top_k dropped, min_p 0) for every
+  // surface — chat settings and API alike — while an EXPLICIT request
+  // temperature in API kwargs still wins (engine deterministic-defaults
+  // policy). Deterministic mode goes further and hard-pins greedy for every
+  // request (greedy-only). 'auto' previously sent compatible-only, which
+  // silently kept the bundle's sampled temperature as the default and made
+  // every app-managed MTP session run stochastic rejection sampling.
   const samplingArgs = [
     '--native-mtp-sampling-policy',
-    mode === 'deterministic' ? 'greedy-only' : 'compatible-only',
+    mode === 'deterministic' ? 'greedy-only' : 'deterministic-defaults',
   ]
   if (input.depthOverride !== true) {
     // Adaptive policy: emit NO explicit depth. --native-mtp-depth becomes

@@ -65,5 +65,9 @@ export function resolveMtpTemperatureNotice(
     if (temperature > 0) return { kind: 'inactive', temperature }
     return { kind: 'pinned' }
   }
-  return { kind: 'active', temperature }
+  // Auto launches with the deterministic-defaults policy: the STARTUP
+  // DEFAULT is pinned to greedy, but an explicit nonzero temperature the
+  // user set is still honored by the engine (API kwargs win).
+  if (temperature > 0) return { kind: 'active', temperature }
+  return { kind: 'pinned' }
 }

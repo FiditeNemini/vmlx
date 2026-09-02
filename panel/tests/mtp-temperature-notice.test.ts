@@ -22,7 +22,7 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'pinned' })
   })
 
-  it('describes sampled Auto MTP as active', () => {
+  it('describes an explicit sampled temperature in Auto as honored (kwargs win)', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 1 }),
     ).toEqual({ kind: 'active', temperature: 1 })
@@ -31,10 +31,10 @@ describe('MTP temperature disclosure', () => {
     ).toEqual({ kind: 'active', temperature: 0.01 })
   })
 
-  it('keeps greedy Auto distinct from a deterministic pin', () => {
+  it('reports the pinned greedy startup default in Auto mode', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: true, mode: 'auto', temperature: 0 }),
-    ).toEqual({ kind: 'active', temperature: 0 })
+    ).toEqual({ kind: 'pinned' })
   })
 
   it('flags a stale nonzero temperature in deterministic mode', () => {

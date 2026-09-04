@@ -96,39 +96,22 @@ def _qwen35_mtp_proposal_head(model: Any) -> Any:
         return None
     bits = int(plan.get("proposal_bits") or 4)
 
-    # Converter-calibrated proposal codes beat the runtime RTN requant when
-    # the stamp points at them; load/validation problems fall open to RTN.
-    stamped = None
-    if str(plan.get("proposal_source") or "") == "stamped_tensors":
-        from vmlx_engine.native_mtp_proposal_stamp import (
-            load_stamped_proposal_tensors,
-        )
-
-        stamped = load_stamped_proposal_tensors(
-            native_mtp_active_model_path(), source, bits
-        )
-
     started = _time.perf_counter()
     try:
-        if stamped is not None:
-            weight = stamped["weight"]
-            scales = stamped["scales"]
-            biases = stamped["biases"]
-        else:
-            dense = mx.dequantize(
-                source.weight,
-                source.scales,
-                source.biases,
-                group_size=source.group_size,
-                bits=source.bits,
-                mode=source.mode,
-            )
-            weight, scales, biases = mx.quantize(
-                dense,
-                group_size=source.group_size,
-                bits=bits,
-                mode=source.mode,
-            )
+        dense = mx.dequantize(
+            source.weight,
+            source.scales,
+            source.biases,
+            group_size=source.group_size,
+            bits=source.bits,
+            mode=source.mode,
+        )
+        weight, scales, biases = mx.quantize(
+            dense,
+            group_size=source.group_size,
+            bits=bits,
+            mode=source.mode,
+        )
         proposal = nn.QuantizedLinear(
             64,
             64,
@@ -142,12 +125,9 @@ def _qwen35_mtp_proposal_head(model: Any) -> Any:
         proposal.biases = biases
         mx.eval(proposal.weight, proposal.scales, proposal.biases)
         state["head"] = proposal
-        state["reason"] = "ready_stamped" if stamped is not None else "ready"
+        state["reason"] = "ready"
         logger.info(
-            "qwen3_5 MTP proposal head ready (%s): q8/g64 -> q%d/g%d "
-            "build_ms=%.2f",
-            "calibrated stamped tensors" if stamped is not None
-            else "runtime requant",
+            "qwen3_5 MTP proposal head ready: q8/g64 -> q%d/g%d build_ms=%.2f",
             bits,
             source.group_size,
             (_time.perf_counter() - started) * 1000.0,

@@ -1742,42 +1742,22 @@ class LanguageModel(nn.Module):
             state.reason = str(plan.get("reason") or "stamped_ineligible")
             return state.status()
 
-        # Converter-calibrated proposal codes beat the runtime RTN requant
-        # when the stamp points at them (GPTQ/imatrix rounding preserves
-        # acceptance); any load/validation problem falls open to RTN.
-        stamped_tensors = None
-        if str(plan.get("proposal_source") or "") == "stamped_tensors":
-            from vmlx_engine.native_mtp_proposal_stamp import (
-                load_stamped_proposal_tensors,
-            )
-
-            stamped_tensors = load_stamped_proposal_tensors(
-                native_mtp_active_model_path(),
-                source,
-                int(plan.get("proposal_bits") or state.requested_bits),
-            )
-
         started = time.perf_counter()
         try:
-            if stamped_tensors is not None:
-                weight = stamped_tensors["weight"]
-                scales = stamped_tensors["scales"]
-                biases = stamped_tensors["biases"]
-            else:
-                dense = mx.dequantize(
-                    source.weight,
-                    source.scales,
-                    source.biases,
-                    group_size=source.group_size,
-                    bits=source.bits,
-                    mode=source.mode,
-                )
-                weight, scales, biases = mx.quantize(
-                    dense,
-                    group_size=source.group_size,
-                    bits=state.requested_bits,
-                    mode=source.mode,
-                )
+            dense = mx.dequantize(
+                source.weight,
+                source.scales,
+                source.biases,
+                group_size=source.group_size,
+                bits=source.bits,
+                mode=source.mode,
+            )
+            weight, scales, biases = mx.quantize(
+                dense,
+                group_size=source.group_size,
+                bits=state.requested_bits,
+                mode=source.mode,
+            )
             # Construct only a tiny shell, then replace all generated arrays.
             # The real output/input geometry lives in the quantized tensors.
             proposal = nn.QuantizedLinear(
@@ -1793,16 +1773,11 @@ class LanguageModel(nn.Module):
             proposal.biases = biases
             mx.eval(proposal.weight, proposal.scales, proposal.biases)
             state.head = proposal
-            state.reason = (
-                "ready_stamped" if stamped_tensors is not None else "ready"
-            )
+            state.reason = "ready"
             state.build_ms = (time.perf_counter() - started) * 1000.0
             logger.info(
-                "qwen4_exp MTP proposal head ready (%s): q%d/g%d -> q%d/g%d "
+                "qwen4_exp MTP proposal head ready: q%d/g%d -> q%d/g%d "
                 "build_ms=%.2f",
-                "calibrated stamped tensors"
-                if stamped_tensors is not None
-                else "runtime requant",
                 source.bits,
                 source.group_size,
                 state.requested_bits,

@@ -34,7 +34,6 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 STAMP_FILENAME = "vmlx_mtp_proposal_head.json"
-TENSORS_FILENAME = "vmlx_mtp_proposal_head.safetensors"
 STAMP_VERSION = 1
 STAMP_BASIS = (
     "settled 2026-09-03 A/B on Qwen3.8-Flash-Next-JANG_4S fixed-D3: "
@@ -45,50 +44,6 @@ STAMP_BASIS = (
 
 def _stamp_path(bundle_path: str | Path) -> Path:
     return Path(bundle_path) / STAMP_FILENAME
-
-
-def _draft_artifact(stamp: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """The converter's calibrated-artifact block, if structurally sound."""
-
-    artifact = stamp.get("draft_artifact")
-    if not isinstance(artifact, dict):
-        return None
-    if str(artifact.get("file") or "") != TENSORS_FILENAME:
-        return None
-    sha = artifact.get("sha256")
-    if not isinstance(sha, str) or len(sha) != 64:
-        return None
-    return artifact
-
-
-def _resolve_proposal_source(stamp: dict[str, Any]) -> str:
-    """Single activation path for calibrated proposal tensors.
-
-    Three ways to reach "stamped_tensors", in precedence order:
-    1. env VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE=stamped — the measurement
-       override for running the acceptance A/B before validation.
-    2. explicit stamp field proposal_source="stamped_tensors".
-    3. a converter draft_artifact block WITH acceptance_validated=true —
-       an unvalidated artifact never activates by default (the converter's
-       own contract: flip validated only after a measured live A/B), so a
-       freshly-uploaded artifact cannot double-activate ahead of its gate.
-    Everything else -> runtime_rtn.
-    """
-
-    forced = os.environ.get(
-        "VMLINUX_QWEN4_MTP_DRAFT_HEAD_SOURCE",
-        os.environ.get("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", ""),
-    ).strip().lower()
-    artifact = _draft_artifact(stamp)
-    if forced == "stamped" and artifact is not None:
-        return "stamped_tensors"
-    if forced == "rtn":
-        return "runtime_rtn"
-    if str(stamp.get("proposal_source") or "") == "stamped_tensors":
-        return "stamped_tensors"
-    if artifact is not None and artifact.get("acceptance_validated") is True:
-        return "stamped_tensors"
-    return "runtime_rtn"
 
 
 def _normalized_source(source_layout: dict[str, Any]) -> dict[str, Any]:
@@ -317,9 +272,6 @@ def resolve_proposal_head_plan(
             }
             if plan["eligible"]:
                 plan["proposal_bits"] = int(stamp.get("proposal_bits") or 4)
-                # Converter-side stamps may point at calibrated proposal
-                # tensors instead of the runtime RTN requant.
-                plan["proposal_source"] = _resolve_proposal_source(stamp)
             else:
                 plan["reason"] = str(stamp.get("reason") or "stamped_ineligible")
             return plan
@@ -370,111 +322,8 @@ def resolve_proposal_head_plan(
     return plan
 
 
-def load_stamped_proposal_tensors(
-    bundle_path: str | Path | None,
-    source_head: Any,
-    proposal_bits: int,
-) -> Optional[dict[str, Any]]:
-    """Load calibrated proposal-head tensors stamped by the converter.
-
-    Expected file: ``vmlx_mtp_proposal_head.safetensors`` in the bundle
-    root with keys ``weight``/``scales``/``biases`` — the lm_head
-    requantized to ``proposal_bits`` at the SOURCE group size with
-    GPTQ/imatrix error-compensated codes (affine mode). Geometry and
-    scales dtype are validated against the loaded source head; any
-    mismatch or read error fails open to None (the caller falls back to
-    the runtime RTN requant), because a bad sidecar must never block a
-    launch or degrade to a mis-shaped head.
-    """
-
-    if not bundle_path:
-        return None
-    path = Path(bundle_path) / TENSORS_FILENAME
-    try:
-        if not path.is_file():
-            logger.warning(
-                "%s declares stamped proposal tensors but %s is missing; "
-                "falling back to runtime requant",
-                STAMP_FILENAME,
-                TENSORS_FILENAME,
-            )
-            return None
-
-        # sha256-verify against the stamp's draft_artifact when it carries
-        # one (the converter contract: users of the artifact must verify and
-        # fall back to RTN on mismatch — a half-written or tampered sidecar
-        # must never become the proposal head).
-        stamp = read_proposal_stamp(bundle_path) or {}
-        artifact = _draft_artifact(stamp)
-        if artifact is not None:
-            import hashlib
-
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            if digest != artifact["sha256"]:
-                logger.warning(
-                    "%s sha256 mismatch (stamp %s…, file %s…); falling back "
-                    "to runtime requant",
-                    TENSORS_FILENAME,
-                    str(artifact["sha256"])[:12],
-                    digest[:12],
-                )
-                return None
-
-        import mlx.core as mx
-
-        tensors = mx.load(str(path))
-        missing = [k for k in ("weight", "scales", "biases") if k not in tensors]
-        if missing:
-            logger.warning(
-                "%s missing keys %s; falling back to runtime requant",
-                TENSORS_FILENAME,
-                missing,
-            )
-            return None
-        weight = tensors["weight"]
-        scales = tensors["scales"]
-        biases = tensors["biases"]
-
-        group_size = int(source_head.group_size)
-        vocab = int(source_head.scales.shape[0])
-        hidden = int(source_head.scales.shape[1]) * group_size
-        expected_weight = (vocab, hidden * proposal_bits // 32)
-        expected_meta = (vocab, hidden // group_size)
-        if (
-            tuple(int(d) for d in weight.shape) != expected_weight
-            or tuple(int(d) for d in scales.shape) != expected_meta
-            or tuple(int(d) for d in biases.shape) != expected_meta
-        ):
-            logger.warning(
-                "%s geometry mismatch (weight=%s scales=%s biases=%s, "
-                "expected %s / %s); falling back to runtime requant",
-                TENSORS_FILENAME,
-                tuple(weight.shape),
-                tuple(scales.shape),
-                tuple(biases.shape),
-                expected_weight,
-                expected_meta,
-            )
-            return None
-        if scales.dtype != source_head.scales.dtype:
-            # Keep the family compute-dtype contract — a stray fp32/fp16
-            # scale dtype here would re-open the promotion trap.
-            scales = scales.astype(source_head.scales.dtype)
-            biases = biases.astype(source_head.biases.dtype)
-        return {"weight": weight, "scales": scales, "biases": biases}
-    except Exception as exc:  # noqa: BLE001 - advisory sidecar, fail open
-        logger.warning(
-            "Could not load %s (%s); falling back to runtime requant",
-            TENSORS_FILENAME,
-            exc,
-        )
-        return None
-
-
 __all__ = [
     "STAMP_FILENAME",
-    "TENSORS_FILENAME",
-    "load_stamped_proposal_tensors",
     "read_proposal_stamp",
     "resolve_proposal_head_plan",
     "write_proposal_stamp",

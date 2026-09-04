@@ -3901,12 +3901,6 @@ class MLLMNativeMTPStats:
     # rather than something to infer from the throughput.
     margin_truncated_cycles: int = 0
     verify_ms: float = 0.0
-    # Always-on wall of the ONE blocking device round-trip per verify cycle
-    # (verify logits materialize + sample/decide).  Unlike verify_ms, which is
-    # only real under the MTP trace (lazy graph-build time otherwise), this is
-    # measured on every cycle and grows with context like an AR step does; the
-    # AR-safety governor uses it to scale its AR baseline with context.
-    verify_wall_ms: float = 0.0
     sample_ms: float = 0.0
     draft_ms: float = 0.0
     snapshot_ms: float = 0.0
@@ -3962,7 +3956,6 @@ class MLLMNativeMTPStats:
 
         timings = {
             "verify": self.verify_ms,
-            "verify_wall": self.verify_wall_ms,
             "sample": self.sample_ms,
             "draft": self.draft_ms,
             "snapshot": self.snapshot_ms,
@@ -4115,13 +4108,18 @@ class MLLMNativeMTPState:
     # emitted tokens is the real MTP cost per token.
     ar_step_ms: float = 0.0
     cycle_span_start: float = 0.0
-    # Windowed AR-safety governor (policy-independent, on-the-fly fallback):
-    # first_verify_ms anchors context scaling of the AR baseline; cost_window
-    # holds recent (cycles, emitted, verify_ms_total, perf_counter) samples so
+    # Windowed AR-safety governor (policy-independent, on-the-fly fallback).
+    # cost_window holds one (cycles, emitted, perf_counter) sample per cycle so
     # a MID-STREAM or long-context slowdown is caught within ~W cycles rather
-    # than only when the whole-request average sags.
-    first_verify_ms: float = 0.0
-    cost_window: List[Tuple[int, int, float, float]] = field(default_factory=list)
+    # than only when the whole-request average sags.  anchor_cycle_ms /
+    # anchor_context_tokens are the median per-cycle wall and the context
+    # length at the first full post-warmup window; the AR baseline scales by
+    # the cycle-wall growth since then, bounded by the context growth (no
+    # forward grows faster than linearly in context).
+    anchor_cycle_ms: float = 0.0
+    anchor_context_tokens: int = 0
+    prompt_tokens: int = 0
+    cost_window: List[Tuple[int, int, float]] = field(default_factory=list)
     # The request began from a restored prefix. The MTP head cache starts
     # COLD on such requests (backbone hiddens are not stored), so the first
     # gate windows measure a context-starved head: run 3 of a live A/B
@@ -5633,11 +5631,11 @@ def _native_mtp_maybe_cost_fallback(
 def _native_mtp_windowed_ar_verdict(
     *,
     ar_step_ms: float,
-    first_verify_ms: float,
-    window_cycles: int,
+    anchor_cycle_ms: float,
+    cur_cycle_ms: float,
+    context_ratio: float,
     delta_emitted: int,
     delta_wall_ms: float,
-    delta_verify_ms: float,
     margin: float,
     per_cycle_ms_per_tok: Optional[Sequence[float]] = None,
 ) -> Optional[Tuple[float, float]]:
@@ -5645,35 +5643,42 @@ def _native_mtp_windowed_ar_verdict(
     when MTP is slower than a CONTEXT-SCALED AR baseline by the margin, else
     None. Factored out so the arithmetic is unit-testable without a model.
 
-    ar_baseline scales the short-context seed AR step by how much the verify
-    round-trip wall has grown since the post-warmup anchor window (attention
-    grows with context for both AR and verify), clamped so it never dips
-    below the seed floor.  When ``per_cycle_ms_per_tok`` is given, the window
-    MEDIAN must also exceed the threshold (a single stalled cycle cannot trip).
+    ar_baseline = seed AR step x scale, where scale is the growth of the
+    MEDIAN per-cycle wall since the post-warmup anchor (the forward at the
+    current context is what grows for AR and MTP alike), bounded above by the
+    context growth ratio (attention is at most linear in context, so a step
+    cannot legitimately grow faster than context does — an abrupt MTP-only
+    slowdown therefore cannot hide behind the scale) and below by 1.0 (the
+    seed is a floor).  When ``per_cycle_ms_per_tok`` is given, the window
+    MEDIAN must also exceed the threshold: one stalled cycle cannot trip an
+    irreversible demotion.
     """
-    if ar_step_ms <= 0.0 or window_cycles <= 0:
+    if ar_step_ms <= 0.0:
         return None
     if delta_emitted <= 0 or delta_wall_ms <= 0.0:
         return None
     mtp_ms_per_tok = delta_wall_ms / delta_emitted
-    if first_verify_ms > 0.0:
-        cur_verify_avg = delta_verify_ms / window_cycles
-        scale = max(1.0, cur_verify_avg / first_verify_ms)
-    else:
-        scale = 1.0
+    scale = 1.0
+    if anchor_cycle_ms > 0.0 and cur_cycle_ms > 0.0:
+        scale = cur_cycle_ms / anchor_cycle_ms
+        scale = min(scale, max(1.0, float(context_ratio)))
+        scale = max(1.0, scale)
     ar_baseline = ar_step_ms * scale
-    if mtp_ms_per_tok <= ar_baseline * margin:
+    threshold = ar_baseline * margin
+    if mtp_ms_per_tok <= threshold:
         return None
     if per_cycle_ms_per_tok:
-        # Stall robustness: one long cycle (background store, page fault, GC)
-        # inflates the window MEAN but not the per-cycle MEDIAN.  Demotion is
-        # irreversible for the request, so require the typical cycle to be
-        # slow too, not just the sum.
         ordered = sorted(float(v) for v in per_cycle_ms_per_tok)
-        median = ordered[len(ordered) // 2]
-        if median <= ar_baseline * margin:
+        if ordered[len(ordered) // 2] <= threshold:
             return None
     return mtp_ms_per_tok, ar_baseline
+
+
+def _native_mtp_median(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(v) for v in values)
+    return ordered[len(ordered) // 2]
 
 
 def _native_mtp_maybe_ar_safety_fallback(
@@ -5687,6 +5692,9 @@ def _native_mtp_maybe_ar_safety_fallback(
     context-scaled AR baseline; on a real regression it demotes the request to
     pure AR for the remainder (irreversible this request; safe — switching to
     AR only stops speculating, the backbone cache stays coherent).
+
+    Everything here is wall-clock + counters (no extra device sync): the ring
+    timestamps are taken once per cycle after the cycle's device round-trip.
     """
     if state.ar_fallback_pending:
         return False
@@ -5699,11 +5707,6 @@ def _native_mtp_maybe_ar_safety_fallback(
     ar_ms = float(getattr(state, "ar_step_ms", 0.0) or 0.0)
     if ar_ms <= 0.0:
         return False
-
-    # Real wall of the per-cycle device round-trip (stats.verify_ms is lazy
-    # graph-build time unless the MTP trace is on — it read ~0 in production
-    # and left the context scale pinned at 1.0).
-    verify_total = float(state.stats.verify_wall_ms)
 
     restore_scale = 4 if getattr(state, "restored_prefix", False) else 1
     warmup = restore_scale * _native_mtp_env_int(
@@ -5725,47 +5728,50 @@ def _native_mtp_maybe_ar_safety_fallback(
     now = time.perf_counter()
     emitted = cycles + int(state.stats.accepted_tokens)
     ring = state.cost_window
-    ring.append((cycles, emitted, verify_total, now))
+    ring.append((cycles, emitted, now))
     if len(ring) > window + 1:
         del ring[0 : len(ring) - (window + 1)]
     if len(ring) <= window:
         return False  # window not full yet — do not judge a cold window
 
-    c0, e0, v0, t0 = ring[0]
-    if state.first_verify_ms <= 0.0:
-        # Anchor the context reference on the FIRST FULL post-warmup window
-        # (not cycle 1, whose round-trip carries cold-start cost and would
-        # make every later window look "cheaper" -> scale clamped to 1).
-        if cycles - c0 > 0 and verify_total - v0 > 0.0:
-            state.first_verify_ms = (verify_total - v0) / (cycles - c0)
-        else:
+    c0, e0, t0 = ring[0]
+    per_cycle_ms: List[float] = []
+    per_cycle_ms_per_tok: List[float] = []
+    for prev, cur in zip(ring, ring[1:]):
+        d_ms = (cur[2] - prev[2]) * 1000.0
+        d_e = cur[1] - prev[1]
+        per_cycle_ms.append(d_ms)
+        if d_e > 0:
+            per_cycle_ms_per_tok.append(d_ms / d_e)
+    cur_cycle_ms = _native_mtp_median(per_cycle_ms)
+    context_now = int(state.prompt_tokens) + emitted
+    if state.anchor_cycle_ms <= 0.0:
+        # Anchor on the FIRST FULL post-warmup window (not cycle 1, whose
+        # cold-start cost would make every later window look cheaper and pin
+        # the scale at 1.0).
+        if cur_cycle_ms <= 0.0:
             return False
+        state.anchor_cycle_ms = cur_cycle_ms
+        state.anchor_context_tokens = max(1, context_now)
+    context_ratio = context_now / max(1, state.anchor_context_tokens)
     margin = _native_mtp_env_float(
         1.25,
         "VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN",
         "VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN",
     )
-    per_cycle: List[float] = []
-    for prev, cur in zip(ring, ring[1:]):
-        d_e = cur[1] - prev[1]
-        if d_e > 0:
-            per_cycle.append((cur[3] - prev[3]) * 1000.0 / d_e)
     verdict = _native_mtp_windowed_ar_verdict(
         ar_step_ms=ar_ms,
-        first_verify_ms=float(state.first_verify_ms),
-        window_cycles=cycles - c0,
+        anchor_cycle_ms=float(state.anchor_cycle_ms),
+        cur_cycle_ms=cur_cycle_ms,
+        context_ratio=context_ratio,
         delta_emitted=emitted - e0,
         delta_wall_ms=(now - t0) * 1000.0,
-        delta_verify_ms=verify_total - v0,
         margin=margin,
-        per_cycle_ms_per_tok=per_cycle,
+        per_cycle_ms_per_tok=per_cycle_ms_per_tok,
     )
     if verdict is None:
         return False
     mtp_ms_per_tok, ar_baseline = verdict
-    ordered = sorted(per_cycle)
-    cyc_median = ordered[len(ordered) // 2] if ordered else 0.0
-    cyc_max = ordered[-1] if ordered else 0.0
     prior_depth = int(state.depth or 1)
     state.depth = 1
     state.ar_fallback_pending = True
@@ -5776,7 +5782,8 @@ def _native_mtp_maybe_ar_safety_fallback(
     logger.info(
         "MLLM MTP[%s] windowed AR safety D%d -> AR at cycle=%d "
         "(%.1fms/tok vs ctx-scaled AR %.1fms, seed %.1fms, window=%d, "
-        "cycle median %.1f max %.1f ms/tok, verify anchor %.1f -> %.1f ms)",
+        "cycle median %.1f max %.1f ms/tok, cycle wall anchor %.1f -> %.1f ms, "
+        "context %d -> %d)",
         request_id,
         prior_depth,
         cycles,
@@ -5784,10 +5791,12 @@ def _native_mtp_maybe_ar_safety_fallback(
         ar_baseline,
         ar_ms,
         window,
-        cyc_median,
-        cyc_max,
-        float(state.first_verify_ms),
-        (verify_total - v0) / max(1, cycles - c0),
+        _native_mtp_median(per_cycle_ms_per_tok),
+        max(per_cycle_ms_per_tok) if per_cycle_ms_per_tok else 0.0,
+        float(state.anchor_cycle_ms),
+        cur_cycle_ms,
+        int(state.anchor_context_tokens),
+        context_now,
     )
     return True
 
@@ -14945,6 +14954,11 @@ class MLLMBatchGenerator:
             ),
             profile_key=request_profile_key,
         )
+        state.prompt_tokens = (
+            int(request.input_ids.shape[-1])
+            if getattr(request, "input_ids", None) is not None
+            else 0
+        )
         state.stats.profile_seed = profile_seed
         state.stats.prompt_primed_pairs = int(primed_pairs)
         state.stats.prompt_prime_source = prime_source
@@ -14970,12 +14984,13 @@ class MLLMBatchGenerator:
         request._native_mtp_state = state
         logger.info(
             "MLLM native MTP path activated for request=%s depth=%d seed=%s "
-            "prompt_prime=%s folded_pairs=%d",
+            "prompt_prime=%s folded_pairs=%d seed_ar_ms=%.1f",
             request.request_id,
             depth,
             profile_seed,
             prime_source,
             int(primed_pairs),
+            float(_seed_ar_ms),
         )
         return True
 
@@ -15171,7 +15186,6 @@ class MLLMBatchGenerator:
         _native_mtp_trace_stop(state.stats, "verify_ms", trace_t0)
 
         depth = len(state.drafts)
-        verify_wall_t0 = time.perf_counter()
         trace_t0 = _native_mtp_trace_start()
         # ONE device round-trip per cycle: sample the verify rows, compare them
         # against the drafts, and count the leading accepted run -- all on
@@ -15200,9 +15214,6 @@ class MLLMBatchGenerator:
             )
             state.draft_ids = fused_draft_ids
             _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
-            state.stats.verify_wall_ms += (
-                time.perf_counter() - verify_wall_t0
-            ) * 1000.0
         else:
             target_tokens, target_lps, target_ids = _native_mtp_sample_rows(
                 logits[:, -(depth + 1) :, :].reshape(depth + 1, -1),
@@ -15210,9 +15221,6 @@ class MLLMBatchGenerator:
                 also_eval=(tuple(state.drafts) if _NATIVE_MTP_FUSED_SYNC else ()),
             )
             _native_mtp_trace_stop(state.stats, "sample_ms", trace_t0)
-            state.stats.verify_wall_ms += (
-                time.perf_counter() - verify_wall_t0
-            ) * 1000.0
             trace_t0 = _native_mtp_trace_start()
             _native_mtp_materialize_draft_ids(state)
             _native_mtp_trace_stop(state.stats, "materialize_ms", trace_t0)

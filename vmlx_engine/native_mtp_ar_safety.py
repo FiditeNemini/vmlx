@@ -8,17 +8,31 @@ what a fixed policy disables; this valve is not a depth policy, it is the
 guarantee that a request never keeps speculating while losing to plain AR.
 
 Mechanism (wall-clock + counters only, no device sync added anywhere):
-  * one ring sample per cycle: (cycles, emitted, perf_counter)
-  * skip while cycles < warmup (longer for an unprimed head) or the ring is
-    not full
-  * per-cycle wall = dt; per-cycle ms/tok = dt / d_emitted
-  * anchor = median per-cycle wall + context length at the FIRST full window
-  * scale = clamp(median_now / anchor, 1, context_now / context_anchor)
-    (a forward cannot grow faster than linearly in context, so an abrupt
-    MTP-only slowdown cannot hide behind the scale; the seed is a floor)
+  * one timestamp per cycle from cycle 1; per-cycle wall = dt,
+    per-cycle ms/tok = dt / d_emitted
+  * anchor = MEDIAN per-cycle wall over the warmup cycles — measured under
+    the same conditions (concurrency, thermal, context) as the seed AR step,
+    within a fraction of a second of it.  seed_ar_ms / anchor is then the
+    AR-step : MTP-cycle cost ratio of this model at this depth, which is a
+    property of the model (verify rows + head forwards), not of the load.
+  * after warmup, judge on a sliding window: scale = median cycle wall now /
+    anchor (both directions: a second batched request joining doubles the
+    wall-clock per cycle AND what AR would cost this request, so the baseline
+    follows; when it leaves, the baseline follows back down).  Long context
+    grows the cycle wall by the same absolute amount it grows AR, i.e. by a
+    smaller RATIO, so the scale under-estimates AR growth there: the valve can
+    only demote a little early at long context, never late.
   * trip iff window-mean ms/tok AND per-cycle MEDIAN ms/tok exceed
-    seed_ar_ms x scale x margin (a single stalled cycle cannot trip an
-    irreversible demotion)
+    seed_ar_ms x scale x margin.  An acceptance collapse raises ms/tok without
+    changing the cycle wall, so it is never masked; a single stalled cycle
+    cannot trip an irreversible demotion (median guard).
+  * skip while cycles < warmup (longer for an unprimed head) or the window is
+    not full.
+
+Accepted blind spot: an MTP-only per-cycle slowdown that leaves AR untouched
+(e.g. draft-head page faults) raises the scale with it and is not caught
+until acceptance suffers.  Measured batching false trips were real; this
+class is hypothetical.
 
 Known limitation: the first request after a model load measures an inflated
 seed (compile / cold pages), so the valve is lax for that one request.
@@ -132,9 +146,9 @@ def windowed_ar_verdict(
     mtp_ms_per_tok = delta_wall_ms / delta_emitted
     scale = 1.0
     if anchor_cycle_ms > 0.0 and cur_cycle_ms > 0.0:
+        # Both directions on purpose: concurrency, thermal and context move
+        # AR and the MTP cycle together.  ``context_ratio`` is informational.
         scale = cur_cycle_ms / anchor_cycle_ms
-        scale = min(scale, max(1.0, float(context_ratio)))
-        scale = max(1.0, scale)
     ar_baseline = ar_step_ms * scale
     threshold = ar_baseline * margin
     if mtp_ms_per_tok <= threshold:
@@ -152,6 +166,8 @@ class ArSafetyState:
     anchor_cycle_ms: float = 0.0
     anchor_context_tokens: int = 0
     prompt_tokens: int = 0
+    last_cycle_t: float = 0.0
+    warmup_cycle_ms: List[float] = field(default_factory=list)
     ring: List[Tuple[int, int, float]] = field(default_factory=list)
 
 
@@ -208,7 +224,19 @@ def ar_safety_step(
     if not ar_safety_enabled():
         return None
     warmup = ar_safety_warmup_cycles(primed=primed)
-    if cycles < warmup:
+    if cycles <= warmup:
+        # Warmup: collect per-cycle walls for the anchor (same conditions as
+        # the seed).  Cycle 1's dt is measured from the previous timestamp,
+        # so the first call only stamps.
+        if st.last_cycle_t > 0.0:
+            st.warmup_cycle_ms.append((float(now) - st.last_cycle_t) * 1000.0)
+        st.last_cycle_t = float(now)
+        if cycles == warmup and st.anchor_cycle_ms <= 0.0:
+            anchor = median(st.warmup_cycle_ms)
+            if anchor > 0.0:
+                st.anchor_cycle_ms = anchor
+                st.anchor_context_tokens = max(1, int(st.prompt_tokens) + int(emitted))
+            st.ring.append((int(cycles), int(emitted), float(now)))
         return None
     window = ar_safety_window_cycles()
     ring = st.ring
@@ -230,6 +258,8 @@ def ar_safety_step(
     cur_cycle_ms = median(per_cycle_ms)
     context_now = int(st.prompt_tokens) + int(emitted)
     if st.anchor_cycle_ms <= 0.0:
+        # Warmup produced no usable anchor (e.g. warmup 1); anchor on the
+        # first full window instead.
         if cur_cycle_ms <= 0.0:
             return None
         st.anchor_cycle_ms = cur_cycle_ms

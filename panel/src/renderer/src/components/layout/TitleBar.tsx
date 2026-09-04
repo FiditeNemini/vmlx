@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
 import {
   MessageSquare,
   Server,
@@ -133,19 +134,40 @@ function LanguagePicker({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(
+    null,
+  );
 
+  // The titlebar bar is h-10 with overflow-hidden, and the main content is a
+  // later sibling with its own stacking context — an in-flow absolute dropdown
+  // is BOTH clipped by the bar and painted over by main content (a covered,
+  // unclickable menu, not a dev-build artifact). Render it in a body portal
+  // positioned under the button so it escapes both.
   useEffect(() => {
+    if (!open) return undefined;
+    const place = () => {
+      const r = ref.current?.getBoundingClientRect();
+      if (r) setMenuPos({ top: r.bottom + 4, right: window.innerWidth - r.right });
+    };
+    place();
     function handleClickOutside(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        ref.current &&
+        !ref.current.contains(target) &&
+        menuRef.current &&
+        !menuRef.current.contains(target)
+      ) {
         setOpen(false);
       }
     }
-    if (open) {
-      document.addEventListener("mousedown", handleClickOutside);
-      return () =>
-        document.removeEventListener("mousedown", handleClickOutside);
-    }
-    return undefined;
+    document.addEventListener("mousedown", handleClickOutside);
+    window.addEventListener("resize", place);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("resize", place);
+    };
   }, [open]);
 
   const { t } = useTranslation();
@@ -161,26 +183,38 @@ function LanguagePicker({
       >
         {LOCALE_FLAGS[locale]}
       </button>
-      {open && (
-        <div className="absolute right-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-lg py-1 z-50 min-w-[140px]">
-          {LOCALES.map((l) => (
-            <button
-              key={l}
-              data-vmlx-locale-option={l}
-              onClick={() => {
-                setLocale(l);
-                setOpen(false);
-              }}
-              className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-accent transition-colors ${
-                locale === l ? "bg-primary/10 font-medium" : ""
-              }`}
-            >
-              <span>{LOCALE_FLAGS[l]}</span>
-              <span>{LOCALE_NAMES[l]}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      {open &&
+        menuPos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="fixed bg-popover border border-border rounded-lg shadow-lg py-1 min-w-[140px]"
+            style={{
+              top: menuPos.top,
+              right: menuPos.right,
+              zIndex: 2147483647,
+              WebkitAppRegion: "no-drag",
+            } as React.CSSProperties}
+          >
+            {LOCALES.map((l) => (
+              <button
+                key={l}
+                data-vmlx-locale-option={l}
+                onClick={() => {
+                  setLocale(l);
+                  setOpen(false);
+                }}
+                className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 hover:bg-accent transition-colors ${
+                  locale === l ? "bg-primary/10 font-medium" : ""
+                }`}
+              >
+                <span>{LOCALE_FLAGS[l]}</span>
+                <span>{LOCALE_NAMES[l]}</span>
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

@@ -47,11 +47,18 @@ def test_acceptance_collapse_trips_without_cycle_wall_change():
     assert v is not None
 
 
-def test_thermal_or_context_growth_scales_baseline_both_ways():
+def test_context_growth_scales_baseline_up_and_seed_is_a_floor():
     # Cycle wall 30 -> 45 (context/thermal): baseline 15 -> threshold 18.75;
-    # MTP at 17 ms/tok holds. Cycle wall back to 24: baseline 8 -> 17 trips.
+    # MTP at 17 ms/tok holds.
     assert verdict(cur_cycle_ms=45.0, delta_emitted=16, delta_wall_ms=272.0) is None
-    assert verdict(cur_cycle_ms=24.0, delta_emitted=16, delta_wall_ms=272.0) is not None
+    # Cycle wall BELOW the anchor (slow early cycles after a big prefill
+    # inflated the anchor): the scale clamps at 1, baseline stays at the
+    # seed (10 -> threshold 12.5); MTP at 12 ms/tok must NOT trip. Measured
+    # 2026-09-04: a scale below 1 falsely demoted healthy MTP 3x in 22 turns.
+    v = verdict(cur_cycle_ms=24.0, delta_emitted=16, delta_wall_ms=192.0)
+    assert v is None
+    v2 = verdict(cur_cycle_ms=24.0, delta_emitted=16, delta_wall_ms=272.0)
+    assert v2 is not None and abs(v2[1] - 10.0) < 1e-6
 
 
 def test_single_stall_cycle_does_not_trip():

@@ -14,13 +14,16 @@ before the seed timer):
     user experiences.
   * anchor = MEDIAN per-cycle wall over the warmup cycles (same conditions
     as the AR baseline measurement, within a fraction of a second).
-  * scale = median cycle wall now / anchor, both directions: thermal and
-    context move AR and the MTP cycle together.  Long context grows the cycle
-    wall by the same absolute amount it grows AR, i.e. by a smaller ratio,
-    so the scale under-estimates AR growth: the valve can demote a little
-    early at long context, never late.  (Native MTP in the multimodal lane
-    is single-row — admission stays closed while an MTP row is active — so
-    concurrency never enters this measurement.)
+  * scale = max(1, median cycle wall now / anchor): context and thermal
+    move AR and the MTP cycle together, and the baseline is a FLOOR — the
+    first cycles after a large prefill run slow (measured 2026-09-04: anchor
+    43ms vs 32ms steady at 1.2k-26k context), so a scale allowed below 1
+    demoted healthy MTP three times in a 22-turn run.  Long context grows
+    the cycle wall by the same absolute amount it grows AR, i.e. by a
+    smaller ratio, so the scale under-estimates AR growth: the valve can
+    demote a little early at long context, never late.  (Native MTP in the
+    multimodal lane is single-row — admission stays closed while an MTP row
+    is active — so concurrency never enters this measurement.)
   * baseline = the request's measured AR ms/tok once it has run an AR tier
     (true AR at the live context), else the seed AR step.
   * trip iff window-mean ms/tok AND per-cycle MEDIAN ms/tok exceed
@@ -147,9 +150,9 @@ def windowed_ar_verdict(
     mtp_ms_per_tok = delta_wall_ms / delta_emitted
     scale = 1.0
     if anchor_cycle_ms > 0.0 and cur_cycle_ms > 0.0:
-        # Cycle-wall growth: context and thermal, both directions.
+        # Cycle-wall growth (context, thermal); the baseline is a floor.
         # ``context_ratio`` is informational.
-        scale = cur_cycle_ms / anchor_cycle_ms
+        scale = max(1.0, cur_cycle_ms / anchor_cycle_ms)
     ar_baseline = ar_step_ms * scale
     threshold = ar_baseline * margin
     if mtp_ms_per_tok <= threshold:

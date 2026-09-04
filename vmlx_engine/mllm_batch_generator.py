@@ -5674,15 +5674,19 @@ class NativeMTPArTier:
         self.tokens_since_fallback += 1
         self.total_ar_tokens += 1
 
+    last_measured_ms_per_tok: float = 0.0
+
     def measured_ar_ms_per_tok(self) -> float:
         if len(self.step_walls_ms) < 4:
-            return 0.0
+            return self.last_measured_ms_per_tok
         ordered = sorted(self.step_walls_ms)
-        return ordered[len(ordered) // 2]
+        self.last_measured_ms_per_tok = ordered[len(ordered) // 2]
+        return self.last_measured_ms_per_tok
 
     def probe_due(self) -> bool:
         return (
             self.tokens_since_fallback >= self.next_probe_tokens
+            and len(self.step_walls_ms) >= 4
             and self.measured_ar_ms_per_tok() > 0.0
         )
 

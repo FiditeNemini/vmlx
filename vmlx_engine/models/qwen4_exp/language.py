@@ -78,11 +78,20 @@ _HYPER_SPLIT_INDICES = {}
 
 
 def _mtp_draft_head_request() -> tuple[Optional[int], str]:
-    """Return the explicitly requested proposal-head width and its status."""
+    """Return the requested proposal-head width and its status.
+
+    Default ON at 4 bits since the settled 2026-09-03 A/B: three
+    back-to-back same-thermal pairs on Qwen3.8-Flash-Next-JANG_4S at fixed
+    D3 all measured the q4 proposal head faster on BOTH probe lanes
+    (count +2.3-3.0%, code +1.8-2.8%) — cheaper drafting outweighs its
+    ~7.5pt acceptance cost, and correctness is untouched because target
+    verification always uses the checkpoint-owned full head. Set
+    VMLX_QWEN4_MTP_DRAFT_HEAD_BITS=0 to disable for A/B.
+    """
 
     raw = os.environ.get(
         "VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS",
-        os.environ.get("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", "0"),
+        os.environ.get("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", "4"),
     ).strip().lower()
     if raw in {"", "0", "false", "no", "off", "none"}:
         return None, "disabled"

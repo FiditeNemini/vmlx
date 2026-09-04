@@ -1134,9 +1134,24 @@ def _quantize_qwen4_lm_head(model, *, bits: int):
     mx.eval(model.lm_head.weight, model.lm_head.scales, model.lm_head.biases)
 
 
-def test_qwen4_exp_mtp_draft_head_is_default_off_and_keeps_target_head(monkeypatch):
+def test_qwen4_exp_mtp_draft_head_is_default_on_and_keeps_target_head(monkeypatch):
+    # Default flipped ON at q4 after the settled 2026-09-03 A/B (three
+    # same-thermal pairs, both probe lanes faster). The target head must stay
+    # the checkpoint-owned lm_head regardless — the q4 copy is proposal-only.
     monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
     monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=8)
+    target_head = model.lm_head
+
+    status = model.prepare_mtp_draft_head()
+    assert status["configured"] is True
+    assert status["requested_bits"] == 4
+    assert model.lm_head is target_head
+
+
+def test_qwen4_exp_mtp_draft_head_env_zero_disables(monkeypatch):
+    monkeypatch.setenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", "0")
     model = LanguageModel(_tiny_args())
     _quantize_qwen4_lm_head(model, bits=8)
     target_head = model.lm_head

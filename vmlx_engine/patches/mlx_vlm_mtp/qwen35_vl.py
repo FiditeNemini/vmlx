@@ -31,6 +31,112 @@ from vmlx_engine.metal.qwen35_gdn_gate_terms import (
 
 logger = logging.getLogger(__name__)
 
+
+def _qwen35_mtp_draft_head_bits() -> Optional[int]:
+    """Requested low-bit proposal-head width for the Qwen3.5/3.8 MTP lane.
+
+    Default OFF: the qwen4_exp q4 proposal head measured a settled win on
+    Flash-Next (2026-09-03), but that result does not transfer to this
+    family's head geometry without its own live A/B. Enable with
+    VMLX_QWEN35_MTP_DRAFT_HEAD_BITS=4 for the measurement; verification
+    always uses the checkpoint-owned head either way, so this copy can only
+    shape proposals — emitted tokens remain exactly verified.
+    """
+
+    raw = os.environ.get(
+        "VMLINUX_QWEN35_MTP_DRAFT_HEAD_BITS",
+        os.environ.get("VMLX_QWEN35_MTP_DRAFT_HEAD_BITS", "0"),
+    ).strip().lower()
+    if raw in {"", "0", "false", "no", "off", "none"}:
+        return None
+    try:
+        bits = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return bits if bits == 4 else None
+
+
+def _qwen35_mtp_proposal_head(model: Any) -> Any:
+    """Lazily build (once) and return the q4 proposal head, or None.
+
+    Mirrors qwen4_exp's prepare_mtp_draft_head: requantize the q8/g64
+    affine lm_head to q4 for draft sampling only. Any layout the requant
+    cannot prove supported fails closed to the full head.
+    """
+
+    state = getattr(model, "_vmlx_mtp_draft_head_state", None)
+    if state is None:
+        state = {"attempted": False, "head": None, "reason": "not_built"}
+        model._vmlx_mtp_draft_head_state = state
+    if state["attempted"]:
+        return state["head"]
+    state["attempted"] = True
+
+    bits = _qwen35_mtp_draft_head_bits()
+    if bits is None:
+        state["reason"] = "disabled"
+        return None
+
+    import time as _time
+
+    import mlx.nn as nn
+
+    source = getattr(model, "lm_head", None)
+    if not isinstance(source, nn.QuantizedLinear):
+        state["reason"] = "unsupported_source_type"
+        return None
+    if (
+        getattr(source, "bits", None) != 8
+        or getattr(source, "group_size", None) != 64
+        or str(getattr(source, "mode", "affine") or "affine") != "affine"
+    ):
+        state["reason"] = "unsupported_source_layout"
+        return None
+
+    started = _time.perf_counter()
+    try:
+        dense = mx.dequantize(
+            source.weight,
+            source.scales,
+            source.biases,
+            group_size=source.group_size,
+            bits=source.bits,
+            mode=source.mode,
+        )
+        weight, scales, biases = mx.quantize(
+            dense,
+            group_size=source.group_size,
+            bits=bits,
+            mode=source.mode,
+        )
+        proposal = nn.QuantizedLinear(
+            64,
+            64,
+            bias=False,
+            group_size=source.group_size,
+            bits=bits,
+            mode=source.mode,
+        )
+        proposal.weight = weight
+        proposal.scales = scales
+        proposal.biases = biases
+        mx.eval(proposal.weight, proposal.scales, proposal.biases)
+        state["head"] = proposal
+        state["reason"] = "ready"
+        logger.info(
+            "qwen3_5 MTP proposal head ready: q8/g64 -> q%d/g%d build_ms=%.2f",
+            bits,
+            source.group_size,
+            (_time.perf_counter() - started) * 1000.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - optional path must fail closed
+        state["head"] = None
+        state["reason"] = f"build_failed:{type(exc).__name__}"
+        logger.warning(
+            "qwen3_5 MTP proposal head disabled after build failure: %s", exc
+        )
+    return state["head"]
+
 _PATCHED = False
 _DISABLE_ENV_VALUES = {"0", "false", "FALSE", "no", "NO", "off", "OFF"}
 
@@ -1043,7 +1149,8 @@ def _patch_language_model(qlang: Any) -> None:
         if self.args.tie_word_embeddings:
             logits = self.model.embed_tokens.as_linear(mtp_out)
         else:
-            logits = self.lm_head(mtp_out)
+            head = _qwen35_mtp_proposal_head(self)
+            logits = head(mtp_out) if head is not None else self.lm_head(mtp_out)
         if return_hidden:
             return logits, mtp_out
         return logits

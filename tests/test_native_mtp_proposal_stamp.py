@@ -307,3 +307,82 @@ def test_malformed_proposal_bits_treated_as_absent_and_healed(tmp_path):
     assert plan["stamp_source"] == "new"
     healed = json.loads((tmp_path / STAMP_FILENAME).read_text())
     assert healed["proposal_bits"] == 4
+
+
+def _artifact_stamp(bundle, sha, validated):
+    stamp = {
+        "version": 1,
+        "family": "qwen4_exp",
+        "source": Q8_G64,
+        "eligible": True,
+        "proposal_bits": 4,
+        "draft_artifact": {
+            "file": "vmlx_mtp_proposal_head.safetensors",
+            "sha256": sha,
+            "bits": 4,
+            "group_size": 64,
+            "acceptance_validated": validated,
+        },
+    }
+    (bundle / STAMP_FILENAME).write_text(json.dumps(stamp))
+
+
+def test_unvalidated_draft_artifact_stays_on_rtn(tmp_path, monkeypatch):
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", raising=False)
+    _write_config(tmp_path, Q8_G64)
+    _artifact_stamp(tmp_path, "0" * 64, validated=False)
+    plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
+    assert plan["eligible"] is True
+    assert plan["proposal_source"] == "runtime_rtn"
+
+
+def test_validated_draft_artifact_activates(tmp_path, monkeypatch):
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", raising=False)
+    _write_config(tmp_path, Q8_G64)
+    _artifact_stamp(tmp_path, "0" * 64, validated=True)
+    plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
+    assert plan["proposal_source"] == "stamped_tensors"
+
+
+def test_env_forces_stamped_for_ab_before_validation(tmp_path, monkeypatch):
+    monkeypatch.setenv("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", "stamped")
+    _write_config(tmp_path, Q8_G64)
+    _artifact_stamp(tmp_path, "0" * 64, validated=False)
+    plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
+    assert plan["proposal_source"] == "stamped_tensors"
+    monkeypatch.setenv("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", "rtn")
+    plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
+    assert plan["proposal_source"] == "runtime_rtn"
+
+
+def test_sha_mismatch_falls_back_to_rtn(tmp_path, monkeypatch):
+    import mlx.core as mx
+    import mlx.nn as nn
+
+    from vmlx_engine.native_mtp_proposal_stamp import (
+        TENSORS_FILENAME,
+        load_stamped_proposal_tensors,
+    )
+
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", raising=False)
+    _write_config(tmp_path, Q8_G64)
+    lin = nn.Linear(256, 512, bias=False).to_quantized(group_size=64, bits=8)
+    mx.eval(lin.weight, lin.scales, lin.biases)
+    dense = mx.dequantize(
+        lin.weight, lin.scales, lin.biases, group_size=64, bits=8
+    )
+    w, s, b = mx.quantize(dense, group_size=64, bits=4)
+    mx.save_safetensors(
+        str(tmp_path / TENSORS_FILENAME.replace(".safetensors", "")),
+        {"weight": w, "scales": s, "biases": b},
+    )
+    # Stamp declares a WRONG sha -> loader must refuse (None => RTN path).
+    _artifact_stamp(tmp_path, "f" * 64, validated=True)
+    assert load_stamped_proposal_tensors(tmp_path, lin, 4) is None
+    # Correct sha -> loads.
+    import hashlib
+
+    real = hashlib.sha256((tmp_path / TENSORS_FILENAME).read_bytes()).hexdigest()
+    _artifact_stamp(tmp_path, real, validated=True)
+    loaded = load_stamped_proposal_tensors(tmp_path, lin, 4)
+    assert loaded is not None

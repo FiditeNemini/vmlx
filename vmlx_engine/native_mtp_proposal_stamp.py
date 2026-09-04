@@ -47,6 +47,50 @@ def _stamp_path(bundle_path: str | Path) -> Path:
     return Path(bundle_path) / STAMP_FILENAME
 
 
+def _draft_artifact(stamp: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The converter's calibrated-artifact block, if structurally sound."""
+
+    artifact = stamp.get("draft_artifact")
+    if not isinstance(artifact, dict):
+        return None
+    if str(artifact.get("file") or "") != TENSORS_FILENAME:
+        return None
+    sha = artifact.get("sha256")
+    if not isinstance(sha, str) or len(sha) != 64:
+        return None
+    return artifact
+
+
+def _resolve_proposal_source(stamp: dict[str, Any]) -> str:
+    """Single activation path for calibrated proposal tensors.
+
+    Three ways to reach "stamped_tensors", in precedence order:
+    1. env VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE=stamped — the measurement
+       override for running the acceptance A/B before validation.
+    2. explicit stamp field proposal_source="stamped_tensors".
+    3. a converter draft_artifact block WITH acceptance_validated=true —
+       an unvalidated artifact never activates by default (the converter's
+       own contract: flip validated only after a measured live A/B), so a
+       freshly-uploaded artifact cannot double-activate ahead of its gate.
+    Everything else -> runtime_rtn.
+    """
+
+    forced = os.environ.get(
+        "VMLINUX_QWEN4_MTP_DRAFT_HEAD_SOURCE",
+        os.environ.get("VMLX_QWEN4_MTP_DRAFT_HEAD_SOURCE", ""),
+    ).strip().lower()
+    artifact = _draft_artifact(stamp)
+    if forced == "stamped" and artifact is not None:
+        return "stamped_tensors"
+    if forced == "rtn":
+        return "runtime_rtn"
+    if str(stamp.get("proposal_source") or "") == "stamped_tensors":
+        return "stamped_tensors"
+    if artifact is not None and artifact.get("acceptance_validated") is True:
+        return "stamped_tensors"
+    return "runtime_rtn"
+
+
 def _normalized_source(source_layout: dict[str, Any]) -> dict[str, Any]:
     return {
         "bits": source_layout.get("bits"),
@@ -275,9 +319,7 @@ def resolve_proposal_head_plan(
                 plan["proposal_bits"] = int(stamp.get("proposal_bits") or 4)
                 # Converter-side stamps may point at calibrated proposal
                 # tensors instead of the runtime RTN requant.
-                plan["proposal_source"] = str(
-                    stamp.get("proposal_source") or "runtime_rtn"
-                )
+                plan["proposal_source"] = _resolve_proposal_source(stamp)
             else:
                 plan["reason"] = str(stamp.get("reason") or "stamped_ineligible")
             return plan
@@ -357,6 +399,27 @@ def load_stamped_proposal_tensors(
                 TENSORS_FILENAME,
             )
             return None
+
+        # sha256-verify against the stamp's draft_artifact when it carries
+        # one (the converter contract: users of the artifact must verify and
+        # fall back to RTN on mismatch — a half-written or tampered sidecar
+        # must never become the proposal head).
+        stamp = read_proposal_stamp(bundle_path) or {}
+        artifact = _draft_artifact(stamp)
+        if artifact is not None:
+            import hashlib
+
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if digest != artifact["sha256"]:
+                logger.warning(
+                    "%s sha256 mismatch (stamp %s…, file %s…); falling back "
+                    "to runtime requant",
+                    TENSORS_FILENAME,
+                    str(artifact["sha256"])[:12],
+                    digest[:12],
+                )
+                return None
+
         import mlx.core as mx
 
         tensors = mx.load(str(path))

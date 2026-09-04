@@ -12489,6 +12489,36 @@ class MLLMBatchGenerator:
                                         self.block_aware_cache.release_cache(req.request_id)
                                         continue
                                 if is_hybrid and ssm_states is not None and reconstructed is not None:
+                                    # The KV offset (restored block tensors) and
+                                    # the companion boundary (block table token
+                                    # count) are independently sourced; unequal
+                                    # means split-brained attention/recurrent
+                                    # state. Fail closed: full prefill.
+                                    from .utils.cache_extent import (
+                                        hybrid_kv_boundary_mismatch,
+                                    )
+
+                                    _kv_mismatch = hybrid_kv_boundary_mismatch(
+                                        reconstructed,
+                                        int(getattr(block_table, "num_tokens", 0) or 0),
+                                    )
+                                    if _kv_mismatch is not None:
+                                        logger.warning(
+                                            "VLM hybrid restore REJECTED for %s: KV "
+                                            "layer %d restored at offset %d but the "
+                                            "SSM companion boundary is %d; pairing "
+                                            "them would desynchronize attention and "
+                                            "recurrent state. Full prefill instead.",
+                                            req.request_id,
+                                            _kv_mismatch[0],
+                                            _kv_mismatch[1],
+                                            int(getattr(block_table, "num_tokens", 0) or 0),
+                                        )
+                                        self._adjust_paged_hit_credit(req.request_id, 0)
+                                        self.block_aware_cache.release_cache(req.request_id)
+                                        req._cached_tokens = 0
+                                        req.prompt_cache = None
+                                        continue
                                     # Full hybrid cache reconstruction:
                                     # KV from paged cache + SSM from companion cache
                                     full_cache = _fix_hybrid_cache(

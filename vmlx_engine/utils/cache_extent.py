@@ -33,6 +33,36 @@ def cache_offset(cache_obj: Any) -> int:
     return max(0, offset)
 
 
+def hybrid_kv_boundary_mismatch(caches: Any, boundary: int):
+    """First KV layer whose restored ``offset`` disagrees with the companion
+    boundary, as ``(layer_index, offset)``; ``None`` when every layer that
+    reports an offset sits exactly at ``boundary``.
+
+    A hybrid restore pairs attention KV (restored from paged blocks, its
+    ``offset`` derived from the block tensors) with recurrent SSM/GDN/KDA
+    state keyed at ``boundary`` (the block table's token count).  The two
+    lengths come from independent sources; they agree by bookkeeping, not by
+    construction.  If they ever diverge, the model's two halves advance from
+    different positions and the output degenerates (token 0 / verbatim loops
+    on the Swift lane, 2026-09-04).  Callers must FAIL CLOSED on a mismatch —
+    drop the hit and prefill in full — never proceed split-brained.
+
+    Layers without an offset (recurrent slots, wrappers that never populate
+    it) report 0 and are skipped: unknown is not a mismatch.
+    """
+    try:
+        boundary = int(boundary)
+    except (TypeError, ValueError):
+        return None
+    if boundary <= 0 or not caches:
+        return None
+    for index, layer in enumerate(caches):
+        offset = cache_offset(layer)
+        if offset > 0 and offset != boundary:
+            return index, offset
+    return None
+
+
 def logical_truncate_target(cache_obj: Any, target_len: int, physical: int) -> int:
     """Clamp a requested truncation length to what the cache LOGICALLY holds.
 

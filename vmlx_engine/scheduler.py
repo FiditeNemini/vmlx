@@ -8220,6 +8220,30 @@ class Scheduler:
             request.remaining_tokens = request.prompt_token_ids
             return None
 
+        # The KV offset (from the restored block tensors) and the companion
+        # boundary (the block table's token count) come from independent
+        # sources.  Pairing them unequal desynchronizes the attention and
+        # recurrent halves; fail closed to a full prefill instead.
+        from .utils.cache_extent import hybrid_kv_boundary_mismatch
+
+        _kv_mismatch = hybrid_kv_boundary_mismatch(reconstructed, fetch_num)
+        if _kv_mismatch is not None:
+            logger.warning(
+                "Request %s: hybrid restore REJECTED — KV layer %d restored at "
+                "offset %d but the SSM companion boundary is %d; pairing them "
+                "would desynchronize attention and recurrent state. Full "
+                "prefill instead.",
+                request.request_id,
+                _kv_mismatch[0],
+                _kv_mismatch[1],
+                int(fetch_num or 0),
+            )
+            self._release_unusable_paged_hit(request)
+            request.prompt_cache = None
+            request.cached_tokens = 0
+            request.remaining_tokens = request.prompt_token_ids
+            return None
+
         full_cache = _fix_hybrid_cache(
             reconstructed,
             self.model,

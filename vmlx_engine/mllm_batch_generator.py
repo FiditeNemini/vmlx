@@ -5730,17 +5730,18 @@ def _native_mtp_maybe_ar_safety_fallback(
     if verdict is None:
         return False
     mtp_ms_per_tok, ar_baseline = verdict
+    prior_depth = int(state.depth or 1)
     state.depth = 1
     state.ar_fallback_pending = True
     state.ar_fallback_reason = (
-        f"windowed_ar_safety mtp_ms_per_tok={mtp_ms_per_tok:.1f}"
+        f"windowed_ar_safety d{prior_depth} mtp_ms_per_tok={mtp_ms_per_tok:.1f}"
         f">ar_baseline={ar_baseline:.1f}(seed={ar_ms:.1f})x{margin:.2f}"
     )
     logger.info(
         "MLLM MTP[%s] windowed AR safety D%d -> AR at cycle=%d "
         "(%.1fms/tok vs ctx-scaled AR %.1fms, seed %.1fms, window=%d)",
         request_id,
-        int(state.depth or 1),
+        prior_depth,
         cycles,
         mtp_ms_per_tok,
         ar_baseline,

@@ -150,4 +150,4 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     assert tripped is True
     assert state.ar_fallback_pending is True
     assert state.depth == 1
-    assert "windowed_ar_safety" in (state.ar_fallback_reason or "")
+    assert "windowed_ar_safety d3" in (state.ar_fallback_reason or "")

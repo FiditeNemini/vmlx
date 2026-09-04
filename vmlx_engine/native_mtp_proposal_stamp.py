@@ -128,15 +128,93 @@ def _derive_plan(source: dict[str, Any], family: str) -> dict[str, Any]:
     mode = source.get("mode")
     if source.get("tied"):
         return {"eligible": False, "reason": "tied_embeddings"}
-    if mode != "affine" or not isinstance(bits, int):
+    if not isinstance(bits, int):
         return {"eligible": False, "reason": "non_affine_or_unquantized_head"}
+    if mode != "affine":
+        # Known-quantized but unmeasured mode (e.g. the 27B-MXFP8 head):
+        # reason matches the converter-side stamper so a re-derive after a
+        # deleted stamp reproduces the shipped verdict byte-for-byte.
+        return {
+            "eligible": False,
+            "reason": f"unmeasured_layout_q{bits}_g{group_size}",
+        }
     if bits <= 6:
-        # 27B D-tiers land here (q4/g128, q6/g128): drafting already pays a
-        # cheap head; a lower-bit copy has nothing left to save.
+        # 27B D-tiers (q2/q4/q6 g128) and Flash-Next 2L (q6/g64) land here:
+        # drafting already pays a cheap head; a lower-bit copy has nothing
+        # left to save.
         return {"eligible": False, "reason": "native_head_already_low_bit"}
     if bits == 8 and group_size == 64:
         return {"eligible": True, "proposal_bits": 4}
     return {"eligible": False, "reason": f"unmeasured_layout_q{bits}_g{group_size}"}
+
+
+# The measured families this stamp may be WRITTEN for. Other model types can
+# still use the in-process verdict, but a persistent stamp lands in a user's
+# bundle only when the bundle's own config confirms it is one of these.
+_STAMPABLE_MODEL_TYPES: dict[str, frozenset[str]] = {
+    "qwen4_exp": frozenset({"qwen4_exp", "qwen4_exp_text"}),
+    "qwen3_5": frozenset(
+        {"qwen3_5", "qwen3_5_text", "qwen3_5_vl", "qwen3_5_moe", "qwen3_5_moe_text"}
+    ),
+}
+
+
+def _bundle_confirms_source(
+    bundle_path: str | Path, source: dict[str, Any], family: str
+) -> tuple[bool, str]:
+    """Confirm bundle type + head layout from the bundle's own config.
+
+    The loaded tensors are the runtime source of truth for the in-process
+    verdict; this is a second, independent read of config.json before the
+    verdict is persisted into the user's bundle: the model_type must be one
+    of the measured JANG Qwen3.8 types for this family, and the config's
+    lm_head quantization entry (explicit or default) must agree with the
+    loaded head. Any disagreement or unreadable config means "do not write"
+    — never "block".
+    """
+
+    try:
+        config = json.loads((Path(bundle_path) / "config.json").read_text())
+    except Exception as exc:  # noqa: BLE001 - unconfirmable, not fatal
+        return False, f"config_unreadable:{type(exc).__name__}"
+    if not isinstance(config, dict):
+        return False, "config_not_a_mapping"
+
+    model_type = str(config.get("model_type") or "").strip().lower()
+    allowed = _STAMPABLE_MODEL_TYPES.get(family, frozenset())
+    if model_type not in allowed:
+        return False, f"model_type_not_stampable:{model_type or 'missing'}"
+
+    if bool(config.get("tie_word_embeddings", False)) != bool(source.get("tied")):
+        return False, "tie_word_embeddings_mismatch"
+
+    quant = config.get("quantization")
+    if not isinstance(quant, dict):
+        return False, "no_quantization_block"
+    head_entry: Any = None
+    for key in ("language_model.lm_head", "lm_head", "model.lm_head"):
+        candidate = quant.get(key)
+        if isinstance(candidate, dict):
+            head_entry = candidate
+            break
+    if head_entry is None:
+        # Fall back to the bundle-wide default layout.
+        head_entry = {
+            k: v for k, v in quant.items() if not isinstance(v, dict)
+        }
+    declared = {
+        "bits": head_entry.get("bits"),
+        "group_size": head_entry.get("group_size"),
+        "mode": str(head_entry.get("mode") or "affine"),
+    }
+    loaded = {
+        "bits": source.get("bits"),
+        "group_size": source.get("group_size"),
+        "mode": source.get("mode"),
+    }
+    if declared != loaded:
+        return False, f"config_head_mismatch:{declared}!={loaded}"
+    return True, "confirmed"
 
 
 def resolve_proposal_head_plan(
@@ -186,7 +264,22 @@ def resolve_proposal_head_plan(
     else:
         record["reason"] = plan["reason"]
 
-    stamped = bool(bundle_path) and write_proposal_stamp(bundle_path, record)
+    # Confirm bundle type + declared head layout from the bundle's own
+    # config before persisting anything into the user's bundle. The
+    # in-process verdict above applies regardless; only the WRITE is gated.
+    stamped = False
+    if bundle_path:
+        confirmed, why = _bundle_confirms_source(bundle_path, source, family)
+        if confirmed:
+            stamped = write_proposal_stamp(bundle_path, record)
+        else:
+            logger.info(
+                "Not stamping %s in %s (unconfirmed bundle: %s); "
+                "in-process verdict still applies",
+                STAMP_FILENAME,
+                Path(bundle_path).name,
+                why,
+            )
     plan["stamped"] = stamped
     plan["stamp_source"] = "new" if stamped else "none"
     return plan

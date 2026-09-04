@@ -2571,6 +2571,19 @@ def test_qwen4_exp_prepare_stamps_bundle_once_and_honors_existing(
     monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
     monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
     monkeypatch.setattr(native_mtp, "_ACTIVE_NATIVE_MTP_MODEL_PATH", tmp_path)
+    # The write is gated on the bundle's own config confirming the model
+    # type + declared head layout; give the tmp bundle a confirming config.
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "tie_word_embeddings": False,
+                "quantization": {
+                    "lm_head": {"bits": 8, "group_size": 64, "mode": "affine"}
+                },
+            }
+        )
+    )
 
     model = LanguageModel(_tiny_args())
     _quantize_qwen4_lm_head(model, bits=8)

@@ -307,7 +307,7 @@ def _validated_flat_tuning_depth(tuning: dict[str, Any]) -> int | None:
         except (TypeError, ValueError):
             continue
         speed = _positive_finite_number(raw_speed)
-        if 1 <= key <= 3 and speed is not None:
+        if 1 <= key <= native_mtp_max_depth() and speed is not None:
             speeds[key] = speed
 
     # "best" is meaningful only across the producer's complete supported
@@ -674,7 +674,7 @@ def _native_mtp_explicitly_requested() -> bool:
         if raw is None:
             continue
         try:
-            if 1 <= int(raw) <= 3:
+            if 1 <= int(raw) <= native_mtp_max_depth():
                 return True
         except (TypeError, ValueError):
             continue

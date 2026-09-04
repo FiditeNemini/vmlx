@@ -147,7 +147,7 @@ class NativeMTPProfileStore:
             depth = min(configured, ceiling)
             return depth, f"tuning_validated_d{depth}"
         if unseen_start_depth is not None:
-            depth = max(1, min(3, int(unseen_start_depth), ceiling))
+            depth = max(1, min(int(unseen_start_depth), ceiling))
             source = str(unseen_start_source or "measured_family_cold_start")
             return depth, f"{source}_d{depth}"
         return 0, "unseen_ar"
@@ -198,7 +198,7 @@ class NativeMTPProfileStore:
                 return
 
             qualified: list[tuple[float, int]] = []
-            for depth in (1, 2, 3):
+            for depth in range(1, native_mtp_max_depth() + 1):
                 label = f"d{depth}"
                 value = values.get(label)
                 n = int(counts.get(label) or 0)

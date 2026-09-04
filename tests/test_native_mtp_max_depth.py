@@ -47,3 +47,12 @@ def test_coerce_depth_honors_ceiling(monkeypatch):
     assert native_mtp._coerce_native_mtp_depth("9") == 5
     monkeypatch.setenv("VMLX_NATIVE_MTP_MAX_DEPTH", "3")
     assert native_mtp._coerce_native_mtp_depth("5") == 3
+
+
+def test_stats_arrays_scale_with_ceiling(monkeypatch):
+    monkeypatch.setenv("VMLX_NATIVE_MTP_MAX_DEPTH", "5")
+    from vmlx_engine.mllm_batch_generator import MLLMNativeMTPStats
+
+    stats = MLLMNativeMTPStats()
+    assert len(stats.accepted_by_depth) == 5
+    assert len(stats.drafted_by_depth) == 5

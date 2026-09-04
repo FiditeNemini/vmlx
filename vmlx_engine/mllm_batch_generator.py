@@ -3872,6 +3872,19 @@ def _fetch_request_ssm_longest_prefix(
     return result, lookup
 
 
+def _native_mtp_stats_depth_slots() -> int:
+    """Per-depth stats slots sized by the configured depth ceiling.
+
+    With fixed 3-long arrays a depth-4/5 probe silently dropped its per-depth
+    acceptance accounting (the guarded readers returned None), which made a
+    deeper sweep unmeasurable even after the depth caps were parameterized.
+    """
+
+    from .native_mtp import native_mtp_max_depth
+
+    return native_mtp_max_depth()
+
+
 @dataclass
 class MLLMNativeMTPStats:
     cycles: int = 0
@@ -3894,8 +3907,12 @@ class MLLMNativeMTPStats:
     restore_ms: float = 0.0
     replay_ms: float = 0.0
     materialize_ms: float = 0.0
-    accepted_by_depth: List[int] = field(default_factory=lambda: [0, 0, 0])
-    drafted_by_depth: List[int] = field(default_factory=lambda: [0, 0, 0])
+    accepted_by_depth: List[int] = field(
+        default_factory=lambda: [0] * _native_mtp_stats_depth_slots()
+    )
+    drafted_by_depth: List[int] = field(
+        default_factory=lambda: [0] * _native_mtp_stats_depth_slots()
+    )
     seed_main_forwards: int = 0
     verify_main_forwards: int = 0
     replay_main_forwards: int = 0
@@ -5240,16 +5257,18 @@ def _native_mtp_log_stats(
         stats.margin_truncated_cycles,
     )
     if any(stats.drafted_by_depth) or any(stats.accepted_by_depth):
+        accept_by_depth = ",".join(
+            f"d{level + 1}={stats.accepted_by_depth[level]}/"
+            f"{stats.drafted_by_depth[level]}"
+            for level in range(
+                min(len(stats.accepted_by_depth), len(stats.drafted_by_depth))
+            )
+        )
         logger.info(
-            "MLLM MTP[%s] accept_by_depth[d1=%d/%d,d2=%d/%d,d3=%d/%d] "
+            "MLLM MTP[%s] accept_by_depth[%s] "
             "forwards[seed_main=%d,verify_main=%d,replay_main=%d,mtp=%d]",
             request_id,
-            stats.accepted_by_depth[0],
-            stats.drafted_by_depth[0],
-            stats.accepted_by_depth[1],
-            stats.drafted_by_depth[1],
-            stats.accepted_by_depth[2],
-            stats.drafted_by_depth[2],
+            accept_by_depth,
             stats.seed_main_forwards,
             stats.verify_main_forwards,
             stats.replay_main_forwards,
@@ -5907,7 +5926,13 @@ def _native_mtp_maybe_raise_depth(
     ):
         return
 
-    ceiling = max(1, min(3, int(getattr(state, "depth_ceiling", 3) or 3)))
+    ceiling = max(
+        1,
+        min(
+            _native_mtp_stats_depth_slots(),
+            int(getattr(state, "depth_ceiling", 3) or 3),
+        ),
+    )
     if current >= ceiling:
         return
 
@@ -14595,10 +14620,10 @@ class MLLMBatchGenerator:
 
         # Resolve the AR-vs-MTP decision BEFORE the MTP seed forward below:
         # a skipped activation must not pay the extra hidden-state forward.
-        from .native_mtp import native_mtp_effective_depth
+        from .native_mtp import native_mtp_effective_depth, native_mtp_max_depth
 
         depth, depth_source = native_mtp_effective_depth()
-        depth = max(1, min(3, depth))
+        depth = max(1, min(native_mtp_max_depth(), depth))
         profile_seed = "configured"
         request_profile_key = None
         # An explicit VMLX/VMLINUX_NATIVE_MTP_DEPTH env override is a user

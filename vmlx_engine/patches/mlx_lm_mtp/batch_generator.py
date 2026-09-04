@@ -1700,7 +1700,6 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
 
     Depth 1 reproduces the original 2-token draft+bonus cycle exactly.
     """
-    cycle_own_t0 = time.perf_counter()
 
     import mlx.core as mx
 
@@ -1900,7 +1899,6 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     emit_tok = mx.array([emit_id], dtype=mx.uint32)
     state.next_main = emit_tok
     request_label = str(gen_batch.uids[0]) if gen_batch.uids else "?"
-    state.ar_safety.own_ms_total += (time.perf_counter() - cycle_own_t0) * 1000.0
     if _text_mtp_maybe_ar_safety_fallback(
         request_label, state
     ) or _text_mtp_maybe_cost_fallback(

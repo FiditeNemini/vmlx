@@ -114,7 +114,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
-from .native_mtp_ar_safety import ArSafetyState, ar_safety_step, windowed_ar_verdict
+from .native_mtp_ar_safety import (
+    ArSafetyState,
+    ar_safety_step,
+    ar_safety_window_cycles,
+    windowed_ar_verdict,
+)
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -4113,6 +4118,12 @@ class MLLMNativeMTPState:
     # Windowed AR-safety governor (policy-independent, on-the-fly fallback);
     # mechanism documented in vmlx_engine/native_mtp_ar_safety.py.
     ar_safety: ArSafetyState = field(default_factory=ArSafetyState)
+    # Re-entry: this state was seeded by an AR-tier probe.  ``ar_tier`` is
+    # the request's AR tier (measured AR ms/tok, backoff schedule); a probe
+    # is judged against the MEASURED AR with hysteresis and either keeps MTP
+    # (probe cleared, baseline = measured AR) or falls back with backoff.
+    ar_tier: Optional["NativeMTPArTier"] = None
+    probe: bool = False
     # The request began from a restored prefix. The MTP head cache starts
     # COLD on such requests (backbone hiddens are not stored), so the first
     # gate windows measure a context-starved head: run 3 of a live A/B
@@ -5625,6 +5636,71 @@ def _native_mtp_maybe_cost_fallback(
 _native_mtp_windowed_ar_verdict = windowed_ar_verdict
 
 
+_NATIVE_MTP_REENTRY_FIRST_PROBE_TOKENS = 16
+_NATIVE_MTP_REENTRY_AR_WINDOW = 16
+_NATIVE_MTP_REENTRY_HYSTERESIS = 1.10
+
+
+@dataclass
+class NativeMTPArTier:
+    """Per-request AR tier after an AR-safety demotion (multimodal lane).
+
+    Measures the request's TRUE AR ms/tok (wall between consecutive AR
+    steps, windowed median) at the live context, and schedules MTP re-entry
+    probes at 16 * 2**k AR tokens (k = failed probes; no cap, just backoff).
+    A probe re-seeds native MTP from the pending token (that forward is a
+    real AR step, nothing is wasted) with a fresh head cache — measured
+    2026-09-04: an unprimed head loses no acceptance worth a re-prime — and
+    is judged by the valve against the measured AR with 1.10 hysteresis.
+    """
+
+    depth: int
+    step_walls_ms: List[float] = field(default_factory=list)
+    last_step_t: float = 0.0
+    tokens_since_fallback: int = 0
+    next_probe_tokens: int = _NATIVE_MTP_REENTRY_FIRST_PROBE_TOKENS
+    backoff: int = 0
+    probes: int = 0
+    reentries: int = 0
+    fallbacks: int = 1
+    total_ar_tokens: int = 0
+
+    def record_step(self, now: float) -> None:
+        if self.last_step_t > 0.0:
+            self.step_walls_ms.append((now - self.last_step_t) * 1000.0)
+            if len(self.step_walls_ms) > _NATIVE_MTP_REENTRY_AR_WINDOW:
+                del self.step_walls_ms[0 : len(self.step_walls_ms) - _NATIVE_MTP_REENTRY_AR_WINDOW]
+        self.last_step_t = now
+        self.tokens_since_fallback += 1
+        self.total_ar_tokens += 1
+
+    def measured_ar_ms_per_tok(self) -> float:
+        if len(self.step_walls_ms) < 4:
+            return 0.0
+        ordered = sorted(self.step_walls_ms)
+        return ordered[len(ordered) // 2]
+
+    def probe_due(self) -> bool:
+        return (
+            self.tokens_since_fallback >= self.next_probe_tokens
+            and self.measured_ar_ms_per_tok() > 0.0
+        )
+
+    def probe_failed(self) -> None:
+        self.backoff += 1
+        self.next_probe_tokens = _NATIVE_MTP_REENTRY_FIRST_PROBE_TOKENS << self.backoff
+        self.tokens_since_fallback = 0
+        self.fallbacks += 1
+        self.step_walls_ms = []
+        self.last_step_t = 0.0
+
+
+def _native_mtp_reentry_enabled() -> bool:
+    return _native_mtp_env_flag(
+        True, "VMLINUX_NATIVE_MTP_AR_REENTRY", "VMLX_NATIVE_MTP_AR_REENTRY"
+    )
+
+
 def _native_mtp_maybe_ar_safety_fallback(
     request_id: str, state: MLLMNativeMTPState
 ) -> bool:
@@ -5639,21 +5715,49 @@ def _native_mtp_maybe_ar_safety_fallback(
     if state.ar_fallback_pending:
         return False
     cycles = int(state.stats.cycles)
+    tier = state.ar_tier
+    measured_ar = tier.measured_ar_ms_per_tok() if tier is not None else 0.0
+    baseline = measured_ar if measured_ar > 0.0 else float(
+        getattr(state, "ar_step_ms", 0.0) or 0.0
+    )
+    probing = bool(state.probe)
     trip = ar_safety_step(
         state.ar_safety,
         cycles=cycles,
         emitted=cycles + int(state.stats.accepted_tokens),
         now=time.perf_counter(),
-        seed_ar_ms=float(getattr(state, "ar_step_ms", 0.0) or 0.0),
+        seed_ar_ms=baseline,
         primed=str(state.stats.prompt_prime_source or "unprimed") != "unprimed",
+        # A probe must BEAT measured AR (hysteresis below 1.0) to keep MTP;
+        # a settled request only drops when it LOSES by the margin.
+        margin=(1.0 / _NATIVE_MTP_REENTRY_HYSTERESIS) if probing else None,
     )
+    if probing and trip is None and len(state.ar_safety.ring) > ar_safety_window_cycles():
+        # First full window of the probe beat measured AR: MTP stays.
+        state.probe = False
+        if tier is not None:
+            tier.reentries += 1
+        logger.info(
+            "MLLM MTP[%s] re-entry probe kept D%d (measured AR %.1fms/tok)",
+            request_id,
+            int(state.depth or 1),
+            baseline,
+        )
+        return False
     if trip is None:
         return False
     prior_depth = int(state.depth or 1)
     state.depth = 1
     state.ar_fallback_pending = True
     state.ar_fallback_reason = trip.reason(prior_depth)
-    logger.info("MLLM MTP[%s] %s", request_id, trip.log_text(prior_depth))
+    if probing and tier is not None:
+        tier.probe_failed()
+    logger.info(
+        "MLLM MTP[%s] %s%s",
+        request_id,
+        "re-entry probe lost: " if probing else "",
+        trip.log_text(prior_depth),
+    )
     return True
 
 
@@ -15032,7 +15136,6 @@ class MLLMBatchGenerator:
             raise RuntimeError("native MTP verify entered without pending drafts")
 
         sampler = self._make_request_sampler(request)
-        cycle_own_t0 = time.perf_counter()
         pending = getattr(state, "pending_verify", None)
         state.pending_verify = None
         if pending is None:
@@ -15161,7 +15264,6 @@ class MLLMBatchGenerator:
         # AR safety valve FIRST, every cycle, regardless of depth policy —
         # fixed depth disables depth adaptation but must still escape to AR
         # when MTP is measurably slower than a context-scaled AR baseline.
-        state.ar_safety.own_ms_total += (time.perf_counter() - cycle_own_t0) * 1000.0
         _native_mtp_maybe_ar_safety_fallback(request.request_id, state)
         _native_mtp_maybe_adapt_depth(request.request_id, state)
         _native_mtp_arm_value_cycle(state, now=_value_cycle_now)
@@ -15354,6 +15456,56 @@ class MLLMBatchGenerator:
             state.depth,
             state.stats,
         )
+
+    def _reseed_native_mtp_probe(
+        self, batch: Any, tier: "NativeMTPArTier"
+    ) -> bool:
+        """Re-enter native MTP from the AR tier as a PROBE.
+
+        Seeds exactly like the post-prefill seed, from the pending token in
+        ``batch.y`` (sampled, not yet fed nor emitted — the same shape as the
+        first token after prefill).  The head cache starts fresh; the valve
+        judges the probe's first full window against the tier's MEASURED AR
+        with hysteresis and either keeps MTP or falls back with backoff.
+        """
+        req = batch.requests[0]
+        if getattr(req, "_native_mtp_state", None) is not None:
+            return False
+        if not _native_mtp_reentry_enabled():
+            return False
+        measured = tier.measured_ar_ms_per_tok()
+        try:
+            seeded = self._seed_native_mtp_from_prefill(
+                req, batch.cache, batch.y, batch.logprobs
+            )
+        except Exception as exc:
+            logger.info(
+                "MLLM MTP[%s] re-entry probe seed failed: %s", req.request_id, exc
+            )
+            tier.probe_failed()
+            return False
+        if not seeded or getattr(req, "_native_mtp_state", None) is None:
+            tier.probe_failed()
+            return False
+        state = req._native_mtp_state
+        state.ar_tier = tier
+        state.probe = True
+        tier.probes += 1
+        try:
+            delattr(req, "_native_mtp_ar_tier")
+        except AttributeError:
+            pass
+        logger.info(
+            "MLLM MTP[%s] re-entry probe #%d at D%d after %d AR tokens "
+            "(measured AR %.1fms/tok, backoff %d)",
+            req.request_id,
+            tier.probes,
+            int(state.depth or 1),
+            tier.tokens_since_fallback,
+            measured,
+            tier.backoff,
+        )
+        return True
 
     def _next_native_mtp_token(
         self,
@@ -15672,6 +15824,13 @@ class MLLMBatchGenerator:
                     )
                     if hasattr(batch.requests[0], "_native_mtp_state"):
                         delattr(batch.requests[0], "_native_mtp_state")
+                    if _native_mtp_reentry_enabled():
+                        tier = mtp_state.ar_tier or NativeMTPArTier(
+                            depth=max(1, int(getattr(mtp_state, "depth_ceiling", 0) or 0)
+                                      or int(mtp_state.depth or 1))
+                        )
+                        tier.last_step_t = time.perf_counter()
+                        batch.requests[0]._native_mtp_ar_tier = tier
             except Exception as exc:
                 logger.error(
                     "MLLM native MTP decode failed for %s: %s",
@@ -15706,13 +15865,35 @@ class MLLMBatchGenerator:
                 ]
         else:
             y, logprobs = batch.y, batch.logprobs
-            _step_t0 = time.perf_counter() if _next_trace else 0.0
-            batch.y, batch.logprobs = self._step(y[:, None], batch.cache)
-            _step_s = time.perf_counter() - _step_t0 if _next_trace else 0.0
-            _async_t0 = time.perf_counter() if _next_trace else 0.0
-            _submit_decode_token_eval(batch.y, batch.cache)
-            _async_s = time.perf_counter() - _async_t0 if _next_trace else 0.0
-            _materialize_t0 = time.perf_counter() if _next_trace else 0.0
+            reentered = False
+            tier = (
+                getattr(batch.requests[0], "_native_mtp_ar_tier", None)
+                if len(batch.requests) == 1
+                else None
+            )
+            if tier is not None:
+                # AR tier: measure the true AR step wall and, when a probe is
+                # due, re-seed native MTP from the pending token (its seed
+                # forward IS this step's AR forward — nothing is wasted).
+                tier.record_step(time.perf_counter())
+                if tier.probe_due() and self._reseed_native_mtp_probe(batch, tier):
+                    mtp_state = batch.requests[0]._native_mtp_state
+                    token, lp = self._next_native_mtp_token(
+                        batch.requests[0], batch.cache, mtp_state
+                    )
+                    y = [token]
+                    logprobs = [lp]
+                    batch.y = mx.array([token], dtype=mx.uint32)
+                    batch.logprobs = [lp]
+                    reentered = True
+            if not reentered:
+                _step_t0 = time.perf_counter() if _next_trace else 0.0
+                batch.y, batch.logprobs = self._step(y[:, None], batch.cache)
+                _step_s = time.perf_counter() - _step_t0 if _next_trace else 0.0
+                _async_t0 = time.perf_counter() if _next_trace else 0.0
+                _submit_decode_token_eval(batch.y, batch.cache)
+                _async_s = time.perf_counter() - _async_t0 if _next_trace else 0.0
+                _materialize_t0 = time.perf_counter() if _next_trace else 0.0
 
         if hasattr(y, "tolist"):
             y = y.tolist()
@@ -15822,6 +16003,28 @@ class MLLMBatchGenerator:
                     )
                     try:
                         delattr(req, "_native_mtp_state")
+                    except AttributeError:
+                        pass
+                finish_tier = getattr(req, "_native_mtp_ar_tier", None) or (
+                    mtp_state_for_finish.ar_tier
+                    if mtp_state_for_finish is not None
+                    else None
+                )
+                if finish_tier is not None:
+                    logger.info(
+                        "MLLM MTP[%s] AR-tier summary: fallbacks=%d probes=%d "
+                        "reentries=%d ar_tokens=%d measured_ar=%.1fms/tok "
+                        "ended_in=%s",
+                        request_id,
+                        finish_tier.fallbacks,
+                        finish_tier.probes,
+                        finish_tier.reentries,
+                        finish_tier.total_ar_tokens,
+                        finish_tier.measured_ar_ms_per_tok(),
+                        "AR" if mtp_state_for_finish is None else f"D{int(mtp_state_for_finish.depth or 1)}",
+                    )
+                    try:
+                        delattr(req, "_native_mtp_ar_tier")
                     except AttributeError:
                         pass
                 # Extract cache NOW before batch.filter() invalidates indices.

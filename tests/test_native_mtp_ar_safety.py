@@ -47,38 +47,11 @@ def test_acceptance_collapse_trips_without_cycle_wall_change():
     assert v is not None
 
 
-def test_batched_join_is_judged_against_batched_ar():
-    # A partner joined: WALL ms/tok doubled (5 -> 10) but this request's OWN
-    # span did not (30 -> 30): AR rows share one step, so the baseline stays
-    # at the seed. 10 <= 12.5 holds at high acceptance...
-    v = verdict(cur_cycle_ms=30.0, delta_emitted=32, delta_wall_ms=320.0)
-    assert v is None
-    # ...and at ordinary acceptance (2 tok/cycle -> 30 wall ms/tok) MTP now
-    # genuinely loses to the ~10ms batched AR step -> trips. This is the
-    # measured batch-2 behaviour (30-40 ms/tok vs a ~27ms step).
-    v2 = verdict(cur_cycle_ms=30.0, delta_emitted=16, delta_wall_ms=480.0)
-    assert v2 is not None
-
-
-def test_thermal_or_context_own_growth_scales_baseline_both_ways():
-    # Own span 30 -> 45 (context/thermal): baseline 15 -> threshold 18.75;
-    # MTP at 17 ms/tok holds. Own span back to 24: baseline 8 -> 17 trips.
+def test_thermal_or_context_growth_scales_baseline_both_ways():
+    # Cycle wall 30 -> 45 (context/thermal): baseline 15 -> threshold 18.75;
+    # MTP at 17 ms/tok holds. Cycle wall back to 24: baseline 8 -> 17 trips.
     assert verdict(cur_cycle_ms=45.0, delta_emitted=16, delta_wall_ms=272.0) is None
     assert verdict(cur_cycle_ms=24.0, delta_emitted=16, delta_wall_ms=272.0) is not None
-
-
-def test_long_context_is_conservative_not_lax():
-    # Context grew: AR went 10 -> 20 (absolute +10), cycle wall 30 -> 40
-    # (same absolute +10, smaller ratio). Scale = 1.33 -> baseline 13.3,
-    # below true AR (20): the valve can demote EARLY (MTP at 18 trips even
-    # though it beats true AR) but never LATE (MTP at 30 > 20 trips too).
-    early = verdict(cur_cycle_ms=40.0, delta_emitted=16, delta_wall_ms=288.0)
-    assert early is not None
-    late = verdict(cur_cycle_ms=40.0, delta_emitted=16, delta_wall_ms=480.0)
-    assert late is not None
-    # And genuinely fast MTP at long context holds.
-    fast = verdict(cur_cycle_ms=40.0, delta_emitted=32, delta_wall_ms=320.0)
-    assert fast is None
 
 
 def test_single_stall_cycle_does_not_trip():
@@ -98,16 +71,14 @@ def test_guards_return_none():
     assert verdict(delta_emitted=16, delta_wall_ms=0.0) is None
 
 
-def _drive(st, *, cycle_ms, tok_per_cycle, own_ms=None, seed_ar_ms=10.0,
+def _drive(st, *, cycle_ms, tok_per_cycle, seed_ar_ms=10.0,
            primed=True, start_cycle=1, end_cycle=60, t0=0.0, emitted0=0):
     """Feed the governor a synthetic run; returns (trip_cycle, trip, t, emitted).
-    ``cycle_ms`` is the wall between cycles; ``own_ms`` this request's own
-    span per cycle (defaults to the wall, i.e. a solo request)."""
+    ``cycle_ms`` is the wall between cycles."""
     t = t0
     emitted = emitted0
     for cyc in range(start_cycle, end_cycle):
         t += cycle_ms(cyc) / 1000.0
-        st.own_ms_total += (own_ms(cyc) if own_ms else cycle_ms(cyc))
         emitted += tok_per_cycle(cyc)
         trip = ar_safety_step(st, cycles=cyc, emitted=emitted, now=t,
                               seed_ar_ms=seed_ar_ms, primed=primed)
@@ -141,24 +112,6 @@ def test_anchor_is_warmup_median_of_own_span(monkeypatch):
     assert c is None, (c, trip and trip.log_text(3))
 
 
-def test_partner_join_trips_at_ordinary_acceptance_holds_at_high(monkeypatch):
-    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY_WARMUP", raising=False)
-    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY_WINDOW", raising=False)
-    # Solo 30ms/cycle then a partner joins at cycle 30: wall 60ms/cycle,
-    # own span still 30. At 2.4 tok/cycle -> 25 wall ms/tok vs 12.5 -> trips
-    # soon after the join (batched AR at ~10ms wins).
-    st = ArSafetyState(prompt_tokens=50)
-    c, trip, *_ = _drive(st, cycle_ms=lambda c: 30.0 if c < 30 else 60.0,
-                         own_ms=lambda c: 30.0,
-                         tok_per_cycle=lambda c: 3 if c % 5 else 1, end_cycle=80)
-    assert c is not None and 30 <= c <= 40, (c, trip and trip.log_text(3))
-    # At 6 tok/cycle (count-like), 10 wall ms/tok <= 12.5 -> stays MTP.
-    st2 = ArSafetyState(prompt_tokens=50)
-    c2, *_ = _drive(st2, cycle_ms=lambda c: 30.0 if c < 30 else 60.0,
-                    own_ms=lambda c: 30.0, tok_per_cycle=lambda c: 6, end_cycle=80)
-    assert c2 is None
-
-
 def test_acceptance_collapse_trips_solo(monkeypatch):
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY_WARMUP", raising=False)
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY_WINDOW", raising=False)
@@ -190,7 +143,7 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     state.stats.cycles = 40
     state.stats.accepted_tokens = 0
     # Full ring, 1 tok/cycle at 20ms/cycle = 20 ms/tok, flat cycle wall.
-    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020, 20.0 * i) for i in range(9)]
+    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]
     assert m._native_mtp_maybe_ar_safety_fallback("req-fixed", state) is True
     assert state.ar_fallback_pending is True
     assert state.depth == 1
@@ -204,7 +157,7 @@ def test_disabled_by_kill_switch(monkeypatch):
     state = _vlm_state(m)
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
-    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020, 20.0 * i) for i in range(9)]
+    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
     assert state.ar_fallback_pending is False
 
@@ -224,7 +177,7 @@ def test_text_lane_trips_under_fixed_policy(monkeypatch):
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.draft_tokens_accepted = 0
-    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020, 20.0 * i) for i in range(9)]
+    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]
     assert tl._text_mtp_maybe_cost_fallback("req", state, now=time.perf_counter()) is False
     assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is True
     assert state.ar_fallback_pending is True
@@ -244,6 +197,91 @@ def test_text_lane_fast_window_holds(monkeypatch):
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.draft_tokens_accepted = 40
-    state.ar_safety.ring = [(31 + i, 2 * (31 + i), base_t + i * 0.010, 20.0 * i) for i in range(9)]
+    state.ar_safety.ring = [(31 + i, 2 * (31 + i), base_t + i * 0.010) for i in range(9)]
     assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is False
     assert state.ar_fallback_pending is False
+
+
+def test_probe_margin_requires_beating_measured_ar():
+    # A re-entry probe is judged with margin 1/1.10: MTP at 9.5 ms/tok vs
+    # measured AR 10 does NOT beat it by the hysteresis -> trip (probe lost);
+    # at 8.5 it does -> hold (probe kept).
+    st = ArSafetyState(prompt_tokens=50)
+    c, *_ = _drive(st, cycle_ms=lambda c: 19.0, tok_per_cycle=lambda c: 2,
+                   seed_ar_ms=10.0, primed=False)
+    assert c is None  # 9.5 <= 12.5 at the default margin: a settled request holds
+    st2 = ArSafetyState(prompt_tokens=50)
+    t = 0.0; emitted = 0; tripped = None
+    for cyc in range(1, 60):
+        t += 0.019; emitted += 2
+        trip = ar_safety_step(st2, cycles=cyc, emitted=emitted, now=t,
+                              seed_ar_ms=10.0, primed=False, margin=1 / 1.10)
+        if trip is not None:
+            tripped = cyc; break
+    assert tripped == 24  # unprimed warmup 16 + window 8
+    st3 = ArSafetyState(prompt_tokens=50)
+    t = 0.0; emitted = 0; tripped = None
+    for cyc in range(1, 60):
+        t += 0.017; emitted += 2
+        trip = ar_safety_step(st3, cycles=cyc, emitted=emitted, now=t,
+                              seed_ar_ms=10.0, primed=False, margin=1 / 1.10)
+        if trip is not None:
+            tripped = cyc; break
+    assert tripped is None
+
+
+def test_ar_tier_backoff_and_measurement():
+    from vmlx_engine.mllm_batch_generator import NativeMTPArTier
+
+    tier = NativeMTPArTier(depth=3)
+    t = 100.0
+    for _ in range(15):
+        tier.record_step(t); t += 0.025
+    assert tier.probe_due() is False  # 15 < 16 tokens
+    tier.record_step(t); t += 0.025
+    assert tier.probe_due() is True
+    assert abs(tier.measured_ar_ms_per_tok() - 25.0) < 1e-6
+    tier.probe_failed()
+    assert tier.next_probe_tokens == 32 and tier.backoff == 1 and tier.fallbacks == 2
+    assert tier.probe_due() is False
+    tier.probe_failed()
+    assert tier.next_probe_tokens == 64
+
+
+def test_probe_kept_switches_baseline_to_measured_ar(monkeypatch):
+    # A probe that beats measured AR is kept: probe flag clears, reentries++.
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = _vlm_state(m)
+    tier = m.NativeMTPArTier(depth=3)
+    t0 = time.perf_counter() - 2.0
+    for i in range(16):
+        tier.record_step(t0 + i * 0.025)  # measured AR 25 ms/tok
+    state.ar_tier = tier
+    state.probe = True
+    state.stats.prompt_prime_source = "unprimed"
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 40
+    state.stats.accepted_tokens = 80  # 3 tok/cycle
+    state.ar_safety.anchor_cycle_ms = 40.0
+    # 40ms cycles, 3 tok/cycle = 13.3 ms/tok < 25/1.10 -> kept
+    state.ar_safety.ring = [(31 + i, 3 * (31 + i), base_t + i * 0.040) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.probe is False
+    assert tier.reentries == 1
+    # A probe that LOSES: 1 tok/cycle at 40ms = 40 ms/tok -> falls back, backoff.
+    state2 = _vlm_state(m)
+    tier2 = m.NativeMTPArTier(depth=3)
+    for i in range(16):
+        tier2.record_step(t0 + i * 0.025)
+    state2.ar_tier = tier2
+    state2.probe = True
+    state2.stats.prompt_prime_source = "unprimed"
+    state2.stats.cycles = 40
+    state2.stats.accepted_tokens = 0
+    state2.ar_safety.anchor_cycle_ms = 40.0
+    state2.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.040) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req2", state2) is True
+    assert state2.ar_fallback_pending is True
+    assert tier2.backoff == 1 and tier2.next_probe_tokens == 32

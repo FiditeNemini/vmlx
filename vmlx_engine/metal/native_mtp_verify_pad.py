@@ -21,6 +21,16 @@ Default OFF. History: the dflash rows==4 kernel won an isolated projection
 microbenchmark but lost the complete lazy Qwen graph, so this ships gated
 behind ``VMLX_MTP_VERIFY_PAD=1`` and stays off until a full-model A/B on the
 exact bundle proves it out (house rule: isolated wins die on the full graph).
+
+MEASURED RESULT (2026-09-03, Qwen3.8-Flash-Next-JANG_4S, fixed D3, G17s,
+MLX 0.32.2, 4 probes median): this dispatcher LOSES on the full graph —
+count 72.4 -> 45.2 tok/s, code 72.7 -> 43.8 (~-38%), AND acceptance drops
+73.0% -> 65.1% because crossing qmv -> qmm_t_nax changes the verify logits
+(TF32-class), which shifts which drafts are accepted. Zero-pad-to-tile +
+stock quantized_matmul is therefore the WRONG mechanism; the verify-NAX-tile
+idea needs a real fused kernel that applies scales on the cooperative
+destination (the D-lane research item), not pad-and-stock-matmul. Kept
+default-off as a documented dead end + the row-independence unit tests.
 """
 
 from __future__ import annotations

@@ -318,6 +318,14 @@ def _capture_boundary(ctx: _PrimeContext, hidden: Any, start: int, end: int) -> 
         # vMLX stores the predecessor's exact N-1 terminal cache and can
         # restore that non-block-aligned boundary on an identical request.
         boundary = max(boundary, terminal_boundary)
+    # The backbone prefix cache never holds more than the N-1 terminal
+    # boundary of this prompt, so a sidecar keyed past it can never be
+    # restored.  Measured 2026-09-04 (Flash-Next 4S, 14-turn chat): a prompt
+    # of exactly 5952 tokens (93 x 64) published its sidecar at 5952 while
+    # every later turn restored the prefix at 5951; priming was lost for the
+    # rest of the conversation and MTP ran unprimed (acceptance 77-84% ->
+    # 44-63%, decode 45-60 -> 25-35 tok/s).
+    boundary = min(boundary, terminal_boundary)
     if boundary <= start or boundary > len(ctx.prompt_tokens) or boundary <= 1:
         return
     prior = ctx.boundary_candidate

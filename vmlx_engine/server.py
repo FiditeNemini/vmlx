@@ -29235,7 +29235,11 @@ Examples:
     if getattr(args, "disable_native_mtp", False):
         os.environ["VMLINUX_NATIVE_MTP"] = "0"
     if getattr(args, "native_mtp_depth", None) is not None:
-        os.environ["VMLINUX_NATIVE_MTP_DEPTH"] = str(max(1, min(3, int(args.native_mtp_depth))))
+        from .native_mtp import native_mtp_max_depth
+
+        os.environ["VMLINUX_NATIVE_MTP_DEPTH"] = str(
+            max(1, min(native_mtp_max_depth(), int(args.native_mtp_depth)))
+        )
     if getattr(args, "native_mtp_depth_policy", None) is not None:
         os.environ["VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH"] = (
             "0" if args.native_mtp_depth_policy == "fixed" else "1"

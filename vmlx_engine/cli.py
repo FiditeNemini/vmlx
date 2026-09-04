@@ -1656,8 +1656,14 @@ def serve_command(args):
         os.environ.pop("VMLINUX_NATIVE_MTP_DEPTH", None)
         os.environ.pop("VMLX_NATIVE_MTP_DEPTH", None)
     if getattr(args, "native_mtp_depth", None) is not None:
-        if args.native_mtp_depth < 1 or args.native_mtp_depth > 3:
-            print(f"Error: --native-mtp-depth must be between 1 and 3, got {args.native_mtp_depth}")
+        from .native_mtp import native_mtp_max_depth
+
+        _mtp_depth_ceiling = native_mtp_max_depth()
+        if args.native_mtp_depth < 1 or args.native_mtp_depth > _mtp_depth_ceiling:
+            print(
+                f"Error: --native-mtp-depth must be between 1 and "
+                f"{_mtp_depth_ceiling}, got {args.native_mtp_depth}"
+            )
             sys.exit(1)
         os.environ["VMLINUX_NATIVE_MTP_DEPTH"] = str(args.native_mtp_depth)
     if getattr(args, "native_mtp_depth_policy", None) is not None:

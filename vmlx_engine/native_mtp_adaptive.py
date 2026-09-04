@@ -13,6 +13,8 @@ still become output only after the main model accepts them.
 
 from __future__ import annotations
 
+from .native_mtp import native_mtp_max_depth
+
 from dataclasses import dataclass, field
 
 
@@ -36,16 +38,19 @@ class NativeMTPAdaptiveValueState:
     """Mutable, request-local measurements and probe lifecycle."""
 
     samples_by_depth: list[list[NativeMTPDepthCycleSample]] = field(
-        default_factory=lambda: [[], [], []]
+        default_factory=lambda: [[] for _ in range(native_mtp_max_depth())]
     )
-    last_sample_cycle: list[int] = field(default_factory=lambda: [0, 0, 0])
-    last_probe_cycle: list[int] = field(default_factory=lambda: [0, 0, 0])
+    last_sample_cycle: list[int] = field(
+        default_factory=lambda: [0] * native_mtp_max_depth())
+    last_probe_cycle: list[int] = field(
+        default_factory=lambda: [0] * native_mtp_max_depth())
     # Consecutive wall-value losses by probe TARGET. A stable winning depth
     # must not pay the same known-loser experiment every fixed interval for
     # the rest of a long response. Each loss doubles that target's re-probe
     # interval (capped below); a later win or a safety-driven phase change
     # resets the debt.
-    probe_revert_counts: list[int] = field(default_factory=lambda: [0, 0, 0])
+    probe_revert_counts: list[int] = field(
+        default_factory=lambda: [0] * native_mtp_max_depth())
     active_probe_origin: int = 0
     active_probe_target: int = 0
     last_change_cycle: int = 0
@@ -55,7 +60,7 @@ class NativeMTPAdaptiveValueState:
 
 
 def _bounded_depth(depth: int) -> int:
-    return max(1, min(3, int(depth or 1)))
+    return max(1, min(native_mtp_max_depth(), int(depth or 1)))
 
 
 def add_depth_cycle_sample(
@@ -201,7 +206,7 @@ def note_forced_depth_change(
     state.active_probe_target = 0
     # A safety gate is evidence that the workload phase changed. Do not carry
     # old wall-value loser backoff into the new phase.
-    state.probe_revert_counts[:] = [0, 0, 0]
+    state.probe_revert_counts[:] = [0] * native_mtp_max_depth()
     if target == origin:
         return
     state.last_change_cycle = int(cycle)
@@ -237,7 +242,7 @@ def choose_depth_by_value(
     """
 
     current = _bounded_depth(current_depth)
-    ceiling = max(1, min(3, int(depth_ceiling or 1)))
+    ceiling = max(1, min(native_mtp_max_depth(), int(depth_ceiling or 1)))
     cycle = max(0, int(cycle))
     minimum_samples = max(2, int(minimum_samples))
     cooldown_cycles = max(minimum_samples, int(cooldown_cycles))
@@ -382,7 +387,7 @@ def adaptive_value_snapshot(
     values: dict[str, float | None] = {}
     conditional: dict[str, float | None] = {}
     sample_counts: dict[str, int] = {}
-    for depth in (1, 2, 3):
+    for depth in range(1, native_mtp_max_depth() + 1):
         label = f"d{depth}"
         value = depth_value_tps(
             state, depth, minimum_samples=minimum_samples
@@ -404,7 +409,7 @@ def adaptive_value_snapshot(
         },
         "probe_revert_counts": {
             f"d{depth}": int(state.probe_revert_counts[depth - 1] or 0)
-            for depth in (1, 2, 3)
+            for depth in range(1, native_mtp_max_depth() + 1)
         },
         "transitions": list(state.transitions),
     }

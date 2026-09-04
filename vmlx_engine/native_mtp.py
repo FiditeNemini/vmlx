@@ -19,6 +19,31 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Native-MTP depth ceiling. The product default is 3 and does NOT change: this
+# is a MEASUREMENT lever so a depth sweep can probe D4/D5 on bundles+lanes that
+# can verify them (VLM lane with partial rollback), never a shipped raise.
+# Correctness gates still apply per lane — the text lane hard-caps hybrids at
+# D1 and qwen4_exp sharded-GDN rollback is not implemented, so raising this
+# does not by itself make those lanes run deeper.
+_NATIVE_MTP_DEPTH_HARD_CEILING = 8
+_NATIVE_MTP_DEFAULT_MAX_DEPTH = 3
+
+
+def native_mtp_max_depth() -> int:
+    """Resolve the configured native-MTP depth ceiling (default 3)."""
+    raw = os.environ.get(
+        "VMLINUX_NATIVE_MTP_MAX_DEPTH",
+        os.environ.get("VMLX_NATIVE_MTP_MAX_DEPTH", ""),
+    ).strip()
+    if not raw:
+        return _NATIVE_MTP_DEFAULT_MAX_DEPTH
+    try:
+        value = int(raw)
+    except ValueError:
+        return _NATIVE_MTP_DEFAULT_MAX_DEPTH
+    return max(1, min(_NATIVE_MTP_DEPTH_HARD_CEILING, value))
+
+
 _DISABLE_ENV_VALUES = {"0", "false", "FALSE", "no", "NO", "off", "OFF"}
 
 _FAMILY_ALIAS = {
@@ -240,7 +265,7 @@ def _coerce_native_mtp_depth(raw: Any) -> int | None:
         value = int(raw)
     except (TypeError, ValueError):
         return None
-    return max(1, min(3, value))
+    return max(1, min(native_mtp_max_depth(), value))
 
 
 def _positive_finite_number(raw: Any) -> float | None:
@@ -293,7 +318,7 @@ def _validated_flat_tuning_depth(tuning: dict[str, Any]) -> int | None:
     # actually supports and measured.
     raw_ceiling = tuning.get("measured_depth_ceiling", tuning.get("depth_ceiling", 3))
     try:
-        measured_ceiling = max(1, min(3, int(raw_ceiling)))
+        measured_ceiling = max(1, min(native_mtp_max_depth(), int(raw_ceiling)))
     except (TypeError, ValueError):
         return None
     required_depths = set(range(1, measured_ceiling + 1))
@@ -775,7 +800,7 @@ def native_mtp_effective_depth(
         depth = 3
         source = "default"
     if source != "default":
-        return max(1, min(3, depth)), source
+        return max(1, min(native_mtp_max_depth(), depth)), source
 
     tuned_path = model_path or _ACTIVE_NATIVE_MTP_MODEL_PATH
     if not _env_disabled("VMLINUX_NATIVE_MTP_USE_TUNING", "VMLX_NATIVE_MTP_USE_TUNING"):
@@ -803,7 +828,7 @@ def native_mtp_effective_depth(
                 _v3_mtp.get("recommended_num_drafts")
             )
             if not _v3_invalid and _v3_drafts:
-                return max(1, min(3, _v3_drafts)), "bundle:recommended_num_drafts"
+                return max(1, min(native_mtp_max_depth(), _v3_drafts)), "bundle:recommended_num_drafts"
     except Exception:
         pass
 
@@ -816,7 +841,7 @@ def native_mtp_effective_depth(
         family = None
     if family == "hy_v3":
         return 1, "family_default:hy_v3"
-    return max(1, min(3, depth)), source
+    return max(1, min(native_mtp_max_depth(), depth)), source
 
 
 def inspect_native_mtp_bundle(bundle_path: str | Path | None) -> dict[str, Any]:

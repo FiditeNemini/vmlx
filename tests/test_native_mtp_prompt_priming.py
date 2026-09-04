@@ -119,7 +119,10 @@ def test_scheduler_arms_dense_qwen35_only_with_measured_opt_in(monkeypatch):
     assert not capture_requested(generator.language_model)
 
 
-def test_cold_prompt_is_folded_and_published_at_full_block_boundary():
+def test_cold_prompt_is_folded_and_published_at_terminal_boundary():
+    # The prefix cache restores a predecessor at its N-1 terminal even when the
+    # prompt length is block-aligned (live: 5952-token prompt restored at 5951),
+    # so the sidecar is keyed at N-1 = 3, not the full block 4.
     host = _Host()
     sidecar = _SidecarStore()
     assert not prepare_prompt(
@@ -158,8 +161,8 @@ def test_cold_prompt_is_folded_and_published_at_full_block_boundary():
     assert mtp_cache[0].offset == 4
     assert host.calls[-1] == [5]
     assert sidecar.snapshot is not None
-    assert sidecar.snapshot.boundary_tokens == 4
-    assert sidecar.snapshot.mtp_cache[0].offset == 3
+    assert sidecar.snapshot.boundary_tokens == 3
+    assert sidecar.snapshot.mtp_cache[0].offset == 2
 
 
 def test_warm_sidecar_continues_only_the_uncached_tail():
@@ -183,21 +186,22 @@ def test_warm_sidecar_continues_only_the_uncached_tail():
     assert take_primed(source, source_backbone, mx.array([5])) is not None
 
     warm = _Host()
+    # The predecessor's prefix is restored at its N-1 terminal (3 tokens).
     assert prepare_prompt(
         warm,
         request_id="warm",
         prompt_tokens=[1, 2, 3, 4, 6, 7],
-        cached_tokens=4,
+        cached_tokens=3,
         prefix_cache=sidecar,
     )
     backbone = [_Cache(offset=6)]
     capture_prefill(
         warm,
-        mx.array([[6, 7]]),
-        mx.ones((1, 2, 2)),
+        mx.array([[4, 6, 7]]),
+        mx.ones((1, 3, 2)),
         backbone,
     )
-    assert warm.calls == [[6, 7]]
+    assert warm.calls == [[4, 6, 7]]
     backbone[0].offset = 7
     primed = take_primed(warm, backbone, mx.array([8]))
     assert primed is not None

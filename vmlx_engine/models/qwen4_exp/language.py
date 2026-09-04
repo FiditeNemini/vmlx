@@ -1719,8 +1719,14 @@ class LanguageModel(nn.Module):
         # every later launch (and other agents reading the bundle) honors
         # the same verdict without re-deriving. An existing stamp whose
         # recorded source layout still matches is authoritative.
-        from ...native_mtp import native_mtp_active_model_path
-        from ...native_mtp_proposal_stamp import resolve_proposal_head_plan
+        # Absolute imports only: this module is also executed under the
+        # mlx_vlm package namespace at load, where a relative ...native_mtp
+        # resolves to mlx_vlm.native_mtp and aborts server startup
+        # (ModuleNotFoundError, found live on Flash-Next 4S 2026-09-03).
+        from vmlx_engine.native_mtp import native_mtp_active_model_path
+        from vmlx_engine.native_mtp_proposal_stamp import (
+            resolve_proposal_head_plan,
+        )
 
         plan = resolve_proposal_head_plan(
             native_mtp_active_model_path(),

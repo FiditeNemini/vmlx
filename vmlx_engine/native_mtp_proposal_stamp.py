@@ -76,6 +76,18 @@ def read_proposal_stamp(bundle_path: str | Path | None) -> Optional[dict[str, An
         return None
     if not isinstance(data.get("eligible"), bool):
         return None
+    if data["eligible"]:
+        # An eligible stamp must carry a sane proposal width, or honoring it
+        # would raise on the fast path and turn an advisory sidecar into a
+        # launch failure. Malformed -> treat the whole stamp as absent.
+        bits = data.get("proposal_bits", 4)
+        if not isinstance(bits, int) or isinstance(bits, bool) or bits < 1:
+            logger.warning(
+                "Ignoring %s with malformed proposal_bits=%r",
+                STAMP_FILENAME,
+                bits,
+            )
+            return None
     return data
 
 

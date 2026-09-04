@@ -283,3 +283,27 @@ def test_standalone_jang_config_sidecar_counts_as_calibrated(tmp_path):
     plan = resolve_proposal_head_plan(tmp_path, Q4_G128, family="qwen3_5")
     assert plan["reason"] == "native_head_already_low_bit"
     assert plan["stamped"] is True
+
+
+def test_malformed_proposal_bits_treated_as_absent_and_healed(tmp_path):
+    # A corrupted eligible stamp must never raise on the honor fast path —
+    # it is treated as absent, re-derived from the loaded head, and rewritten.
+    _write_config(tmp_path, Q8_G64)
+    (tmp_path / STAMP_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "family": "qwen4_exp",
+                "source": Q8_G64,
+                "eligible": True,
+                "proposal_bits": "q4",
+            }
+        )
+    )
+    assert read_proposal_stamp(tmp_path) is None
+    plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
+    assert plan["eligible"] is True
+    assert plan["proposal_bits"] == 4
+    assert plan["stamp_source"] == "new"
+    healed = json.loads((tmp_path / STAMP_FILENAME).read_text())
+    assert healed["proposal_bits"] == 4

@@ -118,3 +118,64 @@ describe("mtp-component-updater (one-time dated warning)", () => {
     expect(sent).toHaveLength(0);
   });
 });
+
+describe("bundleHasFixedMtpComponent (conformance gate)", () => {
+  const { mkdtempSync, writeFileSync, mkdirSync } = require("node:fs");
+  const { tmpdir } = require("node:os");
+  const { join: j } = require("node:path");
+
+  beforeEach(() => {
+    settings.clear();
+    vi.clearAllMocks();
+    detectMock.mockReturnValue({ family: "qwen4-exp" });
+  });
+
+  function bundle(opts: { mtpKeys?: boolean; sidecar?: boolean; stamp?: boolean }) {
+    const dir = mkdtempSync(j(tmpdir(), "JANGQ-AI-"));
+    writeFileSync(
+      j(dir, "model.safetensors.index.json"),
+      JSON.stringify({
+        weight_map: opts.mtpKeys
+          ? { "mtp.fc.weight": "model-00023.safetensors", "lm_head.weight": "model-00023.safetensors" }
+          : { "lm_head.weight": "model-00023.safetensors" },
+      }),
+    );
+    if (opts.sidecar) {
+      mkdirSync(j(dir, "mtp_draft"));
+      writeFileSync(j(dir, "mtp_draft", "vmlx_mtp_proposal_head.safetensors"), "x");
+    }
+    if (opts.stamp) {
+      writeFileSync(
+        j(dir, "vmlx_mtp_proposal_head.json"),
+        JSON.stringify({
+          draft_artifact: { file: "mtp_draft/vmlx_mtp_proposal_head.safetensors" },
+        }),
+      );
+    }
+    return dir;
+  }
+
+  it("conformant bundle (fix present) never warns", async () => {
+    const dir = bundle({ mtpKeys: true, sidecar: true, stamp: true });
+    expect(__test.bundleHasFixedMtpComponent(dir)).toBe(true);
+    const { win, sent } = fakeWindow();
+    checkMtpComponentUpdateOnLoad(() => win as never, dir);
+    await flush();
+    expect(sent).toHaveLength(0);
+  });
+
+  it("older/broken layouts warn: missing sidecar, missing stamp, no indexed mtp keys", async () => {
+    for (const opts of [
+      { mtpKeys: true, sidecar: false, stamp: true },
+      { mtpKeys: true, sidecar: true, stamp: false },
+      { mtpKeys: false, sidecar: true, stamp: true },
+    ]) {
+      const dir = bundle(opts);
+      expect(__test.bundleHasFixedMtpComponent(dir)).toBe(false);
+      const { win, sent } = fakeWindow();
+      checkMtpComponentUpdateOnLoad(() => win as never, dir);
+      await flush();
+      expect(sent).toHaveLength(1);
+    }
+  });
+});

@@ -2224,5 +2224,12 @@
     "allChecksPassed": "All {{count}} checks passed",
     "summaryDetail": "{{passed}} passed, {{failed}} failed, {{warnings}} warnings",
     "checking": "checking..."
+  },
+  "mtpFix": {
+    "title": "Model fix available",
+    "body": "{model} was updated on {date} with a fix for faster MTP (multi-token prediction). Your copy is missing this fix — please redownload the entire model. The download runs in the Download tab and your current copy keeps working until it completes.",
+    "skip": "Skip",
+    "download": "Download",
+    "starting": "Starting…"
   }
 }

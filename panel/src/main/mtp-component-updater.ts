@@ -11,6 +11,8 @@
 // future fix shows the warning once more.
 
 import { BrowserWindow } from 'electron'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 import { db } from './database'
 import { detectModelConfigFromDir } from './model-config-registry'
@@ -54,10 +56,41 @@ function repoIdFromModelPath(modelPath: string): string | null {
   return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`
 }
 
+// The fixed bundles' contract, checked locally with three read-only looks:
+// mtp.* keys present in the weight index, the calibrated proposal-head
+// sidecar under mtp_draft/, and a stamp whose draft_artifact points at it.
+// A bundle missing ANY of these is an older/broken MTP layout — the user
+// must redownload the entire model to utilize MTP. A conformant bundle
+// never warns. This inspects files only; it changes nothing about how MTP
+// is detected, loaded, or used.
+function bundleHasFixedMtpComponent(modelPath: string): boolean {
+  try {
+    const index = JSON.parse(
+      readFileSync(join(modelPath, 'model.safetensors.index.json'), 'utf8'),
+    ) as { weight_map?: Record<string, string> }
+    const hasMtpKeys = Object.keys(index.weight_map ?? {}).some((k) =>
+      k.startsWith('mtp.'),
+    )
+    if (!hasMtpKeys) return false
+
+    const sidecarRel = 'mtp_draft/vmlx_mtp_proposal_head.safetensors'
+    if (!existsSync(join(modelPath, sidecarRel))) return false
+
+    const stamp = JSON.parse(
+      readFileSync(join(modelPath, 'vmlx_mtp_proposal_head.json'), 'utf8'),
+    ) as { draft_artifact?: { file?: string } }
+    return stamp.draft_artifact?.file === sidecarRel
+  } catch {
+    return false
+  }
+}
+
 /**
- * Fire-and-forget: when the user loads a Flash-Next JANG model, show the
- * one-time dated redownload warning unless it was already dismissed for
- * this fix date. Never throws; never blocks or delays the load.
+ * Fire-and-forget: when the user loads a Flash-Next JANG model whose bundle
+ * is an older/broken MTP layout (missing the fixed component), show the
+ * one-time dated redownload warning unless already dismissed for this fix
+ * date. A bundle that carries the fix never warns. Never throws; never
+ * blocks or delays the load.
  */
 export function checkMtpComponentUpdateOnLoad(
   getWindow: () => BrowserWindow | null,
@@ -67,6 +100,7 @@ export function checkMtpComponentUpdateOnLoad(
   void (async () => {
     try {
       if (!modelPath || !isFlashNextQwen4Exp(modelPath)) return
+      if (bundleHasFixedMtpComponent(modelPath)) return
       const repoId = repoIdFromModelPath(modelPath)
       if (!repoId) return
       const runKey = `${repoId}@${MTP_FIX_DATE}`
@@ -109,4 +143,4 @@ export function dismissMtpComponentUpdate(
 }
 
 // Exposed for tests.
-export const __test = { repoIdFromModelPath }
+export const __test = { repoIdFromModelPath, bundleHasFixedMtpComponent }

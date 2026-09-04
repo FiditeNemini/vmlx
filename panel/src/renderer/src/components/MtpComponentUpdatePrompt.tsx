@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useTranslation } from '../i18n'
 import { Modal } from './ui/Modal'
 
 interface MtpComponentUpdate {
@@ -17,6 +18,7 @@ interface MtpComponentUpdate {
  * (a bumped date) prompts once more.
  */
 export function MtpComponentUpdatePrompt() {
+  const { t } = useTranslation()
   const [update, setUpdate] = useState<MtpComponentUpdate | null>(null)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -57,15 +59,13 @@ export function MtpComponentUpdatePrompt() {
   }
 
   return (
-    <Modal title="Model fix available" onClose={persistAndClose}>
+    <Modal title={t('mtpFix.title')} onClose={persistAndClose}>
       <div className="space-y-4 text-sm">
         <p>
-          <strong>{modelName}</strong> was updated on{' '}
-          <strong>{update.remoteFingerprint}</strong> with a fix for faster
-          MTP (multi-token prediction). If you downloaded it before that
-          date, please redownload the entire model. The download runs in the
-          Download tab and your current copy keeps working until it
-          completes.
+          {t('mtpFix.body', {
+            model: modelName,
+            date: update.remoteFingerprint,
+          })}
         </p>
         {error && <p className="text-destructive text-xs">{error}</p>}
         <div className="flex items-center justify-end gap-2">
@@ -73,14 +73,14 @@ export function MtpComponentUpdatePrompt() {
             className="px-3 py-1.5 rounded text-xs border border-border hover:bg-accent"
             onClick={persistAndClose}
           >
-            Skip
+            {t('mtpFix.skip')}
           </button>
           <button
             className="px-3 py-1.5 rounded text-xs bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
             disabled={starting}
             onClick={handleDownload}
           >
-            {starting ? 'Starting…' : 'Download'}
+            {starting ? t('mtpFix.starting') : t('mtpFix.download')}
           </button>
         </div>
       </div>

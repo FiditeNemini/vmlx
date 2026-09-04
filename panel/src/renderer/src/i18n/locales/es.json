@@ -2224,5 +2224,12 @@
     "allChecksPassed": "Se superaron las {{count}} verificaciones",
     "summaryDetail": "{{passed}} superadas, {{failed}} fallidas, {{warnings}} advertencias",
     "checking": "verificando..."
+  },
+  "mtpFix": {
+    "title": "Corrección del modelo disponible",
+    "body": "{model} se actualizó el {date} con una corrección para un MTP (predicción multi-token) más rápido. A tu copia le falta esta corrección: vuelve a descargar el modelo completo. La descarga se ejecuta en la pestaña Descargas y tu copia actual sigue funcionando hasta que termine.",
+    "skip": "Omitir",
+    "download": "Descargar",
+    "starting": "Iniciando…"
   }
 }

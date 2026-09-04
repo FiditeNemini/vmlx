@@ -2224,5 +2224,12 @@
     "allChecksPassed": "全部 {{count}} 项检查通过",
     "summaryDetail": "{{passed}} 项通过,{{failed}} 项失败,{{warnings}} 项警告",
     "checking": "检查中..."
+  },
+  "mtpFix": {
+    "title": "模型修复可用",
+    "body": "{model} 已于 {date} 更新，包含更快 MTP（多 token 预测）的修复。您的副本缺少此修复——请重新下载整个模型。下载在“下载”标签页中进行，完成之前您当前的副本仍可正常使用。",
+    "skip": "跳过",
+    "download": "下载",
+    "starting": "正在开始…"
   }
 }

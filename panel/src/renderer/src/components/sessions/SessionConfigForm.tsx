@@ -181,7 +181,7 @@ export const DEFAULT_CONFIG: SessionConfig = {
   numDraftTokens: 3,
   nativeMtpMode: 'auto',
   nativeMtpDepth: 3,
-  nativeMtpDepthOverride: false,
+  nativeMtpDepthOverride: true,
   smelt: false,
   smeltExperts: 50,
   flashMoe: false,

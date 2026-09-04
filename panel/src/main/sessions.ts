@@ -309,6 +309,22 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
       detectedFamily,
       detected.reasoningParser,
     )
+    // Native MTP default: FIXED depth 3 for the Qwen3.8 MTP families
+    // (Flash-Next qwen4-exp — every JANG tier and CRACK variant — and the
+    // Qwen3.8-27B qwen3.5 D-series). Adaptive proved a wrong default for
+    // fresh sessions (Eric, 2026-09-05: the session started adaptive when
+    // it must start fixed D3). Fill ONLY missing values: an explicit user
+    // choice (including turning the override off) always survives.
+    if (effectiveFamily === 'qwen4-exp' || effectiveFamily === 'qwen3.5') {
+      if ((config as any).nativeMtpDepthOverride === undefined) {
+        ;(config as any).nativeMtpDepthOverride = true
+        changed = true
+      }
+      if ((config as any).nativeMtpDepth === undefined) {
+        ;(config as any).nativeMtpDepth = 3
+        changed = true
+      }
+    }
     if (
       effectiveFamily === 'deepseek-v4' &&
       (config.timeout == null || config.timeout === GENERIC_DEFAULT_TIMEOUT_SECONDS)
@@ -3953,8 +3969,12 @@ export class SessionManager extends EventEmitter {
           nativeMtpMode: proc.nativeMtpSamplingPolicy === 'deterministic-defaults'
             ? 'deterministic'
             : 'auto',
-          nativeMtpDepth: (detected as any).nativeMtp?.depth ?? 3,
-          nativeMtpDepthOverride: false,
+          nativeMtpDepth: ['qwen4-exp', 'qwen3.5'].includes(detectedFamily ?? '')
+            ? 3
+            : ((detected as any).nativeMtp?.depth ?? 3),
+          nativeMtpDepthOverride: ['qwen4-exp', 'qwen3.5'].includes(
+            detectedFamily ?? '',
+          ),
           enableAutoToolChoice: detected.enableAutoToolChoice
         }
         applyBundleStartupDefaults(defaultConfig, proc.modelPath)

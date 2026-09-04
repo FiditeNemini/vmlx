@@ -294,7 +294,16 @@ const api = {
       const handler = (_: any, data: any) => callback(data)
       ipcRenderer.on('app:updateAvailable', handler)
       return () => { ipcRenderer.removeListener('app:updateAvailable', handler) }
-    }
+    },
+    onMtpComponentUpdateAvailable: (callback: (data: any) => void) => {
+      const handler = (_: any, data: any) => callback(data)
+      ipcRenderer.on('models:mtpComponentUpdateAvailable', handler)
+      return () => {
+        ipcRenderer.removeListener('models:mtpComponentUpdateAvailable', handler)
+      }
+    },
+    dismissMtpComponentUpdate: (repoId: string, remoteFingerprint: string) =>
+      ipcRenderer.invoke('models:dismissMtpComponentUpdate', repoId, remoteFingerprint)
   },
 
   // API Gateway

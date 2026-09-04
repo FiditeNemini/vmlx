@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow, dialog, app as electronApp, type OpenDialogOptions } from 'electron'
 import { readFileSync } from 'fs'
 import { sessionManager } from '../sessions'
+import { checkMtpComponentUpdateOnLoad } from '../mtp-component-updater'
 import { db } from '../database'
 import type { ServerConfig } from '../server'
 import { abortByEndpoint } from './chat'
@@ -145,6 +146,20 @@ export function registerSessionHandlers(getWindow: () => BrowserWindow | null): 
     ipcMain.handle('sessions:start', async (_, sessionId: string) => {
       try {
         await sessionManager.startSession(sessionId)
+        // One-time reminder when a Flash-Next JANG model is loaded and its
+        // MTP component was updated upstream. Fire-and-forget: can never
+        // block or fail the start.
+        try {
+          const started = sessionManager.getSession(sessionId)
+          if (started?.modelPath) {
+            checkMtpComponentUpdateOnLoad(
+              () => BrowserWindow.getAllWindows()[0] ?? null,
+              started.modelPath,
+            )
+          }
+        } catch {
+          /* reminder is best-effort */
+        }
         return { success: true }
       } catch (error) {
         return { success: false, error: formatSessionLifecycleError(error) }

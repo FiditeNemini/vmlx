@@ -11,6 +11,7 @@ import { SetupScreen } from './components/setup/SetupScreen'
 import { ToastProvider } from './components/Toast'
 import { DownloadStatusBar } from './components/DownloadStatusBar'
 import { UpdateBanner } from './components/UpdateBanner'
+import { MtpComponentUpdatePrompt } from './components/MtpComponentUpdatePrompt'
 import { useAppState } from './contexts/AppStateContext'
 import { useSessionsContext } from './contexts/SessionsContext'
 import { ChatModeToolbar } from './components/layout/ChatModeToolbar'
@@ -194,6 +195,7 @@ function App() {
       <div className="flex flex-col h-screen bg-background text-foreground">
         <TitleBar />
         <UpdateBanner />
+        <MtpComponentUpdatePrompt />
         <DownloadStatusBar />
 
         <div className="flex flex-1 overflow-hidden">

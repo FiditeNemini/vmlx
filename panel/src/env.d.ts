@@ -381,6 +381,17 @@ declare global {
             notes?: string;
           }) => void,
         ) => () => void;
+        onMtpComponentUpdateAvailable: (
+          callback: (data: {
+            repoId: string;
+            modelPath: string;
+            remoteFingerprint: string;
+          }) => void,
+        ) => () => void;
+        dismissMtpComponentUpdate: (
+          repoId: string,
+          remoteFingerprint: string,
+        ) => Promise<{ success: boolean }>;
       };
       gateway: {
         getStatus: () => Promise<{

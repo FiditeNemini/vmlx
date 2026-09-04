@@ -24,6 +24,7 @@ import { buildContentSecurityPolicy } from './csp'
 import { db } from './database'
 import { checkEngineVersion, installEngineStreaming } from './engine-manager'
 import { checkForUpdates } from './update-checker'
+import { dismissMtpComponentUpdate } from './mtp-component-updater'
 import { ProcessManager } from './process-manager'
 import { attachProcessStdioErrorGuard } from './childProcessStreamGuards'
 import { createTray, destroyTray, hasTray } from './tray'
@@ -295,6 +296,13 @@ function createWindow(): void {
       db.deleteSetting(key)
       return { success: true }
     })
+    ipcMain.handle(
+      'models:dismissMtpComponentUpdate',
+      (_e, repoId: string, remoteFingerprint: string) => {
+        dismissMtpComponentUpdate(repoId, remoteFingerprint)
+        return { success: true }
+      }
+    )
 
     // Auto-detect inference mode on first launch based on system RAM.
     // Casual (≤48GB) or Expert (>48GB). User can override anytime.

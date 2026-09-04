@@ -14824,8 +14824,17 @@ class MLLMBatchGenerator:
         if _NATIVE_MTP_SKIP_REPLAY and len(state.drafts) >= 1:
             verify_kwargs["n_confirmed"] = 1
         from .metal.native_mtp_verify_qmm import native_mtp_verify_qmm_scope
+        from .metal.native_mtp_verify_pad import native_mtp_verify_pad_scope
 
-        with native_mtp_verify_qmm_scope() as verify_qmm_scope_stats:
+        # Two self-contained verify-projection acceleration lanes, both default
+        # off and mutually compatible (the pad dispatcher only pads small-M
+        # activations that the dflash kernel's rows==4 gate would also own).
+        # Each stays gated behind its own env until a full-model A/B on the
+        # exact bundle proves it — isolated projection wins have repeatedly
+        # died on the complete lazy Qwen graph in this codebase.
+        with native_mtp_verify_qmm_scope() as verify_qmm_scope_stats, (
+            native_mtp_verify_pad_scope()
+        ) as verify_pad_scope_stats:
             output = self.language_model(
                 inputs[None, :],
                 cache=cache,
@@ -14834,7 +14843,7 @@ class MLLMBatchGenerator:
             )
         state.stats.verify_qmm_calls += int(
             verify_qmm_scope_stats.get("calls", 0)
-        )
+        ) + int(verify_pad_scope_stats.get("padded", 0))
         if isinstance(output, tuple):
             logits, hidden = output
         elif hasattr(output, "logits") and hasattr(output, "hidden_states"):

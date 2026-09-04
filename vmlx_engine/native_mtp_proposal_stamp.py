@@ -34,6 +34,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 STAMP_FILENAME = "vmlx_mtp_proposal_head.json"
+TENSORS_FILENAME = "vmlx_mtp_proposal_head.safetensors"
 STAMP_VERSION = 1
 STAMP_BASIS = (
     "settled 2026-09-03 A/B on Qwen3.8-Flash-Next-JANG_4S fixed-D3: "
@@ -272,6 +273,11 @@ def resolve_proposal_head_plan(
             }
             if plan["eligible"]:
                 plan["proposal_bits"] = int(stamp.get("proposal_bits") or 4)
+                # Converter-side stamps may point at calibrated proposal
+                # tensors instead of the runtime RTN requant.
+                plan["proposal_source"] = str(
+                    stamp.get("proposal_source") or "runtime_rtn"
+                )
             else:
                 plan["reason"] = str(stamp.get("reason") or "stamped_ineligible")
             return plan
@@ -322,8 +328,90 @@ def resolve_proposal_head_plan(
     return plan
 
 
+def load_stamped_proposal_tensors(
+    bundle_path: str | Path | None,
+    source_head: Any,
+    proposal_bits: int,
+) -> Optional[dict[str, Any]]:
+    """Load calibrated proposal-head tensors stamped by the converter.
+
+    Expected file: ``vmlx_mtp_proposal_head.safetensors`` in the bundle
+    root with keys ``weight``/``scales``/``biases`` — the lm_head
+    requantized to ``proposal_bits`` at the SOURCE group size with
+    GPTQ/imatrix error-compensated codes (affine mode). Geometry and
+    scales dtype are validated against the loaded source head; any
+    mismatch or read error fails open to None (the caller falls back to
+    the runtime RTN requant), because a bad sidecar must never block a
+    launch or degrade to a mis-shaped head.
+    """
+
+    if not bundle_path:
+        return None
+    path = Path(bundle_path) / TENSORS_FILENAME
+    try:
+        if not path.is_file():
+            logger.warning(
+                "%s declares stamped proposal tensors but %s is missing; "
+                "falling back to runtime requant",
+                STAMP_FILENAME,
+                TENSORS_FILENAME,
+            )
+            return None
+        import mlx.core as mx
+
+        tensors = mx.load(str(path))
+        missing = [k for k in ("weight", "scales", "biases") if k not in tensors]
+        if missing:
+            logger.warning(
+                "%s missing keys %s; falling back to runtime requant",
+                TENSORS_FILENAME,
+                missing,
+            )
+            return None
+        weight = tensors["weight"]
+        scales = tensors["scales"]
+        biases = tensors["biases"]
+
+        group_size = int(source_head.group_size)
+        vocab = int(source_head.scales.shape[0])
+        hidden = int(source_head.scales.shape[1]) * group_size
+        expected_weight = (vocab, hidden * proposal_bits // 32)
+        expected_meta = (vocab, hidden // group_size)
+        if (
+            tuple(int(d) for d in weight.shape) != expected_weight
+            or tuple(int(d) for d in scales.shape) != expected_meta
+            or tuple(int(d) for d in biases.shape) != expected_meta
+        ):
+            logger.warning(
+                "%s geometry mismatch (weight=%s scales=%s biases=%s, "
+                "expected %s / %s); falling back to runtime requant",
+                TENSORS_FILENAME,
+                tuple(weight.shape),
+                tuple(scales.shape),
+                tuple(biases.shape),
+                expected_weight,
+                expected_meta,
+            )
+            return None
+        if scales.dtype != source_head.scales.dtype:
+            # Keep the family compute-dtype contract — a stray fp32/fp16
+            # scale dtype here would re-open the promotion trap.
+            scales = scales.astype(source_head.scales.dtype)
+            biases = biases.astype(source_head.biases.dtype)
+        return {"weight": weight, "scales": scales, "biases": biases}
+    except Exception as exc:  # noqa: BLE001 - advisory sidecar, fail open
+        logger.warning(
+            "Could not load %s (%s); falling back to runtime requant",
+            TENSORS_FILENAME,
+            exc,
+        )
+        return None
+
+
 __all__ = [
     "STAMP_FILENAME",
+    "TENSORS_FILENAME",
+    "load_stamped_proposal_tensors",
     "read_proposal_stamp",
     "resolve_proposal_head_plan",
     "write_proposal_stamp",

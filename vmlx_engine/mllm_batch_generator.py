@@ -14748,6 +14748,12 @@ class MLLMBatchGenerator:
             bool(getattr(sampler, "_vmlx_acceptance_logprobs", None)),
         )
         seed_main_forwards = 1
+        # Drain a batch partner's pending lazy work so the seed measures THIS
+        # request's AR step only (the AR-safety baseline).
+        try:
+            mx.synchronize()
+        except Exception:
+            pass
         _seed_t0 = time.perf_counter()
         output = self.language_model(
             first_tok[:, None],
@@ -15026,6 +15032,7 @@ class MLLMBatchGenerator:
             raise RuntimeError("native MTP verify entered without pending drafts")
 
         sampler = self._make_request_sampler(request)
+        cycle_own_t0 = time.perf_counter()
         pending = getattr(state, "pending_verify", None)
         state.pending_verify = None
         if pending is None:
@@ -15154,6 +15161,7 @@ class MLLMBatchGenerator:
         # AR safety valve FIRST, every cycle, regardless of depth policy —
         # fixed depth disables depth adaptation but must still escape to AR
         # when MTP is measurably slower than a context-scaled AR baseline.
+        state.ar_safety.own_ms_total += (time.perf_counter() - cycle_own_t0) * 1000.0
         _native_mtp_maybe_ar_safety_fallback(request.request_id, state)
         _native_mtp_maybe_adapt_depth(request.request_id, state)
         _native_mtp_arm_value_cycle(state, now=_value_cycle_now)

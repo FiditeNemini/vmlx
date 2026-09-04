@@ -7,32 +7,33 @@ verify cycle, for FIXED and ADAPTIVE depth alike.  The depth-adapt gates are
 what a fixed policy disables; this valve is not a depth policy, it is the
 guarantee that a request never keeps speculating while losing to plain AR.
 
-Mechanism (wall-clock + counters only, no device sync added anywhere):
-  * one timestamp per cycle from cycle 1; per-cycle wall = dt,
-    per-cycle ms/tok = dt / d_emitted
-  * anchor = MEDIAN per-cycle wall over the warmup cycles — measured under
-    the same conditions (concurrency, thermal, context) as the seed AR step,
-    within a fraction of a second of it.  seed_ar_ms / anchor is then the
-    AR-step : MTP-cycle cost ratio of this model at this depth, which is a
-    property of the model (verify rows + head forwards), not of the load.
-  * after warmup, judge on a sliding window: scale = median cycle wall now /
-    anchor (both directions: a second batched request joining doubles the
-    wall-clock per cycle AND what AR would cost this request, so the baseline
-    follows; when it leaves, the baseline follows back down).  Long context
-    grows the cycle wall by the same absolute amount it grows AR, i.e. by a
-    smaller RATIO, so the scale under-estimates AR growth there: the valve can
-    only demote a little early at long context, never late.
-  * trip iff window-mean ms/tok AND per-cycle MEDIAN ms/tok exceed
-    seed_ar_ms x scale x margin.  An acceptance collapse raises ms/tok without
-    changing the cycle wall, so it is never masked; a single stalled cycle
+Mechanism (wall-clock + counters; the only sync added is ONE per request,
+before the seed timer, so a batch partner's pending work cannot inflate it):
+  * per cycle: wall-clock timestamp AND this request's OWN cycle span (entry
+    of the verify cycle to the accept decision).  MTP cost = WALL ms/tok
+    (what the user experiences: under batching it includes the partner's
+    serialized cycles).  The AR alternative is the batched AR step, which
+    costs about the seed regardless of how many rows ride it, so the
+    baseline is the seed and is NOT scaled for concurrency.
+  * context and thermal DO move AR: they are tracked by the growth of the
+    request's OWN cycle span (concurrency-invariant): scale = median own
+    span now / anchor own span, anchor = median own span over the warmup
+    cycles (same conditions as the seed, within a fraction of a second).
+    Long context grows the own span by the same absolute amount it grows
+    AR, i.e. by a smaller ratio, so the scale under-estimates AR growth
+    there: the valve can demote a little early at long context, never late.
+  * trip iff window-mean wall ms/tok AND per-cycle MEDIAN ms/tok exceed
+    seed_ar_ms x scale x margin.  Acceptance collapse raises ms/tok without
+    changing the own span, so it is never masked; a single stalled cycle
     cannot trip an irreversible demotion (median guard).
   * skip while cycles < warmup (longer for an unprimed head) or the window is
     not full.
 
-Accepted blind spot: an MTP-only per-cycle slowdown that leaves AR untouched
-(e.g. draft-head page faults) raises the scale with it and is not caught
-until acceptance suffers.  Measured batching false trips were real; this
-class is hypothetical.
+Measured 2026-09-04 (Flash-Next 4S, batch-2): MTP cycles are serialized per
+request while AR rows share one step, so at ~56% acceptance MTP costs 30-40
+wall ms/tok against a ~27 ms batched AR step — those trips are CORRECT; at
+~90% acceptance both requests stay MTP at ~22 ms/tok.  A per-request valve
+then converges the batch to all-AR or all-MTP, whichever is faster.
 
 Known limitation: the first request after a model load measures an inflated
 seed (compile / cold pages), so the valve is lax for that one request.
@@ -146,8 +147,8 @@ def windowed_ar_verdict(
     mtp_ms_per_tok = delta_wall_ms / delta_emitted
     scale = 1.0
     if anchor_cycle_ms > 0.0 and cur_cycle_ms > 0.0:
-        # Both directions on purpose: concurrency, thermal and context move
-        # AR and the MTP cycle together.  ``context_ratio`` is informational.
+        # Own-span growth: context and thermal (both directions), never
+        # concurrency.  ``context_ratio`` is informational.
         scale = cur_cycle_ms / anchor_cycle_ms
     ar_baseline = ar_step_ms * scale
     threshold = ar_baseline * margin
@@ -163,12 +164,14 @@ def windowed_ar_verdict(
 class ArSafetyState:
     """Per-request governor state, embedded in each lane's MTP state."""
 
-    anchor_cycle_ms: float = 0.0
+    anchor_cycle_ms: float = 0.0  # median OWN cycle span over warmup
     anchor_context_tokens: int = 0
     prompt_tokens: int = 0
-    last_cycle_t: float = 0.0
+    own_ms_total: float = 0.0  # accumulated by the lane: own span per cycle
+    last_own_total: float = 0.0
     warmup_cycle_ms: List[float] = field(default_factory=list)
-    ring: List[Tuple[int, int, float]] = field(default_factory=list)
+    # (cycles, emitted, wall perf_counter, own_ms_total)
+    ring: List[Tuple[int, int, float, float]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -201,7 +204,7 @@ class ArSafetyTrip:
             f"{self.ar_baseline:.1f}ms, seed {self.seed_ar_ms:.1f}ms, "
             f"window={self.window}, cycle median "
             f"{self.cycle_median_ms_per_tok:.1f} max "
-            f"{self.cycle_max_ms_per_tok:.1f} ms/tok, cycle wall anchor "
+            f"{self.cycle_max_ms_per_tok:.1f} ms/tok, own span anchor "
             f"{self.anchor_cycle_ms:.1f} -> {self.cur_cycle_ms:.1f} ms, "
             f"context {self.anchor_context_tokens} -> {self.context_now})"
         )
@@ -224,38 +227,39 @@ def ar_safety_step(
     if not ar_safety_enabled():
         return None
     warmup = ar_safety_warmup_cycles(primed=primed)
+    own_total = float(st.own_ms_total)
     if cycles <= warmup:
-        # Warmup: collect per-cycle walls for the anchor (same conditions as
-        # the seed).  Cycle 1's dt is measured from the previous timestamp,
-        # so the first call only stamps.
-        if st.last_cycle_t > 0.0:
-            st.warmup_cycle_ms.append((float(now) - st.last_cycle_t) * 1000.0)
-        st.last_cycle_t = float(now)
+        # Warmup: collect this request's own cycle spans for the anchor
+        # (same conditions as the seed).
+        own_delta = own_total - st.last_own_total
+        if own_delta > 0.0:
+            st.warmup_cycle_ms.append(own_delta)
+        st.last_own_total = own_total
         if cycles == warmup and st.anchor_cycle_ms <= 0.0:
             anchor = median(st.warmup_cycle_ms)
             if anchor > 0.0:
                 st.anchor_cycle_ms = anchor
                 st.anchor_context_tokens = max(1, int(st.prompt_tokens) + int(emitted))
-            st.ring.append((int(cycles), int(emitted), float(now)))
+            st.ring.append((int(cycles), int(emitted), float(now), own_total))
         return None
     window = ar_safety_window_cycles()
     ring = st.ring
-    ring.append((int(cycles), int(emitted), float(now)))
+    ring.append((int(cycles), int(emitted), float(now), own_total))
     if len(ring) > window + 1:
         del ring[0 : len(ring) - (window + 1)]
     if len(ring) <= window:
         return None  # window not full yet — never judge a cold window
 
-    c0, e0, t0 = ring[0]
-    per_cycle_ms: List[float] = []
+    c0, e0, t0, _o0 = ring[0]
+    per_cycle_own_ms: List[float] = []
     per_cycle_ms_per_tok: List[float] = []
     for prev, cur in zip(ring, ring[1:]):
-        d_ms = (cur[2] - prev[2]) * 1000.0
+        d_wall_ms = (cur[2] - prev[2]) * 1000.0
         d_e = cur[1] - prev[1]
-        per_cycle_ms.append(d_ms)
+        per_cycle_own_ms.append(cur[3] - prev[3])
         if d_e > 0:
-            per_cycle_ms_per_tok.append(d_ms / d_e)
-    cur_cycle_ms = median(per_cycle_ms)
+            per_cycle_ms_per_tok.append(d_wall_ms / d_e)
+    cur_cycle_ms = median(per_cycle_own_ms)
     context_now = int(st.prompt_tokens) + int(emitted)
     if st.anchor_cycle_ms <= 0.0:
         # Warmup produced no usable anchor (e.g. warmup 1); anchor on the

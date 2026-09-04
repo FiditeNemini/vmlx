@@ -4,6 +4,21 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.53] - 2026-09-04
+
+### Fixed
+- **Qwen3.8-Flash-Next MTP works again on the fixed bundles.** 1.6.52 could not detect, load, or use MTP on the re-uploaded Flash-Next bundles: the loader discovered weight files by a filename glob and swept the calibrated proposal-head sidecar (which carries `lm_head.*` copies) into the weight load, aborting every launch with a duplicate-tensor error. Weight files now come from the model index (`model.safetensors.index.json`), so the MTP tensors load from the regular shards that name them and unrelated sidecar files are ignored; a file the index references but is missing still fails loudly.
+- **New Qwen3.8 MTP sessions start at fixed depth 3, not adaptive.** The Server panel's displayed depth default was never sent, so fresh Flash-Next and Qwen3.8-27B sessions silently launched with an adaptive depth policy. New sessions for these families now start at fixed depth 3; an explicit depth choice (including switching off the fixed override) is preserved and saved.
+
+### Added
+- **Calibrated multi-token-prediction proposal head.** When a Flash-Next bundle ships an imatrix-calibrated q4 proposal head (`mtp_draft/vmlx_mtp_proposal_head.safetensors`, pinned by the bundle stamp), the runtime verifies it by SHA-256 and uses it for speculative drafting; any missing, mismatched, or malformed artifact falls back silently to the runtime-rebuilt head. Speculative verification always uses the checkpoint head, so the calibrated head only affects draft acceptance, never output.
+- **One-time "model updated" notice for Flash-Next.** Loading a Qwen3.8-Flash-Next model (any tier or variant) whose local copy predates the MTP fix shows a one-time, dismissible in-app notice — localized in all supported languages — offering to redownload the model; a copy that already carries the fix never prompts.
+
+### Fixed (UI)
+- **Language picker menu is reachable.** The title-bar language dropdown was clipped by the title bar and painted over by the main content; it now renders above all content so every language is selectable.
+
+---
+
 ## [1.6.52] - 2026-09-02
 
 ### Fixed

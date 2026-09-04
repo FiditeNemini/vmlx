@@ -4108,6 +4108,13 @@ class MLLMNativeMTPState:
     # emitted tokens is the real MTP cost per token.
     ar_step_ms: float = 0.0
     cycle_span_start: float = 0.0
+    # Windowed AR-safety governor (policy-independent, on-the-fly fallback):
+    # first_verify_ms anchors context scaling of the AR baseline; cost_window
+    # holds recent (cycles, emitted, verify_ms_total, perf_counter) samples so
+    # a MID-STREAM or long-context slowdown is caught within ~W cycles rather
+    # than only when the whole-request average sags.
+    first_verify_ms: float = 0.0
+    cost_window: List[Tuple[int, int, float, float]] = field(default_factory=list)
     # The request began from a restored prefix. The MTP head cache starts
     # COLD on such requests (backbone hiddens are not stored), so the first
     # gate windows measure a context-starved head: run 3 of a live A/B
@@ -5616,6 +5623,133 @@ def _native_mtp_maybe_cost_fallback(
     return True
 
 
+def _native_mtp_windowed_ar_verdict(
+    *,
+    ar_step_ms: float,
+    first_verify_ms: float,
+    window_cycles: int,
+    delta_emitted: int,
+    delta_wall_ms: float,
+    delta_verify_ms: float,
+    margin: float,
+) -> Optional[Tuple[float, float]]:
+    """Pure windowed MTP-vs-AR decision. Returns (mtp_ms_per_tok, ar_baseline)
+    when MTP is slower than a CONTEXT-SCALED AR baseline by the margin, else
+    None. Factored out so the arithmetic is unit-testable without a model.
+
+    ar_baseline scales the short-context seed AR step by how much the verify
+    forward has grown since the first cycle (attention grows with context for
+    both AR and verify), clamped so it never dips below the seed floor.
+    """
+    if ar_step_ms <= 0.0 or window_cycles <= 0:
+        return None
+    if delta_emitted <= 0 or delta_wall_ms <= 0.0:
+        return None
+    mtp_ms_per_tok = delta_wall_ms / delta_emitted
+    if first_verify_ms > 0.0:
+        cur_verify_avg = delta_verify_ms / window_cycles
+        scale = max(1.0, cur_verify_avg / first_verify_ms)
+    else:
+        scale = 1.0
+    ar_baseline = ar_step_ms * scale
+    if mtp_ms_per_tok > ar_baseline * margin:
+        return mtp_ms_per_tok, ar_baseline
+    return None
+
+
+def _native_mtp_maybe_ar_safety_fallback(
+    request_id: str, state: MLLMNativeMTPState
+) -> bool:
+    """Policy-INDEPENDENT on-the-fly AR safety valve.
+
+    Runs every cycle for BOTH fixed and adaptive depth (unlike the depth-adapt
+    gates, which fixed depth disables). Catches a MID-STREAM or long-context
+    slowdown within ~W cycles by comparing a WINDOWED MTP ms/token against a
+    context-scaled AR baseline; on a real regression it demotes the request to
+    pure AR for the remainder (irreversible this request; safe — switching to
+    AR only stops speculating, the backbone cache stays coherent).
+    """
+    if state.ar_fallback_pending:
+        return False
+    if not _native_mtp_env_flag(
+        True,
+        "VMLINUX_NATIVE_MTP_AR_SAFETY",
+        "VMLX_NATIVE_MTP_AR_SAFETY",
+    ):
+        return False
+    ar_ms = float(getattr(state, "ar_step_ms", 0.0) or 0.0)
+    if ar_ms <= 0.0:
+        return False
+
+    verify_total = float(state.stats.verify_ms)
+    if state.first_verify_ms <= 0.0 and verify_total > 0.0:
+        # First post-seed cycle: anchor the low-context verify reference.
+        state.first_verify_ms = verify_total
+
+    restore_scale = 4 if getattr(state, "restored_prefix", False) else 1
+    warmup = restore_scale * _native_mtp_env_int(
+        12,
+        "VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
+        "VMLX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
+        minimum=1,
+    )
+    cycles = int(state.stats.cycles)
+    if cycles < warmup:
+        return False
+
+    window = restore_scale * _native_mtp_env_int(
+        16,
+        "VMLINUX_NATIVE_MTP_AR_SAFETY_WINDOW",
+        "VMLX_NATIVE_MTP_AR_SAFETY_WINDOW",
+        minimum=4,
+    )
+    now = time.perf_counter()
+    emitted = cycles + int(state.stats.accepted_tokens)
+    ring = state.cost_window
+    ring.append((cycles, emitted, verify_total, now))
+    if len(ring) > window + 1:
+        del ring[0 : len(ring) - (window + 1)]
+    if len(ring) <= window:
+        return False  # window not full yet — do not judge a cold window
+
+    c0, e0, v0, t0 = ring[0]
+    margin = _native_mtp_env_float(
+        1.25,
+        "VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+        "VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+    )
+    verdict = _native_mtp_windowed_ar_verdict(
+        ar_step_ms=ar_ms,
+        first_verify_ms=float(state.first_verify_ms),
+        window_cycles=cycles - c0,
+        delta_emitted=emitted - e0,
+        delta_wall_ms=(now - t0) * 1000.0,
+        delta_verify_ms=verify_total - v0,
+        margin=margin,
+    )
+    if verdict is None:
+        return False
+    mtp_ms_per_tok, ar_baseline = verdict
+    state.depth = 1
+    state.ar_fallback_pending = True
+    state.ar_fallback_reason = (
+        f"windowed_ar_safety mtp_ms_per_tok={mtp_ms_per_tok:.1f}"
+        f">ar_baseline={ar_baseline:.1f}(seed={ar_ms:.1f})x{margin:.2f}"
+    )
+    logger.info(
+        "MLLM MTP[%s] windowed AR safety D%d -> AR at cycle=%d "
+        "(%.1fms/tok vs ctx-scaled AR %.1fms, seed %.1fms, window=%d)",
+        request_id,
+        int(state.depth or 1),
+        cycles,
+        mtp_ms_per_tok,
+        ar_baseline,
+        ar_ms,
+        window,
+    )
+    return True
+
+
 def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) -> None:
     """Lower future recursive draft depth when measured acceptance is poor.
 
@@ -5623,6 +5757,8 @@ def _native_mtp_maybe_adapt_depth(request_id: str, state: MLLMNativeMTPState) ->
     This only changes the next draft suffix, so it cannot invalidate the
     current verifier cache state.
     """
+    if state.ar_fallback_pending:
+        return
     if not _native_mtp_env_flag(
         True,
         "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH",
@@ -15102,6 +15238,10 @@ class MLLMBatchGenerator:
             accepted=accepted,
             now=_value_cycle_now,
         )
+        # AR safety valve FIRST, every cycle, regardless of depth policy —
+        # fixed depth disables depth adaptation but must still escape to AR
+        # when MTP is measurably slower than a context-scaled AR baseline.
+        _native_mtp_maybe_ar_safety_fallback(request.request_id, state)
         _native_mtp_maybe_adapt_depth(request.request_id, state)
         _native_mtp_arm_value_cycle(state, now=_value_cycle_now)
         if accepted == depth:

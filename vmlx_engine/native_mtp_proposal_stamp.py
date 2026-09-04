@@ -159,18 +159,22 @@ _STAMPABLE_MODEL_TYPES: dict[str, frozenset[str]] = {
 }
 
 
-def _bundle_confirms_source(
+def _bundle_confirms_type(
     bundle_path: str | Path, source: dict[str, Any], family: str
 ) -> tuple[bool, str]:
-    """Confirm bundle type + head layout from the bundle's own config.
+    """Confirm the bundle TYPE (never the layout) before writing a stamp.
 
-    The loaded tensors are the runtime source of truth for the in-process
-    verdict; this is a second, independent read of config.json before the
-    verdict is persisted into the user's bundle: the model_type must be one
-    of the measured JANG Qwen3.8 types for this family, and the config's
-    lm_head quantization entry (explicit or default) must agree with the
-    loaded head. Any disagreement or unreadable config means "do not write"
-    — never "block".
+    The stamp is a cache of a pure function of the LOADED lm_head — the
+    loaded module is the only layout authority, because config defaults lie
+    (the 2L misstamp: a converter agent read the bundle-wide 6-bit tier
+    default while the per-module lm_head override was q8/g64). So this
+    check deliberately does NOT compare the config's declared quantization
+    against the loaded head; it only confirms this is a measured JANG
+    Qwen3.8 bundle of the resolving family, so the sidecar never lands in
+    an unrelated model's directory. A config-vs-loaded head disagreement
+    is logged as evidence of the default-vs-override case, not a veto —
+    vetoing on it would leave a bad shipped stamp permanently uncorrected
+    and break the self-healing property.
     """
 
     try:
@@ -185,35 +189,36 @@ def _bundle_confirms_source(
     if model_type not in allowed:
         return False, f"model_type_not_stampable:{model_type or 'missing'}"
 
-    if bool(config.get("tie_word_embeddings", False)) != bool(source.get("tied")):
-        return False, "tie_word_embeddings_mismatch"
-
     quant = config.get("quantization")
-    if not isinstance(quant, dict):
-        return False, "no_quantization_block"
-    head_entry: Any = None
-    for key in ("language_model.lm_head", "lm_head", "model.lm_head"):
-        candidate = quant.get(key)
-        if isinstance(candidate, dict):
-            head_entry = candidate
-            break
-    if head_entry is None:
-        # Fall back to the bundle-wide default layout.
-        head_entry = {
-            k: v for k, v in quant.items() if not isinstance(v, dict)
+    if isinstance(quant, dict):
+        head_entry: Any = None
+        for key in ("language_model.lm_head", "lm_head", "model.lm_head"):
+            candidate = quant.get(key)
+            if isinstance(candidate, dict):
+                head_entry = candidate
+                break
+        if head_entry is None:
+            head_entry = {
+                k: v for k, v in quant.items() if not isinstance(v, dict)
+            }
+        declared = {
+            "bits": head_entry.get("bits"),
+            "group_size": head_entry.get("group_size"),
+            "mode": str(head_entry.get("mode") or "affine"),
         }
-    declared = {
-        "bits": head_entry.get("bits"),
-        "group_size": head_entry.get("group_size"),
-        "mode": str(head_entry.get("mode") or "affine"),
-    }
-    loaded = {
-        "bits": source.get("bits"),
-        "group_size": source.get("group_size"),
-        "mode": source.get("mode"),
-    }
-    if declared != loaded:
-        return False, f"config_head_mismatch:{declared}!={loaded}"
+        loaded = {
+            "bits": source.get("bits"),
+            "group_size": source.get("group_size"),
+            "mode": source.get("mode"),
+        }
+        if declared != loaded:
+            logger.info(
+                "config.json head declaration %s differs from loaded head %s "
+                "in %s — stamping from the loaded head (config defaults lie)",
+                declared,
+                loaded,
+                Path(bundle_path).name,
+            )
     return True, "confirmed"
 
 
@@ -264,12 +269,12 @@ def resolve_proposal_head_plan(
     else:
         record["reason"] = plan["reason"]
 
-    # Confirm bundle type + declared head layout from the bundle's own
-    # config before persisting anything into the user's bundle. The
+    # Confirm the bundle TYPE from its own config before persisting anything
+    # into the user's bundle (layout truth stays with the loaded head). The
     # in-process verdict above applies regardless; only the WRITE is gated.
     stamped = False
     if bundle_path:
-        confirmed, why = _bundle_confirms_source(bundle_path, source, family)
+        confirmed, why = _bundle_confirms_type(bundle_path, source, family)
         if confirmed:
             stamped = write_proposal_stamp(bundle_path, record)
         else:

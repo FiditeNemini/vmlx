@@ -4126,9 +4126,16 @@ def _native_mtp_depth_for_request(request: Any) -> int:
 
 
 def _native_mtp_depth_ceiling_for_request(request: Any) -> int:
-    """Return the verifier-supported adaptive-depth ceiling."""
+    """Return the verifier-supported adaptive-depth ceiling.
 
-    return 3
+    Product default is 3; VMLX_NATIVE_MTP_MAX_DEPTH raises it so a depth sweep
+    can probe D4/D5. Per-lane rollback correctness still gates whether a deeper
+    probe actually verifies — this only lifts the numeric ceiling.
+    """
+
+    from .native_mtp import native_mtp_max_depth
+
+    return native_mtp_max_depth()
 
 
 def _native_mtp_logprobs(logits_2d: mx.array) -> mx.array:

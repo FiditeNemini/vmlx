@@ -36,6 +36,8 @@ Contract (audited 2026-08-30):
 
 from __future__ import annotations
 
+from .native_mtp import native_mtp_max_depth
+
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple
@@ -126,8 +128,8 @@ class NativeMTPProfileStore:
         import time as _time
 
         now = _time.monotonic() if now is None else float(now)
-        configured = max(1, min(3, int(configured_depth or 1)))
-        ceiling = max(1, min(3, int(capability_ceiling or 1)))
+        configured = max(1, min(native_mtp_max_depth(), int(configured_depth or 1)))
+        ceiling = max(1, min(native_mtp_max_depth(), int(capability_ceiling or 1)))
         with self._lock:
             profile = self._profiles.get(key)
             if profile is not None and profile.learned_depth is not None:

@@ -140,7 +140,7 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.accepted_tokens = 0
-    state.stats.verify_ms = 12.0 * 40
+    state.stats.verify_wall_ms = 12.0 * 40
     win = 16
     state.cost_window = [
         (24 + i, 24 + i, 12.0 * (24 + i), base_t + i * 0.020)
@@ -151,3 +151,53 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     assert state.ar_fallback_pending is True
     assert state.depth == 1
     assert "windowed_ar_safety d3" in (state.ar_fallback_reason or "")
+
+
+def test_single_stall_cycle_does_not_trip():
+    # 15 healthy cycles at 5 ms/tok and ONE 400ms stall: the window MEAN is
+    # over threshold but the per-cycle MEDIAN is not -> hold (demotion is
+    # irreversible; a background store / page fault must not cause it).
+    per_cycle = [5.0] * 15 + [400.0]
+    v = _native_mtp_windowed_ar_verdict(
+        ar_step_ms=10.0, first_verify_ms=12.0, window_cycles=16,
+        delta_emitted=16, delta_wall_ms=sum(per_cycle), delta_verify_ms=192.0,
+        margin=1.25, per_cycle_ms_per_tok=per_cycle,
+    )
+    assert v is None
+    # Same mean, but SUSTAINED slowness (every cycle slow) -> trips.
+    sustained = [sum(per_cycle) / 16] * 16
+    v2 = _native_mtp_windowed_ar_verdict(
+        ar_step_ms=10.0, first_verify_ms=12.0, window_cycles=16,
+        delta_emitted=16, delta_wall_ms=sum(sustained), delta_verify_ms=192.0,
+        margin=1.25, per_cycle_ms_per_tok=sustained,
+    )
+    assert v2 is not None
+
+
+def test_anchor_is_first_full_window_not_cycle_one(monkeypatch):
+    # The context reference is taken from the first FULL post-warmup window,
+    # so a cold cycle-1 round-trip cannot pin the scale at 1.0 forever, and
+    # verify growth after the anchor raises the AR baseline.
+    import time
+
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = m.MLLMNativeMTPState(
+        mtp_cache=[], next_main=None, drafts=[], draft_lps=[], draft_ids=[],
+        depth=3,
+    )
+    state.ar_step_ms = 10.0
+    assert state.first_verify_ms == 0.0
+    base_t = time.perf_counter() - 1.0
+    # Window of 16 cycles at 12ms verify each, 2 tok/cycle, 5 ms/tok (fast).
+    state.stats.cycles = 40
+    state.stats.accepted_tokens = 40
+    state.stats.verify_wall_ms = 12.0 * 40
+    state.cost_window = [
+        (24 + i, 2 * (24 + i), 12.0 * (24 + i), base_t + i * 0.010)
+        for i in range(17)
+    ]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert abs(state.first_verify_ms - 12.0) < 1e-6
+    assert state.ar_fallback_pending is False

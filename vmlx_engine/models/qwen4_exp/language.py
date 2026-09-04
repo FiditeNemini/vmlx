@@ -1714,12 +1714,26 @@ class LanguageModel(nn.Module):
         if not isinstance(source, nn.QuantizedLinear):
             state.reason = "unsupported_source_type"
             return state.status()
-        if (
-            state.source_bits != 8
-            or state.group_size != 64
-            or state.mode != "affine"
-        ):
-            state.reason = "unsupported_source_layout"
+
+        # One-time per-bundle eligibility check, persisted as a stamp so
+        # every later launch (and other agents reading the bundle) honors
+        # the same verdict without re-deriving. An existing stamp whose
+        # recorded source layout still matches is authoritative.
+        from ...native_mtp import native_mtp_active_model_path
+        from ...native_mtp_proposal_stamp import resolve_proposal_head_plan
+
+        plan = resolve_proposal_head_plan(
+            native_mtp_active_model_path(),
+            {
+                "bits": state.source_bits,
+                "group_size": state.group_size,
+                "mode": state.mode,
+                "tied": bool(getattr(self.args, "tie_word_embeddings", False)),
+            },
+            family="qwen4_exp",
+        )
+        if not plan.get("eligible"):
+            state.reason = str(plan.get("reason") or "stamped_ineligible")
             return state.status()
 
         started = time.perf_counter()

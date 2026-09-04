@@ -32,28 +32,14 @@ from vmlx_engine.metal.qwen35_gdn_gate_terms import (
 logger = logging.getLogger(__name__)
 
 
-def _qwen35_mtp_draft_head_bits() -> Optional[int]:
-    """Requested low-bit proposal-head width for the Qwen3.5/3.8 MTP lane.
-
-    Default OFF: the qwen4_exp q4 proposal head measured a settled win on
-    Flash-Next (2026-09-03), but that result does not transfer to this
-    family's head geometry without its own live A/B. Enable with
-    VMLX_QWEN35_MTP_DRAFT_HEAD_BITS=4 for the measurement; verification
-    always uses the checkpoint-owned head either way, so this copy can only
-    shape proposals — emitted tokens remain exactly verified.
-    """
+def _qwen35_mtp_draft_head_disabled() -> bool:
+    """Explicit kill switch for the Qwen3.5/3.8 proposal head."""
 
     raw = os.environ.get(
         "VMLINUX_QWEN35_MTP_DRAFT_HEAD_BITS",
-        os.environ.get("VMLX_QWEN35_MTP_DRAFT_HEAD_BITS", "0"),
+        os.environ.get("VMLX_QWEN35_MTP_DRAFT_HEAD_BITS", ""),
     ).strip().lower()
-    if raw in {"", "0", "false", "no", "off", "none"}:
-        return None
-    try:
-        bits = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return bits if bits == 4 else None
+    return raw in {"0", "false", "no", "off", "none"}
 
 
 def _qwen35_mtp_proposal_head(model: Any) -> Any:
@@ -62,6 +48,14 @@ def _qwen35_mtp_proposal_head(model: Any) -> Any:
     Mirrors qwen4_exp's prepare_mtp_draft_head: requantize the q8/g64
     affine lm_head to q4 for draft sampling only. Any layout the requant
     cannot prove supported fails closed to the full head.
+
+    Eligibility comes from the one-time per-bundle stamp
+    (vmlx_mtp_proposal_head.json): the first launch derives the verdict
+    from the head layout and stamps it; later launches honor it as-is.
+    All current 27B D-tiers ship q4/q6 heads, so they stamp ineligible
+    (nothing to save) — the build engages automatically only for a
+    future q8/g64-headed bundle. VMLX_QWEN35_MTP_DRAFT_HEAD_BITS=0 is
+    the explicit kill switch.
     """
 
     state = getattr(model, "_vmlx_mtp_draft_head_state", None)
@@ -72,26 +66,35 @@ def _qwen35_mtp_proposal_head(model: Any) -> Any:
         return state["head"]
     state["attempted"] = True
 
-    bits = _qwen35_mtp_draft_head_bits()
-    if bits is None:
-        state["reason"] = "disabled"
-        return None
-
     import time as _time
 
     import mlx.nn as nn
+
+    from vmlx_engine.native_mtp import native_mtp_active_model_path
+    from vmlx_engine.native_mtp_proposal_stamp import resolve_proposal_head_plan
 
     source = getattr(model, "lm_head", None)
     if not isinstance(source, nn.QuantizedLinear):
         state["reason"] = "unsupported_source_type"
         return None
-    if (
-        getattr(source, "bits", None) != 8
-        or getattr(source, "group_size", None) != 64
-        or str(getattr(source, "mode", "affine") or "affine") != "affine"
-    ):
-        state["reason"] = "unsupported_source_layout"
+
+    plan = resolve_proposal_head_plan(
+        native_mtp_active_model_path(),
+        {
+            "bits": getattr(source, "bits", None),
+            "group_size": getattr(source, "group_size", None),
+            "mode": str(getattr(source, "mode", "affine") or "affine"),
+            "tied": bool(getattr(model.args, "tie_word_embeddings", False)),
+        },
+        family="qwen3_5",
+    )
+    if _qwen35_mtp_draft_head_disabled():
+        state["reason"] = "disabled_by_env"
         return None
+    if not plan.get("eligible"):
+        state["reason"] = str(plan.get("reason") or "stamped_ineligible")
+        return None
+    bits = int(plan.get("proposal_bits") or 4)
 
     started = _time.perf_counter()
     try:

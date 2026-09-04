@@ -1162,6 +1162,18 @@ def _set_mtp_active(active: bool) -> None:
     set_mtp_active(active)
 
 
+def native_mtp_active_model_path() -> Path | None:
+    """Bundle path of the currently activated native-MTP runtime, if any.
+
+    Set by maybe_apply_native_mtp before model construction in every lane
+    that can draft; None in sanitize-only/doctor/deactivated states — i.e.
+    exactly when drafting cannot happen. Callers treat None as "skip any
+    bundle-sidecar work" (fail-open).
+    """
+
+    return _ACTIVE_NATIVE_MTP_MODEL_PATH
+
+
 def deactivate_native_mtp() -> None:
     global _ACTIVE_NATIVE_MTP_MODEL_PATH
     _ACTIVE_NATIVE_MTP_MODEL_PATH = None

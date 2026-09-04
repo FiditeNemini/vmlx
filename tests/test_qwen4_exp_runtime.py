@@ -1205,7 +1205,9 @@ def test_qwen4_exp_mtp_draft_head_rejects_unsupported_source_layout(monkeypatch)
     assert first == second
     assert first["available"] is False
     assert first["source_bits"] == 6
-    assert first["reason"] == "unsupported_source_layout"
+    # The stamped plan names WHY the layout is refused: a <=6-bit head is
+    # already cheap for drafting, so a lower-bit copy has nothing to save.
+    assert first["reason"] == "native_head_already_low_bit"
 
 
 def test_qwen4_exp_mtp_fusion_preserves_distinct_hyper_connection_branches():
@@ -2556,3 +2558,43 @@ def test_qwen4_exp_ple_manifest_aliases_are_deterministic_and_fail_closed():
             aliases,
             label="test",
         )
+
+
+def test_qwen4_exp_prepare_stamps_bundle_once_and_honors_existing(
+    monkeypatch, tmp_path
+):
+    import json
+
+    from vmlx_engine import native_mtp
+    from vmlx_engine.native_mtp_proposal_stamp import STAMP_FILENAME
+
+    monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.setattr(native_mtp, "_ACTIVE_NATIVE_MTP_MODEL_PATH", tmp_path)
+
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=8)
+    status = model.prepare_mtp_draft_head()
+    assert status["available"] is True
+
+    stamp_file = tmp_path / STAMP_FILENAME
+    stamp = json.loads(stamp_file.read_text())
+    assert stamp["eligible"] is True
+    assert stamp["proposal_bits"] == 4
+    assert stamp["source"] == {
+        "bits": 8, "group_size": 64, "mode": "affine", "tied": False,
+    }
+
+    # A stamped opt-out with a matching source is authoritative on the next
+    # launch: the head must NOT build, and the file must not be rewritten.
+    stamp["eligible"] = False
+    stamp["reason"] = "user_opt_out"
+    del stamp["proposal_bits"]
+    stamp_file.write_text(json.dumps(stamp))
+
+    fresh = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(fresh, bits=8)
+    veto = fresh.prepare_mtp_draft_head()
+    assert veto["available"] is False
+    assert veto["reason"] == "user_opt_out"
+    assert json.loads(stamp_file.read_text())["reason"] == "user_opt_out"

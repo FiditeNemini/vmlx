@@ -5698,6 +5698,12 @@ class NativeMTPArTier:
         self.step_walls_ms = []
         self.last_step_t = 0.0
 
+    def settled_trip(self) -> None:
+        """A request that had re-entered (probe kept) lost again later: count
+        the fallback, restart the AR window, and damp oscillation with one
+        more backoff step so the next probe waits longer than the last."""
+        self.probe_failed()
+
 
 def _native_mtp_reentry_enabled() -> bool:
     return _native_mtp_env_flag(
@@ -5754,8 +5760,11 @@ def _native_mtp_maybe_ar_safety_fallback(
     state.depth = 1
     state.ar_fallback_pending = True
     state.ar_fallback_reason = trip.reason(prior_depth)
-    if probing and tier is not None:
-        tier.probe_failed()
+    if tier is not None:
+        if probing:
+            tier.probe_failed()
+        else:
+            tier.settled_trip()
     logger.info(
         "MLLM MTP[%s] %s%s",
         request_id,

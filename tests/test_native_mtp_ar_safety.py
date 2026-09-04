@@ -292,3 +292,29 @@ def test_probe_kept_switches_baseline_to_measured_ar(monkeypatch):
     assert m._native_mtp_maybe_ar_safety_fallback("req2", state2) is True
     assert state2.ar_fallback_pending is True
     assert tier2.backoff == 1 and tier2.next_probe_tokens == 32
+
+
+def test_settled_reentry_that_trips_again_backs_off(monkeypatch):
+    # After a kept probe, a later trip must count as a fallback, restart the
+    # AR window, and back off further (no immediate re-probe).
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = _vlm_state(m)
+    tier = m.NativeMTPArTier(depth=3)
+    t0 = time.perf_counter() - 2.0
+    for i in range(20):
+        tier.record_step(t0 + i * 0.025)
+    tier.reentries = 1
+    state.ar_tier = tier
+    state.probe = False  # settled after a kept probe
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 40
+    state.stats.accepted_tokens = 0
+    state.ar_safety.anchor_cycle_ms = 40.0
+    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.040) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is True
+    assert tier.fallbacks == 2
+    assert tier.tokens_since_fallback == 0
+    assert tier.next_probe_tokens == 32
+    assert tier.probe_due() is False

@@ -212,3 +212,25 @@ def test_text_lane_fast_window_holds(monkeypatch):
     state.ar_safety.ring = [(24 + i, 2 * (24 + i), base_t + i * 0.010) for i in range(17)]
     assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is False
     assert state.ar_fallback_pending is False
+
+
+def test_first_judgment_cycle_primed_vs_unprimed(monkeypatch):
+    # Primed head: judged from cycle warmup(8)+window(8)=16. Unprimed: 16+8=24.
+    from vmlx_engine.native_mtp_ar_safety import ArSafetyState, ar_safety_step
+
+    for name in ("VMLX_NATIVE_MTP_AR_SAFETY_WARMUP", "VMLX_NATIVE_MTP_AR_SAFETY_WINDOW"):
+        monkeypatch.delenv(name, raising=False)
+
+    def first_trip_cycle(primed):
+        st = ArSafetyState(prompt_tokens=50)
+        t = 0.0
+        for cyc in range(1, 60):
+            t += 0.020  # 20 ms/cycle, 1 tok/cycle = 20 ms/tok vs AR 10 -> losing
+            trip = ar_safety_step(st, cycles=cyc, emitted=cyc, now=t,
+                                  seed_ar_ms=10.0, primed=primed)
+            if trip is not None:
+                return cyc
+        return None
+
+    assert first_trip_cycle(True) == 16
+    assert first_trip_cycle(False) == 24

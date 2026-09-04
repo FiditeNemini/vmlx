@@ -1113,9 +1113,7 @@ def _text_mtp_maybe_ar_safety_fallback(request_id: str, state: _MtpState) -> boo
         emitted=cycles + int(state.stats.draft_tokens_accepted),
         now=time.perf_counter(),
         seed_ar_ms=float(state.ar_step_ms or 0.0),
-        restored_prefix=str(state.stats.prompt_prime_source or "").startswith(
-            "restored"
-        ),
+        primed=str(state.stats.prompt_prime_source or "unprimed") != "unprimed",
     )
     if trip is None:
         return False

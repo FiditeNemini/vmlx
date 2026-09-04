@@ -9,7 +9,8 @@ guarantee that a request never keeps speculating while losing to plain AR.
 
 Mechanism (wall-clock + counters only, no device sync added anywhere):
   * one ring sample per cycle: (cycles, emitted, perf_counter)
-  * skip while cycles < warmup (x restore_scale) or the ring is not full
+  * skip while cycles < warmup (longer for an unprimed head) or the ring is
+    not full
   * per-cycle wall = dt; per-cycle ms/tok = dt / d_emitted
   * anchor = median per-cycle wall + context length at the FIRST full window
   * scale = clamp(median_now / anchor, 1, context_now / context_anchor)
@@ -29,8 +30,14 @@ import os
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
-DEFAULT_WARMUP_CYCLES = 12
-DEFAULT_WINDOW_CYCLES = 16
+# Measured 2026-09-04 on Flash-Next 4S: primed requests (cold prompt AND
+# restored prefix — priming folds the restored prefix too) run healthy from
+# the first cycle (15-24 ms/tok in the first window), so no restored-prefix
+# multiplier is needed for the valve; an UNPRIMED head starts cold and gets a
+# longer warmup.  8+8 => first judgment at cycle 16 (~0.65s at D3 on 4S).
+DEFAULT_WARMUP_CYCLES = 8
+DEFAULT_UNPRIMED_WARMUP_CYCLES = 16
+DEFAULT_WINDOW_CYCLES = 8
 DEFAULT_MARGIN = 1.25
 
 
@@ -70,11 +77,12 @@ def ar_safety_enabled() -> bool:
     return env_flag(True, "VMLINUX_NATIVE_MTP_AR_SAFETY", "VMLX_NATIVE_MTP_AR_SAFETY")
 
 
-def ar_safety_warmup_cycles() -> int:
+def ar_safety_warmup_cycles(*, primed: bool = True) -> int:
+    default = DEFAULT_WARMUP_CYCLES if primed else DEFAULT_UNPRIMED_WARMUP_CYCLES
     return env_int(
-        DEFAULT_WARMUP_CYCLES,
-        "VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
-        "VMLX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
+        default,
+        "VMLINUX_NATIVE_MTP_AR_SAFETY_WARMUP",
+        "VMLX_NATIVE_MTP_AR_SAFETY_WARMUP",
         minimum=1,
     )
 
@@ -190,7 +198,7 @@ def ar_safety_step(
     emitted: int,
     now: float,
     seed_ar_ms: float,
-    restored_prefix: bool = False,
+    primed: bool = True,
 ) -> Optional[ArSafetyTrip]:
     """Record this cycle's sample and decide.  Call once per verify cycle,
     AFTER the cycle's device round-trip, BEFORE any depth adaptation.  The
@@ -199,11 +207,10 @@ def ar_safety_step(
         return None
     if not ar_safety_enabled():
         return None
-    restore_scale = 4 if restored_prefix else 1
-    warmup = restore_scale * ar_safety_warmup_cycles()
+    warmup = ar_safety_warmup_cycles(primed=primed)
     if cycles < warmup:
         return None
-    window = restore_scale * ar_safety_window_cycles()
+    window = ar_safety_window_cycles()
     ring = st.ring
     ring.append((int(cycles), int(emitted), float(now)))
     if len(ring) > window + 1:

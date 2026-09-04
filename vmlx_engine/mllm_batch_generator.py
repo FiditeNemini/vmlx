@@ -5645,7 +5645,7 @@ def _native_mtp_maybe_ar_safety_fallback(
         emitted=cycles + int(state.stats.accepted_tokens),
         now=time.perf_counter(),
         seed_ar_ms=float(getattr(state, "ar_step_ms", 0.0) or 0.0),
-        restored_prefix=bool(getattr(state, "restored_prefix", False)),
+        primed=str(state.stats.prompt_prime_source or "unprimed") != "unprimed",
     )
     if trip is None:
         return False

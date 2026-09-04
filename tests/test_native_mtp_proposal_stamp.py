@@ -29,6 +29,7 @@ def _write_config(
             {
                 "model_type": model_type,
                 "tie_word_embeddings": tied,
+                "jang_config": {"calibrated": True},
                 "quantization": {
                     head_key: {
                         "bits": layout["bits"],
@@ -162,6 +163,7 @@ def test_2l_misstamp_self_heals_on_first_load(tmp_path):
             {
                 "model_type": "qwen4_exp",
                 "tie_word_embeddings": False,
+                "jang_config": {"calibrated": True},
                 # Top-level tier default says 6-bit; no per-module entry.
                 "quantization": {"bits": 6, "group_size": 64, "mode": "affine"},
             }
@@ -230,10 +232,54 @@ def test_bundle_wide_default_quant_layout_confirms(tmp_path):
             {
                 "model_type": "qwen4_exp",
                 "tie_word_embeddings": False,
+                "jang_config": {"calibrated": True},
                 "quantization": {"bits": 8, "group_size": 64, "mode": "affine"},
             }
         )
     )
     plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
     assert plan["eligible"] is True
+    assert plan["stamped"] is True
+
+
+def test_uncalibrated_speed_pack_gets_no_stamp_and_no_eligible_verdict(tmp_path):
+    # Same architecture, plain benchmark quant, NO jang marker: the premise
+    # ("valid because JANG bundles are calibrated") is absent, so neither the
+    # stamp nor the eligible verdict is earned.
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen4_exp",
+                "tie_word_embeddings": False,
+                "quantization": {
+                    "lm_head": {"bits": 8, "group_size": 64, "mode": "affine"}
+                },
+            }
+        )
+    )
+    plan = resolve_proposal_head_plan(tmp_path, Q8_G64, family="qwen4_exp")
+    assert plan["eligible"] is False
+    assert plan["reason"] == "uncalibrated_bundle"
+    assert plan["stamped"] is False
+    assert not (tmp_path / STAMP_FILENAME).exists()
+
+
+def test_standalone_jang_config_sidecar_counts_as_calibrated(tmp_path):
+    # 27B-style marker: jang_config.json file, nothing embedded in config.
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3_5",
+                "tie_word_embeddings": False,
+                "quantization": {
+                    "language_model.lm_head": {
+                        "bits": 4, "group_size": 128, "mode": "affine"
+                    }
+                },
+            }
+        )
+    )
+    (tmp_path / "jang_config.json").write_text(json.dumps({"calibrated": True}))
+    plan = resolve_proposal_head_plan(tmp_path, Q4_G128, family="qwen3_5")
+    assert plan["reason"] == "native_head_already_low_bit"
     assert plan["stamped"] is True

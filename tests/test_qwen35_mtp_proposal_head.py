@@ -34,6 +34,7 @@ def _confirming_config(bundle, head_bits: int, group_size: int = 64):
             {
                 "model_type": "qwen3_5_vl",
                 "tie_word_embeddings": False,
+                "jang_config": {"calibrated": True},
                 "quantization": {
                     "language_model.lm_head": {
                         "bits": head_bits,

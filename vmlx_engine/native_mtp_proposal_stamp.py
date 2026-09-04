@@ -189,6 +189,20 @@ def _bundle_confirms_type(
     if model_type not in allowed:
         return False, f"model_type_not_stampable:{model_type or 'missing'}"
 
+    # The eligibility rule's premise is "valid because JANG bundles are
+    # AWQ+imatrix/GPTQ calibrated". A plain benchmark quant of the same
+    # architecture (speed-audit packs) has the same model_type but has not
+    # earned the verdict: require the JANG calibration marker — either the
+    # standalone jang_config.json sidecar (27B-style) or the jang_config /
+    # jang block embedded in config.json (Flash-Next-style).
+    has_jang_marker = (
+        (Path(bundle_path) / "jang_config.json").is_file()
+        or isinstance(config.get("jang_config"), dict)
+        or isinstance(config.get("jang"), dict)
+    )
+    if not has_jang_marker:
+        return False, "not_a_jang_bundle"
+
     quant = config.get("quantization")
     if isinstance(quant, dict):
         head_entry: Any = None
@@ -278,12 +292,18 @@ def resolve_proposal_head_plan(
         if confirmed:
             stamped = write_proposal_stamp(bundle_path, record)
         else:
+            if why == "not_a_jang_bundle" and plan.get("eligible"):
+                # An uncalibrated q8 head has not earned an eligible
+                # verdict — the measured win was on calibrated JANG heads.
+                # Downgrade the in-process verdict too, not just the write.
+                plan = {"eligible": False, "reason": "uncalibrated_bundle"}
             logger.info(
                 "Not stamping %s in %s (unconfirmed bundle: %s); "
-                "in-process verdict still applies",
+                "verdict=%s",
                 STAMP_FILENAME,
                 Path(bundle_path).name,
                 why,
+                "uncalibrated_bundle" if why == "not_a_jang_bundle" else "kept",
             )
     plan["stamped"] = stamped
     plan["stamp_source"] = "new" if stamped else "none"

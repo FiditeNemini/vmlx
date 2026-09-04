@@ -2578,6 +2578,7 @@ def test_qwen4_exp_prepare_stamps_bundle_once_and_honors_existing(
             {
                 "model_type": "qwen4_exp",
                 "tie_word_embeddings": False,
+                "jang_config": {"calibrated": True},
                 "quantization": {
                     "lm_head": {"bits": 8, "group_size": 64, "mode": "affine"}
                 },

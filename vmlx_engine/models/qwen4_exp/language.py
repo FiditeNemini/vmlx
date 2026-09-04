@@ -77,6 +77,96 @@ logger = logging.getLogger(__name__)
 _HYPER_SPLIT_INDICES = {}
 
 
+def _load_calibrated_proposal_sidecar(
+    bundle_path,
+    source_head,
+    proposal_bits: int,
+) -> Optional[Dict[str, Any]]:
+    """Load the stamp-declared calibrated q4 proposal head, or None.
+
+    Flash-Next contract: the bundle stamp's ``draft_artifact`` names a
+    sha256-pinned sidecar (``mtp_draft/vmlx_mtp_proposal_head.safetensors``)
+    holding ``lm_head.{weight,scales,biases}`` — the imatrix-weighted q4
+    refit of the bundle's own calibrated lm_head. Validate everything
+    (declared bits/group/mode, path containment, sha256, tensor keys,
+    geometry against the actually-loaded head) and return the tensors;
+    ANY problem returns None so the caller keeps the RTN rebuild — a bad
+    sidecar can never block a load or install a mis-shaped head.
+    """
+
+    if not bundle_path:
+        return None
+    try:
+        import hashlib
+        from pathlib import Path as _Path
+
+        # Absolute import only: this module also executes under the mlx_vlm
+        # package namespace, where a relative import aborts server startup.
+        from vmlx_engine.native_mtp_proposal_stamp import read_proposal_stamp
+
+        stamp = read_proposal_stamp(bundle_path)
+        if not stamp:
+            return None
+        artifact = stamp.get("draft_artifact")
+        if not isinstance(artifact, dict):
+            return None
+        declared_sha = artifact.get("sha256")
+        rel_file = str(artifact.get("file") or "")
+        if (
+            not isinstance(declared_sha, str)
+            or len(declared_sha) != 64
+            or not rel_file
+            or int(artifact.get("bits") or 0) != proposal_bits
+            or int(artifact.get("group_size") or 0) != int(source_head.group_size)
+            or str(artifact.get("mode") or "affine") != "affine"
+        ):
+            return None
+
+        bundle_dir = _Path(bundle_path).resolve()
+        sidecar = (bundle_dir / rel_file).resolve()
+        if not sidecar.is_file() or bundle_dir not in sidecar.parents:
+            return None
+        if hashlib.sha256(sidecar.read_bytes()).hexdigest() != declared_sha:
+            logger.warning(
+                "qwen4_exp proposal sidecar sha256 mismatch (%s); using RTN "
+                "rebuild",
+                rel_file,
+            )
+            return None
+
+        tensors = mx.load(str(sidecar))
+        try:
+            weight = tensors["lm_head.weight"]
+            scales = tensors["lm_head.scales"]
+            biases = tensors["lm_head.biases"]
+        except KeyError:
+            return None
+
+        group_size = int(source_head.group_size)
+        vocab = int(source_head.scales.shape[0])
+        hidden = int(source_head.scales.shape[1]) * group_size
+        if (
+            tuple(int(d) for d in weight.shape)
+            != (vocab, hidden * proposal_bits // 32)
+            or tuple(int(d) for d in scales.shape)
+            != (vocab, hidden // group_size)
+            or tuple(int(d) for d in biases.shape)
+            != (vocab, hidden // group_size)
+        ):
+            return None
+        if scales.dtype != source_head.scales.dtype:
+            # Family compute-dtype contract: stray metadata dtype here would
+            # re-open the fp32-promotion trap.
+            scales = scales.astype(source_head.scales.dtype)
+            biases = biases.astype(source_head.biases.dtype)
+        return {"weight": weight, "scales": scales, "biases": biases}
+    except Exception as exc:  # noqa: BLE001 - sidecar is optional, fail open
+        logger.warning(
+            "qwen4_exp proposal sidecar unusable (%s); using RTN rebuild", exc
+        )
+        return None
+
+
 def _mtp_draft_head_request() -> tuple[Optional[int], str]:
     """Return the requested proposal-head width and its status.
 
@@ -1742,22 +1832,41 @@ class LanguageModel(nn.Module):
             state.reason = str(plan.get("reason") or "stamped_ineligible")
             return state.status()
 
+        # Calibrated sidecar first (Flash-Next contract): when the stamp's
+        # draft_artifact points at the imatrix-refit q4 head (under the
+        # bundle's mtp_draft/ subfolder — the root holds no tensor files
+        # except model shards), sha256-verify and use it. ANY failure —
+        # missing file, sha mismatch, bad keys, wrong geometry — falls back
+        # silently to the RTN rebuild. Verification always uses the
+        # checkpoint head and the depth policy is unchanged, so the artifact
+        # can only shape proposals, never outputs.
+        stamped_tensors = _load_calibrated_proposal_sidecar(
+            native_mtp_active_model_path(),
+            source,
+            int(state.requested_bits or 4),
+        )
+
         started = time.perf_counter()
         try:
-            dense = mx.dequantize(
-                source.weight,
-                source.scales,
-                source.biases,
-                group_size=source.group_size,
-                bits=source.bits,
-                mode=source.mode,
-            )
-            weight, scales, biases = mx.quantize(
-                dense,
-                group_size=source.group_size,
-                bits=state.requested_bits,
-                mode=source.mode,
-            )
+            if stamped_tensors is not None:
+                weight = stamped_tensors["weight"]
+                scales = stamped_tensors["scales"]
+                biases = stamped_tensors["biases"]
+            else:
+                dense = mx.dequantize(
+                    source.weight,
+                    source.scales,
+                    source.biases,
+                    group_size=source.group_size,
+                    bits=source.bits,
+                    mode=source.mode,
+                )
+                weight, scales, biases = mx.quantize(
+                    dense,
+                    group_size=source.group_size,
+                    bits=state.requested_bits,
+                    mode=source.mode,
+                )
             # Construct only a tiny shell, then replace all generated arrays.
             # The real output/input geometry lives in the quantized tensors.
             proposal = nn.QuantizedLinear(
@@ -1773,11 +1882,16 @@ class LanguageModel(nn.Module):
             proposal.biases = biases
             mx.eval(proposal.weight, proposal.scales, proposal.biases)
             state.head = proposal
-            state.reason = "ready"
+            state.reason = (
+                "ready_sidecar" if stamped_tensors is not None else "ready"
+            )
             state.build_ms = (time.perf_counter() - started) * 1000.0
             logger.info(
-                "qwen4_exp MTP proposal head ready: q%d/g%d -> q%d/g%d "
+                "qwen4_exp MTP proposal head ready (%s): q%d/g%d -> q%d/g%d "
                 "build_ms=%.2f",
+                "sidecar, sha-verified"
+                if stamped_tensors is not None
+                else "RTN rebuild",
                 source.bits,
                 source.group_size,
                 state.requested_bits,

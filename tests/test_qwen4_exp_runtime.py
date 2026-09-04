@@ -2612,3 +2612,145 @@ def test_qwen4_exp_prepare_stamps_bundle_once_and_honors_existing(
     assert veto["available"] is False
     assert veto["reason"] == "user_opt_out"
     assert json.loads(stamp_file.read_text())["reason"] == "user_opt_out"
+
+
+def test_weight_files_come_from_index_never_glob(tmp_path):
+    # Flash-Next contract: model.safetensors.index.json is the sole authority
+    # for which files hold weights; extra files (the proposal sidecar, stray
+    # exports) must never be swept in or fail the load.
+    import json as _json
+
+    from vmlx_engine.models.qwen4_exp.loader import _enumerate_weight_files
+
+    for name in ("model-00001-of-00002.safetensors",
+                 "model-00002-of-00002.safetensors",
+                 "vmlx_mtp_proposal_head.safetensors",
+                 "stray-export.safetensors"):
+        (tmp_path / name).write_bytes(b"x")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        _json.dumps({
+            "weight_map": {
+                "lm_head.weight": "model-00001-of-00002.safetensors",
+                "mtp.fc.weight": "model-00002-of-00002.safetensors",
+            }
+        })
+    )
+    files = [p.name for p in _enumerate_weight_files(tmp_path)]
+    assert files == [
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    ]
+
+    # A file the index references but is missing on disk fails LOUDLY.
+    (tmp_path / "model-00002-of-00002.safetensors").unlink()
+    import pytest as _pytest
+
+    with _pytest.raises(FileNotFoundError, match="references missing"):
+        _enumerate_weight_files(tmp_path)
+
+
+def test_weight_files_glob_fallback_without_index(tmp_path):
+    from vmlx_engine.models.qwen4_exp.loader import _enumerate_weight_files
+
+    (tmp_path / "model.safetensors").write_bytes(b"x")
+    (tmp_path / "consolidated.safetensors").write_bytes(b"x")
+    files = [p.name for p in _enumerate_weight_files(tmp_path)]
+    assert files == ["model.safetensors"]
+
+
+def _write_sidecar_bundle(tmp_path, source_head, *, sha=None, bits=4):
+    import hashlib
+    import json as _json
+
+    draft_dir = tmp_path / "mtp_draft"
+    draft_dir.mkdir(exist_ok=True)
+    dense = mx.dequantize(
+        source_head.weight, source_head.scales, source_head.biases,
+        group_size=source_head.group_size, bits=source_head.bits, mode="affine",
+    )
+    w, s, b = mx.quantize(dense, group_size=source_head.group_size, bits=bits)
+    # Perturb one code so the sidecar differs from any runtime RTN rebuild —
+    # byte-equality with the LOADED head then proves the sidecar is in use.
+    w_np = __import__("numpy").array(w)
+    w_np[0, 0] ^= 1
+    w = mx.array(w_np)
+    path = draft_dir / "vmlx_mtp_proposal_head.safetensors"
+    mx.save_safetensors(
+        str(path).replace(".safetensors", ""),
+        {"lm_head.weight": w, "lm_head.scales": s, "lm_head.biases": b},
+    )
+    real_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    (tmp_path / "config.json").write_text(_json.dumps({
+        "model_type": "qwen4_exp",
+        "tie_word_embeddings": False,
+        "jang_config": {"calibrated": True},
+        "quantization": {"lm_head": {"bits": 8, "group_size": 64,
+                                     "mode": "affine"}},
+    }))
+    (tmp_path / "vmlx_mtp_proposal_head.json").write_text(_json.dumps({
+        "version": 1,
+        "family": "qwen4_exp",
+        "source": {"bits": 8, "group_size": 64, "mode": "affine",
+                   "tied": False},
+        "eligible": True,
+        "proposal_bits": 4,
+        "draft_artifact": {
+            "file": "mtp_draft/vmlx_mtp_proposal_head.safetensors",
+            "sha256": sha or real_sha,
+            "bits": bits,
+            "group_size": 64,
+            "mode": "affine",
+            "acceptance_validated": False,
+        },
+    }))
+    return w
+
+
+def test_calibrated_sidecar_used_when_sha_verifies(monkeypatch, tmp_path):
+    from vmlx_engine import native_mtp
+
+    monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.setattr(native_mtp, "_ACTIVE_NATIVE_MTP_MODEL_PATH", tmp_path)
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=8)
+    sidecar_weight = _write_sidecar_bundle(tmp_path, model.lm_head)
+
+    status = model.prepare_mtp_draft_head()
+    assert status["available"] is True
+    assert status["reason"] == "ready_sidecar"
+    # Hard proof: loaded packed q4 codes byte-equal the sidecar tensors
+    # (RTN would produce the unperturbed codes).
+    head = model._mtp_draft_head_state.head
+    assert bool(mx.all(head.weight == sidecar_weight))
+
+
+def test_sidecar_sha_mismatch_falls_back_to_rtn(monkeypatch, tmp_path):
+    from vmlx_engine import native_mtp
+
+    monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.setattr(native_mtp, "_ACTIVE_NATIVE_MTP_MODEL_PATH", tmp_path)
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=8)
+    _write_sidecar_bundle(tmp_path, model.lm_head, sha="f" * 64)
+
+    status = model.prepare_mtp_draft_head()
+    assert status["available"] is True
+    assert status["reason"] == "ready"  # RTN rebuild, silently
+
+
+def test_missing_sidecar_file_falls_back_to_rtn(monkeypatch, tmp_path):
+    from vmlx_engine import native_mtp
+
+    monkeypatch.delenv("VMLINUX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_MTP_DRAFT_HEAD_BITS", raising=False)
+    monkeypatch.setattr(native_mtp, "_ACTIVE_NATIVE_MTP_MODEL_PATH", tmp_path)
+    model = LanguageModel(_tiny_args())
+    _quantize_qwen4_lm_head(model, bits=8)
+    _write_sidecar_bundle(tmp_path, model.lm_head)
+    (tmp_path / "mtp_draft" / "vmlx_mtp_proposal_head.safetensors").unlink()
+
+    status = model.prepare_mtp_draft_head()
+    assert status["available"] is True
+    assert status["reason"] == "ready"

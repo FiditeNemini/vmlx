@@ -425,17 +425,57 @@ def _load_non_table_weight_files(
     return weights, is_mlx_format, ple_buffers
 
 
+def _enumerate_weight_files(model_path: Path) -> list[Path]:
+    """Weight files come from the index, never from a filename glob.
+
+    The Flash-Next bundle contract: ``model.safetensors.index.json`` is the
+    sole authority for which files hold model weights (mtp.* tensors live in
+    the regular model-* shards it names). An extra file the index does not
+    mention — the calibrated proposal-head sidecar, a stray export, an
+    AppleDouble copy — must never be swept into the weight load or fail it
+    (a root-level sidecar carrying lm_head.* copies aborted every load with
+    "duplicate qwen4_exp tensor lm_head.biases", found live 2026-09-04).
+    Bundles without an index (single-file layouts) keep the original glob.
+    """
+
+    index_path = model_path / "model.safetensors.index.json"
+    if index_path.is_file():
+        try:
+            index = json.loads(index_path.read_text())
+            weight_map = index.get("weight_map")
+            if isinstance(weight_map, dict) and weight_map:
+                files = sorted(
+                    {str(name) for name in weight_map.values() if name}
+                )
+                resolved = [model_path / name for name in files]
+                missing = [p.name for p in resolved if not p.is_file()]
+                if missing:
+                    raise FileNotFoundError(
+                        "model.safetensors.index.json references missing "
+                        f"files: {', '.join(missing)}"
+                    )
+                return resolved
+        except FileNotFoundError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - unreadable index -> glob
+            logger.warning(
+                "qwen4_exp index unreadable (%s); falling back to glob", exc
+            )
+
+    return sorted(
+        Path(path)
+        for path in glob.glob(str(model_path / "*.safetensors"))
+        if not path.endswith("consolidated.safetensors")
+    )
+
+
 def _load_non_table_weights(
     model_path: Path,
     affine1_modules: frozenset[str],
 ) -> tuple[dict[str, mx.array], bool, dict[str, mx.array]]:
     from safetensors import safe_open
 
-    weight_files = sorted(
-        Path(path)
-        for path in glob.glob(str(model_path / "*.safetensors"))
-        if not path.endswith("consolidated.safetensors")
-    )
+    weight_files = _enumerate_weight_files(model_path)
     if not weight_files:
         raise FileNotFoundError(f"No safetensors found in {model_path}")
 

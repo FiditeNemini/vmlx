@@ -89,6 +89,7 @@ from ...native_mtp_adaptive import (
     choose_depth_by_value,
     finish_armed_depth_cycle,
 )
+from ...native_mtp_ar_safety import ArSafetyState, ar_safety_step
 from ...native_mtp_cache_telemetry import (
     native_mtp_cache_lifecycle_snapshot,
     native_mtp_cache_snapshot,
@@ -711,6 +712,9 @@ class _MtpState:
     ar_fallback_reason: Optional[str] = None
     ar_step_ms: float = 0.0
     cycle_span_start: float = 0.0
+    # Policy-independent AR safety valve (runs for fixed depth too); see
+    # vmlx_engine/native_mtp_ar_safety.py.
+    ar_safety: ArSafetyState = field(default_factory=ArSafetyState)
 
     # Accept-rate / throughput counters. Surfaced via logger.info on finish.
     stats: _MtpStats = field(default_factory=_MtpStats)
@@ -1092,6 +1096,39 @@ def _text_mtp_cost_ratio(
     return mtp_ms_per_token / ar_step_ms, mtp_ms_per_token
 
 
+def _text_mtp_maybe_ar_safety_fallback(request_id: str, state: _MtpState) -> bool:
+    """Policy-INDEPENDENT on-the-fly AR safety valve (text lane).
+
+    Unlike ``_text_mtp_maybe_cost_fallback`` below (adaptive-only by design),
+    this runs for FIXED D1/D2/D3 as well: a fixed depth is the user's choice
+    of how much to speculate, never a request to keep losing to plain AR.
+    Windowed, context-scaled, stall-robust; see native_mtp_ar_safety.
+    """
+    if state.ar_fallback_pending:
+        return False
+    cycles = int(state.stats.cycles)
+    trip = ar_safety_step(
+        state.ar_safety,
+        cycles=cycles,
+        emitted=cycles + int(state.stats.draft_tokens_accepted),
+        now=time.perf_counter(),
+        seed_ar_ms=float(state.ar_step_ms or 0.0),
+        restored_prefix=str(state.stats.prompt_prime_source or "").startswith(
+            "restored"
+        ),
+    )
+    if trip is None:
+        return False
+    prior_depth = int(state.depth or 1)
+    state.ar_fallback_pending = True
+    state.ar_fallback_reason = trip.reason(prior_depth)
+    state.stats.fallback_reason = state.ar_fallback_reason
+    state.stats.fallback_mtp_ms_per_token = trip.mtp_ms_per_tok
+    state.stats.fallback_ar_step_ms = trip.ar_baseline
+    logger.info("MTP[%s] %s", request_id, trip.log_text(prior_depth))
+    return True
+
+
 def _text_mtp_maybe_cost_fallback(
     request_id: str,
     state: _MtpState,
@@ -1429,6 +1466,10 @@ def _post_init_mtp(gen_batch: Any) -> None:
 
     state = _MtpState()
     state.ar_step_ms = seed_step_ms
+    try:
+        state.ar_safety.prompt_tokens = int(len(gen_batch.tokens[0]))
+    except Exception:
+        state.ar_safety.prompt_tokens = 0
     if _glm_prompt_priming_enabled(gen_batch.model):
         from ...native_mtp_prompt_priming import prime_stats, take_primed
 
@@ -1856,8 +1897,11 @@ def _run_verify_cycle(gen_batch: Any, state: _MtpState) -> None:
     # --- new draft chain from the last confirmed position ---
     emit_tok = mx.array([emit_id], dtype=mx.uint32)
     state.next_main = emit_tok
-    if _text_mtp_maybe_cost_fallback(
-        str(gen_batch.uids[0]) if gen_batch.uids else "?",
+    request_label = str(gen_batch.uids[0]) if gen_batch.uids else "?"
+    if _text_mtp_maybe_ar_safety_fallback(
+        request_label, state
+    ) or _text_mtp_maybe_cost_fallback(
+        request_label,
         state,
         now=time.perf_counter(),
     ):

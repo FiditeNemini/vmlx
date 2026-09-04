@@ -114,6 +114,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
+from .native_mtp_ar_safety import ArSafetyState, ar_safety_step, windowed_ar_verdict
+
 import mlx.core as mx
 import mlx.nn as nn
 
@@ -4108,18 +4110,9 @@ class MLLMNativeMTPState:
     # emitted tokens is the real MTP cost per token.
     ar_step_ms: float = 0.0
     cycle_span_start: float = 0.0
-    # Windowed AR-safety governor (policy-independent, on-the-fly fallback).
-    # cost_window holds one (cycles, emitted, perf_counter) sample per cycle so
-    # a MID-STREAM or long-context slowdown is caught within ~W cycles rather
-    # than only when the whole-request average sags.  anchor_cycle_ms /
-    # anchor_context_tokens are the median per-cycle wall and the context
-    # length at the first full post-warmup window; the AR baseline scales by
-    # the cycle-wall growth since then, bounded by the context growth (no
-    # forward grows faster than linearly in context).
-    anchor_cycle_ms: float = 0.0
-    anchor_context_tokens: int = 0
-    prompt_tokens: int = 0
-    cost_window: List[Tuple[int, int, float]] = field(default_factory=list)
+    # Windowed AR-safety governor (policy-independent, on-the-fly fallback);
+    # mechanism documented in vmlx_engine/native_mtp_ar_safety.py.
+    ar_safety: ArSafetyState = field(default_factory=ArSafetyState)
     # The request began from a restored prefix. The MTP head cache starts
     # COLD on such requests (backbone hiddens are not stored), so the first
     # gate windows measure a context-starved head: run 3 of a live A/B
@@ -5628,176 +5621,39 @@ def _native_mtp_maybe_cost_fallback(
     return True
 
 
-def _native_mtp_windowed_ar_verdict(
-    *,
-    ar_step_ms: float,
-    anchor_cycle_ms: float,
-    cur_cycle_ms: float,
-    context_ratio: float,
-    delta_emitted: int,
-    delta_wall_ms: float,
-    margin: float,
-    per_cycle_ms_per_tok: Optional[Sequence[float]] = None,
-) -> Optional[Tuple[float, float]]:
-    """Pure windowed MTP-vs-AR decision. Returns (mtp_ms_per_tok, ar_baseline)
-    when MTP is slower than a CONTEXT-SCALED AR baseline by the margin, else
-    None. Factored out so the arithmetic is unit-testable without a model.
-
-    ar_baseline = seed AR step x scale, where scale is the growth of the
-    MEDIAN per-cycle wall since the post-warmup anchor (the forward at the
-    current context is what grows for AR and MTP alike), bounded above by the
-    context growth ratio (attention is at most linear in context, so a step
-    cannot legitimately grow faster than context does — an abrupt MTP-only
-    slowdown therefore cannot hide behind the scale) and below by 1.0 (the
-    seed is a floor).  When ``per_cycle_ms_per_tok`` is given, the window
-    MEDIAN must also exceed the threshold: one stalled cycle cannot trip an
-    irreversible demotion.
-    """
-    if ar_step_ms <= 0.0:
-        return None
-    if delta_emitted <= 0 or delta_wall_ms <= 0.0:
-        return None
-    mtp_ms_per_tok = delta_wall_ms / delta_emitted
-    scale = 1.0
-    if anchor_cycle_ms > 0.0 and cur_cycle_ms > 0.0:
-        scale = cur_cycle_ms / anchor_cycle_ms
-        scale = min(scale, max(1.0, float(context_ratio)))
-        scale = max(1.0, scale)
-    ar_baseline = ar_step_ms * scale
-    threshold = ar_baseline * margin
-    if mtp_ms_per_tok <= threshold:
-        return None
-    if per_cycle_ms_per_tok:
-        ordered = sorted(float(v) for v in per_cycle_ms_per_tok)
-        if ordered[len(ordered) // 2] <= threshold:
-            return None
-    return mtp_ms_per_tok, ar_baseline
-
-
-def _native_mtp_median(values: Sequence[float]) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(float(v) for v in values)
-    return ordered[len(ordered) // 2]
+# Pure decision math lives in the shared module (both lanes use it).
+_native_mtp_windowed_ar_verdict = windowed_ar_verdict
 
 
 def _native_mtp_maybe_ar_safety_fallback(
     request_id: str, state: MLLMNativeMTPState
 ) -> bool:
-    """Policy-INDEPENDENT on-the-fly AR safety valve.
+    """Policy-INDEPENDENT on-the-fly AR safety valve (multimodal lane).
 
     Runs every cycle for BOTH fixed and adaptive depth (unlike the depth-adapt
-    gates, which fixed depth disables). Catches a MID-STREAM or long-context
-    slowdown within ~W cycles by comparing a WINDOWED MTP ms/token against a
-    context-scaled AR baseline; on a real regression it demotes the request to
-    pure AR for the remainder (irreversible this request; safe — switching to
-    AR only stops speculating, the backbone cache stays coherent).
-
-    Everything here is wall-clock + counters (no extra device sync): the ring
-    timestamps are taken once per cycle after the cycle's device round-trip.
+    gates, which fixed depth disables).  On a real windowed regression it
+    demotes the request to pure AR for the remainder (irreversible this
+    request; safe — switching to AR only stops speculating, the backbone
+    cache stays coherent).  See native_mtp_ar_safety.ar_safety_step.
     """
     if state.ar_fallback_pending:
         return False
-    if not _native_mtp_env_flag(
-        True,
-        "VMLINUX_NATIVE_MTP_AR_SAFETY",
-        "VMLX_NATIVE_MTP_AR_SAFETY",
-    ):
-        return False
-    ar_ms = float(getattr(state, "ar_step_ms", 0.0) or 0.0)
-    if ar_ms <= 0.0:
-        return False
-
-    restore_scale = 4 if getattr(state, "restored_prefix", False) else 1
-    warmup = restore_scale * _native_mtp_env_int(
-        12,
-        "VMLINUX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
-        "VMLX_NATIVE_MTP_ADAPTIVE_WARMUP_CYCLES",
-        minimum=1,
-    )
     cycles = int(state.stats.cycles)
-    if cycles < warmup:
+    trip = ar_safety_step(
+        state.ar_safety,
+        cycles=cycles,
+        emitted=cycles + int(state.stats.accepted_tokens),
+        now=time.perf_counter(),
+        seed_ar_ms=float(getattr(state, "ar_step_ms", 0.0) or 0.0),
+        restored_prefix=bool(getattr(state, "restored_prefix", False)),
+    )
+    if trip is None:
         return False
-
-    window = restore_scale * _native_mtp_env_int(
-        16,
-        "VMLINUX_NATIVE_MTP_AR_SAFETY_WINDOW",
-        "VMLX_NATIVE_MTP_AR_SAFETY_WINDOW",
-        minimum=4,
-    )
-    now = time.perf_counter()
-    emitted = cycles + int(state.stats.accepted_tokens)
-    ring = state.cost_window
-    ring.append((cycles, emitted, now))
-    if len(ring) > window + 1:
-        del ring[0 : len(ring) - (window + 1)]
-    if len(ring) <= window:
-        return False  # window not full yet — do not judge a cold window
-
-    c0, e0, t0 = ring[0]
-    per_cycle_ms: List[float] = []
-    per_cycle_ms_per_tok: List[float] = []
-    for prev, cur in zip(ring, ring[1:]):
-        d_ms = (cur[2] - prev[2]) * 1000.0
-        d_e = cur[1] - prev[1]
-        per_cycle_ms.append(d_ms)
-        if d_e > 0:
-            per_cycle_ms_per_tok.append(d_ms / d_e)
-    cur_cycle_ms = _native_mtp_median(per_cycle_ms)
-    context_now = int(state.prompt_tokens) + emitted
-    if state.anchor_cycle_ms <= 0.0:
-        # Anchor on the FIRST FULL post-warmup window (not cycle 1, whose
-        # cold-start cost would make every later window look cheaper and pin
-        # the scale at 1.0).
-        if cur_cycle_ms <= 0.0:
-            return False
-        state.anchor_cycle_ms = cur_cycle_ms
-        state.anchor_context_tokens = max(1, context_now)
-    context_ratio = context_now / max(1, state.anchor_context_tokens)
-    margin = _native_mtp_env_float(
-        1.25,
-        "VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN",
-        "VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN",
-    )
-    verdict = _native_mtp_windowed_ar_verdict(
-        ar_step_ms=ar_ms,
-        anchor_cycle_ms=float(state.anchor_cycle_ms),
-        cur_cycle_ms=cur_cycle_ms,
-        context_ratio=context_ratio,
-        delta_emitted=emitted - e0,
-        delta_wall_ms=(now - t0) * 1000.0,
-        margin=margin,
-        per_cycle_ms_per_tok=per_cycle_ms_per_tok,
-    )
-    if verdict is None:
-        return False
-    mtp_ms_per_tok, ar_baseline = verdict
     prior_depth = int(state.depth or 1)
     state.depth = 1
     state.ar_fallback_pending = True
-    state.ar_fallback_reason = (
-        f"windowed_ar_safety d{prior_depth} mtp_ms_per_tok={mtp_ms_per_tok:.1f}"
-        f">ar_baseline={ar_baseline:.1f}(seed={ar_ms:.1f})x{margin:.2f}"
-    )
-    logger.info(
-        "MLLM MTP[%s] windowed AR safety D%d -> AR at cycle=%d "
-        "(%.1fms/tok vs ctx-scaled AR %.1fms, seed %.1fms, window=%d, "
-        "cycle median %.1f max %.1f ms/tok, cycle wall anchor %.1f -> %.1f ms, "
-        "context %d -> %d)",
-        request_id,
-        prior_depth,
-        cycles,
-        mtp_ms_per_tok,
-        ar_baseline,
-        ar_ms,
-        window,
-        _native_mtp_median(per_cycle_ms_per_tok),
-        max(per_cycle_ms_per_tok) if per_cycle_ms_per_tok else 0.0,
-        float(state.anchor_cycle_ms),
-        cur_cycle_ms,
-        int(state.anchor_context_tokens),
-        context_now,
-    )
+    state.ar_fallback_reason = trip.reason(prior_depth)
+    logger.info("MLLM MTP[%s] %s", request_id, trip.log_text(prior_depth))
     return True
 
 
@@ -14954,7 +14810,7 @@ class MLLMBatchGenerator:
             ),
             profile_key=request_profile_key,
         )
-        state.prompt_tokens = (
+        state.ar_safety.prompt_tokens = (
             int(request.input_ids.shape[-1])
             if getattr(request, "input_ids", None) is not None
             else 0

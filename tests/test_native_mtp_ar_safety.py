@@ -10,7 +10,7 @@ div-by-small/empty guards.
 
 import time
 
-from vmlx_engine.mllm_batch_generator import _native_mtp_windowed_ar_verdict
+from vmlx_engine.native_mtp_ar_safety import windowed_ar_verdict as _native_mtp_windowed_ar_verdict
 
 BASE = dict(
     ar_step_ms=10.0,
@@ -109,7 +109,7 @@ def _state(m, depth=3):
         depth=depth,
     )
     state.ar_step_ms = 10.0
-    state.prompt_tokens = 100
+    state.ar_safety.prompt_tokens = 100
     return state
 
 
@@ -123,13 +123,13 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
 
     state = _state(m)
-    state.anchor_cycle_ms = 20.0
-    state.anchor_context_tokens = 120
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.anchor_context_tokens = 120
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.accepted_tokens = 0
     # Full ring, 1 tok/cycle at 20ms/cycle = 20 ms/tok, flat cycle wall.
-    state.cost_window = [(24 + i, 24 + i, base_t + i * 0.020) for i in range(17)]
+    state.ar_safety.ring = [(24 + i, 24 + i, base_t + i * 0.020) for i in range(17)]
     tripped = m._native_mtp_maybe_ar_safety_fallback("req-fixed", state)
     assert tripped is True
     assert state.ar_fallback_pending is True
@@ -144,15 +144,15 @@ def test_anchor_is_first_full_window_not_cycle_one(monkeypatch):
 
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
     state = _state(m)
-    assert state.anchor_cycle_ms == 0.0
+    assert state.ar_safety.anchor_cycle_ms == 0.0
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.accepted_tokens = 40
     # 2 tok/cycle at 10ms/cycle = 5 ms/tok (fast).
-    state.cost_window = [(24 + i, 2 * (24 + i), base_t + i * 0.010) for i in range(17)]
+    state.ar_safety.ring = [(24 + i, 2 * (24 + i), base_t + i * 0.010) for i in range(17)]
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
-    assert abs(state.anchor_cycle_ms - 10.0) < 1e-6
-    assert state.anchor_context_tokens == 100 + 80
+    assert abs(state.ar_safety.anchor_cycle_ms - 10.0) < 1e-6
+    assert state.ar_safety.anchor_context_tokens == 100 + 80
     assert state.ar_fallback_pending is False
 
 
@@ -161,10 +161,54 @@ def test_disabled_by_kill_switch(monkeypatch):
 
     monkeypatch.setenv("VMLX_NATIVE_MTP_AR_SAFETY", "0")
     state = _state(m)
-    state.anchor_cycle_ms = 20.0
-    state.anchor_context_tokens = 120
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.anchor_context_tokens = 120
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
-    state.cost_window = [(24 + i, 24 + i, base_t + i * 0.020) for i in range(17)]
+    state.ar_safety.ring = [(24 + i, 24 + i, base_t + i * 0.020) for i in range(17)]
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.ar_fallback_pending is False
+
+
+def test_text_lane_trips_under_fixed_policy(monkeypatch):
+    # The TEXT lane (GLM / DSV4 / non-VL bundles) had the same hole: its
+    # runtime cost gate is chained to adaptive_enabled. The shared valve must
+    # fire there under FIXED depth too — same scenario as the VLM test.
+    from vmlx_engine.patches.mlx_lm_mtp import batch_generator as tl
+
+    monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = tl._MtpState()
+    state.adaptive_enabled = False
+    state.depth = 3
+    state.ar_step_ms = 10.0
+    state.ar_safety.prompt_tokens = 100
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.anchor_context_tokens = 120
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 40
+    state.stats.draft_tokens_accepted = 0
+    state.ar_safety.ring = [(24 + i, 24 + i, base_t + i * 0.020) for i in range(17)]
+    # The adaptive-only gate stays silent under fixed policy...
+    assert tl._text_mtp_maybe_cost_fallback("req", state, now=time.perf_counter()) is False
+    # ...the policy-independent valve does not.
+    assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is True
+    assert state.ar_fallback_pending is True
+    assert "windowed_ar_safety d3" in (state.ar_fallback_reason or "")
+    assert state.stats.fallback_reason == state.ar_fallback_reason
+
+
+def test_text_lane_fast_window_holds(monkeypatch):
+    from vmlx_engine.patches.mlx_lm_mtp import batch_generator as tl
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = tl._MtpState()
+    state.depth = 3
+    state.ar_step_ms = 10.0
+    state.ar_safety.prompt_tokens = 100
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 40
+    state.stats.draft_tokens_accepted = 40
+    state.ar_safety.ring = [(24 + i, 2 * (24 + i), base_t + i * 0.010) for i in range(17)]
+    assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is False
     assert state.ar_fallback_pending is False

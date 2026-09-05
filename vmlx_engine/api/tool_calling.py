@@ -553,12 +553,37 @@ def check_and_inject_fallback_tools(
         and "<minimax:tool_call>" in instruction_prompt
         and all(f'<invoke name="{name}">' in instruction_prompt for name in tool_names)
     )
+    # MiniMax-M2.7 templates render the tool schemas natively inside a
+    # <tools>...</tools> block and show ONE generic <invoke name="tool-name-1">
+    # example instead of one example per tool. Requiring per-tool examples
+    # sent every M2.7 request with tools through the fallback injection
+    # (user report 2026-09-04: "Chat template needs fallback tool schema
+    # injection" on every call, followed by parsed tool calls dropped for
+    # empty required arguments). A rendered schema block that names every
+    # tool is the native contract.
+    _minimax_has_native_tool_schema = (
+        is_minimax_native_tool_prompt
+        and "<minimax:tool_call>" in instruction_prompt
+        and "<tools>" in instruction_prompt
+        and "</tools>" in instruction_prompt
+        and all(name in instruction_prompt for name in tool_names)
+    )
+    # Two native dialects render the schema block: MiMo-style XML entries
+    # (<name>tool</name>) and JSON entries ({"name": "tool", ...}) as emitted
+    # by the Qwen3.8-27B D-series and Nanbeige templates. Requiring the XML
+    # form sent every 27B / Nanbeige tool call through the fallback injection
+    # (matrix over all bundle templates, 2026-09-05).
     _xml_function_has_native_tool_schema = (
         is_xml_function_native_tool_prompt
         and "<tool_call>" in instruction_prompt
         and "<function=example_function_name>" in instruction_prompt
         and "<tools>" in instruction_prompt
-        and all(f"<name>{name}</name>" in instruction_prompt for name in tool_names)
+        and all(
+            f"<name>{name}</name>" in instruction_prompt
+            or f'"name": "{name}"' in instruction_prompt
+            or f'"name":"{name}"' in instruction_prompt
+            for name in tool_names
+        )
     )
     _step3p5_has_concrete_tool_examples = (
         is_step3p5_native_tool_prompt
@@ -595,7 +620,11 @@ def check_and_inject_fallback_tools(
             or _lfm2_has_concrete_tool_examples
         )
         and (not is_openpangu_native_tool_prompt or _openpangu_has_concrete_tool_examples)
-        and (not is_minimax_native_tool_prompt or _minimax_has_concrete_tool_examples)
+        and (
+            not is_minimax_native_tool_prompt
+            or _minimax_has_concrete_tool_examples
+            or (_minimax_has_native_tool_schema and not tool_choice_required)
+        )
         and (not is_xml_function_native_tool_prompt or _xml_function_has_native_tool_schema)
         and (
             not is_step3p5_native_tool_prompt

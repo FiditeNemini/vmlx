@@ -10029,7 +10029,11 @@ class TestStartupCompatibilityGuards:
         end = source.index("_step3p5_has_concrete_tool_examples", start)
         block = source[start:end]
 
-        assert 'all(f"<name>{name}</name>" in instruction_prompt for name in tool_names)' in block
+        # Both native schema dialects must be accepted: MiMo-style <name> XML
+        # entries and the JSON entries the Qwen3.8-27B D-series / Nanbeige
+        # templates render inside <tools> (matrix 2026-09-05).
+        assert 'f"<name>{name}</name>" in instruction_prompt' in block
+        assert 'f\'"name": "{name}"\' in instruction_prompt' in block
         assert 'all(f"<function={name}>" in instruction_prompt for name in tool_names)' not in block
         assert '"<function=example_function_name>" not in source'
         assert "def _splice_tool_prompt_into_rendered_chatml(" in source

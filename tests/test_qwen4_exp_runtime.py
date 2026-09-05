@@ -233,7 +233,11 @@ def test_qwen4_exp_qsa_persists_raw_index_projection_before_pool_norm_and_rope()
     mask = indexer(hidden, cache, offset=0, position_ids=positions)
     mx.eval(expected_raw, mask, cache.idx_keys)
 
-    payload = np.asarray(cache.idx_keys[:, 0, :, :])
+    # The persisted lane is the logical slice exposed by ``state``; the live
+    # backing buffer grows in steps and may be longer.
+    persisted = cache.state[2]
+    assert persisted.shape[2] == length and cache.idx_keys.shape[2] >= length
+    payload = np.asarray(persisted[:, 0, :, :])
     np.testing.assert_array_equal(
         payload[..., : args.indexer_head_dim],
         np.asarray(expected_raw).astype(np.float32),
@@ -275,7 +279,9 @@ def test_qwen4_exp_qsa_bypasses_selection_while_all_blocks_fit_budget(monkeypatc
 
     assert mask is None
     assert cache.idx_keys is not None
-    assert cache.idx_keys.shape[2] == length
+    # logical extent == length; the physical backing grows in steps
+    assert cache._idx_offset == length
+    assert cache.idx_keys.shape[2] >= length
 
 
 def test_qwen4_exp_qsa_selects_complete_blocks_and_keeps_off_boundary_tail():

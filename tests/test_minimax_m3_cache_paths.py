@@ -1717,3 +1717,62 @@ def test_minimax_m3_residual_think_markup_is_stripped_for_display_and_tools():
     assert server._strip_think_for_tool_parse(raw) == "private visible"
     assert server._strip_residual_think_markup_for_display(implicit) == "visible answer"
     assert server._strip_think_for_tool_parse(implicit) == "visible answer"
+
+
+def test_single_cache_idx_lane_grows_in_steps_and_keeps_logical_contract():
+    """A2: the raw index lane is backed by step-sized buffers; every contract
+    surface (state, update_index return, trim, restore, validator) sees the
+    logical extent only.  Covers a step boundary from both sides."""
+    import mlx.core as mx
+    import numpy as np
+    from vmlx_engine.models.minimax_m3.cache import (
+        MiniMaxM3SparseCache,
+        restore_minimax_m3_sparse,
+    )
+
+    c = MiniMaxM3SparseCache()
+    step = c.idx_step
+    total = 0
+    expected = []
+    for n in (step - 1, 1, 1, 3):  # 255 | 256 | 257 | 260
+        kv = mx.zeros((1, 1, n, 2))
+        c.update_and_fetch(kv, kv)
+        chunk = mx.arange(total, total + n, dtype=mx.float32)[None, None, :, None]
+        chunk = mx.broadcast_to(chunk, (1, 1, n, 4))
+        out = c.update_index(chunk)
+        total += n
+        expected.append(np.asarray(chunk))
+        assert out.shape[2] == total == c.offset == c._idx_offset
+        assert c.idx_keys.shape[2] >= total
+        assert c.idx_keys.shape[2] % step == 0
+        np.testing.assert_array_equal(np.asarray(out), np.concatenate(expected, axis=2))
+    k, v, idx = c.state
+    assert idx.shape[2] == total
+    # trim mid-step then keep appending: contract holds, no stale rows leak
+    assert c.trim(5) == 5
+    assert c._idx_offset == c.offset == total - 5
+    kv = mx.zeros((1, 1, 2, 2)); c.update_and_fetch(kv, kv)
+    tail = mx.full((1, 1, 2, 4), 9.0)
+    out = c.update_index(tail)
+    assert out.shape[2] == total - 3
+    assert float(out[0, 0, -1, 0]) == 9.0 and float(out[0, 0, -3, 0]) == float(total - 6)
+    # restore from the persisted tuple is exact-length and equal
+    r = restore_minimax_m3_sparse(*c.state)
+    assert r.idx_keys.shape[2] == r.offset == total - 3
+    np.testing.assert_array_equal(np.asarray(r.idx_keys), np.asarray(c.state[2]))
+
+
+def test_validator_accepts_step_backed_live_lane_and_rejects_short_lane():
+    import mlx.core as mx
+    from vmlx_engine.cache_record_validator import validate_live_cache
+    from vmlx_engine.models.minimax_m3.cache import MiniMaxM3SparseCache
+
+    c = MiniMaxM3SparseCache()
+    kv = mx.zeros((1, 1, 7, 2)); c.update_and_fetch(kv, kv)
+    c.update_index(mx.zeros((1, 1, 7, 4)))
+    assert c.idx_keys.shape[2] == c.idx_step > c.offset
+    ok, reason, _ = validate_live_cache([c])
+    assert ok, reason
+    c.idx_keys = c.idx_keys[..., :3, :]  # lane shorter than the logical offset
+    ok, reason, _ = validate_live_cache([c])
+    assert not ok and "idx_keys length" in reason

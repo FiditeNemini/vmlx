@@ -71,25 +71,42 @@ class MiniMaxM3SparseCache(KVCache):
                     return
 
     # ── indexer-key side (called by the attention layer each step) ──
-    def update_index(self, idx_k: mx.array) -> mx.array:
-        """Append this step's idx_k [B, 1, T, D] and return the full idx history.
+    # Physical growth step for the raw index lane (same policy as the K/V
+    # side): the lane used to be re-concatenated at its exact length on every
+    # step, an O(context) copy per token per sparse layer (13.6 MB at 26k
+    # tokens for a 131-wide F32 payload).  ``_idx_offset`` is the LOGICAL
+    # length; ``idx_keys.shape[2]`` may exceed it.  Every reader goes through
+    # ``state``/``update_index`` (both slice to the logical extent) or
+    # ``offset``; the record validator accepts a longer physical backing.
+    idx_step = 256
 
-        Grows with the same step/over-allocation policy as the KV side so the two
-        offsets stay aligned; the indexer reads `idx_keys[..., : self.offset, :]`.
+    def update_index(self, idx_k: mx.array) -> mx.array:
+        """Append this step's idx_k [B, H, T, D] and return the index history.
+
+        Returns idx_keys sliced to the CURRENT KV offset. The attention forward
+        calls cache.update_and_fetch(k, v) BEFORE the indexer (upstream
+        ordering), so self.offset is already the post-append length and this
+        slice equals the full appended idx history -> Sk matches SDPA's K.
+        Keeps update_index, the indexer scoring, and `state` serialization all
+        consistent on self.offset (the 'return full' variant desynced
+        serialization and broke coherence).
         """
-        prev = self.idx_keys
-        if prev is None:
-            self.idx_keys = idx_k
-        else:
-            self.idx_keys = mx.concatenate([prev, idx_k], axis=2)
-        self._idx_offset = self.idx_keys.shape[2]
-        # Return idx_keys sliced to the CURRENT KV offset. The attention forward now
-        # calls cache.update_and_fetch(k, v) BEFORE the indexer (upstream ordering),
-        # so self.offset is already the post-append length and this slice equals the
-        # full appended idx history -> Sk matches SDPA's K. Keeps update_index, the
-        # indexer scoring, and `state` serialization all consistent on self.offset
-        # (the 'return full' variant desynced serialization and broke coherence).
-        return self.idx_keys[..., : self.offset, :] if self.offset else self.idx_keys
+        prev = int(self._idx_offset)
+        n = int(idx_k.shape[2])
+        if self.idx_keys is None or prev + n > int(self.idx_keys.shape[2]):
+            B, H, _, D = idx_k.shape
+            n_steps = (self.idx_step + n - 1) // self.idx_step
+            grown = mx.zeros((B, H, n_steps * self.idx_step, D), dtype=idx_k.dtype)
+            if self.idx_keys is None:
+                self.idx_keys = grown
+            else:
+                if prev % self.idx_step != 0:
+                    self.idx_keys = self.idx_keys[..., :prev, :]
+                self.idx_keys = mx.concatenate([self.idx_keys, grown], axis=2)
+        self.idx_keys[..., prev : prev + n, :] = idx_k
+        self._idx_offset = prev + n
+        logical = int(self.offset) if self.offset else self._idx_offset
+        return self.idx_keys[..., :logical, :]
 
     # ── serialization: expose the 3-tensor slice the disk tiers pack ──
     @property

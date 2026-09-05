@@ -1131,10 +1131,13 @@ def _validate_live_single_cache(layer_cache: Any, *, layer_idx: int) -> Tuple[bo
                     f"layer {layer_idx}: MiniMaxM3 offset {parsed_offset} "
                     f"exceeds K/V backing lengths {key_len}/{value_len}"
                 ), total_bytes
-            if parsed_offset != idx_len:
+            # The single-sequence sparse cache grows idx_keys in step-sized
+            # backing buffers too (logical extent = offset); only a lane
+            # SHORTER than the logical offset is corrupt.
+            if parsed_offset > idx_len:
                 return False, (
                     f"layer {layer_idx}: MiniMaxM3 logical offset "
-                    f"{parsed_offset} != idx_keys length {idx_len}"
+                    f"{parsed_offset} > idx_keys length {idx_len}"
                 ), total_bytes
         elif key_len != idx_len:
             return False, (

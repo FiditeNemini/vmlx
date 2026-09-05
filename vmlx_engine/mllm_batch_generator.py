@@ -15646,6 +15646,7 @@ class MLLMBatchGenerator:
         if not _native_mtp_reentry_enabled():
             return False
         measured = tier.measured_ar_ms_per_tok()
+        _seed_t0 = time.perf_counter()
         try:
             seeded = self._seed_native_mtp_from_prefill(
                 req, batch.cache, batch.y, batch.logprobs
@@ -15674,13 +15675,14 @@ class MLLMBatchGenerator:
             pass
         logger.info(
             "MLLM MTP[%s] re-entry probe #%d at D%d after %d AR tokens "
-            "(measured AR %.1fms/tok, backoff %d)",
+            "(measured AR %.1fms/tok, backoff %d, seed wall=%.1fms)",
             req.request_id,
             tier.probes,
             int(state.depth or 1),
             tier.tokens_since_fallback,
             measured,
             tier.backoff,
+            (time.perf_counter() - _seed_t0) * 1000.0,
         )
         return True
 
@@ -15966,6 +15968,7 @@ class MLLMBatchGenerator:
                     getattr(mtp_state, "ar_fallback_pending", False)
                     and not mtp_state.queue
                 ):
+                    _handoff_t0 = time.perf_counter()
                     self._abandon_pending_native_mtp_verify(mtp_state, batch.cache)
                     ready, fallback_reason = _native_mtp_ar_fallback_ready(
                         batch.cache,
@@ -16001,6 +16004,11 @@ class MLLMBatchGenerator:
                     )
                     if hasattr(batch.requests[0], "_native_mtp_state"):
                         delattr(batch.requests[0], "_native_mtp_state")
+                    logger.info(
+                        "MLLM MTP[%s] AR handoff wall=%.1fms",
+                        batch.requests[0].request_id,
+                        (time.perf_counter() - _handoff_t0) * 1000.0,
+                    )
                     if _native_mtp_reentry_enabled():
                         tier = mtp_state.ar_tier or NativeMTPArTier(
                             depth=max(

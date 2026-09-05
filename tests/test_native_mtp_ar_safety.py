@@ -604,6 +604,9 @@ def _running_state(m, *, depth=3, anchor_ms=30.0, cycle_ms=30.0, cycles=40, emit
     base_t = time.perf_counter() - 1.0
     state.ar_safety.anchor_cycle_ms = anchor_ms
     state.ar_safety.ring = [(cycles - 8 + i, emitted_per_cycle * (cycles - 8 + i), base_t + i * cycle_ms / 1000.0) for i in range(9)]
+    # Same-depth calibration ledger: this depth's anchor and its recent walls.
+    state.cal_anchor_ms = {depth: anchor_ms}
+    state.cal_recent_ms = {depth: [cycle_ms] * 8}
     return state
 
 
@@ -664,3 +667,231 @@ def test_tier_records_ar_wall_and_calibration_counters():
         t.record_step(now); now += 0.025
     assert t.total_ar_tokens == 6 and abs(t.total_ar_ms - 125.0) < 1e-6
     assert abs(t.measured_ar_ms_per_tok() - 25.0) < 1e-6
+
+
+# ---- calibration lifecycle (model-free): budgets, return, next-request policy ----------
+from types import SimpleNamespace
+
+
+class _FakeGen:
+    """Stand-in for the generator in ``_reseed_native_mtp_probe``: seeds a fresh
+    state at the requested depth and records the depth the seed was asked for."""
+
+    def __init__(self, m):
+        self.m = m
+        self.seeds = []
+
+    def _seed_native_mtp_from_prefill(self, req, cache, y, logprobs, start_depth_override=None):
+        st = _vlm_state(self.m, depth=int(start_depth_override or 3))
+        st.depth_ceiling = 3
+        self.seeds.append(start_depth_override)
+        req._native_mtp_state = st
+        return True
+
+
+def _reseed(m, gen, tier):
+    req = SimpleNamespace(request_id="r", num_tokens=100, _native_mtp_ar_tier=tier)
+    batch = SimpleNamespace(requests=[req], cache=[], y=None, logprobs=None)
+    ok = m.MLLMBatchGenerator._reseed_native_mtp_probe(gen, batch, tier)
+    return ok, getattr(req, "_native_mtp_state", None)
+
+
+def _ar_steps(tier, n, ms=25.0):
+    now = 1000.0
+    for _ in range(n):
+        tier.record_step(now); now += ms / 1000.0
+
+
+def test_probe_depth_alternates_between_d1_and_configured():
+    from vmlx_engine.mllm_batch_generator import NativeMTPArTier
+
+    t = NativeMTPArTier(depth=3)
+    seen = []
+    for k in range(4):
+        t.probes = k
+        seen.append(t.probe_depth(3))
+    assert seen == [1, 3, 1, 3]
+    assert NativeMTPArTier(depth=1).probe_depth(1) == 1
+
+
+def test_loss_reentry_budget_blocks_probes_but_never_a_calibration_return(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_REENTRY", raising=False)
+    loss = m.NativeMTPArTier(depth=3)
+    loss.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
+    _ar_steps(loss, 40)
+    assert loss.probe_due() is False  # budget exhausted: stays in AR
+    cal = m.NativeMTPArTier(depth=3, calibration=True, reenter_depth=3)
+    cal.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
+    cal.next_probe_tokens = m._NATIVE_MTP_CALIBRATION_TOKENS
+    _ar_steps(cal, m._NATIVE_MTP_CALIBRATION_TOKENS)
+    assert cal.probe_due() is True  # a calibration always returns
+
+
+def test_calibration_return_resumes_at_left_depth_without_spending_the_budget(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_REENTRY", raising=False)
+    gen = _FakeGen(m)
+    tier = m.NativeMTPArTier(depth=3, calibration=True, reenter_depth=3, calibrations=1)
+    tier.probes = 4
+    _ar_steps(tier, 8)
+    ok, state = _reseed(m, gen, tier)
+    assert ok and state is not None
+    assert gen.seeds == [3]  # the FIRST draft chain is already the return width
+    assert state.probe is False and state.depth == 3  # resumed run, not a probe
+    assert tier.probes == 4 and tier.calibration is False  # no budget spent
+    assert state.ar_tier is tier and state.epoch == 6  # 4 probes + 1 calibration + 1
+    assert state.calibrations == 1
+
+
+def test_loss_reentry_probe_alternates_depth_and_spends_the_budget(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_REENTRY", raising=False)
+    gen = _FakeGen(m)
+    tier = m.NativeMTPArTier(depth=3)
+    _ar_steps(tier, 16)
+    ok, state = _reseed(m, gen, tier)
+    assert ok and state.probe is True and state.depth == 1 and tier.probes == 1
+    tier2 = m.NativeMTPArTier(depth=3); tier2.probes = 1
+    _ar_steps(tier2, 32)
+    ok, state2 = _reseed(m, gen, tier2)
+    assert ok and state2.probe is True and state2.depth == 3 and tier2.probes == 2
+    assert gen.seeds == [1, 3]
+
+
+def _calibrated_running_state(m, tier, *, tok_per_cycle, cycle_ms=45.0, cycles=40):
+    """A resumed (calibration-returned) D3 run with a full judged window."""
+    state = _vlm_state(m, depth=3)
+    state.depth_ceiling = 3; state.ladder_depth = 3
+    state.ar_tier = tier
+    state.stats.cycles = cycles
+    state.stats.accepted_tokens = cycles * (tok_per_cycle - 1)
+    base_t = time.perf_counter() - 1.0
+    state.ar_safety.anchor_cycle_ms = cycle_ms
+    state.ar_safety.ring = [(cycles - 8 + i, tok_per_cycle * (cycles - 8 + i), base_t + i * cycle_ms / 1000.0) for i in range(9)]
+    state.cal_anchor_ms = {3: cycle_ms}; state.cal_recent_ms = {3: [cycle_ms] * 8}
+    state.last_ar_measure_emitted = cycles * tok_per_cycle - 20
+    return state
+
+
+def test_calibration_return_that_wins_keeps_depth_and_counters(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    tier = m.NativeMTPArTier(depth=3, calibrations=1)
+    _ar_steps(tier, 8, ms=25.0)  # measured AR 25 ms/tok
+    state = _calibrated_running_state(m, tier, tok_per_cycle=3, cycle_ms=45.0)  # 15 ms/tok
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 3 and not state.ar_fallback_pending
+    assert tier.fallbacks == 1 and tier.probes == 0 and tier.backoff == 0
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_calibration_return_that_loses_steps_down_the_ladder_not_to_ar(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    tier = m.NativeMTPArTier(depth=3, calibrations=1)
+    _ar_steps(tier, 8, ms=25.0)
+    state = _calibrated_running_state(m, tier, tok_per_cycle=1, cycle_ms=45.0)  # 45 ms/tok, losing
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 1 and not state.ar_fallback_pending  # rung 1, judged with margin 1.0
+    assert tier.fallbacks == 1 and tier.backoff == 0
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_calibration_lifecycle_three_and_four_returns_then_budget_closes(monkeypatch):
+    """Trigger -> 8 AR steps -> return at the same depth, four times; the
+    fifth trigger is refused and the ordinary valve judges the window."""
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_REENTRY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    gen = _FakeGen(m)
+    tier = None
+    for n in range(1, 5):
+        state = _running_state(m, anchor_ms=30.0, cycle_ms=60.0, emitted_per_cycle=6, cycles=40 * n)
+        state.ar_tier = tier; state.calibrations = n - 1
+        assert m._native_mtp_maybe_ar_safety_fallback("req", state) is True
+        assert "ar_calibration" in state.ar_fallback_reason
+        tier = state.ar_tier
+        assert tier.calibration and tier.calibrations == n and tier.reenter_depth == 3
+        _ar_steps(tier, m._NATIVE_MTP_CALIBRATION_TOKENS)
+        assert tier.probe_due()
+        ok, resumed = _reseed(m, gen, tier)
+        assert ok and resumed.probe is False and resumed.depth == 3
+        assert resumed.calibrations == n and tier.probes == 0 and tier.fallbacks == 1
+    assert gen.seeds == [3, 3, 3, 3]
+    # fifth: budget closed; a losing window is judged by the valve (D3 -> D1), not calibrated
+    state = _running_state(m, anchor_ms=30.0, cycle_ms=60.0, emitted_per_cycle=1, cycles=400)
+    state.ar_tier = tier; state.calibrations = 4
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert "ar_calibration" not in (state.ar_fallback_reason or "") and state.depth == 1
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_finish_during_calibration_is_not_an_ar_ending():
+    from vmlx_engine import mllm_batch_generator as m
+
+    cal = m.NativeMTPArTier(depth=3, calibration=True, reenter_depth=3)
+    loss = m.NativeMTPArTier(depth=3)
+    assert m._native_mtp_finish_tier_label(None, cal) == "D3(calibrating)"
+    assert m._native_mtp_finish_tier_label(None, loss) == "AR"
+    st = _vlm_state(m, depth=2)
+    assert m._native_mtp_finish_tier_label(st, cal) == "D2"
+    # the sticky start rung reads the label before "(": D3 never starts the next request at D1
+    assert m._native_mtp_finish_tier_label(None, cal).split("(")[0] not in ("AR", "D1")
+    st.ar_tier = cal
+    assert m._native_mtp_handoff_is_calibration(st) is True
+    st.ar_tier = loss
+    assert m._native_mtp_handoff_is_calibration(st) is False
+
+
+def test_profile_ignores_a_calibration_handoff():
+    from vmlx_engine.native_mtp_profile import NativeMTPProfileStore
+
+    store = NativeMTPProfileStore()
+    key = ("qwen4_exp", False, "text", False)
+    store.observe(key, final_depth=3, fallback_to_ar=False, fallback_reason="x",
+                  finish_reason="length", values_tok_s={"d3": 50.0}, sample_counts={"d3": 100},
+                  ar_baseline_tps=35.0)
+    before = store.snapshot()
+    learned = next(iter(before.values()))["learned_depth"]
+    assert learned == 3
+    store.observe(key, final_depth=3, fallback_to_ar=False, fallback_reason="ar_calibration drift=+0.30",
+                  finish_reason="ar_calibration", values_tok_s={}, sample_counts={}, ar_baseline_tps=35.0)
+    after = next(iter(store.snapshot().values()))
+    assert after["learned_depth"] == 3 and after["last_finish_reason"] == "length"
+
+
+def test_calibration_drift_is_same_depth_and_consecutive_only(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY_WINDOW", raising=False)
+    st = _vlm_state(m, depth=3)
+    st.ar_safety.anchor_cycle_ms = 40.0  # valve warmup done
+    t = 100.0
+    # 9 consecutive D3 cycles at 30 ms -> anchor for depth 3
+    for c in range(1, 10):
+        d = m._native_mtp_calibration_drift(st, 3, t, c); t += 0.030
+    assert abs(st.cal_anchor_ms.get(3, 0.0) - 30.0) < 1e-6 and abs(d) < 1e-6
+    # interleaved D1 cycles (confidence gate / ladder) are NOT depth-3 evidence
+    for c in range(10, 30):
+        depth = 1 if c % 2 else 3
+        d = m._native_mtp_calibration_drift(st, depth, t, c); t += (0.030 if depth == 3 else 0.020)
+    assert abs(d) < 0.01  # no depth-3 wall is recorded across a depth change
+    assert abs(m._native_mtp_calibration_drift(st, 3, t, 30)) < 0.01
+    # a gap in cycles (a probe ran in between) never counts as one wall
+    t += 5.0
+    d = m._native_mtp_calibration_drift(st, 3, t, 40); t += 0.030
+    assert abs(d) < 0.01 and max(st.cal_recent_ms[3]) < 100.0
+    # 9 consecutive D3 cycles at 60 ms -> drift +1.0 for depth 3
+    for c in range(41, 50):
+        d = m._native_mtp_calibration_drift(st, 3, t, c); t += 0.060
+    assert abs(d - 1.0) < 0.05

@@ -4158,6 +4158,23 @@ class MLLMNativeMTPState:
     # calibration) and how many calibrations this request has spent.
     last_ar_measure_emitted: int = 0
     calibrations: int = 0
+    # Calibration drift is judged per depth: a window mixing D1 and D3
+    # cycles (the first-draft confidence gate shortens ~25% of drafts, and
+    # the ladder moves the depth) swings the median cycle wall by +-30%
+    # without any change in conditions (measured 2026-09-05: calibrations
+    # fired at emitted=54 with drift -0.32 on a mixed window).  Each depth
+    # gets its own anchor (median of its first full window AFTER warmup)
+    # and its own recent walls; drift compares like with like.
+    cal_anchor_ms: Dict[int, float] = field(default_factory=dict)
+    cal_recent_ms: Dict[int, List[float]] = field(default_factory=dict)
+    cal_last_t: float = 0.0
+    cal_last_depth: int = 0
+    cal_last_cycle: int = 0
+    # Ledger epoch: 0 for the post-prefill seed, then one per re-entry
+    # (probe or calibration return).  Cycle counters restart per epoch;
+    # ``req_tok`` in the trace is the request's cumulative output.
+    epoch: int = 0
+    # Re-entry probes alternate D1 / configured depth (see NativeMTPArTier).
     # The request began from a restored prefix. The MTP head cache starts
     # COLD on such requests (backbone hiddens are not stored), so the first
     # gate windows measure a context-starved head: run 3 of a live A/B
@@ -5742,9 +5759,19 @@ class NativeMTPArTier:
         self.last_measured_ms_per_tok = ordered[len(ordered) // 2]
         return self.last_measured_ms_per_tok
 
+    def probe_depth(self, configured: int) -> int:
+        """Depth of the next re-entry probe.  The ladder demotes through D1,
+        so a request in AR has seen BOTH rungs lose at some stretch; which
+        one wins later is unknown.  Probes alternate D1 (cheap cycle, most
+        likely to break even) and the configured depth (measured 2026-09-05
+        on 4S: D1 lost to AR at 27-32 ms/tok on stretches where pinned D3
+        ran 18-21), so neither rung is starved."""
+        configured = max(1, int(configured or 1))
+        return 1 if (self.probes % 2 == 0 or configured <= 1) else configured
+
     def probe_due(self) -> bool:
         return (
-            self.probes < _NATIVE_MTP_MAX_REENTRY_PROBES
+            (self.calibration or self.probes < _NATIVE_MTP_MAX_REENTRY_PROBES)
             and self.tokens_since_fallback >= self.next_probe_tokens
             and len(self.step_walls_ms) >= 4
             and self.measured_ar_ms_per_tok() > 0.0
@@ -5772,11 +5799,14 @@ def _native_mtp_reentry_enabled() -> bool:
 
 
 _NATIVE_MTP_PROMOTE_FIRST_CYCLES = 32
-# Per-request retry budget. On content where MTP hovers within ~10% of AR
-# every retry costs a little; once a request has lost twice it stays at AR
-# (measured on 4M/4S: the residual sub-AR turns were the repeatedly re-tried
-# ones). Promotion back to the configured depth gets three tries.
-_NATIVE_MTP_MAX_REENTRY_PROBES = 2
+# Per-request retry budget.  Re-entry probes are spaced 16 << k AR tokens
+# apart (16, 32, 64, 128) and a clear loser aborts within ~5 cycles, so four
+# probes bound the retry tax at well under a second per request; a cap of
+# two left a 1,024-token answer in AR for its last ~380 tokens while the
+# unvalved depth-3 arm won every remaining 64-token bin by 12-35% (measured
+# 2026-09-05 on 4S, hot: 38.9 vs 46.8 tok/s).  Promotion back to the
+# configured depth gets three tries.
+_NATIVE_MTP_MAX_REENTRY_PROBES = 4
 _NATIVE_MTP_MAX_PROMOTIONS = 3
 # Configured-depth -> D1 economics probe: first after the first full judged
 # window (warmup 8 + window 8), then with exponential backoff; two per request.
@@ -5846,6 +5876,67 @@ def _native_mtp_first_promotion_cycle(sticky_start: bool) -> int:
     re-examined after ONE window; a D1 reached by this request's own
     demotion waits the full interval (and backs off on repeated losses)."""
     return ar_safety_window_cycles() if sticky_start else _NATIVE_MTP_PROMOTE_FIRST_CYCLES
+
+
+def _native_mtp_handoff_is_calibration(state: MLLMNativeMTPState) -> bool:
+    """True when the pending AR handoff is a bounded calibration (entered
+    from a winning phase to re-measure AR), not a loss-driven fallback."""
+    tier = state.ar_tier
+    return bool(tier is not None and getattr(tier, "calibration", False))
+
+
+def _native_mtp_finish_tier_label(
+    mtp_state: Optional[MLLMNativeMTPState], tier: Optional["NativeMTPArTier"]
+) -> str:
+    """Where a finished request ended, for the AR-tier summary and the next
+    request's sticky start rung.  A request that finishes during a
+    calibration's AR steps did NOT lose: it ended at the depth the
+    calibration left (label ``D<n>(calibrating)``), so the next request must
+    not start at D1 on its account.  Plain AR only when the tier is a
+    loss-driven fallback with no MTP state alive."""
+    if mtp_state is not None:
+        return f"D{int(mtp_state.depth or 1)}"
+    if tier is not None and getattr(tier, "calibration", False):
+        return f"D{max(1, int(getattr(tier, 'reenter_depth', 1) or 1))}(calibrating)"
+    return "AR"
+
+
+def _native_mtp_calibration_drift(
+    state: MLLMNativeMTPState, depth: int, now: float, cycles: int = 0
+) -> float:
+    """Same-depth cycle-wall drift for the calibration trigger.  Records
+    this cycle's wall under ``depth`` (the wall since the previous cycle,
+    only when the previous cycle ran at the same depth, and only once the
+    valve's warmup has produced an anchor so the slow post-prefill cycles
+    never seed a depth's anchor).  A depth's anchor is the median of its
+    first full window; drift = median(recent) / anchor - 1, or 0.0 until
+    both exist."""
+    window = ar_safety_window_cycles()
+    depth = int(depth or 1)
+    consecutive = int(cycles) == int(state.cal_last_cycle) + 1
+    if (
+        consecutive
+        and state.cal_last_t > 0.0
+        and state.cal_last_depth == depth
+        and state.ar_safety.anchor_cycle_ms > 0.0
+    ):
+        wall = (float(now) - state.cal_last_t) * 1000.0
+        if wall > 0.0:
+            recent = state.cal_recent_ms.setdefault(depth, [])
+            recent.append(wall)
+            if len(recent) > window:
+                del recent[0 : len(recent) - window]
+            if depth not in state.cal_anchor_ms and len(recent) >= window:
+                state.cal_anchor_ms[depth] = median(recent)
+    state.cal_last_t = float(now)
+    state.cal_last_depth = depth
+    state.cal_last_cycle = int(cycles)
+    anchor = state.cal_anchor_ms.get(depth, 0.0)
+    recent = state.cal_recent_ms.get(depth, [])
+    if anchor <= 0.0 or len(recent) < window:
+        return 0.0
+    cur = median(recent)
+    return (cur / anchor - 1.0) if cur > 0.0 else 0.0
 
 
 def _native_mtp_recent_ms_per_tok(state: MLLMNativeMTPState) -> float:
@@ -5959,13 +6050,7 @@ def _native_mtp_maybe_ar_safety_fallback(
         and state.calibrations < _NATIVE_MTP_MAX_CALIBRATIONS
     ):
         _emitted = cycles + int(state.stats.accepted_tokens)
-        _ring = state.ar_safety.ring
-        _drift = 0.0
-        if state.ar_safety.anchor_cycle_ms > 0.0 and len(_ring) > ar_safety_window_cycles():
-            _walls = [(b[2] - a[2]) * 1000.0 for a, b in zip(_ring, _ring[1:])]
-            _cur = median(_walls) if _walls else 0.0
-            if _cur > 0.0:
-                _drift = _cur / state.ar_safety.anchor_cycle_ms - 1.0
+        _drift = _native_mtp_calibration_drift(state, depth_now, time.perf_counter(), cycles)
         _stale = (_emitted - int(state.last_ar_measure_emitted)) >= _NATIVE_MTP_CALIBRATION_INTERVAL_TOKENS
         if abs(_drift) >= _NATIVE_MTP_CALIBRATION_DRIFT or _stale:
             tier = state.ar_tier or NativeMTPArTier(depth=max(1, int(state.ladder_depth or depth_now)))
@@ -15149,8 +15234,14 @@ class MLLMBatchGenerator:
         cache: List[Any],
         first_tokens: mx.array,
         first_logprobs: List[mx.array],
+        start_depth_override: Optional[int] = None,
     ) -> bool:
-        """Seed native MTP after prompt prefill produced the first token."""
+        """Seed native MTP after prompt prefill produced the first token.
+
+        ``start_depth_override``: a re-entry (probe or calibration return)
+        names the depth it intends to run at, so the FIRST draft chain is
+        already that width; the sticky start rung applies only to fresh
+        requests."""
         if not self._native_mtp_enabled_for_request(request):
             return False
         if request.max_tokens <= 1:
@@ -15301,7 +15392,9 @@ class MLLMBatchGenerator:
         # 30 ms AR step) before the first judgment, every turn.
         start_depth = depth
         _last_tier = str(getattr(self, "_native_mtp_last_tier", "") or "")
-        if depth > 1 and _last_tier in ("AR", "D1") and _native_mtp_reentry_enabled():
+        if start_depth_override is not None:
+            start_depth = max(1, min(int(start_depth_override), depth))
+        elif depth > 1 and _last_tier in ("AR", "D1") and _native_mtp_reentry_enabled():
             start_depth = 1
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
             request,
@@ -15341,7 +15434,7 @@ class MLLMBatchGenerator:
             and _native_mtp_depth_probe_enabled()
         ):
             state.depth_probe_at_cycle = _NATIVE_MTP_DEPTH_PROBE_FIRST_CYCLES
-        if start_depth < depth:
+        if start_depth < depth and start_depth_override is None:
             state.promote_at_cycle = _native_mtp_first_promotion_cycle(True)
             logger.info(
                 "MLLM MTP[%s] start rung D1 (previous request ended in %s); "
@@ -15697,7 +15790,7 @@ class MLLMBatchGenerator:
             _emitted_now = int(state.stats.cycles) + int(state.stats.accepted_tokens)
             logger.info(
                 "MTPCYCLE[%s] c=%d wall_ms=%.1f depth=%d accepted=%d emitted=%d "
-                "tier=%s seed_ar=%.1f measured_ar=%.1f",
+                "tier=%s seed_ar=%.1f measured_ar=%.1f epoch=%d req_tok=%d t=%.4f",
                 request.request_id,
                 int(state.stats.cycles),
                 (_value_cycle_now - _prev_t) * 1000.0 if _prev_t else 0.0,
@@ -15707,6 +15800,9 @@ class MLLMBatchGenerator:
                 "probe" if state.probe else ("promote" if state.promote_probe else ("dprobe" if state.depth_probe else "run")),
                 float(getattr(state, "ar_step_ms", 0.0) or 0.0),
                 float(state.ar_tier.measured_ar_ms_per_tok()) if state.ar_tier is not None else 0.0,
+                int(getattr(state, "epoch", 0) or 0),
+                int(getattr(request, "num_tokens", 0) or 0),
+                float(_value_cycle_now),
             )
             state._trace_prev_t = _value_cycle_now
         _native_mtp_maybe_ar_safety_fallback(request.request_id, state)
@@ -15919,10 +16015,17 @@ class MLLMBatchGenerator:
         if not _native_mtp_reentry_enabled():
             return False
         measured = tier.measured_ar_ms_per_tok()
+        _ladder = max(1, int(tier.depth or 1))
+        _intended_depth = (
+            max(1, min(int(tier.reenter_depth or 1), _ladder))
+            if tier.calibration
+            else tier.probe_depth(_ladder)
+        )
         _seed_t0 = time.perf_counter()
         try:
             seeded = self._seed_native_mtp_from_prefill(
-                req, batch.cache, batch.y, batch.logprobs
+                req, batch.cache, batch.y, batch.logprobs,
+                start_depth_override=_intended_depth,
             )
         except Exception as exc:
             logger.info(
@@ -15935,25 +16038,40 @@ class MLLMBatchGenerator:
             return False
         state = req._native_mtp_state
         state.ar_tier = tier
-        state.probe = True
         state.ladder_depth = max(1, int(tier.depth or state.depth_ceiling or 1))
-        if tier.calibration:
-            # A calibration left a WINNING phase: come back at that depth and
-            # let the probe window confirm against the fresh measured AR.
-            state.depth = max(1, min(int(tier.reenter_depth or 1), state.ladder_depth))
-            tier.calibration = False
-        else:
-            # Probe at D1: the cheapest rung and the one most likely to beat AR;
-            # promotion back to the configured depth follows if D1 wins.
-            state.depth = 1
+        state.epoch = int(tier.probes) + int(tier.calibrations) + 1
         state.last_ar_measure_emitted = int(state.stats.cycles) + int(state.stats.accepted_tokens)
         state.calibrations = int(getattr(tier, "calibrations", 0) or 0)
         state.ar_safety.reset(int(state.stats.cycles))
-        tier.probes += 1
         try:
             delattr(req, "_native_mtp_ar_tier")
         except AttributeError:
             pass
+        if tier.calibration:
+            # A calibration left a WINNING phase: RESUME at that depth with a
+            # fresh window and the fresh measured AR as the baseline.  It is
+            # not a probe: it needs no 10% hysteresis win (measured
+            # 2026-09-05: a resumed D2 running 5% under AR was declared a lost
+            # probe and cascaded to 736 AR tokens), and it spends none of the
+            # re-entry budget or backoff.  The ordinary ladder judges it.
+            state.probe = False
+            state.depth = _intended_depth
+            tier.calibration = False
+            if state.depth == 1 and state.ladder_depth > 1:
+                state.promote_at_cycle = int(state.stats.cycles) + _NATIVE_MTP_PROMOTE_FIRST_CYCLES
+            logger.info(
+                "MLLM MTP[%s] calibration re-entry at D%d after %d AR tokens "
+                "(measured AR %.1fms/tok, seed wall=%.1fms)",
+                req.request_id,
+                int(state.depth or 1),
+                tier.tokens_since_fallback,
+                measured,
+                (time.perf_counter() - _seed_t0) * 1000.0,
+            )
+            return True
+        state.probe = True
+        state.depth = _intended_depth
+        tier.probes += 1
         logger.info(
             "MLLM MTP[%s] re-entry probe #%d at D%d after %d AR tokens "
             "(measured AR %.1fms/tok, backoff %d, seed wall=%.1fms)",
@@ -16262,22 +16380,37 @@ class MLLMBatchGenerator:
                         )
                     batch.y, batch.logprobs = self._step(batch.y[:, None], batch.cache)
                     _submit_decode_token_eval(batch.y, batch.cache)
+                    # A calibration handoff leaves a WINNING phase to measure
+                    # AR; it is not a loss and must not teach the session
+                    # profile (learned_depth=0 / AR verdict) or the next
+                    # request's start rung.
+                    _handoff_reason = (
+                        "ar_calibration"
+                        if _native_mtp_handoff_is_calibration(mtp_state)
+                        else "fallback_to_ar"
+                    )
+                    _hs = mtp_state.stats
+                    _hs.configured_depth = int(
+                        mtp_state.ladder_depth or mtp_state.depth_ceiling or mtp_state.depth or 0
+                    )
+                    _hs.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
                     _native_mtp_log_stats(
                         batch.requests[0].request_id,
                         mtp_state.stats,
-                        "fallback_to_ar",
+                        _handoff_reason,
                         mtp_state.mtp_cache,
                     )
                     self._stats.record_native_mtp(
                         request_id=batch.requests[0].request_id,
                         stats=mtp_state.stats,
-                        finish_reason="fallback_to_ar",
+                        finish_reason=_handoff_reason,
                         final_depth=mtp_state.depth,
                         fallback_reason=mtp_state.ar_fallback_reason,
                     )
-                    self._observe_native_mtp_profile(
-                        mtp_state, "fallback_to_ar"
-                    )
+                    if _handoff_reason == "fallback_to_ar":
+                        self._observe_native_mtp_profile(
+                            mtp_state, "fallback_to_ar"
+                        )
                     logger.info(
                         "MLLM MTP[%s] fallback to AR after queue drain: %s",
                         batch.requests[0].request_id,
@@ -16345,7 +16478,19 @@ class MLLMBatchGenerator:
                 # AR tier: measure the true AR step wall and, when a probe is
                 # due, re-seed native MTP from the pending token (its seed
                 # forward IS this step's AR forward — nothing is wasted).
-                tier.record_step(time.perf_counter())
+                _ar_now = time.perf_counter()
+                _ar_prev = float(tier.last_step_t or 0.0)
+                tier.record_step(_ar_now)
+                if _NATIVE_MTP_CYCLE_TRACE:
+                    logger.info(
+                        "ARSTEP[%s] n=%d wall_ms=%.1f req_tok=%d calibration=%d t=%.4f",
+                        batch.requests[0].request_id,
+                        int(tier.total_ar_tokens),
+                        (_ar_now - _ar_prev) * 1000.0 if _ar_prev > 0.0 else 0.0,
+                        int(getattr(batch.requests[0], "num_tokens", 0) or 0),
+                        int(bool(tier.calibration)),
+                        float(_ar_now),
+                    )
                 if tier.probe_due() and self._reseed_native_mtp_probe(batch, tier):
                     mtp_state = batch.requests[0]._native_mtp_state
                     token, lp = self._next_native_mtp_token(
@@ -16502,14 +16647,13 @@ class MLLMBatchGenerator:
                     if mtp_state_for_finish is not None
                     else (2 * ar_safety_window_cycles() if finish_tier is not None else 0)
                 )
+                _ended_in = _native_mtp_finish_tier_label(mtp_state_for_finish, finish_tier)
                 if not _native_mtp_should_record_last_tier(
                     _finished_before, _finish_cycles, ar_safety_window_cycles()
                 ):
                     self._native_mtp_last_tier = ""
-                elif mtp_state_for_finish is not None:
-                    self._native_mtp_last_tier = f"D{int(mtp_state_for_finish.depth or 1)}"
-                elif getattr(req, "_native_mtp_ar_tier", None) is not None:
-                    self._native_mtp_last_tier = "AR"
+                elif mtp_state_for_finish is not None or finish_tier is not None:
+                    self._native_mtp_last_tier = _ended_in.split("(")[0]
                 if finish_tier is not None:
                     logger.info(
                         "MLLM MTP[%s] AR-tier summary: fallbacks=%d probes=%d "
@@ -16521,7 +16665,7 @@ class MLLMBatchGenerator:
                         finish_tier.reentries,
                         finish_tier.total_ar_tokens,
                         finish_tier.measured_ar_ms_per_tok(),
-                        "AR" if mtp_state_for_finish is None else f"D{int(mtp_state_for_finish.depth or 1)}",
+                        _ended_in,
                         int(getattr(finish_tier, "calibrations", 0) or 0),
                         float(getattr(finish_tier, "total_ar_ms", 0.0) or 0.0),
                     )

@@ -449,3 +449,62 @@ def test_sticky_start_evidence_rules():
     # a sticky D1 start is re-examined after one window, own demotion waits
     assert _native_mtp_first_promotion_cycle(True) == 8
     assert _native_mtp_first_promotion_cycle(False) == _NATIVE_MTP_PROMOTE_FIRST_CYCLES
+
+
+def test_depth_probe_keeps_d1_when_it_beats_configured_depth(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = _vlm_state(m)
+    state.depth = 3
+    state.ladder_depth = 3
+    state.depth_probe_at_cycle = 16
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 20
+    state.stats.accepted_tokens = 40
+    # D3 window: 3 tok/cycle at 30 ms/cycle = 10 ms/tok (AR seed 12 -> healthy)
+    state.ar_step_ms = 12.0
+    state.ar_safety.ring = [(11 + i, 3 * (11 + i), base_t + i * 0.030) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth_probe is True and state.depth == 1 and state.depth_probes == 1
+    assert abs(state.dcfg_ms_per_tok - 10.0) < 1e-6
+    # D1 window: 1.9 tok/cycle at 15 ms/cycle = 7.9 ms/tok < 10/1.1 -> keep D1
+    state.stats.cycles = 40
+    state.ar_safety.anchor_cycle_ms = 15.0
+    state.ar_safety.ring = [(31 + i, int(1.9 * (31 + i)), base_t + i * 0.015) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth_probe is False and state.depth == 1
+    assert state.promote_at_cycle > 40 and state.d1_ms_per_tok > 0
+
+
+def test_depth_probe_returns_to_configured_depth_when_d1_loses(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = _vlm_state(m)
+    state.depth = 3
+    state.ladder_depth = 3
+    state.depth_probe_at_cycle = 16
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 20
+    state.stats.accepted_tokens = 40
+    state.ar_step_ms = 12.0
+    state.ar_safety.ring = [(11 + i, 3 * (11 + i), base_t + i * 0.030) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 1 and state.depth_probe is True
+    # D1 window at 9.5 ms/tok: not 10% better than D3's 10 -> probe lost
+    state.stats.cycles = 40
+    state.ar_safety.anchor_cycle_ms = 19.0
+    state.ar_safety.ring = [(31 + i, 2 * (31 + i), base_t + i * 0.019) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth_probe is False and state.depth == 3
+    assert state.depth_probe_at_cycle > 40 and state.depth_probe_backoff == 1
+    # budget: a second probe is allowed, a third is not
+    state.stats.cycles = state.depth_probe_at_cycle + 1
+    state.ar_safety.ring = [(state.stats.cycles - 9 + i, 3 * (state.stats.cycles - 9 + i), base_t + i * 0.030) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth_probes == 2 and state.depth == 1
+    state.depth_probe = False; state.depth = 3; state.depth_probe_at_cycle = state.stats.cycles
+    state.ar_safety.ring = [(state.stats.cycles - 9 + i, 3 * (state.stats.cycles - 9 + i), base_t + i * 0.030) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 3 and state.depth_probes == 2

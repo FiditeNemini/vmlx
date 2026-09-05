@@ -135,13 +135,22 @@ _MIXED_ENV = {
 }
 
 
+_DEFAULT_MIXED = {
+    # Measured 2026-09-05 on Flash-Next 4S (q2 gate / q3 up), plain decoding,
+    # interleaved x2 with receipts: +2.1-2.7% at 1.7k / 6.6k / 26k context
+    # with byte-identical outputs. Processes running native MTP keep the
+    # whole pair kernel off (see install_affine_moe_pair_decode).
+    "qwen4_exp": True,
+    "glm5_next": False,
+}
+
+
 def _mixed_requested(family: str) -> bool:
-    """Opt-in: admit per-projection (gate != up) and 3/6-bit expert layouts
-    through the generic chunk-unpack kernel.  Off by default until the
-    interleaved A/B on the mixed bundles (4S, 6S) proves it."""
+    """Admit per-projection (gate != up) and 3/6-bit expert layouts through
+    the generic chunk-unpack kernel (VMLX_QWEN4_FUSED_MOE_PAIR_MIXED)."""
     value = os.environ.get(_MIXED_ENV[family])
     if value is None:
-        return False
+        return _DEFAULT_MIXED[family]
     return value.strip().lower() not in {"", "0", "false", "off", "no"}
 
 

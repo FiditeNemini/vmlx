@@ -442,7 +442,7 @@ def test_mixed_layout_pair_kernel_matches_stock(gate_bits, gate_gs, up_bits, up_
     )
 
 
-def test_mixed_layout_registration_is_opt_in(monkeypatch):
+def test_mixed_layout_registration_default_and_kill_switch(monkeypatch):
     mixed = _mixed_switch(2, 64, 3, 64)
     uniform = _mixed_switch(2, 64, 2, 64)
 
@@ -458,11 +458,11 @@ def test_mixed_layout_registration_is_opt_in(monkeypatch):
          "clamp_limit": None},
     )
     monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
-    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR_MIXED", raising=False)
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR_MIXED", "0")
     assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 0
     assert affine_moe_pair_status("qwen4_exp")["reason"] == "mixed_layout_atomic_fallback"
 
-    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR_MIXED", "1")
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR_MIXED")  # default on for qwen4_exp
     assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 2
     status = affine_moe_pair_status("qwen4_exp")
     assert status["installed"] == 2 and status["fallback_modules"] == 0

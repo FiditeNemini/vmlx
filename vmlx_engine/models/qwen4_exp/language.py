@@ -1662,6 +1662,60 @@ def prepare_quantized_projection_groups(model: nn.Module) -> Dict[str, int]:
     return prepared
 
 
+class _RouteOverlapProbe:
+    """Diagnostic (VMLX_QWEN4_MOE_ROUTE_OVERLAP_LOG=1): for multi-row calls
+    (MTP verification, S = depth + 1) count distinct routed experts against
+    rows x top_k on a bounded sample of calls, and log a running summary.
+    A small-row expert kernel can only reuse packed weights across rows to
+    the extent routes overlap; this measures that before any kernel work.
+    Costs one host readback per sampled call, so it is never on by default."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.sampled = 0
+        self.rows = 0
+        self.slots = 0
+        self.distinct = 0
+        self.by_rows: Dict[int, List[int]] = {}
+
+    def observe(self, inds: mx.array) -> None:
+        self.calls += 1
+        if self.calls % 16 != 1:  # sample 1 in 16 multi-row calls
+            return
+        arr = np.asarray(inds).reshape(-1, inds.shape[-1])
+        rows, top_k = arr.shape
+        distinct = int(np.unique(arr).size)
+        self.sampled += 1
+        self.rows += rows
+        self.slots += rows * top_k
+        self.distinct += distinct
+        acc = self.by_rows.setdefault(rows, [0, 0])
+        acc[0] += distinct
+        acc[1] += rows * top_k
+        if self.sampled % 32 == 0:
+            per_rows = ", ".join(
+                f"S={r}: {d}/{sl} ({100.0 * d / max(1, sl):.0f}%)"
+                for r, (d, sl) in sorted(self.by_rows.items())
+            )
+            logger.info(
+                "qwen4_exp MoE route overlap: %d sampled multi-row calls, "
+                "distinct experts / (rows x top_k) = %d/%d (%.0f%%); %s",
+                self.sampled,
+                self.distinct,
+                self.slots,
+                100.0 * self.distinct / max(1, self.slots),
+                per_rows,
+            )
+
+
+_ROUTE_OVERLAP_PROBE: Optional[_RouteOverlapProbe] = (
+    _RouteOverlapProbe()
+    if os.environ.get("VMLX_QWEN4_MOE_ROUTE_OVERLAP_LOG", "0").strip().lower()
+    not in {"0", "false", "no", "off"}
+    else None
+)
+
+
 class SparseMoeBlock(nn.Module):
     def __init__(self, args: Qwen4ExpTextArgs):
         super().__init__()
@@ -1689,6 +1743,8 @@ class SparseMoeBlock(nn.Module):
             scores = scores / scores.sum(axis=-1, keepdims=True)
         if profile_phases is not None:
             profile_phases["moe_router"] = _profile_eval(inds, scores)
+        if _ROUTE_OVERLAP_PROBE is not None and x.ndim == 3 and x.shape[1] > 1:
+            _ROUTE_OVERLAP_PROBE.observe(inds)
 
         routed, fused_reduction = qwen4_affine_switchglu(
             self.switch_mlp, x, inds, scores

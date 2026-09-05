@@ -84,3 +84,16 @@ def test_compiled_hyper_connection_matches_eager(rows, monkeypatch):
     e = eager if isinstance(eager, mx.array) else mx.concatenate([t.reshape(-1) for t in eager if t is not None])
     c = compiled if isinstance(compiled, mx.array) else mx.concatenate([t.reshape(-1) for t in compiled if t is not None])
     assert bool(mx.allclose(e, c, atol=1e-5, rtol=1e-5)), f"rows={rows}"
+
+
+def test_route_overlap_probe_counts_distinct_experts():
+    probe = L._RouteOverlapProbe()
+    inds = mx.array([[[1, 2, 3], [2, 3, 4], [1, 2, 3], [9, 9, 9]]])  # S=4, top_k=3
+    probe.observe(inds)  # call 1 sampled
+    assert probe.sampled == 1 and probe.rows == 4 and probe.slots == 12
+    assert probe.distinct == 5  # {1,2,3,4,9}
+    for _ in range(15):
+        probe.observe(inds)  # calls 2..16 skipped by the 1-in-16 sampler
+    assert probe.sampled == 1
+    probe.observe(inds)  # call 17 sampled again
+    assert probe.sampled == 2 and probe.by_rows[4] == [10, 24]

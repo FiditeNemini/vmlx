@@ -5766,6 +5766,10 @@ _NATIVE_MTP_MAX_PROMOTIONS = 3
 # window (warmup 8 + window 8), then with exponential backoff; two per request.
 _NATIVE_MTP_DEPTH_PROBE_FIRST_CYCLES = 16
 _NATIVE_MTP_MAX_DEPTH_PROBES = 2
+# Diagnostic per-cycle trace (VMLX_NATIVE_MTP_CYCLE_TRACE=1): one INFO line per
+# verify cycle with the cycle wall, depth, accepted count and the governor's
+# current baselines.  Off by default; it adds a log call per cycle.
+_NATIVE_MTP_CYCLE_TRACE = os.environ.get("VMLX_NATIVE_MTP_CYCLE_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _native_mtp_adaptive_policy() -> bool:
@@ -15611,6 +15615,23 @@ class MLLMBatchGenerator:
         # AR safety valve FIRST, every cycle, regardless of depth policy —
         # fixed depth disables depth adaptation but must still escape to AR
         # when MTP is measurably slower than a context-scaled AR baseline.
+        if _NATIVE_MTP_CYCLE_TRACE:
+            _prev_t = getattr(state, "_trace_prev_t", 0.0) or 0.0
+            _emitted_now = int(state.stats.cycles) + int(state.stats.accepted_tokens)
+            logger.info(
+                "MTPCYCLE[%s] c=%d wall_ms=%.1f depth=%d accepted=%d emitted=%d "
+                "tier=%s seed_ar=%.1f measured_ar=%.1f",
+                request.request_id,
+                int(state.stats.cycles),
+                (_value_cycle_now - _prev_t) * 1000.0 if _prev_t else 0.0,
+                int(depth),
+                int(accepted),
+                _emitted_now,
+                "probe" if state.probe else ("promote" if state.promote_probe else ("dprobe" if state.depth_probe else "run")),
+                float(getattr(state, "ar_step_ms", 0.0) or 0.0),
+                float(state.ar_tier.measured_ar_ms_per_tok()) if state.ar_tier is not None else 0.0,
+            )
+            state._trace_prev_t = _value_cycle_now
         _native_mtp_maybe_ar_safety_fallback(request.request_id, state)
         _native_mtp_maybe_adapt_depth(request.request_id, state)
         _native_mtp_arm_value_cycle(state, now=_value_cycle_now)

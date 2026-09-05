@@ -38,8 +38,18 @@ Accepted blind spot: an MTP-only per-cycle slowdown that leaves AR untouched
 (e.g. draft-head page faults) raises the scale with it and is caught only
 once acceptance suffers.  Hypothetical; no such case was measured.
 
+The seed is ONE synchronized AR step measured right after prefill.  Measured
+2026-09-05 on Flash-Next 4S at 1.7k context: seed 22.0 ms/tok against a true
+AR rate of 24.7 ms/tok (40.5 tok/s), i.e. the seed read 12% fast and demoted
+a D3 window that was running at 23.9 ms/tok -- faster than real AR.  One
+sample is not a baseline, so while the baseline is the seed the trip margin
+is ``DEFAULT_SEED_MARGIN`` (the seed's observed error band); once the request
+has a MEASURED AR (or measured D1) baseline the margin is ``DEFAULT_MARGIN``.
+
 Known limitation: the first request after a model load measures an inflated
-seed (compile / cold pages), so the valve is lax for that one request.
+seed (compile / cold pages), so the valve is lax for that one request; the
+multimodal lane also never lets that request's tier seed the next request's
+start rung.
 """
 
 from __future__ import annotations
@@ -62,6 +72,8 @@ DEFAULT_WINDOW_CYCLES = 8
 # against a ~35 tok/s AR step. Stall robustness comes from the median guard,
 # hysteresis from the re-entry/promotion probes (which must WIN by 10%).
 DEFAULT_MARGIN = 1.0
+# Margin while the baseline is the single-sample seed (see module docstring).
+DEFAULT_SEED_MARGIN = 1.10
 DEFAULT_PROBE_WARMUP_CYCLES = 4
 PROBE_EARLY_ABORT_RATIO = 1.5
 
@@ -126,6 +138,17 @@ def ar_safety_margin() -> float:
         DEFAULT_MARGIN,
         "VMLINUX_NATIVE_MTP_RUNTIME_COST_MARGIN",
         "VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN",
+    )
+
+
+def ar_safety_seed_margin() -> float:
+    return max(
+        ar_safety_margin(),
+        env_float(
+            DEFAULT_SEED_MARGIN,
+            "VMLINUX_NATIVE_MTP_SEED_COST_MARGIN",
+            "VMLX_NATIVE_MTP_SEED_COST_MARGIN",
+        ),
     )
 
 
@@ -242,6 +265,7 @@ def ar_safety_step(
     margin: Optional[float] = None,
     probe: bool = False,
     scale_context: bool = True,
+    baseline_measured: bool = False,
 ) -> Optional[ArSafetyTrip]:
     """Record this cycle's sample and decide.  Call once per verify cycle,
     AFTER the cycle's device round-trip, BEFORE any depth adaptation.  The
@@ -250,7 +274,11 @@ def ar_safety_step(
     ``probe``: a re-entry/promotion probe is judged FAST — 4 warmup cycles,
     and a clear loser (mean cost above 1.5x the baseline once 4 judged
     cycles exist) is aborted before the window fills, so a losing probe
-    costs a handful of cycles instead of 24."""
+    costs a handful of cycles instead of 24.
+
+    ``baseline_measured``: ``seed_ar_ms`` is a measured AR/D1 cost over many
+    tokens (margin ``DEFAULT_MARGIN``) rather than the one-step seed (margin
+    ``DEFAULT_SEED_MARGIN``)."""
     if seed_ar_ms <= 0.0:
         return None
     if not ar_safety_enabled():
@@ -276,7 +304,7 @@ def ar_safety_step(
     if len(ring) > window + 1:
         del ring[0 : len(ring) - (window + 1)]
     if margin is None:
-        margin = ar_safety_margin()
+        margin = ar_safety_margin() if baseline_measured else ar_safety_seed_margin()
     if len(ring) <= window:
         if probe and len(ring) >= 5:
             # Early abort for a clearly losing probe.

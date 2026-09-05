@@ -5730,6 +5730,27 @@ _NATIVE_MTP_MAX_REENTRY_PROBES = 2
 _NATIVE_MTP_MAX_PROMOTIONS = 3
 
 
+def _native_mtp_should_record_last_tier(
+    finished_requests: int, cycles: int, window: int
+) -> bool:
+    """Whether a finishing request's tier may seed the NEXT request's start
+    rung.  The first request after a model load runs on cold graphs and
+    inflated timings (its D3 -> D1 demotion is an artifact: measured
+    2026-09-05, it made the following requests start at D1 at 39 tok/s
+    where D3 ran 50), and a request that saw fewer than two judgment
+    windows never settled anywhere.  Neither is evidence about the next
+    request."""
+    return int(finished_requests) >= 1 and int(cycles) >= 2 * int(window)
+
+
+def _native_mtp_first_promotion_cycle(sticky_start: bool) -> int:
+    """Cycle of the first D1 -> configured-depth promotion probe.  A sticky
+    D1 start is a guess inherited from the previous request, so it is
+    re-examined after ONE window; a D1 reached by this request's own
+    demotion waits the full interval (and backs off on repeated losses)."""
+    return ar_safety_window_cycles() if sticky_start else _NATIVE_MTP_PROMOTE_FIRST_CYCLES
+
+
 def _native_mtp_recent_ms_per_tok(state: MLLMNativeMTPState) -> float:
     ring = state.ar_safety.ring
     if len(ring) < 2:
@@ -5811,6 +5832,7 @@ def _native_mtp_maybe_ar_safety_fallback(
         # baseline; a measured AR (live context) or a measured D1 cost needs
         # none, and applying it let D1 run ~10% above AR on 4M.
         scale_context=not (promoting or measured_ar > 0.0),
+        baseline_measured=bool(promoting or measured_ar > 0.0),
     )
     window_full = len(state.ar_safety.ring) > ar_safety_window_cycles()
 
@@ -15098,14 +15120,14 @@ class MLLMBatchGenerator:
         )
         state.ladder_depth = max(1, int(depth))
         if start_depth < depth:
-            state.promote_at_cycle = _NATIVE_MTP_PROMOTE_FIRST_CYCLES
+            state.promote_at_cycle = _native_mtp_first_promotion_cycle(True)
             logger.info(
                 "MLLM MTP[%s] start rung D1 (previous request ended in %s); "
                 "promotion probe to D%d after %d cycles",
                 request.request_id,
                 _last_tier,
                 depth,
-                _NATIVE_MTP_PROMOTE_FIRST_CYCLES,
+                state.promote_at_cycle,
             )
         state.stats.profile_seed = profile_seed
         state.stats.prompt_primed_pairs = int(primed_pairs)
@@ -16209,7 +16231,22 @@ class MLLMBatchGenerator:
                     if mtp_state_for_finish is not None
                     else None
                 )
-                if mtp_state_for_finish is not None:
+                _finished_before = int(
+                    getattr(self, "_native_mtp_finished_requests", 0) or 0
+                )
+                self._native_mtp_finished_requests = _finished_before + 1
+                # An AR-ended request reached its trip only after a full
+                # warmup + window of judged cycles, so it counts as settled.
+                _finish_cycles = int(
+                    mtp_state_for_finish.stats.cycles
+                    if mtp_state_for_finish is not None
+                    else (2 * ar_safety_window_cycles() if finish_tier is not None else 0)
+                )
+                if not _native_mtp_should_record_last_tier(
+                    _finished_before, _finish_cycles, ar_safety_window_cycles()
+                ):
+                    self._native_mtp_last_tier = ""
+                elif mtp_state_for_finish is not None:
                     self._native_mtp_last_tier = f"D{int(mtp_state_for_finish.depth or 1)}"
                 elif getattr(req, "_native_mtp_ar_tier", None) is not None:
                     self._native_mtp_last_tier = "AR"

@@ -398,3 +398,54 @@ def test_retry_budget_caps_probes_and_promotions():
     tier.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
     assert tier.probe_due() is False  # budget spent: stay AR for the request
     assert m._NATIVE_MTP_MAX_PROMOTIONS >= 1
+
+
+# ---- seed-uncertainty margin + sticky-start evidence (2026-09-05) ----------
+
+def _drive_uniform(st, *, ms_per_tok, cycles=40, seed=10.0, **kw):
+    """Feed uniform cycles (1 token each) at ms_per_tok; return the first trip."""
+    t = 100.0
+    for c in range(1, cycles + 1):
+        t += ms_per_tok / 1000.0
+        trip = ar_safety_step(st, cycles=c, emitted=c, now=t, seed_ar_ms=seed, **kw)
+        if trip is not None:
+            return trip
+    return None
+
+
+def test_seed_baseline_uses_seed_margin_measured_uses_exact(monkeypatch):
+    monkeypatch.delenv("VMLX_NATIVE_MTP_SEED_COST_MARGIN", raising=False)
+    monkeypatch.delenv("VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN", raising=False)
+    # 5% slower than the one-step seed: inside the seed's error band -> hold.
+    assert _drive_uniform(ArSafetyState(), ms_per_tok=10.5) is None
+    # Same cost against a MEASURED baseline: a real loss -> trip.
+    trip = _drive_uniform(ArSafetyState(), ms_per_tok=10.5, baseline_measured=True)
+    assert trip is not None and abs(trip.margin - 1.0) < 1e-9
+    # 15% slower than the seed is outside the band -> trip with the seed margin.
+    trip = _drive_uniform(ArSafetyState(), ms_per_tok=11.5)
+    assert trip is not None and abs(trip.margin - 1.10) < 1e-9
+
+
+def test_seed_margin_never_below_runtime_margin(monkeypatch):
+    from vmlx_engine.native_mtp_ar_safety import ar_safety_seed_margin
+
+    monkeypatch.setenv("VMLX_NATIVE_MTP_RUNTIME_COST_MARGIN", "1.25")
+    monkeypatch.setenv("VMLX_NATIVE_MTP_SEED_COST_MARGIN", "1.05")
+    assert abs(ar_safety_seed_margin() - 1.25) < 1e-9
+
+
+def test_sticky_start_evidence_rules():
+    from vmlx_engine.mllm_batch_generator import (
+        _native_mtp_first_promotion_cycle,
+        _native_mtp_should_record_last_tier,
+        _NATIVE_MTP_PROMOTE_FIRST_CYCLES,
+    )
+
+    # first request after load never seeds the next start rung
+    assert not _native_mtp_should_record_last_tier(0, 200, 8)
+    # too few judged cycles never seeds it
+    assert not _native_mtp_should_record_last_tier(3, 15, 8)
+    assert _native_mtp_should_record_last_tier(1, 16, 8)
+    # a sticky D1 start is re-examined after one window, own demotion waits
+    assert _native_mtp_first_promotion_cycle(True) == 8
+    assert _native_mtp_first_promotion_cycle(False) == _NATIVE_MTP_PROMOTE_FIRST_CYCLES

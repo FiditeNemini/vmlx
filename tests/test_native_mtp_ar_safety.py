@@ -510,14 +510,25 @@ def test_depth_probe_returns_to_configured_depth_when_d1_loses(monkeypatch):
     assert state.depth == 3 and state.depth_probes == 2
 
 
-def test_depth_probe_switch_pins_configured_depth(monkeypatch):
-    """Contract: with VMLX_NATIVE_MTP_DEPTH_PROBE=0 a request that beats AR at
-    its configured depth never tries D1; with the default it tries D1 once."""
+def test_depth_probe_follows_policy_and_explicit_switch(monkeypatch):
+    """Contract: a FIXED policy request that beats AR at its configured depth
+    never tries D1 (only the AR-safety valve may step it down); an ADAPTIVE
+    request tries D1 once; VMLX_NATIVE_MTP_DEPTH_PROBE overrides either way."""
     from vmlx_engine import mllm_batch_generator as m
 
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
-    for probe_env, expect_depth in (("0", 3), ("1", 1)):
-        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH_PROBE", probe_env)
+    monkeypatch.delenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", raising=False)
+    for policy_env, probe_env, expect_depth in (
+        ("0", None, 3),   # fixed: no probe
+        ("1", None, 1),   # adaptive: probe
+        ("0", "1", 1),    # fixed + explicit probe on
+        ("1", "0", 3),    # adaptive + explicit probe off
+    ):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", policy_env)
+        if probe_env is None:
+            monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH_PROBE", raising=False)
+        else:
+            monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH_PROBE", probe_env)
         state = _vlm_state(m)
         state.depth = 3
         state.ladder_depth = 3
@@ -528,8 +539,46 @@ def test_depth_probe_switch_pins_configured_depth(monkeypatch):
         state.stats.accepted_tokens = 40
         state.ar_safety.ring = [(11 + i, 3 * (11 + i), base_t + i * 0.030) for i in range(9)]
         assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
-        assert state.depth == expect_depth, f"probe_env={probe_env}"
-    monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH_PROBE")
+        assert state.depth == expect_depth, f"policy={policy_env} probe_env={probe_env}"
+    monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH_PROBE", raising=False)
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", raising=False)
+
+
+def test_fixed_policy_still_steps_down_only_through_ar_safety(monkeypatch):
+    """Under fixed, a window slower than plain decoding still trips the valve
+    (D3 -> D1 with the logged reason); a healthy window never moves."""
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    state = _vlm_state(m)
+    state.depth = 3; state.ladder_depth = 3; state.depth_probe_at_cycle = 16
+    state.ar_step_ms = 10.0
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 20; state.stats.accepted_tokens = 20
+    # 1 tok/cycle at 20 ms/cycle = 20 ms/tok vs AR 10 -> valve trips D3 -> D1
+    state.ar_safety.ring = [(11 + i, 11 + i, base_t + i * 0.020) for i in range(9)]
+    state.ar_safety.anchor_cycle_ms = 20.0
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 1 and state.depth_probe is False
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_finish_line_fields_policy_configured_and_throughput(caplog):
+    import logging
+    from vmlx_engine.mllm_batch_generator import MLLMNativeMTPStats, _native_mtp_log_stats
+
+    stats = MLLMNativeMTPStats()
+    stats.cycles = 10; stats.accepted_tokens = 12; stats.drafted_tokens = 30
+    stats.init_emits = 2; stats.draft_emits = 12; stats.bonus_emits = 4; stats.verify_emits = 6
+    stats.cycles_by_depth[3] = 7; stats.cycles_by_depth[1] = 3
+    stats.configured_depth = 3; stats.depth_policy = "fixed"; stats.span_seconds = 0.5
+    with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_batch_generator"):
+        _native_mtp_log_stats("req", stats, "length", None)
+    line = next(r.getMessage() for r in caplog.records if "finish=length" in r.getMessage())
+    assert "cycles_by_depth[d1=3,d3=7]" in line
+    assert "policy=fixed configured=D3" in line
+    assert "confirmed_tok_s=48.0 span_s=0.50" in line
 
 
 def test_finish_line_reports_cycles_by_depth():

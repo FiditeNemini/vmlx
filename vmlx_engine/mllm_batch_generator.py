@@ -3899,6 +3899,11 @@ class MLLMNativeMTPStats:
     # reported with the finish line so a receipt shows the ACTUAL depth
     # occupancy of a governed request rather than its configured depth.
     cycles_by_depth: List[int] = field(default_factory=lambda: [0] * 8)
+    # Set by the generator at finish: configured (ceiling) depth, policy and
+    # confirmed-output throughput over the request's own MTP span.
+    configured_depth: int = 0
+    depth_policy: str = ""
+    span_seconds: float = 0.0
     accepts: int = 0
     rejects: int = 0
     init_emits: int = 0
@@ -5284,10 +5289,15 @@ def _native_mtp_log_stats(
     occupancy = ",".join(
         f"d{d}={n}" for d, n in enumerate(stats.cycles_by_depth) if d > 0 and n > 0
     )
+    emitted = stats.init_emits + stats.draft_emits + stats.bonus_emits + stats.verify_emits
+    confirmed_tok_s = (
+        emitted / stats.span_seconds if stats.span_seconds > 0.0 and emitted > 0 else 0.0
+    )
     logger.info(
         "MLLM MTP[%s] finish=%s cycles=%d accepted=%d/%d (%.1f%%) "
         "emits[init=%d,draft=%d,bonus=%d,verify=%d] margin_truncated=%d "
-        "cycles_by_depth[%s]",
+        "cycles_by_depth[%s] policy=%s configured=D%d "
+        "confirmed_tok_s=%.1f span_s=%.2f",
         request_id,
         reason,
         stats.cycles,
@@ -5300,6 +5310,10 @@ def _native_mtp_log_stats(
         stats.verify_emits,
         stats.margin_truncated_cycles,
         occupancy or "none",
+        stats.depth_policy or "unknown",
+        stats.configured_depth,
+        confirmed_tok_s,
+        stats.span_seconds,
     )
     if any(stats.drafted_by_depth) or any(stats.accepted_by_depth):
         accept_by_depth = ",".join(
@@ -5754,15 +5768,27 @@ _NATIVE_MTP_DEPTH_PROBE_FIRST_CYCLES = 16
 _NATIVE_MTP_MAX_DEPTH_PROBES = 2
 
 
-def _native_mtp_depth_probe_enabled() -> bool:
-    """Depth economics probe (configured depth vs D1). On by default for
-    BOTH policies: the configured depth is the starting depth and ceiling,
-    and the runtime steps down only when a measured window shows D1 faster
-    by the hysteresis. ``VMLX_NATIVE_MTP_DEPTH_PROBE=0`` pins the configured
-    depth except for the AR-safety ladder (which ``VMLX_NATIVE_MTP_AR_SAFETY=0``
-    disables in turn) -- the two switches together give an exact pin."""
+def _native_mtp_adaptive_policy() -> bool:
     return _native_mtp_env_flag(
-        True, "VMLINUX_NATIVE_MTP_DEPTH_PROBE", "VMLX_NATIVE_MTP_DEPTH_PROBE"
+        True, "VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "VMLX_NATIVE_MTP_ADAPTIVE_DEPTH"
+    )
+
+
+def _native_mtp_depth_probe_enabled() -> bool:
+    """Depth economics probe (configured depth vs D1): may the runtime try
+    D1 while the configured depth is beating plain decoding?
+
+    Contract: ``adaptive`` may choose the measured winner, so the probe is
+    on; ``fixed`` keeps the configured depth and steps down ONLY through the
+    explicit AR-safety valve (logged with its reason), so the probe is off.
+    ``VMLX_NATIVE_MTP_DEPTH_PROBE`` overrides either way.  With the probe
+    off and ``VMLX_NATIVE_MTP_AR_SAFETY=0`` the depth is pinned; the per-cycle
+    first-draft confidence gate (``VMLX_NATIVE_MTP_DRAFT_MARGIN``) is a
+    separate, older mechanism and still shortens low-confidence drafts."""
+    return _native_mtp_env_flag(
+        _native_mtp_adaptive_policy(),
+        "VMLINUX_NATIVE_MTP_DEPTH_PROBE",
+        "VMLX_NATIVE_MTP_DEPTH_PROBE",
     )
 
 
@@ -16323,6 +16349,17 @@ class MLLMBatchGenerator:
                     self._rewind_native_mtp_terminal_boundary(
                         req, batch.cache, mtp_state_for_finish
                     )
+                    _fs = mtp_state_for_finish.stats
+                    _fs.configured_depth = int(
+                        mtp_state_for_finish.ladder_depth
+                        or mtp_state_for_finish.depth_ceiling
+                        or mtp_state_for_finish.depth
+                        or 0
+                    )
+                    _fs.depth_policy = "adaptive" if _native_mtp_adaptive_policy() else "fixed"
+                    _span0 = float(getattr(mtp_state_for_finish, "cycle_span_start", 0.0) or 0.0)
+                    if _span0 > 0.0:
+                        _fs.span_seconds = max(0.0, time.perf_counter() - _span0)
                     _native_mtp_log_stats(
                         request_id,
                         mtp_state_for_finish.stats,

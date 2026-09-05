@@ -4,7 +4,12 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.54] - 2026-09-04
+## [1.6.54] - 2026-09-05
+
+### Fixed
+- **Native tool prompts are no longer overridden for MiniMax-M2.7, Qwen3.8-27B and Nanbeige.** These families' chat templates render the tool schemas natively (a `<tools>` block plus an example call), but the fallback probe expected a different dialect and injected a second schema on every request, logging "Chat template needs fallback tool schema injection"; the conflicting instructions then produced tool calls that were dropped for empty required arguments. The probe now accepts a rendered schema block that names every tool. Verified across every bundle template on the drive: all 50 renderable templates take the native path.
+- **Coding-tool Install works from the app.** The Install button spawned `npm` without the shell's PATH and failed with `spawnSync npm ENOENT`; it now resolves the installer against the usual install locations.
+- **Hermes Agent has a manual-setup snippet** (the provider block for `~/.hermes/config.yaml`) like the other coding tools.
 
 ### Changed
 - **Native MTP depth ladder: never below plain decoding, and back up when it wins.** The speculative-decoding safety valve now trips as soon as the windowed cost per token exceeds the request's own autoregressive step (no 25% tolerance). A losing configured depth first drops to depth 1, which is often faster than depth 3 on ordinary prose, and only a losing depth 1 drops to plain decoding. Re-entry probes start at depth 1, are judged within a few cycles and abort early when clearly losing, and a promotion probe climbs back to the configured depth only when it measurably beats the depth-1 cost. A request that ended in plain decoding or depth 1 starts the next request at depth 1 with a scheduled promotion probe, so a losing conversation stops paying for a depth-3 opening every turn. Each request gets a bounded number of retries and then stays on its current rung. Measured on Flash-Next 4M over a 14-turn chat to 16k context: mean decode ~33 → ~38 tok/s with far fewer sub-AR turns; 4S unchanged.

@@ -1159,6 +1159,84 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
 QSACache = _SparseIndexerKVCache
 
 
+class _QSAPooledFrontier:
+    """Retained pooled/normed/roped keys of the COMPLETED 4-token blocks.
+
+    Exact by construction: a completed block's pooled key depends only on its
+    own four raw index keys and the block's first-token position, neither of
+    which changes once the block is complete. Lives in ``cache.derived`` so a
+    trim truncates it (``truncate_to_tokens``) and any restore/replacement
+    clears it (the cache's ``state`` setter). Kill switch:
+    ``VMLX_QWEN4_QSA_POOL_RETAIN=0`` recomputes every call (the old path).
+    """
+
+    __slots__ = (
+        "pooled", "blocks", "batch", "ratio", "reused", "recomputed", "evicted"
+    )
+
+    def __init__(self, ratio: int, batch: int) -> None:
+        self.pooled: Optional[mx.array] = None  # [B, NB, D] float32
+        self.blocks = 0
+        self.batch = batch
+        self.ratio = ratio
+        self.reused = 0
+        self.recomputed = 0
+        self.evicted = 0
+
+    @property
+    def nbytes(self) -> int:
+        return 0 if self.pooled is None else int(self.pooled.nbytes)
+
+    def truncate_to_tokens(self, tokens: int) -> None:
+        keep = max(0, int(tokens)) // self.ratio
+        if keep < self.blocks:
+            self.blocks = keep
+            self.pooled = None if keep == 0 else self.pooled[:, :keep, :]
+
+
+def _exact_mrope_cos_sin(
+    rotary: "Qwen3_5RotaryEmbedding", position_ids: mx.array, dtype
+) -> tuple[mx.array, mx.array]:
+    """Shape-independent M-RoPE cos/sin for ``position_ids`` ``[3, B, S]``.
+
+    The stock embedding forms ``inv_freq @ positions`` with a K=1 matmul; the
+    GEMM kernel MLX picks for multi-row chunks rounds that product differently
+    from the single-row GEMV (up to ~3e-4 rad at position 12), so the same
+    absolute position gets different angles at prefill and at decode. The
+    QSA indexer needs one angle per position regardless of chunk shape so a
+    retained pooled block key is bitwise the value a full recompute produces.
+    An elementwise product is the exact fp32 product for every shape.
+    """
+    if position_ids.ndim == 2:
+        position_ids = mx.broadcast_to(
+            position_ids[None, ...], (3,) + tuple(position_ids.shape)
+        )
+    pos = position_ids.astype(mx.float32)[..., None]  # [3, B, S, 1]
+    freqs = pos * rotary.inv_freq.astype(mx.float32)  # [3, B, S, F]
+    freqs = rotary.apply_interleaved_mrope(freqs, rotary.mrope_section)
+    emb = mx.concatenate([freqs, freqs], axis=-1)
+    return mx.cos(emb).astype(dtype), mx.sin(emb).astype(dtype)
+
+
+def _qsa_pool_retention_enabled() -> bool:
+    return os.environ.get("VMLX_QWEN4_QSA_POOL_RETAIN", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
+def _qsa_pool_retention_max_bytes() -> int:
+    """Per-cache-object cap on retained pooled bytes (default 256 MiB, which
+    is ~2M tokens of one QSA layer at head_dim 128). Above it the frontier is
+    evicted and that layer falls back to the exact full recompute; this only
+    ever trades speed, never refuses work."""
+    raw = os.environ.get("VMLX_QWEN4_QSA_POOL_RETAIN_MAX_MB", "").strip()
+    try:
+        mb = float(raw) if raw else 256.0
+    except ValueError:
+        mb = 256.0
+    return int(max(0.0, mb) * 1024 * 1024)
+
+
 class QSAIndexer(nn.Module):
     def __init__(self, args: Qwen4ExpTextArgs):
         super().__init__()
@@ -1232,7 +1310,7 @@ class QSAIndexer(nn.Module):
 
         if position_ids is None:
             position_ids = mx.arange(offset, offset + S)[None, :]
-        qcos, qsin = self.rotary_emb(q, position_ids)
+        qcos, qsin = _exact_mrope_cos_sin(self.rotary_emb, position_ids, q.dtype)
         q, _ = apply_multimodal_rotary_pos_emb(q, q, qcos, qsin)
         q = q.transpose(0, 2, 1, 3)
 
@@ -1261,21 +1339,7 @@ class QSAIndexer(nn.Module):
         num_blocks = T // self.compress_ratio
         if num_blocks <= self.block_topk:
             return None
-        pooled = (
-            all_keys[:, : num_blocks * self.compress_ratio, :]
-            .reshape(B, num_blocks, self.compress_ratio, self.head_dim)
-            .astype(mx.float32)
-            .mean(axis=2)
-        )
-        pooled = self.k_layernorm(pooled[:, :, None, :]).transpose(0, 2, 1, 3)
-        block_positions = all_positions[
-            :, : num_blocks * self.compress_ratio : self.compress_ratio, :
-        ].transpose(2, 0, 1)
-        block_cos, block_sin = self.rotary_emb(pooled, block_positions)
-        pooled, _ = apply_multimodal_rotary_pos_emb(
-            pooled, pooled, block_cos, block_sin
-        )
-        pooled = pooled[:, 0, :, :]
+        pooled = self._pooled_block_keys(cache, all_keys, all_positions, num_blocks, B)
 
         # scores: relu(q·k) summed over heads / sqrt(D) → [B, S, NB]
         scores = sparse_index_scores_decode(
@@ -1328,6 +1392,77 @@ class QSAIndexer(nn.Module):
 
         min_val = mx.array(-np.inf, dtype=mx.float32)
         return mx.where(keep_tokens[:, None], mx.array(0.0, dtype=mx.float32), min_val)
+
+
+    def _pool_blocks(
+        self, keys: mx.array, positions: mx.array, first_block: int, last_block: int, B: int
+    ) -> mx.array:
+        """Pool, normalize and rotate blocks [first_block, last_block) → [B, n, D]."""
+        r = self.compress_ratio
+        n = last_block - first_block
+        pooled = (
+            keys[:, first_block * r : last_block * r, :]
+            .reshape(B, n, r, self.head_dim)
+            .astype(mx.float32)
+            .mean(axis=2)
+        )
+        pooled = self.k_layernorm(pooled[:, :, None, :]).transpose(0, 2, 1, 3)
+        block_positions = positions[
+            :, first_block * r : last_block * r : r, :
+        ].transpose(2, 0, 1)
+        block_cos, block_sin = _exact_mrope_cos_sin(
+            self.rotary_emb, block_positions, pooled.dtype
+        )
+        pooled, _ = apply_multimodal_rotary_pos_emb(
+            pooled, pooled, block_cos, block_sin
+        )
+        return pooled[:, 0, :, :]
+
+    def _pooled_block_keys(
+        self,
+        cache: Optional[QSACache],
+        all_keys: mx.array,
+        all_positions: mx.array,
+        num_blocks: int,
+        B: int,
+    ) -> mx.array:
+        """Completed-block pooled keys, reusing the retained frontier when the
+        cache is the single-sequence QSA cache (batch caches carry per-row
+        offsets; they take the full recompute)."""
+        frontier = None
+        if (
+            cache is not None
+            and type(cache) is _SparseIndexerKVCache
+            and _qsa_pool_retention_enabled()
+        ):
+            frontier = cache.derived.get("qsa_pooled")
+            if frontier is None or frontier.batch != B or frontier.ratio != self.compress_ratio:
+                frontier = _QSAPooledFrontier(self.compress_ratio, B)
+                cache.derived["qsa_pooled"] = frontier
+        if frontier is None:
+            return self._pool_blocks(all_keys, all_positions, 0, num_blocks, B)
+        have = frontier.blocks if frontier.pooled is not None else 0
+        if have > num_blocks:
+            # The raw lane shrank without a trim hook firing: never trust the
+            # frontier past the raw history.
+            frontier.truncate_to_tokens(num_blocks * self.compress_ratio)
+            have = frontier.blocks
+        if have == num_blocks:
+            frontier.reused += num_blocks
+            return frontier.pooled
+        new = self._pool_blocks(all_keys, all_positions, have, num_blocks, B)
+        frontier.recomputed += num_blocks - have
+        frontier.reused += have
+        pooled = new if have == 0 else mx.concatenate([frontier.pooled, new], axis=1)
+        if num_blocks * B * self.head_dim * 4 > _qsa_pool_retention_max_bytes():
+            # Size eviction: return the exact answer, drop the retained state.
+            frontier.evicted += 1
+            frontier.pooled = None
+            frontier.blocks = 0
+            return pooled
+        frontier.pooled = pooled
+        frontier.blocks = num_blocks
+        return frontier.pooled
 
 
 class QSAAttention(nn.Module):

@@ -53,6 +53,22 @@ class MiniMaxM3SparseCache(KVCache):
         super().__init__()
         self.idx_keys: mx.array | None = None
         self._idx_offset = 0
+        # Ephemeral DERIVED state owned by the consumer (e.g. Qwen4's QSA
+        # indexer keeps its pooled/normed/roped completed-block keys here so
+        # they are not recomputed from the whole raw history every call).
+        # Never serialized; cleared on any restore/replacement, truncated on
+        # trim. The raw ``idx_keys`` lane stays the only authority.
+        self.derived: dict = {}
+
+    def _truncate_derived(self) -> None:
+        for value in list(self.derived.values()):
+            fn = getattr(value, "truncate_to_tokens", None)
+            if callable(fn):
+                try:
+                    fn(int(self.offset or 0))
+                except Exception:
+                    self.derived.clear()
+                    return
 
     # ── indexer-key side (called by the attention layer each step) ──
     def update_index(self, idx_k: mx.array) -> mx.array:
@@ -84,6 +100,7 @@ class MiniMaxM3SparseCache(KVCache):
 
     @state.setter
     def state(self, v):
+        self.derived = {}
         if len(v) == 3:
             keys, values, idx = v
             KVCache.state.fset(self, (keys, values))
@@ -107,6 +124,8 @@ class MiniMaxM3SparseCache(KVCache):
         if self.idx_keys is not None and trimmed:
             self.idx_keys = self.idx_keys[..., : self.offset, :]
             self._idx_offset = self.offset
+        if trimmed:
+            self._truncate_derived()
         return trimmed
 
 
@@ -124,6 +143,7 @@ class BatchMiniMaxM3SparseCache(BatchKVCache):
         super().__init__(left_padding)
         self.idx_keys: mx.array | None = None
         self._idx_offset = 0
+        self.derived: dict = {}  # never populated on the batched cache
 
     def update_index(self, idx_k: mx.array) -> mx.array:
         """Append batched indexer keys after the matching K/V append."""

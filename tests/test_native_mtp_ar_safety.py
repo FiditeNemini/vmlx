@@ -537,6 +537,7 @@ def test_depth_probe_follows_policy_and_explicit_switch(monkeypatch):
         base_t = time.perf_counter() - 1.0
         state.stats.cycles = 20
         state.stats.accepted_tokens = 40
+        state.ar_safety.anchor_cycle_ms = 30.0  # steady: ring cycles match the anchor (no drift)
         state.ar_safety.ring = [(11 + i, 3 * (11 + i), base_t + i * 0.030) for i in range(9)]
         assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
         assert state.depth == expect_depth, f"policy={policy_env} probe_env={probe_env}"
@@ -590,3 +591,76 @@ def test_finish_line_reports_cycles_by_depth():
     assert stats.cycles_by_depth[3] == 3 and stats.cycles_by_depth[1] == 4
     occupancy = ",".join(f"d{d}={n}" for d, n in enumerate(stats.cycles_by_depth) if d > 0 and n > 0)
     assert occupancy == "d1=4,d3=3"
+
+
+# ---- bounded AR calibration (context-matched baseline refresh) -----------------
+
+def _running_state(m, *, depth=3, anchor_ms=30.0, cycle_ms=30.0, cycles=40, emitted_per_cycle=3):
+    state = _vlm_state(m)
+    state.depth = depth; state.ladder_depth = depth
+    state.ar_step_ms = 12.0
+    state.stats.cycles = cycles
+    state.stats.accepted_tokens = cycles * (emitted_per_cycle - 1)
+    base_t = time.perf_counter() - 1.0
+    state.ar_safety.anchor_cycle_ms = anchor_ms
+    state.ar_safety.ring = [(cycles - 8 + i, emitted_per_cycle * (cycles - 8 + i), base_t + i * cycle_ms / 1000.0) for i in range(9)]
+    return state
+
+
+def test_calibration_triggers_on_cycle_wall_drift_and_reenters_at_same_depth(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    # cycle wall 2x the anchor (drift +100%), MTP still cheap per token (10 ms/tok)
+    state = _running_state(m, anchor_ms=30.0, cycle_ms=60.0, emitted_per_cycle=6)
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is True
+    assert state.ar_fallback_pending and "ar_calibration" in state.ar_fallback_reason
+    assert "drift=+1.00" in state.ar_fallback_reason
+    tier = state.ar_tier
+    assert tier is not None and tier.calibration and tier.reenter_depth == 3
+    assert tier.next_probe_tokens == m._NATIVE_MTP_CALIBRATION_TOKENS
+    assert tier.backoff == 0 and state.calibrations == 1
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_calibration_triggers_on_stale_interval_not_on_steady_short_runs(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    steady = _running_state(m, anchor_ms=30.0, cycle_ms=30.0, cycles=40)
+    assert m._native_mtp_maybe_ar_safety_fallback("req", steady) is False
+    assert not steady.ar_fallback_pending and steady.calibrations == 0
+    stale = _running_state(m, anchor_ms=30.0, cycle_ms=30.0, cycles=400, emitted_per_cycle=3)  # ~1,200 emitted
+    assert m._native_mtp_maybe_ar_safety_fallback("req", stale) is True
+    assert "stale=True" in stale.ar_fallback_reason and stale.calibrations == 1
+    monkeypatch.setenv("VMLX_NATIVE_MTP_AR_CALIBRATION", "0")
+    off = _running_state(m, anchor_ms=30.0, cycle_ms=60.0, emitted_per_cycle=6)
+    assert m._native_mtp_maybe_ar_safety_fallback("req", off) is False
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_CALIBRATION")
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_calibration_budget_is_bounded(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    state = _running_state(m, anchor_ms=30.0, cycle_ms=60.0, emitted_per_cycle=6)
+    state.calibrations = m._NATIVE_MTP_MAX_CALIBRATIONS
+    # budget exhausted: no calibration; the ordinary valve judges the window instead
+    m._native_mtp_maybe_ar_safety_fallback("req", state)
+    assert "ar_calibration" not in (state.ar_fallback_reason or "")
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")
+
+
+def test_tier_records_ar_wall_and_calibration_counters():
+    from vmlx_engine.mllm_batch_generator import NativeMTPArTier
+
+    t = NativeMTPArTier(depth=3)
+    now = 100.0
+    for _ in range(6):
+        t.record_step(now); now += 0.025
+    assert t.total_ar_tokens == 6 and abs(t.total_ar_ms - 125.0) < 1e-6
+    assert abs(t.measured_ar_ms_per_tok() - 25.0) < 1e-6

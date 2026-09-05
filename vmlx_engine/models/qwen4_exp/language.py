@@ -1275,6 +1275,15 @@ def _qsa_exact_rope_enabled() -> bool:
     }
 
 
+def _qsa_exact_rope_attn_enabled() -> bool:
+    """Exact angles for the QSA ATTENTION rotary (default off: model-wide
+    numerics change awaiting its own long-context quality A/B;
+    ``VMLX_QWEN4_EXACT_ROPE_ATTN=1``)."""
+    return os.environ.get("VMLX_QWEN4_EXACT_ROPE_ATTN", "0").strip().lower() not in {
+        "", "0", "false", "no", "off"
+    }
+
+
 def _qsa_pool_retention_enabled() -> bool:
     if not _qsa_exact_rope_enabled():
         return False
@@ -1597,7 +1606,15 @@ class QSAAttention(nn.Module):
 
         if position_ids is None:
             position_ids = mx.arange(offset, offset + S)[None, :]
-        cos, sin = self.rotary_emb(values, position_ids)
+        if _qsa_exact_rope_attn_enabled():
+            # Opt-in numerical correction for the attention rotary (see
+            # _exact_mrope_cos_sin): the stock K=1 matmul rounds the angle
+            # with ~1e-3 RELATIVE error for any chunk of >= 2 rows, so prefill
+            # keys and decode queries disagree by radians on the highest
+            # frequencies at long positions. Separate A/B campaign.
+            cos, sin = _exact_mrope_cos_sin(self.rotary_emb, position_ids, values.dtype)
+        else:
+            cos, sin = self.rotary_emb(values, position_ids)
         queries, keys = apply_multimodal_rotary_pos_emb(queries, keys, cos, sin)
 
         if cache is not None:

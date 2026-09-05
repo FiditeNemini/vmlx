@@ -151,6 +151,31 @@ function safeWriteJSON(path: string, data: any): void {
   try { chmodSync(path, 0o600) } catch {}
 }
 
+// Electron strips the user's shell PATH, so `npm` / `pip` must be resolved
+// against the same install locations `commandExists` accepts (user report
+// 2026-09-04: "Install" for Hermes failed with `spawnSync npm ENOENT`).
+function resolveCommand(cmd: string): { file: string; env: NodeJS.ProcessEnv } {
+  const dirs = [
+    join(homedir(), '.local', 'bin'),
+    join(homedir(), '.npm-global', 'bin'),
+    '/opt/homebrew/bin',
+    '/opt/homebrew/opt/node@20/bin',
+    '/opt/homebrew/opt/node@22/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    join(homedir(), '.cargo', 'bin'),
+    join(homedir(), '.bun', 'bin'),
+    join(homedir(), '.volta', 'bin'),
+    join(homedir(), '.yarn', 'bin'),
+  ]
+  const env = { ...process.env, PATH: `${process.env.PATH || ''}:${dirs.join(':')}` }
+  for (const dir of dirs) {
+    const candidate = join(dir, cmd)
+    if (existsSync(candidate)) return { file: candidate, env }
+  }
+  return { file: cmd, env }
+}
+
 function commandExists(cmd: string): boolean {
   // Check common install locations (Electron strips user PATH)
   const paths = [
@@ -670,7 +695,8 @@ export function registerCodingToolHandlers(): void {
     const tool = TOOLS[toolId]
     if (!tool) return { success: false, error: 'Unknown tool' }
     try {
-      execFileSync(tool.installCmd, tool.installArgs, { stdio: 'pipe', timeout: 120000 })
+      const resolved = resolveCommand(tool.installCmd)
+      execFileSync(resolved.file, tool.installArgs, { stdio: 'pipe', timeout: 120000, env: resolved.env })
       return { success: true }
     } catch (e) {
       return { success: false, error: (e as Error).message }
@@ -747,6 +773,20 @@ export function registerCodingToolHandlers(): void {
           },
         }, null, 2),
         notes: 'Merge the "provider" key into your existing opencode.json. If the file doesn\'t exist, create it with { "$schema": "https://opencode.ai/config.json", "provider": { ... } }. Verify: opencode --version',
+      },
+      'hermes': {
+        filePath: `${home}/.hermes/config.yaml`,
+        language: 'yaml',
+        snippet: [
+          'providers:',
+          `  ${HERMES_PROVIDER_KEY}:`,
+          `    base_url: ${baseUrl}/v1`,
+          '    api_key: mlxstudio',
+          '    models:',
+          `      ${modelName}: {}`,
+          `    ${MLXSTUDIO_TAG}: true`,
+        ].join('\n'),
+        notes: 'Merge the provider under your existing "providers" mapping in ~/.hermes/config.yaml (do not replace the file). Hermes appends /chat/completions, so base_url must end at /v1. Select the model in Hermes with: hermes --model ' + modelName,
       },
       'openclaw': {
         filePath: `${home}/.openclaw/openclaw.json`,

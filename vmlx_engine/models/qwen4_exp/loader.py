@@ -849,7 +849,15 @@ def load_qwen4_exp_vlm_model(model_path: str | Path, *, lazy: bool = False):
     from vmlx_engine.acceleration_contract import record_acceleration_attestation
 
     install_qwen4_affine_moe(model)
-    install_affine_moe_pair_decode(model, family="qwen4_exp")
+    from vmlx_engine.native_mtp_ar_safety import env_flag as _env_flag
+
+    native_mtp_active = bool(
+        _env_flag(True, "VMLINUX_NATIVE_MTP", "VMLX_NATIVE_MTP")
+        and getattr(model.language_model, "mtp", None) is not None
+    )
+    install_affine_moe_pair_decode(
+        model, family="qwen4_exp", native_mtp_active=native_mtp_active
+    )
     record_acceleration_attestation(
         model,
         "qwen4_exp",

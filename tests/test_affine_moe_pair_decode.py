@@ -504,3 +504,23 @@ def test_mtp_head_modules_stay_on_stock_path_unless_requested(monkeypatch):
     monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR_MTP_HEAD", "1")
     assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 2
     assert hasattr(head, _CONFIG_ATTR)
+
+
+def test_pair_kernel_stays_off_under_native_mtp_unless_forced(monkeypatch):
+    switch = _quantized_switch(bits=2, activation=SwiGLU())
+
+    class _Model:
+        def named_modules(self):
+            return [("model.layers.0.mlp.switch_mlp", switch)]
+
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS, "qwen4_exp",
+        {"hidden": 128, "intermediate": 64, "top_k": 4, "layouts": {(2, 32), (4, 32)}, "clamp_limit": None},
+    )
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp", native_mtp_active=True) == 0
+    assert affine_moe_pair_status("qwen4_exp")["reason"] == "native_mtp_active"
+    assert not hasattr(switch, _CONFIG_ATTR)
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp", native_mtp_active=False) == 1
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR", "1")
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp", native_mtp_active=True) == 1

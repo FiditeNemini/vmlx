@@ -666,13 +666,46 @@ def affine_moe_routed_output(
     return (selected * scores[..., None].astype(selected.dtype)).sum(axis=-2), True
 
 
-def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
-    """Register an entirely compatible SwitchGLU stack or keep stock MLX."""
+def _explicitly_requested(family: str) -> bool:
+    env = {
+        "qwen4_exp": "VMLX_QWEN4_FUSED_MOE_PAIR",
+        "glm5_next": "VMLX_GLM5_FUSED_MOE_PAIR",
+    }[family]
+    value = os.environ.get(env)
+    return value is not None and value.strip().lower() not in {"", "0", "false", "off", "no"}
+
+
+def install_affine_moe_pair_decode(
+    model: Any, *, family: str, native_mtp_active: bool = False
+) -> int:
+    """Register an entirely compatible SwitchGLU stack or keep stock MLX.
+
+    ``native_mtp_active``: the process will run the bundle's native MTP.
+    Measured 2026-09-05 on Flash-Next 4M (uniform q4/g64, governor off,
+    fixed D3, two rounds): the single-row pair kernel on the backbone still
+    cost the verify cycle 5-12% at 1.7k context (45.9-48.9 vs 51.4 tok/s
+    with the kernel off, acceptance 34-39% vs 44%) after the draft head was
+    excluded, and 20-25% with the head included; plain decoding gains +3%.
+    Under native MTP the kernel therefore stays off unless the family env
+    requests it explicitly."""
 
     if family not in _FAMILY_CONTRACTS:
         raise ValueError(f"unsupported affine MoE pair family {family}")
     if not _requested(family):
         _STATUS[family] = {"installed": 0, "reason": "disabled via env"}
+        return 0
+    if native_mtp_active and not _explicitly_requested(family):
+        _STATUS[family] = {
+            "installed": 0,
+            "reason": "native_mtp_active",
+            "detail": "single-row expert kernel measured slower on the MTP verify cycle at identical acceptance",
+        }
+        logger.info(
+            "%s affine MoE pair fusion kept stock path: native MTP is active "
+            "for this process (set %s=1 to force)",
+            family,
+            {"qwen4_exp": "VMLX_QWEN4_FUSED_MOE_PAIR", "glm5_next": "VMLX_GLM5_FUSED_MOE_PAIR"}[family],
+        )
         return 0
     from mlx_lm.models.switch_layers import SwitchGLU
 

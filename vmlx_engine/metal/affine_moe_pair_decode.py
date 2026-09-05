@@ -44,6 +44,41 @@ class _PairConfig:
     group_size: int
     clamp_limit: float | None
     fuse_down: bool = False
+    # Up-projection layout when it differs from gate (mixed-bit bundles:
+    # Flash-Next 4S carries q2 gate / q3 up, 6S q4 / q6).  None = same as gate.
+    up_bits: int | None = None
+    up_group_size: int | None = None
+
+    @property
+    def up_bits_eff(self) -> int:
+        return self.bits if self.up_bits is None else int(self.up_bits)
+
+    @property
+    def up_group_size_eff(self) -> int:
+        return self.group_size if self.up_group_size is None else int(self.up_group_size)
+
+    @property
+    def mixed_layout(self) -> bool:
+        """Generic 32-value-chunk unpack path: needed whenever the two
+        projections differ or either uses a width that does not pack into
+        whole uint32 words (3-bit: 8 values per 3 bytes, 6-bit: 4 per 3)."""
+        return (
+            self.up_bits_eff != self.bits
+            or self.up_group_size_eff != self.group_size
+            or self.bits in (3, 6)
+        )
+
+    @property
+    def chunks_per_row(self) -> int:
+        return self.hidden // 32
+
+    @property
+    def up_packed_per_row(self) -> int:
+        return self.hidden * self.up_bits_eff // 32
+
+    @property
+    def up_groups_per_row(self) -> int:
+        return self.hidden // self.up_group_size_eff
 
     @property
     def packed_per_row(self) -> int:
@@ -75,6 +110,9 @@ _FAMILY_CONTRACTS = {
         "hidden": 2560,
         "top_k": 10,
         "layouts": {(2, 64), (4, 64)},
+        # Layouts admitted (per projection, gate and up may differ) when the
+        # mixed-layout kernel is requested; what the shipped bundles carry.
+        "mixed_layouts": {(2, 32), (2, 64), (3, 64), (4, 64), (6, 64), (8, 64)},
         "clamp_limit": None,
     },
     "glm5_next": {
@@ -89,6 +127,22 @@ _DEFAULT_ENABLED = {
     "qwen4_exp": True,
     "glm5_next": False,
 }
+
+
+_MIXED_ENV = {
+    "qwen4_exp": "VMLX_QWEN4_FUSED_MOE_PAIR_MIXED",
+    "glm5_next": "VMLX_GLM5_FUSED_MOE_PAIR_MIXED",
+}
+
+
+def _mixed_requested(family: str) -> bool:
+    """Opt-in: admit per-projection (gate != up) and 3/6-bit expert layouts
+    through the generic chunk-unpack kernel.  Off by default until the
+    interleaved A/B on the mixed bundles (4S, 6S) proves it."""
+    value = os.environ.get(_MIXED_ENV[family])
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "off", "no"}
 
 
 def _requested(family: str) -> bool:
@@ -108,12 +162,19 @@ def _projection_reason(projection: Any, *, hidden: int, intermediate: int) -> st
         return f"class={projection.__class__.__name__}"
     bits = int(getattr(projection, "bits", -1))
     group_size = int(getattr(projection, "group_size", -1))
-    if bits <= 0 or 32 % bits:
-        return f"bits={bits} does not pack evenly into uint32"
+    if bits not in (2, 3, 4, 6, 8):
+        return f"bits={bits} is not an affine width the kernels unpack"
     if group_size <= 0 or hidden % group_size:
         return f"group_size={group_size} is incompatible with hidden={hidden}"
-    if group_size % (32 // bits):
-        return f"group_size={group_size} does not contain whole packed words"
+    if 32 % bits == 0:
+        if group_size % (32 // bits):
+            return f"group_size={group_size} does not contain whole packed words"
+    elif group_size % 32:
+        # 3/6-bit rows are read in 32-value chunks (whole words) that must
+        # not straddle a quantization group.
+        return f"group_size={group_size} is not a multiple of 32 for {bits}-bit"
+    if hidden % 32:
+        return f"hidden={hidden} is not a multiple of the 32-value chunk"
     if str(getattr(projection, "mode", "affine")) != "affine":
         return f"mode={getattr(projection, 'mode', None)}"
     if int(projection.input_dims) != hidden:
@@ -180,10 +241,18 @@ def _switch_config(switch: Any, family: str) -> _PairConfig:
         raise ValueError(f"gate={gate_reason}; up={up_reason}")
     gate_layout = (int(switch.gate_proj.bits), int(switch.gate_proj.group_size))
     up_layout = (int(switch.up_proj.bits), int(switch.up_proj.group_size))
-    if gate_layout != up_layout:
+    mixed_ok = _mixed_requested(family)
+    admitted = set(contract["layouts"]) | (
+        set(contract.get("mixed_layouts", ())) if mixed_ok else set()
+    )
+    if gate_layout != up_layout and not mixed_ok:
         raise ValueError(f"gate/up layouts differ: {gate_layout} != {up_layout}")
-    if gate_layout not in contract["layouts"]:
-        raise ValueError(f"unsupported {family} gate/up layout {gate_layout}")
+    if gate_layout not in admitted:
+        raise ValueError(f"unsupported {family} gate layout {gate_layout}")
+    if up_layout not in admitted:
+        raise ValueError(f"unsupported {family} up layout {up_layout}")
+    if not mixed_ok and gate_layout[0] in (3, 6):
+        raise ValueError(f"{gate_layout[0]}-bit layout needs the mixed kernel")
     gate_experts = int(switch.gate_proj.weight.shape[0])
     up_experts = int(switch.up_proj.weight.shape[0])
     if gate_experts != up_experts:
@@ -216,6 +285,8 @@ def _switch_config(switch: Any, family: str) -> _PairConfig:
         top_k=int(contract["top_k"]),
         bits=gate_layout[0],
         group_size=gate_layout[1],
+        up_bits=up_layout[0] if up_layout != gate_layout else None,
+        up_group_size=up_layout[1] if up_layout != gate_layout else None,
         clamp_limit=clamp_limit,
         fuse_down=(
             family == "glm5_next"
@@ -223,6 +294,75 @@ def _switch_config(switch: Any, family: str) -> _PairConfig:
             and down_layout == gate_layout == (2, 128)
         ),
     )
+
+
+def _unpack_expr(words: str, bits: int, index: int) -> str:
+    """Metal expression for value ``index`` of a 32-value chunk stored as a
+    consecutive LSB-first bitstream in ``bits`` uint32 words (MLX affine
+    packing for every width; 3/6-bit values may straddle two words)."""
+    off = index * bits
+    word, shift = off // 32, off % 32
+    mask = (1 << bits) - 1
+    if shift + bits <= 32:
+        return f"(({words}[{word}u] >> {shift}u) & {mask}u)"
+    return (
+        f"((({words}[{word}u] >> {shift}u) | ({words}[{word + 1}u] << {32 - shift}u)) & {mask}u)"
+    )
+
+
+def _pair_source_mixed(config: _PairConfig, clamp: str) -> str:
+    gb, ub = config.bits, config.up_bits_eff
+    lines = []
+    for i in range(32):
+        lines.append(
+            f"            v = (float)x[input_base + {i}u]; xsum += v;\n"
+            f"            gdot += v * (float){_unpack_expr('gw', gb, i)};\n"
+            f"            udot += v * (float){_unpack_expr('uw', ub, i)};"
+        )
+    body = "\n".join(lines)
+    return f"""
+        uint tid = thread_position_in_grid.x;
+        uint sgid = tid / 32u;
+        uint lane = thread_index_in_simdgroup;
+        uint route = sgid / {config.intermediate}u;
+        uint out_d = sgid % {config.intermediate}u;
+        if (route >= {config.top_k}u) return;
+
+        uint expert = (uint)expert_ids[route];
+        size_t row = (size_t)expert * {config.intermediate}u + out_d;
+        const device uint32_t* gate_row = gate_weight + row * {config.packed_per_row}u;
+        const device uint32_t* up_row = up_weight + row * {config.up_packed_per_row}u;
+        size_t gate_meta = row * {config.groups_per_row}u;
+        size_t up_meta = row * {config.up_groups_per_row}u;
+        float gate_acc = 0.0f;
+        float up_acc = 0.0f;
+
+        for (uint chunk = lane; chunk < {config.chunks_per_row}u; chunk += 32u) {{
+            uint input_base = chunk * 32u;
+            float gate_scale = (float)gate_scales[gate_meta + input_base / {config.group_size}u];
+            float gate_bias = (float)gate_biases[gate_meta + input_base / {config.group_size}u];
+            float up_scale = (float)up_scales[up_meta + input_base / {config.up_group_size_eff}u];
+            float up_bias = (float)up_biases[up_meta + input_base / {config.up_group_size_eff}u];
+            const device uint32_t* gw = gate_row + chunk * {gb}u;
+            const device uint32_t* uw = up_row + chunk * {ub}u;
+            float gdot = 0.0f;
+            float udot = 0.0f;
+            float xsum = 0.0f;
+            float v;
+{body}
+            gate_acc += gate_scale * gdot + gate_bias * xsum;
+            up_acc += up_scale * udot + up_bias * xsum;
+        }}
+        gate_acc = simd_sum(gate_acc);
+        up_acc = simd_sum(up_acc);
+        if (lane == 0u) {{
+            float g = (float)((T)gate_acc);
+            float u = (float)((T)up_acc);
+{clamp}
+            float activated = g / (1.0f + metal::exp(-g)) * u;
+            output[(size_t)route * {config.intermediate}u + out_d] = (T)activated;
+        }}
+"""
 
 
 def _pair_source(config: _PairConfig) -> str:
@@ -233,6 +373,8 @@ def _pair_source(config: _PairConfig) -> str:
         g = metal::min(g, {limit:.1f}f);
         u = metal::clamp(u, -{limit:.1f}f, {limit:.1f}f);
 """
+    if config.mixed_layout:
+        return _pair_source_mixed(config, clamp)
     return f"""
         uint tid = thread_position_in_grid.x;
         uint sgid = tid / 32u;
@@ -288,6 +430,7 @@ def _pair_kernel(config: _PairConfig):
     return mx.fast.metal_kernel(
         name=(
             f"vmlx_{config.family}_q{config.bits}g{config.group_size}_"
+            f"u{config.up_bits_eff}g{config.up_group_size_eff}_"
             "selected_pair_swiglu"
         ),
         input_names=[
@@ -574,7 +717,10 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
         return 0
     for module, config in accepted:
         setattr(module, _CONFIG_ATTR, config)
-    layouts = sorted({(config.bits, config.group_size) for _, config in accepted})
+    layouts = sorted(
+        {(config.bits, config.group_size) for _, config in accepted}
+        | {(config.up_bits_eff, config.up_group_size_eff) for _, config in accepted}
+    )
     full_down_modules = sum(config.fuse_down for _, config in accepted)
     fallback_reasons = [reason for _module, reason in rejected]
     _STATUS[family] = {

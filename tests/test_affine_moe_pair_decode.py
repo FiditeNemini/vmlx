@@ -380,3 +380,99 @@ def test_switch_config_rejects_cross_projection_geometry_mismatch(
         "intermediate geometry mismatch" in reason
         for reason in status["fallback_reasons"]
     )
+
+
+# ---- mixed-layout / 3-6 bit pair kernel (Flash-Next 4S: q2 gate + q3 up; 6S: q4/q6) ----
+
+def _mixed_switch(gate_bits, gate_gs, up_bits, up_gs, down_bits=4, metadata_dtype=mx.float16):
+    from mlx_lm.models.switch_layers import SwitchLinear
+
+    mx.random.seed(77)
+    switch = SwitchGLU(128, 64, 8, activation=SwiGLU(), bias=False)
+    switch.gate_proj = switch.gate_proj.to_quantized(group_size=gate_gs, bits=gate_bits)
+    switch.up_proj = switch.up_proj.to_quantized(group_size=up_gs, bits=up_bits)
+    switch.down_proj = switch.down_proj.to_quantized(group_size=32, bits=down_bits)
+    for projection in (switch.gate_proj, switch.up_proj, switch.down_proj):
+        projection.scales = projection.scales.astype(metadata_dtype)
+        projection.biases = projection.biases.astype(metadata_dtype)
+    switch.eval()
+    mx.eval(switch.parameters())
+    return switch
+
+
+@pytest.mark.parametrize(
+    ("gate_bits", "gate_gs", "up_bits", "up_gs", "activation_dtype"),
+    [
+        (2, 64, 3, 64, mx.float16),   # 4S majority layer
+        (3, 64, 3, 64, mx.float16),   # 4S q3 gate layers
+        (2, 32, 3, 64, mx.float16),   # 4S single q2/g32 gate layer
+        (4, 64, 6, 64, mx.float16),   # 6S layers with q6 up
+        (6, 64, 6, 64, mx.bfloat16),
+        (8, 64, 2, 64, mx.float16),
+        (4, 64, 4, 64, mx.float16),   # uniform layout must still match through the generic path
+    ],
+)
+def test_mixed_layout_pair_kernel_matches_stock(gate_bits, gate_gs, up_bits, up_gs, activation_dtype):
+    switch = _mixed_switch(gate_bits, gate_gs, up_bits, up_gs)
+    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(activation_dtype)
+    indices = mx.array([0, 2, 5, 7], dtype=mx.uint32).reshape(1, 1, 4)
+    expanded = mx.expand_dims(x, (-2, -3))
+    reference = switch.activation(
+        switch.up_proj(expanded, indices), switch.gate_proj(expanded, indices)
+    )
+    config = _PairConfig(
+        family=f"test_mixed_g{gate_bits}_{gate_gs}_u{up_bits}_{up_gs}",
+        hidden=128, intermediate=64, top_k=4,
+        bits=gate_bits, group_size=gate_gs, clamp_limit=None,
+        up_bits=up_bits if (up_bits, up_gs) != (gate_bits, gate_gs) else None,
+        up_group_size=up_gs if (up_bits, up_gs) != (gate_bits, gate_gs) else None,
+    )
+    if (gate_bits, gate_gs) == (up_bits, up_gs) and gate_bits not in (3, 6):
+        # force the generic path for the uniform control case
+        config = _PairConfig(**{**config.__dict__, "up_bits": up_bits, "up_group_size": up_gs, "bits": gate_bits})
+        object.__setattr__(config, "up_group_size", up_gs)
+    candidate = _run_pair(switch, config, x, indices)
+    mx.eval(reference, candidate)
+    assert candidate.shape == reference.shape
+    uses_bf16 = activation_dtype == mx.bfloat16
+    atol = 2.5e-4 if uses_bf16 else 3.1e-5
+    rtol = 6e-3 if uses_bf16 else 2e-3
+    assert mx.allclose(candidate, reference, atol=atol, rtol=rtol), (
+        f"max abs {float(mx.abs(candidate - reference).max()):.3e}"
+    )
+
+
+def test_mixed_layout_registration_is_opt_in(monkeypatch):
+    mixed = _mixed_switch(2, 64, 3, 64)
+    uniform = _mixed_switch(2, 64, 2, 64)
+
+    class _Model:
+        def named_modules(self):
+            return [("a", mixed), ("b", uniform)]
+
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS, "qwen4_exp",
+        {"hidden": 128, "intermediate": 64, "top_k": 4,
+         "layouts": {(2, 64), (4, 64)},
+         "mixed_layouts": {(2, 32), (2, 64), (3, 64), (4, 64), (6, 64), (8, 64)},
+         "clamp_limit": None},
+    )
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR_MIXED", raising=False)
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 0
+    assert affine_moe_pair_status("qwen4_exp")["reason"] == "mixed_layout_atomic_fallback"
+
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR_MIXED", "1")
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 2
+    status = affine_moe_pair_status("qwen4_exp")
+    assert status["installed"] == 2 and status["fallback_modules"] == 0
+    assert (3, 64) in status["layouts"] and (2, 64) in status["layouts"]
+    cfg = getattr(mixed, _CONFIG_ATTR)
+    assert cfg.mixed_layout and cfg.up_bits_eff == 3 and cfg.bits == 2
+    x = (mx.random.normal((1, 1, 128)) * 0.2).astype(mx.float16)
+    idx = mx.array([1, 3, 4, 6], dtype=mx.uint32).reshape(1, 1, 4)
+    out, fused = affine_moe_pair_activation(mixed, x, idx)
+    assert fused and out is not None
+    ref = mixed.activation(mixed.up_proj(mx.expand_dims(x, (-2, -3)), idx), mixed.gate_proj(mx.expand_dims(x, (-2, -3)), idx))
+    mx.eval(out, ref)
+    assert mx.allclose(out, ref, atol=3.1e-5, rtol=2e-3)

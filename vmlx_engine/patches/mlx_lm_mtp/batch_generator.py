@@ -1118,6 +1118,12 @@ def _text_mtp_maybe_ar_safety_fallback(request_id: str, state: _MtpState) -> boo
     if trip is None:
         return False
     prior_depth = int(state.depth or 1)
+    if prior_depth > 1:
+        # First rung: D1 with a fresh window; AR only if D1 loses too.
+        state.depth = 1
+        state.ar_safety.reset(cycles)
+        logger.info("MTP[%s] AR safety D%d -> D1: %s", request_id, prior_depth, trip.log_text(prior_depth))
+        return False
     state.ar_fallback_pending = True
     state.ar_fallback_reason = trip.reason(prior_depth)
     state.stats.fallback_reason = state.ar_fallback_reason

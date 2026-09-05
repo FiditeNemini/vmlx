@@ -146,15 +146,24 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     monkeypatch.setenv("VMLINUX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")  # fixed
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
     state = _vlm_state(m)
+    state.depth_ceiling = 3
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.accepted_tokens = 0
     # Full ring, 1 tok/cycle at 20ms/cycle = 20 ms/tok, flat cycle wall.
     state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]
+    # Rung 1: D3 loses -> D1 with a fresh window (not AR yet).
+    assert m._native_mtp_maybe_ar_safety_fallback("req-fixed", state) is False
+    assert state.depth == 1 and state.ar_fallback_pending is False
+    assert state.ar_safety.ring == [] and state.ar_safety.cycle_base == 40
+    assert state.promote_at_cycle > 40
+    # Rung 2: D1 loses too -> AR.
+    state.stats.cycles = 80
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.ring = [(71 + i, 71 + i, base_t + i * 0.020) for i in range(9)]
     assert m._native_mtp_maybe_ar_safety_fallback("req-fixed", state) is True
     assert state.ar_fallback_pending is True
-    assert state.depth == 1
-    assert "windowed_ar_safety d3" in (state.ar_fallback_reason or "")
+    assert "windowed_ar_safety d1" in (state.ar_fallback_reason or "")
 
 
 def test_disabled_by_kill_switch(monkeypatch):
@@ -186,9 +195,16 @@ def test_text_lane_trips_under_fixed_policy(monkeypatch):
     state.stats.draft_tokens_accepted = 0
     state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]
     assert tl._text_mtp_maybe_cost_fallback("req", state, now=time.perf_counter()) is False
+    # Rung 1: D3 -> D1.
+    assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 1 and state.ar_fallback_pending is False
+    # Rung 2: D1 -> AR.
+    state.stats.cycles = 80
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.ring = [(71 + i, 71 + i, base_t + i * 0.020) for i in range(9)]
     assert tl._text_mtp_maybe_ar_safety_fallback("req", state) is True
     assert state.ar_fallback_pending is True
-    assert "windowed_ar_safety d3" in (state.ar_fallback_reason or "")
+    assert "windowed_ar_safety d1" in (state.ar_fallback_reason or "")
     assert state.stats.fallback_reason == state.ar_fallback_reason
 
 
@@ -267,6 +283,7 @@ def test_probe_kept_switches_baseline_to_measured_ar(monkeypatch):
         tier.record_step(t0 + i * 0.025)  # measured AR 25 ms/tok
     state.ar_tier = tier
     state.probe = True
+    state.depth = 1
     state.stats.prompt_prime_source = "unprimed"
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
@@ -277,6 +294,7 @@ def test_probe_kept_switches_baseline_to_measured_ar(monkeypatch):
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
     assert state.probe is False
     assert tier.reentries == 1
+    assert state.promote_at_cycle == 40 + m._NATIVE_MTP_PROMOTE_FIRST_CYCLES
     # A probe that LOSES: 1 tok/cycle at 40ms = 40 ms/tok -> falls back, backoff.
     state2 = _vlm_state(m)
     tier2 = m.NativeMTPArTier(depth=3)
@@ -307,7 +325,8 @@ def test_settled_reentry_that_trips_again_backs_off(monkeypatch):
         tier.record_step(t0 + i * 0.025)
     tier.reentries = 1
     state.ar_tier = tier
-    state.probe = False  # settled after a kept probe
+    state.probe = False  # settled at D1 after a kept probe
+    state.depth = 1
     base_t = time.perf_counter() - 1.0
     state.stats.cycles = 40
     state.stats.accepted_tokens = 0
@@ -318,3 +337,51 @@ def test_settled_reentry_that_trips_again_backs_off(monkeypatch):
     assert tier.tokens_since_fallback == 0
     assert tier.next_probe_tokens == 32
     assert tier.probe_due() is False
+
+
+def test_promotion_probe_wins_and_loses(monkeypatch):
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    state = _vlm_state(m)
+    state.depth = 1
+    state.ladder_depth = 3
+    state.promote_at_cycle = 40
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 40
+    state.stats.accepted_tokens = 40
+    # D1 has been running at 2 tok/cycle, 20ms/cycle = 10 ms/tok.
+    state.ar_safety.ring = [(31 + i, 2 * (31 + i), base_t + i * 0.020) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.promote_probe is True and state.depth == 3
+    assert abs(state.d1_ms_per_tok - 10.0) < 1e-6
+    # Promotion window: D3 at 3.5 tok/cycle, 28ms/cycle = 8 ms/tok < 10/1.1 -> promoted.
+    state.stats.cycles = 60
+    state.ar_safety.anchor_cycle_ms = 28.0
+    state.ar_safety.ring = [(51 + i, int(3.5 * (51 + i)), base_t + i * 0.028) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.promote_probe is False and state.depth == 3
+    # Later D3 loses to AR (20 ms/tok vs 10) -> back to D1 with backoff.
+    state.stats.cycles = 100
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.ring = [(91 + i, 91 + i, base_t + i * 0.020) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.depth == 1 and state.ar_fallback_pending is False
+    assert state.promote_at_cycle > 100
+
+
+def test_probe_early_abort_on_clear_loser(monkeypatch):
+    from vmlx_engine.native_mtp_ar_safety import ArSafetyState, ar_safety_step
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    st = ArSafetyState(prompt_tokens=50)
+    st.reset(100)
+    t = 0.0; emitted = 0; tripped = None
+    for cyc in range(101, 140):
+        t += 0.040; emitted += 1  # 40 ms/tok vs AR 10: a clear loser
+        trip = ar_safety_step(st, cycles=cyc, emitted=emitted, now=t,
+                              seed_ar_ms=10.0, primed=False, margin=1 / 1.10, probe=True)
+        if trip is not None:
+            tripped = cyc; break
+    # warmup 4 + 5 ring samples -> aborted by cycle ~110, not after 24 cycles
+    assert tripped is not None and tripped <= 112

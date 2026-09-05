@@ -542,7 +542,10 @@ class GatedResidual(nn.Module):
                 f"got {hyper_input.shape[-1]}"
             )
         compiled_forward = getattr(self, "_compiled_forward", None)
-        if compiled_forward is not None and hyper_input.shape[-2] == 1:
+        if (
+            compiled_forward is not None
+            and 1 <= hyper_input.shape[-2] <= _hc_compile_max_rows()
+        ):
             return compiled_forward(hyper_input)
         return self._forward(hyper_input)
 
@@ -926,6 +929,35 @@ class PLELayer(nn.Module):
 # --------------------------------------------------------------------------- #
 # GDN — qwen3_5 GatedDeltaNet with sigmoid output gate
 # --------------------------------------------------------------------------- #
+def _env_rows(name: str, default: int = 1) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def _gdn_group_max_rows() -> int:
+    """Widest chunk (rows per sequence) the grouped GDN projection accepts.
+
+    Default 1 = decode only. MTP verification runs depth+1 rows (2..4); the
+    grouped QMM is exact for any row count because affine rows are packed
+    independently, but a wider output can select a different MLX kernel, so
+    widths above 1 stay an opt-in experiment (VMLX_QWEN4_GDN_GROUP_MAX_ROWS)
+    until the interleaved A/B on the verifier proves them.
+    """
+    return _env_rows("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", 1)
+
+
+def _hc_compile_max_rows() -> int:
+    """Widest chunk the compiled hyper-connection path accepts (default 1).
+    mx.compile specializes per input shape, so admitting verify widths only
+    adds one trace per width (VMLX_QWEN4_HC_COMPILE_MAX_ROWS)."""
+    return _env_rows("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", 1)
+
+
 def _decode_quantized_linears_fused(
     linears: tuple[nn.Module, ...], x: mx.array
 ) -> tuple[mx.array, ...] | None:
@@ -937,7 +969,7 @@ def _decode_quantized_linears_fused(
     Qwen3.8 GDN has four such projections in each of its 36 linear-attention
     layers, so the unfused path paid 108 unnecessary launches per token.
     """
-    if x.ndim != 3 or x.shape[1] != 1:
+    if x.ndim != 3 or x.shape[1] < 1 or x.shape[1] > _gdn_group_max_rows():
         return None
     if quantized_projection_group_reason(
         linears, activation_dtype=x.dtype

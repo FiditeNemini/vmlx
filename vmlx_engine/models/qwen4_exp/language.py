@@ -939,23 +939,28 @@ def _env_rows(name: str, default: int = 1) -> int:
         return default
 
 
+_VERIFY_MAX_ROWS = 4  # depth 3 + 1 bonus row
+
+
 def _gdn_group_max_rows() -> int:
     """Widest chunk (rows per sequence) the grouped GDN projection accepts.
 
-    Default 1 = decode only. MTP verification runs depth+1 rows (2..4); the
-    grouped QMM is exact for any row count because affine rows are packed
-    independently, but a wider output can select a different MLX kernel, so
-    widths above 1 stay an opt-in experiment (VMLX_QWEN4_GDN_GROUP_MAX_ROWS)
-    until the interleaved A/B on the verifier proves them.
+    Decode is one row; MTP verification runs depth+1 rows (2..4). The
+    grouped QMM is bitwise the separate projections for any row count
+    (affine rows are packed independently; pinned at S=1..4 for q2/q4 g64,
+    f16/bf16). Measured 2026-09-05 on Flash-Next 4S, governor off,
+    interleaved x2: rows<=4 vs rows==1 at fixed D3 = +0.9% / +0.3% / +0.7%
+    (1.7k / 6.6k / 26k context), never negative. Override with
+    VMLX_QWEN4_GDN_GROUP_MAX_ROWS (1 = decode only).
     """
-    return _env_rows("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", 1)
+    return _env_rows("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", _VERIFY_MAX_ROWS)
 
 
 def _hc_compile_max_rows() -> int:
-    """Widest chunk the compiled hyper-connection path accepts (default 1).
-    mx.compile specializes per input shape, so admitting verify widths only
-    adds one trace per width (VMLX_QWEN4_HC_COMPILE_MAX_ROWS)."""
-    return _env_rows("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", 1)
+    """Widest chunk the compiled hyper-connection path accepts (default 4,
+    the verify width). mx.compile specializes per input shape, so admitting
+    verify widths only adds one trace per width (VMLX_QWEN4_HC_COMPILE_MAX_ROWS)."""
+    return _env_rows("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", _VERIFY_MAX_ROWS)
 
 
 def _decode_quantized_linears_fused(

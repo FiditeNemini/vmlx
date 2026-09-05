@@ -1670,7 +1670,9 @@ def test_small_row_sigmoid_gated_rmsnorm_refuses_prefill_width():
     ) is None
 
 
-def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
+def test_qwen4_exp_gdn_projection_fusion_stops_at_the_verify_width():
+    """Decode (1 row) and MTP verification (up to 4 rows) take the grouped
+    projection; prefill-width chunks keep the stock per-projection QMMs."""
     from vmlx_engine.models.qwen4_exp.language import (
         _decode_quantized_linears_fused,
     )
@@ -1679,7 +1681,9 @@ def test_qwen4_exp_gdn_projection_fusion_stays_decode_only():
         nn.Linear(64, 64, bias=False).to_quantized(group_size=64, bits=4)
         for _ in range(4)
     )
-    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 2, 64))) is None
+    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 4, 64))) is not None
+    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 5, 64))) is None
+    assert _decode_quantized_linears_fused(linears, mx.zeros((1, 64, 64))) is None
 
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
@@ -2536,11 +2540,23 @@ def test_qwen4_exp_hyper_compile_is_decode_only_and_numerically_equivalent():
             np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5
         )
 
+    # verify widths (<= 4 rows) also take the compiled path, bit-for-bit
+    # against eager within fp tolerance
+    verify = mx.arange(4 * 256, dtype=mx.float32).reshape(1, 4, 256) / 511.0
+    module._compiled_forward = mx.compile(module._forward)
+    eager_v = module._forward(verify)
+    compiled_v = module(verify)
+    mx.eval(*eager_v, *compiled_v)
+    for expected, actual in zip(eager_v, compiled_v):
+        np.testing.assert_allclose(
+            np.asarray(actual), np.asarray(expected), rtol=1e-5, atol=1e-5
+        )
+
     def forbidden_decode(_inputs):
-        raise AssertionError("prefill must not use the single-token compiled path")
+        raise AssertionError("prefill must not use the short-chunk compiled path")
 
     module._compiled_forward = forbidden_decode
-    prefill = module(mx.zeros((1, 2, 256), dtype=mx.float32))
+    prefill = module(mx.zeros((1, 5, 256), dtype=mx.float32))
     mx.eval(*prefill)
 
 

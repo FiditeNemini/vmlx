@@ -43,29 +43,30 @@ def test_grouped_projection_bitwise_at_verify_widths(bits, dtype, rows):
         assert bool(mx.array_equal(g, w)), f"rows={rows} bits={bits} {dtype}"
 
 
-def test_gdn_group_gate_defaults_to_single_row(monkeypatch):
+def test_gdn_group_gate_defaults_to_verify_width(monkeypatch):
     monkeypatch.delenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", raising=False)
     linears = _qlinears(256, (256, 128, 16, 16), 4, 64, mx.float16)
-    x = (mx.random.normal((1, 2, 256))).astype(mx.float16)
-    assert L._decode_quantized_linears_fused(linears, x) is None
-    x1 = x[:, :1]
-    assert L._decode_quantized_linears_fused(linears, x1) is not None
-    monkeypatch.setenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", "4")
-    got = L._decode_quantized_linears_fused(linears, x)
+    x = (mx.random.normal((1, 4, 256))).astype(mx.float16)
+    got = L._decode_quantized_linears_fused(linears, x)  # 4 rows: grouped by default
     assert got is not None
     for g, w in zip(got, (l(x) for l in linears)):
         assert bool(mx.array_equal(g, w))
-    x5 = mx.concatenate([x, x, x], axis=1)  # 6 rows > cap
+    x5 = mx.concatenate([x, x[:, :1]], axis=1)  # 5 rows > verify width -> stock
     assert L._decode_quantized_linears_fused(linears, x5) is None
+    monkeypatch.setenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", "1")
+    assert L._decode_quantized_linears_fused(linears, x) is None
+    assert L._decode_quantized_linears_fused(linears, x[:, :1]) is not None
 
 
 def test_env_rows_parsing(monkeypatch):
     monkeypatch.setenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", "3")
     assert L._hc_compile_max_rows() == 3
     monkeypatch.setenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", "garbage")
-    assert L._hc_compile_max_rows() == 1
+    assert L._hc_compile_max_rows() == 4
     monkeypatch.setenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", "0")
     assert L._hc_compile_max_rows() == 1
+    monkeypatch.delenv("VMLX_QWEN4_HC_COMPILE_MAX_ROWS")
+    assert L._hc_compile_max_rows() == 4 and L._gdn_group_max_rows() == 4
 
 
 @pytest.mark.parametrize("rows", [1, 2, 3, 4])

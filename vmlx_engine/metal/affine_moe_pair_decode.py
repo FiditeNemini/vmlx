@@ -145,6 +145,21 @@ def _mixed_requested(family: str) -> bool:
     return value.strip().lower() not in {"", "0", "false", "off", "no"}
 
 
+def _is_mtp_head_module(name: str) -> bool:
+    return any(part == "mtp" or part.startswith("mtp_") for part in name.split("."))
+
+
+def _mtp_head_requested(family: str) -> bool:
+    env = {
+        "qwen4_exp": "VMLX_QWEN4_FUSED_MOE_PAIR_MTP_HEAD",
+        "glm5_next": "VMLX_GLM5_FUSED_MOE_PAIR_MTP_HEAD",
+    }[family]
+    value = os.environ.get(env)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "off", "no"}
+
+
 def _requested(family: str) -> bool:
     env = {
         "qwen4_exp": "VMLX_QWEN4_FUSED_MOE_PAIR",
@@ -661,11 +676,24 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
         return 0
     from mlx_lm.models.switch_layers import SwitchGLU
 
-    modules = [
-        module
-        for _name, module in model.named_modules()
+    named = [
+        (name, module)
+        for name, module in model.named_modules()
         if isinstance(module, SwitchGLU)
     ]
+    # The native-MTP draft head runs its expert layer three times per verify
+    # cycle inside the async draft/verify pipeline. Measured 2026-09-05 on
+    # Flash-Next 4M (uniform q4/g64, governor off, fixed D3): with the pair
+    # kernel registered on the head the cycle ran 39.4 / 43.0 / 33.8 tok/s at
+    # 1.7k / 6.6k / 26k against 51.6 / 45.9 / 37.2 with it off, at identical
+    # acceptance; the backbone's single-row decode keeps its +3%. Keep the
+    # head's modules on the stock path unless explicitly requested.
+    include_head = _mtp_head_requested(family)
+    excluded = [
+        name for name, _module in named
+        if not include_head and _is_mtp_head_module(name)
+    ]
+    modules = [module for name, module in named if name not in set(excluded)]
     if not modules:
         _STATUS[family] = {"installed": 0, "reason": "no SwitchGLU modules"}
         return 0
@@ -728,6 +756,7 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
         "eligible_modules": len(accepted),
         "fallback_modules": len(rejected),
         "total_modules": len(modules),
+        "excluded_mtp_head_modules": len(excluded),
         "reason": None if not rejected else "partial_layout_fallback",
         "fallback_reasons": fallback_reasons[:3],
         "layouts": layouts,
@@ -735,13 +764,14 @@ def install_affine_moe_pair_decode(model: Any, *, family: str) -> int:
     }
     logger.info(
         "%s affine MoE pair fusion registered for %d/%d modules; layouts=%s; "
-        "fallback=%d; full_down=%d",
+        "fallback=%d; full_down=%d; mtp_head_excluded=%d",
         family,
         len(accepted),
         len(modules),
         layouts,
         len(rejected),
         full_down_modules,
+        len(excluded),
     )
     return len(accepted)
 

@@ -476,3 +476,31 @@ def test_mixed_layout_registration_is_opt_in(monkeypatch):
     ref = mixed.activation(mixed.up_proj(mx.expand_dims(x, (-2, -3)), idx), mixed.gate_proj(mx.expand_dims(x, (-2, -3)), idx))
     mx.eval(out, ref)
     assert mx.allclose(out, ref, atol=3.1e-5, rtol=2e-3)
+
+
+def test_mtp_head_modules_stay_on_stock_path_unless_requested(monkeypatch):
+    from vmlx_engine.metal.affine_moe_pair_decode import _is_mtp_head_module
+
+    assert _is_mtp_head_module("language_model.mtp.layers.0.mlp.switch_mlp")
+    assert _is_mtp_head_module("model.mtp_layers.0.switch_mlp")
+    assert not _is_mtp_head_module("language_model.model.layers.3.mlp.switch_mlp")
+
+    backbone = _quantized_switch(bits=2, activation=SwiGLU())
+    head = _quantized_switch(bits=2, activation=SwiGLU())
+
+    class _Model:
+        def named_modules(self):
+            return [("model.layers.0.mlp.switch_mlp", backbone), ("mtp.layers.0.mlp.switch_mlp", head)]
+
+    monkeypatch.setitem(
+        _FAMILY_CONTRACTS, "qwen4_exp",
+        {"hidden": 128, "intermediate": 64, "top_k": 4, "layouts": {(2, 32), (4, 32)}, "clamp_limit": None},
+    )
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR", raising=False)
+    monkeypatch.delenv("VMLX_QWEN4_FUSED_MOE_PAIR_MTP_HEAD", raising=False)
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 1
+    assert hasattr(backbone, _CONFIG_ATTR) and not hasattr(head, _CONFIG_ATTR)
+    assert affine_moe_pair_status("qwen4_exp")["excluded_mtp_head_modules"] == 1
+    monkeypatch.setenv("VMLX_QWEN4_FUSED_MOE_PAIR_MTP_HEAD", "1")
+    assert install_affine_moe_pair_decode(_Model(), family="qwen4_exp") == 2
+    assert hasattr(head, _CONFIG_ATTR)

@@ -241,6 +241,7 @@ def ar_safety_step(
     primed: bool = True,
     margin: Optional[float] = None,
     probe: bool = False,
+    scale_context: bool = True,
 ) -> Optional[ArSafetyTrip]:
     """Record this cycle's sample and decide.  Call once per verify cycle,
     AFTER the cycle's device round-trip, BEFORE any depth adaptation.  The
@@ -317,7 +318,7 @@ def ar_safety_step(
     context_ratio = context_now / max(1, st.anchor_context_tokens)
     verdict = windowed_ar_verdict(
         ar_step_ms=float(seed_ar_ms),
-        anchor_cycle_ms=float(st.anchor_cycle_ms),
+        anchor_cycle_ms=float(st.anchor_cycle_ms) if scale_context else 0.0,
         cur_cycle_ms=cur_cycle_ms,
         context_ratio=context_ratio,
         delta_emitted=int(emitted) - e0,

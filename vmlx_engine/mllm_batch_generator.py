@@ -5797,6 +5797,10 @@ def _native_mtp_maybe_ar_safety_fallback(
         primed=primed,
         margin=(1.0 / _NATIVE_MTP_REENTRY_HYSTERESIS) if (probing or promoting) else None,
         probe=(probing or promoting),
+        # The cycle-wall context scale exists to grow a SHORT-context seed
+        # baseline; a measured AR (live context) or a measured D1 cost needs
+        # none, and applying it let D1 run ~10% above AR on 4M.
+        scale_context=not (promoting or measured_ar > 0.0),
     )
     window_full = len(state.ar_safety.ring) > ar_safety_window_cycles()
 
@@ -15042,12 +15046,22 @@ class MLLMBatchGenerator:
                 else "cold_prompt"
             )
         draft_head_before = _native_mtp_draft_head_status(self.language_model)
+        # Sticky start rung: when the previous request on this engine ended in
+        # AR or D1, the configured depth just lost on this workload, so start
+        # the next request at D1 and let the promotion probe climb back if
+        # the configured depth wins.  Measured on 4M: a turn that cannot beat
+        # AR at any depth spent its first 25 cycles at D3 (36 ms/tok vs a
+        # 30 ms AR step) before the first judgment, every turn.
+        start_depth = depth
+        _last_tier = str(getattr(self, "_native_mtp_last_tier", "") or "")
+        if depth > 1 and _last_tier in ("AR", "D1") and _native_mtp_reentry_enabled():
+            start_depth = 1
         drafts, draft_lps, draft_ids = self._draft_native_mtp_tokens(
             request,
             hidden[:, -1:, :],
             next_tok,
             mtp_cache,
-            depth,
+            start_depth,
         )
         mx.eval(first_tok, next_tok)
 
@@ -15057,7 +15071,7 @@ class MLLMBatchGenerator:
             drafts=drafts,
             draft_lps=draft_lps,
             draft_ids=draft_ids,
-            depth=depth,
+            depth=start_depth,
             depth_ceiling=_native_mtp_depth_ceiling_for_request(request),
             head_chain_pairs=max(0, len(drafts) - 1),
             ar_step_ms=_seed_ar_ms,
@@ -15072,6 +15086,17 @@ class MLLMBatchGenerator:
             if getattr(request, "input_ids", None) is not None
             else 0
         )
+        state.ladder_depth = max(1, int(depth))
+        if start_depth < depth:
+            state.promote_at_cycle = _NATIVE_MTP_PROMOTE_FIRST_CYCLES
+            logger.info(
+                "MLLM MTP[%s] start rung D1 (previous request ended in %s); "
+                "promotion probe to D%d after %d cycles",
+                request.request_id,
+                _last_tier,
+                depth,
+                _NATIVE_MTP_PROMOTE_FIRST_CYCLES,
+            )
         state.stats.profile_seed = profile_seed
         state.stats.prompt_primed_pairs = int(primed_pairs)
         state.stats.prompt_prime_source = prime_source
@@ -16166,6 +16191,10 @@ class MLLMBatchGenerator:
                     if mtp_state_for_finish is not None
                     else None
                 )
+                if mtp_state_for_finish is not None:
+                    self._native_mtp_last_tier = f"D{int(mtp_state_for_finish.depth or 1)}"
+                elif getattr(req, "_native_mtp_ar_tier", None) is not None:
+                    self._native_mtp_last_tier = "AR"
                 if finish_tier is not None:
                     logger.info(
                         "MLLM MTP[%s] AR-tier summary: fallbacks=%d probes=%d "

@@ -385,3 +385,16 @@ def test_probe_early_abort_on_clear_loser(monkeypatch):
             tripped = cyc; break
     # warmup 4 + 5 ring samples -> aborted by cycle ~110, not after 24 cycles
     assert tripped is not None and tripped <= 112
+
+
+def test_retry_budget_caps_probes_and_promotions():
+    from vmlx_engine import mllm_batch_generator as m
+
+    tier = m.NativeMTPArTier(depth=3)
+    t = 100.0
+    for _ in range(20):
+        tier.record_step(t); t += 0.025
+    assert tier.probe_due() is True
+    tier.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
+    assert tier.probe_due() is False  # budget spent: stay AR for the request
+    assert m._NATIVE_MTP_MAX_PROMOTIONS >= 1

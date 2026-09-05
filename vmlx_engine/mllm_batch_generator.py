@@ -4131,6 +4131,7 @@ class MLLMNativeMTPState:
     promote_probe: bool = False
     promote_at_cycle: int = 0
     promote_backoff: int = 0
+    promotions: int = 0
     d1_ms_per_tok: float = 0.0
     # The request began from a restored prefix. The MTP head cache starts
     # COLD on such requests (backbone hiddens are not stored), so the first
@@ -5693,7 +5694,8 @@ class NativeMTPArTier:
 
     def probe_due(self) -> bool:
         return (
-            self.tokens_since_fallback >= self.next_probe_tokens
+            self.probes < _NATIVE_MTP_MAX_REENTRY_PROBES
+            and self.tokens_since_fallback >= self.next_probe_tokens
             and len(self.step_walls_ms) >= 4
             and self.measured_ar_ms_per_tok() > 0.0
         )
@@ -5720,6 +5722,12 @@ def _native_mtp_reentry_enabled() -> bool:
 
 
 _NATIVE_MTP_PROMOTE_FIRST_CYCLES = 32
+# Per-request retry budget. On content where MTP hovers within ~10% of AR
+# every retry costs a little; once a request has lost twice it stays at AR
+# (measured on 4M/4S: the residual sub-AR turns were the repeatedly re-tried
+# ones). Promotion back to the configured depth gets three tries.
+_NATIVE_MTP_MAX_REENTRY_PROBES = 2
+_NATIVE_MTP_MAX_PROMOTIONS = 3
 
 
 def _native_mtp_recent_ms_per_tok(state: MLLMNativeMTPState) -> float:
@@ -5768,12 +5776,14 @@ def _native_mtp_maybe_ar_safety_fallback(
         and state.ladder_depth > 1
         and state.promote_at_cycle > 0
         and cycles >= state.promote_at_cycle
+        and state.promotions < _NATIVE_MTP_MAX_PROMOTIONS
     ):
         d1_cost = _native_mtp_recent_ms_per_tok(state)
         if d1_cost > 0.0:
             state.d1_ms_per_tok = d1_cost
             state.depth = state.ladder_depth
             state.promote_probe = True
+            state.promotions += 1
             state.promote_at_cycle = 0
             state.ar_safety.reset(cycles)
             logger.info(

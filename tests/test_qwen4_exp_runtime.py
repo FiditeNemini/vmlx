@@ -2754,3 +2754,37 @@ def test_missing_sidecar_file_falls_back_to_rtn(monkeypatch, tmp_path):
     status = model.prepare_mtp_draft_head()
     assert status["available"] is True
     assert status["reason"] == "ready"
+
+
+def test_qwen4_exp_memmap_rows_dedupe_matches_direct_gather(tmp_path):
+    """The mmap gather copies each distinct row once; result is identical to
+    the direct fancy-index gather for duplicate-heavy 1-D and 2-D index sets,
+    including BF16 widening."""
+    import json
+
+    from vmlx_engine.models.qwen4_exp.table_reader import SafetensorsRowReader
+
+    for dtype_tag, np_dtype in (("U32", np.uint32), ("BF16", np.uint16)):
+        values = (np.arange(40, dtype=np.uint32) * 977 % 65521).astype(np_dtype).reshape(8, 5)
+        tensor_name = "table.weight"
+        header = json.dumps(
+            {tensor_name: {"dtype": dtype_tag, "shape": list(values.shape),
+                           "data_offsets": [0, values.nbytes]}},
+            separators=(",", ":"),
+        ).encode()
+        path = tmp_path / f"rows_{dtype_tag}.safetensors"
+        path.write_bytes(len(header).to_bytes(8, "little") + header + values.tobytes())
+        reader = SafetensorsRowReader(path, tensor_name)
+        for rows in (
+            np.array([7, 7, 7, 7], dtype=np.int64),
+            np.array([3, 0, 3, 1, 0, 3], dtype=np.int64),
+            np.array([[1, 1, 2], [2, 5, 1]], dtype=np.int64),
+            np.array([4], dtype=np.int64),
+            np.array([6, 2, 0], dtype=np.int64),  # all distinct
+        ):
+            got = reader.rows(rows)
+            direct = reader.mm[rows]
+            if dtype_tag == "BF16":
+                direct = (np.asarray(direct, dtype=np.uint16).astype(np.uint32) << 16).view(np.float32)
+            assert got.shape == (*rows.shape, 5)
+            np.testing.assert_array_equal(got, np.asarray(direct))

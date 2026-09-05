@@ -297,7 +297,23 @@ class SafetensorsRowReader:
         self.random_access_advised = _advise_random_access(self.mm)
 
     def rows(self, indices: np.ndarray) -> np.ndarray:
-        values = self.mm[indices]
+        """Gather rows from the mmap; each distinct row is copied once.
+
+        A PLE gather repeats rows whenever an n-gram recurs inside the chunk
+        (common at prefill: heads x tokens); the pread path already reads
+        unique rows, this path copied every duplicate."""
+        indices = np.asarray(indices)
+        flat = indices.reshape(-1)
+        if flat.size > 1:
+            unique, inverse = np.unique(flat, return_inverse=True)
+            if unique.size < flat.size:
+                values = np.asarray(self.mm[unique])[inverse].reshape(
+                    *indices.shape, *self.shape[1:]
+                )
+            else:
+                values = self.mm[indices]
+        else:
+            values = self.mm[indices]
         if self.dtype_tag == "BF16":
             raw = np.asarray(values, dtype=np.uint16)
             return (raw.astype(np.uint32) << 16).view(np.float32)

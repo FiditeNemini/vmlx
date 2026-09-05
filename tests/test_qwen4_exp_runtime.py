@@ -1678,7 +1678,7 @@ def test_qwen4_exp_gdn_projection_fusion_stops_at_the_verify_width(monkeypatch):
         _decode_quantized_linears_fused,
     )
 
-    monkeypatch.setenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", "4")
+    monkeypatch.delenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", raising=False)
 
     linears = tuple(
         nn.Linear(64, 64, bias=False).to_quantized(group_size=64, bits=4)

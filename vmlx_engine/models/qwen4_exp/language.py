@@ -940,11 +940,12 @@ def _env_rows(name: str, default: int = 1) -> int:
 
 
 _VERIFY_MAX_ROWS = 4  # depth 3 + 1 bonus row
-# Default stays decode-only until the full-model receipts exist (output
-# equality rows<=4 vs rows==1 at temperature 0 on the real bundles, plus
-# tool continuations in Electron and the raw API); the interleaved 4S timing
-# (+0.3-0.9%) alone does not promote a default.
-_DEFAULT_GROUP_ROWS = 1
+# Receipts 2026-09-05 (chain, 4S, fixed D3, governor off, two rounds):
+# rows<=4 vs rows==1 = +0.6% / +0.7% / +0.7% at 1.7k / 6.6k / 26k with
+# byte-identical outputs at every context; source-matched Electron run with
+# rows=4 (three connected turns to a 20k-token prompt, coherent) and the raw
+# API tool probe on the same app engine (3/3 calls with arguments).
+_DEFAULT_GROUP_ROWS = _VERIFY_MAX_ROWS
 
 
 def _gdn_group_max_rows() -> int:
@@ -955,15 +956,15 @@ def _gdn_group_max_rows() -> int:
     (affine rows are packed independently; pinned at S=1..4 for q2/q4 g64,
     f16/bf16 on synthetic geometry). Measured 2026-09-05 on Flash-Next 4S,
     governor off, interleaved x2: rows<=4 vs rows==1 at fixed D3 = +0.9% /
-    +0.3% / +0.7% (1.7k / 6.6k / 26k), never negative. Default 1 until the
-    full-model output-equality and tool-continuation receipts are in;
-    VMLX_QWEN4_GDN_GROUP_MAX_ROWS=4 admits verify widths.
+    +0.3% / +0.7% (1.7k / 6.6k / 26k), never negative, byte-identical
+    outputs. Default 4 (verify width); VMLX_QWEN4_GDN_GROUP_MAX_ROWS=1
+    restores decode-only.
     """
     return _env_rows("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", _DEFAULT_GROUP_ROWS)
 
 
 def _hc_compile_max_rows() -> int:
-    """Widest chunk the compiled hyper-connection path accepts (default 1).
+    """Widest chunk the compiled hyper-connection path accepts (default 4).
     mx.compile specializes per input shape, so admitting verify widths only
     adds one trace per width (VMLX_QWEN4_HC_COMPILE_MAX_ROWS)."""
     return _env_rows("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", _DEFAULT_GROUP_ROWS)

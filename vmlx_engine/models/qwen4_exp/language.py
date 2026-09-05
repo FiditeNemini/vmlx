@@ -1191,6 +1191,10 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
 QSACache = _SparseIndexerKVCache
 
 
+_QSA_NEG_INF = mx.array(-float("inf"), dtype=mx.float32)
+_QSA_ZERO = mx.array(0.0, dtype=mx.float32)
+
+
 class _QSAPooledFrontier:
     """Retained pooled/normed/roped keys of the COMPLETED 4-token blocks.
 
@@ -1394,13 +1398,11 @@ class QSAIndexer(nn.Module):
         # per query i (absolute pos p = offset+i): visible tokens 0..p
         #   complete blocks for that query: ncb(p) = (p+1)//ratio
         #   keep: topk(block_topk) among blocks [0, ncb) + tail tokens [ncb*ratio, p]
-        abs_pos = np.arange(offset, offset + S)
-        ncb = (abs_pos + 1) // self.compress_ratio  # [S]
-        ncb_mx = mx.array(ncb)
+        # Built on device: no per-call NumPy upload for the query positions.
+        ncb_mx = (mx.arange(offset + 1, offset + S + 1) // self.compress_ratio)  # [S]
         block_ids = mx.arange(num_blocks)
         complete = block_ids[None, :] < ncb_mx[:, None]  # [S, NB]
-        neg = mx.array(-np.inf, dtype=mx.float32)
-        masked_scores = mx.where(complete[None], scores, neg)
+        masked_scores = mx.where(complete[None], scores, _QSA_NEG_INF)
 
         k_sel = min(self.block_topk, num_blocks)
         top_idx = mx.argpartition(-masked_scores, kth=k_sel - 1, axis=-1)[
@@ -1422,8 +1424,7 @@ class QSAIndexer(nn.Module):
         tail = token_ids[None, :] >= (ncb_mx * self.compress_ratio)[:, None]  # [S, T]
         keep_tokens = keep_tokens | tail[None]
 
-        min_val = mx.array(-np.inf, dtype=mx.float32)
-        return mx.where(keep_tokens[:, None], mx.array(0.0, dtype=mx.float32), min_val)
+        return mx.where(keep_tokens[:, None], _QSA_ZERO, _QSA_NEG_INF)
 
 
     def _pool_blocks(

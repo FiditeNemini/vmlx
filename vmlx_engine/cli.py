@@ -4289,10 +4289,16 @@ Examples:
         "--native-mtp-depth-policy",
         choices=["adaptive", "fixed"],
         default=None,
-        help="Depth policy for native MTP. adaptive treats --native-mtp-depth as "
-             "the starting depth and may promote/demote it per request; fixed "
-             "keeps the exact selected depth for every request. If omitted, the existing "
-             "environment/default adaptive policy is preserved.",
+        help="Depth policy for native MTP. Both policies start every request at "
+             "--native-mtp-depth and never exceed it. adaptive may lower the depth "
+             "per request on measured acceptance; fixed does not adapt on acceptance. "
+             "Under BOTH policies the runtime still steps down to depth 1 or plain "
+             "decoding when a measured window is slower than plain decoding, and "
+             "tries depth 1 once against the configured depth's measured cost, "
+             "climbing back when the configured depth wins. Set "
+             "VMLX_NATIVE_MTP_DEPTH_PROBE=0 and VMLX_NATIVE_MTP_AR_SAFETY=0 to pin "
+             "the depth exactly (accepting slower-than-plain decoding). If omitted, "
+             "the existing environment/default adaptive policy is preserved.",
     )
     serve_parser.add_argument(
         "--native-mtp-sampling-policy",

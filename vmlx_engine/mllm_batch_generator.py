@@ -3895,6 +3895,10 @@ def _native_mtp_stats_depth_slots() -> int:
 @dataclass
 class MLLMNativeMTPStats:
     cycles: int = 0
+    # Verify cycles spent at each draft depth (index = depth, 0 unused);
+    # reported with the finish line so a receipt shows the ACTUAL depth
+    # occupancy of a governed request rather than its configured depth.
+    cycles_by_depth: List[int] = field(default_factory=lambda: [0] * 8)
     accepts: int = 0
     rejects: int = 0
     init_emits: int = 0
@@ -5277,9 +5281,13 @@ def _native_mtp_log_stats(
     if mtp_cache is not None or not stats.mtp_head_cache:
         stats.mtp_head_cache = native_mtp_cache_snapshot(mtp_cache)
     rate = (stats.accepted_tokens / stats.drafted_tokens * 100.0) if stats.drafted_tokens else 0.0
+    occupancy = ",".join(
+        f"d{d}={n}" for d, n in enumerate(stats.cycles_by_depth) if d > 0 and n > 0
+    )
     logger.info(
         "MLLM MTP[%s] finish=%s cycles=%d accepted=%d/%d (%.1f%%) "
-        "emits[init=%d,draft=%d,bonus=%d,verify=%d] margin_truncated=%d",
+        "emits[init=%d,draft=%d,bonus=%d,verify=%d] margin_truncated=%d "
+        "cycles_by_depth[%s]",
         request_id,
         reason,
         stats.cycles,
@@ -5291,6 +5299,7 @@ def _native_mtp_log_stats(
         stats.bonus_emits,
         stats.verify_emits,
         stats.margin_truncated_cycles,
+        occupancy or "none",
     )
     if any(stats.drafted_by_depth) or any(stats.accepted_by_depth):
         accept_by_depth = ",".join(
@@ -5745,6 +5754,18 @@ _NATIVE_MTP_DEPTH_PROBE_FIRST_CYCLES = 16
 _NATIVE_MTP_MAX_DEPTH_PROBES = 2
 
 
+def _native_mtp_depth_probe_enabled() -> bool:
+    """Depth economics probe (configured depth vs D1). On by default for
+    BOTH policies: the configured depth is the starting depth and ceiling,
+    and the runtime steps down only when a measured window shows D1 faster
+    by the hysteresis. ``VMLX_NATIVE_MTP_DEPTH_PROBE=0`` pins the configured
+    depth except for the AR-safety ladder (which ``VMLX_NATIVE_MTP_AR_SAFETY=0``
+    disables in turn) -- the two switches together give an exact pin."""
+    return _native_mtp_env_flag(
+        True, "VMLINUX_NATIVE_MTP_DEPTH_PROBE", "VMLX_NATIVE_MTP_DEPTH_PROBE"
+    )
+
+
 def _native_mtp_should_record_last_tier(
     finished_requests: int, cycles: int, window: int
 ) -> bool:
@@ -5840,6 +5861,7 @@ def _native_mtp_maybe_ar_safety_fallback(
         not probing
         and not promoting
         and not depth_probing
+        and _native_mtp_depth_probe_enabled()
         and depth_now == state.ladder_depth
         and depth_now > 1
         and state.depth_probe_at_cycle > 0
@@ -15205,7 +15227,12 @@ class MLLMBatchGenerator:
             else 0
         )
         state.ladder_depth = max(1, int(depth))
-        if depth > 1 and start_depth == depth and _native_mtp_reentry_enabled():
+        if (
+            depth > 1
+            and start_depth == depth
+            and _native_mtp_reentry_enabled()
+            and _native_mtp_depth_probe_enabled()
+        ):
             state.depth_probe_at_cycle = _NATIVE_MTP_DEPTH_PROBE_FIRST_CYCLES
         if start_depth < depth:
             state.promote_at_cycle = _native_mtp_first_promotion_cycle(True)
@@ -15523,6 +15550,8 @@ class MLLMBatchGenerator:
             )
 
         state.stats.cycles += 1
+        if 0 <= depth < len(state.stats.cycles_by_depth):
+            state.stats.cycles_by_depth[depth] += 1
         state.stats.drafted_tokens += depth
         state.stats.accepted_tokens += accepted
         for level in range(min(depth, len(state.stats.drafted_by_depth))):

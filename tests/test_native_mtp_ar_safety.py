@@ -508,3 +508,36 @@ def test_depth_probe_returns_to_configured_depth_when_d1_loses(monkeypatch):
     state.ar_safety.ring = [(state.stats.cycles - 9 + i, 3 * (state.stats.cycles - 9 + i), base_t + i * 0.030) for i in range(9)]
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
     assert state.depth == 3 and state.depth_probes == 2
+
+
+def test_depth_probe_switch_pins_configured_depth(monkeypatch):
+    """Contract: with VMLX_NATIVE_MTP_DEPTH_PROBE=0 a request that beats AR at
+    its configured depth never tries D1; with the default it tries D1 once."""
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    for probe_env, expect_depth in (("0", 3), ("1", 1)):
+        monkeypatch.setenv("VMLX_NATIVE_MTP_DEPTH_PROBE", probe_env)
+        state = _vlm_state(m)
+        state.depth = 3
+        state.ladder_depth = 3
+        state.depth_probe_at_cycle = 16
+        state.ar_step_ms = 12.0
+        base_t = time.perf_counter() - 1.0
+        state.stats.cycles = 20
+        state.stats.accepted_tokens = 40
+        state.ar_safety.ring = [(11 + i, 3 * (11 + i), base_t + i * 0.030) for i in range(9)]
+        assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+        assert state.depth == expect_depth, f"probe_env={probe_env}"
+    monkeypatch.delenv("VMLX_NATIVE_MTP_DEPTH_PROBE")
+
+
+def test_finish_line_reports_cycles_by_depth():
+    from vmlx_engine.mllm_batch_generator import MLLMNativeMTPStats
+
+    stats = MLLMNativeMTPStats()
+    for depth in (3, 3, 1, 3, 1, 1, 1):
+        stats.cycles_by_depth[depth] += 1
+    assert stats.cycles_by_depth[3] == 3 and stats.cycles_by_depth[1] == 4
+    occupancy = ",".join(f"d{d}={n}" for d, n in enumerate(stats.cycles_by_depth) if d > 0 and n > 0)
+    assert occupancy == "d1=4,d3=3"

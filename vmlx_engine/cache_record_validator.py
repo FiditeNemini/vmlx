@@ -1132,13 +1132,30 @@ def _validate_live_single_cache(layer_cache: Any, *, layer_idx: int) -> Tuple[bo
                     f"exceeds K/V backing lengths {key_len}/{value_len}"
                 ), total_bytes
             # The single-sequence sparse cache grows idx_keys in step-sized
-            # backing buffers too (logical extent = offset); only a lane
-            # SHORTER than the logical offset is corrupt.
+            # backing buffers (physical capacity >= logical extent).  Two
+            # checks: the backing must hold the logical offset, AND the
+            # INITIALIZED extent (_idx_offset) must equal the logical offset;
+            # spare capacity must never hide an under- or over-appended lane.
             if parsed_offset > idx_len:
                 return False, (
                     f"layer {layer_idx}: MiniMaxM3 logical offset "
                     f"{parsed_offset} > idx_keys length {idx_len}"
                 ), total_bytes
+            initialized = getattr(layer_cache, "_idx_offset", None)
+            if isinstance(initialized, int) and not isinstance(initialized, bool):
+                if initialized != parsed_offset:
+                    return False, (
+                        f"layer {layer_idx}: MiniMaxM3 initialized index extent "
+                        f"{initialized} != logical offset {parsed_offset}"
+                    ), total_bytes
+                if initialized > idx_len:
+                    return False, (
+                        f"layer {layer_idx}: MiniMaxM3 initialized index extent "
+                        f"{initialized} > idx_keys length {idx_len}"
+                    ), total_bytes
+            derived_nbytes = getattr(layer_cache, "derived_nbytes", 0)
+            if isinstance(derived_nbytes, int) and not isinstance(derived_nbytes, bool):
+                total_bytes += derived_nbytes
         elif key_len != idx_len:
             return False, (
                 f"layer {layer_idx}: MiniMaxM3 lane length mismatch without "

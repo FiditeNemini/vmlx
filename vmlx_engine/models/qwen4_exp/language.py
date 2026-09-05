@@ -940,6 +940,11 @@ def _env_rows(name: str, default: int = 1) -> int:
 
 
 _VERIFY_MAX_ROWS = 4  # depth 3 + 1 bonus row
+# Default stays decode-only until the full-model receipts exist (output
+# equality rows<=4 vs rows==1 at temperature 0 on the real bundles, plus
+# tool continuations in Electron and the raw API); the interleaved 4S timing
+# (+0.3-0.9%) alone does not promote a default.
+_DEFAULT_GROUP_ROWS = 1
 
 
 def _gdn_group_max_rows() -> int:
@@ -948,19 +953,20 @@ def _gdn_group_max_rows() -> int:
     Decode is one row; MTP verification runs depth+1 rows (2..4). The
     grouped QMM is bitwise the separate projections for any row count
     (affine rows are packed independently; pinned at S=1..4 for q2/q4 g64,
-    f16/bf16). Measured 2026-09-05 on Flash-Next 4S, governor off,
-    interleaved x2: rows<=4 vs rows==1 at fixed D3 = +0.9% / +0.3% / +0.7%
-    (1.7k / 6.6k / 26k context), never negative. Override with
-    VMLX_QWEN4_GDN_GROUP_MAX_ROWS (1 = decode only).
+    f16/bf16 on synthetic geometry). Measured 2026-09-05 on Flash-Next 4S,
+    governor off, interleaved x2: rows<=4 vs rows==1 at fixed D3 = +0.9% /
+    +0.3% / +0.7% (1.7k / 6.6k / 26k), never negative. Default 1 until the
+    full-model output-equality and tool-continuation receipts are in;
+    VMLX_QWEN4_GDN_GROUP_MAX_ROWS=4 admits verify widths.
     """
-    return _env_rows("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", _VERIFY_MAX_ROWS)
+    return _env_rows("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", _DEFAULT_GROUP_ROWS)
 
 
 def _hc_compile_max_rows() -> int:
-    """Widest chunk the compiled hyper-connection path accepts (default 4,
-    the verify width). mx.compile specializes per input shape, so admitting
-    verify widths only adds one trace per width (VMLX_QWEN4_HC_COMPILE_MAX_ROWS)."""
-    return _env_rows("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", _VERIFY_MAX_ROWS)
+    """Widest chunk the compiled hyper-connection path accepts (default 1).
+    mx.compile specializes per input shape, so admitting verify widths only
+    adds one trace per width (VMLX_QWEN4_HC_COMPILE_MAX_ROWS)."""
+    return _env_rows("VMLX_QWEN4_HC_COMPILE_MAX_ROWS", _DEFAULT_GROUP_ROWS)
 
 
 def _decode_quantized_linears_fused(
@@ -1259,7 +1265,19 @@ def _exact_mrope_cos_sin(
     return mx.cos(emb).astype(dtype), mx.sin(emb).astype(dtype)
 
 
+def _qsa_exact_rope_enabled() -> bool:
+    """Exact elementwise M-RoPE angles in the QSA indexer (default on).
+    ``VMLX_QWEN4_QSA_EXACT_ROPE=0`` restores the stock K=1-matmul rotary for
+    old-vs-new qualification runs; retention is then disabled too because its
+    parity proof depends on shape-independent angles."""
+    return os.environ.get("VMLX_QWEN4_QSA_EXACT_ROPE", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+
+
 def _qsa_pool_retention_enabled() -> bool:
+    if not _qsa_exact_rope_enabled():
+        return False
     return os.environ.get("VMLX_QWEN4_QSA_POOL_RETAIN", "1").strip().lower() not in {
         "0", "false", "no", "off"
     }
@@ -1351,7 +1369,10 @@ class QSAIndexer(nn.Module):
 
         if position_ids is None:
             position_ids = mx.arange(offset, offset + S)[None, :]
-        qcos, qsin = _exact_mrope_cos_sin(self.rotary_emb, position_ids, q.dtype)
+        if _qsa_exact_rope_enabled():
+            qcos, qsin = _exact_mrope_cos_sin(self.rotary_emb, position_ids, q.dtype)
+        else:
+            qcos, qsin = self.rotary_emb(q, position_ids)
         q, _ = apply_multimodal_rotary_pos_emb(q, q, qcos, qsin)
         q = q.transpose(0, 2, 1, 3)
 
@@ -1448,9 +1469,12 @@ class QSAIndexer(nn.Module):
         block_positions = positions[
             :, first_block * r : last_block * r : r, :
         ].transpose(2, 0, 1)
-        block_cos, block_sin = _exact_mrope_cos_sin(
-            self.rotary_emb, block_positions, pooled.dtype
-        )
+        if _qsa_exact_rope_enabled():
+            block_cos, block_sin = _exact_mrope_cos_sin(
+                self.rotary_emb, block_positions, pooled.dtype
+            )
+        else:
+            block_cos, block_sin = self.rotary_emb(pooled, block_positions)
         pooled, _ = apply_multimodal_rotary_pos_emb(
             pooled, pooled, block_cos, block_sin
         )

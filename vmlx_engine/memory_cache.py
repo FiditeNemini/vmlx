@@ -253,6 +253,10 @@ def estimate_kv_cache_memory(cache: list[Any]) -> int:
             idx_keys_attr = getattr(layer_cache, "idx_keys", None)
             if idx_keys_attr is not None and hasattr(idx_keys_attr, "nbytes"):
                 total_bytes += idx_keys_attr.nbytes
+            # Consumer-owned derived state (retained pooled QSA keys).
+            derived_nbytes = getattr(layer_cache, "derived_nbytes", 0)
+            if isinstance(derived_nbytes, int):
+                total_bytes += derived_nbytes
 
         # MambaCache/ArraysCache: .cache attribute is a list of arrays
         elif hasattr(layer_cache, "cache") and isinstance(

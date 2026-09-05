@@ -1670,12 +1670,15 @@ def test_small_row_sigmoid_gated_rmsnorm_refuses_prefill_width():
     ) is None
 
 
-def test_qwen4_exp_gdn_projection_fusion_stops_at_the_verify_width():
-    """Decode (1 row) and MTP verification (up to 4 rows) take the grouped
-    projection; prefill-width chunks keep the stock per-projection QMMs."""
+def test_qwen4_exp_gdn_projection_fusion_stops_at_the_verify_width(monkeypatch):
+    """Decode (1 row) and, when admitted, MTP verification (up to 4 rows)
+    take the grouped projection; prefill-width chunks keep the stock
+    per-projection QMMs."""
     from vmlx_engine.models.qwen4_exp.language import (
         _decode_quantized_linears_fused,
     )
+
+    monkeypatch.setenv("VMLX_QWEN4_GDN_GROUP_MAX_ROWS", "4")
 
     linears = tuple(
         nn.Linear(64, 64, bias=False).to_quantized(group_size=64, bits=4)

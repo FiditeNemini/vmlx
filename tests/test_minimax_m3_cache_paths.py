@@ -1762,6 +1762,56 @@ def test_single_cache_idx_lane_grows_in_steps_and_keeps_logical_contract():
     np.testing.assert_array_equal(np.asarray(r.idx_keys), np.asarray(c.state[2]))
 
 
+def test_validator_rejects_under_and_over_appended_index_lane_and_counts_derived():
+    """Spare capacity must not hide an index lane whose INITIALIZED extent
+    differs from the K/V offset (under-append: rows past _idx_offset are
+    unwritten; over-append: rows past offset are stale)."""
+    import mlx.core as mx
+    from vmlx_engine.cache_record_validator import validate_live_cache
+    from vmlx_engine.models.minimax_m3.cache import (
+        MiniMaxM3SparseCache,
+        clone_minimax_m3_sparse,
+        restore_minimax_m3_sparse,
+    )
+
+    c = MiniMaxM3SparseCache()
+    kv = mx.zeros((1, 1, 5, 2)); c.update_and_fetch(kv, kv)
+    c.update_index(mx.zeros((1, 1, 5, 4)))
+    ok, reason, nbytes = validate_live_cache([c])
+    assert ok, reason
+    # under-append: initialized extent 4 < offset 5 with capacity 256
+    c._idx_offset = 4
+    ok, reason, _ = validate_live_cache([c])
+    assert not ok and "initialized index extent 4 != logical offset 5" in reason
+    # over-append: initialized extent 7 > offset 5
+    c._idx_offset = 7
+    ok, reason, _ = validate_live_cache([c])
+    assert not ok and "initialized index extent 7" in reason
+    c._idx_offset = 5
+    # the append itself fails closed on a desynchronised lane
+    d = MiniMaxM3SparseCache()
+    kv = mx.zeros((1, 1, 3, 2)); d.update_and_fetch(kv, kv)
+    d.update_index(mx.zeros((1, 1, 3, 4)))
+    kv = mx.zeros((1, 1, 2, 2)); d.update_and_fetch(kv, kv)  # KV advanced by 2
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="desynchronised"):
+        d.update_index(mx.zeros((1, 1, 1, 4)))  # index advanced by 1 only
+    # restore and clone produce exact-length lanes that validate
+    r = restore_minimax_m3_sparse(*c.state)
+    ok, reason, _ = validate_live_cache([r]); assert ok, reason
+    k = clone_minimax_m3_sparse(c, 4)
+    ok, reason, _ = validate_live_cache([k]); assert ok, reason
+    # derived bytes are reported by the cache and counted by the validator
+    class _Derived:
+        nbytes = 4096
+        def truncate_to_tokens(self, n): pass
+    c.derived["probe"] = _Derived()
+    assert c.derived_nbytes == 4096
+    ok, reason, nbytes_with = validate_live_cache([c])
+    assert ok, reason
+    assert nbytes_with == nbytes + 4096
+
+
 def test_validator_accepts_step_backed_live_lane_and_rejects_short_lane():
     import mlx.core as mx
     from vmlx_engine.cache_record_validator import validate_live_cache

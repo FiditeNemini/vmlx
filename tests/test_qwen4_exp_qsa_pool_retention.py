@@ -110,9 +110,17 @@ def _lockstep(ix, steps, monkeypatch, *, batch: int = 1, positions=False):
 
 def test_retention_default_on_and_kill_switch(monkeypatch):
     monkeypatch.delenv("VMLX_QWEN4_QSA_POOL_RETAIN", raising=False)
-    from vmlx_engine.models.qwen4_exp.language import _qsa_pool_retention_enabled
+    monkeypatch.delenv("VMLX_QWEN4_QSA_EXACT_ROPE", raising=False)
+    from vmlx_engine.models.qwen4_exp.language import (
+        _qsa_exact_rope_enabled,
+        _qsa_pool_retention_enabled,
+    )
 
-    assert _qsa_pool_retention_enabled()
+    assert _qsa_exact_rope_enabled() and _qsa_pool_retention_enabled()
+    # the stock rotary is shape-dependent, so retention cannot be exact under it
+    monkeypatch.setenv("VMLX_QWEN4_QSA_EXACT_ROPE", "0")
+    assert not _qsa_exact_rope_enabled() and not _qsa_pool_retention_enabled()
+    monkeypatch.delenv("VMLX_QWEN4_QSA_EXACT_ROPE")
     for v in ("0", "false", "OFF"):
         monkeypatch.setenv("VMLX_QWEN4_QSA_POOL_RETAIN", v)
         assert not _qsa_pool_retention_enabled()

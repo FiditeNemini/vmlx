@@ -60,6 +60,18 @@ class MiniMaxM3SparseCache(KVCache):
         # trim. The raw ``idx_keys`` lane stays the only authority.
         self.derived: dict = {}
 
+    @property
+    def derived_nbytes(self) -> int:
+        """Bytes held by consumer-owned derived state (e.g. Qwen4's retained
+        pooled QSA keys); reported to the cache accounting alongside K/V and
+        the raw index lane."""
+        total = 0
+        for value in self.derived.values():
+            nb = getattr(value, "nbytes", None)
+            if isinstance(nb, int):
+                total += nb
+        return total
+
     def _truncate_derived(self) -> None:
         for value in list(self.derived.values()):
             fn = getattr(value, "truncate_to_tokens", None)
@@ -105,6 +117,15 @@ class MiniMaxM3SparseCache(KVCache):
                 self.idx_keys = mx.concatenate([self.idx_keys, grown], axis=2)
         self.idx_keys[..., prev : prev + n, :] = idx_k
         self._idx_offset = prev + n
+        if self.offset and self._idx_offset != int(self.offset):
+            # The attention layer appends K/V for exactly these rows before
+            # the indexer runs; any other relation means the raw lane and
+            # the K/V lane have desynchronised.  Fail closed: a slice past
+            # the initialized extent would expose unwritten rows.
+            raise ValueError(
+                "sparse index lane desynchronised from K/V: "
+                f"idx_offset={self._idx_offset} kv_offset={int(self.offset)}"
+            )
         logical = int(self.offset) if self.offset else self._idx_offset
         return self.idx_keys[..., :logical, :]
 

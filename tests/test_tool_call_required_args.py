@@ -224,3 +224,20 @@ def test_chat_stream_tool_call_path_delivers_diagnostics_before_done():
     tc_path = src.index("Skip normal end-of-stream handling")
     assert src.rfind("_tc_diagnostics = _take_tool_call_drop_diagnostics()", 0, tc_path) != -1
     assert src.index("_tc_warning_chunk = ChatCompletionChunk(") < tc_path
+
+
+def test_shared_filter_covers_both_parser_branches_and_every_dialect():
+    """Point 6 of the release review: the presence + schema filter is applied on
+    the named-parser branch AND the generic branch of the parser wrapper, and the
+    Anthropic and Ollama dialects reach it through the chat lane (they do not
+    parse tool calls on their own)."""
+    wrapper = inspect.getsource(_server._parse_tool_calls_with_parser)
+    assert wrapper.count("_filter_to_request_tools(") >= 3  # definition + parser branch + generic branch
+    anthropic = inspect.getsource(_server.create_anthropic_message)
+    assert "stream_chat_completion(" in anthropic and "dispatch_omni_chat_completion(" in anthropic
+    ollama = inspect.getsource(_server.ollama_chat)
+    assert "create_chat_completion(" in ollama
+    for name, src in (("anthropic", anthropic), ("ollama", ollama)):
+        assert "parse_tool_calls(" not in src and "_filter_to_request_tools" not in src, name
+    responses = inspect.getsource(_server.create_response)
+    assert "_parse_tool_calls_with_parser(" in responses

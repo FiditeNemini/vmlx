@@ -6574,9 +6574,13 @@ class TestV4bToolChoiceRequired:
             "Chat Completions required-tool 400 must preserve raw_preview so "
             "parser/model failures are classifiable from smoke artifacts"
         )
+        # 51ead4c4: qwen4_exp keeps its tool catalog stable under a specific
+        # tool_choice (the rendered prompt must not change per call), so the
+        # template copy is gated on the catalog predicate; ordering still holds.
         required_copy = source.index(
-            'if _is_required_tool_choice(_tool_choice):'
+            'if _is_required_tool_choice(_tool_choice) and not _qwen4_stable_tool_catalog:'
         )
+        assert '_qwen4_stable_tool_catalog = bool(' in source
         template_snapshot = source.index(
             'chat_kwargs["chat_template_kwargs"] = extra_ct'
         )
@@ -6593,9 +6597,13 @@ class TestV4bToolChoiceRequired:
         assert "required" in source, (
             "Responses API must check tool_choice='required'"
         )
+        # 51ead4c4: qwen4_exp keeps its tool catalog stable under a specific
+        # tool_choice (the rendered prompt must not change per call), so the
+        # template copy is gated on the catalog predicate; ordering still holds.
         required_copy = source.index(
-            'if _is_required_tool_choice(_tool_choice):'
+            'if _is_required_tool_choice(_tool_choice) and not _qwen4_stable_tool_catalog:'
         )
+        assert '_qwen4_stable_tool_catalog = bool(' in source
         template_snapshot = source.index(
             'chat_kwargs["chat_template_kwargs"] = extra_ct'
         )

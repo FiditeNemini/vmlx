@@ -1178,6 +1178,19 @@ function validatedFlatNativeMtpDepth(tuning: any): number | undefined {
   return depth
 }
 
+// Nested native_mtp / best_native_mtp_depth blocks carry an attestation, not
+// a speed table. Same evidence rule as the engine (vmlx_engine/native_mtp.py
+// _attested_block_depth): depth 1 is the conservative seed; deeper needs
+// validated === true. A block that merely omitted `validated` used to pass.
+function attestedBlockNativeMtpDepth(block: any): number | undefined {
+  if (!block || typeof block !== 'object') return undefined
+  if (block.blocked === true || block.output_equivalent === false) return undefined
+  const depth = coerceNativeMtpDepth(block.best_depth)
+  if (depth === undefined) return undefined
+  if (depth === 1) return 1
+  return block.validated === true ? depth : undefined
+}
+
 function readNativeMtpTuningDepth(modelPath: string): { depth: number; source: string } | undefined {
   try {
     const tuningPath = join(modelPath, 'vmlx_mtp_tuning.json')
@@ -1185,18 +1198,17 @@ function readNativeMtpTuningDepth(modelPath: string): { depth: number; source: s
     const tuning = JSON.parse(readFileSync(tuningPath, 'utf-8'))
     const nativeMtp = tuning?.native_mtp
     if (nativeMtp && typeof nativeMtp === 'object') {
-      const allowed =
-        nativeMtp.blocked !== true &&
-        nativeMtp.validated !== false &&
-        nativeMtp.output_equivalent !== false
-      const depth = allowed ? coerceNativeMtpDepth(nativeMtp.best_depth) : undefined
+      if (nativeMtp.blocked === true || nativeMtp.validated === false || nativeMtp.output_equivalent === false) {
+        return undefined
+      }
+      const depth = attestedBlockNativeMtpDepth(nativeMtp)
       if (depth) {
         return { depth, source: 'vmlx_mtp_tuning.json:native_mtp.best_depth' }
       }
     }
     const sweep = tuning?.best_native_mtp_depth
     if (sweep && typeof sweep === 'object') {
-      const depth = coerceNativeMtpDepth(sweep.best_depth)
+      const depth = attestedBlockNativeMtpDepth(sweep)
       if (depth) {
         return { depth, source: 'vmlx_mtp_tuning.json:best_native_mtp_depth.best_depth' }
       }

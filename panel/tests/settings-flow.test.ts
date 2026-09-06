@@ -1875,8 +1875,16 @@ describe('Native MTP', () => {
         expect(sessionsSource).toContain('--native-mtp-sampling-policy')
         expect(sessionsSource).toContain('--disable-native-mtp')
         expect(sessionsSource).toContain('data?.mtp?.request_policy')
-        expect(sessionsSource).toContain("proc.nativeMtpSamplingPolicy === 'deterministic-defaults'")
-        expect(serverTypesSource).toContain("nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only'")
+        // Adoption recovers the live process's policy/depth through the shared
+        // helper; the old inline mapping turned an Auto session's own
+        // deterministic-defaults launch policy into UI 'deterministic', which
+        // the launcher re-emitted as greedy-only after restart.
+        expect(sessionsSource).toContain('adoptNativeMtpConfig(proc, detectedFamily')
+        expect(sessionsSource).not.toContain("proc.nativeMtpSamplingPolicy === 'deterministic-defaults'")
+        expect(sessionsSource).toContain('data?.mtp?.depth_policy')
+        expect(sessionsSource).toContain('data?.mtp?.effective_depth')
+        expect(serverTypesSource).toContain("nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only' | 'disabled'")
+        expect(serverTypesSource).toContain("nativeMtpDepthPolicy?: 'fixed' | 'adaptive'")
         expect(formSource).toContain('Native MTP')
         expect(formSource).toContain('nativeMtpMode')
         expect(formSource).toContain('nativeMtpDepth')

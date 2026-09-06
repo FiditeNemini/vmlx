@@ -370,3 +370,22 @@ def test_blocked_tuning_file_leaks_no_depth(tmp_path):
     }))
     depth, source = _model_tuning_depth(str(tmp_path))
     assert depth is None and source is None
+
+
+def test_nested_tuning_block_needs_validated_true_above_depth_one(tmp_path):
+    """One evidence rule for every sidecar format: a nested block that merely
+    omits ``validated`` (or a sweep block without it) may recommend depth 1
+    but not deeper; ``validated: true`` unlocks its stated depth."""
+    import json
+    from vmlx_engine.native_mtp import _model_tuning_depth
+
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({"native_mtp": {"best_depth": 3}}))
+    assert _model_tuning_depth(str(tmp_path)) == (None, None)
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({"native_mtp": {"best_depth": 1}}))
+    assert _model_tuning_depth(str(tmp_path)) == (1, "vmlx_mtp_tuning.json:native_mtp.best_depth")
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({"native_mtp": {"best_depth": 3, "validated": True}}))
+    assert _model_tuning_depth(str(tmp_path)) == (3, "vmlx_mtp_tuning.json:native_mtp.best_depth")
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({"best_native_mtp_depth": {"best_depth": 2}}))
+    assert _model_tuning_depth(str(tmp_path)) == (None, None)
+    (tmp_path / "vmlx_mtp_tuning.json").write_text(json.dumps({"best_native_mtp_depth": {"best_depth": 2, "validated": True}}))
+    assert _model_tuning_depth(str(tmp_path)) == (2, "vmlx_mtp_tuning.json:best_native_mtp_depth.best_depth")

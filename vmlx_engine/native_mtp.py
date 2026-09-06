@@ -333,6 +333,31 @@ def _validated_flat_tuning_depth(tuning: dict[str, Any]) -> int | None:
     return depth
 
 
+def _attested_block_depth(block: dict[str, Any]) -> int | None:
+    """Depth from a nested ``native_mtp`` / ``best_native_mtp_depth`` block.
+
+    Those blocks carry an attestation, not a speed table, so they are held to
+    the same rule as the flat format's evidence gate: depth 1 is the
+    conservative seed and is accepted as long as the block is not blocked or
+    invalidated; any deeper recommendation needs ``validated`` to be exactly
+    ``True``.  A block that merely omits ``validated`` used to pass (the
+    check was ``is not False``), which let an unvalidated D2/D3 through here
+    while the flat format demanded matched wall-speed evidence.
+    """
+    if not isinstance(block, dict):
+        return None
+    if block.get("blocked") is True or block.get("output_equivalent") is False:
+        return None
+    depth = _coerce_native_mtp_depth(block.get("best_depth"))
+    if depth is None:
+        return None
+    if depth == 1:
+        return 1
+    if block.get("validated") is not True:
+        return None
+    return depth
+
+
 def _model_tuning_depth(
     bundle_path: str | Path | None,
 ) -> tuple[int | None, str | None]:
@@ -344,12 +369,11 @@ def _model_tuning_depth(
     candidates: list[tuple[str, Any]] = []
     native_mtp = tuning.get("native_mtp")
     if isinstance(native_mtp, dict):
-        native_mtp_depth_allowed = (
-            native_mtp.get("blocked") is not True
-            and native_mtp.get("validated") is not False
-            and native_mtp.get("output_equivalent") is not False
-        )
-        if not native_mtp_depth_allowed:
+        if (
+            native_mtp.get("blocked") is True
+            or native_mtp.get("validated") is False
+            or native_mtp.get("output_equivalent") is False
+        ):
             # A tuning file that declares its native_mtp measurement
             # blocked/invalid must not leak a depth through the legacy
             # top-level fallback keys either (2026-07-10 audit High-4).
@@ -357,7 +381,7 @@ def _model_tuning_depth(
         candidates.append(
             (
                 "vmlx_mtp_tuning.json:native_mtp.best_depth",
-                native_mtp.get("best_depth"),
+                _attested_block_depth(native_mtp),
             )
         )
 
@@ -366,7 +390,7 @@ def _model_tuning_depth(
         candidates.append(
             (
                 "vmlx_mtp_tuning.json:best_native_mtp_depth.best_depth",
-                sweep_result.get("best_depth"),
+                _attested_block_depth(sweep_result),
             )
         )
 

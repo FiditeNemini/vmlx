@@ -1,3 +1,4 @@
+import { adoptNativeMtpConfig } from '../shared/nativeMtpAdoption'
 import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
 import {
   healthFailureToleranceCount,
@@ -2089,6 +2090,9 @@ export class SessionManager extends EventEmitter {
         let healthy = false
         let modelName: string | undefined
         let nativeMtpSamplingPolicy = parsed.nativeMtpSamplingPolicy
+        let nativeMtpDepthPolicy = parsed.nativeMtpDepthPolicy
+        let nativeMtpDepth = parsed.nativeMtpDepth
+        const nativeMtpDisabled = parsed.nativeMtpDisabled
         let standbyDepth: 'soft' | 'deep' | null = null
         try {
           const res = await fetch(
@@ -2103,9 +2107,20 @@ export class SessionManager extends EventEmitter {
             if (
               healthMtpPolicy === 'compatible-only' ||
               healthMtpPolicy === 'deterministic-defaults' ||
-              healthMtpPolicy === 'greedy-only'
+              healthMtpPolicy === 'greedy-only' ||
+              healthMtpPolicy === 'disabled'
             ) {
               nativeMtpSamplingPolicy = healthMtpPolicy
+            }
+            // The live engine reports its effective depth and depth policy;
+            // adoption must recover them rather than guess a family default.
+            const healthDepthPolicy = data?.mtp?.depth_policy
+            if (healthDepthPolicy === 'fixed' || healthDepthPolicy === 'adaptive') {
+              nativeMtpDepthPolicy = healthDepthPolicy
+            }
+            const healthDepth = data?.mtp?.effective_depth
+            if (typeof healthDepth === 'number' && Number.isFinite(healthDepth)) {
+              nativeMtpDepth = healthDepth
             }
             // Detect standby state for proper re-adoption
             if (data.status === 'standby_soft') standbyDepth = 'soft'
@@ -2120,6 +2135,9 @@ export class SessionManager extends EventEmitter {
           healthy,
           modelName,
           nativeMtpSamplingPolicy,
+          nativeMtpDepthPolicy,
+          nativeMtpDepth,
+          nativeMtpDisabled,
           standbyDepth
         })
       }
@@ -2133,6 +2151,9 @@ export class SessionManager extends EventEmitter {
     port: number
     modelPath: string
     nativeMtpSamplingPolicy?: 'compatible-only' | 'deterministic-defaults' | 'greedy-only'
+    nativeMtpDepthPolicy?: 'fixed' | 'adaptive'
+    nativeMtpDepth?: number
+    nativeMtpDisabled?: boolean
   } | null {
     try {
       const parts = line.trim().split(/\s+/)
@@ -2174,7 +2195,13 @@ export class SessionManager extends EventEmitter {
         | 'greedy-only'
         | undefined
 
-      return { pid, port, modelPath, nativeMtpSamplingPolicy }
+      const depthPolicyMatch = cmdStart.match(/--native-mtp-depth-policy\s+(fixed|adaptive)/)
+      const nativeMtpDepthPolicy = depthPolicyMatch?.[1] as 'fixed' | 'adaptive' | undefined
+      const depthMatch = cmdStart.match(/--native-mtp-depth\s+(\d+)/)
+      const nativeMtpDepth = depthMatch ? parseInt(depthMatch[1]) : undefined
+      const nativeMtpDisabled = /(^|\s)--disable-native-mtp(\s|$)/.test(cmdStart) || undefined
+
+      return { pid, port, modelPath, nativeMtpSamplingPolicy, nativeMtpDepthPolicy, nativeMtpDepth, nativeMtpDisabled }
     } catch (_) {
       return null
     }
@@ -3966,15 +3993,14 @@ export class SessionManager extends EventEmitter {
             : undefined,
           dsv4ActivationQat: false,
           defaultEnableThinking: undefined,
-          nativeMtpMode: proc.nativeMtpSamplingPolicy === 'deterministic-defaults'
-            ? 'deterministic'
-            : 'auto',
-          nativeMtpDepth: ['qwen4-exp', 'qwen3.5'].includes(detectedFamily ?? '')
-            ? 3
-            : ((detected as any).nativeMtp?.depth ?? 3),
-          nativeMtpDepthOverride: ['qwen4-exp', 'qwen3.5'].includes(
-            detectedFamily ?? '',
-          ),
+          ...(() => {
+            const adopted = adoptNativeMtpConfig(proc, detectedFamily, (detected as any).nativeMtp?.depth)
+            return {
+              nativeMtpMode: adopted.nativeMtpMode,
+              nativeMtpDepth: adopted.nativeMtpDepth,
+              nativeMtpDepthOverride: adopted.nativeMtpDepthOverride,
+            }
+          })(),
           enableAutoToolChoice: detected.enableAutoToolChoice
         }
         applyBundleStartupDefaults(defaultConfig, proc.modelPath)

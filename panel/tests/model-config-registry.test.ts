@@ -2760,3 +2760,19 @@ describe('detectModelConfigFromDir supportsThinkingBudget capability', () => {
     expect(detected.supportsInstructMode).toBe(false)
   })
 })
+
+describe('sidecar evidence rule is shared across formats', () => {
+  it('a nested native_mtp block without validated: true may recommend depth 1 but not deeper', () => {
+    const dir = makeModelDir(
+      { model_type: 'qwen3_5', text_config: { model_type: 'qwen3_5_text', mtp_num_hidden_layers: 1 } },
+      { format: 'jang', mtp: { kept: true, enabled: true, num_layers: 1 }, capabilities: { family: 'qwen3_5', cache_type: 'hybrid' } },
+    )
+    writeFileSync(join(dir, 'model.safetensors.index.json'), JSON.stringify({ weight_map: { 'mtp.fc.weight': 'model.safetensors' } }))
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({ native_mtp: { best_depth: 3 } }))
+    expect(detectModelConfigFromDir(dir).nativeMtp?.depthSource).not.toBe('vmlx_mtp_tuning.json:native_mtp.best_depth')
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({ native_mtp: { best_depth: 1 } }))
+    expect(detectModelConfigFromDir(dir).nativeMtp).toMatchObject({ depth: 1, depthSource: 'vmlx_mtp_tuning.json:native_mtp.best_depth' })
+    writeFileSync(join(dir, 'vmlx_mtp_tuning.json'), JSON.stringify({ best_native_mtp_depth: { best_depth: 2, validated: true } }))
+    expect(detectModelConfigFromDir(dir).nativeMtp).toMatchObject({ depth: 2, depthSource: 'vmlx_mtp_tuning.json:best_native_mtp_depth.best_depth' })
+  })
+})

@@ -4,7 +4,7 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
-## [1.6.55] - Unreleased
+## [1.6.55] - 2026-09-06
 
 - **Native MTP: adopting a running engine keeps its sampling policy and depth.** Adoption mapped the Auto session's own `deterministic-defaults` launch policy to the Deterministic override, which the launcher re-emitted as `greedy-only` on the next restart, pinning explicit request temperatures to greedy. Adoption now recovers the live engine's request policy, depth policy and effective depth (from `/health` first, the process arguments second) and maps them back so a restart relaunches the same policy: Auto stays Auto, the Deterministic override stays Deterministic, a disabled engine adopts as Off, and explicit depth 1/2/3 or Adaptive survive. Only an engine that exposes none of this falls back to the family default (fixed depth 3 for Qwen3.8 MTP families, as before).
 - **Native MTP: one evidence rule for every tuning sidecar format.** A nested `native_mtp` or `best_native_mtp_depth` block that merely omitted `validated` could recommend depth 2 or 3, while the flat format demanded matched wall-speed evidence. Both the engine and the desktop registry now accept depth 1 from such a block as the conservative seed and require `validated: true` for anything deeper; blocked and invalidated blocks still contribute nothing.

@@ -20210,7 +20210,11 @@ async def create_chat_completion(
 
     _cc_parse_text = _strip_think_for_tool_parse(content_for_parsing)
 
-    # Parse tool calls from output using configured parser (skip when tool_choice="none")
+    # Parse tool calls from output using configured parser (skip when tool_choice="none").
+    # Capture dropped-call / schema-validation diagnostics so the JSON reply
+    # carries the same `warnings` the stream does (a warning that only reaches
+    # the server log is not a warning the caller can act on).
+    _begin_tool_call_drop_capture()
     cleaned_text, tool_calls = (
         _parse_tool_calls_with_parser(_cc_parse_text, request)
         if not _suppress_tools
@@ -20370,6 +20374,7 @@ async def create_chat_completion(
             finish_reason,
         ),
         structured_output_warnings,
+        _take_tool_call_drop_diagnostics() or None,
     )
     if (
         response_warnings
@@ -23535,7 +23540,9 @@ async def create_response(
 
     parse_text = _strip_think_for_tool_parse(content_for_parsing)
 
-    # Parse tool calls (skip when tool_choice="none")
+    # Parse tool calls (skip when tool_choice="none"); capture dropped-call /
+    # schema-validation diagnostics for the response `warnings` field.
+    _begin_tool_call_drop_capture()
     cleaned_text, tool_calls = (
         _parse_tool_calls_with_parser(parse_text, request)
         if not _suppress_tools
@@ -23793,6 +23800,7 @@ async def create_response(
                 _response_finish,
             ),
             structured_output_warnings,
+            _take_tool_call_drop_diagnostics() or None,
         ),
     )
     if _response_terminal.finish_reason not in {"cancelled", "error"}:
@@ -26383,9 +26391,12 @@ async def stream_chat_completion(
     # Bug 5: surface dropped-tool-call diagnostics to the client even when no
     # reasoning-only warning fired. A parser-dropped call leaves the stream
     # without a tool_calls delta; without this hook the client sees an empty
-    # response with no signal as to why.
+    # response with no signal as to why. Diagnostics are also delivered when a
+    # call WAS emitted: under warn-mode schema validation the call is delivered
+    # together with its problems, and a sibling call dropped for an unavailable
+    # name must not vanish silently just because another call surfaced.
     _dropped_tc_diagnostics = _take_tool_call_drop_diagnostics()
-    if _dropped_tc_diagnostics and not tool_calls_emitted:
+    if _dropped_tc_diagnostics:
         if _stream_chat_warnings is None:
             _stream_chat_warnings = []
         _stream_chat_warnings.extend(_dropped_tc_diagnostics)

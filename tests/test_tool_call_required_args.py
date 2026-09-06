@@ -111,3 +111,83 @@ def test_schema_mode_switch_defaults_to_warn(monkeypatch):
     assert tool_args_schema_mode() == "enforce"
     monkeypatch.setenv("VMLX_TOOL_ARGS_SCHEMA_VALIDATION", "bogus")
     assert tool_args_schema_mode() == "warn"
+
+
+# ---- warnings reach the caller on every lane -------------------------------------------
+import inspect
+import json
+
+from vmlx_engine import server as _server
+from vmlx_engine.server import (
+    ChatCompletionRequest,
+    _begin_tool_call_drop_capture,
+    _parse_tool_calls_with_parser,
+    _record_tool_call_drop,
+    _take_tool_call_drop_diagnostics,
+)
+
+
+def test_drop_diagnostic_capture_round_trip_and_noop_without_capture():
+    _server._TOOL_CALL_DROP_DIAGNOSTICS.set(None)
+    _record_tool_call_drop("ignored: capture not started")
+    assert _take_tool_call_drop_diagnostics() == []
+    _begin_tool_call_drop_capture()
+    _record_tool_call_drop("first")
+    _record_tool_call_drop("second")
+    assert _take_tool_call_drop_diagnostics() == ["first", "second"]
+    assert _take_tool_call_drop_diagnostics() == []
+
+
+def _request_with_strict_tool() -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="m",
+        messages=[{"role": "user", "content": "set the mode"}],
+        tools=[{"type": "function", "function": STRICT}],
+    )
+
+
+def _set_mode_call(args: dict) -> str:
+    return "<tool_call>" + json.dumps({"name": "set_mode", "arguments": args}) + "</tool_call>"
+
+
+def test_warn_mode_delivers_the_call_and_records_the_schema_problem(monkeypatch):
+    monkeypatch.delenv("VMLX_TOOL_ARGS_SCHEMA_VALIDATION", raising=False)
+    monkeypatch.setattr(_server, "_tool_call_parser_disabled_explicitly", False, raising=False)
+    _begin_tool_call_drop_capture()
+    _, calls = _parse_tool_calls_with_parser(
+        _set_mode_call({"mode": "nope", "level": 1, "label": "ok", "meta": {"unit": "kg"}}),
+        _request_with_strict_tool(),
+    )
+    diagnostics = _take_tool_call_drop_diagnostics()
+    assert calls and len(calls) == 1 and calls[0].function.name == "set_mode"
+    assert diagnostics and "set_mode" in diagnostics[0] and "mode" in diagnostics[0]
+
+
+def test_enforce_mode_drops_the_call_and_records_why(monkeypatch):
+    monkeypatch.setenv("VMLX_TOOL_ARGS_SCHEMA_VALIDATION", "enforce")
+    monkeypatch.setattr(_server, "_tool_call_parser_disabled_explicitly", False, raising=False)
+    _begin_tool_call_drop_capture()
+    _, calls = _parse_tool_calls_with_parser(
+        _set_mode_call({"mode": "nope", "level": 1, "label": "ok", "meta": {"unit": "kg"}}),
+        _request_with_strict_tool(),
+    )
+    diagnostics = _take_tool_call_drop_diagnostics()
+    assert not calls
+    assert diagnostics and "set_mode" in diagnostics[0]
+
+
+def test_every_lane_surfaces_dropped_call_diagnostics_in_warnings():
+    """Non-streaming Chat and Responses start capture before parsing and merge the
+    diagnostics into `warnings`; the chat stream delivers them even when a call was
+    emitted (warn mode delivers the call together with its problems)."""
+    for fn in (_server.create_chat_completion, _server.create_response):
+        src = inspect.getsource(fn)
+        assert src.index("_begin_tool_call_drop_capture()") < src.index("_parse_tool_calls_with_parser(")
+        assert "_take_tool_call_drop_diagnostics() or None," in src
+    for fn in (_server.stream_chat_completion, _server.stream_responses_api):
+        src = inspect.getsource(fn)
+        assert "_begin_tool_call_drop_capture()" in src
+        assert "_take_tool_call_drop_diagnostics()" in src
+    chat_stream = inspect.getsource(_server.stream_chat_completion)
+    assert "_dropped_tc_diagnostics and not tool_calls_emitted" not in chat_stream
+    assert "if _dropped_tc_diagnostics:" in chat_stream

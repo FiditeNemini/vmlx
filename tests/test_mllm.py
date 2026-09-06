@@ -820,6 +820,13 @@ class TestMLLMModelInit:
             "vmlx_engine.api.utils.resolve_to_local_path",
             lambda name: "/models/fake-jang-vl",
         )
+        # dff701da gates every load on bundle integrity before the loader runs;
+        # this fake bundle has no shards, so stand in for the gate (it has its
+        # own tests in test_model_bundle_integrity.py).
+        monkeypatch.setattr(
+            "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+            lambda model, *, allow_download: ("/models/fake-jang-vl", {}),
+        )
         monkeypatch.setattr("vmlx_engine.utils.jang_loader.is_jang_model", lambda path: True)
         monkeypatch.setattr(
             "vmlx_engine.utils.jang_loader.load_jang_vlm_model",

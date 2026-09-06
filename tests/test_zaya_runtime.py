@@ -398,6 +398,13 @@ def test_public_jang_loaders_accept_mxfp4_weight_format(tmp_path, monkeypatch):
     calls = []
 
     monkeypatch.setattr(jang_loader, "_is_v2_model", lambda path: True)
+    # dff701da gates both public loaders on bundle integrity; this config-only
+    # fake bundle has no shards, so stand in for the gate (tested on its own
+    # in test_model_bundle_integrity.py).
+    monkeypatch.setattr(
+        "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+        lambda model, *, allow_download: (str(model_dir), {}),
+    )
 
     def fake_vlm(path, jang_cfg, **kwargs):
         calls.append(("vlm", Path(path).name, jang_cfg["weight_format"]))
@@ -1136,6 +1143,13 @@ def test_mllm_load_registers_zaya1_vl_adapter_before_stock_mlx_vlm_load(tmp_path
     import mlx_vlm.utils
 
     monkeypatch.setattr(api_utils, "resolve_to_local_path", lambda _: tmp_path)
+    # dff701da gates every load on bundle integrity; this config-only fake
+    # bundle has no shards, so stand in for the gate (tested on its own in
+    # test_model_bundle_integrity.py).
+    monkeypatch.setattr(
+        "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+        lambda model, *, allow_download: (str(tmp_path), {}),
+    )
     monkeypatch.setattr(jang_loader, "is_jang_model", lambda _: False)
     monkeypatch.setattr(
         mlx_vlm.utils,

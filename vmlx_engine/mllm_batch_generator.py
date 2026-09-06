@@ -159,6 +159,33 @@ from .native_mtp_profile import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _maybe_dump_prompt_tokens(request_id: str, token_ids, tokenizer) -> None:
+    """Opt-in diagnostic: when VMLX_PROMPT_DUMP_DIR names a directory, write the
+    request's final prompt token ids (and their decoded text) as JSON so two
+    consecutive requests' rendered prompts can be diffed token by token. Never
+    raises; inert unless the variable is set."""
+
+    dump_dir = os.environ.get("VMLX_PROMPT_DUMP_DIR")
+    if not dump_dir:
+        return
+    try:
+        import json as _json
+
+        ids = [int(t) for t in token_ids]
+        text = None
+        if tokenizer is not None and hasattr(tokenizer, "decode"):
+            try:
+                text = tokenizer.decode(ids)
+            except Exception:  # noqa: BLE001
+                text = None
+        os.makedirs(dump_dir, exist_ok=True)
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(request_id))
+        with open(os.path.join(dump_dir, f"{int(time.time() * 1000)}-{safe}.json"), "w") as fh:
+            _json.dump({"request_id": request_id, "token_count": len(ids), "token_ids": ids, "text": text}, fh)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("prompt dump skipped for %s: %s", request_id, exc)
 _MIMO_AUDIO_TOKENIZER_CACHE: Dict[str, Any] = {}
 
 
@@ -8047,6 +8074,7 @@ class MLLMBatchGenerator:
                     f"Text-only fast-path for {request.request_id}: "
                     f"{len(token_ids)} tokens ({processing_time*1000:.1f}ms)"
                 )
+                _maybe_dump_prompt_tokens(request.request_id, token_ids, getattr(self, "tokenizer", None))
                 return
 
         from mlx_vlm.utils import prepare_inputs

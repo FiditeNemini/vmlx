@@ -4170,6 +4170,10 @@ class MLLMNativeMTPState:
     cal_last_t: float = 0.0
     cal_last_depth: int = 0
     cal_last_cycle: int = 0
+    cal_samples: Dict[int, int] = field(default_factory=dict)
+    # Final rung confirmation: the cycle at which D1 first lost a window; the
+    # D1 -> AR fallback needs a second losing window within a few windows.
+    ar_trip_pending_cycle: int = 0
     # Ledger epoch: 0 for the post-prefill seed, then one per re-entry
     # (probe or calibration return).  Cycle counters restart per epoch;
     # ``req_tok`` in the trace is the request's cumulative output.
@@ -5704,6 +5708,13 @@ _native_mtp_windowed_ar_verdict = windowed_ar_verdict
 _NATIVE_MTP_REENTRY_FIRST_PROBE_TOKENS = 16
 _NATIVE_MTP_REENTRY_AR_WINDOW = 16
 _NATIVE_MTP_REENTRY_HYSTERESIS = 1.10
+# Re-entry spacing doubles per failed/re-tripped probe up to 16 << 8 = 4,096
+# AR tokens; a re-entry that survived this many output tokens relaxes it.
+_NATIVE_MTP_REENTRY_MAX_BACKOFF = 8
+_NATIVE_MTP_REENTRY_SETTLE_TOKENS = 256
+# The final rung (D1 -> AR) costs a handoff, AR tokens and a re-seed, so it
+# needs a second losing window within this many windows of the first.
+_NATIVE_MTP_D1_TRIP_CONFIRM_WINDOWS = 3
 
 
 @dataclass
@@ -5771,25 +5782,40 @@ class NativeMTPArTier:
 
     def probe_due(self) -> bool:
         return (
-            (self.calibration or self.probes < _NATIVE_MTP_MAX_REENTRY_PROBES)
-            and self.tokens_since_fallback >= self.next_probe_tokens
+            self.tokens_since_fallback >= self.next_probe_tokens
             and len(self.step_walls_ms) >= 4
             and self.measured_ar_ms_per_tok() > 0.0
         )
 
-    def probe_failed(self) -> None:
-        self.backoff += 1
-        self.next_probe_tokens = _NATIVE_MTP_REENTRY_FIRST_PROBE_TOKENS << self.backoff
+    def _restart_ar_window(self) -> None:
+        self.next_probe_tokens = _NATIVE_MTP_REENTRY_FIRST_PROBE_TOKENS << min(
+            self.backoff, _NATIVE_MTP_REENTRY_MAX_BACKOFF
+        )
         self.tokens_since_fallback = 0
         self.fallbacks += 1
         self.step_walls_ms = []
         self.last_step_t = 0.0
 
-    def settled_trip(self) -> None:
-        """A request that had re-entered (probe kept) lost again later: count
-        the fallback, restart the AR window, and damp oscillation with one
-        more backoff step so the next probe waits longer than the last."""
-        self.probe_failed()
+    def probe_failed(self) -> None:
+        self.backoff += 1
+        self._restart_ar_window()
+
+    def settled_trip(self, survived_tokens: int = 0) -> None:
+        """A request that had re-entered (probe kept) lost again later.  If
+        the re-entry survived at least ``_NATIVE_MTP_REENTRY_SETTLE_TOKENS``
+        of output it was a genuine win and this trip is a new transient:
+        relax the backoff one step so recovery stays prompt.  A rapid re-trip
+        is oscillation: back off one more step.  There is no hard probe cap:
+        with the interval doubling up to 16 << 8 AR tokens, the retry tax is
+        geometrically bounded, while a cap converted every long answer's
+        inevitable transient trips into permanent plain decoding (measured
+        2026-09-05, packaged app: a 9,843-token answer spent 8,406 tokens in
+        AR at 34 ms/tok after four kept re-entries, where D1 measured 20)."""
+        if int(survived_tokens) >= _NATIVE_MTP_REENTRY_SETTLE_TOKENS:
+            self.backoff = max(0, self.backoff - 1)
+        else:
+            self.backoff += 1
+        self._restart_ar_window()
 
 
 def _native_mtp_reentry_enabled() -> bool:
@@ -5799,14 +5825,9 @@ def _native_mtp_reentry_enabled() -> bool:
 
 
 _NATIVE_MTP_PROMOTE_FIRST_CYCLES = 32
-# Per-request retry budget.  Re-entry probes are spaced 16 << k AR tokens
-# apart (16, 32, 64, 128) and a clear loser aborts within ~5 cycles, so four
-# probes bound the retry tax at well under a second per request; a cap of
-# two left a 1,024-token answer in AR for its last ~380 tokens while the
-# unvalved depth-3 arm won every remaining 64-token bin by 12-35% (measured
-# 2026-09-05 on 4S, hot: 38.9 vs 46.8 tok/s).  Promotion back to the
-# configured depth gets three tries.
-_NATIVE_MTP_MAX_REENTRY_PROBES = 4
+# Re-entry probes are not capped per request (see NativeMTPArTier.settled_trip);
+# the doubling interval bounds the tax.  Promotion back to the configured
+# depth gets three tries per D1 phase.
 _NATIVE_MTP_MAX_PROMOTIONS = 3
 # Configured-depth -> D1 economics probe: first after the first full judged
 # window (warmup 8 + window 8), then with exponential backoff; two per request.
@@ -5926,7 +5947,12 @@ def _native_mtp_calibration_drift(
             recent.append(wall)
             if len(recent) > window:
                 del recent[0 : len(recent) - window]
-            if depth not in state.cal_anchor_ms and len(recent) >= window:
+            state.cal_samples[depth] = int(state.cal_samples.get(depth, 0)) + 1
+            # Anchor on the SECOND full window at this depth: the first one
+            # still carries the slow post-prefill / post-restore cycles
+            # (measured 2026-09-05: a first-window anchor read 26% high and
+            # fired a calibration at output 74 on every tool-loop turn).
+            if depth not in state.cal_anchor_ms and state.cal_samples[depth] >= 2 * window:
                 state.cal_anchor_ms[depth] = median(recent)
     state.cal_last_t = float(now)
     state.cal_last_depth = depth
@@ -6187,6 +6213,16 @@ def _native_mtp_maybe_ar_safety_fallback(
         return True
 
     if trip is None:
+        if (
+            state.ar_trip_pending_cycle > 0
+            and window_full
+            and cycles - int(state.ar_trip_pending_cycle) > ar_safety_window_cycles()
+        ):
+            logger.info(
+                "MLLM MTP[%s] AR safety D1 recovered at cycle=%d without fallback",
+                request_id, cycles,
+            )
+            state.ar_trip_pending_cycle = 0
         return False
 
     prior_depth = depth_now
@@ -6205,11 +6241,27 @@ def _native_mtp_maybe_ar_safety_fallback(
         )
         return False
 
-    # D1 lost to AR -> pure AR for now (re-entry probes follow).
+    # D1 lost a window.  The final rung costs a handoff, AR tokens and a
+    # re-seed, so it needs confirmation: a second losing window within
+    # _NATIVE_MTP_D1_TRIP_CONFIRM_WINDOWS (an 8-cycle window at D1 spans
+    # ~12 tokens; on long answers D1 lost single windows by 2-7% and won
+    # the surrounding bins).
+    window = ar_safety_window_cycles()
+    pending = int(state.ar_trip_pending_cycle or 0)
+    if pending <= 0 or cycles - pending > _NATIVE_MTP_D1_TRIP_CONFIRM_WINDOWS * window:
+        state.ar_trip_pending_cycle = cycles
+        state.ar_safety.ring.clear()
+        logger.info(
+            "MLLM MTP[%s] AR safety D1 losing at cycle=%d (%.1fms/tok vs AR %.1fms); "
+            "confirming over the next window",
+            request_id, cycles, trip.mtp_ms_per_tok, trip.ar_baseline,
+        )
+        return False
+    state.ar_trip_pending_cycle = 0
     state.ar_fallback_pending = True
     state.ar_fallback_reason = trip.reason(prior_depth)
     if tier is not None:
-        tier.settled_trip()
+        tier.settled_trip(cycles + int(state.stats.accepted_tokens))
     logger.info("MLLM MTP[%s] %s", request_id, trip.log_text(prior_depth))
     return True
 

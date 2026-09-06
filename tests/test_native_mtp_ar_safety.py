@@ -157,12 +157,18 @@ def test_safety_runs_and_trips_under_fixed_policy(monkeypatch):
     assert state.depth == 1 and state.ar_fallback_pending is False
     assert state.ar_safety.ring == [] and state.ar_safety.cycle_base == 40
     assert state.promote_at_cycle > 40
-    # Rung 2: D1 loses too -> AR.
+    # Rung 2: D1 loses a window -> pending confirmation, NOT yet AR.
     state.stats.cycles = 80
     state.ar_safety.anchor_cycle_ms = 20.0
     state.ar_safety.ring = [(71 + i, 71 + i, base_t + i * 0.020) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req-fixed", state) is False
+    assert state.ar_fallback_pending is False and state.ar_trip_pending_cycle == 80
+    assert state.ar_safety.ring == []  # judged again from a fresh window
+    # A second losing window within three windows confirms -> AR.
+    state.stats.cycles = 90
+    state.ar_safety.ring = [(81 + i, 81 + i, base_t + i * 0.020) for i in range(9)]
     assert m._native_mtp_maybe_ar_safety_fallback("req-fixed", state) is True
-    assert state.ar_fallback_pending is True
+    assert state.ar_fallback_pending is True and state.ar_trip_pending_cycle == 0
     assert "windowed_ar_safety d1" in (state.ar_fallback_reason or "")
 
 
@@ -332,11 +338,24 @@ def test_settled_reentry_that_trips_again_backs_off(monkeypatch):
     state.stats.accepted_tokens = 0
     state.ar_safety.anchor_cycle_ms = 40.0
     state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.040) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False  # pending confirmation
+    state.stats.cycles = 50
+    state.ar_safety.ring = [(41 + i, 41 + i, base_t + i * 0.040) for i in range(9)]
     assert m._native_mtp_maybe_ar_safety_fallback("req", state) is True
     assert tier.fallbacks == 2
     assert tier.tokens_since_fallback == 0
-    assert tier.next_probe_tokens == 32
+    assert tier.next_probe_tokens == 32 and tier.backoff == 1  # rapid re-trip: back off
     assert tier.probe_due() is False
+    # A re-entry that ran 300 tokens before tripping again was a real win: relax.
+    state2 = _vlm_state(m); state2.ar_tier = tier; state2.depth = 1
+    state2.stats.cycles = 300; state2.stats.accepted_tokens = 0
+    state2.ar_safety.anchor_cycle_ms = 40.0
+    state2.ar_safety.ring = [(291 + i, 291 + i, base_t + i * 0.040) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state2) is False
+    state2.stats.cycles = 310
+    state2.ar_safety.ring = [(301 + i, 301 + i, base_t + i * 0.040) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state2) is True
+    assert tier.backoff == 0 and tier.next_probe_tokens == 16 and tier.fallbacks == 3
 
 
 def test_promotion_probe_wins_and_loses(monkeypatch):
@@ -387,7 +406,7 @@ def test_probe_early_abort_on_clear_loser(monkeypatch):
     assert tripped is not None and tripped <= 112
 
 
-def test_retry_budget_caps_probes_and_promotions():
+def test_reentry_spacing_is_geometric_and_uncapped_in_count():
     from vmlx_engine import mllm_batch_generator as m
 
     tier = m.NativeMTPArTier(depth=3)
@@ -395,8 +414,11 @@ def test_retry_budget_caps_probes_and_promotions():
     for _ in range(20):
         tier.record_step(t); t += 0.025
     assert tier.probe_due() is True
-    tier.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
-    assert tier.probe_due() is False  # budget spent: stay AR for the request
+    tier.probes = 40  # many probes later a probe is still due once the interval passed
+    assert tier.probe_due() is True
+    for _ in range(12):
+        tier.probe_failed()
+    assert tier.backoff == 12 and tier.next_probe_tokens == 16 << m._NATIVE_MTP_REENTRY_MAX_BACKOFF
     assert m._NATIVE_MTP_MAX_PROMOTIONS >= 1
 
 
@@ -714,16 +736,16 @@ def test_probe_depth_alternates_between_d1_and_configured():
     assert NativeMTPArTier(depth=1).probe_depth(1) == 1
 
 
-def test_loss_reentry_budget_blocks_probes_but_never_a_calibration_return(monkeypatch):
+def test_deep_backoff_spaces_probes_but_never_delays_a_calibration_return(monkeypatch):
     from vmlx_engine import mllm_batch_generator as m
 
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_REENTRY", raising=False)
     loss = m.NativeMTPArTier(depth=3)
-    loss.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
+    loss.backoff = 9; loss._restart_ar_window()  # deep backoff: 4,096 AR tokens between probes
     _ar_steps(loss, 40)
-    assert loss.probe_due() is False  # budget exhausted: stays in AR
+    assert loss.probe_due() is False and loss.next_probe_tokens == 4096
     cal = m.NativeMTPArTier(depth=3, calibration=True, reenter_depth=3)
-    cal.probes = m._NATIVE_MTP_MAX_REENTRY_PROBES
+    cal.probes = 9
     cal.next_probe_tokens = m._NATIVE_MTP_CALIBRATION_TOKENS
     _ar_steps(cal, m._NATIVE_MTP_CALIBRATION_TOKENS)
     assert cal.probe_due() is True  # a calibration always returns
@@ -735,13 +757,13 @@ def test_calibration_return_resumes_at_left_depth_without_spending_the_budget(mo
     monkeypatch.delenv("VMLX_NATIVE_MTP_AR_REENTRY", raising=False)
     gen = _FakeGen(m)
     tier = m.NativeMTPArTier(depth=3, calibration=True, reenter_depth=3, calibrations=1)
-    tier.probes = 4
+    tier.probes = 4; tier.backoff = 3
     _ar_steps(tier, 8)
     ok, state = _reseed(m, gen, tier)
     assert ok and state is not None
     assert gen.seeds == [3]  # the FIRST draft chain is already the return width
     assert state.probe is False and state.depth == 3  # resumed run, not a probe
-    assert tier.probes == 4 and tier.calibration is False  # no budget spent
+    assert tier.probes == 4 and tier.backoff == 3 and tier.calibration is False  # nothing spent
     assert state.ar_tier is tier and state.epoch == 6  # 4 probes + 1 calibration + 1
     assert state.calibrations == 1
 
@@ -877,21 +899,52 @@ def test_calibration_drift_is_same_depth_and_consecutive_only(monkeypatch):
     st = _vlm_state(m, depth=3)
     st.ar_safety.anchor_cycle_ms = 40.0  # valve warmup done
     t = 100.0
-    # 9 consecutive D3 cycles at 30 ms -> anchor for depth 3
+    # first full window at 45 ms (post-prefill), second at 30 ms -> anchor = second window
     for c in range(1, 10):
+        d = m._native_mtp_calibration_drift(st, 3, t, c); t += 0.045
+    assert 3 not in st.cal_anchor_ms
+    for c in range(10, 19):
         d = m._native_mtp_calibration_drift(st, 3, t, c); t += 0.030
     assert abs(st.cal_anchor_ms.get(3, 0.0) - 30.0) < 1e-6 and abs(d) < 1e-6
     # interleaved D1 cycles (confidence gate / ladder) are NOT depth-3 evidence
-    for c in range(10, 30):
+    for c in range(19, 39):
         depth = 1 if c % 2 else 3
         d = m._native_mtp_calibration_drift(st, depth, t, c); t += (0.030 if depth == 3 else 0.020)
     assert abs(d) < 0.01  # no depth-3 wall is recorded across a depth change
-    assert abs(m._native_mtp_calibration_drift(st, 3, t, 30)) < 0.01
+    assert abs(m._native_mtp_calibration_drift(st, 3, t, 39)) < 0.01
     # a gap in cycles (a probe ran in between) never counts as one wall
     t += 5.0
-    d = m._native_mtp_calibration_drift(st, 3, t, 40); t += 0.030
+    d = m._native_mtp_calibration_drift(st, 3, t, 50); t += 0.030
     assert abs(d) < 0.01 and max(st.cal_recent_ms[3]) < 100.0
     # 9 consecutive D3 cycles at 60 ms -> drift +1.0 for depth 3
-    for c in range(41, 50):
+    for c in range(51, 60):
         d = m._native_mtp_calibration_drift(st, 3, t, c); t += 0.060
     assert abs(d - 1.0) < 0.05
+
+
+def test_d1_single_losing_window_recovers_without_fallback(monkeypatch):
+    """One losing D1 window sets a pending mark; a winning window clears it;
+    a losing window long after the mark starts a new confirmation instead
+    of falling back."""
+    from vmlx_engine import mllm_batch_generator as m
+
+    monkeypatch.delenv("VMLX_NATIVE_MTP_AR_SAFETY", raising=False)
+    monkeypatch.setenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH", "0")
+    state = _vlm_state(m, depth=1); state.depth_ceiling = 3; state.ladder_depth = 3
+    base_t = time.perf_counter() - 1.0
+    state.stats.cycles = 40; state.stats.accepted_tokens = 0
+    state.ar_safety.ring = [(31 + i, 31 + i, base_t + i * 0.020) for i in range(9)]  # 20 ms/tok vs AR 10
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.ar_trip_pending_cycle == 40 and not state.ar_fallback_pending
+    # winning window (3 tok/cycle at 20 ms = 6.7 ms/tok): pending clears
+    state.stats.cycles = 60; state.stats.accepted_tokens = 120
+    state.ar_safety.anchor_cycle_ms = 20.0
+    state.ar_safety.ring = [(51 + i, 3 * (51 + i), base_t + i * 0.020) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.ar_trip_pending_cycle == 0
+    # a losing window much later starts a NEW confirmation (no fallback)
+    state.stats.cycles = 200; state.stats.accepted_tokens = 120
+    state.ar_safety.ring = [(191 + i, 120 + 191 + i, base_t + i * 0.020) for i in range(9)]
+    assert m._native_mtp_maybe_ar_safety_fallback("req", state) is False
+    assert state.ar_trip_pending_cycle == 200 and not state.ar_fallback_pending
+    monkeypatch.delenv("VMLX_NATIVE_MTP_ADAPTIVE_DEPTH")

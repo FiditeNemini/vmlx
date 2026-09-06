@@ -2651,6 +2651,10 @@ class BlockDiskStore:
                     # each data slot as soon as publication settles.
                     item = None
                 except queue.Empty:
+                    # Idle: every enqueued write has been processed and its
+                    # fence settled, so an owed periodic budget rescan runs
+                    # here, off every request's terminal durability barrier.
+                    self._run_deferred_budget_reconcile()
                     continue
 
                 # Drain remaining items without blocking
@@ -2694,6 +2698,32 @@ class BlockDiskStore:
                     item = None
         finally:
             write_conn.close()
+
+    def _run_deferred_budget_reconcile(self) -> None:
+        """Run an owed interval rescan of the global budget while the writer is idle."""
+
+        budget = getattr(self, "global_budget", None)
+        if budget is None or not getattr(budget, "deferred_reconcile_due", False):
+            return
+        started = time.perf_counter()
+        try:
+            result = budget.run_deferred_reconcile()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Deferred global block-cache budget rescan failed: %s", exc)
+            return
+        if result is None:
+            return
+        self.disk_evictions += int(getattr(result, "evicted_entries", 0) or 0)
+        logger.info(
+            "Deferred global block-cache budget rescan: %.3fs scan_performed=%s "
+            "usage=%.3fGB / %.3fGB evicted=%d compliant=%s",
+            time.perf_counter() - started,
+            result.scan_performed,
+            result.bytes_after / 1e9,
+            result.max_size_bytes / 1e9,
+            int(result.evicted_entries or 0),
+            result.compliant,
+        )
 
     def _process_write_batch(
         self,

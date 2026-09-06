@@ -941,3 +941,47 @@ def test_symlinked_namespace_marker_fails_closed(tmp_path: Path) -> None:
         assert payload.exists()
     finally:
         budget._remove_lease()
+
+
+def test_interval_due_rescan_is_deferred_off_the_publication_path(tmp_path, monkeypatch):
+    """An accounting call inside the publication critical section must not walk the
+    root merely because the reconcile interval elapsed; it owes the rescan to the
+    owner's idle time. Over-ceiling, strict-fence and missing-accounting cases stay
+    inline (covered by the crossing/strict test above)."""
+    from vmlx_engine import global_disk_cache_budget as budget_module
+
+    root = tmp_path / "root"
+    budget = budget_module.GlobalDiskCacheBudget(root, 10_000_000, reconcile_interval_seconds=0.0)
+    try:
+        assert budget.enforce(force=True).scan_performed is True
+        scans = []
+        real_scan = budget._scan_locked
+
+        def counted_scan(**kwargs):
+            scans.append(1)
+            return real_scan(**kwargs)
+
+        monkeypatch.setattr(budget, "_scan_locked", counted_scan)
+        with budget.exclusive_mutation_guard() as locked:
+            assert locked
+            result = budget.account_finalized_write_locked(100)
+        assert result.scan_performed is False and result.accounted is True
+        assert scans == []
+        assert budget.deferred_reconcile_due is True
+        deferred = budget.run_deferred_reconcile()
+        assert deferred is not None and deferred.scan_performed is True
+        # _enforce_locked scans once for candidates and once for the post-trim total
+        assert len(scans) >= 1
+        assert budget.deferred_reconcile_due is False
+        assert budget.run_deferred_reconcile() is None
+    finally:
+        budget.close()
+
+
+def test_writer_idle_branch_runs_the_deferred_rescan():
+    import inspect
+    from vmlx_engine.block_disk_store import BlockDiskStore
+
+    src = inspect.getsource(BlockDiskStore._background_writer)
+    idle = src.index("except queue.Empty:")
+    assert src.index("self._run_deferred_budget_reconcile()", idle) < src.index("# Drain remaining items", idle)

@@ -253,6 +253,13 @@ class GlobalDiskCacheBudget:
         self._thread_lock = _root_thread_lock(self.root)
         self._last_result: GlobalBudgetResult | None = None
         self._last_reconcile_monotonic_ns = 0
+        # Set when a periodic (interval-due) physical rescan was owed by an
+        # accounting call that ran inside a publication critical section.
+        # The rescan walks every managed namespace and opens every block
+        # index; on a root with hundreds of namespaces that is seconds, and
+        # a request's terminal durability barrier must never wait for it.
+        # The owning store runs it from its writer thread while idle.
+        self._deferred_reconcile_due = False
         self._lease_id = f"{os.getpid()}-{uuid.uuid4().hex}"
         self._lease_owner_pid = os.getpid()
         self._lease_owner_birth_identity = _process_birth_identity(
@@ -717,13 +724,19 @@ class GlobalDiskCacheBudget:
             or time.time_ns() - state["reconciled_at_ns"]
             >= self._reconcile_interval_ns
         )
+        # Inline (inside the publication critical section) only when the
+        # write cannot be published without it: a strict fence, missing
+        # accounting, or an estimate above the ceiling. A merely interval-due
+        # rescan is deferred to the owner's idle time; publication then costs
+        # one O(1) ledger update instead of a full root scan.
         force_reconcile = bool(
             force_reconcile
-            or interval_due
             or (maximum > 0 and estimate > maximum)
         )
         if force_reconcile:
             return self._enforce_locked(protected_blocks=protected_blocks)
+        if interval_due:
+            self._deferred_reconcile_due = True
         result = GlobalBudgetResult(
             max_size_bytes=maximum,
             bytes_before=estimate,
@@ -739,6 +752,27 @@ class GlobalDiskCacheBudget:
             reconciliation_generation=state["reconciliation_generation"],
         )
         self._last_result = result
+        return result
+
+    @property
+    def deferred_reconcile_due(self) -> bool:
+        """True when an interval-due physical rescan is owed off the publish path."""
+
+        return bool(self._deferred_reconcile_due)
+
+    def run_deferred_reconcile(self) -> GlobalBudgetResult | None:
+        """Perform the owed periodic rescan under the root-exclusive lock.
+
+        Returns ``None`` when nothing is owed. The flag is cleared only after a
+        scan actually ran, so a skipped (lock-unavailable / errored) attempt is
+        retried on the next idle opportunity.
+        """
+
+        if not self._deferred_reconcile_due:
+            return None
+        result = self.enforce(force=True)
+        if result.scan_performed:
+            self._deferred_reconcile_due = False
         return result
 
     @staticmethod

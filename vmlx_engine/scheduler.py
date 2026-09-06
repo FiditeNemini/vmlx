@@ -1551,12 +1551,9 @@ class Scheduler:
                         block_disk_store = BlockDiskStore(
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
-                            # Idle-time maintenance (the periodic budget rescan)
+                            # Idle-time maintenance, the periodic budget rescan,
                             # must not start while a request is in flight.
-                            activity_probe=lambda: bool(
-                                getattr(self, "waiting", None)
-                                or getattr(self, "running", None)
-                            ),
+                            activity_probe=self._block_store_activity_probe,
                             # Admission follows the cache objects actually
                             # instantiated by the loaded model, never a stale
                             # process environment or family-name guess.
@@ -2127,6 +2124,11 @@ class Scheduler:
                 "make_cache() failed during cache-architecture detection; "
                 "refusing to classify the model as plain KV"
             ) from e
+
+    def _block_store_activity_probe(self) -> bool:
+        """True while any request is waiting or running (block-store maintenance gate)."""
+
+        return bool(getattr(self, "waiting", None) or getattr(self, "running", None))
 
     def _expected_cache_layer_count(self) -> Optional[int]:
         """Return the number of cache-bearing layers for validation/scope keys.

@@ -1001,7 +1001,8 @@ def test_writer_idle_branch_runs_the_deferred_rescan():
     from vmlx_engine import scheduler as text_scheduler, mllm_scheduler
     for module in (text_scheduler, mllm_scheduler):
         src_mod = inspect.getsource(module)
-        assert src_mod.count("activity_probe=lambda: bool(") == 1, module.__name__
+        assert src_mod.count("activity_probe=self._block_store_activity_probe,") == 1, module.__name__
+        assert "def _block_store_activity_probe(self) -> bool:" in src_mod, module.__name__
 
 
 def test_reconcile_rescans_only_after_an_eviction(tmp_path, monkeypatch):

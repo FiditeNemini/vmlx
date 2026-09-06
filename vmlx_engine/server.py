@@ -7256,7 +7256,21 @@ def _parse_tool_calls_with_parser(
             pass
         return names
 
+    # Why the last _filter_to_request_tools call dropped calls: "validation"
+    # (missing required argument / schema violation under enforce) or
+    # "unavailable" (name not in the request's tools). When every parsed call
+    # was a validation drop, callers return the CLEANED text: the native
+    # markup of a dropped call is not an answer, and the diagnostics already
+    # tell the caller what happened.
+    _filter_drop_kinds: list[str] = []
+
+    def _dropped_only_validated_calls() -> bool:
+        return bool(_filter_drop_kinds) and all(
+            kind == "validation" for kind in _filter_drop_kinds
+        )
+
     def _filter_to_request_tools(tool_calls: list | None) -> list | None:
+        _filter_drop_kinds.clear()
         if not tool_calls:
             return tool_calls
         allowed = _allowed_tool_names()
@@ -7355,6 +7369,7 @@ def _parse_tool_calls_with_parser(
                         f"{', '.join(missing)}. Try a clearer prompt, raise "
                         f"max_tokens, or disable thinking for this turn."
                     )
+                    _filter_drop_kinds.append("validation")
                     continue
                 if schema_mode != "off":
                     status, problems = validate_tool_args_against_schema(
@@ -7372,6 +7387,7 @@ def _parse_tool_calls_with_parser(
                                 f"A tool call to '{name}' was dropped because its "
                                 f"arguments violate the tool's schema: {detail}."
                             )
+                            _filter_drop_kinds.append("validation")
                             continue
                         logger.warning(
                             "Parsed tool call %s for %r violates the tool schema "
@@ -7404,6 +7420,7 @@ def _parse_tool_calls_with_parser(
                     f"in the request's tools list. Available tools: "
                     f"{sorted(allowed)}."
                 )
+                _filter_drop_kinds.append("unavailable")
         return filtered or None
 
     def _repair_instruction_echo_tool_call(text: str) -> tuple[str, list | None]:
@@ -7586,6 +7603,8 @@ def _parse_tool_calls_with_parser(
             calls = _filter_to_request_tools(calls)
             if calls:
                 return cleaned, calls
+            if _dropped_only_validated_calls():
+                return cleaned, None
             return text, None
         repaired_cleaned, repaired_calls = _repair_instruction_echo_tool_call(text)
         if repaired_calls:
@@ -7687,6 +7706,11 @@ def _parse_tool_calls_with_parser(
             filtered_tool_calls = _filter_to_request_tools(tool_calls)
             if filtered_tool_calls:
                 return result.content or "", filtered_tool_calls
+            if _dropped_only_validated_calls():
+                # Every parsed call was dropped for missing / invalid
+                # arguments: the markup is not an answer, the diagnostics
+                # carry the reason.
+                return result.content or "", None
             # Parser consumed only unavailable tool names. Treat as plain text
             # so clients do not receive hallucinated function calls like
             # README.md()/src()/tests() when the request only exposed
@@ -25798,6 +25822,20 @@ async def stream_chat_completion(
                 ],
             }
             yield f"data: {_dump_chat_chunk(tc_finish_chunk)}\n\n"
+            # This path returns before the end-of-stream diagnostics block, so
+            # deliver the recorded drop / schema warnings here (warn-mode
+            # problems ride alongside the delivered call; a sibling call
+            # dropped for an unavailable name is reported, not lost).
+            _tc_diagnostics = _take_tool_call_drop_diagnostics()
+            if _tc_diagnostics:
+                _tc_warning_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=_created_ts,
+                    model=request.model,
+                    choices=[],
+                    warnings=_tc_diagnostics,
+                )
+                yield f"data: {_dump_chat_chunk(_tc_warning_chunk)}\n\n"
             # Skip normal end-of-stream handling — we already set finish_reason
             if include_usage:
                 _tc_usage = Usage(

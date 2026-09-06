@@ -191,3 +191,36 @@ def test_every_lane_surfaces_dropped_call_diagnostics_in_warnings():
     chat_stream = inspect.getsource(_server.stream_chat_completion)
     assert "_dropped_tc_diagnostics and not tool_calls_emitted" not in chat_stream
     assert "if _dropped_tc_diagnostics:" in chat_stream
+
+
+def test_enforce_drop_returns_cleaned_text_not_raw_markup(monkeypatch):
+    """When every parsed call was dropped for invalid arguments the caller gets the
+    cleaned text (no native markup) plus the diagnostic — the markup is not an answer."""
+    monkeypatch.setenv("VMLX_TOOL_ARGS_SCHEMA_VALIDATION", "enforce")
+    monkeypatch.setattr(_server, "_tool_call_parser_disabled_explicitly", False, raising=False)
+    _begin_tool_call_drop_capture()
+    text, calls = _parse_tool_calls_with_parser(
+        _set_mode_call({"mode": "nope", "level": 1, "label": "ok", "meta": {"unit": "kg"}}),
+        _request_with_strict_tool(),
+    )
+    assert not calls
+    assert "<tool_call>" not in text and "set_mode" not in text
+    assert _take_tool_call_drop_diagnostics()
+
+
+def test_unavailable_name_drop_keeps_the_text_as_plain_answer(monkeypatch):
+    monkeypatch.delenv("VMLX_TOOL_ARGS_SCHEMA_VALIDATION", raising=False)
+    monkeypatch.setattr(_server, "_tool_call_parser_disabled_explicitly", False, raising=False)
+    _begin_tool_call_drop_capture()
+    raw = "<tool_call>" + json.dumps({"name": "not_a_tool", "arguments": {"x": 1}}) + "</tool_call>"
+    text, calls = _parse_tool_calls_with_parser(raw, _request_with_strict_tool())
+    assert not calls
+    assert text == raw
+    assert any("not_a_tool" in d for d in _take_tool_call_drop_diagnostics())
+
+
+def test_chat_stream_tool_call_path_delivers_diagnostics_before_done():
+    src = inspect.getsource(_server.stream_chat_completion)
+    tc_path = src.index("Skip normal end-of-stream handling")
+    assert src.rfind("_tc_diagnostics = _take_tool_call_drop_diagnostics()", 0, tc_path) != -1
+    assert src.index("_tc_warning_chunk = ChatCompletionChunk(") < tc_path

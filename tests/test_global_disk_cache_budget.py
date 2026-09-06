@@ -985,3 +985,11 @@ def test_writer_idle_branch_runs_the_deferred_rescan():
     src = inspect.getsource(BlockDiskStore._background_writer)
     idle = src.index("except queue.Empty:")
     assert src.index("self._run_deferred_budget_reconcile()", idle) < src.index("# Drain remaining items", idle)
+    # the rescan waits for a quiet writer: a store enqueues blocks one by one, so
+    # an empty queue between two blocks is not idle (measured: the rescan fired
+    # between block 1 and block 2 and the barrier stayed at 5 s)
+    quiet = inspect.getsource(BlockDiskStore._writer_quiet_for_maintenance)
+    for needle in ("_pending_write_items > 0", "_write_inflight > 0", "post_eviction_complete", "_last_write_activity_monotonic"):
+        assert needle in quiet
+    run = inspect.getsource(BlockDiskStore._run_deferred_budget_reconcile)
+    assert run.index("_writer_quiet_for_maintenance()") < run.index("run_deferred_reconcile()")

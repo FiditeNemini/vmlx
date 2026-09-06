@@ -641,6 +641,10 @@ class BlockDiskStore:
         # fully completed.  ``Queue.empty()`` cannot provide this guarantee: a
         # writer may already have dequeued a block that can still republish it.
         self._pending_write_items = 0
+        # Monotonic time of the last enqueue or batch start; the deferred
+        # budget rescan waits for a quiet writer, not a momentarily empty queue
+        # (a store enqueues its blocks one by one while the writer drains).
+        self._last_write_activity_monotonic = time.monotonic()
         self._writer_thread = threading.Thread(
             target=self._background_writer, daemon=True, name="block-disk-writer"
         )
@@ -1352,6 +1356,7 @@ class BlockDiskStore:
                     return "writer_stopped"
                 try:
                     self._write_queue.put_nowait(item)
+                    self._last_write_activity_monotonic = time.monotonic()
                 except queue.Full:
                     remaining = deadline - time.monotonic()
                     if timeout_s <= 0.0 or remaining <= 0.0:
@@ -2699,11 +2704,33 @@ class BlockDiskStore:
         finally:
             write_conn.close()
 
+    _MAINTENANCE_QUIET_SECONDS = 1.0
+
+    def _writer_quiet_for_maintenance(self) -> bool:
+        """True only when no store is in progress: nothing queued or in flight,
+        no unfinished write fence, and no write activity for a full second."""
+
+        if not self._write_queue.empty():
+            return False
+        with self._stats_lock:
+            if self._pending_write_items > 0 or self._write_inflight > 0:
+                return False
+            for state in self._write_fences.values():
+                if state.get("post_eviction_complete") or state.get("producer_aborted"):
+                    continue
+                return False
+        return (
+            time.monotonic() - self._last_write_activity_monotonic
+            >= self._MAINTENANCE_QUIET_SECONDS
+        )
+
     def _run_deferred_budget_reconcile(self) -> None:
         """Run an owed interval rescan of the global budget while the writer is idle."""
 
         budget = getattr(self, "global_budget", None)
         if budget is None or not getattr(budget, "deferred_reconcile_due", False):
+            return
+        if not self._writer_quiet_for_maintenance():
             return
         started = time.perf_counter()
         try:
@@ -2735,6 +2762,7 @@ class BlockDiskStore:
         access_only_batch = bool(batch) and all(
             item and item[0] == "__access__" for item in batch
         )
+        self._last_write_activity_monotonic = time.monotonic()
         with self._stats_lock:
             # Count CPU encoding as in-flight writer work too. Durability
             # waiters also observe _pending_write_items, but /health must not

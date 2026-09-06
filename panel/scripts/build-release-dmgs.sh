@@ -1296,8 +1296,7 @@ sign_remaining_app_macho_leaves() {
     signature=""
     if ! signature="$("$APPLE_CODESIGN" -dv --verbose=4 "$native_file" 2>&1)"; then
       :
-    elif ! printf '%s\n' "$signature" |
-      grep -Eq "Signature=adhoc|flags=.*adhoc|TeamIdentifier=not set"; then
+    elif ! grep -Eq "Signature=adhoc|flags=.*adhoc|TeamIdentifier=not set" <<< "$signature"; then
       continue
     fi
 
@@ -1322,10 +1321,13 @@ verify_release_macho_leaves() {
   while IFS= read -r native_file; do
     checked_count=$((checked_count + 1))
     signature="$("$APPLE_CODESIGN" -dv --verbose=4 "$native_file" 2>&1 || true)"
-    if ! printf '%s\n' "$signature" | grep -Fqx "Authority=$EXPECTED_CODESIGN_IDENTITY" ||
-      ! printf '%s\n' "$signature" | grep -Fqx "TeamIdentifier=$EXPECTED_APPLE_TEAM_ID" ||
-      ! printf '%s\n' "$signature" | grep -q "^Timestamp=" ||
-      ! printf '%s\n' "$signature" | grep -Eq "^CodeDirectory .*flags=.*runtime"; then
+    # Here-strings, not printf pipes: grep -q exits on its first match, printf
+    # then fails with EPIPE, and under pipefail a correct signature became a
+    # release failure (measured 2026-09-05: six correctly signed leaves).
+    if ! grep -Fqx "Authority=$EXPECTED_CODESIGN_IDENTITY" <<< "$signature" ||
+      ! grep -Fqx "TeamIdentifier=$EXPECTED_APPLE_TEAM_ID" <<< "$signature" ||
+      ! grep -q "^Timestamp=" <<< "$signature" ||
+      ! grep -Eq "^CodeDirectory .*flags=.*runtime" <<< "$signature"; then
       echo "ERROR: release Mach-O leaf is not signed by the exact configured Apple team: $native_file" >&2
       printf '%s\n' "$signature" >&2
       failed=1

@@ -4946,12 +4946,12 @@ def tool_schema_allows_null(fn_schema: Any, key: str) -> bool:
 def missing_required_tool_args(fn_schema: Any, args: Any) -> list[str]:
     """Required arguments a parsed tool call failed to supply.
 
-    Absent keys and blank strings are missing.  An explicit JSON ``null`` is a
-    VALUE when the schema declares the property nullable (measured 2026-09-05
-    on the packaged 1.6.54 candidate: the model passed ``parent: null`` exactly
-    as a ``["string", "null"]`` required property asked, and the call was
-    dropped as "missing"); a null for a non-nullable property still counts as
-    missing.  ``False``, ``0``, ``[]`` and ``{}`` are values."""
+    This is JSON Schema's PRESENCE rule and nothing more: a key listed in
+    ``required`` must be present.  An explicit ``null`` is a value when the
+    property is declared nullable and missing otherwise; ``False``, ``0``,
+    ``[]``, ``{}`` and ``""`` are values.  (Blank strings used to count as
+    missing here; a minimum length belongs in the schema as ``minLength``
+    and is enforced by ``validate_tool_args_against_schema``.)"""
     params = fn_schema.get("parameters", {}) if isinstance(fn_schema, dict) else {}
     required = params.get("required", []) if isinstance(params, dict) else []
     if not isinstance(required, list) or not required:
@@ -4965,13 +4965,72 @@ def missing_required_tool_args(fn_schema: Any, args: Any) -> list[str]:
         if key not in args:
             missing.append(key)
             continue
-        value = args[key]
-        if value is None:
-            if not tool_schema_allows_null(fn_schema, key):
-                missing.append(key)
-        elif isinstance(value, str) and value.strip() == "":
+        if args[key] is None and not tool_schema_allows_null(fn_schema, key):
             missing.append(key)
     return missing
+
+
+# Argument validation against the tool's declared JSON Schema.  Contract:
+#   * ``off``: presence only (the historical behaviour).
+#   * ``warn`` (default): the call is still delivered; violations are logged
+#     and surfaced to the client as warnings so an agent can see WHY a tool
+#     rejected the arguments.
+#   * ``enforce``: a call whose generated arguments violate the schema is
+#     dropped with the same explicit warning/error contract as a missing
+#     required argument (never coerced, never repaired).
+# Supported subset = whatever the jsonschema Draft 2020-12 validator applies to
+# the ``parameters`` object: types (integer vs number vs boolean are distinct,
+# no coercion), enum/const, minimum/maximum, minLength/maxLength/pattern,
+# required, properties/additionalProperties, items, anyOf/oneOf, nullable
+# types.  A malformed INPUT schema is reported as such and treated as
+# unconstrained; it never drops a call.
+_TOOL_ARGS_SCHEMA_MODES = ("off", "warn", "enforce")
+
+
+def tool_args_schema_mode() -> str:
+    raw = (
+        os.environ.get("VMLX_TOOL_ARGS_SCHEMA_VALIDATION")
+        or os.environ.get("VMLINUX_TOOL_ARGS_SCHEMA_VALIDATION")
+        or "warn"
+    ).strip().lower()
+    return raw if raw in _TOOL_ARGS_SCHEMA_MODES else "warn"
+
+
+def validate_tool_args_against_schema(
+    fn_schema: Any, args: Any
+) -> tuple[str, list[str]]:
+    """Return ``(status, problems)`` for parsed arguments against the tool's
+    ``parameters`` schema.  ``status`` is ``"valid"``, ``"invalid"`` (the
+    generated arguments violate the schema; ``problems`` names each path and
+    rule) or ``"unconstrained"`` (no usable schema: absent, not an object
+    schema, or malformed -- ``problems`` then explains why the schema was not
+    applied).  No coercion is ever attempted."""
+    params = fn_schema.get("parameters") if isinstance(fn_schema, dict) else None
+    if not isinstance(params, dict) or not params:
+        return "unconstrained", []
+    if params.get("type") not in (None, "object") and "properties" not in params:
+        return "unconstrained", [f"parameters schema type {params.get('type')!r} is not an object schema"]
+    if not isinstance(args, dict):
+        return "invalid", ["arguments are not a JSON object"]
+    try:
+        from jsonschema import Draft202012Validator, SchemaError
+    except Exception:  # pragma: no cover - dependency is declared
+        return "unconstrained", ["jsonschema is not importable"]
+    try:
+        Draft202012Validator.check_schema(params)
+        validator = Draft202012Validator(params)
+    except SchemaError as exc:
+        return "unconstrained", [f"malformed input schema: {getattr(exc, 'message', exc)}"]
+    except Exception as exc:  # noqa: BLE001
+        return "unconstrained", [f"schema could not be compiled: {exc}"]
+    problems: list[str] = []
+    try:
+        for err in sorted(validator.iter_errors(args), key=lambda e: list(e.path)):
+            path = "/".join(str(p) for p in err.path) or "<root>"
+            problems.append(f"{path}: {err.message}")
+    except Exception as exc:  # noqa: BLE001
+        return "unconstrained", [f"schema validation failed to run: {exc}"]
+    return ("invalid" if problems else "valid"), problems
 
 
 def _filter_tools_for_specific_choice(
@@ -7277,6 +7336,7 @@ def _parse_tool_calls_with_parser(
             )
 
         filtered = []
+        schema_mode = tool_args_schema_mode()
         for tc in tool_calls:
             name, raw_args, call_id = _function_payload(tc)
             if name in allowed:
@@ -7284,7 +7344,7 @@ def _parse_tool_calls_with_parser(
                 if missing:
                     logger.warning(
                         "Dropping parsed tool call %s for %r because required "
-                        "argument(s) are missing or empty: %s",
+                        "argument(s) are missing: %s",
                         call_id or "<no-id>",
                         name,
                         ", ".join(missing),
@@ -7296,6 +7356,37 @@ def _parse_tool_calls_with_parser(
                         f"max_tokens, or disable thinking for this turn."
                     )
                     continue
+                if schema_mode != "off":
+                    status, problems = validate_tool_args_against_schema(
+                        schemas_by_name.get(name) or {}, _coerce_json_args(raw_args)
+                    )
+                    if status == "invalid":
+                        detail = "; ".join(problems[:6])
+                        if schema_mode == "enforce":
+                            logger.warning(
+                                "Dropping parsed tool call %s for %r: generated "
+                                "arguments violate the tool schema: %s",
+                                call_id or "<no-id>", name, detail,
+                            )
+                            _record_tool_call_drop(
+                                f"A tool call to '{name}' was dropped because its "
+                                f"arguments violate the tool's schema: {detail}."
+                            )
+                            continue
+                        logger.warning(
+                            "Parsed tool call %s for %r violates the tool schema "
+                            "(delivered; VMLX_TOOL_ARGS_SCHEMA_VALIDATION=warn): %s",
+                            call_id or "<no-id>", name, detail,
+                        )
+                        _record_tool_call_drop(
+                            f"The tool call to '{name}' was delivered, but its "
+                            f"arguments violate the tool's schema: {detail}."
+                        )
+                    elif status == "unconstrained" and problems:
+                        logger.info(
+                            "Tool schema for %r not applied to call %s: %s",
+                            name, call_id or "<no-id>", "; ".join(problems[:3]),
+                        )
                 filtered.append(tc)
             else:
                 rewritten = _rewrite_tool_alias(tc)

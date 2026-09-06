@@ -4158,6 +4158,11 @@ class MLLMNativeMTPState:
     # calibration) and how many calibrations this request has spent.
     last_ar_measure_emitted: int = 0
     calibrations: int = 0
+    # Interval to the next stale-triggered calibration (768, or 256 after a
+    # measurement that jumped >1.5x above the previous one) and the previous
+    # measured AR it is compared against.
+    calibration_interval_tokens: int = 0
+    prev_measured_ar_ms: float = 0.0
     # Calibration drift is judged per depth: a window mixing D1 and D3
     # cycles (the first-draft confidence gate shortens ~25% of drafts, and
     # the ladder moves the depth) swings the median cycle wall by +-30%
@@ -5749,6 +5754,7 @@ class NativeMTPArTier:
     reenter_depth: int = 1
     calibrations: int = 0
     total_ar_ms: float = 0.0
+    prev_measured_ar_ms: float = 0.0
 
     def record_step(self, now: float) -> None:
         if self.last_step_t > 0.0:
@@ -5834,14 +5840,26 @@ _NATIVE_MTP_MAX_PROMOTIONS = 3
 _NATIVE_MTP_DEPTH_PROBE_FIRST_CYCLES = 16
 _NATIVE_MTP_MAX_DEPTH_PROBES = 2
 # Bounded AR calibration (context-matched baseline refresh from a winning
-# MTP phase): triggered when the judged window's cycle wall drifts more than
-# 25% from the anchor, or after this many emitted tokens without an AR
-# measurement; costs _NATIVE_MTP_CALIBRATION_TOKENS AR steps plus one
-# re-seed, at most _NATIVE_MTP_MAX_CALIBRATIONS times per request.
+# MTP phase): triggered when the same-depth cycle wall drifts more than 25%
+# from its anchor, or after _NATIVE_MTP_CALIBRATION_INTERVAL_TOKENS emitted
+# tokens without an AR measurement; costs _NATIVE_MTP_CALIBRATION_TOKENS AR
+# steps plus one re-seed.  The cost is bounded by SPACING, not by a
+# per-request count: a drift-triggered calibration needs at least
+# _NATIVE_MTP_CALIBRATION_MIN_SPACING_TOKENS since the last AR measurement
+# (<= 8 AR tokens per 512 emitted, ~1.6% of tokens worst case).  A hard cap
+# of four left an inflated baseline in force for the rest of a long answer
+# (measured 2026-09-05 on 27B 2D: a calibration sampled inside a 40 s
+# process-wide slowdown read 88-96 ms/tok against 36-40 before and after,
+# and with the budget spent every later window was judged against it).
+# A measurement that jumps more than _NATIVE_MTP_CALIBRATION_JUMP above the
+# previous one is re-checked after _NATIVE_MTP_CALIBRATION_RECHECK_TOKENS
+# instead of the full interval, so a stall-time reading is retired quickly.
 _NATIVE_MTP_CALIBRATION_DRIFT = 0.25
 _NATIVE_MTP_CALIBRATION_INTERVAL_TOKENS = 768
+_NATIVE_MTP_CALIBRATION_MIN_SPACING_TOKENS = 512
+_NATIVE_MTP_CALIBRATION_RECHECK_TOKENS = 256
+_NATIVE_MTP_CALIBRATION_JUMP = 1.5
 _NATIVE_MTP_CALIBRATION_TOKENS = 8
-_NATIVE_MTP_MAX_CALIBRATIONS = 4
 
 
 def _native_mtp_calibration_enabled() -> bool:
@@ -6073,12 +6091,14 @@ def _native_mtp_maybe_ar_safety_fallback(
         and not depth_probing
         and _native_mtp_calibration_enabled()
         and _native_mtp_reentry_enabled()
-        and state.calibrations < _NATIVE_MTP_MAX_CALIBRATIONS
     ):
         _emitted = cycles + int(state.stats.accepted_tokens)
         _drift = _native_mtp_calibration_drift(state, depth_now, time.perf_counter(), cycles)
-        _stale = (_emitted - int(state.last_ar_measure_emitted)) >= _NATIVE_MTP_CALIBRATION_INTERVAL_TOKENS
-        if abs(_drift) >= _NATIVE_MTP_CALIBRATION_DRIFT or _stale:
+        _since = _emitted - int(state.last_ar_measure_emitted)
+        _interval = int(state.calibration_interval_tokens or _NATIVE_MTP_CALIBRATION_INTERVAL_TOKENS)
+        _stale = _since >= _interval
+        _spaced = _since >= _NATIVE_MTP_CALIBRATION_MIN_SPACING_TOKENS
+        if _stale or (_spaced and abs(_drift) >= _NATIVE_MTP_CALIBRATION_DRIFT):
             tier = state.ar_tier or NativeMTPArTier(depth=max(1, int(state.ladder_depth or depth_now)))
             tier.calibration = True
             tier.reenter_depth = depth_now
@@ -16094,6 +16114,14 @@ class MLLMBatchGenerator:
         state.epoch = int(tier.probes) + int(tier.calibrations) + 1
         state.last_ar_measure_emitted = int(state.stats.cycles) + int(state.stats.accepted_tokens)
         state.calibrations = int(getattr(tier, "calibrations", 0) or 0)
+        _prev = float(getattr(tier, "prev_measured_ar_ms", 0.0) or 0.0)
+        state.prev_measured_ar_ms = float(measured or 0.0)
+        tier.prev_measured_ar_ms = float(measured or 0.0)
+        state.calibration_interval_tokens = (
+            _NATIVE_MTP_CALIBRATION_RECHECK_TOKENS
+            if _prev > 0.0 and measured > _prev * _NATIVE_MTP_CALIBRATION_JUMP
+            else _NATIVE_MTP_CALIBRATION_INTERVAL_TOKENS
+        )
         state.ar_safety.reset(int(state.stats.cycles))
         try:
             delattr(req, "_native_mtp_ar_tier")

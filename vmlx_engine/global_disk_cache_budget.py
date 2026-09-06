@@ -771,7 +771,11 @@ class GlobalDiskCacheBudget:
         if not self._deferred_reconcile_due:
             return None
         result = self.enforce(force=True)
-        if result.scan_performed:
+        # enforce() reports scan_performed=True on its error path too (with
+        # accounted=False and an error); only a completed, accounted scan
+        # settles the debt. A failed or lock-unavailable attempt is retried on
+        # the next quiet opportunity.
+        if result.scan_performed and result.accounted and not result.error:
             self._deferred_reconcile_due = False
         return result
 

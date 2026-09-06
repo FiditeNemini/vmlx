@@ -1037,3 +1037,81 @@ def test_reconcile_rescans_only_after_an_eviction(tmp_path, monkeypatch):
         assert len(scans) == 2
     finally:
         budget.close()
+
+
+def test_deferred_reconcile_is_retried_after_a_failed_scan(tmp_path, monkeypatch):
+    """enforce() reports scan_performed=True on its error path; the owed rescan must
+    survive that and be retried, never silently dropped."""
+    from vmlx_engine import global_disk_cache_budget as budget_module
+
+    root = tmp_path / "root"
+    budget = budget_module.GlobalDiskCacheBudget(root, 10_000_000, reconcile_interval_seconds=0.0)
+    try:
+        assert budget.enforce(force=True).scan_performed is True
+        with budget.exclusive_mutation_guard() as locked:
+            assert locked
+            budget.account_finalized_write_locked(100)
+        assert budget.deferred_reconcile_due is True
+
+        def failing_scan(**kwargs):
+            raise OSError("cannot inspect cache file: simulated")
+
+        monkeypatch.setattr(budget, "_scan_locked", failing_scan)
+        failed = budget.run_deferred_reconcile()
+        assert failed is not None and failed.scan_performed is True
+        assert failed.accounted is False and failed.error
+        assert budget.deferred_reconcile_due is True, "a failed scan must not settle the debt"
+        monkeypatch.undo()
+        ok = budget.run_deferred_reconcile()
+        assert ok is not None and ok.accounted is True and not ok.error
+        assert budget.deferred_reconcile_due is False
+    finally:
+        budget.close()
+
+
+def test_maintenance_never_starts_while_requests_are_in_flight_and_crossing_stays_inline(tmp_path):
+    """Continuous traffic: the activity probe keeps the idle rescan off, the O(1)
+    accounting keeps running, and a ceiling crossing still reconciles inline
+    (fail-closed) regardless of the deferred flag."""
+    from vmlx_engine import global_disk_cache_budget as budget_module
+    from vmlx_engine.block_disk_store import BlockDiskStore
+
+    root = tmp_path / "root"
+    now = time.time()
+    _indexed_block(root / "aaaaaaaaaaaa", "aa-old", size=64_000, accessed=now - 100)
+    _indexed_block(root / "bbbbbbbbbbbb", "bb-new", size=64_000, accessed=now)
+    before = _physical_total(root)
+    busy = {"value": True}
+    # ceiling just under the physical total: the startup trim evicts the LRU block,
+    # and a later accounted write of `before` bytes crosses it again
+    store = BlockDiskStore(
+        cache_dir=str(root / "cccccccccccc"),
+        max_size_gb=(before - 32_000) / 1e9,
+        global_cache_root=str(root),
+        allow_legacy_hashed_namespaces=True,
+        activity_probe=lambda: busy["value"],
+    )
+    try:
+        budget = store.global_budget
+        budget._reconcile_interval_ns = 0
+        with budget.exclusive_mutation_guard() as locked:
+            assert locked
+            result = budget.account_finalized_write_locked(100)
+        assert result.scan_performed is False and budget.deferred_reconcile_due is True
+        # busy engine: quiet rule false, rescan not started, flag kept
+        assert store._writer_quiet_for_maintenance() is False
+        store._run_deferred_budget_reconcile()
+        assert budget.deferred_reconcile_due is True
+        # ceiling crossing while busy: inline reconcile, no dependence on idle time
+        with budget.exclusive_mutation_guard() as locked:
+            assert locked
+            crossing = budget.account_finalized_write_locked(before)
+        assert crossing.scan_performed is True
+        # engine goes quiet: the owed rescan runs and settles
+        busy["value"] = False
+        store._last_write_activity_monotonic = time.monotonic() - 5.0
+        assert store._writer_quiet_for_maintenance() is True
+        store._run_deferred_budget_reconcile()
+        assert budget.deferred_reconcile_due is False
+    finally:
+        store.shutdown()

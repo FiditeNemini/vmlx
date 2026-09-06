@@ -4919,6 +4919,61 @@ def _attach_effective_tools_for_tool_parsing(request: Any, tools: list[Any]) -> 
         logger.debug("Failed to attach effective tool schema set for parser context")
 
 
+def tool_schema_allows_null(fn_schema: Any, key: str) -> bool:
+    """Whether a tool's JSON Schema declares ``key`` as nullable: ``type`` is or
+    contains ``"null"``, ``nullable: true``, or an ``anyOf``/``oneOf`` branch
+    with ``type: "null"`` (the shape OpenAI strict-mode SDKs emit for optional
+    fields that are still listed as required)."""
+    params = fn_schema.get("parameters") if isinstance(fn_schema, dict) else None
+    props = params.get("properties") if isinstance(params, dict) else None
+    spec = props.get(key) if isinstance(props, dict) else None
+    if not isinstance(spec, dict):
+        return False
+    if spec.get("nullable") is True:
+        return True
+    typ = spec.get("type")
+    if typ == "null" or (isinstance(typ, list) and "null" in typ):
+        return True
+    for branch_key in ("anyOf", "oneOf"):
+        branches = spec.get(branch_key)
+        if isinstance(branches, list) and any(
+            isinstance(b, dict) and b.get("type") == "null" for b in branches
+        ):
+            return True
+    return False
+
+
+def missing_required_tool_args(fn_schema: Any, args: Any) -> list[str]:
+    """Required arguments a parsed tool call failed to supply.
+
+    Absent keys and blank strings are missing.  An explicit JSON ``null`` is a
+    VALUE when the schema declares the property nullable (measured 2026-09-05
+    on the packaged 1.6.54 candidate: the model passed ``parent: null`` exactly
+    as a ``["string", "null"]`` required property asked, and the call was
+    dropped as "missing"); a null for a non-nullable property still counts as
+    missing.  ``False``, ``0``, ``[]`` and ``{}`` are values."""
+    params = fn_schema.get("parameters", {}) if isinstance(fn_schema, dict) else {}
+    required = params.get("required", []) if isinstance(params, dict) else []
+    if not isinstance(required, list) or not required:
+        return []
+    if not isinstance(args, dict):
+        args = {}
+    missing: list[str] = []
+    for key in required:
+        if not isinstance(key, str) or not key:
+            continue
+        if key not in args:
+            missing.append(key)
+            continue
+        value = args[key]
+        if value is None:
+            if not tool_schema_allows_null(fn_schema, key):
+                missing.append(key)
+        elif isinstance(value, str) and value.strip() == "":
+            missing.append(key)
+    return missing
+
+
 def _filter_tools_for_specific_choice(
     tools: list[Any],
     tool_choice: Any,
@@ -7187,19 +7242,7 @@ def _parse_tool_calls_with_parser(
             if not name:
                 return []
             schema = schemas_by_name.get(name) or {}
-            params = schema.get("parameters", {}) if isinstance(schema, dict) else {}
-            required = params.get("required", []) if isinstance(params, dict) else []
-            if not isinstance(required, list) or not required:
-                return []
-            args = _coerce_json_args(raw_args)
-            missing: list[str] = []
-            for key in required:
-                if not isinstance(key, str) or not key:
-                    continue
-                value = args.get(key)
-                if value is None or (isinstance(value, str) and value.strip() == ""):
-                    missing.append(key)
-            return missing
+            return missing_required_tool_args(schema, _coerce_json_args(raw_args))
 
         def _rewrite_tool_alias(tc: Any) -> Any | None:
             name, raw_args, call_id = _function_payload(tc)

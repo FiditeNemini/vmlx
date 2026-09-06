@@ -483,28 +483,45 @@ class TestJANGLoader:
         from vmlx_engine.utils.jang_loader import is_jang_model
         assert is_jang_model("/nonexistent/path") is False
 
-    def test_missing_format_field_error(self, tmp_path):
+    def test_missing_format_field_error(self, tmp_path, monkeypatch):
         """Config without format/weight_format should give clear error.
         Error message was broadened to `missing 'format' / 'weight_format'`
         when v1.3.58 added JANGTQ support (weight_format=mxtq)."""
         (tmp_path / "jang_config.json").write_text('{"quantization": {}}')
         (tmp_path / "config.json").write_text('{"model_type": "llama", "hidden_size": 128, "num_attention_heads": 2, "vocab_size": 100}')
+        # dff701da gates the public loader on bundle integrity before the format
+        # check; this config-only fake bundle has no shards, so stand in for the
+        # gate (tested on its own in test_model_bundle_integrity.py).
+        monkeypatch.setattr(
+            "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+            lambda model, *, allow_download: (str(tmp_path), {}),
+        )
         from vmlx_engine.utils.jang_loader import load_jang_model
         with pytest.raises(ValueError, match=r"missing 'format'.*weight_format"):
             load_jang_model(str(tmp_path))
 
-    def test_wrong_format_value_error(self, tmp_path):
+    def test_wrong_format_value_error(self, tmp_path, monkeypatch):
         """Config with wrong format value should be rejected."""
         (tmp_path / "jang_config.json").write_text('{"format": "gguf"}')
         (tmp_path / "config.json").write_text('{"model_type": "llama", "hidden_size": 128, "num_attention_heads": 2, "vocab_size": 100}')
+        # bundle-integrity gate stand-in (dff701da), see test_missing_format_field_error
+        monkeypatch.setattr(
+            "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+            lambda model, *, allow_download: (str(tmp_path), {}),
+        )
         from vmlx_engine.utils.jang_loader import load_jang_model
         with pytest.raises(ValueError, match="Not a JANG model"):
             load_jang_model(str(tmp_path))
 
-    def test_unsupported_version_error(self, tmp_path):
+    def test_unsupported_version_error(self, tmp_path, monkeypatch):
         """Format version 3.x should be rejected (1.x and 2.x are supported)."""
         (tmp_path / "jang_config.json").write_text('{"format": "jang", "format_version": "3.0"}')
         (tmp_path / "config.json").write_text('{"model_type": "llama", "hidden_size": 128, "num_attention_heads": 2, "vocab_size": 100, "num_hidden_layers": 2, "intermediate_size": 256, "rms_norm_eps": 1e-5}')
+        # bundle-integrity gate stand-in (dff701da), see test_missing_format_field_error
+        monkeypatch.setattr(
+            "vmlx_engine.model_bundle_integrity.prepare_model_bundle_for_load",
+            lambda model, *, allow_download: (str(tmp_path), {}),
+        )
         from vmlx_engine.utils.jang_loader import load_jang_model
         with pytest.raises(ValueError, match="Unsupported JANG format version"):
             load_jang_model(str(tmp_path))

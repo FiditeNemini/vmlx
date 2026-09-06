@@ -60,7 +60,7 @@ import time
 import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Callable, Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -442,6 +442,7 @@ class BlockDiskStore:
         global_cache_root: Optional[str] = None,
         allow_legacy_hashed_namespaces: bool = False,
         allow_legacy_direct_namespace: bool = False,
+        activity_probe: Optional[Callable[[], bool]] = None,
         max_pending_write_bytes: Optional[int] = None,
         **kwargs,
     ):
@@ -641,6 +642,10 @@ class BlockDiskStore:
         # fully completed.  ``Queue.empty()`` cannot provide this guarantee: a
         # writer may already have dequeued a block that can still republish it.
         self._pending_write_items = 0
+        # The owning scheduler reports whether any request is waiting or
+        # running; maintenance never starts while a request is in flight, so
+        # a store that is about to happen cannot land behind the rescan.
+        self._activity_probe = activity_probe
         # Monotonic time of the last enqueue or batch start; the deferred
         # budget rescan waits for a quiet writer, not a momentarily empty queue
         # (a store enqueues its blocks one by one while the writer drains).
@@ -2712,6 +2717,13 @@ class BlockDiskStore:
 
         if not self._write_queue.empty():
             return False
+        probe = self._activity_probe
+        if probe is not None:
+            try:
+                if probe():
+                    return False
+            except Exception:  # noqa: BLE001
+                return False  # unknown engine state counts as busy
         with self._stats_lock:
             if self._pending_write_items > 0 or self._write_inflight > 0:
                 return False

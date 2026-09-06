@@ -993,3 +993,11 @@ def test_writer_idle_branch_runs_the_deferred_rescan():
         assert needle in quiet
     run = inspect.getsource(BlockDiskStore._run_deferred_budget_reconcile)
     assert run.index("_writer_quiet_for_maintenance()") < run.index("run_deferred_reconcile()")
+    # a request in flight (prefill/decode with no writes yet) is not quiet: the
+    # first live loop at 877f4c22 ran the rescan during decode and the terminal
+    # store waited 3.8 s behind it. BOTH schedulers hand the store a probe.
+    assert "self._activity_probe" in quiet
+    from vmlx_engine import scheduler as text_scheduler, mllm_scheduler
+    for module in (text_scheduler, mllm_scheduler):
+        src_mod = inspect.getsource(module)
+        assert src_mod.count("activity_probe=lambda: bool(") == 1, module.__name__

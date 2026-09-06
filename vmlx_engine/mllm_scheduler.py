@@ -797,6 +797,12 @@ class MLLMScheduler:
                         block_disk_store = BlockDiskStore(
                             cache_dir=cache_dir,
                             max_size_gb=self.config.block_disk_cache_max_gb,
+                            # Idle-time maintenance (the periodic budget rescan)
+                            # must not start while a request is in flight.
+                            activity_probe=lambda: bool(
+                                getattr(self, "waiting", None)
+                                or getattr(self, "running", None)
+                            ),
                             # Admission follows the cache objects actually
                             # instantiated by the loaded model, never a stale
                             # process environment or family-name guess.

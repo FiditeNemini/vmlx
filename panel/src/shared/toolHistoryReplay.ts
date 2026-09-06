@@ -153,9 +153,16 @@ export function replayPersistedAssistantHistory(
   const resultByCall = new Map(results.map((result) => [result.tool_call_id, result]))
   const replay: any[] = []
 
-  for (const iteration of iterations) {
+  // Reasoning segments are stored in step order (one per tool step, then the
+  // final answer's). The live loop's status records number tool steps from 1
+  // ("generating" is 0) while older rows and fixtures number them from 0, so
+  // map each distinct step to its RANK, not its raw iteration value; indexing
+  // by the raw value gave the first tool step the final answer's reasoning
+  // and dropped the final reasoning, which re-rendered the turn differently
+  // from the prompt the model actually saw and broke prefix reuse.
+  iterations.forEach((iteration, rank) => {
     const group = groups.get(iteration) || []
-    const reasoning = segments[iteration]
+    const reasoning = segments[rank]
     if (useResponsesApi) {
       if (reasoning?.trim()) replay.push(reasoningItem(reasoning))
       for (const call of group) {
@@ -194,11 +201,9 @@ export function replayPersistedAssistantHistory(
         }
       }
     }
-  }
+  })
 
-  const lastIteration =
-    iterations.length > 0 ? iterations[iterations.length - 1] : -1
-  const finalReasoning = segments[lastIteration + 1]
+  const finalReasoning = segments[iterations.length]
   if (useResponsesApi) {
     if (finalReasoning?.trim()) replay.push(reasoningItem(finalReasoning))
     if (content.trim()) replay.push({ type: 'output_text', text: content })

@@ -602,7 +602,8 @@ def test_accounting_avoids_root_scan_until_crossing_or_strict_fence(
                 require_reconciled=True,
             )
         assert strict.scan_performed is True
-        assert calls >= 2
+        # one scan: nothing was evicted, so the post-trim rescan is skipped
+        assert calls >= 1
     finally:
         budget._remove_lease()
 
@@ -1001,3 +1002,37 @@ def test_writer_idle_branch_runs_the_deferred_rescan():
     for module in (text_scheduler, mllm_scheduler):
         src_mod = inspect.getsource(module)
         assert src_mod.count("activity_probe=lambda: bool(") == 1, module.__name__
+
+
+def test_reconcile_rescans_only_after_an_eviction(tmp_path, monkeypatch):
+    """Nothing evicted -> one root scan (the first scan's totals stand under the
+    exclusive lock). Something evicted -> a second scan re-measures."""
+    from vmlx_engine import global_disk_cache_budget as budget_module
+
+    root = tmp_path / "root"
+    now = time.time()
+    _indexed_block(root / "aaaaaaaaaaaa", "aa-old", size=64_000, accessed=now - 100)
+    _indexed_block(root / "bbbbbbbbbbbb", "bb-new", size=64_000, accessed=now)
+    before = _physical_total(root)
+    # generous ceiling first: nothing to evict
+    budget = budget_module.GlobalDiskCacheBudget(root, before * 4, orphan_grace_seconds=0, reconcile_interval_seconds=3600)
+    try:
+        scans = []
+        real_scan = budget._scan_locked
+        monkeypatch.setattr(budget, "_scan_locked", lambda **kw: (scans.append(1), real_scan(**kw))[1])
+        first = budget.enforce(force=True)
+        assert first.scan_performed is True and first.evicted_entries == 0
+        assert len(scans) == 1
+    finally:
+        budget.close()
+    # tight ceiling: an eviction happens and the physical state is re-measured
+    budget = budget_module.GlobalDiskCacheBudget(root, before - 32_000, orphan_grace_seconds=0, reconcile_interval_seconds=3600)
+    try:
+        scans = []
+        real_scan = budget._scan_locked
+        monkeypatch.setattr(budget, "_scan_locked", lambda **kw: (scans.append(1), real_scan(**kw))[1])
+        second = budget.enforce(force=True)
+        assert second.scan_performed is True and second.evicted_entries >= 1
+        assert len(scans) == 2
+    finally:
+        budget.close()

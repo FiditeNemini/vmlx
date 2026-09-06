@@ -1599,8 +1599,10 @@ class GlobalDiskCacheBudget:
                 )
 
         try:
+            lock_started = time.perf_counter()
             with self._exclusive_guard():
-                return self._enforce_locked()
+                lock_wait_s = time.perf_counter() - lock_started
+                return self._enforce_locked(lock_wait_s=lock_wait_s)
         except (OSError, sqlite3.Error) as exc:
             result = GlobalBudgetResult(
                 max_size_bytes=self._requested_max_size_bytes,
@@ -1628,9 +1630,15 @@ class GlobalDiskCacheBudget:
         self,
         *,
         protected_blocks: set[tuple[Path, str]] | None = None,
+        lock_wait_s: float = 0.0,
     ) -> GlobalBudgetResult:
-        """Reconcile and trim while the root-exclusive lock is held."""
+        """Reconcile and trim while the root-exclusive lock is held.
 
+        Phase timings (lock wait, scan, eviction, rescan, accounting write) are
+        logged for every performed reconcile so a slow one is attributable.
+        """
+
+        phase_started = time.perf_counter()
         protected_keys = {
             (Path(database).resolve(), str(block_hash))
             for database, block_hash in (protected_blocks or set())
@@ -1646,6 +1654,8 @@ class GlobalDiskCacheBudget:
         }
         now_ns = time.time_ns()
         candidates, total, _protected = self._scan_locked(now_ns=now_ns)
+        scan_s = time.perf_counter() - phase_started
+        evict_started = time.perf_counter()
         before = total
         evicted_entries = 0
         evicted_bytes = 0
@@ -1831,7 +1841,18 @@ class GlobalDiskCacheBudget:
                 evicted_entries += 1
                 evicted_bytes += freed
 
-        _, after, protected_after = self._scan_locked(now_ns=time.time_ns())
+        evict_s = time.perf_counter() - evict_started
+        rescan_started = time.perf_counter()
+        if evicted_entries:
+            # Physical state changed under the exclusive lock: re-measure.
+            _, after, protected_after = self._scan_locked(now_ns=time.time_ns())
+        else:
+            # Nothing was removed and the root-exclusive lock is still held,
+            # so the first scan's totals are the current physical state; a
+            # second full walk of every namespace would only repeat it.
+            after, protected_after = total, _protected
+        rescan_s = time.perf_counter() - rescan_started
+        account_started = time.perf_counter()
         reconciled_at_ns = time.time_ns()
         reconciliation_generation = accounting["reconciliation_generation"] + 1
         self._write_accounting_locked(
@@ -1858,6 +1879,21 @@ class GlobalDiskCacheBudget:
         )
         self._last_result = result
         self._last_reconcile_monotonic_ns = time.monotonic_ns()
+        account_s = time.perf_counter() - account_started
+        logger.info(
+            "Global block-cache budget reconcile: total=%.3fs lock_wait=%.3fs "
+            "scan=%.3fs evict=%.3fs rescan=%.3fs account=%.3fs evicted=%d "
+            "usage=%.3fGB / %.3fGB",
+            time.perf_counter() - phase_started + lock_wait_s,
+            lock_wait_s,
+            scan_s,
+            evict_s,
+            rescan_s,
+            account_s,
+            evicted_entries,
+            after / 1e9,
+            max_size_bytes / 1e9,
+        )
         if evicted_entries:
             logger.info(
                 "Global block-cache eviction: removed %d entries (%.3fGB); "

@@ -871,7 +871,8 @@ def test_explicit_strict_fence_forces_physical_reconciliation(
         assert store.seal_write_fence(fence_id)
         _stats, fence = _wait_for_fence(store, fence_id)
         assert fence["post_eviction_complete"] is True
-        assert calls >= 2
+        # one physical scan: nothing was evicted, so the post-trim rescan is skipped
+        assert calls >= 1
         assert (
             fence["global_reconciliation_generation"]
             > startup_generation

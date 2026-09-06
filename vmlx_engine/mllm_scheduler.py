@@ -140,6 +140,7 @@ KEY CLASSES
 - ``MLLMScheduler`` -- Main scheduler class
 """
 
+from .persistence_outcome import LEDGER as _PERSIST, format_outcome as _format_persistence_outcome
 import asyncio
 import hashlib
 import logging
@@ -3872,6 +3873,7 @@ class MLLMScheduler:
                                     cached_tokens,
                                     len(truncated_tokens),
                                 )
+                                _PERSIST.record(request_id, "already_durable", f"cached prefix covers {cached_tokens}/{len(truncated_tokens)} cache-key tokens", retained_tokens=cached_tokens)
                                 cache_blocks = None
                                 request._extracted_cache = None
                             else:
@@ -4156,6 +4158,7 @@ class MLLMScheduler:
                                 else:
                                     cache_blocks = raw() if callable(raw) else raw
                             if cache_blocks is None:
+                                _PERSIST.record(request_id, "skipped", "resolved extracted cache is empty")
                                 logger.info(
                                     "Skipping VLM paged cache store for %s: "
                                     "resolved extracted cache is empty "
@@ -4379,7 +4382,13 @@ class MLLMScheduler:
                                                     len(truncated_tokens),
                                                     side_key_suffix,
                                                 )
+                                            _PERSIST.record(
+                                                request_id, "stored",
+                                                f"paged {len(cache_states)} layers, blocks={block_table_blocks}",
+                                                retained_tokens=int(retained_tokens) if isinstance(retained_tokens, int) else None,
+                                            )
                                         else:
+                                            _PERSIST.record(request_id, "skipped", "no storable layer states")
                                             logger.info(
                                                 "Skipping VLM paged cache store for %s: "
                                                 "extracted cache produced no storable layer states "
@@ -4391,17 +4400,20 @@ class MLLMScheduler:
                                                 prompt_len,
                                             )
                         else:
+                            _PERSIST.record(request_id, "skipped", "no prompt token ids")
                             logger.info(
                                 "Skipping VLM paged cache store for %s: "
                                 "finish response had cache but no prompt token ids",
                                 request_id,
                             )
                     except Exception as e:
+                        _PERSIST.record(request_id, "failed", f"paged: {e}")
                         logger.warning(f"Failed to store VLM paged cache for {request_id}: {e}", exc_info=True)
                     finally:
                         if request is not None:
                             request._extracted_cache = None
                 elif request is not None:
+                    _PERSIST.record(request_id, "skipped", "no extracted prompt cache on finished request")
                     logger.info(
                         "Skipping VLM paged cache store for %s: no extracted "
                         "prompt cache on finished request (prompt_tokens=%d, "
@@ -4556,7 +4568,9 @@ class MLLMScheduler:
                                             f"({len(cache_key_tokens)} cache-key tokens from "
                                             f"{prompt_len} prompt tokens)"
                                         )
+                                        _PERSIST.record(request_id, "stored", "memory-aware", retained_tokens=len(cache_key_tokens))
                                     else:
+                                        _PERSIST.record(request_id, "refused", "memory-aware store rejected")
                                         logger.info(
                                             "VLM memory-aware cache store rejected "
                                             "for %s (%d cache-key tokens, %d layers)",
@@ -4567,6 +4581,7 @@ class MLLMScheduler:
                                             else -1,
                                         )
                     except Exception as e:
+                        _PERSIST.record(request_id, "failed", f"memory-aware: {e}")
                         logger.warning(f"VLM memory-aware cache store failed for {request_id}: {e}")
                     finally:
                         if request is not None:
@@ -4636,7 +4651,9 @@ class MLLMScheduler:
                                         f"({len(cache_key_tokens)} cache-key tokens from "
                                         f"{prompt_len} prompt tokens)"
                                     )
+                                    _PERSIST.record(request_id, "stored", "legacy prefix cache (L1 only)", retained_tokens=len(cache_key_tokens), durable=False)
                     except Exception as e:
+                        _PERSIST.record(request_id, "failed", f"legacy: {e}")
                         logger.debug(f"VLM prefix cache store failed for {request_id}: {e}")
                     finally:
                         if request is not None:
@@ -5434,17 +5451,15 @@ class MLLMScheduler:
                         not self._terminal_cleanup_complete.is_set()
                     )
                     await self._terminal_cleanup_complete.wait()
-                    if _durability_was_pending:
-                        logger.info(
-                            "Terminal durability barrier: request=%s "
-                            "wait_ms=%.3f cache_persisted=true",
-                            request_id,
-                            (
-                                time.perf_counter()
-                                - _durability_wait_started
-                            )
-                            * 1000.0,
-                        )
+                    _outcome = _PERSIST.take(request_id)
+                    logger.info(
+                        "Terminal durability barrier: request=%s wait_ms=%.3f "
+                        "waited=%s %s",
+                        request_id,
+                        (time.perf_counter() - _durability_wait_started) * 1000.0,
+                        "true" if _durability_was_pending else "false",
+                        _format_persistence_outcome(_outcome),
+                    )
                 yield output
         finally:
             # Cleanup queue — runs on normal exit AND GeneratorExit (client disconnect)

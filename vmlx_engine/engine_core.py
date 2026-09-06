@@ -11,6 +11,7 @@ This module provides the EngineCore class that coordinates:
 The design follows vLLM's engine architecture adapted for MLX.
 """
 
+from .persistence_outcome import LEDGER as _PERSIST, format_outcome as _format_persistence_outcome
 import asyncio
 import logging
 import time
@@ -694,17 +695,15 @@ class EngineCore:
                             not self._terminal_cleanup_complete.is_set()
                         )
                         await self._terminal_cleanup_complete.wait()
-                        if _durability_was_pending:
-                            logger.info(
-                                "Terminal durability barrier: request=%s "
-                                "wait_ms=%.3f cache_persisted=true",
-                                request_id,
-                                (
-                                    time.perf_counter()
-                                    - _durability_wait_started
-                                )
-                                * 1000.0,
-                            )
+                        _outcome = _PERSIST.take(request_id)
+                        logger.info(
+                            "Terminal durability barrier: request=%s wait_ms=%.3f "
+                            "waited=%s %s",
+                            request_id,
+                            (time.perf_counter() - _durability_wait_started) * 1000.0,
+                            "true" if _durability_was_pending else "false",
+                            _format_persistence_outcome(_outcome),
+                        )
 
                     yield output
 

@@ -14,6 +14,7 @@ The scheduler follows vLLM's design with:
 - Continuous batching via BatchGenerator
 """
 
+from .persistence_outcome import LEDGER as _PERSIST
 import logging
 import os
 import random
@@ -10457,6 +10458,7 @@ class Scheduler:
                     f"Skipping cache store for {request_id}: "
                     f"output_len={_output_len}, status={request.status.name}"
                 )
+                _PERSIST.record(request_id, "skipped", f"output_len={_output_len} status={request.status.name}")
                 if hasattr(request, "_extracted_cache"):
                     request._extracted_cache = None
 
@@ -11134,10 +11136,12 @@ class Scheduler:
                                     f"{len(request._extracted_cache)} layers, "
                                     f"{_coverage_note})"
                                 )
+                                _PERSIST.record(request_id, "stored", f"paged {_coverage_note}", retained_tokens=len(store_tokens))
                         except Exception as e:
                             logger.warning(
                                 f"Failed to store paged cache for {request_id}: {e}"
                             )
+                            _PERSIST.record(request_id, "failed", f"paged: {e}")
                         finally:
                             # Clear extracted cache reference to help GC
                             request._extracted_cache = None
@@ -11183,6 +11187,7 @@ class Scheduler:
                                     _rel_e,
                                 )
                     else:
+                        _PERSIST.record(request_id, "skipped", "no extracted cache")
                         logger.info(
                             "Skipping paged cache store for %s: no extracted cache "
                             "(prompt_tokens=%d, gen_prompt_len=%d, block_cache_enabled=%s)",
@@ -11330,17 +11335,20 @@ class Scheduler:
                                             f"from {prompt_len} prompt tokens, "
                                             f"KV truncated to {prompt_len - 1})"
                                         )
+                                    _PERSIST.record(request_id, "stored", "memory-aware", retained_tokens=len(cache_key_tokens))
                                 else:
                                     logger.warning(
                                         f"Cache store rejected for request {request_id} "
                                         f"({prompt_len} tokens) — entry too large for budget"
                                     )
+                                    _PERSIST.record(request_id, "refused", "memory-aware: entry too large for budget")
                                 # Disk L2 is written above for memory-aware
                                 # configs (including MiniMax-M3 paged-off).
                         except Exception as e:
                             logger.warning(
                                 f"Failed to store memory-aware cache for {request_id}: {e}"
                             )
+                            _PERSIST.record(request_id, "failed", f"memory-aware: {e}")
                         finally:
                             # Clear extracted cache reference to help GC
                             request._extracted_cache = None
@@ -11412,10 +11420,12 @@ class Scheduler:
                                     f"from {prompt_len} prompt tokens, "
                                     f"truncated from {prompt_len + len(request.output_token_ids)})"
                                 )
+                                _PERSIST.record(request_id, "stored", "legacy prefix cache (L1 only)", retained_tokens=len(cache_key_tokens), durable=False)
                                 # NOTE: Disk L2 store is handled by the paged
                                 # cache path. Legacy prefix cache is L1-only.
                         except Exception as e:
                             logger.debug(f"Failed to store cache for {request_id}: {e}")
+                            _PERSIST.record(request_id, "failed", f"legacy: {e}")
                         finally:
                             # Clear extracted cache reference to help GC
                             request._extracted_cache = None

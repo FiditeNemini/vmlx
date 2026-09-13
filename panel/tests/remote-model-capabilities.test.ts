@@ -187,6 +187,21 @@ describe('remote model capability hydration', () => {
     )
   })
 
+  it('accepts an API base ending in /v1 without duplicating the version', async () => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request) =>
+      new Response(JSON.stringify(DSV4_CAPABILITIES), {
+        status: String(url).includes('/v1/v1/') ? 404 : 200,
+      })) as unknown as typeof fetch
+    await expect(fetchRemoteModelCapabilities({
+      remoteUrl: 'https://gateway.test/tenant/v1/',
+      remoteModel: 'dsv4-final94',
+    }, fetchImpl)).resolves.toMatchObject({ family: 'deepseek_v4' })
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://gateway.test/tenant/v1/models/dsv4-final94/capabilities',
+      expect.any(Object),
+    )
+  })
+
   it('rejects unqualified fallback capabilities for a different model', async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response('', { status: 404 }))

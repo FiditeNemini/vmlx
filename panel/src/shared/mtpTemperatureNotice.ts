@@ -21,6 +21,8 @@ export interface MtpTemperatureNotice {
 }
 
 export interface MtpTemperatureNoticeInput {
+  /** Remote connections do not own or enforce the server's startup mode. */
+  isRemote?: boolean
   /** True only when the bundle really carries native MTP heads. */
   nativeMtpSupported: boolean
   /** Session `nativeMtpMode`: 'auto' | 'deterministic' | 'off'. */
@@ -54,7 +56,7 @@ export function resolveMtpTemperatureNotice(
   input: MtpTemperatureNoticeInput,
 ): MtpTemperatureNotice | null {
   // No MTP heads -> temperature has nothing to do with MTP. Say nothing.
-  if (!input.nativeMtpSupported) return null
+  if (input.isRemote || !input.nativeMtpSupported) return null
 
   const mode = typeof input.mode === 'string' && input.mode ? input.mode : 'auto'
   // Explicitly disabled by the user: temperature is unrelated to MTP.

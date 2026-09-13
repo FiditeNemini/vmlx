@@ -1,5 +1,6 @@
 import { REASONING_EFFORT_LEVELS } from './reasoningEffortPolicy'
 import { normalizeDetectedFamilyName } from './detectedFamilyNames'
+import { remoteServerBaseUrl } from './remoteApiUrl'
 export interface RemoteModelConnection {
   remoteUrl?: string
   remoteApiKey?: string
@@ -292,7 +293,7 @@ export async function fetchRemoteModelCapabilities(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = 4_500,
 ): Promise<JsonRecord | null> {
-  const baseUrl = nonEmptyString(connection.remoteUrl)?.replace(/\/+$/, '')
+  const baseUrl = connection.remoteUrl && remoteServerBaseUrl(connection.remoteUrl)
   if (!baseUrl) return null
   const headers: Record<string, string> = { Accept: 'application/json' }
   if (connection.remoteApiKey) headers.Authorization = `Bearer ${connection.remoteApiKey}`

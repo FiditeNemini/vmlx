@@ -1,4 +1,5 @@
 import { adoptNativeMtpConfig } from '../shared/nativeMtpAdoption'
+import { remoteServerBaseUrl } from '../shared/remoteApiUrl'
 import { markImageGenerationServerStopping, recordImageGenerationLog, requestImageGenerationServerStop } from './ipc/imageGenerationState'
 import { GATEWAY_SINGLE_MODEL_MODE_KEY, isGatewaySettingEnabled } from '../shared/gatewaySettingsKeys'
 import {
@@ -3626,7 +3627,7 @@ export class SessionManager extends EventEmitter {
     this.emit('session:starting', { sessionId: session.id, modelPath: session.modelPath })
     this.pushLog(session.id, `[INFO] Connecting to remote endpoint...`)
 
-    const baseUrl = session.remoteUrl!.replace(/\/+$/, '')
+    const baseUrl = remoteServerBaseUrl(session.remoteUrl!)
     const headers: Record<string, string> = {}
     if (session.remoteApiKey) headers['Authorization'] = `Bearer ${session.remoteApiKey}`
     if (session.remoteOrganization) headers['OpenAI-Organization'] = session.remoteOrganization
@@ -4270,7 +4271,7 @@ export class SessionManager extends EventEmitter {
             continue
           }
           try {
-            const remoteBase = session.remoteUrl.replace(/\/+$/, '')
+            const remoteBase = remoteServerBaseUrl(session.remoteUrl)
             const remoteHeaders: Record<string, string> = {}
             // The list read above carries no secret, so fetch this one
             // session's key. Only reached for a remote session that is

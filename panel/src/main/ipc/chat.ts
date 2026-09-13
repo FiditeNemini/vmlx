@@ -13,6 +13,7 @@ import {
   readGenerationDefaults,
 } from "./models";
 import type { RemoteDetectedConfig } from "../../shared/remoteModelCapabilities";
+import { remoteServerBaseUrl } from "../../shared/remoteApiUrl";
 import {
   BUILTIN_TOOLS,
   isBuiltinTool,
@@ -1336,7 +1337,7 @@ export function registerChatHandlers(
 
       const rawBaseUrl =
         isRemote && resolvedSession?.remoteUrl
-          ? resolvedSession.remoteUrl.replace(/\/+$/, "")
+          ? remoteServerBaseUrl(resolvedSession.remoteUrl)
           : `http://${connectHost(resolved.host)}:${resolved.port}`;
       // Resolve .local mDNS hostnames to IPv4 — Node.js fetch resolves them to
       // unreachable IPv6 link-local addresses (fe80::...) causing "fetch failed"

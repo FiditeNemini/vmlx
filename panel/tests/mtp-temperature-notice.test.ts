@@ -7,6 +7,14 @@ import {
 } from '../src/shared/mtpTemperatureNotice'
 
 describe('MTP temperature disclosure', () => {
+  it('does not infer a remote servers active mode from bundle capability or local defaults', () => {
+    expect(resolveMtpTemperatureNotice({
+      nativeMtpSupported: true, mode: 'auto', temperature: 0, isRemote: true,
+    })).toBeNull()
+    expect(resolveMtpTemperatureNotice({
+      nativeMtpSupported: true, mode: 'deterministic', temperature: 0, isRemote: true,
+    })).toBeNull()
+  })
   it('says nothing when the bundle has no MTP heads', () => {
     expect(
       resolveMtpTemperatureNotice({ nativeMtpSupported: false, mode: 'deterministic', temperature: 0 }),
@@ -64,7 +72,8 @@ describe('MTP temperature disclosure', () => {
     )
     expect(source).toContain('resolveMtpTemperatureNotice(')
     expect(source).toContain('data-testid="mtp-temperature-notice"')
-    expect(source).toContain("const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'")
+    expect(source).toContain("const mtpGreedyEnforced = !isRemote && detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'")
+    expect(source).toMatch(/resolveMtpTemperatureNotice\(\{\s*isRemote,/)
     expect(source).toContain('disabled={mtpGreedyEnforced}')
     expect(source).toContain('const displayedTemperature = mtpGreedyEnforced')
     expect(source).toContain('const displayedTopP = mtpGreedyEnforced')

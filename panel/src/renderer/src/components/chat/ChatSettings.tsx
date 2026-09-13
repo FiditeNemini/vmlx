@@ -4,6 +4,7 @@ import { useToast } from '../Toast'
 import { useTranslation } from '../../i18n'
 import { buildChatSettingsCompatibilityWarnings } from './chatSettingsCompatibility'
 import { buildChatSettingsResetOverrides } from '../../../../shared/chatSettingsResetPolicy'
+import { remoteServerBaseUrl } from '../../../../shared/remoteApiUrl'
 import {
   loadChatSettingsCompatibility,
   loadChatSettingsHydration,
@@ -133,7 +134,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const [savedChatModelPath, setSavedChatModelPath] = useState<string | undefined>(undefined)
   const [messageCount, setMessageCount] = useState(0)
   const loadRequestRef = useRef(0)
-  const hydrationKey = `${chatId}\u0000${session.modelPath}\u0000${session.config || ''}`
+  const hydrationKey = `${chatId}\u0000${session.modelPath}\u0000${session.config || ''}\u0000${session.remoteUrl || ''}`
   const hydrationCurrent = hydratedKey === hydrationKey
   const displayedDefaultsState = hydrationCurrent ? defaultsState : 'loading'
   const displayedModelDefaults = hydrationCurrent ? modelDefaults : persistedModelDefaults
@@ -177,7 +178,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
     modelDefaultMode: detectedNativeMtpDefaultMode,
     depthOverride: nativeMtpConfig.nativeMtpDepthOverride === true,
   })
-  const mtpGreedyEnforced = detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'
+  const mtpGreedyEnforced = !isRemote && detectedNativeMtpSupported === true && nativeMtpMode === 'deterministic'
   const displayedTemperature = mtpGreedyEnforced
     ? 0
     : displayedOverrides.temperature ?? displayedModelDefaults.temperature
@@ -185,6 +186,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   // session's nativeMtpMode plus the effective temperature. Both are needed, so
   // neither a capable bundle nor a deterministic session alone is enough.
   const mtpTemperatureNotice = resolveMtpTemperatureNotice({
+    isRemote,
     nativeMtpSupported: detectedNativeMtpSupported === true,
     mode: nativeMtpMode,
     temperature: displayedTemperature,
@@ -477,7 +479,7 @@ function statusToneClass(status: string): string {
           <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">{t('chat.settings.serverInfo')}</h3>
           {(() => {
             const baseUrl = isRemote && session.remoteUrl
-              ? session.remoteUrl.replace(/\/+$/, '')
+              ? remoteServerBaseUrl(session.remoteUrl)
               : `http://${session.host}:${session.port}`
             const isImage = session.modelType === 'image'
             const apiUrl = isImage

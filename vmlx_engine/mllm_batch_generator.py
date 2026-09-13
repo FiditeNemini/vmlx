@@ -5584,39 +5584,44 @@ def _companion_exempt_cache(cache_obj: Any) -> bool:
     )
 
 
+def _append_prefill_cache_materialization_items(
+    cache_obj: Any, items: List[Any]
+) -> None:
+    # Keep recursion outside a closure: a local recursive function captures
+    # itself and `items`, retaining every chunk's old arrays until cyclic GC.
+    # Those arrays can own large backing buffers even after cache replacement.
+    if cache_obj is None:
+        return
+    keys = getattr(cache_obj, "keys", None)
+    values = getattr(cache_obj, "values", None)
+    if keys is not None or values is not None:
+        for value in (keys, values):
+            if isinstance(value, (list, tuple)):
+                items.extend(v for v in value if v is not None)
+            elif value is not None:
+                items.append(value)
+        return
+    nested = getattr(cache_obj, "caches", None)
+    if isinstance(nested, (list, tuple)):
+        for sub_cache in nested:
+            _append_prefill_cache_materialization_items(sub_cache, items)
+        return
+    ssm_cache = getattr(cache_obj, "cache", None)
+    if isinstance(ssm_cache, list):
+        items.extend(arr for arr in ssm_cache if arr is not None)
+        return
+    state = getattr(cache_obj, "state", None)
+    if isinstance(state, (list, tuple)):
+        items.extend(arr for arr in state if arr is not None)
+    elif state is not None:
+        items.append(state)
+
+
 def _prefill_cache_materialization_items(cache: Optional[List[Any]]) -> List[Any]:
     """Collect KV/SSM cache arrays that should be realized after prefix prefill."""
     items: List[Any] = []
-
-    def _collect(cache_obj: Any) -> None:
-        if cache_obj is None:
-            return
-        keys = getattr(cache_obj, "keys", None)
-        values = getattr(cache_obj, "values", None)
-        if keys is not None or values is not None:
-            for value in (keys, values):
-                if isinstance(value, (list, tuple)):
-                    items.extend(v for v in value if v is not None)
-                elif value is not None:
-                    items.append(value)
-            return
-        nested = getattr(cache_obj, "caches", None)
-        if isinstance(nested, (list, tuple)):
-            for sub_cache in nested:
-                _collect(sub_cache)
-            return
-        ssm_cache = getattr(cache_obj, "cache", None)
-        if isinstance(ssm_cache, list):
-            items.extend(arr for arr in ssm_cache if arr is not None)
-            return
-        state = getattr(cache_obj, "state", None)
-        if isinstance(state, (list, tuple)):
-            items.extend(arr for arr in state if arr is not None)
-        elif state is not None:
-            items.append(state)
-
     for entry in cache or []:
-        _collect(entry)
+        _append_prefill_cache_materialization_items(entry, items)
     return items
 
 

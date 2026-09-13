@@ -1,3 +1,5 @@
+import { resolveNativeMtpStartupMode } from './nativeMtpLaunchArgs'
+
 /**
  * Native MTP settings recovered from a LIVE engine process during adoption.
  *
@@ -13,8 +15,8 @@
  *   a disabled engine adopts as mode 'off'.
  * Depth/policy come from the process (health first, argv second), never from
  * a family guess; only when the process exposes nothing does the family
- * default apply (fixed D3 for qwen4-exp / qwen3.5, the explicitly requested
- * fresh-session default; otherwise the detected depth without an override).
+ * default apply (Flash Next Off, 27B Auto; both keep a fixed D3 ceiling;
+ * otherwise the detected depth without an override).
  */
 export type AdoptedSamplingPolicy = 'compatible-only' | 'deterministic-defaults' | 'greedy-only' | 'disabled'
 
@@ -48,19 +50,21 @@ export function adoptNativeMtpConfig(
   const familyDefault = FIXED_D3_FAMILIES.has(detectedFamily ?? '')
   const fallbackDepth = familyDefault ? 3 : (clampDepth(detectedDepth) ?? 3)
   const fallback: AdoptedNativeMtpConfig = {
-    nativeMtpMode: 'auto',
+    nativeMtpMode: resolveNativeMtpStartupMode(detectedFamily),
     nativeMtpDepth: fallbackDepth,
     nativeMtpDepthOverride: familyDefault,
     nativeMtpAdoptionSource: familyDefault ? 'family-default' : 'detected-default',
   }
   const policy = proc.nativeMtpSamplingPolicy
   const disabled = proc.nativeMtpDisabled === true || policy === 'disabled'
+  const liveDepth = clampDepth(proc.nativeMtpDepth)
+  const hasLivePolicy = policy !== undefined || liveDepth !== undefined
+    || proc.nativeMtpDepthPolicy !== undefined
   const mode: AdoptedNativeMtpConfig['nativeMtpMode'] = disabled
     ? 'off'
     : policy === 'greedy-only'
       ? 'deterministic'
-      : 'auto'
-  const liveDepth = clampDepth(proc.nativeMtpDepth)
+      : hasLivePolicy ? 'auto' : fallback.nativeMtpMode
   if (proc.nativeMtpDepthPolicy === 'fixed' && liveDepth !== undefined) {
     return { nativeMtpMode: mode, nativeMtpDepth: liveDepth, nativeMtpDepthOverride: true, nativeMtpAdoptionSource: 'process' }
   }

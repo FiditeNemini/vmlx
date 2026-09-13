@@ -18,6 +18,7 @@ import {
   applyBundleGenerationDefaultsToSessionConfig,
 } from '../../../../shared/sessionGenerationDefaults'
 import { usesExactTypedPromptDiskCache } from '../../../../shared/detectedFamilyNames'
+import { resolveNativeMtpStartupMode } from '../../../../shared/nativeMtpLaunchArgs'
 
 interface ModelInfo {
   path: string
@@ -76,6 +77,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const launchSessionIdRef = useRef<string | null>(null)
   const mountedRef = useRef(true)
   const modelDefaultsRequestRef = useRef(0)
+  const nativeMtpModeEditedRef = useRef(false)
 
   // Remote session fields
   const [remoteUrl, setRemoteUrl] = useState('')
@@ -96,6 +98,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       const prev = defaultsOnly ? { ...DEFAULT_CONFIG, port: current.port } : current
       const next: SessionConfig = {
         ...prev,
+        nativeMtpMode: resolveNativeMtpStartupMode(
+          detected?.family,
+          !defaultsOnly && nativeMtpModeEditedRef.current ? prev.nativeMtpMode : undefined,
+        ),
         // Auto remains undefined; detection is displayed separately and launch
         // resolves the effective value. Materializing detection here made a
         // model-derived default indistinguishable from an explicit user choice.
@@ -221,6 +227,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   }, [initialModelPath])
 
   const handleChange = <K extends keyof SessionConfig>(key: K, value: SessionConfig[K]) => {
+    if (key === 'nativeMtpMode') nativeMtpModeEditedRef.current = true
     setConfig(prev => ({ ...prev, [key]: value }))
   }
 
@@ -239,6 +246,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         ]) as [any, any]
         if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
         if (detected && detected.family !== 'unknown') {
+          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family)
           base.enableAutoToolChoice = undefined
           if (['deepseek-v4', 'minimax_m3', 'openpangu_v2'].includes(detected.family)) {
             base.timeout = 900
@@ -305,6 +313,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
       }
     }
     if (!mountedRef.current || modelDefaultsRequestRef.current !== requestId) return
+    nativeMtpModeEditedRef.current = false
     setConfig(base)
     setDefaultsPending(false)
   }
@@ -689,6 +698,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                           if (existing?.config) {
                             try {
                               const stored = JSON.parse(existing.config)
+                              nativeMtpModeEditedRef.current = stored.nativeMtpMode !== undefined
                               // Preserve explicit tri-state tool policy. Legacy
                               // migration belongs in the versioned DB/session
                               // migration, never in this renderer reload path.
@@ -705,7 +715,10 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                               try {
                                 const det = await window.api.models.detectConfig(model.path) as any
                                 if (!selectionStillCurrent()) return
-                                setConfig(current => applyBundleDsv4PoolQuantToSessionConfig(current, det))
+                                setConfig(current => ({
+                                  ...applyBundleDsv4PoolQuantToSessionConfig(current, det),
+                                  nativeMtpMode: resolveNativeMtpStartupMode(det?.family, stored.nativeMtpMode),
+                                }))
                                 if (det?.cacheType) setDetectedCacheType(det.cacheType)
                                 setDetectedUsePagedCache(det?.usePagedCache)
                                 setDetectedCacheSubtype(det?.cacheSubtype)

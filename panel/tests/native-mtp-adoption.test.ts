@@ -47,8 +47,9 @@ describe('native MTP adoption round-trip', () => {
     }
   })
 
-  it('falls back to the explicitly requested fixed D3 family default only when the process exposes nothing', () => {
-    expect(adoptNativeMtpConfig({}, 'qwen4-exp', 1)).toMatchObject({ nativeMtpMode: 'auto', nativeMtpDepth: 3, nativeMtpDepthOverride: true, nativeMtpAdoptionSource: 'family-default' })
+  it('uses Flash Off only when the process exposes no explicit policy, without changing 27B', () => {
+    expect(adoptNativeMtpConfig({}, 'qwen4-exp', 1)).toMatchObject({ nativeMtpMode: 'off', nativeMtpDepth: 3, nativeMtpDepthOverride: true, nativeMtpAdoptionSource: 'family-default' })
+    expect(adoptNativeMtpConfig({}, 'qwen3.5', 1)).toMatchObject({ nativeMtpMode: 'auto', nativeMtpDepth: 3, nativeMtpDepthOverride: true, nativeMtpAdoptionSource: 'family-default' })
     expect(adoptNativeMtpConfig({}, 'glm5-next', 2)).toMatchObject({ nativeMtpMode: 'auto', nativeMtpDepth: 2, nativeMtpDepthOverride: false, nativeMtpAdoptionSource: 'detected-default' })
     // compatible-only has no UI mode of its own: adopt as auto, which relaunches with deterministic-defaults (documented change)
     expect(adoptNativeMtpConfig({ nativeMtpSamplingPolicy: 'compatible-only' }, 'qwen4-exp', 1).nativeMtpMode).toBe('auto')

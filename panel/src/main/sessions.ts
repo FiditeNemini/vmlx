@@ -108,7 +108,7 @@ import {
   filterAdditionalArgs,
   finitePositiveInteger,
 } from '../shared/launchArgValues'
-import { buildNativeMtpLaunchArgs } from '../shared/nativeMtpLaunchArgs'
+import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../shared/nativeMtpLaunchArgs'
 import { planSessionConfigSave } from '../shared/sessionConfigLifecycle'
 
 /** Result of findEnginePath: packaged Python, a source-bound dev venv, or a system binary. */
@@ -314,11 +314,17 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
       detectedFamily,
       detected.reasoningParser,
     )
-    // Native MTP default: FIXED depth 3 for the Qwen3.8 MTP families
+    // Flash Next now starts with MTP Off unless a mode was explicitly saved.
+    // Do not migrate an existing Auto/Deterministic/Off choice on restart.
+    if (effectiveFamily === 'qwen4-exp' && (config as any).nativeMtpMode === undefined) {
+      ;(config as any).nativeMtpMode = resolveNativeMtpStartupMode(effectiveFamily)
+      changed = true
+    }
+    // Native MTP ceiling: FIXED depth 3 for the Qwen3.8 MTP families
     // (Flash-Next qwen4-exp — every JANG tier and CRACK variant — and the
     // Qwen3.8-27B qwen3.5 D-series). Adaptive proved a wrong default for
-    // fresh sessions (Eric, 2026-09-05: the session started adaptive when
-    // it must start fixed D3). Fill ONLY missing values: an explicit user
+    // fresh sessions. Flash Next's Off mode leaves this ceiling dormant until
+    // the user opts in. Fill ONLY missing values: an explicit user
     // choice (including turning the override off) always survives.
     if (effectiveFamily === 'qwen4-exp' || effectiveFamily === 'qwen3.5') {
       if ((config as any).nativeMtpDepthOverride === undefined) {
@@ -2230,6 +2236,7 @@ export class SessionManager extends EventEmitter {
   private async _createSessionInner(modelPath: string, config: Partial<ServerConfig>): Promise<Session> {
     // Normalize path to prevent trailing-slash mismatches
     modelPath = normalizePath(modelPath)
+    const requestedNativeMtpMode = (config as any).nativeMtpMode
     // Incoming creation values are current user intent, not a persisted legacy
     // row. In particular, explicit4096 must not be mistaken for an old generic
     // default merely because it has the same numeric value.
@@ -2263,6 +2270,11 @@ export class SessionManager extends EventEmitter {
       // Merge new config into existing (don't overwrite unspecified fields)
       let existingConfig: Record<string, any> = {}
       try { existingConfig = JSON.parse(existing.config || '{}') } catch (_) { }
+      // A sparse create request reuses the saved mode. Filling a missing
+      // fresh default above must not overwrite an existing explicit opt-in.
+      if (requestedNativeMtpMode === undefined && existingConfig.nativeMtpMode !== undefined) {
+        ;(config as any).nativeMtpMode = existingConfig.nativeMtpMode
+      }
       const host = (config.host as string) || existing.host
       const port = (config.port as number) || existing.port
       applyBundleStartupDefaults(existingConfig, modelPath)

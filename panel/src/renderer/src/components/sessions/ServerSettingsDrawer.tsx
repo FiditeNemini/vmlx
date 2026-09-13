@@ -16,6 +16,7 @@ import {
   applyBundleGenerationDefaultsToSessionConfig,
 } from '../../../../shared/sessionGenerationDefaults'
 import { usesExactTypedPromptDiskCache } from '../../../../shared/detectedFamilyNames'
+import { resolveNativeMtpStartupMode } from '../../../../shared/nativeMtpLaunchArgs'
 import { hasLiveLocalSession } from '../../../../shared/sessionConfigLifecycle'
 import { apiCapabilityKey, sessionCapabilityModalities } from '../../../../shared/apiModelCapabilities'
 
@@ -278,6 +279,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         const detected = await window.api.models.detectConfig(session.modelPath)
         if (!resetStillCurrent()) return
         if (detected && detected.family !== 'unknown') {
+          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family)
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {
             base.dsv4PrefixCache = true

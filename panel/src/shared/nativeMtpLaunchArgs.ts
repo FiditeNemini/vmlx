@@ -1,4 +1,18 @@
 import { finitePositiveInteger } from './launchArgValues'
+import { normalizeDetectedFamilyName } from './detectedFamilyNames'
+
+/** Fresh/reset session policy. Explicit saved choices always win. */
+export function resolveNativeMtpStartupMode(
+  family?: string,
+  configured?: 'auto' | 'deterministic' | 'off',
+): 'auto' | 'deterministic' | 'off' {
+  if (configured !== undefined) return configured
+  // Classify by architecture, never the folder name, quant tier, or MTP depth.
+  // D3 remains the opt-in ceiling; it is not evidence the user enabled MTP.
+  return normalizeDetectedFamilyName(family) === 'qwen4-exp' || family === 'qwen4_exp_text'
+    ? 'off'
+    : 'auto'
+}
 
 export interface NativeMtpLaunchPolicyInput {
   supported: boolean

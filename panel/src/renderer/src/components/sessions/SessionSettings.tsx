@@ -39,7 +39,7 @@ import {
   filterAdditionalArgs,
   finitePositiveInteger,
 } from '../../../../shared/launchArgValues'
-import { buildNativeMtpLaunchArgs } from '../../../../shared/nativeMtpLaunchArgs'
+import { buildNativeMtpLaunchArgs, resolveNativeMtpStartupMode } from '../../../../shared/nativeMtpLaunchArgs'
 
 interface Session {
   id: string
@@ -732,6 +732,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
         const detected = await window.api.models.detectConfig(session.modelPath)
         if (!resetStillCurrent()) return
         if (detected && detected.family !== 'unknown') {
+          base.nativeMtpMode = resolveNativeMtpStartupMode(detected.family)
           // Reset restores model-derived Auto, not a sticky explicit On/Off.
           base.enableAutoToolChoice = undefined
           if (detected.family === 'deepseek-v4') {

@@ -422,11 +422,13 @@ export function PerformancePanel({ endpoint, sessionStatus }: PerformancePanelPr
                 value={
                   health.mtp.runtime_active
                     ? `${t('sessions.performance.statusActive')}${health.mtp.runtime_scope ? ` (${health.mtp.runtime_scope})` : ''}`
-                    : health.mtp.runtime_available
-                      ? t('sessions.performance.weightsPresentRuntimeReady')
-                    : health.mtp.artifact_available
-                      ? t('sessions.performance.weightsPresentRuntimeUnwired')
-                      : health.mtp.status.replace(/_/g, ' ')
+                    : health.mtp.status === 'runtime_disabled'
+                      ? t('sessions.cache.statusDisabled')
+                      : health.mtp.runtime_available
+                        ? t('sessions.performance.weightsPresentRuntimeReady')
+                        : health.mtp.artifact_available
+                          ? t('sessions.performance.weightsPresentRuntimeUnwired')
+                          : health.mtp.status.replace(/_/g, ' ')
                 }
               />
             )}

@@ -26,9 +26,6 @@ FLAGS = [
     "VMLX_QWEN4_ALIGNED_MOE_PREFILL",
 ]
 SPARSE_FUSED_FLAG = "VMLX_QWEN4_SPARSE_FUSED_PREFILL"
-SPARSE_AR_FLAG = "VMLX_QWEN4_SPARSE_AR"
-SPARSE_AR_BLOCKS_FLAG = "VMLX_QWEN4_SPARSE_AR_DIRECT_BLOCKS"
-ALL_FLAGS = [*FLAGS, SPARSE_FUSED_FLAG, SPARSE_AR_FLAG, SPARSE_AR_BLOCKS_FLAG]
 
 
 def main():
@@ -40,8 +37,6 @@ def main():
     p.add_argument("--arms", default="gdn,verify,direct,checkpoints,aligned_moe,combined")
     p.add_argument("--prefill-step-size", type=int, default=4096)
     p.add_argument("--continuation-step-size", type=int, default=4)
-    p.add_argument("--reference-arm", choices=("stock", "sparse_ar"), default="stock",
-                   help="sparse_ar retains qualified sparse prefill and the dense-mask AR bitmap control")
     p.add_argument("--attention-fixture", type=Path,
                    help="For sparse_oracle, save the first real attention inputs for component diagnosis")
     a = p.parse_args()
@@ -56,7 +51,7 @@ def main():
         coalesce_qwen4_prefill_checkpoints,
     )
 
-    for flag in ALL_FLAGS:
+    for flag in [*FLAGS, SPARSE_FUSED_FLAG]:
         os.environ[flag] = "0"
     os.environ["VMLX_NATIVE_MTP_PROMPT_PRIMING"] = "0"
     mx.set_cache_limit(2 * 1024**3)
@@ -136,14 +131,8 @@ def main():
         return logits
 
     def forward(tokens, flags, tail=1):
-        for flag in ALL_FLAGS:
+        for flag in [*FLAGS, SPARSE_FUSED_FLAG]:
             os.environ[flag] = str(int(flag in flags))
-        # These guards are load-time attributes in the serving model. The
-        # same-weight diagnostic explicitly switches them between arms.
-        for _, module in lm.named_modules():
-            if hasattr(module, "_sparse_ar_decode"):
-                module._sparse_ar_decode = SPARSE_AR_FLAG in flags
-                module._sparse_ar_direct_blocks = SPARSE_AR_BLOCKS_FLAG in flags
         cache = lm.make_cache()
         ids = mx.array([tokens], dtype=mx.int32)
         length = len(tokens)
@@ -201,8 +190,7 @@ def main():
         length = context + tail - 1
         tokens = (seed_tokens * (length // len(seed_tokens) + 1))[:length]
         print("Reference", context, flush=True)
-        reference_flags = [SPARSE_FUSED_FLAG, SPARSE_AR_FLAG] if a.reference_arm == "sparse_ar" else []
-        ref = forward(tokens, reference_flags, tail)
+        ref = forward(tokens, [], tail)
         for label, flags in [
             ("repeat", []),
             ("gdn", [FLAGS[0]]),
@@ -213,7 +201,6 @@ def main():
             ("combined", FLAGS),
             ("sparse_fused", [SPARSE_FUSED_FLAG]),
             ("sparse_oracle", [SPARSE_FUSED_FLAG]),
-            ("sparse_ar_blocks", [SPARSE_FUSED_FLAG, SPARSE_AR_FLAG, SPARSE_AR_BLOCKS_FLAG]),
         ]:
             if label not in a.arms.split(","):
                 continue
@@ -221,30 +208,16 @@ def main():
                 continue
             from vmlx_engine.metal import qwen4_aligned_moe_prefill as aligned_impl
             from vmlx_engine.metal import qwen4_sparse_fused_prefill as sparse_impl
-            from vmlx_engine.metal import qwen4_sparse_decode as ar_impl
             before_dispatch = aligned_impl.DISPATCH_COUNT
             before_sparse = sparse_impl.DISPATCH_COUNT
             start = time.monotonic()
             original_call = sparse_impl._call
-            original_ar_call = ar_impl.attention_from_blocks
-            direct_ar_dispatches = 0
-
-            def counted_ar(*args, **kwargs):
-                nonlocal direct_ar_dispatches
-                result = original_ar_call(*args, **kwargs)
-                if result is not None:
-                    direct_ar_dispatches += 1
-                return result
-
             try:
                 if label == "sparse_oracle":
                     sparse_impl._call = stock_from_blocks
-                if label == "sparse_ar_blocks":
-                    ar_impl.attention_from_blocks = counted_ar
                 got = forward(tokens, flags, tail)
             finally:
                 sparse_impl._call = original_call
-                ar_impl.attention_from_blocks = original_ar_call
 
             dispatches = aligned_impl.DISPATCH_COUNT - before_dispatch
             sparse_dispatches = sparse_impl.DISPATCH_COUNT - before_sparse
@@ -252,8 +225,6 @@ def main():
                 assert sparse_dispatches > 0, "sparse fused path did not execute"
             if context == 1024 and label in ("aligned_moe", "combined"):
                 assert dispatches > 0, "aligned MoE guard silently bypassed the eligible case"
-            if label == "sparse_ar_blocks":
-                assert direct_ar_dispatches > 0, "direct AR path did not execute"
 
             def logsoftmax(x):
                 x = x.astype(np.float64)
@@ -271,8 +242,6 @@ def main():
                 "rows": len(ref),
                 "aligned_moe_dispatches": dispatches,
                 "sparse_fused_dispatches": sparse_dispatches,
-                "direct_ar_dispatches": direct_ar_dispatches,
-                "reference_arm": a.reference_arm,
                 "prefill_step_size": a.prefill_step_size,
                 "continuation_step_size": a.continuation_step_size,
                 "mean_kl": float(np.mean(kl)),
@@ -287,8 +256,6 @@ def main():
                 and row["max_kl"] <= 0.05
                 and row["logit_rms"] <= 0.1
             )
-            if label == "sparse_ar_blocks":
-                row["passed"] = row["passed"] and bool(np.array_equal(ref, got))
             rows.append(row)
             a.output.write_text(
                 json.dumps(

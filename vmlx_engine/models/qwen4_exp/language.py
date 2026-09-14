@@ -1762,7 +1762,6 @@ class QSAAttention(nn.Module):
         )
         self.qkv_group = None
         self._sparse_ar_decode = os.environ.get("VMLX_QWEN4_SPARSE_AR", "0") == "1"
-        self._sparse_ar_direct_blocks = os.environ.get("VMLX_QWEN4_SPARSE_AR_DIRECT_BLOCKS", "0") == "1"
         self._sparse_ar_observed = False
 
     def prepare_runtime(self) -> bool:
@@ -1825,12 +1824,6 @@ class QSAAttention(nn.Module):
         # saved pre-append offset for this query chunk's absolute positions.
         direct_prefill = False
         sparse_fused_prefill = False
-        direct_ar = False
-        if (self._sparse_ar_decode and self._sparse_ar_direct_blocks and not self.training
-                and type(self.indexer) is QSAIndexer
-                and self.indexer.compress_ratio == 4 and self.indexer.block_topk == 512):
-            from vmlx_engine.metal.qwen4_sparse_decode import supported as sparse_ar_supported
-            direct_ar = sparse_ar_supported(queries, keys, values, scale=self.scale)
         if (
             os.environ.get("VMLX_QWEN4_SPARSE_FUSED_PREFILL", "0") == "1"
             # The helper owns the measured upper row bound. Keep media bulk
@@ -1875,25 +1868,8 @@ class QSAAttention(nn.Module):
             cache,
             offset=offset,
             position_ids=position_ids,
-            return_blocks=direct_prefill or sparse_fused_prefill or direct_ar,
+            return_blocks=direct_prefill or sparse_fused_prefill,
         )
-        if direct_ar:
-            from vmlx_engine.metal.qwen4_sparse_decode import attention_from_blocks
-            selected, valid = index_mask
-            out = attention_from_blocks(
-                queries, keys, values, selected, valid, scale=self.scale, enabled=True,
-            )
-            if out is None:
-                # Admission precedes the one cache/indexer update. A violated
-                # internal contract must not retry an already-advanced model.
-                raise RuntimeError("QSA direct AR consumer rejected admitted selected blocks")
-            if not self._sparse_ar_observed:
-                mx.eval(out)
-                self._sparse_ar_observed = True
-                logger.info("QSA AR dispatch path=selected_bitmap1024 context=%d "
-                            "dtype=%s partitions=1024 stream=caller", T, queries.dtype)
-            out = out.transpose(0, 2, 1, 3).reshape(B, S, -1)
-            return self.o_proj(out * mx.sigmoid(gate))
         if direct_prefill or sparse_fused_prefill:
             selected, valid = index_mask
             consumer = qwen4_sparse_fused_prefill.attention if sparse_fused_prefill else qsa_prefill_direct

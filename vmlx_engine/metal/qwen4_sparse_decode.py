@@ -35,39 +35,6 @@ def _bitmap():
     )
 
 
-@lru_cache(maxsize=1)
-def _selected_bitmap():
-    """Construct the identical partition bits without a full-context mask."""
-    return mx.fast.metal_kernel(
-        name="vmlx_qsa_ar_selected_bitmap1024",
-        input_names=["selected", "valid", "length"], output_names=["bitmap"],
-        atomic_outputs=True, ensure_row_contiguous=False,
-        source="""
-        uint i = thread_position_in_grid.x;
-        uint n = uint(length[0]);
-        uint complete = n / 4u;
-        if (i < uint(selected_shape[1])) {
-            int block = selected[i * selected_strides[1]];
-            if (valid[i * valid_strides[1]] && block >= 0 && uint(block) < complete) {
-                for (uint j = 0; j < 4u; ++j) {
-                    uint pos = uint(block) * 4u + j;
-                    uint step = pos / 1024u;
-                    atomic_fetch_or_explicit(&bitmap[(pos % 1024u) * 4u + step / 32u],
-                                             1u << (step % 32u), memory_order_relaxed);
-                }
-            }
-        }
-        if (i == uint(selected_shape[1])) {
-            for (uint pos = complete * 4u; pos < n; ++pos) {
-                uint step = pos / 1024u;
-                atomic_fetch_or_explicit(&bitmap[(pos % 1024u) * 4u + step / 32u],
-                                         1u << (step % 32u), memory_order_relaxed);
-            }
-        }
-        """,
-    )
-
-
 # The two-pass arithmetic is adapted from MLX v0.32.2 sdpa_vector.h.
 # Copyright (c) 2024 Apple Inc. Licensed under the MIT License:
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -172,51 +139,18 @@ def _finish():
     )
 
 
-def supported(q, k, v, *, scale):
-    """Shape-only admission before the caller chooses an indexer output form."""
-    return not (q.shape != (1, 24, 1, 256)
+def attention(q, k, v, mask, *, scale, enabled=False):
+    """Return the optional AR result, or None for the unmodified caller path."""
+    if (not enabled or q.shape != (1, 24, 1, 256)
             or k.ndim != 4 or k.shape[:2] != (1, 2) or k.shape[3] != 256
             or v.shape != k.shape or not 65537 <= k.shape[2] <= 131072
             or q.dtype != mx.float16 or k.dtype != q.dtype or v.dtype != q.dtype
+            or mask is None or mask.shape != (1, 1, 1, k.shape[2]) or mask.dtype != q.dtype
             or scale != 0.0625 or os.environ.get("MLX_SDPA_BLOCKS")
-            or mx.default_device() != mx.gpu or not _hardware_allowed())
-
-
-def attention(q, k, v, mask, *, scale, enabled=False):
-    """Return the optional AR result, or None for the unmodified caller path."""
-    if (not enabled or not supported(q, k, v, scale=scale)
-            or mask is None or mask.shape != (1, 1, 1, k.shape[2]) or mask.dtype != q.dtype):
+            or mx.default_device() != mx.gpu or not _hardware_allowed()):
         return None
     bitmap = _bitmap()(inputs=[mask], grid=(1024, 1, 1), threadgroup=(256, 1, 1),
                        output_shapes=[(1024, 4)], output_dtypes=[mx.uint32])[0]
-    return _attention_from_bitmap(q, k, v, mask, bitmap)
-
-
-def attention_from_blocks(q, k, v, selected, valid, *, scale, enabled=False):
-    """QSA's selected four-token blocks plus its incomplete tail, AR only.
-
-    The bitmap is order independent; attention still traverses absolute keys
-    in the original partition order. No cache arrays or quantization change.
-    Only the exact QSA zero/-infinity mask contract is represented here; the
-    general additive-mask path above retains finite biases and empty masks.
-    """
-    if (not enabled or not supported(q, k, v, scale=scale)
-            or selected.shape != (1, 512) or selected.dtype != mx.int32
-            or valid.shape != selected.shape or valid.dtype != mx.bool_):
-        return None
-    tokens = k.shape[2]
-    bitmap = _selected_bitmap()(
-        inputs=[selected, valid, mx.array([tokens], dtype=mx.uint32)],
-        grid=(513, 1, 1), threadgroup=(256, 1, 1),
-        output_shapes=[(1024, 4)], output_dtypes=[mx.uint32], init_value=0,
-    )[0]
-    # Only selected keys are visited. A stride-zero view supplies their exact
-    # additive +0 without allocating/casting/scanning a context-sized mask.
-    mask = mx.broadcast_to(mx.zeros((1,), dtype=q.dtype), (1, 1, 1, tokens))
-    return _attention_from_bitmap(q, k, v, mask, bitmap)
-
-
-def _attention_from_bitmap(q, k, v, mask, bitmap):
     partials, sums, maxs = _partials()(
         inputs=[q, k, v, mask, bitmap], grid=(64, 12, 1024), threadgroup=(32, 12, 1),
         output_shapes=[(24, 1024, 256), (24, 1024), (24, 1024)],

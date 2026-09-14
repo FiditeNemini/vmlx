@@ -87,6 +87,7 @@ from vmlx_engine.metal.sparse_index_score_decode import (
 from .ngram import NGramHasher
 from .host_profile import profile_decode_forward
 from .projection_cache import validated_projection_group
+from .media_positions import media_rope_index
 
 
 logger = logging.getLogger(__name__)
@@ -2781,7 +2782,18 @@ class LanguageModel(nn.Module):
             return logits, expanded_hidden
         return LanguageModelOutput(logits=logits)
 
-    get_rope_index = _Qwen35VlmLanguageModel.get_rope_index
+    def get_rope_index(
+        self, input_ids, image_grid_thw=None, video_grid_thw=None,
+        attention_mask=None,
+    ):
+        if image_grid_thw is None and video_grid_thw is None:
+            # Preserve the pinned runtime's pure-text and padding contract.
+            return _Qwen35VlmLanguageModel.get_rope_index(
+                self, input_ids, None, None, attention_mask
+            )
+        return media_rope_index(
+            self.config, input_ids, image_grid_thw, video_grid_thw, attention_mask
+        )
 
     def make_cache(self):
         caches = []

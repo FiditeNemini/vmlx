@@ -13,6 +13,7 @@ import logging
 import pytest
 
 from vmlx_engine import context_limits
+from vmlx_engine.errors import PromptTooLongError
 
 
 @pytest.fixture(autouse=True)
@@ -45,11 +46,73 @@ def test_binding_clamp_logs_context_exhaustion_notice(caplog):
     assert any("CONTEXT EXHAUSTION" in rec.message for rec in caplog.records)
 
 
-def test_prompt_at_or_over_ceiling_defers_to_prompt_guard():
-    context_limits.set_declared_context_tokens(1000)
-    # never returns a <1 budget on its own — the prompt-limit guard owns
-    # over-ceiling prompts
-    assert context_limits.clamp_output_to_declared_context(1200, 512) == 512
+@pytest.mark.parametrize("declared", [1000, 262144, 1048576])
+@pytest.mark.parametrize("excess", [0, 1, 200])
+def test_prompt_without_output_room_is_typed_rejection(declared, excess):
+    context_limits.set_declared_context_tokens(declared)
+    request_id = f"no-room-{declared}-{excess}"
+    with pytest.raises(PromptTooLongError) as caught:
+        context_limits.clamp_output_to_declared_context(
+            declared + excess, 512, request_id=request_id
+        )
+    assert caught.value.prompt_tokens == declared + excess
+    assert caught.value.max_prompt_tokens == declared - 1
+    assert caught.value.request_id == request_id
+    assert caught.value.source == PromptTooLongError.DECLARED_CONTEXT_SOURCE
+    assert f"declared context of {declared} tokens" in str(caught.value)
+    assert "one output token" in str(caught.value)
+    assert context_limits.pop_context_clamp(request_id) is None
+
+
+def test_one_output_slot_remains_valid_and_larger_output_is_reported():
+    context_limits.set_declared_context_tokens(262144)
+    assert context_limits.clamp_output_to_declared_context(262143, 1) == 1
+    assert context_limits.clamp_output_to_declared_context(
+        262143, 512, request_id="last-slot"
+    ) == 1
+    assert context_limits.pop_context_clamp("last-slot") == {
+        "prompt_tokens": 262143,
+        "requested_max_tokens": 512,
+        "clamped_max_tokens": 1,
+        "declared_context_tokens": 262144,
+    }
+
+
+def test_one_million_declared_context_is_not_capped_at_256k():
+    context_limits.set_declared_context_tokens(1048576)
+    assert context_limits.clamp_output_to_declared_context(300000, 4096) == 4096
+
+
+def test_declared_boundary_preserves_diagnostic_opt_out(monkeypatch):
+    context_limits.set_declared_context_tokens(262144)
+    monkeypatch.setenv("VMLX_CONTEXT_OUTPUT_CLAMP", "0")
+    assert context_limits.clamp_output_to_declared_context(262144, 512) == 512
+
+
+def test_no_room_error_round_trip_keeps_declared_limit_and_correct_remedy():
+    import json
+    from vmlx_engine.engine.batched import _raise_prompt_too_long_from_output
+    from vmlx_engine.request import RequestOutput
+    from vmlx_engine.server import _prompt_too_long_response_from_error
+
+    output = RequestOutput(
+        request_id="no-room-wire",
+        finished=True,
+        finish_reason="error",
+        error_code="prompt_too_long",
+        error_prompt_tokens=262144,
+        error_max_prompt_tokens=262143,
+        error_source=PromptTooLongError.DECLARED_CONTEXT_SOURCE,
+    )
+    with pytest.raises(PromptTooLongError) as caught:
+        _raise_prompt_too_long_from_output(output)
+    response = _prompt_too_long_response_from_error(caught.value)
+    assert response.status_code == 413
+    error = json.loads(response.body)["error"]
+    assert error["code"] == "prompt_too_long"
+    assert "declared context of 262144 tokens" in error["message"]
+    assert "one output token" in error["message"]
+    assert "--max-prompt-tokens" not in error["message"]
 
 
 def test_env_toggle_disables(monkeypatch, caplog):

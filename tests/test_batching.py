@@ -501,6 +501,91 @@ class TestSchedulerBasic:
         with pytest.raises(ValueError, match="prompt_too_long"):
             scheduler.add_request(request)
 
+    @pytest.mark.parametrize("configured_cap", [262144, 524288, 0])
+    def test_text_declared_context_reserves_output_before_cache_admission(
+        self, mock_model, mock_tokenizer, configured_cap
+    ):
+        from vmlx_engine import context_limits
+        from vmlx_engine.errors import PromptTooLongError
+
+        scheduler = Scheduler(model=mock_model, tokenizer=mock_tokenizer)
+        request = Request(
+            request_id="text-declared-no-room",
+            prompt=[1] * 262144,
+            sampling_params=SamplingParams(max_tokens=1),
+        )
+        request._max_prompt_tokens = configured_cap
+        old_declared = context_limits.get_declared_context_tokens()
+        context_limits.set_declared_context_tokens(262144)
+        try:
+            with pytest.raises(PromptTooLongError) as caught:
+                scheduler.add_request(request)
+            assert caught.value.max_prompt_tokens == 262143
+            assert scheduler.get_num_waiting() == 0
+            assert scheduler.get_request(request.request_id) is None
+            assert request.sampling_params.max_tokens == 1
+        finally:
+            context_limits.set_declared_context_tokens(old_declared)
+
+    @pytest.mark.parametrize("configured_cap", [262144, 524288, 0])
+    def test_mllm_declared_context_reserves_output_after_expansion(
+        self, configured_cap
+    ):
+        import mlx.core as mx
+        from vmlx_engine import context_limits
+        from vmlx_engine.errors import PromptTooLongError
+        from vmlx_engine.mllm_batch_generator import (
+            MLLMBatchGenerator,
+            MLLMBatchRequest,
+        )
+
+        generator = object.__new__(MLLMBatchGenerator)
+        request = MLLMBatchRequest(
+            uid=1,
+            request_id="mllm-declared-no-room",
+            prompt="processor-expanded prompt",
+            max_prompt_tokens=configured_cap,
+            input_ids=mx.zeros((1, 262144), dtype=mx.int32),
+            max_tokens=1,
+        )
+        old_declared = context_limits.get_declared_context_tokens()
+        context_limits.set_declared_context_tokens(262144)
+        try:
+            with pytest.raises(PromptTooLongError) as caught:
+                generator._raise_if_prompt_over_limit(
+                    request, source="processor-expanded prompt"
+                )
+            assert caught.value.prompt_tokens == 262144
+            assert caught.value.max_prompt_tokens == 262143
+            assert request.max_tokens == 1
+        finally:
+            context_limits.set_declared_context_tokens(old_declared)
+
+    def test_mllm_declared_context_clamps_the_budget_used_by_decode(self):
+        import mlx.core as mx
+        from vmlx_engine import context_limits
+        from vmlx_engine.mllm_batch_generator import (
+            MLLMBatchGenerator,
+            MLLMBatchRequest,
+        )
+
+        generator = object.__new__(MLLMBatchGenerator)
+        request = MLLMBatchRequest(
+            uid=1, request_id="mllm-last-slot", prompt="expanded prompt",
+            input_ids=mx.zeros((1, 999), dtype=mx.int32),
+            max_prompt_tokens=1000, max_tokens=512,
+        )
+        old_declared = context_limits.get_declared_context_tokens()
+        context_limits.set_declared_context_tokens(1000)
+        try:
+            generator._raise_if_prompt_over_limit(request, source="expanded prompt")
+            assert request.max_tokens == 1
+            assert context_limits.pop_context_clamp(request.request_id)[
+                "clamped_max_tokens"
+            ] == 1
+        finally:
+            context_limits.set_declared_context_tokens(old_declared)
+
     def test_mllm_exact_prompt_limit_counts_processor_expanded_media_tokens(self):
         """VLM media prompts are capped after processor expansion, not estimates."""
         import mlx.core as mx
@@ -530,6 +615,81 @@ class TestSchedulerBasic:
         assert exc.prompt_tokens == 4
         assert exc.max_prompt_tokens == 3
         assert exc.source == "prompt with media (tokenized, media tokens included)"
+
+    @pytest.mark.parametrize("rejection", ["context", "strict", "media"])
+    @pytest.mark.parametrize("with_sibling", [False, True])
+    def test_preprocess_rejection_never_reenters_prefill(
+        self, monkeypatch, rejection, with_sibling
+    ):
+        from unittest.mock import Mock
+        import vmlx_engine.mllm_batch_generator as module
+        from vmlx_engine.errors import (
+            MediaControlsUnmeetableError, MediaInputError, PromptTooLongError,
+        )
+        monkeypatch.setattr(
+            module.MLLMBatchGenerator, "_stream",
+            module.mx.default_stream(module.mx.gpu),
+        )
+
+        class LM:
+            layers = []
+
+            def __call__(self, ids, cache=None):
+                return module.mx.zeros((1, 8, 4))
+
+            def make_cache(self):
+                return []
+
+        generator = module.MLLMBatchGenerator.__new__(module.MLLMBatchGenerator)
+        generator.language_model = generator._cache_model = LM()
+        generator._stats = SimpleNamespace(prompt_tokens=0, prompt_time=0)
+        generator._is_hybrid = generator._ssm_companion_enabled = False
+        generator._prefix_cache_enabled = generator._decode_trace = False
+        generator.block_aware_cache = generator.memory_aware_cache = None
+        generator.prefix_cache = generator.disk_cache = None
+        generator._hybrid_kv_positions = []
+        generator._prefill_errors = []
+        generator._drain_tight_memory_allocator = lambda *args: None
+        generator._media_scoped_cache_extra_keys = Mock(return_value={})
+        generator._request_has_media_cache_context = lambda *args: False
+        generator._media_prefix_cache_allowed = lambda *args: False
+        generator._prepare_native_mtp_prompt_priming = lambda *args: None
+        generator._seed_native_mtp_from_prefill = lambda *args: None
+        generator._make_request_sampler = lambda req: lambda logits: module.mx.array([2])
+        rejected = module.MLLMBatchRequest(uid=1, request_id="rejected", prompt="one")
+        sibling = module.MLLMBatchRequest(uid=2, request_id="sibling", prompt="two")
+        errors = {
+            "context": PromptTooLongError(
+                8, 7, source=PromptTooLongError.DECLARED_CONTEXT_SOURCE
+            ),
+            "strict": MediaControlsUnmeetableError("below processor floor"),
+            "media": MediaInputError("unreadable image"),
+        }
+
+        def preprocess(req):
+            req.input_ids = module.mx.arange(8)[None, :]
+            if req is rejected:
+                raise errors[rejection]
+
+        generator._preprocess_request = preprocess
+        generator._run_vision_encoding = Mock(return_value=module.mx.zeros((1, 8, 4)))
+        original = [rejected, sibling] if with_sibling else [rejected]
+        batch = generator._process_prompts(original)
+        # _next owns removal from its queue using the original list length.
+        assert len(original) == (2 if with_sibling else 1)
+        assert [c.args[0].request_id for c in generator._run_vision_encoding.call_args_list] == (
+            ["sibling"] if with_sibling else []
+        )
+        assert [c.args[0].request_id for c in generator._media_scoped_cache_extra_keys.call_args_list] == (
+            ["sibling"] if with_sibling else []
+        )
+        assert generator._stats.prompt_tokens == (8 if with_sibling else 0)
+        assert len(generator._prefill_errors) == 1
+        assert generator._prefill_errors[0].request_id == "rejected"
+        assert generator._prefill_errors[0].error_code == (
+            "prompt_too_long" if rejection == "context" else errors[rejection].code
+        )
+        assert (batch.request_ids if batch else []) == (["sibling"] if with_sibling else [])
 
     def test_mllm_media_prompt_limit_runs_before_pixel_and_prefix_cache(self):
         """Rejecting a VLM media prompt must not create pixel/prefix cache entries."""

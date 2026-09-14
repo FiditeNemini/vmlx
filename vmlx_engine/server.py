@@ -1143,6 +1143,21 @@ def _prompt_too_long_response(
     from starlette.responses import JSONResponse
 
     limit = int(max_prompt_tokens or _max_prompt_tokens or 0)
+    if source == PromptTooLongError.DECLARED_CONTEXT_SOURCE:
+        # Raising a session prompt cap cannot enlarge the bundle's declared
+        # context. Keep that limit and its remedy truthful on JSON lanes too.
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "message": str(PromptTooLongError(
+                        estimated_tokens, int(max_prompt_tokens), source=source
+                    )),
+                    "type": "invalid_request_error",
+                    "code": "prompt_too_long",
+                }
+            },
+        )
     return JSONResponse(
         status_code=413,
         content={

@@ -9429,19 +9429,15 @@ class MLLMBatchGenerator:
         # scheduler's admission clamp): prompt + output must not run past the
         # positional ceiling; a binding clamp logs a clear context-exhaustion
         # notice instead of silently degrading past-ceiling.
-        sampling_params = getattr(request, "sampling_params", None)
-        if sampling_params is not None and getattr(
-            sampling_params, "max_tokens", None
-        ) is not None:
-            from vmlx_engine.context_limits import (
-                clamp_output_to_declared_context,
-            )
+        from vmlx_engine.context_limits import clamp_output_to_declared_context
 
-            sampling_params.max_tokens = clamp_output_to_declared_context(
-                prompt_tokens,
-                sampling_params.max_tokens,
-                request_id=str(request.request_id),
-            )
+        # MLLMScheduler copies SamplingParams into this flattened request;
+        # decode consumes request.max_tokens, not request.sampling_params.
+        request.max_tokens = clamp_output_to_declared_context(
+            prompt_tokens,
+            request.max_tokens,
+            request_id=str(request.request_id),
+        )
 
     def _maybe_capture_clean_ssm_boundary(
         self,
@@ -13739,6 +13735,7 @@ class MLLMBatchGenerator:
 
         self._drain_tight_memory_allocator("before_prefill")
 
+        rejected_request_ids: set[str] = set()
         for req in requests:
             if _prefill_cancelled(req):
                 _release_cancelled_prefill_request(req)
@@ -13763,6 +13760,7 @@ class MLLMBatchGenerator:
                 trace.stop("preprocess")
             except (MediaControlsUnmeetableError, MediaInputError) as strict_err:
                 trace.stop("preprocess")
+                rejected_request_ids.add(req.request_id)
                 logger.info(
                     "Rejected VLM prompt for %s before cache lookup/store: %s",
                     req.request_id,
@@ -13782,6 +13780,7 @@ class MLLMBatchGenerator:
                 continue
             except PromptTooLongError as prompt_err:
                 trace.stop("preprocess")
+                rejected_request_ids.add(req.request_id)
                 logger.info(
                     "Rejected VLM prompt for %s before cache lookup/store: %s",
                     req.request_id,
@@ -15263,9 +15262,13 @@ class MLLMBatchGenerator:
             )
             req._cache_execution = _lookup_execution
 
-        # A queued/lookup-stage cancellation must not start model work. Keep
-        # the input list itself unchanged: _next consumes its original length.
-        requests = [req for req in requests if not _prefill_cancelled(req)]
+        # Preprocessing rejection must leave the later forward loop too; an
+        # exception can occur after input_ids have already been populated.
+        # Keep the input list unchanged: _next consumes its original length.
+        requests = [
+            req for req in requests
+            if req.request_id not in rejected_request_ids and not _prefill_cancelled(req)
+        ]
 
         # Get token sequences and lengths
         input_ids_list = [

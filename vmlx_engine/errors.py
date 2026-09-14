@@ -5,6 +5,10 @@
 class PromptTooLongError(ValueError):
     """Raised when an exact tokenized prompt exceeds the configured context cap."""
 
+    # Travels through the existing scheduler error_source field, so the
+    # declared-context rejection survives worker/API reconstruction unchanged.
+    DECLARED_CONTEXT_SOURCE = "declared_context"
+
     def __init__(
         self,
         prompt_tokens: int,
@@ -17,6 +21,15 @@ class PromptTooLongError(ValueError):
         self.max_prompt_tokens = int(max_prompt_tokens)
         self.source = source
         self.request_id = request_id
+        if source == self.DECLARED_CONTEXT_SOURCE:
+            super().__init__(
+                f"prompt_too_long: tokenized prompt has {self.prompt_tokens} tokens; "
+                f"the model has a declared context of {self.max_prompt_tokens + 1} "
+                "tokens including input and output. At least one output token "
+                f"must remain (maximum input {self.max_prompt_tokens}). "
+                "Shorten the prompt/history or use a larger-context model."
+            )
+            return
         super().__init__(
             f"prompt_too_long: {source} has {self.prompt_tokens} tokens, "
             f"max prompt/context tokens is {self.max_prompt_tokens}"

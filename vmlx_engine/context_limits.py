@@ -29,6 +29,8 @@ import logging
 import os
 import threading
 
+from .errors import PromptTooLongError
+
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
@@ -71,8 +73,9 @@ def clamp_output_to_declared_context(
     the whole point is that context exhaustion must never be silent. When
     the declared ceiling is unknown (0) or the clamp is disabled, the
     requested value passes through unchanged. A prompt already at/over the
-    ceiling is left to the prompt-limit guard (this function never returns
-    a smaller-than-1 budget on its own).
+    ceiling cannot admit a positive output budget: raise the existing typed
+    prompt error before cache lookup/prefill, rather than returning a zero
+    budget or allowing generation beyond the declared limit.
     """
     if requested_max_tokens is None:
         return None
@@ -86,6 +89,13 @@ def clamp_output_to_declared_context(
         return requested_max_tokens
     remaining = declared - prompt_count
     if remaining <= 0:
+        if requested > 0:
+            raise PromptTooLongError(
+                prompt_count,
+                declared - 1,
+                source=PromptTooLongError.DECLARED_CONTEXT_SOURCE,
+                request_id=request_id,
+            )
         return requested_max_tokens
     if requested <= remaining:
         return requested

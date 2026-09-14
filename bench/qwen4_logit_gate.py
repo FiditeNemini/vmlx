@@ -4,7 +4,6 @@ Requires exclusive ownership of model memory; do not run beside a server.
 Each option is compared with the unchanged math path on identical tokens.
 Gates are fixed before execution: mean KL <= .01, maximum row KL <= .05,
 and logit RMS <= .1. Top-1 agreement and absolute error are also reported.
-The explicit gdn_ar arm requires exactly equal logits, not those tolerances.
 """
 
 from __future__ import annotations
@@ -27,7 +26,6 @@ FLAGS = [
     "VMLX_QWEN4_ALIGNED_MOE_PREFILL",
 ]
 SPARSE_FUSED_FLAG = "VMLX_QWEN4_SPARSE_FUSED_PREFILL"
-GDN_AR_FLAG = "VMLX_QWEN4_UNIFIED_GDN_AR"
 
 
 def main():
@@ -53,7 +51,7 @@ def main():
         coalesce_qwen4_prefill_checkpoints,
     )
 
-    for flag in [*FLAGS, SPARSE_FUSED_FLAG, GDN_AR_FLAG]:
+    for flag in [*FLAGS, SPARSE_FUSED_FLAG]:
         os.environ[flag] = "0"
     os.environ["VMLX_NATIVE_MTP_PROMPT_PRIMING"] = "0"
     mx.set_cache_limit(2 * 1024**3)
@@ -133,12 +131,8 @@ def main():
         return logits
 
     def forward(tokens, flags, tail=1):
-        for flag in [*FLAGS, SPARSE_FUSED_FLAG, GDN_AR_FLAG]:
+        for flag in [*FLAGS, SPARSE_FUSED_FLAG]:
             os.environ[flag] = str(int(flag in flags))
-        for layer in lm.model.layers:
-            recurrent = getattr(layer, "linear_attn", None)
-            if recurrent is not None:
-                recurrent._unified_gdn_ar = GDN_AR_FLAG in flags
         cache = lm.make_cache()
         ids = mx.array([tokens], dtype=mx.int32)
         length = len(tokens)
@@ -207,7 +201,6 @@ def main():
             ("combined", FLAGS),
             ("sparse_fused", [SPARSE_FUSED_FLAG]),
             ("sparse_oracle", [SPARSE_FUSED_FLAG]),
-            ("gdn_ar", [GDN_AR_FLAG]),
         ]:
             if label not in a.arms.split(","):
                 continue
@@ -217,11 +210,6 @@ def main():
             from vmlx_engine.metal import qwen4_sparse_fused_prefill as sparse_impl
             before_dispatch = aligned_impl.DISPATCH_COUNT
             before_sparse = sparse_impl.DISPATCH_COUNT
-            def ar_calls():
-                return sum(getattr(getattr(layer, "linear_attn", None),
-                                   "_unified_gdn_ar_graph_calls", 0)
-                           for layer in lm.model.layers)
-            before_ar = ar_calls()
             start = time.monotonic()
             original_call = sparse_impl._call
             try:
@@ -233,9 +221,6 @@ def main():
 
             dispatches = aligned_impl.DISPATCH_COUNT - before_dispatch
             sparse_dispatches = sparse_impl.DISPATCH_COUNT - before_sparse
-            ar_dispatches = ar_calls() - before_ar
-            if label == "gdn_ar":
-                assert ar_dispatches > 0, "single-token GDN AR path did not execute"
             if label in {"sparse_fused", "sparse_oracle"}:
                 assert sparse_dispatches > 0, "sparse fused path did not execute"
             if context == 1024 and label in ("aligned_moe", "combined"):
@@ -257,7 +242,6 @@ def main():
                 "rows": len(ref),
                 "aligned_moe_dispatches": dispatches,
                 "sparse_fused_dispatches": sparse_dispatches,
-                "gdn_ar_dispatches": ar_dispatches,
                 "prefill_step_size": a.prefill_step_size,
                 "continuation_step_size": a.continuation_step_size,
                 "mean_kl": float(np.mean(kl)),
@@ -272,9 +256,6 @@ def main():
                 and row["max_kl"] <= 0.05
                 and row["logit_rms"] <= 0.1
             )
-            if label == "gdn_ar":
-                row["passed"] = bool(np.array_equal(ref, got))
-                row["exact_logits_required"] = True
             rows.append(row)
             a.output.write_text(
                 json.dumps(

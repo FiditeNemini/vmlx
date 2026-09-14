@@ -27,6 +27,7 @@ import mlx.nn as nn
 import numpy as np
 from mlx_lm.models.cache import ArraysCache
 from vmlx_engine.metal.qwen4_verify_sdpa import qwen4_verify_sdpa
+from vmlx_engine.metal.qwen4_prefill_sdpa import qwen4_prefill_sdpa
 from vmlx_engine.metal.qwen4_qsa_mask import qsa_block_mask, qsa_mask_requested
 from vmlx_engine.metal.qwen4_hc_combine import (
     exact_hc_combine,
@@ -1887,6 +1888,11 @@ class QSAAttention(nn.Module):
                 else None
             ),
         )
+        if out is None:
+            out = qwen4_prefill_sdpa(
+                queries, keys, values, full_mask,
+                scale=self.scale, training=self.training,
+            )
         if out is None:
             out = mx.fast.scaled_dot_product_attention(
                 queries,

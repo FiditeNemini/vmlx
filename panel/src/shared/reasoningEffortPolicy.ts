@@ -1,6 +1,14 @@
 export const REASONING_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 export type ReasoningEffort = typeof REASONING_EFFORT_LEVELS[number]
+export type RemoteReasoningFormat = 'vmlx' | 'openai' | 'openrouter'
+
+export function remoteReasoningFormatForUrl(url?: string): RemoteReasoningFormat {
+  try {
+    if (new URL(url || '').hostname === 'openrouter.ai') return 'openrouter'
+  } catch { /* Unknown endpoints use the explicitly selected standard wire. */ }
+  return 'openai'
+}
 
 const REASONING_EFFORT_SET = new Set<string>(REASONING_EFFORT_LEVELS)
 
@@ -31,20 +39,20 @@ export interface ReasoningRequestFieldsInput {
   sessionHasReasoningParser: boolean
   detectedFamily?: string
   supportedReasoningEfforts?: readonly ReasoningEffort[]
-  /** Strict third-party APIs reject vMLX reasoning extensions. */
-  allowRequestControls?: boolean
+  remoteReasoningFormat?: RemoteReasoningFormat
+  wireApi?: 'completions' | 'responses'
+  defaultReasoningEffort?: ReasoningEffort
 }
 
 export function resolveReasoningEffortForRequest(
   input: ReasoningRequestFieldsInput,
 ): ReasoningEffort | undefined {
   const effort = normalizeReasoningEffort(input.reasoningEffort)
-  if (!effort || input.enableThinking === false || input.allowRequestControls === false) {
+  if (!effort || input.enableThinking === false) {
     return undefined
   }
 
   if (
-    !input.isRemote &&
     input.supportedReasoningEfforts !== undefined &&
     !input.supportedReasoningEfforts.includes(effort)
   ) {
@@ -59,7 +67,7 @@ export function resolveReasoningEffortForRequest(
   if (input.detectedFamily === 'hy3' && input.enableThinking !== true) {
     return undefined
   }
-  return input.sessionHasReasoningParser || input.detectedFamily === 'deepseek-v4'
+  return input.isRemote || input.sessionHasReasoningParser || input.detectedFamily === 'deepseek-v4'
     ? effort
     : undefined
 }
@@ -73,12 +81,38 @@ export function applyReasoningRequestFields(
   body: Record<string, any>,
   input: ReasoningRequestFieldsInput,
 ): void {
-  if (input.allowRequestControls === false) return
-
   // Resolve (and validate) before mutating the body. A stale unsupported saved
   // effort fails clearly instead of partially serializing or falling back to
   // the bundle default under a different label.
   const effort = resolveReasoningEffortForRequest(input)
+
+  // A remote API returns structured reasoning; it does not need a local text
+  // parser. Keep provider fields separate from vMLX template extensions. This
+  // same function is used again for every tool-result continuation.
+  if (input.isRemote && input.remoteReasoningFormat && input.remoteReasoningFormat !== 'vmlx') {
+    if (input.remoteReasoningFormat === 'openrouter' && input.wireApi !== 'responses') {
+      if (input.enableThinking !== undefined || effort) {
+        body.reasoning = {
+          ...(body.reasoning || {}),
+          ...(input.enableThinking !== undefined ? { enabled: input.enableThinking } : {}),
+          ...(effort ? { effort } : {}),
+        }
+      }
+      return
+    }
+    const nativeEffort = input.enableThinking === false ? 'none'
+      : effort ?? (input.enableThinking === true ? input.defaultReasoningEffort : undefined)
+    // Empty reasoning objects are provider Auto, not a portable Thinking On.
+    // Do not invent a tier or silently ignore the user's explicit choice.
+    if (input.enableThinking === true && !nativeEffort) {
+      throw new Error('Choose an explicit reasoning effort in Chat Settings for this remote API. Auto leaves the provider default unchanged.')
+    }
+    if (nativeEffort) {
+      if (input.wireApi === 'responses') body.reasoning = { ...(body.reasoning || {}), effort: nativeEffort }
+      else body.reasoning_effort = nativeEffort
+    }
+    return
+  }
 
   if (input.enableThinking !== undefined) {
     body.enable_thinking = input.enableThinking
@@ -89,7 +123,11 @@ export function applyReasoningRequestFields(
       enable_thinking: body.enable_thinking,
     }
   }
-  if (effort) body.reasoning_effort = effort
+  if (effort) {
+    if (input.isRemote && input.wireApi === 'responses') {
+      body.reasoning = { ...(body.reasoning || {}), effort }
+    } else body.reasoning_effort = effort
+  }
 
   // DSV4's versioned encoder is controlled by enable_thinking plus the exact
   // bundle effort. Do not add generic thinking_mode=reasoning here: the shared

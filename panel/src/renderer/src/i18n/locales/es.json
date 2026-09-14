@@ -421,6 +421,7 @@
       "defaultsEngineFallback": "Este paquete no proporcionó valores predeterminados del muestreador. Los campos sin cambios heredan los valores actuales del motor.",
       "defaultsPartial": "No se pudieron cargar algunos ajustes guardados o metadatos del modelo. Los valores no disponibles no se sustituyeron por ceros.",
       "defaultsUnavailable": "No se pudieron cargar los valores predeterminados del muestreador. Los controles se ocultan en vez de mostrar valores inventados.",
+      "remoteReasoningUnknown": "Este endpoint no anunció capacidades de razonamiento. Auto conserva su valor predeterminado. Las opciones explícitas se envían al proveedor, que puede rechazar ajustes no compatibles; Activado requiere un nivel de esfuerzo compatible.",
       "enableThinking": "Activar pensamiento",
       "thinkingAuto": "Auto",
       "thinkingOn": "Activado",

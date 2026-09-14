@@ -3,6 +3,7 @@ import {
   detectedConfigFromRemoteCapabilities,
   fetchRemoteModelCapabilities,
   generationDefaultsFromRemoteCapabilities,
+  capabilitiesFromOpenRouterModel,
 } from '../src/shared/remoteModelCapabilities'
 
 const DSV4_CAPABILITIES = {
@@ -46,6 +47,37 @@ const DSV4_CAPABILITIES = {
 }
 
 describe('remote model capability hydration', () => {
+  it('maps exact provider metadata without inventing parser or local context capacity', () => {
+    const caps = capabilitiesFromOpenRouterModel({ id: 'vendor/exact-model',
+      supported_parameters: ['tools', 'reasoning'], context_length: 1000000,
+      reasoning: { mandatory: true, supported_efforts: ['low', 'xhigh'], default_effort: 'xhigh' },
+      architecture: { input_modalities: ['text', 'image'] } })
+    const detected = detectedConfigFromRemoteCapabilities(caps)
+    expect(detected).toMatchObject({ supportsThinking: true, supportsInstructMode: false,
+      supportsTools: true, enableAutoToolChoice: true, remoteReasoningFormat: 'openrouter', supportedReasoningEfforts: ['low', 'xhigh'],
+      defaultReasoningEffort: 'xhigh', isMultimodal: true })
+    expect(detected).not.toHaveProperty('reasoningParser')
+    expect(detected).not.toHaveProperty('maxContextLength')
+  })
+  it('keeps provider efforts absent/empty distinct from null', () => {
+    const caps = (reasoning: unknown) => detectedConfigFromRemoteCapabilities(
+      capabilitiesFromOpenRouterModel({ id: 'vendor/model', reasoning }))
+    expect(caps({ mandatory: false })).toMatchObject({ supportedReasoningEfforts: [], supportsInstructMode: true })
+    expect(caps({ supported_efforts: [] })?.supportedReasoningEfforts).toEqual([])
+    expect(caps({ supported_efforts: null })?.supportedReasoningEfforts).toContain('xhigh')
+    expect(caps(undefined)).not.toHaveProperty('supportsThinking')
+  })
+  it('hydrates only the exact selected catalog id, without probing nonexistent capability routes', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ data: [
+      { id: 'vendor/other', supported_parameters: ['tools'] },
+      { id: 'vendor/selected', supported_parameters: ['reasoning'], reasoning: { mandatory: true, supported_efforts: ['high'] } },
+    ] }))) as unknown as typeof fetch
+    const caps = await fetchRemoteModelCapabilities({ remoteUrl: 'https://openrouter.ai/api/v1', remoteModel: 'vendor/selected' }, fetchImpl)
+    expect(caps).toMatchObject({ id: 'vendor/selected', supports_thinking: true, supports_tools: false, reasoning_efforts: ['high'] })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(fetchImpl).toHaveBeenCalledWith('https://openrouter.ai/api/v1/models', expect.any(Object))
+    expect(await fetchRemoteModelCapabilities({ remoteUrl: 'https://openrouter.ai/api/v1', remoteModel: 'missing' }, fetchImpl)).toBeNull()
+  })
   it('maps the live DSV4 parser, reasoning, cache, and modality contract', () => {
     const detected = detectedConfigFromRemoteCapabilities(DSV4_CAPABILITIES)
     expect(detected).toMatchObject({

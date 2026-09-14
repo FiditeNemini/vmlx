@@ -5,6 +5,7 @@ import { useTranslation } from '../../i18n'
 import { buildChatSettingsCompatibilityWarnings } from './chatSettingsCompatibility'
 import { buildChatSettingsResetOverrides } from '../../../../shared/chatSettingsResetPolicy'
 import { remoteServerBaseUrl } from '../../../../shared/remoteApiUrl'
+import { REASONING_EFFORT_LEVELS } from '../../../../shared/reasoningEffortPolicy'
 import {
   loadChatSettingsCompatibility,
   loadChatSettingsHydration,
@@ -157,7 +158,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
   const effectiveReasoningParser = reasoningParserIsEnabled(resolvedReasoningParser)
     ? resolvedReasoningParser
     : undefined
-  const thinkingSupported = resolvedReasoningParser !== 'none' && (
+  const thinkingSupported = isRemote ? detectedSupportsThinking !== false : resolvedReasoningParser !== 'none' && (
     detectedSupportsThinking === true ||
     (detectedSupportsThinking !== false && !!effectiveReasoningParser)
   )
@@ -230,7 +231,7 @@ export function ChatSettings({ chatId, session, reasoningParser, onClose, onOver
           ? ['low', 'medium', 'high']
           : effectiveReasoningParser === 'mistral'
             ? ['high']
-            : []
+            : isRemote ? [...REASONING_EFFORT_LEVELS] : []
     )
   const showReasoningEffort = selectableReasoningEfforts.length > 0
   const reasoningEffortLabel = (effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max'): string => {
@@ -438,6 +439,7 @@ function statusToneClass(status: string): string {
     toolParser: detectedToolParser,
     detectedFamily,
     supportedReasoningEfforts: detectedReasoningEfforts,
+    isRemote,
   })
   const inferenceReady = hydrationCurrent && overridesLoaded
   const partialHydrationFailure =
@@ -662,6 +664,11 @@ function statusToneClass(status: string): string {
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium">{t('chat.settings.enableThinking')}</span>
               </div>
+              {isRemote && detectedSupportsThinking === undefined && (
+                <p className="text-xs text-muted-foreground mb-2" data-vmlx-control="remote-reasoning-unknown">
+                  {t('chat.settings.remoteReasoningUnknown')}
+                </p>
+              )}
               {/* A family whose template never reads `enable_thinking` must not be
                   offered an Auto/On toggle: both values are ignored, so the control
                   renders, is interactive, and does nothing. MEASURED on Muse —

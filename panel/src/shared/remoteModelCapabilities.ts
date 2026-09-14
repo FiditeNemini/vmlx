@@ -1,4 +1,4 @@
-import { REASONING_EFFORT_LEVELS } from './reasoningEffortPolicy'
+import { REASONING_EFFORT_LEVELS, remoteReasoningFormatForUrl, type RemoteReasoningFormat } from './reasoningEffortPolicy'
 import { normalizeDetectedFamilyName } from './detectedFamilyNames'
 import { remoteServerBaseUrl } from './remoteApiUrl'
 export interface RemoteModelConnection {
@@ -26,6 +26,8 @@ export interface RemoteDetectedConfig {
   toolParser?: string
   reasoningParser?: string
   supportsThinking?: boolean
+  supportsTools?: boolean
+  remoteReasoningFormat?: RemoteReasoningFormat
   supportsInstructMode?: boolean
   supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>
   defaultReasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -192,6 +194,13 @@ export function detectedConfigFromRemoteCapabilities(
   const family = normalizedFamily(capabilities.family)
   const detected: RemoteDetectedConfig = {}
 
+  if (capabilities.reasoning_request_format === 'openrouter') {
+    detected.remoteReasoningFormat = 'openrouter'
+  } else if (typeof capabilities.supports_thinking === 'boolean' || reasoningParser) {
+    detected.remoteReasoningFormat = 'vmlx'
+  }
+  if (typeof capabilities.supports_tools === 'boolean') detected.supportsTools = capabilities.supports_tools
+
   if (family) detected.family = family
   if (toolParser) detected.toolParser = toolParser
   if (reasoningParser) detected.reasoningParser = reasoningParser
@@ -201,7 +210,7 @@ export function detectedConfigFromRemoteCapabilities(
   if (typeof capabilities.supports_instruct_mode === 'boolean') {
     detected.supportsInstructMode = capabilities.supports_instruct_mode
   }
-  if (efforts.length > 0) detected.supportedReasoningEfforts = efforts
+  if (Array.isArray(capabilities.reasoning_efforts)) detected.supportedReasoningEfforts = efforts
   if (defaultEffort && REASONING_EFFORTS.has(defaultEffort)) {
     detected.defaultReasoningEffort = defaultEffort as 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   }
@@ -215,7 +224,8 @@ export function detectedConfigFromRemoteCapabilities(
   if (typeof cache.subtype === 'string' && cache.subtype.trim()) detected.cacheSubtype = cache.subtype.trim()
   if (typeof cache.paged === 'boolean') detected.usePagedCache = cache.paged
   if (typeof capabilities.supports_tools === 'boolean' || toolParser) {
-    detected.enableAutoToolChoice = capabilities.supports_tools !== false && Boolean(toolParser)
+    detected.enableAutoToolChoice = capabilities.supports_tools === true ||
+      (capabilities.supports_tools !== false && Boolean(toolParser))
   }
   if (runtimeModalities.length > 0) detected.isMultimodal = runtimeHasMedia
   if (declaredModalities.length > 0 && runtimeModalities.length > 0) {
@@ -283,6 +293,31 @@ export function detectedConfigFromRemoteCapabilities(
   return Object.keys(detected).length > 0 ? detected : null
 }
 
+/** Provider-native metadata, selected by exact model id rather than its name. */
+export function capabilitiesFromOpenRouterModel(value: unknown): JsonRecord | null {
+  const model = record(value)
+  const id = model && nonEmptyString(model.id)
+  if (!model || !id) return null
+  const parameters = Array.isArray(model.supported_parameters) ? stringArray(model.supported_parameters) : undefined
+  const reasoning = record(model.reasoning)
+  const result: JsonRecord = { id, reasoning_request_format: 'openrouter' }
+  if (parameters) {
+    result.supports_tools = parameters.includes('tools')
+    result.supports_thinking = parameters.includes('reasoning') || parameters.includes('reasoning_effort')
+  }
+  if (reasoning) {
+    result.supports_thinking = true
+    if (typeof reasoning.mandatory === 'boolean') result.supports_instruct_mode = !reasoning.mandatory
+    // Missing efforts is distinct from null (provider allows all its tiers).
+    result.reasoning_efforts = reasoning.supported_efforts === null
+      ? [...REASONING_EFFORT_LEVELS] : reasoningEfforts(reasoning.supported_efforts)
+    if (typeof reasoning.default_effort === 'string') result.default_reasoning_effort = reasoning.default_effort
+  }
+  const modalities = stringArray(record(model.architecture)?.input_modalities)
+  if (modalities.length) result.modalities = modalities
+  return result
+}
+
 /**
  * Fetch model-specific capabilities first for multi-model gateways, then the
  * single-model compatibility route. Credentials stay in Electron main and are
@@ -299,6 +334,18 @@ export async function fetchRemoteModelCapabilities(
   if (connection.remoteApiKey) headers.Authorization = `Bearer ${connection.remoteApiKey}`
   if (connection.remoteOrganization) headers['OpenAI-Organization'] = connection.remoteOrganization
   const model = nonEmptyString(connection.remoteModel)
+  if (remoteReasoningFormatForUrl(connection.remoteUrl) === 'openrouter') {
+    if (!model) return null
+    try {
+      const response = await fetchImpl(`${baseUrl}/v1/models`, {
+        headers, signal: AbortSignal.timeout(Math.max(1, Math.floor(timeoutMs))),
+      })
+      if (!response.ok) return null
+      const payload = record(await response.json())
+      const models = Array.isArray(payload?.data) ? payload.data : []
+      return capabilitiesFromOpenRouterModel(models.find(entry => record(entry)?.id === model))
+    } catch { return null }
+  }
   const attempts = [
     ...(model
       ? [{ path: `/v1/models/${encodeURIComponent(model)}/capabilities`, requireIdentity: false }]

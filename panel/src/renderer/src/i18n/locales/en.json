@@ -421,6 +421,7 @@
       "defaultsEngineFallback": "No sampler defaults were available from this bundle. Unchanged fields inherit the engine's live defaults.",
       "defaultsPartial": "Some saved settings or model metadata could not be loaded. Unavailable values were not replaced with zeros.",
       "defaultsUnavailable": "Sampler defaults could not be loaded. Controls are hidden instead of showing invented values.",
+      "remoteReasoningUnknown": "This endpoint did not advertise reasoning capabilities. Auto keeps its default. Explicit choices are sent to the provider, which may reject unsupported settings; On requires a supported effort level.",
       "enableThinking": "Enable Thinking",
       "thinkingAuto": "Auto",
       "thinkingOn": "On",

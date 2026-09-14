@@ -94,12 +94,12 @@ describe('chat settings cross-family compatibility warnings', () => {
     })).toContain('Built-in tools are enabled, but this model has no detected tool parser. Tool calls may not round-trip.')
   })
 
-  it('disables Thinking buttons when no reasoning parser is detected', () => {
+  it('keeps local parser gating and uses advertised capabilities for remote controls', () => {
     const source = readFileSync('src/renderer/src/components/chat/ChatSettings.tsx', 'utf8')
 
     expect(source).toContain('const [detectedSupportsThinking, setDetectedSupportsThinking]')
     expect(source).toContain('const resolvedReasoningParser = resolveEffectiveReasoningParser({')
-    expect(source).toContain("const thinkingSupported = resolvedReasoningParser !== 'none' && (")
+    expect(source).toContain("const thinkingSupported = isRemote ? detectedSupportsThinking !== false : resolvedReasoningParser !== 'none' && (")
     expect(source).toContain('reasoningParserIsEnabled(resolvedReasoningParser)')
     expect(source).toContain('const showReasoningEffort = selectableReasoningEfforts.length > 0')
     expect(source).toContain('const displayedEnableThinking = thinkingSupported ? displayedOverrides.enableThinking : undefined')

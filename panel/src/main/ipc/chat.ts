@@ -14,6 +14,7 @@ import {
 } from "./models";
 import type { RemoteDetectedConfig } from "../../shared/remoteModelCapabilities";
 import { remoteServerBaseUrl } from "../../shared/remoteApiUrl";
+import { accumulateChatToolCallDelta } from "../../shared/chatToolCallDeltas";
 import {
   BUILTIN_TOOLS,
   isBuiltinTool,
@@ -66,6 +67,8 @@ import { buildToolMediaFollowupContent } from "../../shared/toolMediaFollowup";
 import { dsv4OutputBudget } from "../../shared/dsv4RequestBudget";
 import {
   applyReasoningRequestFields,
+  remoteReasoningFormatForUrl,
+  type RemoteReasoningFormat,
   type ReasoningEffort,
 } from "../../shared/reasoningEffortPolicy";
 import {
@@ -328,7 +331,8 @@ function summarizeRequestForLog(bodyJson: string, useResponsesApi: boolean): Rec
       repetition_penalty: body.repetition_penalty,
       enable_thinking: body.enable_thinking,
       thinking_mode: body.thinking_mode,
-      reasoning_effort: body.reasoning_effort,
+      reasoning_effort: body.reasoning_effort ?? body.reasoning?.effort,
+      reasoning_enabled: body.reasoning?.enabled,
       reasoning_strength: body.chat_template_kwargs?.reasoning_strength,
       max_thinking_tokens: body.max_thinking_tokens,
       image_token_budget: body.image_token_budget,
@@ -1071,7 +1075,10 @@ export function registerChatHandlers(
       let thinkingBudgetSupported: boolean | undefined;
       let supportsThinkingBudget: boolean | undefined;
       let supportsInstructMode: boolean | undefined;
+      let supportsThinking: boolean | undefined;
       let supportedReasoningEfforts: ReasoningEffort[] | undefined;
+      let remoteReasoningFormat: RemoteReasoningFormat | undefined;
+      let defaultReasoningEffort: ReasoningEffort | undefined;
       let chatNativeMtp: RemoteDetectedConfig['nativeMtp'];
       let chatSessionConfig: Record<string, unknown> = {};
       let sessionImageTokenBudget: number | undefined;
@@ -1144,7 +1151,10 @@ export function registerChatHandlers(
             );
             supportsThinkingBudget = detected.supportsThinkingBudget;
             supportsInstructMode = detected.supportsInstructMode;
+            supportsThinking = detected.supportsThinking;
             supportedReasoningEfforts = detected.supportedReasoningEfforts;
+            remoteReasoningFormat = detected.remoteReasoningFormat;
+            defaultReasoningEffort = detected.defaultReasoningEffort;
             chatNativeMtp = detected.nativeMtp;
             timeoutSeconds = effectiveFamilyRequestTimeoutSeconds(
               timeoutSeconds,
@@ -1625,10 +1635,14 @@ export function registerChatHandlers(
             chatSessionConfig,
             chatNativeMtp,
           );
-      if (!isRemote && supportsInstructMode === false && overrides?.enableThinking === false) {
+      if (supportsInstructMode === false && overrides?.enableThinking === false) {
         throw new Error(
           "This model has no native Thinking Off/Instruct mode. Open Chat Settings and choose Auto or On.",
         );
+      }
+      if (isRemote && supportsThinking === false &&
+          (overrides.enableThinking === true || (overrides.enableThinking !== false && overrides.reasoningEffort))) {
+        throw new Error('This remote model advertises no reasoning support. Open Chat Settings and choose Auto.');
       }
 
       // Build request messages with system prompt if set
@@ -2396,6 +2410,9 @@ export function registerChatHandlers(
               sessionHasReasoningParser,
               detectedFamily: chatDetectedFamily,
               supportedReasoningEfforts,
+              wireApi: 'responses',
+              remoteReasoningFormat: isRemote ? remoteReasoningFormat ?? remoteReasoningFormatForUrl(apiUrl) : undefined,
+              defaultReasoningEffort,
             });
             applyThinkingBudget(obj);
             // VLM video sampling — forward to engine only when session
@@ -2458,17 +2475,6 @@ export function registerChatHandlers(
             }
             // Only explicit On/Off is serialized. Auto stays omitted so the
             // provider or local engine can apply the model's native policy.
-            // STRICT ENV: Filter out enable_thinking for strict generic 3rd-party API hosts that throw 400 Bad Request.
-            const isStrictApi =
-              isRemote &&
-              apiUrl &&
-              (apiUrl.includes("api.openai.com") ||
-                apiUrl.includes("api.groq.com") ||
-                apiUrl.includes("api.together.xyz") ||
-                apiUrl.includes("api.anthropic.com") ||
-                apiUrl.includes("openrouter.ai") ||
-                apiUrl.includes("api.deepseek.com"));
-
             applyReasoningRequestFields(obj, {
               enableThinking: effectiveEnableThinkingOverride,
               reasoningEffort: overrides?.reasoningEffort,
@@ -2476,7 +2482,9 @@ export function registerChatHandlers(
               sessionHasReasoningParser,
               detectedFamily: chatDetectedFamily,
               supportedReasoningEfforts,
-              allowRequestControls: !isStrictApi,
+              wireApi: 'completions',
+              remoteReasoningFormat: isRemote ? remoteReasoningFormat ?? remoteReasoningFormatForUrl(apiUrl) : undefined,
+              defaultReasoningEffort,
             });
             applyThinkingBudget(obj);
             // VLM video sampling — local engine only (strict 3rd-party APIs
@@ -3552,40 +3560,13 @@ export function registerChatHandlers(
               // streaming (OpenAI-style: first chunk has name, subsequent chunks append arguments)
               if (choice?.tool_calls && Array.isArray(choice.tool_calls)) {
                 for (const tc of choice.tool_calls) {
-                  const fn = tc.function;
-                  const idx = tc.index ?? -1;
-                  if (fn?.name) {
-                    // New tool call: initialize (use index for positional tracking)
-                    const toolCall = {
-                      id:
-                        tc.id ||
-                        `call_${uuidv4().replace(/-/g, "").slice(0, 16)}`,
-                      function: {
-                        name: fn.name,
-                        arguments: fn.arguments || "",
-                      },
-                    };
-                    if (idx >= 0) {
-                      receivedToolCalls[idx] = toolCall;
-                    } else {
-                      receivedToolCalls.push(toolCall);
-                    }
+                  accumulateChatToolCallDelta(receivedToolCalls, tc, () =>
+                    `call_${uuidv4().replace(/-/g, "").slice(0, 16)}`,
+                  );
+                  if (typeof tc.function?.name === 'string' && tc.function.name) {
                     console.log(
-                      `[CHAT] Tool call detected: ${fn.name}(${(fn.arguments || "").slice(0, 100)})`,
+                      `[CHAT] Tool call detected: ${tc.function.name}(${(tc.function.arguments || "").slice(0, 100)})`,
                     );
-                  } else if (fn?.arguments && idx >= 0) {
-                    // Incremental argument chunk: accumulate arguments for existing tool call
-                    if (receivedToolCalls[idx]) {
-                      receivedToolCalls[idx].function.arguments += fn.arguments;
-                    } else {
-                      // Out-of-order index: initialize a placeholder to prevent sparse array crash
-                      receivedToolCalls[idx] = {
-                        id:
-                          tc.id ||
-                          `call_${uuidv4().replace(/-/g, "").slice(0, 16)}`,
-                        function: { name: "", arguments: fn.arguments },
-                      };
-                    }
                   }
                 }
               }

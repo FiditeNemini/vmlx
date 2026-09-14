@@ -13,6 +13,7 @@ export interface ChatSettingsCompatibilityInput {
   toolParser?: string
   detectedFamily?: string
   supportedReasoningEfforts?: Array<'low' | 'medium' | 'high' | 'xhigh' | 'max'>
+  isRemote?: boolean
 }
 
 function basename(path?: string): string {
@@ -74,12 +75,12 @@ export function buildChatSettingsCompatibilityWarnings(input: ChatSettingsCompat
     )
   }
 
-  if (overrides.enableThinking === true && !reasoningParser) {
+  if (!input.isRemote && overrides.enableThinking === true && !reasoningParser) {
     warnings.push('Saved Thinking On cannot take effect because this model has no detected reasoning parser.')
   }
 
   if (overrides.reasoningEffort) {
-    if (!reasoningParser) {
+    if (!input.isRemote && !reasoningParser) {
       warnings.push(
         `Saved reasoning effort "${overrides.reasoningEffort}" cannot take effect because this model has no detected reasoning parser.`,
       )
@@ -100,12 +101,12 @@ export function buildChatSettingsCompatibilityWarnings(input: ChatSettingsCompat
         ? `Auto or ${supportedReasoningEfforts.map(level => level[0].toUpperCase() + level.slice(1)).join('/')}`
         : 'Auto or High'
       warnings.push(`Saved reasoning effort "${overrides.reasoningEffort}" is not supported by ${modelName}. Use ${choices}.`)
-    } else if (!parserUsesEffortLevels(reasoningParser, detectedFamily, supportedReasoningEfforts)) {
+    } else if (!input.isRemote && !parserUsesEffortLevels(reasoningParser, detectedFamily, supportedReasoningEfforts)) {
       warnings.push(`Saved reasoning effort "${overrides.reasoningEffort}" is not used by ${reasoningParser}. Reset the chat setting or switch to Auto.`)
     }
   }
 
-  if (overrides.builtinToolsEnabled === true && !toolParser) {
+  if (!input.isRemote && overrides.builtinToolsEnabled === true && !toolParser) {
     warnings.push('Built-in tools are enabled, but this model has no detected tool parser. Tool calls may not round-trip.')
   }
 

@@ -69,8 +69,10 @@ def _assert_exact(left, right):
         assert left == right
 
 
+@pytest.mark.parametrize("stride", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [mx.float32, mx.float16, mx.bfloat16, "mixed_quant"])
-def test_eager_dispatch_exact_connected_cache_on_caller_stream(monkeypatch, dtype):
+def test_eager_dispatch_exact_connected_cache_on_caller_stream(monkeypatch, dtype, stride):
+    monkeypatch.setenv("VMLX_QWEN4_AR_SUBMISSION_STRIDE", str(stride))
     model = _model(monkeypatch)
     mixed = dtype == "mixed_quant"
     target_dtype = mx.float16 if mixed else dtype
@@ -114,12 +116,16 @@ def test_eager_dispatch_exact_connected_cache_on_caller_stream(monkeypatch, dtyp
                 arm.append((_snapshot(logits), _cache_snapshot(cache)))
             results.append(tuple(arm))
     _assert_exact(*results)
-    assert len(observed_streams) == 4 * len(model.layers)
+    schedule = model.model._ar_submission_schedule
+    single_row_submits = len(model.layers) if schedule is None else sum(schedule)
+    assert len(observed_streams) == 2 * len(model.layers) + 2 * single_row_submits
     assert all(item == stream for item in observed_streams)
 
 
+@pytest.mark.parametrize("stride", [1, 2, 4])
 @pytest.mark.parametrize("accepted_drafts", [0, 1, 2, 3])
-def test_eager_dispatch_exact_verify_rollback_and_continuation(monkeypatch, accepted_drafts):
+def test_eager_dispatch_exact_verify_rollback_and_continuation(monkeypatch, accepted_drafts, stride):
+    monkeypatch.setenv("VMLX_QWEN4_AR_SUBMISSION_STRIDE", str(stride))
     from vmlx_engine.mllm_batch_generator import _native_mtp_rollback_to_confirmed
 
     model = _model(monkeypatch)
@@ -210,3 +216,46 @@ def test_eager_dispatch_submits_before_second_layer_ple_read(monkeypatch):
     assert [index for index, layer in enumerate(model.layers) if layer.ple] == [1]
     assert events[:2] == ["submit", "ple_read"]
     assert events.count("submit") == len(model.layers)
+
+
+@pytest.mark.parametrize("stride", [2, 4])
+def test_ar_cadence_is_single_sequence_single_row_only(monkeypatch, stride):
+    monkeypatch.setenv("VMLX_QWEN4_AR_SUBMISSION_STRIDE", str(stride))
+    model = _model(monkeypatch)
+    schedule = model.model._ar_submission_schedule
+    assert schedule[0] and schedule[-1]
+    assert all(schedule[i - 1] for i, layer in enumerate(model.layers) if i and layer.ple)
+    events = []
+    submit = mx.async_eval
+    gather = language.ShardedNGramEmbedding.__call__
+
+    def record_submit(value):
+        events.append("submit")
+        submit(value)
+
+    def record_gather(self, *args, **kwargs):
+        events.append("ple_read")
+        return gather(self, *args, **kwargs)
+
+    monkeypatch.setattr(mx, "async_eval", record_submit)
+    monkeypatch.setattr(language.ShardedNGramEmbedding, "__call__", record_gather)
+    for batch, rows in ((1, 1), (1, 2), (1, 4), (2, 1), (2, 4)):
+        events.clear()
+        ids = mx.array([[11 + i for i in range(rows)]] * batch)
+        mx.eval(model(ids, cache=model.make_cache()).logits)
+        expected = sum(schedule) if (batch, rows) == (1, 1) else len(model.layers)
+        assert events.count("submit") == expected
+        assert events[:2] == ["submit", "ple_read"]
+
+
+@pytest.mark.parametrize("value", [None, "", "bad", "0", "-1", "3", "99"])
+def test_ar_cadence_default_and_invalid_values_preserve_original(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("VMLX_QWEN4_AR_SUBMISSION_STRIDE", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_QWEN4_AR_SUBMISSION_STRIDE", value)
+    model = _model(monkeypatch)
+    assert model.model._ar_submission_stride == 1
+    assert model.model._ar_submission_schedule is None
+    monkeypatch.setenv("VMLX_QWEN4_AR_SUBMISSION_STRIDE", "4")
+    assert model.model._ar_submission_schedule is None

@@ -2242,6 +2242,19 @@ class Qwen4ExpTextModel(nn.Module):
         self._ple_prefetch = os.environ.get("VMLX_QWEN4_PLE_PREFETCH") == "1"
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
         self.layers = [DecoderLayer(args, i) for i in range(args.num_hidden_layers)]
+        # Diagnostic cadence for single-sequence AR only. Keep the first
+        # submission, each PLE read's predecessor and the last layer eager;
+        # never delay the SSD read behind a wholly lazy prefix. Default 1
+        # preserves the qualified per-layer schedule, including MTP widths.
+        stride = _env_rows("VMLX_QWEN4_AR_SUBMISSION_STRIDE", 1)
+        self._ar_submission_stride = stride if stride in (1, 2, 4) else 1
+        self._ar_submission_schedule = tuple(
+            i == 0 or i == len(self.layers) - 1
+            or i % self._ar_submission_stride == 0
+            or self.layers[i + 1].ple is not None
+            for i in range(len(self.layers))
+        ) if self._ar_submission_stride > 1 else None
+        self._ar_submission_logged = False
         self.hyper_connection_mixer = GatedResidual(args, use_combine=False)
         self.fa_idx = next(
             (i for i, layer in enumerate(self.layers) if not layer.is_linear),
@@ -2301,6 +2314,17 @@ class Qwen4ExpTextModel(nn.Module):
                 len(self.layers),
             )
             self._eager_dispatch_logged = True
+        ar_schedule = (
+            self._ar_submission_schedule
+            if eager_dispatch and tuple(inputs.shape) == (1, 1) else None
+        )
+        if ar_schedule is not None and not self._ar_submission_logged:
+            logger.info(
+                "Qwen AR submission cadence active: stride=%d submissions=%d "
+                "layers=%d rows=1 batch=1 stream=caller",
+                self._ar_submission_stride, sum(ar_schedule), len(self.layers),
+            )
+            self._ar_submission_logged = True
         if _layer_fp:
             _log_layer_fingerprint(-1, h, cache[0] if cache else None)  # input to layer 0
             if _contiguous_state_experiment_enabled():
@@ -2335,7 +2359,7 @@ class Qwen4ExpTextModel(nn.Module):
                     last_token_only=last_token_only and layer_index == len(self.layers) - 1,
                     ple_prefetch=prepared_reads.get(layer_index),
                 )
-                if eager_dispatch:
+                if eager_dispatch and (ar_schedule is None or ar_schedule[layer_index]):
                     # Dependencies remain on the caller's MLX stream; cache
                     # consumers and terminal durability fences stay unchanged.
                     mx.async_eval(h)

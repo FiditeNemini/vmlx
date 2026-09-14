@@ -29,6 +29,7 @@ from mlx_lm.models.cache import ArraysCache
 from vmlx_engine.metal.qwen4_verify_sdpa import qwen4_verify_sdpa
 from vmlx_engine.metal.qwen4_prefill_sdpa import qwen4_prefill_sdpa
 from vmlx_engine.metal.qwen4_qsa_mask import qsa_block_mask, qsa_mask_requested
+from vmlx_engine.metal.sparse_merge_topk import sparse_merge_topk
 from vmlx_engine.metal.qwen4_hc_combine import (
     exact_hc_combine,
     exact_hc_combine_requested,
@@ -1499,6 +1500,7 @@ class QSAIndexer(nn.Module):
             "qwen4_exp"
         )
         self._fused_block_mask = qsa_mask_requested()
+        self._merge_select = os.environ.get("VMLX_QWEN4_QSA_MERGE_SELECT", "0") == "1"
 
     @staticmethod
     def _position_payload(position_ids: mx.array, batch: int, length: int) -> mx.array:
@@ -1613,9 +1615,13 @@ class QSAIndexer(nn.Module):
         masked_scores = mx.where(complete[None], scores, _QSA_NEG_INF)
 
         k_sel = min(self.block_topk, num_blocks)
-        top_idx = mx.argpartition(-masked_scores, kth=k_sel - 1, axis=-1)[
-            ..., :k_sel
-        ]  # [B,S,k]
+        top_idx = None
+        if self._merge_select:
+            top_idx = sparse_merge_topk(-masked_scores, k=k_sel, enabled=True)
+        if top_idx is None:
+            top_idx = mx.argpartition(-masked_scores, kth=k_sel - 1, axis=-1)[
+                ..., :k_sel
+            ]  # [B,S,k]
         if return_blocks:
             # The direct native consumer reads a valid chronological prefix.
             # Sorting preserves selection and puts incomplete blocks last.

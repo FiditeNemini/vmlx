@@ -34,7 +34,12 @@ try:
 except ImportError:
     HAS_MLX = False
 
-from .paged_cache import BlockTable, PagedCacheManager, compute_block_hash
+from .paged_cache import (
+    BlockTable,
+    PagedCacheManager,
+    compute_block_hash,
+    update_block_hash_extras,
+)
 from .cache_key import (
     CACHE_EXTRA_SCOPES_KEY,
     cache_extra_keys_for_token_range,
@@ -8716,7 +8721,7 @@ class BlockAwarePrefixCache:
     ):
         """Yield ``(prefix_len, hash)`` for each block-aligned prefix.
 
-        The writer walks every block-aligned prefix of the prompt. Hashing
+        The original writer walked every block-aligned prefix of the prompt. Hashing
         each prefix FROM SCRATCH makes that quadratic in the
         prompt: block i re-hashes i*block_size tokens, so the total is
         O(len(tokens)^2 / block_size). At 61k tokens with 64-token blocks that
@@ -8732,7 +8737,9 @@ class BlockAwarePrefixCache:
         (declared at __init__, never persisted, never compared against an L2
         record) and key consumers and the writer take their keys from here —
         but it is exactly why this is env-gated and default OFF until it has a
-        live A/B on a long conversation.
+        live A/B on a long conversation. The default legacy writer now also
+        uses incremental hashing, but preserves its original full-prefix keys
+        instead of changing to this chain's distinct keys.
         """
         parent = None
         total = len(tokens)
@@ -8749,6 +8756,54 @@ class BlockAwarePrefixCache:
                 ),
             )
             yield end, parent.hex()
+
+    def _legacy_prefix_index_hash_sequence(
+        self,
+        tokens: List[int],
+        num_blocks: int,
+        cache_extra_keys: Optional[Any] = None,
+    ):
+        """Yield legacy keys without serializing every growing prefix again.
+
+        Unscoped keys hash comma-separated ``str`` values and truncate the hex
+        digest to 16 characters. Scoped keys hash the root seed, the exact
+        ``str(tuple(tokens))`` bytes and canonical extras. Keep both token hash
+        states when conditions are present: a media scope may activate only
+        after an earlier boundary that still needs the unscoped key format.
+        Copying a SHA state at each boundary changes neither format nor keys.
+        """
+        plain = hashlib.sha256()
+        scoped = (
+            hashlib.sha256(b"vmlx-engine-root(")
+            if cache_extra_keys is not None else None
+        )
+        for index in range(num_blocks):
+            start = index * self.block_size
+            end = min(start + self.block_size, len(tokens))
+            if start >= end:
+                break
+            block_tokens = tokens[start:end]
+            if start:
+                plain.update(b",")
+            plain.update(
+                ",".join(str(token) for token in block_tokens).encode("utf-8")
+            )
+            if scoped is not None:
+                if start:
+                    scoped.update(b", ")
+                scoped.update(
+                    ", ".join(repr(token) for token in block_tokens).encode("utf-8")
+                )
+            extra = cache_extra_keys_for_token_range(cache_extra_keys, 0, end)
+            if extra is None:
+                key = plain.hexdigest()[:16]
+            else:
+                completed = scoped.copy()
+                # Python's one-element tuple includes a trailing comma.
+                completed.update(b",)" if end == 1 else b")")
+                update_block_hash_extras(completed, extra)
+                key = completed.hexdigest()
+            yield end, key
 
     def _update_prefix_index(
         self,
@@ -8774,15 +8829,14 @@ class BlockAwarePrefixCache:
                         ),
                     )
                 return
-            for i in range(1, len(block_ids) + 1):
-                prefix_len = min(i * self.block_size, len(tokens))
-                prefix_tokens = tokens[:prefix_len]
-                prefix_hash = self._prefix_index_hash(
-                    prefix_tokens,
-                    cache_extra_keys=cache_extra_keys,
-                )
+            for i, (prefix_len, prefix_hash) in enumerate(
+                self._legacy_prefix_index_hash_sequence(
+                    tokens, len(block_ids), cache_extra_keys=cache_extra_keys
+                ),
+                start=1,
+            ):
                 self._prefix_index[prefix_hash] = (
-                    prefix_tokens,
+                    tokens[:prefix_len],
                     block_ids[:i],
                     self._prefix_index_extra_marker(
                         cache_extra_keys, prefix_len

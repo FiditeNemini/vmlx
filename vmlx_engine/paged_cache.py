@@ -142,6 +142,17 @@ def compute_block_hash(
     # Include token content
     hasher.update(bytes(str(tuple(token_ids)), "utf-8"))
 
+    update_block_hash_extras(hasher, extra_keys)
+    return BlockHash(hasher.digest())
+
+
+def update_block_hash_extras(hasher: Any, extra_keys: Optional[Any]) -> None:
+    """Append the unchanged canonical condition encoding to a hash state.
+
+    The prefix index can copy an incrementally prepared token hash and finish
+    it here. Sharing this encoder preserves the native block hash's exact byte
+    contract for both paths, including causal scopes and bfloat16 arrays.
+    """
     # Include extra keys if present.
     #
     # The encoding is canonical: every node contributes a type tag and a
@@ -211,8 +222,6 @@ def compute_block_hash(
                 )
 
         _hash_extra(extra_keys)
-
-    return BlockHash(hasher.digest())
 
 
 def _native_dsv4_interval_from_payload(

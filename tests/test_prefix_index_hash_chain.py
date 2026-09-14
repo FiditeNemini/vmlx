@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The prefix index hashed every block-aligned prefix FROM SCRATCH.
 
-The writer still walks every block-aligned prefix of the prompt.
-Hashing each one from scratch makes that quadratic: block i re-hashes
+The writer walks every block-aligned prefix of the prompt.
+The original from-scratch hashing was quadratic: block i re-hashes
 i*block_size tokens, so the total is O(len(tokens)^2 / block_size). At 61k
 tokens with 64-token blocks that is ~29 MILLION token-hashes per call — and it
 runs under `paged_cache._lock`, so every other cache operation waits behind it.
@@ -18,7 +18,9 @@ principle because `_prefix_index` is a plain in-memory dict rebuilt per process
 and key consumers and the writer draw their keys from the same helper. The
 lookup scans entries longest-first and validates their native chain identity
 without deriving those index keys. The chained writer stays off until it has
-a live A/B on a long conversation.
+a live A/B on a long conversation. The legacy writer now also hashes
+incrementally while retaining byte-identical full-prefix keys; its equivalence
+and operation-count checks live in test_prefix_index_writer.py.
 """
 
 from __future__ import annotations

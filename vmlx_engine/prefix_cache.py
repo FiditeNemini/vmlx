@@ -3437,6 +3437,7 @@ class BlockAwarePrefixCache:
         best_match = self._find_best_prefix_match(
             tokens,
             cache_extra_keys=cache_extra_keys,
+            min_prefix_len=num_cached,
         )
         if cached_blocks and best_match:
             if len(best_match[0]) > num_cached:
@@ -8532,73 +8533,36 @@ class BlockAwarePrefixCache:
         self,
         tokens: List[int],
         cache_extra_keys: Optional[Any] = None,
+        *,
+        min_prefix_len: int = 0,
     ) -> Optional[Tuple[List[int], List[int]]]:
         """Find and pin the best matching prefix-index entry atomically."""
         with self.paged_cache._lock:
             best_match = None
-            best_len = 0
-            # Try progressively longer prefixes.
-            if self._chained_prefix_index_hash:
-                candidates = list(
-                    self._prefix_index_hash_sequence(
-                        tokens,
-                        len(tokens) // self.block_size,
-                        cache_extra_keys=cache_extra_keys,
-                    )
-                )
-            else:
-                candidates = [
-                    (
-                        n * self.block_size,
-                        self._prefix_index_hash(
-                            tokens[: n * self.block_size],
-                            cache_extra_keys=cache_extra_keys,
-                        ),
-                    )
-                    for n in range(1, len(tokens) // self.block_size + 1)
-                    if n * self.block_size <= len(tokens)
-                ]
-            for prefix_len, prefix_hash in candidates:
-                prefix_tokens = tokens[:prefix_len]
-
-                if prefix_hash in self._prefix_index:
-                    entry = self._prefix_index[prefix_hash]
-                    cached_tokens, block_ids = entry[:2]
-                    cached_extra = entry[2] if len(entry) > 2 else None
-                    if cached_extra != self._prefix_index_extra_marker(
-                        cache_extra_keys, prefix_len
-                    ):
-                        continue
-                    if cached_tokens == prefix_tokens and len(cached_tokens) > best_len:
-                        valid = self._prefix_index_blocks_are_current(
-                            cached_tokens,
-                            block_ids,
-                            cache_extra_keys=cache_extra_keys,
-                        )
-                        if valid:
-                            best_match = (cached_tokens, block_ids)
-                            best_len = len(cached_tokens)
-                        elif self._prefix_index.get(prefix_hash) is entry:
-                            # Delete only the entry which was validated. A
-                            # concurrent store may have replaced this key with
-                            # a fresh chain while the old candidate was stale.
-                            del self._prefix_index[prefix_hash]
-
-            # _update_prefix_index() also records the terminal partial prefix for a
-            # cached request. A later request can have that exact partial prefix
-            # plus a long tail, so the block-aligned loop above will never probe
-            # its hash. Scan indexed entries by exact token-prefix equality and
-            # blocks that still own the exact expected chain hashes; this preserves
-            # chain-hash safety and avoids the legacy content-only block hash path.
-            for prefix_hash, entry in list(self._prefix_index.items()):
+            # The authoritative paged lookup has already pinned min_prefix_len
+            # tokens. Only a longer indexed boundary can improve that result.
+            # Visit stored entries longest-first, including terminal partials:
+            # the former ascending walk rehashed and revalidated every shorter
+            # chain, making a warm long-context lookup quadratic under this lock.
+            # Index keys remain untouched under both existing schemes. Exact
+            # tokens, scoped conditions and native block-chain ownership below
+            # are the acceptance checks, as in the former partial-entry scan.
+            candidates = sorted(
+                (
+                    (key, entry)
+                    for key, entry in self._prefix_index.items()
+                    if max(0, min_prefix_len) < len(entry[0]) <= len(tokens)
+                ),
+                key=lambda item: len(item[1][0]),
+                reverse=True,
+            )
+            for prefix_hash, entry in candidates:
                 cached_tokens, block_ids = entry[:2]
                 cached_extra = entry[2] if len(entry) > 2 else None
                 cached_len = len(cached_tokens)
                 if cached_extra != self._prefix_index_extra_marker(
                     cache_extra_keys, cached_len
                 ):
-                    continue
-                if cached_len <= best_len or cached_len > len(tokens):
                     continue
                 if tokens[:cached_len] != cached_tokens:
                     continue
@@ -8610,8 +8574,9 @@ class BlockAwarePrefixCache:
                 )
                 if valid:
                     best_match = (cached_tokens, block_ids)
-                    best_len = cached_len
+                    break
                 elif self._prefix_index.get(prefix_hash) is entry:
+                    # Remove only the stale entry we actually validated.
                     del self._prefix_index[prefix_hash]
 
             if best_match is None:
@@ -8751,8 +8716,8 @@ class BlockAwarePrefixCache:
     ):
         """Yield ``(prefix_len, hash)`` for each block-aligned prefix.
 
-        The lookup and the update both walk every block-aligned prefix of the
-        prompt. Hashing each prefix FROM SCRATCH makes that quadratic in the
+        The writer walks every block-aligned prefix of the prompt. Hashing
+        each prefix FROM SCRATCH makes that quadratic in the
         prompt: block i re-hashes i*block_size tokens, so the total is
         O(len(tokens)^2 / block_size). At 61k tokens with 64-token blocks that
         is ~29 million token-hashes per call — and it runs under
@@ -8765,7 +8730,7 @@ class BlockAwarePrefixCache:
         The chained values DIFFER from the from-scratch ones. That is safe
         because ``_prefix_index`` is a plain in-memory dict rebuilt per process
         (declared at __init__, never persisted, never compared against an L2
-        record) and both the reader and the writer take their keys from here —
+        record) and key consumers and the writer take their keys from here —
         but it is exactly why this is env-gated and default OFF until it has a
         live A/B on a long conversation.
         """

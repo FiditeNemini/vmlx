@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The prefix index hashed every block-aligned prefix FROM SCRATCH.
 
-Both the lookup and the update walk every block-aligned prefix of the prompt.
+The writer still walks every block-aligned prefix of the prompt.
 Hashing each one from scratch makes that quadratic: block i re-hashes
 i*block_size tokens, so the total is O(len(tokens)^2 / block_size). At 61k
 tokens with 64-token blocks that is ~29 MILLION token-hashes per call — and it
@@ -15,8 +15,10 @@ The chained values DIFFER from the from-scratch ones, which is why this is
 env-gated (VMLX_CHAINED_PREFIX_INDEX_HASH) and DEFAULT OFF. It is safe in
 principle because `_prefix_index` is a plain in-memory dict rebuilt per process
 — declared in __init__, never persisted, never compared against an L2 record —
-and both the reader and the writer draw their keys from the same helper. It
-stays off until it has a live A/B on a long conversation.
+and key consumers and the writer draw their keys from the same helper. The
+lookup scans entries longest-first and validates their native chain identity
+without deriving those index keys. The chained writer stays off until it has
+a live A/B on a long conversation.
 """
 
 from __future__ import annotations
@@ -44,15 +46,26 @@ def test_the_chained_walk_is_linear_not_quadratic():
     assert from_scratch == sum(range(1, n_blocks + 1)) * block_size
 
 
-def test_both_call_sites_go_through_the_gate():
-    lookup = SRC[SRC.index("Find and pin the best matching prefix-index entry") :][:2600]
+def test_key_derivation_and_writer_go_through_the_gate():
+    key = SRC[SRC.index("The `_prefix_index` key for `tokens`") :][:1500]
     update = SRC[SRC.index("Update prefix index with new token sequence") :][:2200]
-    for name, body in (("lookup", lookup), ("update", update)):
+    for name, body in (("key", key), ("update", update)):
         assert "_chained_prefix_index_hash" in body, (
-            f"the {name} path no longer consults the gate, so reader and writer "
-            "could disagree about how the key is derived"
+            f"the {name} path no longer consults the gate, so key users and "
+            "writer could disagree about how the key is derived"
         )
         assert "_prefix_index_hash_sequence" in body
+
+
+def test_lookup_validates_entries_without_rehashing_every_prefix():
+    lookup = SRC.split("def _find_best_prefix_match(", 1)[1].split(
+        "def _prefix_index_blocks_are_current(", 1
+    )[0]
+    assert "_prefix_index_blocks_are_current(" in lookup
+    assert "_prefix_index_extra_marker(" in lookup
+    assert "tokens[:cached_len] != cached_tokens" in lookup
+    assert "_prefix_index_hash(" not in lookup
+    assert "_prefix_index_hash_sequence(" not in lookup
 
 
 def test_the_gate_defaults_off():

@@ -4,6 +4,15 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.58] - 2026-09-14
+
+- Remote sessions: normalize API base URLs, preserve provider-advertised reasoning controls, use protocol-specific Chat/Responses request fields, and retain tool-call IDs when providers stream IDs separately from names and arguments. Remote token counts are accumulated per request and rates are labelled as observed request-window measurements.
+- Qwen Flash-Next: new desktop sessions default to MTP Off. Existing saved choices and other model families' defaults are preserved. When enabled, the selected depth is a ceiling; recovery and promotion account for warmup and probe cost. This does not guarantee that every decoding window outperforms AR.
+- SSD prefix reuse: remove redundant index scans and repeated prefix-key hashing, materialize block reads while their shared guard is held, and preserve supported hybrid checkpoints. Durable tool-generation boundaries remain separate from completion of an entire agent turn.
+- Prefill: release materialized chunk arrays promptly, report completed chunk progress, and allow cancellation at worker-safe chunk boundaries. Declared context and output budgets are checked before multimodal prefill; no family-wide 256K cap is introduced.
+- API and chat: preserve Ollama media controls, notices, reasoning effort and typed errors through the gateway; reject malformed tool argument objects without inventing replacement arguments; keep partial Gemma channel markers out of terminal content; preserve selected sessions across stop and restart.
+- Experimental optimizations remain opt-in unless separately qualified. GLM-5.3 mixed-state persistent SSD reuse is not supported; its native-video quality and performance targets remain limitations. One-million-token inference and independent external-provider generation are not certified by this release.
+
 ## [1.6.57] - 2026-09-10
 
 - Image generation and editing: local-folder discovery, saved quantization metadata, launch validation, request-owned progress, cancellation, and output history handling. Compatible mflux exports can be discovered from component metadata as well as repository tags.

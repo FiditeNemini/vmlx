@@ -75,6 +75,10 @@ from vmlx_engine.metal.qwen4_unified_gdn_verify import (
     unified_gdn_verify_eligible,
     unified_gdn_verify_requested,
 )
+from vmlx_engine.metal.qwen4_unified_gdn_ar import (
+    qwen4_unified_gdn_ar,
+    unified_gdn_ar_requested,
+)
 from vmlx_engine.metal.quantized_projection_group import (
     QuantizedProjectionGroup,
     cached_quantized_projection_group,
@@ -1107,6 +1111,8 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
         self._fused_conv_decode = fused_gdn_conv_requested()
         self._unified_gdn_verify = unified_gdn_verify_requested()
         self._unified_gdn_verify_graph_calls = 0
+        self._unified_gdn_ar = unified_gdn_ar_requested()
+        self._unified_gdn_ar_graph_calls = 0
 
     def _process_chunk(
         self,
@@ -1212,6 +1218,28 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             else:
                 qkv = mx.where(mask[..., None], qkv, 0)
 
+        ar = None
+        if (
+            self._unified_gdn_ar
+            and seq_len == 1
+            and n_confirmed == 0
+            and cache is not None
+            and mask is None
+            and getattr(cache, "lengths", None) is None
+            and not prefill_checkpoint_steps
+            and type(self.norm) is RMSNormGatedSigmoid
+            and not self._fused_conv_decode
+            and not self.norm._fused_decode
+            and not self.training
+            and (self.num_k_heads, self.num_v_heads, self.head_k_dim,
+                 self.head_v_dim, self.conv_kernel_size) == (16, 48, 128, 128, 4)
+        ):
+            ar = qwen4_unified_gdn_ar(
+                qkv, z.reshape(batch_size, seq_len, -1), b, a, conv_state,
+                self.conv1d.weight, self.A_log, self.dt_bias, ssm_state,
+                self.norm.weight, self.norm.eps, enabled=True,
+            )
+
         # Projections above keep their native bits/group sizes. The opt-in
         # recurrence only sees their actual arrays, never a quant-name guess.
         # Unsupported/masked/prefill/batched routes retain the existing path.
@@ -1265,6 +1293,18 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
                 start = end
             cache.prefill_checkpoint_states = checkpoints
             out = mx.concatenate(pieces, axis=1)
+        elif ar is not None:
+            out, conv_f, ssm_f = ar
+            self._unified_gdn_ar_graph_calls += 1
+            if self._unified_gdn_ar_graph_calls == 1:
+                logger.info(
+                    "QWEN4_UNIFIED_GDN_AR graph_built width=1 dtype=%s "
+                    "A_log_dtype=%s dt_bias_dtype=%s gate_dtype=%s "
+                    "key_heads=%d value_heads=%d snapshots=0",
+                    qkv.dtype, self.A_log.dtype, self.dt_bias.dtype,
+                    mx.result_type(a.dtype, self.dt_bias.dtype),
+                    self.num_k_heads, self.num_v_heads,
+                )
         elif unified is not None:
             out, conv_f, ssm_f, state_prefixes, conv_prefixes = unified
             # Existing cache ABI: post-confirmed state and accepted-draft
@@ -1354,7 +1394,7 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             advance = getattr(cache, "advance", None)
             if callable(advance):
                 advance(seq_len)
-        if unified is None:
+        if unified is None and ar is None:
             out = self.norm(out, z)
         return self.out_proj(out.reshape(batch_size, seq_len, -1))
 

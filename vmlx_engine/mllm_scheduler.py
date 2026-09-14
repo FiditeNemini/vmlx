@@ -2828,6 +2828,19 @@ class MLLMScheduler:
                 int(getattr(request, "num_prompt_tokens", 0) or 0),
                 int(getattr(request, "_prefill_tokens_done", 0) or 0),
             )
+            generator = getattr(self, "batch_generator", None)
+            probe = getattr(generator, "request_progress", None)
+            uid = getattr(request, "batch_uid", None)
+            if uid is not None and callable(probe):
+                try:
+                    completed = probe(uid)
+                    if completed is not None:
+                        prompt_side = max(prompt_side, int(completed))
+                except Exception:
+                    # Telemetry must not disrupt generation. Preserve the
+                    # last observed counter across removal or probe failure.
+                    pass
+            request._prefill_tokens_done = prompt_side
             return prompt_side + int(getattr(request, "total_output_tokens", 0) or 0)
 
     def _cleanup_aborted_paged_request(self, request_id: str) -> None:

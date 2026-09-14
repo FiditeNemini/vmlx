@@ -8758,6 +8758,24 @@ class MLLMBatchGenerator:
         logger.debug(f"Inserted {len(requests)} requests, UIDs: {uids}")
         return uids
 
+    def request_progress(self, uid: int) -> Optional[int]:
+        """Completed prefill tokens for this UID, without touching GPU state.
+
+        The scheduler owns a different request object. During _process_prompts
+        these objects remain in unprocessed_requests until the forward returns;
+        during decode they live in active_batch. Do not keep an extra request
+        registry that could retain native cache arrays after completion.
+        """
+        active = getattr(self, "active_batch", None)
+        for requests in (
+            getattr(self, "unprocessed_requests", ()),
+            getattr(active, "requests", ()),
+        ):
+            for request in requests:
+                if request.uid == uid:
+                    return int(getattr(request, "_prefill_tokens_done", 0) or 0)
+        return None
+
     def remove(self, uids: List[int]) -> None:
         """
         Remove requests from processing.
@@ -13251,6 +13269,12 @@ class MLLMBatchGenerator:
             # per-chunk graph. Never clear a pending vision graph's resources.
             mx.eval(embeds)
         for end in bounds:
+            if _HYBRID_PREFILL_MEM_TRACE:
+                _media_chunk_started = time.perf_counter()
+                logger.info(
+                    "media-prefill-begin request=%s span=%d:%d active_bytes=%d",
+                    request.request_id, start, end, int(mx.get_active_memory()),
+                )
             if bounded_glm:
                 active, limit = get_effective_metal_working_set_bytes(mx)
                 if prefill_valve_enabled():
@@ -13283,8 +13307,18 @@ class MLLMBatchGenerator:
                     _diag_array_fp(embeds[:, start:end]), _diag_array_fp(position_ids[..., start:end]) if position_ids is not None else "-",
                 )
             output = lm(input_ids[:, start:end], **call_kwargs)
+            # A Python loop over slices does not bound MLX's lazy graph.
+            # Realize the native KV/recurrent state before advancing, as the
+            # text-prefill path does. Otherwise all chunks can accumulate
+            # until the clean-boundary snapshot or final logits evaluates
+            # them together (a 257k Qwen media-history prompt OOMed there).
+            # Keep the same chunk edges, cache objects and snapshot boundary;
+            # this changes execution lifetime, not model/context semantics.
+            _materialize_prefill_cache_state(cache)
+            # Publish only work that actually completed, not the queued prompt
+            # length. The scheduler reads this generator request by its UID.
+            request._prefill_tokens_done = end
             if bounded_glm:
-                _materialize_prefill_cache_state(cache)
                 peak = int(mx.get_peak_memory())
                 transient = max(0, peak - active)
                 if start > 0 and replace_chunk_transient_observation(
@@ -13333,6 +13367,22 @@ class MLLMBatchGenerator:
                 mx.clear_cache()
             except Exception:
                 pass
+            if _HYBRID_PREFILL_MEM_TRACE:
+                _media_state_bytes = {}
+                for _entry in cache or []:
+                    _kind = type(_entry).__name__
+                    _media_state_bytes[_kind] = _media_state_bytes.get(_kind, 0) + sum(
+                        int(getattr(_array, "nbytes", 0) or 0)
+                        for _array in _prefill_cache_materialization_items([_entry])
+                    )
+                logger.info(
+                    "media-prefill-complete request=%s tokens=%d/%d "
+                    "elapsed_ms=%.3f active_bytes=%d peak_bytes=%d state_bytes=%s",
+                    request.request_id, end, seq_len,
+                    (time.perf_counter() - _media_chunk_started) * 1000,
+                    int(mx.get_active_memory()), int(mx.get_peak_memory()),
+                    _media_state_bytes,
+                )
             start = end
         return output
 

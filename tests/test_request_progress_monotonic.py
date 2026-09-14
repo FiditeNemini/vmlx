@@ -274,6 +274,55 @@ class TestMLLMPrefillProgress:
             "timeout kills a healthy long prefill"
         )
 
+    def test_reads_separate_generator_request_during_prefill_and_decode(self):
+        from vmlx_engine.mllm_batch_generator import (
+            MLLMBatchGenerator,
+            MLLMBatchRequest,
+        )
+
+        generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        generator.uid_counter = 7
+        generator.unprocessed_requests = []
+        generator.active_batch = None
+        batch_request = MLLMBatchRequest(-1, "r", "prompt")
+        uid = generator.insert([batch_request])[0]
+        # These are two distinct objects in _schedule_waiting, not aliases.
+        request = SimpleNamespace(
+            batch_uid=uid, num_prompt_tokens=0, total_output_tokens=0
+        )
+        sched = self._FakeMLLM({"r": request})
+        sched.batch_generator = generator
+        readings = []
+        for end in (4096, 8192, 12288):
+            batch_request._prefill_tokens_done = end
+            readings.append(sched.request_progress("r"))
+        assert readings == [4096, 8192, 12288]
+
+        generator.active_batch = SimpleNamespace(requests=[batch_request])
+        generator.unprocessed_requests = []
+        assert sched.request_progress("r") == 12288
+        request.num_prompt_tokens = 12288
+        request.total_output_tokens = 1
+        assert sched.request_progress("r") == 12289
+        # Removal or a probe failure must not make prior progress disappear.
+        generator.active_batch = None
+        request.num_prompt_tokens = 0
+        assert sched.request_progress("r") == 12289
+
+    def test_generator_progress_does_not_borrow_another_request(self):
+        from vmlx_engine.mllm_batch_generator import MLLMBatchGenerator
+
+        generator = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+        generator.unprocessed_requests = [
+            SimpleNamespace(uid=7, _prefill_tokens_done=8192)
+        ]
+        generator.active_batch = SimpleNamespace(
+            requests=[SimpleNamespace(uid=8, _prefill_tokens_done=16384)]
+        )
+        assert generator.request_progress(7) == 8192
+        assert generator.request_progress(8) == 16384
+        assert generator.request_progress(9) is None
+
     def test_no_double_count_when_decode_starts(self):
         # After prefill: _prefill_tokens_done == prompt len; first output sets
         # num_prompt_tokens to the same value. Sum would jump to 2x.

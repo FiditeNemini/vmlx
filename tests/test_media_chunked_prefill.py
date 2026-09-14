@@ -161,6 +161,68 @@ class _NoEmbedsLM:
 
 
 class TestMediaForwardFallbacks:
+    @pytest.mark.parametrize("clean_boundary", [0, 9000])
+    def test_generic_media_realizes_state_before_the_next_chunk(
+        self, monkeypatch, clean_boundary
+    ):
+        """Chunking calls alone must not accumulate one prompt-sized lazy graph."""
+        from types import SimpleNamespace
+        import vmlx_engine.mllm_batch_generator as mllm
+
+        events = []
+        pending = False
+        request = SimpleNamespace(request_id="media-cache-barrier")
+        completed = []
+
+        class Logits:
+            def __getitem__(self, key):
+                return self
+
+        class LM:
+            def __call__(self, ids, inputs_embeds=None, cache=None):
+                nonlocal pending
+                assert not pending, "previous media chunk cache is still lazy"
+                events.append("forward")
+                pending = True
+                return Logits()
+
+        def realize(cache):
+            nonlocal pending
+            completed.append(getattr(request, "_prefill_tokens_done", 0))
+            events.append("state")
+            pending = False
+
+        def snapshot(*args):
+            assert not pending, "clean-boundary snapshot must see realized state"
+            events.append("snapshot")
+
+        gen = self._gen(_OneShotModel([]), LM())
+        gen.model.get_input_embeddings = lambda ids, **kw: SimpleNamespace(
+            inputs_embeds=_FakeIds(9001)
+        )
+        gen._media_prefill_chunk_tokens = lambda seq_len: 4096
+        gen._media_placeholder_token_ids = lambda: set()
+        gen._native_media_clean_boundary = lambda *args: clean_boundary
+        gen._snapshot_native_media_clean_boundary = snapshot
+        monkeypatch.delenv("VMLX_GLM5_BOUNDED_MEDIA_PREFILL", raising=False)
+        monkeypatch.setattr(mllm, "_materialize_prefill_cache_state", realize)
+        monkeypatch.setattr(mllm.mx, "eval", lambda *args: None)
+        monkeypatch.setattr(mllm.mx, "clear_cache", lambda: events.append("clear"))
+
+        gen._media_forward(
+            request,
+            _FakeIds(9001), 9001, [object()], {},
+        )
+        expected = 4 if clean_boundary else 3
+        assert events.count("forward") == events.count("state") == expected
+        assert events.count("snapshot") == bool(clean_boundary)
+        for i, event in enumerate(events):
+            if event == "forward":
+                assert events[i + 1] == "state"
+        assert not pending
+        assert completed == ([0, 4096, 8192, 9000] if clean_boundary else [0, 4096, 8192])
+        assert request._prefill_tokens_done == 9001
+
     def test_bounded_glm_materializes_each_chunk_and_keeps_guard(self, monkeypatch):
         from types import SimpleNamespace
         import vmlx_engine.mllm_batch_generator as mllm

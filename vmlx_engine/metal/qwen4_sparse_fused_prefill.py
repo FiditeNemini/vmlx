@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 MATH_ABI = "sparse_online_nax_absolute_bk32_contiguous_v6"
 MIN_CONTEXT = 32768
 MAX_CONTEXT = 131072
+MAX_QUERY_ROWS = 4096
 DISPATCH_COUNT = 0
 _state = "unproven"
 _lock = threading.Lock()
@@ -97,7 +98,7 @@ def ready():
 
 
 def supported(q, k, v, ids, valid, *, pos_start, total_tokens, scale):
-    if not enabled() or q.dtype != mx.float16 or not 256 <= q.shape[2] <= 1024:
+    if not enabled() or q.dtype != mx.float16 or not 256 <= q.shape[2] <= MAX_QUERY_ROWS:
         return False
     if not MIN_CONTEXT <= total_tokens <= MAX_CONTEXT:
         return False

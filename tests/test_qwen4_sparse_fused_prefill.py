@@ -48,7 +48,7 @@ def test_failed_preflight_disables_without_retry(monkeypatch):
 
 @pytest.mark.parametrize("rows,total,dtype", [
     (1,32768,mx.float16), (4,32768,mx.float16), (255,32768,mx.float16),
-    (1025,32768,mx.float16), (256,32767,mx.float16),
+    (4097,32768,mx.float16), (256,32767,mx.float16),
     (256,131073,mx.float16), (256,32768,mx.bfloat16),
 ])
 def test_outside_measured_shapes_retains_stock(rows, total, dtype, monkeypatch):
@@ -59,9 +59,11 @@ def test_outside_measured_shapes_retains_stock(rows, total, dtype, monkeypatch):
                                pos_start=total-rows,total_tokens=total,scale=0.0625)
 
 
-@pytest.mark.parametrize("total", [32768,32771,65539])
-def test_current_attention_partial_tail_and_logical_views(active, total):
-    rows = 256
+@pytest.mark.parametrize("rows,total", [
+    (256,32768), (256,32771), (256,65539),
+    (1025,32771), (2048,32768), (4096,65539), (4096,131072),
+])
+def test_current_attention_partial_tail_and_logical_views(active, rows, total):
     offset = total - rows
     q = mx.random.normal((1,24,rows,256), key=mx.random.key(11)).astype(mx.float16)
     k = mx.random.normal((1,2,total+19,256), key=mx.random.key(12)).astype(mx.float16)[:,:,:total]
@@ -81,7 +83,8 @@ def test_current_attention_partial_tail_and_logical_views(active, total):
     assert bool(mx.array_equal(got, ref))
 
 
-def test_actual_indexer_cache_and_restored_suffix(active, monkeypatch):
+@pytest.mark.parametrize("rows", [256,4096])
+def test_actual_indexer_cache_and_restored_suffix(active, monkeypatch, rows):
     from vmlx_engine.models.qwen4_exp import language
     attention = language.QSAAttention(language.Qwen4ExpTextArgs(hidden_size=64))
     attention.set_dtype(mx.float16)
@@ -94,7 +97,7 @@ def test_actual_indexer_cache_and_restored_suffix(active, monkeypatch):
     pos = mx.broadcast_to(mx.arange(offset)[None,None,:,None],(1,1,offset,3)).astype(mx.float32)
     mx.eval(cache.update_and_fetch(k,v),cache.update_index(mx.concatenate([raw,pos],axis=-1)))
     stock, candidate = deepcopy(cache), deepcopy(cache)
-    x = mx.random.normal((1,256,64),key=mx.random.key(24)).astype(mx.float16)
+    x = mx.random.normal((1,rows,64),key=mx.random.key(24)).astype(mx.float16)
     monkeypatch.setenv("VMLX_QWEN4_SPARSE_FUSED_PREFILL","0")
     ref = attention(x,cache=stock)
     mx.eval(ref)
@@ -103,7 +106,7 @@ def test_actual_indexer_cache_and_restored_suffix(active, monkeypatch):
     got = attention(x,cache=candidate)
     mx.eval(got)
     assert fused.DISPATCH_COUNT == before+1
-    assert stock.offset == candidate.offset == offset+256
+    assert stock.offset == candidate.offset == offset+rows
     assert bool(mx.array_equal(ref, got))
     assert all(bool(mx.array_equal(a,b)) for a,b in zip(stock.state,candidate.state))
     # This layer's persisted state is unchanged; a disk-format reconstruction

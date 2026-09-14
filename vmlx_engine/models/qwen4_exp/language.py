@@ -1826,7 +1826,10 @@ class QSAAttention(nn.Module):
         sparse_fused_prefill = False
         if (
             os.environ.get("VMLX_QWEN4_SPARSE_FUSED_PREFILL", "0") == "1"
-            and 256 <= S <= 1024 and B == 1 and not self.training
+            # The helper owns the measured upper row bound. Keep media bulk
+            # chunks eligible for its checks instead of duplicating a stale
+            # smaller limit here; decode and verification remain excluded.
+            and S >= 256 and B == 1 and not self.training
             and self.indexer.compress_ratio == 4 and self.indexer.block_topk == 512
             and 32768 <= T <= 131072
         ):

@@ -1761,6 +1761,8 @@ class QSAAttention(nn.Module):
             mrope_section=args.mrope_section,
         )
         self.qkv_group = None
+        self._sparse_ar_decode = os.environ.get("VMLX_QWEN4_SPARSE_AR", "0") == "1"
+        self._sparse_ar_observed = False
 
     def prepare_runtime(self) -> bool:
         """Replace compatible packed q/k/v rows with one exact projection."""
@@ -1898,23 +1900,37 @@ class QSAAttention(nn.Module):
             causal = causal[None, None]
             full_mask = causal if index_mask is None else causal + index_mask
 
-        out = qwen4_verify_sdpa(
-            queries, keys, values, full_mask, scale=self.scale,
-            selected_token_bound=(
-                self.indexer.block_topk * self.indexer.compress_ratio
-                + self.indexer.compress_ratio - 1
-                if type(self.indexer) is QSAIndexer
-                and T // self.indexer.compress_ratio > self.indexer.block_topk
-                else None
-            ),
-            selected_four_token_block_bound=(
-                self.indexer.block_topk + 1
-                if type(self.indexer) is QSAIndexer
-                and self.indexer.compress_ratio == 4
-                and T // self.indexer.compress_ratio > self.indexer.block_topk
-                else None
-            ),
-        )
+        out = None
+        if self._sparse_ar_decode and not self.training:
+            from vmlx_engine.metal.qwen4_sparse_decode import attention as sparse_ar_attention
+            out = sparse_ar_attention(
+                queries, keys, values, full_mask, scale=self.scale, enabled=True,
+            )
+            if out is not None and not self._sparse_ar_observed:
+                # First qualified dispatch only. Runtime failures propagate;
+                # never replay an already advanced cache through the model.
+                mx.eval(out)
+                self._sparse_ar_observed = True
+                logger.info("QSA AR dispatch path=sparse_bitmap1024 context=%d "
+                            "dtype=%s partitions=1024 stream=caller", T, queries.dtype)
+        if out is None:
+            out = qwen4_verify_sdpa(
+                queries, keys, values, full_mask, scale=self.scale,
+                selected_token_bound=(
+                    self.indexer.block_topk * self.indexer.compress_ratio
+                    + self.indexer.compress_ratio - 1
+                    if type(self.indexer) is QSAIndexer
+                    and T // self.indexer.compress_ratio > self.indexer.block_topk
+                    else None
+                ),
+                selected_four_token_block_bound=(
+                    self.indexer.block_topk + 1
+                    if type(self.indexer) is QSAIndexer
+                    and self.indexer.compress_ratio == 4
+                    and T // self.indexer.compress_ratio > self.indexer.block_topk
+                    else None
+                ),
+            )
         if out is None:
             out = qwen4_prefill_sdpa(
                 queries, keys, values, full_mask,

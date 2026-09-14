@@ -67,4 +67,9 @@ NB_MODULE(_ext, m) {
         "queries"_a, "keys"_a, "selected_blocks"_a, "scale"_a,
         "q_offset"_a, "stream"_a = nb::none());
 
+  m.def("qwen4_qsa_sparse_gqa_attention_nax",
+        &mtplx::qsa_kernels::qwen4_qsa_sparse_gqa_attention_nax,
+        "queries"_a, "keys"_a, "values"_a, "selected_blocks"_a,
+        "scale"_a, "q_offset"_a, "stream"_a = nb::none());
+
 }

@@ -24,3 +24,10 @@ __all__ = [
     "qwen4_qsa_sparse_gqa_attention",
     "qwen4_qsa_sparse_gqa_dense_scores",
 ]
+
+# Preserve legacy loading against an older local binary. Only the experimental
+# consumer requires the new symbol and disables itself when it is absent.
+from . import _ext
+if hasattr(_ext, "qwen4_qsa_sparse_gqa_attention_nax"):
+    qwen4_qsa_sparse_gqa_attention_nax = _ext.qwen4_qsa_sparse_gqa_attention_nax
+    __all__.append("qwen4_qsa_sparse_gqa_attention_nax")

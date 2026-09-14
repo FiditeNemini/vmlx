@@ -72,9 +72,9 @@ struct Qwen4QSASparseGQAParams {
 class Qwen4QSASparseGQAPrimitive : public Primitive {
 public:
   Qwen4QSASparseGQAPrimitive(Stream stream, float scale, int q_offset,
-                             int key_tile, int dimension_tile)
+                             int key_tile, int dimension_tile, bool nax = false)
       : Primitive(stream), scale_(scale), q_offset_(q_offset),
-        key_tile_(key_tile), dimension_tile_(dimension_tile) {}
+        key_tile_(key_tile), dimension_tile_(dimension_tile), nax_(nax) {}
 
   static bool unsupported(const array &q, const array &k, const array &v,
                           const array &selected, float scale, int q_offset,
@@ -171,6 +171,13 @@ public:
     concatenate(kernel_name, "qwen4_qsa_sparse_gqa_", type_to_name(q), "_bk",
                 key_tile_, "_dc", dimension_tile_, "_gqa", gqa, "_hp", hpad,
                 "_d", dim, "_wm", wm);
+    if (nax_) {
+#if defined(MTPLX_QSA_HAS_NAX)
+      kernel_name = "qwen4_sparse_online_nax_" + type_to_name(q);
+#else
+      throw std::runtime_error("QSA NAX kernel requires a macOS 26.2+ build");
+#endif
+    }
 
     auto library = device.get_library(kMetalLibrary, current_binary_dir());
     auto kernel = device.get_kernel(kernel_name, library);
@@ -191,11 +198,12 @@ public:
   bool is_equivalent(const Primitive &other) const override {
     const auto &rhs = static_cast<const Qwen4QSASparseGQAPrimitive &>(other);
     return scale_ == rhs.scale_ && q_offset_ == rhs.q_offset_ &&
-           key_tile_ == rhs.key_tile_ && dimension_tile_ == rhs.dimension_tile_;
+           key_tile_ == rhs.key_tile_ && dimension_tile_ == rhs.dimension_tile_ &&
+           nax_ == rhs.nax_;
   }
   auto state() const {
     return std::make_tuple(nullptr, scale_, q_offset_, key_tile_,
-                           dimension_tile_);
+                           dimension_tile_, nax_);
   }
 
 private:
@@ -203,6 +211,7 @@ private:
   int q_offset_;
   int key_tile_;
   int dimension_tile_;
+  bool nax_;
 };
 
 class Qwen4QSASparseScoresPrimitive : public Primitive {
@@ -397,6 +406,20 @@ array qwen4_qsa_sparse_gqa_attention(const array &queries, const array &keys,
   return array(std::move(out_shape), queries.dtype(),
                std::make_shared<Qwen4QSASparseGQAPrimitive>(
                    stream, scale, q_offset, key_tile, dimension_tile),
+               std::vector<array>{queries, keys, values, selected_blocks});
+}
+
+array qwen4_qsa_sparse_gqa_attention_nax(const array &queries, const array &keys,
+                                      const array &values, const array &selected_blocks,
+                                      float scale, int q_offset, StreamOrDevice s) {
+  auto stream = to_stream(s);
+  if (Qwen4QSASparseGQAPrimitive::unsupported(
+          queries, keys, values, selected_blocks, scale, q_offset, 64, 64, stream)) {
+    throw std::invalid_argument("Unsupported sparse QSA NAX geometry");
+  }
+  return array(queries.shape(), queries.dtype(),
+               std::make_shared<Qwen4QSASparseGQAPrimitive>(
+                   stream, scale, q_offset, 64, 64, true),
                std::vector<array>{queries, keys, values, selected_blocks});
 }
 

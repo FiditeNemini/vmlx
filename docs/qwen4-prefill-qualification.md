@@ -20,6 +20,49 @@ retry the already mutated cache as another prefill.
 
 ## Build
 
+### Experimental sparse online-softmax path
+
+`VMLX_QWEN4_SPARSE_FUSED_PREFILL=1` is a separate default-off experiment,
+not part of the historical qualification below. Unlike `PREFILL_DIRECT`, it
+does not materialize a dense score/probability matrix. Its NAX consumer keeps
+selected keys in their original 32-key tiles, preserves MLX's two independent
+128-wide QK partial sums, and skips only tiles with no selected keys. Packing
+the selected keys changed softmax/PV reduction order and failed full-model
+numerical qualification; that implementation is not the active experiment.
+Legacy materialized-score equality is not an oracle for this path.
+
+Current eligibility is MLX 0.32.2 on `applegpu_g17s`, batch 1, FP16,
+24 query / 2 KV heads, head dimension 256, 512 four-token selected blocks,
+256–1024 query rows and 32768–131072 logical context tokens. Other shapes
+retain their existing path; these are dispatch bounds, not context limits.
+There is no change to decode, MTP, quantization, selection, or cache format.
+The flag and native artifact identity separate prefix-cache namespaces.
+
+An ABI check and nonzero, bit-exact current-SDPA preflight run before this
+consumer can receive selected blocks. A failed preflight leaves stock active.
+An execution error after cache mutation propagates; it never retries that
+chunk against the mutated cache. Component thresholds do not replace
+full-model quality, cache, UI/API and performance qualification.
+
+Use the existing component benchmark with `--stock-path runtime --candidate
+nax` to compare against today's fused masked path. `--candidate fused` denotes
+the older SIMD implementation, which failed the full-model numerical gate.
+Numerical differences
+are reported, not silently treated as exactness or product acceptance.
+The same-weight gate can isolate this experiment with `--arms sparse_fused
+--prefill-step-size 1024 --continuation-step-size 1`. No whole-model speed or
+production-admission claim is made for this experimental flag.
+
+For numerical diagnosis, `--arms sparse_oracle` preserves the selected-block
+route but reconstructs a mask for stock fused SDPA. It compares the native
+consumer on the same real tensors without propagating its result, separating
+consumer arithmetic from the surrounding route. Optional `--attention-fixture`
+saves the first real attention inputs for component-only investigation.
+`--arms repeat` checks stock-versus-stock repeatability. These controls are not
+performance or product-admission receipts.
+
+### Optional extension build
+
 Use an isolated serving environment with the repository lockfile. For the
 optional native QSA extension, follow
 [`VMLX_INTEGRATION.md`](../native_extensions/qsa_kernels/VMLX_INTEGRATION.md).
@@ -118,6 +161,9 @@ new request, incompatible native ABI fallback, and clean installed-wheel
 execution. Record any skipped tests and untested device/OS combinations.
 
 ## Recorded qualification status (2026-09-09)
+
+This historical section covers the five original flags, not the newer
+`SPARSE_FUSED_PREFILL` experiment or its changed native artifact.
 
 **Qualified for review: correctness, serving, recovery and packaging checks pass.** The shipped candidate uses
 16-row expert-aligned MoE tiles. Later tile-size and routing experiments are

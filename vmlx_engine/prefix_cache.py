@@ -539,6 +539,7 @@ def compute_model_cache_key(
             "VMLX_QWEN4_GDN_BLOCKED_PREFILL",
             "VMLX_QWEN4_VERIFY_SDPA",
             "VMLX_QWEN4_PREFILL_DIRECT",
+            "VMLX_QWEN4_SPARSE_FUSED_PREFILL",
             "VMLX_QWEN4_COALESCE_PREFILL_CHECKPOINTS",
             "VMLX_QWEN4_ALIGNED_MOE_PREFILL",
         ):
@@ -562,7 +563,7 @@ def compute_model_cache_key(
                 parts.append("qwen4_verify_math=" + _QWEN4_VERIFY_MATH_ABI)
             if enabled and flag == "VMLX_QWEN4_COALESCE_PREFILL_CHECKPOINTS":
                 parts.append("qwen4_checkpoint_math=" + _QWEN4_CHECKPOINT_MATH_ABI)
-            if enabled and flag == "VMLX_QWEN4_PREFILL_DIRECT":
+            if enabled and flag in {"VMLX_QWEN4_PREFILL_DIRECT", "VMLX_QWEN4_SPARSE_FUSED_PREFILL"}:
                 # A source build is optional: distinguish absent, rebuilt and
                 # installed artifacts before reusing persisted floating-point
                 # state. This is read-only and never imports a Metal module.

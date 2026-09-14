@@ -73,6 +73,9 @@ instantiate_kernel("qwen4_sparse_scores_fill_bfloat16", qwen4_sparse_scores_fill
 // from the preceding fill dispatch. No compact-PV reduction is introduced.
 #if defined(MTPLX_QSA_HAS_NAX)
 #include "mlx/backend/metal/kernels/steel/gemm/nax.h"
+#include "kernels/qwen4_sparse_online_nax.h"
+instantiate_kernel("qwen4_sparse_online_nax_float16", qwen4_sparse_online_nax, half);
+instantiate_kernel("qwen4_sparse_online_nax_bfloat16", qwen4_sparse_online_nax, bfloat16_t);
 
 template <typename T>
 [[kernel, max_total_threads_per_threadgroup(32)]]

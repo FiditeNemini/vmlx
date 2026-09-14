@@ -26,6 +26,12 @@ mx::array qwen4_qsa_sparse_gqa_attention(
     const mx::array &selected_blocks, float scale, int q_offset,
     int key_tile = 64, int dimension_tile = 64, mx::StreamOrDevice s = {});
 
+// Experimental NAX reduction path; distinct numerical and pipeline contract.
+mx::array qwen4_qsa_sparse_gqa_attention_nax(
+    const mx::array &queries, const mx::array &keys, const mx::array &values,
+    const mx::array &selected_blocks, float scale, int q_offset,
+    mx::StreamOrDevice s = {});
+
 // Materialized sparse QK scores [1,2,12,qL,kL] in the input dtype.
 mx::array qwen4_qsa_sparse_gqa_dense_scores(
     const mx::array &queries, const mx::array &keys,

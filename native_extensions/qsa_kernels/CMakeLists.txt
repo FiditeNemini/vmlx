@@ -101,6 +101,7 @@ if(MLX_BUILD_METAL)
       -o ${MTPLX_QSA_METALLIB}
     DEPENDS ${CMAKE_CURRENT_LIST_DIR}/qwen4_qsa_sparse_gqa.metal
             ${CMAKE_CURRENT_LIST_DIR}/kernels/steel_qwen4_qsa_sparse_gqa.h
+            ${CMAKE_CURRENT_LIST_DIR}/kernels/qwen4_sparse_online_nax.h
     COMMAND_EXPAND_LISTS VERBATIM)
   add_custom_target(mtplx_qsa_kernels_metallib DEPENDS ${MTPLX_QSA_METALLIB})
 

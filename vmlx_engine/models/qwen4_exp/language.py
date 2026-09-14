@@ -1821,8 +1821,22 @@ class QSAAttention(nn.Module):
         # validates and slices both at the post-append logical offset; pass the
         # saved pre-append offset for this query chunk's absolute positions.
         direct_prefill = False
+        sparse_fused_prefill = False
         if (
-            os.environ.get("VMLX_QWEN4_PREFILL_DIRECT", "0") == "1"
+            os.environ.get("VMLX_QWEN4_SPARSE_FUSED_PREFILL", "0") == "1"
+            and 256 <= S <= 1024 and B == 1 and not self.training
+            and self.indexer.compress_ratio == 4 and self.indexer.block_topk == 512
+            and 32768 <= T <= 131072
+        ):
+            from vmlx_engine.metal import qwen4_sparse_fused_prefill
+            block_shape = mx.zeros((S, 512), dtype=mx.int32)
+            sparse_fused_prefill = qwen4_sparse_fused_prefill.supported(
+                queries, keys, values, block_shape, block_shape == 0,
+                pos_start=offset, total_tokens=T, scale=self.scale,
+            )
+        if (
+            not sparse_fused_prefill
+            and os.environ.get("VMLX_QWEN4_PREFILL_DIRECT", "0") == "1"
             and S >= 256
             and B == 1
             and not self.training
@@ -1849,15 +1863,16 @@ class QSAAttention(nn.Module):
             cache,
             offset=offset,
             position_ids=position_ids,
-            return_blocks=direct_prefill,
+            return_blocks=direct_prefill or sparse_fused_prefill,
         )
-        if direct_prefill:
+        if direct_prefill or sparse_fused_prefill:
             selected, valid = index_mask
-            out = qsa_prefill_direct(
+            consumer = qwen4_sparse_fused_prefill.attention if sparse_fused_prefill else qsa_prefill_direct
+            out = consumer(
                 queries, keys, values, selected, valid,
                 pos_start=offset, total_tokens=T, scale=self.scale,
             )
-            if not getattr(self, "_direct_prefill_logged", False):
+            if direct_prefill and not getattr(self, "_direct_prefill_logged", False):
                 logger.info(
                     "Powered by MTPLX/oMLX: direct sparse QSA prefill enabled "
                     "https://github.com/youssofal/mtplx"

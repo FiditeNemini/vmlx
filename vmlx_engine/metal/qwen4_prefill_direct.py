@@ -330,7 +330,7 @@ def _build_receipt_mismatch() -> str | None:
     return None
 
 
-def _lane_unavailable_reason() -> str | None:
+def _lane_unavailable_reason(*, require_enabled: bool = True) -> str | None:
     """Why the lane cannot serve this process, ignoring per-call geometry.
 
     Deliberately does NOT consult :func:`qsa_prefill_direct_ready`: that
@@ -347,7 +347,7 @@ def _lane_unavailable_reason() -> str | None:
         )
     if not qsa_prefill_direct_module_ready():
         return "the native QSA sparse-GQA extension is not loaded"
-    if not qsa_prefill_direct_enabled():
+    if require_enabled and not qsa_prefill_direct_enabled():
         return "VMLX_QWEN4_PREFILL_DIRECT is off"
     mismatch = _build_receipt_mismatch()
     if mismatch is not None:
@@ -440,6 +440,7 @@ def qsa_prefill_direct_unsupported_reason(
     block_topk: int = _TOP_K_BLOCKS,
     key_tile: int = _KEY_TILE,
     dimension_tile: int = _DIMENSION_TILE,
+    require_enabled: bool = True,
 ) -> str | None:
     """Return why this call cannot use the direct kernel, or ``None``.
 
@@ -450,7 +451,7 @@ def qsa_prefill_direct_unsupported_reason(
     makes "supported" mean "will dispatch".
     """
 
-    unavailable = _lane_unavailable_reason()
+    unavailable = _lane_unavailable_reason(require_enabled=require_enabled)
     if unavailable is not None:
         return unavailable
     if not _on_metal_device():

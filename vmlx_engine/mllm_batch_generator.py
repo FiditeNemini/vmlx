@@ -7553,6 +7553,8 @@ class MLLMBatchRequest:
     seed: Optional[int] = None
     max_prompt_tokens: int = 0
     enable_thinking: Optional[bool] = None
+    # Shared with the scheduler request; only the model worker touches tensors.
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
     # Video processing parameters (per-request overrides)
     image_token_budget: Optional[int] = None
@@ -7585,6 +7587,39 @@ class MLLMBatchRequest:
 
     # Prefix cache state
     prompt_cache: Optional[List[Any]] = None  # Pre-filled KV cache from Prefix Cache or Disk Cache
+
+
+class _MLLMPrefillCancelled(Exception):
+    """Request-local worker control flow, not a model error or retry trigger."""
+
+
+def _prefill_cancelled(request: Any) -> bool:
+    signal = getattr(request, "cancel_event", None)
+    return signal is not None and signal.is_set()
+
+
+def _raise_if_prefill_cancelled(request: Any) -> None:
+    if _prefill_cancelled(request):
+        logger.info(
+            "MLLM prefill cancelled request=%s completed_tokens=%d",
+            request.request_id,
+            int(getattr(request, "_prefill_tokens_done", 0) or 0),
+        )
+        raise _MLLMPrefillCancelled(request.request_id)
+
+
+def _release_cancelled_prefill_request(request: Any) -> None:
+    """Release only this worker-owned request's transient references."""
+    _clear_mllm_request_media_payloads(request)
+    for attr in (
+        "input_ids", "attention_mask", "prompt_cache",
+        "_media_clean_prefix_cache", "_inline_ssm_capture",
+        "_inline_ssm_checkpoints", "_mixed_swa_boundary", "_dots3_media_boundary",
+        "_qwen_media_tail_full_input_ids",
+    ):
+        if hasattr(request, attr):
+            setattr(request, attr, None)
+    request.extra_kwargs = {}
 
 
 @dataclass
@@ -13038,6 +13073,8 @@ class MLLMBatchGenerator:
                 except AttributeError:
                     pass
             return output
+        except _MLLMPrefillCancelled:
+            raise
         except Exception as ex:
             logger.warning(
                 "Qwen HYBRID conditioned media tail failed for %s; "
@@ -13108,6 +13145,7 @@ class MLLMBatchGenerator:
         the positions. Anything undetected, unsupported, or raising falls
         straight back to the one-shot call.
         """
+        _raise_if_prefill_cancelled(request)
         one_shot = lambda: self.model(input_ids, **kwargs)
 
         if os.environ.get("VMLX_DISABLE_MEDIA_CHUNKED_PREFILL") in (
@@ -13269,6 +13307,7 @@ class MLLMBatchGenerator:
             # per-chunk graph. Never clear a pending vision graph's resources.
             mx.eval(embeds)
         for end in bounds:
+            _raise_if_prefill_cancelled(request)
             if _HYBRID_PREFILL_MEM_TRACE:
                 _media_chunk_started = time.perf_counter()
                 logger.info(
@@ -13318,6 +13357,11 @@ class MLLMBatchGenerator:
             # Publish only work that actually completed, not the queued prompt
             # length. The scheduler reads this generator request by its UID.
             request._prefill_tokens_done = end
+            # Stop may arrive while Metal is executing. Only observe it AFTER
+            # this chunk's native state is realized, before another chunk or
+            # clean-boundary snapshot is submitted. Never interrupt Metal from
+            # the HTTP thread or turn a cancellation into a full-prefill retry.
+            _raise_if_prefill_cancelled(request)
             if bounded_glm:
                 peak = int(mx.get_peak_memory())
                 transient = max(0, peak - active)
@@ -13696,6 +13740,9 @@ class MLLMBatchGenerator:
         self._drain_tight_memory_allocator("before_prefill")
 
         for req in requests:
+            if _prefill_cancelled(req):
+                _release_cancelled_prefill_request(req)
+                continue
             trace = _MLLMPrefillTrace(
                 request_id=req.request_id,
                 prompt_tokens=0,
@@ -13760,6 +13807,9 @@ class MLLMBatchGenerator:
                 # processor inside _preprocess_request; release them whether it
                 # returned, rejected the request or raised
                 _release_derived_media_files(req)
+            if _prefill_cancelled(req):
+                _release_cancelled_prefill_request(req)
+                continue
             # Save full token list BEFORE cache fetch can mutate req.input_ids.
             # Used later for SSM state cache keying (must be consistent with fetch key).
             _all_tokens = (
@@ -15213,6 +15263,10 @@ class MLLMBatchGenerator:
             )
             req._cache_execution = _lookup_execution
 
+        # A queued/lookup-stage cancellation must not start model work. Keep
+        # the input list itself unchanged: _next consumes its original length.
+        requests = [req for req in requests if not _prefill_cancelled(req)]
+
         # Get token sequences and lengths
         input_ids_list = [
             req.input_ids.tolist() if req.input_ids is not None else [0]
@@ -15234,6 +15288,7 @@ class MLLMBatchGenerator:
 
         for i, req in enumerate(requests):
           try:
+            _raise_if_prefill_cancelled(req)
             with mx.stream(MLLMBatchGenerator._stream):
                 trace = prefill_traces.get(req.request_id)
                 if trace is not None:
@@ -15607,6 +15662,7 @@ class MLLMBatchGenerator:
                             trace.stop("forward")
                     else:
                         raise
+                _raise_if_prefill_cancelled(req)
                 execution = dict(getattr(req, "_cache_execution", None) or {})
                 _prompt_tokens = len(
                     getattr(req, "_original_token_ids", None) or []
@@ -15667,7 +15723,6 @@ class MLLMBatchGenerator:
                     if value is not None
                 }
                 self._stats.last_cache_execution = dict(req._cache_execution)
-                per_request_caches.append(req_cache)
 
                 # Free pixel_values and vision tensors after encoding —
                 # they're never needed again and can be very large for
@@ -15766,6 +15821,8 @@ class MLLMBatchGenerator:
                         trace.stop("token_item")
                     if trace is not None:
                         trace.stop("sample")
+                _raise_if_prefill_cancelled(req)
+                per_request_caches.append(req_cache)
                 first_tokens.append(_sampled_value)
                 all_logprobs.append(logprobs.squeeze(0) if logprobs is not None else None)
                 succeeded_requests.append(req)
@@ -16097,6 +16154,12 @@ class MLLMBatchGenerator:
                         )
                 if trace is not None:
                     trace.stop("ssm_capture")
+          except _MLLMPrefillCancelled:
+                _release_cancelled_prefill_request(req)
+                req_cache = logits = last_logits = None
+                # No error response, sampling retry, sibling reset or cache
+                # publication. The scheduler owns deferred block-ref cleanup.
+                continue
           except Exception as prefill_err:
                 # Broadcast shape errors from stale cache (prefix, paged blocks, or
                 # residual batch state) — retry with completely fresh cache.

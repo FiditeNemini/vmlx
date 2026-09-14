@@ -161,6 +161,60 @@ class _NoEmbedsLM:
 
 
 class TestMediaForwardFallbacks:
+    @pytest.mark.parametrize("cancel_at", [0, 4096, 9000])
+    def test_cancel_stops_at_completed_chunk_without_clean_snapshot(
+        self, monkeypatch, cancel_at
+    ):
+        from types import SimpleNamespace
+        import threading
+        import vmlx_engine.mllm_batch_generator as mllm
+
+        signal = threading.Event()
+        request = SimpleNamespace(request_id="cancel-media", cancel_event=signal)
+        events = []
+        end = 0
+
+        class Logits:
+            def __getitem__(self, key):
+                return self
+
+        class LM:
+            def __call__(self, ids, inputs_embeds=None, cache=None):
+                nonlocal end
+                end += ids.shape[-1]
+                events.append(("forward", end))
+                if end == cancel_at:
+                    signal.set()
+                return Logits()
+
+        gen = self._gen(_OneShotModel([]), LM())
+        ids = mllm.mx.arange(9001)[None, :]
+        gen.model.get_input_embeddings = lambda ids, **kw: SimpleNamespace(
+            inputs_embeds=ids[..., None]
+        )
+        gen._media_prefill_chunk_tokens = lambda seq_len: 4096
+        gen._media_placeholder_token_ids = lambda: set()
+        gen._native_media_clean_boundary = lambda *args: 9000
+        gen._snapshot_native_media_clean_boundary = lambda *args: events.append(("snapshot", end))
+        monkeypatch.setattr(mllm, "_materialize_prefill_cache_state", lambda cache: events.append(("state", end)))
+        monkeypatch.setattr(mllm.mx, "eval", lambda *args: None)
+        monkeypatch.setattr(mllm.mx, "clear_cache", lambda: None)
+        monkeypatch.delenv("VMLX_GLM5_BOUNDED_MEDIA_PREFILL", raising=False)
+        if cancel_at == 0:
+            signal.set()
+
+        with pytest.raises(mllm._MLLMPrefillCancelled):
+            gen._media_forward(request, ids, 9001, [object()], {})
+
+        assert end == cancel_at
+        assert not any(kind == "snapshot" for kind, _ in events)
+        assert events[::2] == [("forward", n) for kind, n in events if kind == "state"]
+        assert getattr(request, "_prefill_tokens_done", 0) == cancel_at
+        # Cancellation belongs to the request, never to the shared generator.
+        sibling = SimpleNamespace(request_id="sibling", cancel_event=threading.Event())
+        gen._media_forward(sibling, ids, 9001, [object()], {})
+        assert sibling._prefill_tokens_done == 9001
+
     @pytest.mark.parametrize("clean_boundary", [0, 9000])
     def test_generic_media_realizes_state_before_the_next_chunk(
         self, monkeypatch, clean_boundary

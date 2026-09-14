@@ -474,6 +474,7 @@ class MLLMRequest:
     audio: Optional[List[Any]] = None
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     arrival_time: float = field(default_factory=time.time)
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False, compare=False)
 
     # Batch generator UID (assigned when scheduled)
     batch_uid: Optional[int] = None
@@ -2896,9 +2897,10 @@ class MLLMScheduler:
             True if request was found and aborted
         """
         with self._queue_lock:
-            request = self.requests.pop(request_id, None)
-            if request is None:
+            request = self.requests.get(request_id)
+            if request is None or request.status == RequestStatus.FINISHED_ABORTED:
                 return False
+            request.cancel_event.set()
 
             # Remove from waiting queue
             if request.status == RequestStatus.WAITING:
@@ -2924,13 +2926,14 @@ class MLLMScheduler:
             # Cold request blocks were never published and must be deleted.
             # Existing SSD-hit blocks are durable and only release their
             # request refs; deleting those mappings poisons same-process reuse.
-            self._cleanup_aborted_paged_request(request_id)
-
-            # Clean up streaming detokenizer
-            self._cleanup_detokenizer(request_id)
-
-            # Clear extracted cache GC reference
-            request._extracted_cache = None
+            if request_id not in self._pending_aborts:
+                # Unscheduled requests have no worker-owned tensors. Running
+                # requests keep refs until the same worker has finished its
+                # current chunk and removed the generator row.
+                self._cleanup_aborted_paged_request(request_id)
+                self._cleanup_detokenizer(request_id)
+                request._extracted_cache = None
+                self.requests.pop(request_id, None)
 
             # Mark as aborted
             request.status = RequestStatus.FINISHED_ABORTED
@@ -2952,11 +2955,41 @@ class MLLMScheduler:
                         pass
 
         # Free Metal memory when all requests done
-        if not self.running:
+        if not self.running and not self._pending_aborts:
             clear_mlx_memory_cache(log=logger)
 
-        logger.debug(f"Aborted request {request_id}")
+        logger.info(
+            "MLLM cancellation requested request=%s cleanup_pending=%s",
+            request_id, request_id in self._pending_aborts,
+        )
         return True
+
+    def _process_pending_aborts(self) -> None:
+        """Finish cancellations on the model worker, after its current step."""
+        with self._queue_lock:
+            aborts = list(self._pending_aborts)
+        for request_id in aborts:
+            with self._queue_lock:
+                uid = self.request_id_to_uid.get(request_id)
+            try:
+                if uid is not None and self.batch_generator is not None:
+                    with self._batch_lock:
+                        self.batch_generator.remove([uid])
+            except Exception as exc:
+                logger.warning("Deferred abort remove failed for %s: %s", request_id, exc)
+                # Keep ownership and work visible; failed removal is not idle.
+                continue
+            with self._queue_lock:
+                self._cleanup_aborted_paged_request(request_id)
+                self._cleanup_detokenizer(request_id)
+                request = self.requests.pop(request_id, None)
+                if request is not None:
+                    request._extracted_cache = None
+                self.request_id_to_uid.pop(request_id, None)
+                if uid is not None:
+                    self.uid_to_request_id.pop(uid, None)
+                self._pending_aborts.discard(request_id)
+            logger.info("MLLM cancellation completed request=%s uid=%s", request_id, uid)
 
     def has_requests(self) -> bool:
         """Check for generation work. Foreground only.
@@ -2966,7 +2999,7 @@ class MLLMScheduler:
         AFTER responses are finalized (vmlx#245) — it must never keep
         ``step()`` on the response path.
         """
-        return bool(self.waiting or self.running)
+        return bool(self.waiting or self.running or getattr(self, "_pending_aborts", None))
 
     def has_idle_tasks(self) -> bool:
         """Whether hybrid SSM rederive maintenance is queued (vmlx#245)."""
@@ -3099,6 +3132,7 @@ class MLLMScheduler:
                 uid=-1,  # Will be assigned by batch generator
                 request_id=request.request_id,
                 prompt=request.prompt,
+                cancel_event=request.cancel_event,
                 images=request.images,
                 videos=request.videos,
                 audio=request.audio,
@@ -4951,24 +4985,12 @@ class MLLMScheduler:
         # Process deferred aborts — safe now because previous step's
         # Metal computation has completed. Hold _queue_lock to prevent
         # race with abort_request() modifying _pending_aborts/UID maps.
-        if self._pending_aborts:
-            with self._queue_lock:
-                aborts = list(self._pending_aborts)
-                self._pending_aborts.clear()
-            for rid in aborts:
-                with self._queue_lock:
-                    uid = self.request_id_to_uid.pop(rid, None)
-                if uid is not None:
-                    if self.batch_generator is not None:
-                        try:
-                            with self._batch_lock:
-                                self.batch_generator.remove([uid])
-                        except Exception as e:
-                            logger.warning(f"Deferred abort remove failed for {rid}: {e}")
-                    with self._queue_lock:
-                        self.uid_to_request_id.pop(uid, None)
-                logger.debug(f"Processed deferred abort for {rid}")
+        self._process_pending_aborts()
         _trace_mark("abort_s")
+        if self._pending_aborts:
+            # A failed removal cannot admit or decode more work against the
+            # still-owned generator state. Keep the cleanup visible to health.
+            return output
 
         # Schedule waiting requests
         with self._queue_lock:
@@ -5697,6 +5719,33 @@ class MLLMScheduler:
 
     # ========== Stats and utilities ==========
 
+    def get_request_lifecycle_stats(self) -> Dict[str, Any]:
+        """Small prompt-free snapshot, including not-yet-removed workers."""
+        with self._queue_lock:
+            collectors = sorted(self.output_queues)
+            waiting = [request.request_id for request in self.waiting]
+            cancelling = set(getattr(self, "_pending_aborts", ()))
+            running = sorted(set(self.running) | cancelling)
+            return {
+                "engine_collector_count": len(collectors),
+                "engine_collector_request_ids": collectors,
+                "num_waiting": len(waiting),
+                "waiting_request_ids": waiting,
+                "num_running": len(running),
+                "running_request_ids": running,
+                "running_requests": [
+                    {
+                        "request_id": request_id,
+                        "status": "CANCELLING" if request_id in cancelling else getattr(
+                            self.running[request_id].status,
+                            "name", str(self.running[request_id].status),
+                        ),
+                    }
+                    for request_id in running
+                ],
+                "terminal_cleanup_pending": bool(cancelling) or not self._terminal_cleanup_complete.is_set(),
+            }
+
     def get_stats(self) -> Dict[str, Any]:
         """Get scheduler statistics including all cache mode metrics.
 
@@ -5705,32 +5754,8 @@ class MLLMScheduler:
         legacy/disk). Used by /v1/stats endpoint and health monitoring.
         """
         with self._queue_lock:
-            collector_request_ids = sorted(self.output_queues)
-            waiting_request_ids = [
-                request.request_id for request in self.waiting
-            ]
-            running_request_ids = sorted(self.running)
             stats = {
-                "num_waiting": len(self.waiting),
-                "num_running": len(self.running),
-                "waiting_request_ids": waiting_request_ids,
-                "running_request_ids": running_request_ids,
-                "running_requests": [
-                    {
-                        "request_id": request_id,
-                        "status": getattr(
-                            self.running[request_id].status,
-                            "name",
-                            str(self.running[request_id].status),
-                        ),
-                    }
-                    for request_id in running_request_ids
-                ],
-                "engine_collector_count": len(collector_request_ids),
-                "engine_collector_request_ids": collector_request_ids,
-                "terminal_cleanup_pending": (
-                    not self._terminal_cleanup_complete.is_set()
-                ),
+                **self.get_request_lifecycle_stats(),
                 "num_finished": len(self.finished_req_ids),
                 "num_requests_processed": self.num_requests_processed,
                 "total_prompt_tokens": self.total_prompt_tokens,

@@ -13259,6 +13259,14 @@ def _live_mllm_request_lifecycle_snapshot(
     running requests, and terminal cleanup.  Rebuild only that small view so
     the cached response never reports an in-flight gateway request as idle.
     """
+    lifecycle_probe = getattr(scheduler, "get_request_lifecycle_stats", None)
+    if callable(lifecycle_probe):
+        try:
+            stats = lifecycle_probe()
+            if isinstance(stats, dict):
+                return _request_lifecycle_health_snapshot(stats, stats)
+        except Exception:
+            return None
     lock = getattr(scheduler, "_queue_lock", None)
     output_queues = getattr(scheduler, "output_queues", None)
     waiting = getattr(scheduler, "waiting", None)
@@ -13327,6 +13335,7 @@ async def health():
         await _post_async_engine_teardown_mlx_cleanup("health_standby_deep")
 
     scheduler_probe = _get_scheduler() if _engine is not None else None
+    _live_lifecycle = _live_mllm_request_lifecycle_snapshot(scheduler_probe)
     num_running = num_waiting = 0
     if scheduler_probe is not None:
         # Strict len() semantics: anything that is not a real sized container
@@ -13336,6 +13345,9 @@ async def health():
             num_waiting = len(scheduler_probe.waiting)
         except Exception:
             num_running = num_waiting = 0
+        if _live_lifecycle is not None and _live_lifecycle.get("available"):
+            num_running = _live_lifecycle["scheduler_running_count"]
+            num_waiting = _live_lifecycle["scheduler_waiting_count"]
     cached_result = _health_snapshot_cache.get("result")
     if (num_running or num_waiting) and cached_result is not None:
         import copy as _copy
@@ -13442,9 +13454,6 @@ async def health():
                 _companion_block["last_prefix_lookup"] = _live_lookup
             else:
                 _companion_block.pop("last_prefix_lookup", None)
-        _live_lifecycle = _live_mllm_request_lifecycle_snapshot(
-            scheduler_probe
-        )
         if _live_lifecycle is not None:
             result["request_lifecycle"] = _live_lifecycle
         result["health_gauges_cached"] = True

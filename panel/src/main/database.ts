@@ -49,6 +49,10 @@ export interface Session {
 
 export interface MessageMetrics {
   tokenCount: number;
+  tokenCountKnown?: boolean;
+  decodeMetricSource?: string;
+  remoteRequestSeconds?: number;
+  remotePasses?: number;
   promptTokens?: number;
   cachedTokens?: number;
   cacheDetail?: string;

@@ -111,6 +111,10 @@ export interface MetricItem {
 
 export interface MessageMetrics {
   tokenCount: number;
+  tokenCountKnown?: boolean;
+  decodeMetricSource?: string;
+  remoteRequestSeconds?: number;
+  remotePasses?: number;
   promptTokens?: number;
   cachedTokens?: number;
   cacheDetail?: string;
@@ -129,17 +133,22 @@ export function getMetricsItems(
   const items: MetricItem[] = [];
 
   items.push({
-    label: t('chat.metrics.tokensLabel', { n: metrics.tokenCount }),
-    value: `${metrics.tokenCount}`,
-    title: isStreaming
+    label: t('chat.metrics.tokensLabel', { n: metrics.tokenCountKnown === false ? '—' : metrics.tokenCount }),
+    value: metrics.tokenCountKnown === false ? '—' : `${metrics.tokenCount}`,
+    title: metrics.tokenCountKnown === false ? t('chat.metrics.remoteUsageUnavailable') : isStreaming
       ? t('chat.metrics.tokensTitleStreaming')
       : t('chat.metrics.tokensTitleDone'),
   });
 
   items.push({
-    label: `${metrics.tokensPerSecond} t/s`,
+    label: metrics.decodeMetricSource === 'remote-request'
+      ? t('chat.metrics.remoteRateLabel', { speed: metrics.tokensPerSecond })
+      : `${metrics.tokensPerSecond} t/s`,
     value: metrics.tokensPerSecond,
-    title: t('chat.metrics.tpsTitle'),
+    title: metrics.decodeMetricSource === 'remote-request'
+      ? t('chat.metrics.remoteRateTitle')
+      : metrics.decodeMetricSource === 'unavailable'
+        ? t('chat.metrics.remoteUsageUnavailable') : t('chat.metrics.tpsTitle'),
   });
 
   if (metrics.ppSpeed) {

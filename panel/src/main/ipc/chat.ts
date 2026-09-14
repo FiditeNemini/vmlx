@@ -93,6 +93,7 @@ import {
   type ServerDecodePass,
   summarizeServerDecodePasses,
 } from "../../shared/chatMetrics";
+import { RemoteRequestMetrics } from "../../shared/remoteRequestMetrics";
 import { stripRedundantNamespacedToolPreview } from "../../shared/namespacedToolScaffold";
 import { replayPersistedAssistantHistory } from "../../shared/toolHistoryReplay";
 import { orderComposerContentParts } from "../../shared/composerContentOrder";
@@ -2010,6 +2011,19 @@ export function registerChatHandlers(
       // Per-HTTP-pass provenance for prompt/cache counts. This remains in the
       // outer scope so interrupted responses can refuse client-estimated pp/s.
       let serverSendsUsage = false;
+      const remoteMetrics = isRemote ? new RemoteRequestMetrics() : undefined;
+      const remoteMetricFields = () => {
+        if (!remoteMetrics) return {};
+        const metrics = remoteMetrics.snapshot(Date.now());
+        return {
+          tokenCount: metrics.outputTokens ?? 0,
+          tokenCountKnown: metrics.outputTokens !== undefined,
+          tokensPerSecond: metrics.tokensPerSecond?.toFixed(1) ?? "—",
+          decodeMetricSource: metrics.outputTokens === undefined ? "unavailable" : "remote-request",
+          remoteRequestSeconds: metrics.requestSeconds,
+          remotePasses: metrics.passes,
+        };
+      };
       let cacheDetail = "";
       const recordCacheUsage = (details: any) => {
         const nextCachedTokens = Number(details?.cached_tokens);
@@ -2093,9 +2107,9 @@ export function registerChatHandlers(
       // Accumulates content across tool iterations so abort during tool execution can recover
       // earlier content that would otherwise be lost when fullContent is reset between iterations
       let allGeneratedContent = "";
-      // Per-iteration token count for auto-continue threshold (tokenCount is cumulative)
+      // Per-request count. Provider usage restarts at each HTTP request;
+      // never infer a restart by comparing it with the previous request size.
       let iterationTokenCount = 0;
-      let iterationTokenBase = 0; // tokenCount at start of iteration (for server-usage delta)
       // Cumulative token offset: tracks total tokens from completed iterations.
       // Server restarts completion_tokens from 0 on each new HTTP request, so
       // raw tokenCount only reflects the current iteration. This offset + iterationTokenCount
@@ -2512,6 +2526,7 @@ export function registerChatHandlers(
         logRequestShape(requestBody, "initial");
 
         fetchStartTime = Date.now(); // Capture just before fetch for accurate TTFT
+        remoteMetrics?.beginPass(fetchStartTime);
         // Remote internet providers use Electron's net.fetch for certificates
         // and proxies; loopback model servers use Node streaming for SSE.
         const useNodeStreamingFetch = !isRemote || isLoopbackUrl(apiUrl);
@@ -2977,6 +2992,7 @@ export function registerChatHandlers(
                   ppSpeed,
                   ttft: ttft.toFixed(2),
                   elapsed: elapsed.toFixed(1),
+                  ...remoteMetricFields(),
                 },
               });
               rendererStreamNeedsFlush = true;
@@ -3217,14 +3233,10 @@ export function registerChatHandlers(
               // response.usage extension (never part of a standard remote stream).
               if (responsesEventType === "response.usage" && parsed.usage) {
                 recordServerDecodeUsage(parsed.usage);
+                remoteMetrics?.recordUsage(parsed.usage);
                 if (parsed.usage.output_tokens != null) {
                   tokenCount = parsed.usage.output_tokens;
-                  // Detect server token count restart (new HTTP request resets completion_tokens to 0)
-                  if (tokenCount < iterationTokenBase) iterationTokenBase = 0;
-                  iterationTokenCount = Math.max(
-                    0,
-                    tokenCount - iterationTokenBase,
-                  );
+                  iterationTokenCount = Math.max(0, tokenCount);
                   // Clear contaminated client-counted entries when transitioning to server usage
                   if (!serverSendsUsage) {
                     tpsSnapshots.length = 0;
@@ -3301,13 +3313,10 @@ export function registerChatHandlers(
               }
               if (isResponsesTerminalEvent && respUsage) {
                 recordServerDecodeUsage(respUsage);
+                remoteMetrics?.recordUsage(respUsage);
                 if (respUsage.output_tokens != null) {
                   tokenCount = respUsage.output_tokens;
-                  if (tokenCount < iterationTokenBase) iterationTokenBase = 0;
-                  iterationTokenCount = Math.max(
-                    0,
-                    tokenCount - iterationTokenBase,
-                  );
+                  iterationTokenCount = Math.max(0, tokenCount);
                   if (!serverSendsUsage) {
                     tpsSnapshots.length = 0;
                     tpsTokenBase = tokenCount;
@@ -3342,14 +3351,10 @@ export function registerChatHandlers(
 
               // Update usage BEFORE emitting delta so metrics use real server counts
               if (parsed.usage) {
+                remoteMetrics?.recordUsage(parsed.usage);
                 if (parsed.usage.completion_tokens != null) {
                   tokenCount = parsed.usage.completion_tokens;
-                  // Detect server token count restart (new HTTP request resets completion_tokens to 0)
-                  if (tokenCount < iterationTokenBase) iterationTokenBase = 0;
-                  iterationTokenCount = Math.max(
-                    0,
-                    tokenCount - iterationTokenBase,
-                  );
+                  iterationTokenCount = Math.max(0, tokenCount);
                   // Clear contaminated client-counted entries when transitioning to server usage
                   if (!serverSendsUsage) {
                     tpsSnapshots.length = 0;
@@ -3461,6 +3466,7 @@ export function registerChatHandlers(
                         tokensPerSecond: _hbTps,
                         ttft: ttft.toFixed(2),
                         elapsed: ((now - fetchStartTime) / 1000).toFixed(1),
+                        ...remoteMetricFields(),
                       },
                     });
                   }
@@ -3749,6 +3755,7 @@ export function registerChatHandlers(
         };
 
         await streamSSE(reader);
+        remoteMetrics?.endPass(Date.now());
         if (pendingStreamServerError) throw pendingStreamServerError;
         reconcileResponsesToolBuffer();
 
@@ -3769,6 +3776,7 @@ export function registerChatHandlers(
           responsesFinalText = "";
           // Reset fetchStartTime so TTFT for follow-up is measured correctly
           fetchStartTime = Date.now();
+          remoteMetrics?.beginPass(fetchStartTime);
           firstTokenTime = null;
           lastTokenTime = null;
           // Use the same wire API format as the initial request
@@ -3815,6 +3823,7 @@ export function registerChatHandlers(
           const followUpReader = res.body?.getReader();
           if (!followUpReader) return false;
           await streamSSE(followUpReader);
+          remoteMetrics?.endPass(Date.now());
           if (pendingStreamServerError) throw pendingStreamServerError;
           reconcileResponsesToolBuffer();
           return true;
@@ -4357,6 +4366,7 @@ export function registerChatHandlers(
                       ? ((firstTokenTime - fetchStartTime) / 1000).toFixed(2)
                       : "0",
                     elapsed: (generationMs / 1000).toFixed(1),
+                    ...remoteMetricFields(),
                   },
                 });
               }
@@ -4402,7 +4412,6 @@ export function registerChatHandlers(
             clientSideThinkParsing = false;
             clientSideThinkHoldback = "";
             cumulativeTokenOffset += iterationTokenCount; // Save completed iteration tokens for cumulative total
-            iterationTokenBase = tokenCount; // Save cumulative base for server-usage delta
             iterationTokenCount = 0;
             tpsSnapshots.length = 0;
             liveTps = 0;
@@ -4515,7 +4524,6 @@ export function registerChatHandlers(
               ? allGeneratedContent.length + 2
               : 0;
             cumulativeTokenOffset += iterationTokenCount; // Save completed iteration tokens for cumulative total
-            iterationTokenBase = tokenCount; // Save cumulative base for server-usage delta
             iterationTokenCount = 0;
             tpsSnapshots.length = 0;
             liveTps = 0;
@@ -4623,7 +4631,9 @@ export function registerChatHandlers(
           ...completedServerDecodePasses,
           currentServerDecodePass,
         ]);
+        const remoteSummary = remoteMetrics?.snapshot(Date.now());
         const totalTokenCount =
+          remoteSummary ? (remoteSummary.outputTokens ?? 0) :
           serverDecodeSummary?.outputTokens ??
           (cumulativeTokenOffset + iterationTokenCount);
         const cumulativeDecodeTps =
@@ -4634,13 +4644,18 @@ export function registerChatHandlers(
         // impossible burst, so selectFinalDecodeTps falls back to the median
         // observed rolling stream rate.
         const finalTps =
+          remoteSummary ? (remoteSummary.tokensPerSecond ?? 0) :
           serverDecodeSummary?.tokensPerSecond ??
           selectFinalDecodeTps({
             cumulativeTps: cumulativeDecodeTps,
             rollingTps: liveTpsHistory,
             lastRollingTps: liveTps,
           });
-        const decodeMetricSource = serverDecodeSummary ? "server" : "client";
+        const decodeMetricSource = remoteSummary
+          ? remoteSummary.outputTokens === undefined ? "unavailable" : "remote-request"
+          : serverDecodeSummary ? "server" : "client";
+        const finalTpsLabel = remoteSummary?.outputTokens === undefined && isRemote
+          ? "—" : finalTps.toFixed(1);
         // TTFT measured from fetchStartTime (excludes health check and message building overhead)
         const ttft = Math.max(
           0,
@@ -4790,11 +4805,12 @@ export function registerChatHandlers(
           promptTokens: promptTokens || undefined,
           cachedTokens: cachedTokens || undefined,
           cacheDetail: cacheDetail || undefined,
-          tokensPerSecond: finalTps.toFixed(1),
+          tokensPerSecond: finalTpsLabel,
           decodeMetricSource,
           ppSpeed: finalPpSpeed,
           ttft: ttft.toFixed(2),
           totalTime: totalTime.toFixed(1),
+          ...remoteMetricFields(),
         });
         if (collectedToolStatuses.length > 0) {
           assistantMessage.toolCallsJson = JSON.stringify(
@@ -4980,22 +4996,25 @@ export function registerChatHandlers(
                 promptTokens,
                 cachedTokens,
                 cacheDetail,
-                tokensPerSecond: finalTps.toFixed(1),
+                tokensPerSecond: finalTpsLabel,
+                decodeMetricSource,
                 ppSpeed: finalPpSpeed,
                 ttft: ttft.toFixed(2),
                 totalTime: totalTime.toFixed(1),
+                ...remoteMetricFields(),
               },
             });
           }
         } catch (_) {}
 
         console.log(
-          `[CHAT] Response complete: ${totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTps.toFixed(1)} t/s, decode=${decodeMetricSource}${serverDecodeSummary ? `:${serverDecodeSummary.decodeTokens}/${serverDecodeSummary.decodeSeconds.toFixed(3)}s` : ""}, live=${liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPpSpeed ? `, ${finalPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
+          `[CHAT] Response complete: ${remoteSummary?.outputTokens === undefined && isRemote ? "unknown" : totalTokenCount} tokens in ${totalTime.toFixed(1)}s (${finalTpsLabel} t/s, decode=${decodeMetricSource}${remoteSummary ? `:${remoteSummary.outputTokens ?? "unknown"}/${remoteSummary.requestSeconds.toFixed(3)}s/${remoteSummary.passes}passes` : serverDecodeSummary ? `:${serverDecodeSummary.decodeTokens}/${serverDecodeSummary.decodeSeconds.toFixed(3)}s` : ""}, live=${isRemote ? "request-window" : liveTps.toFixed(1)} t/s, TTFT: ${ttft.toFixed(2)}s${finalStreamPromptTokens ? `, final-pass pp: ${finalStreamPromptTokens} tokens${finalStreamCachedTokens ? ` (${finalStreamCachedTokens} cached)` : ""}${finalPpSpeed ? `, ${finalPpSpeed} pp/s` : ", rate unavailable"}` : ""}, exchange prompt: ${promptTokens} tokens${cachedTokens ? ` (${cachedTokens} cached)` : ""}, usage=${serverSendsUsage ? "server" : "client"})`,
         );
 
         return assistantMessage;
       } catch (error) {
         stopPeriodicSave();
+        remoteMetrics?.endPass(Date.now());
         // Release the SSE reader if it was acquired
         try {
           reader?.cancel();
@@ -5079,7 +5098,9 @@ export function registerChatHandlers(
         // Check abort status BEFORE save/delete decision — needed to preserve
         // tool call displays that the user already saw on screen.
         const wasAborted = abortController.signal.aborted;
-        const abortTotalTokens = cumulativeTokenOffset + iterationTokenCount;
+        const abortTotalTokens = remoteMetrics
+          ? (remoteMetrics.snapshot(Date.now()).outputTokens ?? 0)
+          : cumulativeTokenOffset + iterationTokenCount;
         const abortReasoningContent = currentReasoningContent();
         const abortReasoningSegments = currentReasoningSegments();
         const hadVisibleActivity =
@@ -5140,6 +5161,7 @@ export function registerChatHandlers(
             ppSpeed: abortPpSpeed,
             ttft: abortTtft.toFixed(2),
             totalTime: abortTotalTime.toFixed(1),
+            ...remoteMetricFields(),
           };
 
           // Persist metricsJson to DB so reloading the chat shows real stats

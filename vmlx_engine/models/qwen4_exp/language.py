@@ -30,6 +30,7 @@ from vmlx_engine.metal.qwen4_verify_sdpa import qwen4_verify_sdpa
 from vmlx_engine.metal.qwen4_prefill_sdpa import qwen4_prefill_sdpa
 from vmlx_engine.metal.qwen4_qsa_mask import qsa_block_mask, qsa_mask_requested
 from vmlx_engine.metal.sparse_merge_topk import sparse_merge_topk
+from vmlx_engine.metal.qwen4_qsa_score_reduce import qsa_score_reduce
 from vmlx_engine.metal.qwen4_hc_combine import (
     exact_hc_combine,
     exact_hc_combine_requested,
@@ -1502,6 +1503,7 @@ class QSAIndexer(nn.Module):
         )
         self._fused_block_mask = qsa_mask_requested()
         self._merge_select = os.environ.get("VMLX_QWEN4_QSA_MERGE_SELECT", "0") == "1"
+        self._score_reduce = os.environ.get("VMLX_QWEN4_QSA_SCORE_REDUCE", "0") == "1"
 
     @staticmethod
     def _position_payload(position_ids: mx.array, batch: int, length: int) -> mx.array:
@@ -1602,8 +1604,11 @@ class QSAIndexer(nn.Module):
                 q.astype(mx.float32),
                 pooled.astype(mx.float32),
             )
-            scores = mx.maximum(scores, 0.0).sum(axis=2) / (
-                self.head_dim**0.5
+            reduced = qsa_score_reduce(
+                scores, head_dim=self.head_dim, enabled=self._score_reduce
+            ) if self._score_reduce else None
+            scores = reduced if reduced is not None else (
+                mx.maximum(scores, 0.0).sum(axis=2) / (self.head_dim**0.5)
             )
 
         # per query i (absolute pos p = offset+i): visible tokens 0..p

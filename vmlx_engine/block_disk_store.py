@@ -1240,6 +1240,15 @@ class BlockDiskStore:
                         self.disk_misses += 1
                         self._note_miss("validation")
                     return None
+            # mx.load is lazy: every unevaluated file-backed array keeps its
+            # safetensors reader (and descriptor) alive. Reconstruction holds
+            # thousands of block payloads before concatenating them, so leaving
+            # evaluation to the caller exhausted RLIMIT_NOFILE mid-chain.
+            # Finish this block's I/O while its shared aggregate lock is held;
+            # returned tensors own bytes, not a deferred read of an evictable
+            # file. This preserves native dtype/format and bounds descriptors
+            # independently of context length without raising process limits.
+            mx.eval(*data.values())
             with self._stats_lock:
                 self.disk_hits += 1
                 if _cache_data_has_tq(cache_data):

@@ -5,8 +5,8 @@ on:
   workflow_dispatch:
     inputs:
       candidate_run_id:
-        description: Successful Signed release candidate workflow run ID
-        required: true
+        description: Successful candidate run ID (not used for exact public-asset recovery)
+        required: false
       version:
         description: Exact version, without the v prefix
         required: true
@@ -181,6 +181,13 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Require a candidate run for normal promotion
+        env:
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
 
       - name: Download exact candidate artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -500,12 +507,58 @@ jobs:
           fetch-depth: 0
 
       - name: Download exact candidate artifact
+        if: ${{ !inputs.pypi_recovery }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: vmlx-release-candidate-${{ inputs.source_sha }}
           path: candidate
           run-id: ${{ inputs.candidate_run_id }}
           github-token: ${{ github.token }}
+
+      - name: Recover verified public updater inputs
+        if: ${{ inputs.pypi_recovery }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          JANG_SHA: ${{ inputs.jang_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p candidate
+          gh release download "v$VERSION" --repo jjang-ai/vmlx \
+            --pattern release-info.json --dir candidate
+          gh api "repos/jjang-ai/vmlx/releases/tags/v$VERSION" > candidate/github-release.json
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          raw = Path("candidate/release-info.json").read_bytes()
+          metadata = json.loads(raw)
+          release = json.loads(Path("candidate/github-release.json").read_text())
+          assert metadata["version"] == os.environ["VERSION"]
+          assert metadata["source"]["commit"] == os.environ["SOURCE_SHA"]
+          assert metadata["jangq"]["commit"] == os.environ["JANG_SHA"]
+          assert release["tag_name"] == "v" + os.environ["VERSION"]
+          assert release["draft"] is False
+          assert release["prerelease"] is False
+          assert set(metadata["artifacts"]) == {"sequoia", "tahoe"}
+          expected = {"release-info.json": (len(raw), hashlib.sha256(raw).hexdigest())}
+          for row in metadata["artifacts"].values():
+              expected[row["filename"]] = (row["bytes"], row["sha256"])
+              expected[row["blockmap_filename"]] = (row["blockmap_bytes"], row["blockmap_sha256"])
+          for row in metadata["python_distributions"].values():
+              expected[row["filename"]] = (row["bytes"], row["sha256"])
+          assets = {row["name"]: row for row in release["assets"]}
+          assert len(assets) == len(release["assets"]) and set(assets) == set(expected)
+          for name, (size, digest) in expected.items():
+              asset = assets[name]
+              assert asset["size"] == size and asset["digest"] == "sha256:" + digest
+          notes = release["body"]
+          assert notes.startswith("# vMLX " + os.environ["VERSION"] + "\n")
+          Path("candidate/release-notes.md").write_text(notes)
+          PY
 
       - name: Generate and push the same Tahoe-first manifest
         env:

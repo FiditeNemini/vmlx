@@ -293,6 +293,71 @@ def test_workflows_are_manual_pinned_and_keep_secret_boundaries():
     assert "Check out immutable release helper" in publish
 
 
+def test_pypi_recovery_uses_public_inputs_without_a_candidate_run():
+    import yaml
+    workflow = yaml.load((ROOT / ".github/workflows/publish-release.yml").read_text(), Loader=yaml.BaseLoader)
+    assert workflow["on"]["workflow_dispatch"]["inputs"]["candidate_run_id"]["required"] == "false"
+    steps = workflow["jobs"]["update-manifests"]["steps"]
+    download = next(step for step in steps if step["name"] == "Download exact candidate artifact")
+    assert download["if"] == "${{ !inputs.pypi_recovery }}"
+    recovery = next(step for step in steps if step["name"] == "Recover verified public updater inputs")
+    assert recovery["if"] == "${{ inputs.pypi_recovery }}"
+    assert 'metadata["source"]["commit"] == os.environ["SOURCE_SHA"]' in recovery["run"]
+    assert 'asset["digest"] == "sha256:" + digest' in recovery["run"]
+    assert 'release["draft"] is False' in recovery["run"]
+    assert 'release["prerelease"] is False' in recovery["run"]
+    assert 'candidate/release-notes.md' in recovery["run"]
+    validation = workflow["jobs"]["validate"]["steps"]
+    guard = next(step for step in validation if step["name"] == "Require a candidate run for normal promotion")
+    assert '^[1-9][0-9]*$' in guard["run"]
+
+
+@pytest.mark.parametrize("mismatch", [None, "source", "jang", "tag", "draft", "digest", "size", "duplicate", "notes"])
+def test_public_recovery_checks_production_payload(tmp_path, monkeypatch, mismatch):
+    import hashlib
+    workflow = yaml.load((ROOT / ".github/workflows/publish-release.yml").read_text(), Loader=yaml.BaseLoader)
+    step = next(s for s in workflow["jobs"]["update-manifests"]["steps"]
+                if s["name"] == "Recover verified public updater inputs")
+    code = step["run"].split("python - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    monkeypatch.chdir(tmp_path)
+    for name, value in {"VERSION": "9.8.6", "SOURCE_SHA": "a" * 40, "JANG_SHA": "b" * 40}.items():
+        monkeypatch.setenv(name, value)
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    metadata = {"version": "9.8.6", "source": {"commit": "a" * 40}, "jangq": {"commit": "b" * 40},
+                "artifacts": {}, "python_distributions": {}}
+    assets = []
+    for flavor in ("sequoia", "tahoe"):
+        row = {"filename": flavor + ".dmg", "bytes": 11, "sha256": "c" * 64,
+               "blockmap_filename": flavor + ".blockmap", "blockmap_bytes": 3, "blockmap_sha256": "d" * 64}
+        metadata["artifacts"][flavor] = row
+        assets.extend([{"name": row["filename"], "size": 11, "digest": "sha256:" + "c" * 64},
+                       {"name": row["blockmap_filename"], "size": 3, "digest": "sha256:" + "d" * 64}])
+    for kind in ("wheel", "sdist"):
+        metadata["python_distributions"][kind] = {"filename": kind, "bytes": 7, "sha256": "e" * 64}
+        assets.append({"name": kind, "size": 7, "digest": "sha256:" + "e" * 64})
+    if mismatch in ("source", "jang"):
+        metadata["source" if mismatch == "source" else "jangq"]["commit"] = "f" * 40
+    raw = json.dumps(metadata).encode()
+    (candidate / "release-info.json").write_bytes(raw)
+    assets.append({"name": "release-info.json", "size": len(raw), "digest": "sha256:" + hashlib.sha256(raw).hexdigest()})
+    release = {"tag_name": "v9.8.6", "draft": False, "prerelease": False,
+               "assets": assets, "body": "# vMLX 9.8.6\n\nExact release notes.\n"}
+    if mismatch == "tag": release["tag_name"] = "v9.8.5"
+    if mismatch == "draft": release["draft"] = True
+    if mismatch == "digest": assets[0]["digest"] = "sha256:" + "f" * 64
+    if mismatch == "size": assets[0]["size"] += 1
+    if mismatch == "duplicate": assets.append(dict(assets[0]))
+    if mismatch == "notes": release["body"] = "# vMLX 9.8.5\n"
+    (candidate / "github-release.json").write_text(json.dumps(release))
+    if mismatch:
+        with pytest.raises(AssertionError): exec(compile(code, "workflow-recovery", "exec"), {})
+        assert not (candidate / "release-notes.md").exists()
+    else:
+        exec(compile(code, "workflow-recovery", "exec"), {})
+        assert (candidate / "release-notes.md").read_text() == release["body"]
+
+
 def test_after_pack_detaches_engine_source_hardlinks(tmp_path):
     source = tmp_path / "source.py"
     packaged = tmp_path / "app" / "vmlx-engine-source" / "vmlx_engine" / "source.py"

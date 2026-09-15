@@ -13734,6 +13734,9 @@ class MLLMBatchGenerator:
                 tail = mx.array([tokens[boundary:]])
                 execution = dict(getattr(request, "_cache_execution", None) or {})
                 execution.update({
+                    # The generic initial record says miss. Native restore
+                    # bypasses generic selection, so name its actual source.
+                    "selection": "native-glm+disk", "disk_hit": True,
                     "attempted_cached_tokens": boundary,
                     "reconstructed": True, "dequantized": False,
                     "reconstruction_seconds": native.last_fetch["seconds"],

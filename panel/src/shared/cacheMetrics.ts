@@ -1,9 +1,15 @@
+/** Native/generic execution strings and structured adaptive selections. */
+export function formatCacheSelection(value: unknown): string | null {
+  if (typeof value === 'string') return value.trim() || null
+  if (!value || typeof value !== 'object') return null
+  const { selected, rejected } = value as { selected?: unknown; rejected?: unknown }
+  if (typeof selected !== 'string' || !selected.trim()) return null
+  return selected + (typeof rejected === 'string' && rejected ? ` ← ${rejected}` : '')
+}
+
 /**
  * Preserve every cache tier observed across one logical agent turn.
- *
- * Tool execution creates multiple HTTP generations. A disk-restored first
- * iteration can be followed by a resident paged hit after the tool result; the
- * later usage event must not erase the earlier `disk` evidence.
+ * A later tool generation must not erase the earlier disk-restored evidence.
  */
 export function mergeCacheDetails(current?: string, next?: string): string {
   const tiers: string[] = [];

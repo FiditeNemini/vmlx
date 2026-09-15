@@ -153,7 +153,10 @@ def test_prefill_publishes_exact_full_boundary_before_final_forward(tmp_path, le
         assert boundary == restored[1].offset == length - 1
         # Exact repeat reuses the materialized checkpoint and only forwards
         # the actual final template token. Legacy usage/key fields stay intact.
+        request._cache_execution = {"selection": "miss", "disk_hit": False}
         generator._restore_glm_native_prefix(request)
+        assert request._cache_execution["selection"] == "native-glm+disk"
+        assert request._cache_execution["disk_hit"] is True
         assert request._cached_tokens == length - 1
         assert request._cache_detail == "native-glm+disk"
         assert request.input_ids.tolist() == [[tokens[-1]]]
@@ -198,6 +201,17 @@ def test_failed_publication_is_not_a_durable_boundary():
     gen._store_glm_native_boundary(req, [])
     assert LEDGER.take(req.request_id) == dict(outcome="failed", detail="native SSD boundary failed",
                                              retained_tokens=0, durable=False)
+
+
+@pytest.mark.parametrize("error", [None, OSError("unavailable")])
+def test_failed_native_lookup_does_not_claim_disk_selection(error):
+    gen = MLLMBatchGenerator.__new__(MLLMBatchGenerator)
+    gen.native_glm_cache = SimpleNamespace(fetch=Mock(return_value=None, side_effect=error))
+    gen._tokens_contain_media_placeholders = lambda ids: False
+    request = SimpleNamespace(request_id="native-metadata-miss", _glm_native_full_token_ids=[1, 2, 3],
+                              _cache_execution={"selection": "miss", "disk_hit": False})
+    gen._restore_glm_native_prefix(request)
+    assert request._cache_execution == {"selection": "miss", "disk_hit": False}
 
 
 def test_native_health_reports_real_pool_not_generic_blocks(tmp_path):

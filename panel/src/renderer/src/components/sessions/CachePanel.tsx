@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { describeDsv4ActivationQat } from './dsv4QatStatus'
 import { useTranslation } from '../../i18n'
+import { formatCacheSelection } from '../../../../shared/cacheMetrics'
 
 export interface CachePanelRequestToken {
   identityGeneration: number
@@ -276,6 +277,7 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
   const lastCacheSelection =
     lastCacheExecution?.selection ??
     schedulerStats?.last_cache_selection
+  const selectionLabel = formatCacheSelection(lastCacheSelection)
   const diskCache = stats?.disk_cache
   const kvQuant = stats?.kv_cache_quantization
   const nativeCache = stats?.native_cache
@@ -689,10 +691,10 @@ export function CachePanel({ endpoint, sessionStatus, sessionId }: CachePanelPro
             {t('sessions.cache.selection')}
           </h4>
           <div className="grid grid-cols-2 gap-2 text-sm">
-            {lastCacheSelection?.selected && (
+            {selectionLabel && (
               <StatCard
                 label={t('sessions.cache.selection')}
-                value={`${String(lastCacheSelection.selected)}${lastCacheSelection?.rejected ? ` ← ${String(lastCacheSelection.rejected)}` : ''}`}
+                value={selectionLabel}
               />
             )}
             {lastCacheSelection?.reason && (

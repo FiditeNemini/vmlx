@@ -59,9 +59,9 @@ describe('CachePanel last-request truthfulness', () => {
 
   it('visibly explains adaptive SSD admission instead of showing an unexplained miss', () => {
     expect(source).toContain('schedulerStats?.last_cache_selection')
+    expect(source).toContain('formatCacheSelection(lastCacheSelection)')
+    expect(source).toContain('value={selectionLabel}')
     for (const field of [
-      'selected',
-      'rejected',
       'reason',
       'paged_cached_tokens',
       'cost_history_comparable',

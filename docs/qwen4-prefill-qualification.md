@@ -33,7 +33,7 @@ Legacy materialized-score equality is not an oracle for this path.
 
 Current eligibility is MLX 0.32.2 on `applegpu_g17s`, batch 1, FP16,
 24 query / 2 KV heads, head dimension 256, 512 four-token selected blocks,
-256–1024 query rows and 32768–131072 logical context tokens. Other shapes
+256–4096 query rows and 32768–131072 logical context tokens. Other shapes
 retain their existing path; these are dispatch bounds, not context limits.
 There is no change to decode, MTP, quantization, selection, or cache format.
 The flag and native artifact identity separate prefix-cache namespaces.

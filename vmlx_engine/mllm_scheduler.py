@@ -747,6 +747,7 @@ class MLLMScheduler:
                 ):
                     try:
                         from .prefix_cache import build_block_cache_namespace
+                        from .utils.glm5_cache_policy import glm5_native_media_ssd_enabled
                         root = self.config.block_disk_cache_dir or os.path.expanduser(
                             "~/.cache/vmlx-engine/block-cache"
                         )
@@ -770,9 +771,11 @@ class MLLMScheduler:
                         self._ssm_companion_disk_store = self.native_glm_cache.disk
                         logger.info(
                             "GLM native SSD experimental backend: root=%s cap_bytes=%d "
-                            "layers=%d RAM_retention=0 media=unsupported batch=1",
+                            "layers=%d RAM_retention=0 media=%s batch=1",
                             self.native_glm_cache.budget.root,
                             self.native_glm_cache.disk.budget_bytes, len(native_layout),
+                            "image_video_exact_input_checkpoint"
+                            if glm5_native_media_ssd_enabled() else "unsupported",
                         )
                     except Exception as exc:
                         logger.warning("GLM native SSD initialization refused: %s", exc)

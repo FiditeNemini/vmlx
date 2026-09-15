@@ -226,3 +226,36 @@ def test_health_advertises_only_explicit_media_opt_in(tmp_path, monkeypatch):
         assert not status["cache_store_policy"]["media_partial_item_restore"]
     finally:
         native.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_startup_log_matches_effective_native_media_policy(tmp_path, monkeypatch, caplog, enabled):
+    import asyncio
+    import logging
+
+    from tests.test_glm5_native_ssd_integration import tiny_model
+    from vmlx_engine.mllm_scheduler import MLLMScheduler, MLLMSchedulerConfig
+    from vmlx_engine.server import _native_cache_status
+
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", "1")
+    if enabled:
+        monkeypatch.setenv("VMLX_GLM5_NATIVE_MEDIA_SSD", "1")
+    else:
+        monkeypatch.delenv("VMLX_GLM5_NATIVE_MEDIA_SSD", raising=False)
+    with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
+        scheduler = MLLMScheduler(tiny_model(), tiny_processor(), MLLMSchedulerConfig(
+            enable_prefix_cache=True, enable_block_disk_cache=True,
+            use_paged_cache=False, max_num_seqs=1,
+            block_disk_cache_dir=str(tmp_path / "ssd"), block_disk_cache_max_gb=0.01,
+            model_path=str(tmp_path / "tiny-native-test"),
+        ))
+    try:
+        policy = _native_cache_status(scheduler, family="glm5_next")["cache_store_policy"]["media"]
+        messages = [record.message for record in caplog.records
+                    if "GLM native SSD experimental backend:" in record.message]
+        assert len(messages) == 1
+        assert f"media={policy} batch=1" in messages[0]
+        assert "RAM_retention=0" in messages[0]
+        assert policy == ("image_video_exact_input_checkpoint" if enabled else "unsupported")
+    finally:
+        asyncio.run(scheduler.stop())

@@ -939,6 +939,7 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
         return None
     try:
         from vmlx_engine.utils.memory_limits import (
+            estimate_glm5_cache_memory_from_config,
             estimate_kv_bytes_per_token_from_config,
             metal_resource_limit,
             projected_output_token_cap,
@@ -950,6 +951,27 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
         byte_cap: int | None = None
         bytes_per_token = estimate_kv_bytes_per_token_from_config(config)
         active, max_ws = _metal_projection_stats()
+        glm5_cache = estimate_glm5_cache_memory_from_config(config, 0)
+        # Amortized native growth excludes fixed KDA state and a possible MLA
+        # capacity-block allocation. Reserve both before the unchanged safety
+        # fraction/multiplier. Do not equate quantized weights with KV dtype.
+        cache_reserve = glm5_cache.output_reserve_bytes if glm5_cache else 0
+        if glm5_cache is not None:
+            projection_key = (
+                _model_path or model_name, glm5_cache.absorbed,
+                glm5_cache.kda_layers, glm5_cache.mla_layers,
+                bytes_per_token, cache_reserve, glm5_cache.dsa_scalar_bytes,
+            )
+            if projection_key not in _native_cache_projection_logged:
+                _native_cache_projection_logged.add(projection_key)
+                logger.info(
+                    "Native GLM cache projection: absorbed=%s kda_layers=%d "
+                    "mla_layers=%d growth_bytes_per_token=%d reserve_bytes=%d "
+                    "dsa_scalar_bytes=%d; workspace/buffer policies unchanged",
+                    glm5_cache.absorbed, glm5_cache.kda_layers,
+                    glm5_cache.mla_layers, bytes_per_token, cache_reserve,
+                    glm5_cache.dsa_scalar_bytes,
+                )
         if bytes_per_token > 0 and max_ws > 0:
             budget_fraction = float(
                 _projection_env("VMLX_METAL_PROJECTED_TOKEN_BUDGET_FRACTION", "0.50")
@@ -960,7 +982,7 @@ def _metal_projected_output_token_cap(model_name: str = "") -> int | None:
                 )
             )
             byte_cap = projected_output_token_cap(
-                active_bytes=active,
+                active_bytes=active + cache_reserve,
                 max_working_set_bytes=max_ws,
                 bytes_per_token=bytes_per_token,
                 budget_fraction=budget_fraction,
@@ -1030,6 +1052,7 @@ _projected_guard_warned: set[tuple[int, int, str]] = set()
 # One-shot dedup for the buffer-ceiling INFO in the cap projection above,
 # which is also re-run by every /health poll.
 _buffer_ceiling_logged: set[int] = set()
+_native_cache_projection_logged: set[tuple] = set()
 
 
 def _apply_projected_output_guard(

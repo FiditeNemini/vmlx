@@ -110,6 +110,120 @@ def _positive_int(value, default: int = 0) -> int:
     return parsed if parsed > 0 else int(default)
 
 
+@dataclass(frozen=True)
+class GLM5CacheMemoryEstimate:
+    """Batch-one native state envelope; excludes model weights/workspaces.
+
+    KDA retains fixed FP32 recurrent state and three short-convolution tails.
+    MLA retains either compact latent-v2 or expanded K/V-v1, plus packed DSA
+    keys/gates and completed pool keys. Capacity slack is charged separately
+    from amortized growth; quantized weight bits do not determine cache dtype.
+    """
+
+    token_count: int
+    total_bytes: int
+    kda_bytes: int
+    mla_bytes: int
+    packed_bytes: int
+    pool_bytes: int
+    growth_bytes_per_token: int
+    output_reserve_bytes: int
+    kda_layers: int
+    mla_layers: int
+    absorbed: bool
+    dsa_scalar_bytes: int
+
+
+def estimate_glm5_cache_memory_from_config(
+    config, token_count: int
+) -> Optional[GLM5CacheMemoryEstimate]:
+    """Return a native GLM envelope, or None for unknown/incomplete layouts.
+
+    The model's cache-policy readers are shared, not approximated from a
+    bundle name. Runtime opt-outs retain the legacy expanded representation.
+    The envelope rounds compact capacity upward even when the first append
+    was exact-fit, and budgets pool keys before the sparse threshold too.
+    """
+    from .glm5_cache_policy import (
+        GLM5_MLA_CAPACITY_TOKENS,
+        glm5_dsa_bf16_state_enabled,
+        glm5_mla_absorb_enabled,
+    )
+
+    text = _cfg_get(config, "text_config")
+    candidates = [text, config] if text is not None else [config]
+    for cfg in candidates:
+        if _cfg_get(cfg, "model_type") not in {"glm5_next", "glm5_next_text"}:
+            continue
+        layers = _cfg_get(cfg, "layer_types")
+        count = _positive_int(_cfg_get(cfg, "num_hidden_layers"))
+        if not isinstance(layers, (list, tuple)) or len(layers) != count or not count:
+            continue
+        if any(kind not in {"linear_attention", "deepseek_sparse_attention"}
+               for kind in layers):
+            continue
+        if _cfg_get(cfg, "qk_rope_head_dim", 0) not in (0, None):
+            continue  # This runtime implements pure-NoPE only.
+        kda_layers = layers.count("linear_attention")
+        mla_layers = count - kda_layers
+        linear = _cfg_get(cfg, "linear_attn_config") or cfg
+        linear_heads = _positive_int(_cfg_get(linear, "num_heads",
+                                            _cfg_get(cfg, "linear_num_heads")))
+        linear_dim = _positive_int(_cfg_get(linear, "head_dim",
+                                          _cfg_get(cfg, "linear_head_dim")))
+        conv = _positive_int(_cfg_get(linear, "short_conv_kernel_size",
+                                    _cfg_get(cfg, "linear_conv_kernel")))
+        heads = _positive_int(_cfg_get(cfg, "num_attention_heads"))
+        rank = _positive_int(_cfg_get(cfg, "kv_lora_rank"))
+        qk = _positive_int(_cfg_get(cfg, "qk_nope_head_dim"))
+        value = _positive_int(_cfg_get(cfg, "v_head_dim"))
+        index = _positive_int(_cfg_get(cfg, "index_head_dim"))
+        kpool = _positive_int(_cfg_get(cfg, "index_kpool"))
+        if kda_layers and not all((linear_heads, linear_dim, conv)):
+            continue
+        if mla_layers and not all((heads, rank, qk, value, index, kpool)):
+            continue
+        dtype = (_cfg_get(cfg, "torch_dtype") or _cfg_get(cfg, "dtype")
+                 or _cfg_get(cfg, "mlx_dtype"))
+        scalar = max(2, _dtype_scalar_bytes(dtype)) if dtype else 4
+        dsa_scalar = 2 if glm5_dsa_bf16_state_enabled() else 4
+        absorbed = glm5_mla_absorb_enabled()
+        kda_fixed = kda_layers * (
+            linear_heads * linear_dim * linear_dim * 4
+            + 3 * max(0, conv - 1) * linear_heads * linear_dim * scalar
+        )
+        mla_row = (rank if absorbed else heads * (qk + value)) * scalar
+        packed_row = 2 * index * dsa_scalar
+        pool_row = index * dsa_scalar
+        growth = mla_layers * (mla_row + packed_row)
+        if mla_layers:
+            growth += (mla_layers * pool_row + kpool - 1) // kpool
+        tokens = max(0, int(token_count))
+        pool_count = tokens // max(1, kpool)
+        capacity = GLM5_MLA_CAPACITY_TOKENS
+        pool_capacity = max(1, capacity // max(1, kpool))
+        rounded = lambda n, block: ((n + block - 1) // block) * block
+        rows = rounded(tokens, capacity) if absorbed else tokens
+        pools = rounded(pool_count, pool_capacity) if absorbed else pool_count
+        mla_bytes = mla_layers * rows * mla_row
+        packed_bytes = mla_layers * rows * packed_row
+        pool_bytes = mla_layers * pools * pool_row
+        reserve = kda_fixed
+        if absorbed:
+            reserve += mla_layers * (
+                capacity * (mla_row + packed_row) + pool_capacity * pool_row
+            )
+        fixed = kda_fixed if tokens else 0
+        return GLM5CacheMemoryEstimate(
+            token_count=tokens, total_bytes=fixed + mla_bytes + packed_bytes + pool_bytes,
+            kda_bytes=fixed, mla_bytes=mla_bytes, packed_bytes=packed_bytes,
+            pool_bytes=pool_bytes, growth_bytes_per_token=growth,
+            output_reserve_bytes=reserve, kda_layers=kda_layers,
+            mla_layers=mla_layers, absorbed=absorbed, dsa_scalar_bytes=dsa_scalar,
+        )
+    return None
+
+
 def _dsv4_config(config):
     """Return the text config when it owns a native DeepSeek-V4 topology."""
 
@@ -341,6 +455,9 @@ def estimate_cache_bytes_for_tokens_from_config(
     under-admitted by ~3.9x and advertised an unservable 1M context.
     """
 
+    glm5 = estimate_glm5_cache_memory_from_config(config, token_count)
+    if glm5 is not None:
+        return glm5.total_bytes
     dsv4 = estimate_dsv4_cache_memory_from_config(
         config,
         token_count,
@@ -462,9 +579,10 @@ def estimate_cache_token_capacity_from_config(
     """Return the largest cache length admitted by ``budget_bytes``.
 
     Native DSV4 memory is nonlinear because SWA stops growing at its window
-    while CSA/HCA pools grow at their own ratios.  Its admission envelope is
-    monotonic, so a bounded binary search replaces the incorrect generic
-    bytes-per-token division.  Other families retain the prior linear path.
+    while CSA/HCA pools grow at their own ratios. GLM also has fixed recurrent
+    state plus independently rounded latent/index capacities. Their envelopes
+    are monotonic, so a bounded binary search replaces linear division.
+    Other families retain the prior linear path.
     """
 
     try:
@@ -475,7 +593,8 @@ def estimate_cache_token_capacity_from_config(
     if budget <= 0:
         return 0
 
-    if _dsv4_config(config) is None:
+    if (_dsv4_config(config) is None
+            and estimate_glm5_cache_memory_from_config(config, 0) is None):
         bytes_per_token = estimate_kv_bytes_per_token_from_config(config)
         if bytes_per_token <= 0:
             return 0
@@ -516,11 +635,14 @@ def estimate_cache_token_capacity_from_config(
 def estimate_kv_bytes_per_token_from_config(config) -> int:
     """Estimate live KV-cache bytes added per generated token.
 
-    The estimate intentionally uses standard K+V cache geometry and leaves
-    family-specific temporary/fragmentation safety to callers via their
+    Native families use their own state geometry; other families use standard
+    K+V. Temporary/fragmentation safety remains with callers via their
     projected-budget multiplier. Dict and attr-style configs are both accepted,
     including multimodal wrappers that store text fields under ``text_config``.
     """
+    glm5 = estimate_glm5_cache_memory_from_config(config, 0)
+    if glm5 is not None:
+        return glm5.growth_bytes_per_token
     dsv4_cfg = _dsv4_config(config)
     if dsv4_cfg is not None:
         # Worst-case one-token growth is the local ring growth on every layer

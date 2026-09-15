@@ -100,6 +100,11 @@ from vmlx_engine.metal.sparse_index_score_decode import (
     fused_sparse_index_score_requested,
     sparse_index_scores_decode,
 )
+from vmlx_engine.utils.glm5_cache_policy import (
+    GLM5_MLA_CAPACITY_TOKENS,
+    glm5_dsa_bf16_state_enabled,
+    glm5_mla_absorb_enabled as _glm5_mla_absorb_enabled,
+)
 
 try:  # package import (registered under mlx_lm.models.glm5_next)
     from vmlx_engine.models.glm5_next.kda import (
@@ -148,7 +153,7 @@ MLA_LATENT_RESERVED = 3  # safetensors-stable reserved zero-length tensor
 # transition and the normal prefill quantum; the pool-key block is derived from
 # the bundle's k-pool ratio.  Unlike geometric doubling, block growth keeps the
 # spare allocation bounded beside a roughly 95GB model.
-_GLM5_MLA_CAPACITY_TOKENS = 2_048
+_GLM5_MLA_CAPACITY_TOKENS = GLM5_MLA_CAPACITY_TOKENS
 
 _LOG = logging.getLogger("vmlx_engine")
 _GLM5_MLA_PATHS_LOGGED: set[str] = set()
@@ -164,10 +169,7 @@ def glm5_mla_absorb_enabled() -> bool:
     numerical comparisons with the legacy expanded representation.
     """
 
-    return os.environ.get(
-        "VMLINUX_GLM5_MLA_ABSORB",
-        os.environ.get("VMLX_GLM5_MLA_ABSORB", "1"),
-    ).strip().lower() in {"1", "true", "yes", "on"}
+    return _glm5_mla_absorb_enabled()
 
 
 class Glm5KDACache(ArraysCache):
@@ -1222,8 +1224,7 @@ def _dsa_bf16_state_requested() -> bool:
     state and the score contraction narrow. Default-off until the retrieval
     gate (needle across the index_topk boundary) passes live per bundle.
     """
-    value = os.environ.get("VMLX_GLM5_DSA_BF16", "0").strip().lower()
-    return value in {"1", "true", "yes", "on"}
+    return glm5_dsa_bf16_state_enabled()
 
 
 class Glm5NextIndexer(nn.Module):

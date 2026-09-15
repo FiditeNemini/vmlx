@@ -1244,7 +1244,8 @@ describe('Media attachment product path', () => {
     expect(source).toContain("if (a.kind === 'audio')")
     expect(source).toContain("type: 'input_audio'")
     expect(source).toContain('format: audioFormatFromDataUrl(a.dataUrl)')
-    expect(source).toContain("p.type === 'input_audio' && p.input_audio?.data")
+    const replay = readFileSync('src/renderer/src/components/chat/messageReplay.ts', 'utf8')
+    expect(replay).toContain("part.type === 'input_audio' && part.input_audio?.data")
   })
 
   it('main IPC persists audio attachments as input_audio for the engine', () => {

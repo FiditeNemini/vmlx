@@ -13,6 +13,7 @@ import { renderChatMarkdownHtml } from './mathMarkdown'
 import { reasoningSegmentsForDisplay as getReasoningSegmentsForDisplay } from '../../../../shared/interleavedReasoning'
 import { useTranslation } from '../../i18n'
 import { sanitizeChatHtml } from './sanitizeChatHtml'
+import { restoreUserMessageContent } from './messageReplay'
 
 interface Message {
   id: string
@@ -422,6 +423,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   if (isUser) {
     // Edit mode for user messages
     if (editing && onEdit) {
+      const canResend = !!editText.trim() || !!restoreUserMessageContent(message.content).attachments?.length
       return (
         <div
           className="flex justify-end gap-2.5 ml-[5%] md:ml-[10%] lg:ml-[15%]"
@@ -430,6 +432,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         >
           <div className="flex flex-col items-end max-w-full w-full">
             <textarea
+              data-vmlx-control="chat-edit-input"
               value={editText}
               onChange={e => setEditText(e.target.value)}
               autoFocus
@@ -438,8 +441,8 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  if (editText.trim()) {
-                    onEdit(message.id, editText.trim())
+                  if (canResend) {
+                    onEdit(message.id, editText)
                     setEditing(false)
                   }
                 }
@@ -447,8 +450,8 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               }}
             />
             <div className="flex gap-2 mt-1.5">
-              <button onClick={() => setEditing(false)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-1">{t('chat.bubble.cancel')}</button>
-              <button onClick={() => { if (editText.trim()) { onEdit(message.id, editText.trim()); setEditing(false) } }} className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded hover:bg-primary/90">{t('chat.bubble.send')}</button>
+              <button data-vmlx-control="chat-edit-cancel" onClick={() => setEditing(false)} className="text-xs text-muted-foreground hover:text-foreground px-2 py-1">{t('chat.bubble.cancel')}</button>
+              <button data-vmlx-control="chat-edit-send" disabled={!canResend} onClick={() => { if (canResend) { onEdit(message.id, editText); setEditing(false) } }} className="text-xs bg-primary text-primary-foreground px-3 py-1 rounded hover:bg-primary/90 disabled:opacity-50">{t('chat.bubble.send')}</button>
             </div>
           </div>
         </div>
@@ -465,10 +468,9 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
         {onEdit && !isStreaming && (
           <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
             <button
+              data-vmlx-control="chat-edit"
               onClick={() => {
-                const parsed = parseContentArray(message.content)
-                const textOnly = parsed ? (parsed.find((p: any) => p.type === 'text')?.text ?? '') : message.content
-                setEditText(textOnly)
+                setEditText(restoreUserMessageContent(message.content).content)
                 setEditing(true)
               }}
               className="text-muted-foreground/40 hover:text-foreground transition-colors p-1"
@@ -547,6 +549,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
               </button>
               {isLastAssistant && onRegenerate && (
                 <button
+                  data-vmlx-control="chat-regenerate"
                   onClick={onRegenerate}
                   className="text-muted-foreground/50 hover:text-foreground transition-colors"
                   title={t('chat.bubble.regenerateTitle')}

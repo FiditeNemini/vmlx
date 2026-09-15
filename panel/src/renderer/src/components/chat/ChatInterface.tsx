@@ -7,6 +7,7 @@ import { useTranslation } from '../../i18n'
 import { useSessionsContext } from '../../contexts/SessionsContext'
 import { formatResidentLoad } from '../sessions/loadProgressFormat'
 import { extractResponsesWarnings } from '../../lib/responsesWarnings'
+import { restoreUserMessageContent } from './messageReplay'
 
 interface MessageMetrics {
   tokenCount: number
@@ -83,13 +84,6 @@ function audioFormatFromDataUrl(dataUrl: string): string {
 
 function audioDataFromDataUrl(dataUrl: string): string {
   return dataUrl.includes(',') ? dataUrl.split(',', 2)[1] : dataUrl
-}
-
-function dataUrlFromInputAudio(part: any): string {
-  const data = part?.input_audio?.data || ''
-  const format = part?.input_audio?.format || 'wav'
-  const mime = format === 'mp3' ? 'audio/mpeg' : `audio/${format}`
-  return data.startsWith('data:') ? data : `data:${mime};base64,${data}`
 }
 
 function attachmentContentPart(a: MediaAttachment): any {
@@ -592,54 +586,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     if (!chatId || loading) return
     const lastUser = [...messages].reverse().find(m => m.role === 'user')
     if (!lastUser) return
-    // Handle multimodal content (JSON array with text + image/video/audio)
-    let content = lastUser.content
-    let attachments: MediaAttachment[] | undefined
-    try {
-      const parsed = JSON.parse(content)
-      if (Array.isArray(parsed)) {
-        content = parsed
-          .filter((p: any) => p.type === 'text' && p.text)
-          .map((p: any) => p.text)
-          .join('\n\n')
-        attachments = parsed
-          .filter((p: any) =>
-            (p.type === 'image_url' && p.image_url?.url) ||
-            (p.type === 'video_url' && p.video_url?.url) ||
-            (p.type === 'input_audio' && p.input_audio?.data)
-          )
-          .map((p: any, i: number): MediaAttachment => {
-            // Reconstruct MediaAttachment shape — id/type/size are synthetic
-            // on regenerate (original values are lost when persisted to DB).
-            if (p.type === 'input_audio') {
-              const url = dataUrlFromInputAudio(p)
-              const mimeMatch =
-                typeof url === 'string' ? url.match(/^data:([^;]+);/) : null
-              return {
-                id: `regen-${Date.now()}-${i}`,
-                kind: 'audio',
-                dataUrl: url,
-                name: 'audio',
-                type: mimeMatch ? mimeMatch[1] : 'audio/wav',
-                size: 0,
-              }
-            }
-            const isVideo = p.type === 'video_url'
-            const url: string = isVideo ? p.video_url.url : p.image_url.url
-            const mimeMatch =
-              typeof url === 'string' ? url.match(/^data:([^;]+);/) : null
-            return {
-              id: `regen-${Date.now()}-${i}`,
-              kind: isVideo ? 'video' : 'image',
-              dataUrl: url,
-              name: isVideo ? 'video' : 'image',
-              type: mimeMatch ? mimeMatch[1] : (isVideo ? 'video/mp4' : 'image/png'),
-              size: 0,
-            }
-          })
-        if (attachments && attachments.length === 0) attachments = undefined
-      }
-    } catch { /* not JSON, plain text */ }
+    const { content, attachments } = restoreUserMessageContent(lastUser.content)
     // Delete the original user turn and everything after it in one DB operation.
     // handleSend() will persist exactly one replacement user turn. This also
     // removes any tool/assistant continuation rows belonging to the old turn.
@@ -650,6 +597,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       showToast('error', t('chat.interface.toast.regenerateFailedTitle'), t('chat.interface.toast.regenerateFailedBody'))
       return
     }
+    if (chatIdRef.current !== chatId) return
     setMessages(prev => prev.filter(m => m.timestamp < lastUser.timestamp))
     await handleSend(content, attachments)
   }
@@ -658,12 +606,21 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
   const handleEdit = async (messageId: string, newContent: string) => {
     if (!chatId || loading) return
     const idx = messages.findIndex(m => m.id === messageId)
-    if (idx < 0) return
+    if (idx < 0 || messages[idx].role !== 'user') return
+    const { attachments } = restoreUserMessageContent(messages[idx].content)
+    if (!newContent.trim() && !attachments?.length) return
     // Batch-delete all messages from this point forward (single SQL query)
     const fromTs = messages[idx].timestamp
-    try { await window.api.chat.deleteMessagesFrom(chatId, fromTs) } catch {}
+    try {
+      await window.api.chat.deleteMessagesFrom(chatId, fromTs)
+    } catch (error) {
+      console.error('Failed to truncate chat for editing:', error)
+      showToast('error', t('chat.interface.toast.messageFailedTitle'), formatChatSendErrorMessage(error, t))
+      return
+    }
+    if (chatIdRef.current !== chatId) return
     setMessages(prev => prev.slice(0, idx))
-    handleSend(newContent)
+    await handleSend(newContent, attachments)
   }
 
   if (!chatId) {

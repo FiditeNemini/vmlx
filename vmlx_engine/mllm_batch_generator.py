@@ -13214,6 +13214,19 @@ class MLLMBatchGenerator:
         # cached and uncached answers on media prompts only (text prompts,
         # whose stores slice the main pass, were byte-identical).
         clean_boundary = self._native_media_clean_boundary(request, seq_len, cache)
+        glm_native_boundary = 0
+        if (
+            getattr(self, "native_glm_cache", None) is not None
+            and getattr(request, "_glm_native_media_key", None)
+            and int(getattr(request, "_cached_tokens", 0) or 0) == 0
+            and len(getattr(request, "_glm_native_full_token_ids", None) or []) == seq_len
+            and seq_len > 1
+        ):
+            # This exact main-pass state is durable before the final prompt
+            # token. Never reconstruct media-conditioned KDA after decode.
+            # Keep the edge even with explicit cache bypass so partitioning
+            # does not depend on whether this request publishes a checkpoint.
+            glm_native_boundary = seq_len - 1
         # The generic 8192-token crossover is too late for a nearly resident
         # GLM-5.3: connected image prompts can OOM below it. Qualification-only
         # opt-in; other families and ordinary-headroom requests are unchanged.
@@ -13226,7 +13239,7 @@ class MLLMBatchGenerator:
         if bounded_glm:
             chunk = max(1, min(int(self.prefill_step_size), _TIGHT_PROJECTED_STEP_CAP))
             min_chunk_seq = chunk
-        if clean_boundary <= 0 and (
+        if clean_boundary <= 0 and glm_native_boundary <= 0 and (
             chunk <= 0 or seq_len <= max(chunk, min_chunk_seq)
         ):
             return one_shot()
@@ -13272,6 +13285,8 @@ class MLLMBatchGenerator:
         )
         if clean_boundary > 0:
             bounds = sorted(set(bounds) | {int(clean_boundary)})
+        if glm_native_boundary > 0:
+            bounds = sorted(set(bounds) | {glm_native_boundary})
 
         # Verify the invariant the wrapper asked for instead of trusting it.
         _split_run = None
@@ -13383,6 +13398,8 @@ class MLLMBatchGenerator:
                     "active_bytes=%d peak_bytes=%d transient_bytes=%d",
                     request.request_id, start, end, active, peak, transient,
                 )
+            if end == glm_native_boundary:
+                self._store_glm_native_boundary(request, cache)
             if end == clean_boundary and getattr(request, "_media_clean_snapshot_allowed", True):
                 self._snapshot_native_media_clean_boundary(request, cache, clean_boundary)
                 if _diag_fingerprints_enabled():
@@ -13709,6 +13726,30 @@ class MLLMBatchGenerator:
                 pass
         return step
 
+    def _prepare_glm_native_media_identity(self, request, tokens) -> None:
+        from .utils.glm5_cache_policy import glm5_native_media_ssd_enabled
+
+        request._glm_native_media_key = None
+        if (
+            getattr(self, "native_glm_cache", None) is None
+            or not glm5_native_media_ssd_enabled()
+            or not self._request_has_media_cache_context(request, tokens)
+        ):
+            return
+        from .utils.glm5_native_media import GLM5_MEDIA_KEY, glm5_media_input_key
+        try:
+            request._glm_native_media_key = glm5_media_input_key(
+                request, tokens, self._media_placeholder_token_ids(),
+            )
+            request._cache_extra_keys = _merge_mllm_cache_extra_keys(
+                getattr(request, "_cache_extra_keys", None),
+                {GLM5_MEDIA_KEY: request._glm_native_media_key},
+            )
+        except Exception as exc:
+            request._glm_native_media_key = None
+            request._glm_native_media_skip = f"GLM native SSD media identity unavailable: {type(exc).__name__}"
+            logger.info("%s for %s: %s", request._glm_native_media_skip, request.request_id, exc)
+
     def _restore_glm_native_prefix(self, request) -> None:
         native = getattr(self, "native_glm_cache", None)
         if native is None:
@@ -13717,10 +13758,13 @@ class MLLMBatchGenerator:
         tokens = getattr(request, "_glm_native_full_token_ids", None) or []
         bypass = bool(getattr(request, "_bypass_prefix_cache", False))
         media = self._request_has_media_cache_context(request, tokens)
-        if bypass or media:
+        media_key = getattr(request, "_glm_native_media_key", None)
+        if bypass or (media and not media_key):
             LEDGER.record(
                 request.request_id, "skipped",
-                "GLM native SSD explicit bypass" if bypass else "GLM native SSD media not yet supported",
+                "GLM native SSD explicit bypass" if bypass else getattr(
+                    request, "_glm_native_media_skip", "GLM native SSD media not yet supported"
+                ),
                 retained_tokens=0, durable=False,
             )
             return
@@ -13731,6 +13775,9 @@ class MLLMBatchGenerator:
             )
             if found is not None:
                 boundary, state = found
+                if media and self._tokens_contain_media_placeholders(tokens[boundary:]):
+                    logger.info("GLM native SSD media hit declined for %s: unconsumed media in tail", request.request_id)
+                    return
                 tail = mx.array([tokens[boundary:]])
                 execution = dict(getattr(request, "_cache_execution", None) or {})
                 execution.update({
@@ -13747,6 +13794,9 @@ class MLLMBatchGenerator:
                 request.input_ids = tail
                 request.attention_mask = None
                 request._cache_execution = execution
+                if media:
+                    _clear_mllm_request_media_payloads(request)
+                    logger.info("GLM native SSD media restore for %s: N=%d identity=%s", request.request_id, boundary, media_key)
         except Exception as exc:
             logger.warning("GLM native SSD fetch refused for %s: %s", request.request_id, exc)
 
@@ -13755,7 +13805,10 @@ class MLLMBatchGenerator:
         if native is None or getattr(request, "_bypass_prefix_cache", False):
             return
         tokens = getattr(request, "_glm_native_full_token_ids", None) or []
-        if len(tokens) < 2 or self._request_has_media_cache_context(request, tokens):
+        if len(tokens) < 2 or (
+            self._request_has_media_cache_context(request, tokens)
+            and not getattr(request, "_glm_native_media_key", None)
+        ):
             return
         from .persistence_outcome import LEDGER
         try:
@@ -13909,6 +13962,7 @@ class MLLMBatchGenerator:
                 # including its generation suffix. Leave the legacy key and
                 # usage fields below unchanged for other backends/surfaces.
                 req._glm_native_full_token_ids = _all_tokens
+                self._prepare_glm_native_media_identity(req, _all_tokens)
             # Strip generation prompt tokens from the cache key.
             # Chat templates append assistant role tokens (e.g. <|im_start|>assistant\n<think>\n)
             # at the end. The store path in mllm_scheduler._cleanup_finished() strips these

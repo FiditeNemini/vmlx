@@ -12047,6 +12047,8 @@ def _native_cache_status(
         prompt_disk_cache = getattr(scheduler, "disk_cache", None)
         native_glm_ssd = getattr(scheduler, "native_glm_cache", None)
         if native_glm_ssd is not None:
+            from .utils.glm5_cache_policy import glm5_native_media_ssd_enabled
+            native_media = glm5_native_media_ssd_enabled()
             return _with_runtime_layout({
                 "family": "glm5_next", "schema": native_schema,
                 "schema_implemented": True,
@@ -12059,7 +12061,9 @@ def _native_cache_status(
                     "generic_prefix_restore": "unsupported",
                     "generic_paged_blocks": "unsupported",
                     "prompt_disk_l2": "disabled_native_pool_instead",
-                    "media": "unsupported",
+                    "media": "image_video_exact_input_checkpoint" if native_media else "unsupported",
+                    "media_identity": "processed_pixels_and_grids_v1" if native_media else None,
+                    "media_partial_item_restore": False,
                     "every_request_recomputes_full_prefix": False,
                 },
                 "generic_turboquant_kv": {

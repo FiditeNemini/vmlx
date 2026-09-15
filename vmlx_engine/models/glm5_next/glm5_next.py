@@ -50,7 +50,11 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
-from vmlx_engine.glm5_decode_policy import glm5_compiled_dsa_requested, glm5_exact_moe_requested
+from vmlx_engine.glm5_decode_policy import (
+    glm5_compiled_dsa_requested, glm5_exact_moe_requested,
+    glm5_kda_lowrank_requested,
+)
+from vmlx_engine.metal.glm5_kda_lowrank import Glm5KDALowRankGroup
 from vmlx_engine.metal.glm5_compiled_dsa_decode import glm5_compiled_dsa_output
 from vmlx_engine.metal.glm5_exact_moe_decode import glm5_exact_moe_output
 
@@ -978,6 +982,7 @@ class KDAAttention(nn.Module):
         self.o_proj = nn.Linear(qkv, d, bias=False)
         self.rms_eps = args.rms_norm_eps
         self.qkv_group = None
+        self.lowrank_group = None
         self._fused_gated_norm = fused_gated_rmsnorm_requested()
         self._fused_kda_conv = fused_kda_conv_requested()
         self._fused_kda_prefill = os.environ.get("VMLX_GLM5_KDA_CONV_PREFILL", "0") == "1"
@@ -1007,13 +1012,44 @@ class KDAAttention(nn.Module):
             return q, k, v
         return self.q_proj(x), self.k_proj(x), self.v_proj(x)
 
-    def _gate(self, x: mx.array) -> mx.array:
+    def prepare_lowrank_runtime(self) -> bool:
+        if self.lowrank_group is not None:
+            return True
+        if not glm5_kda_lowrank_requested():
+            return False
+        linears = (self.f_a_proj, self.g_a_proj, self.b_proj,
+                   self.f_b_proj, self.g_b_proj)
+        if not Glm5KDALowRankGroup.compatible(*linears):
+            return False
+        self.lowrank_group = Glm5KDALowRankGroup(*linears)
+        # Packed storage replaces the originals; prefill uses non-owning
+        # original-size views, never an extra retained copy of these weights.
+        self.f_a_proj = self.g_a_proj = self.b_proj = None
+        self.f_b_proj = self.g_b_proj = None
+        return True
+
+    def _gate(self, x: mx.array, projected=None) -> mx.array:
         # lower_bound * sigmoid(exp(A_log) * (f + dt_bias)) — smooth (-5, 0).
         B, T, _ = x.shape
-        f = self.f_b_proj(self.f_a_proj(x)).astype(mx.float32) + self.dt_bias.astype(mx.float32)
+        if projected is None:
+            projected = (self.lowrank_group.decay(x) if self.lowrank_group is not None
+                         else self.f_b_proj(self.f_a_proj(x)))
+        f = projected.astype(mx.float32) + self.dt_bias.astype(mx.float32)
         f = f.reshape(B, T, self.H, self.K)
         rate = mx.exp(self.A_log.astype(mx.float32)).reshape(1, 1, self.H, 1)
         return self.lower_bound * mx.sigmoid(rate * f)
+
+    def _beta(self, x, projected=None):
+        if projected is None:
+            projected = (self.lowrank_group.beta(x) if self.lowrank_group is not None
+                         else self.b_proj(x))
+        return mx.sigmoid(projected.astype(mx.float32))
+
+    def _output_gate(self, x, projected=None):
+        if projected is None:
+            projected = (self.lowrank_group.output_gate(x) if self.lowrank_group is not None
+                         else self.g_b_proj(self.g_a_proj(x)))
+        return projected.reshape(*x.shape[:2], self.H, self.K)
 
     def __call__(
         self,
@@ -1078,8 +1114,10 @@ class KDAAttention(nn.Module):
             q = l2norm(q.reshape(B, seg_t, H, K))
             k = l2norm(k.reshape(B, seg_t, H, K))
             v = v.reshape(B, seg_t, H, K)
-            g = self._gate(seg)
-            beta = mx.sigmoid(self.b_proj(seg).astype(mx.float32))
+            grouped = (self.lowrank_group.decode(seg)
+                       if self.lowrank_group is not None and n_confirmed == 0 else None)
+            g = self._gate(seg, grouped[0] if grouped is not None else None)
+            beta = self._beta(seg, grouped[2] if grouped is not None else None)
             if seg_t == 1 and s0 is not None:
                 fused_step = glm5_kda_step_decode(
                     q[:, 0],
@@ -1106,7 +1144,7 @@ class KDAAttention(nn.Module):
                 o, s1 = kda_recurrent(q, k, v, g, beta, s0)
             else:
                 o, s1 = kda_chunked(q, k, v, g, beta, s0)
-            gate = self.g_b_proj(self.g_a_proj(seg)).reshape(B, seg_t, H, K)
+            gate = self._output_gate(seg, grouped[1] if grouped is not None else None)
             gated = sigmoid_gated_rmsnorm_small_rows(
                 o,
                 gate,
@@ -1153,11 +1191,11 @@ class KDAAttention(nn.Module):
                 k = l2norm(k.reshape(B, T, H, K))
                 v = v.reshape(B, T, H, K)
                 g = self._gate(x)
-                beta = mx.sigmoid(self.b_proj(x).astype(mx.float32))
+                beta = self._beta(x)
                 o, state, recurrent_states = kda_recurrent_with_states(
                     q, k, v, g, beta, state
                 )
-                gate = self.g_b_proj(self.g_a_proj(x)).reshape(B, T, H, K)
+                gate = self._output_gate(x)
                 gated = sigmoid_gated_rmsnorm_small_rows(
                     o,
                     gate,
@@ -2125,6 +2163,7 @@ class Model(nn.Module):
         )
 
         base_kda_groups = 0
+        base_kda_lowrank_groups = 0
         base_dense_gate_up_groups = 0
         base_compiled_router_modules = 0
         base_dsa_block_select_modules = 0
@@ -2138,6 +2177,8 @@ class Model(nn.Module):
                 base_compiled_router_modules += int(layer.mlp._compiled_router)
             if layer.is_linear and layer.self_attn.prepare_runtime():
                 base_kda_groups += 1
+            if layer.is_linear and layer.self_attn.prepare_lowrank_runtime():
+                base_kda_lowrank_groups += 1
             dense = (
                 layer.mlp
                 if isinstance(layer.mlp, DenseMLP)
@@ -2153,6 +2194,8 @@ class Model(nn.Module):
             "base_dsa_block_select_modules": base_dsa_block_select_modules,
             "base_compiled_router_modules": base_compiled_router_modules,
             "base_kda_qkv_groups": base_kda_groups,
+            "base_kda_lowrank_groups": base_kda_lowrank_groups,
+            "base_lowrank_ar_launches_removed": 2 * base_kda_lowrank_groups,
             "base_dense_gate_up_groups": base_dense_gate_up_groups,
             "mtp_dense_gate_up_groups": mtp_dense_gate_up_groups,
             "vectorized_kda_verify_layers": sum(

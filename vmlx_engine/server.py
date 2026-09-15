@@ -28027,13 +28027,15 @@ async def stream_responses_api(
 
                         if tool_call_buffering:
                             if (
-                                _exact_once_tool_contract
-                                and not suppress_reasoning
-                                and delta_msg.reasoning
+                                not suppress_reasoning
+                                and accumulated_reasoning
                             ):
-                                # Exact-once requests buffer from token one, so
-                                # genuine reasoning must still stream. DSV4 can
-                                # emit its canonical DSML call on that same
+                                # A chunk can close reasoning and open a tool
+                                # call at once. Dynamic buffering must release
+                                # its genuine reasoning tail just as an
+                                # exact-once request does; otherwise only .done
+                                # contains the tail and delta consumers lose it.
+                                # DSV4 can emit its canonical DSML call on that same
                                 # reasoning rail, however. Derive the visible
                                 # delta from the full reasoning prefix and stop
                                 # at the first native tool marker; never expose

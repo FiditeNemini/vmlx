@@ -31,9 +31,13 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+from vmlx_engine.glm5_prefill_policy import glm5_register_pairwise_sum_requested
+from vmlx_engine.metal.glm5_pairwise_sum import glm5_pairwise_sum
+
 
 _LOGGER = logging.getLogger(__name__)
 _EXACT_PAIRWISE_OBSERVED = False
+_REGISTER_PAIRWISE_REQUESTED = glm5_register_pairwise_sum_requested()
 _EXACT_PAIRWISE_REQUESTED = os.environ.get(
     "VMLX_GLM5_EXACT_PAIRWISE_BUFFER", "0"
 ).strip().lower() not in {"", "0", "false", "off", "no"}
@@ -123,6 +127,19 @@ def _exact_pairwise_product(
             left.dtype,
         )
     return result
+
+
+def _pairwise_sum(left, right, gates):
+    reduced = glm5_pairwise_sum(
+        left, right, gates, enabled=_REGISTER_PAIRWISE_REQUESTED
+    )
+    if reduced is not None:
+        return reduced
+    products = _exact_pairwise_product(left, right, gates)
+    if products is None:
+        delta = mx.minimum(gates[..., :, None, :] - gates[..., None, :, :], 0.0)
+        products = left[..., :, None, :] * mx.exp(delta) * right[..., None, :, :]
+    return mx.sum(products, axis=-1)
 
 
 def l2norm(x: mx.array, eps: float = 1e-6) -> mx.array:
@@ -366,16 +383,7 @@ def kda_chunked(
     for ci in range(NT):
         g_c = gc[:, :, ci]                                  # [B,H,BT,K]
         k_c = kc[:, :, ci]
-        products = _exact_pairwise_product(k_c, k_c, g_c)
-        if products is None:
-            gd_c = mx.minimum(
-                g_c[..., :, None, :] - g_c[..., None, :, :], 0.0
-            )
-            products = (
-                k_c[..., :, None, :] * mx.exp(gd_c)
-                * k_c[..., None, :, :]
-            )
-        akk_chunks.append(mx.sum(products, axis=-1))
+        akk_chunks.append(_pairwise_sum(k_c, k_c, g_c))
     Akk = mx.stack(akk_chunks, axis=2)                      # [B,H,NT,BT,BT]
     A = mx.where(lower, -(Akk * bc[..., None]), mx.zeros_like(Akk))
 
@@ -394,16 +402,7 @@ def kda_chunked(
     for i in range(NT):
         q_i, k_i = qc[:, :, i], kc[:, :, i]
         u_i, g_i, w_i = u[:, :, i], gc[:, :, i], w[:, :, i]
-        products = _exact_pairwise_product(q_i, k_i, g_i)
-        if products is None:
-            gd = mx.minimum(
-                g_i[..., :, None, :] - g_i[..., None, :, :], 0.0
-            )
-            products = (
-                q_i[..., :, None, :] * mx.exp(gd)
-                * k_i[..., None, :, :]
-            )
-        Aqk = mx.sum(products, axis=-1)
+        Aqk = _pairwise_sum(q_i, k_i, g_i)
         Aqk = mx.where(strict_upper, mx.zeros_like(Aqk), Aqk)
         v_i = u_i - w_i @ S
         outs.append((q_i * mx.exp(g_i)) @ S + Aqk @ v_i)

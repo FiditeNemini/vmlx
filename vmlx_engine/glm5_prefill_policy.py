@@ -4,6 +4,14 @@
 import os
 
 
+GLM5_REGISTER_SUM_MATH_ABI = "mlx0322_row128_v1"
+
+
+def glm5_register_pairwise_sum_requested() -> bool:
+    """Experimental same-tree reduction, off until serving qualification."""
+    return os.environ.get("VMLX_GLM5_REGISTER_PAIRWISE_SUM", "0") == "1"
+
+
 def glm5_prefill_layer_fence_enabled() -> bool:
     """Realize completed-layer state by default; retain an explicit off switch.
 

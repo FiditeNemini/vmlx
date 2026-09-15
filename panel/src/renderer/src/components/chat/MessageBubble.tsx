@@ -196,6 +196,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   const [zoomedImage, setZoomedImage] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [editText, setEditText] = useState('')
+  const [editHasAttachments, setEditHasAttachments] = useState(false)
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text)
@@ -423,7 +424,7 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
   if (isUser) {
     // Edit mode for user messages
     if (editing && onEdit) {
-      const canResend = !!editText.trim() || !!restoreUserMessageContent(message.content).attachments?.length
+      const canResend = !!editText.trim() || editHasAttachments
       return (
         <div
           className="flex justify-end gap-2.5 ml-[5%] md:ml-[10%] lg:ml-[15%]"
@@ -470,7 +471,11 @@ export const MessageBubble = memo(function MessageBubble({ message, isStreaming,
             <button
               data-vmlx-control="chat-edit"
               onClick={() => {
-                setEditText(restoreUserMessageContent(message.content).content)
+                // Media data URLs can be large. Reconstruct once on open, not
+                // on every keystroke while checking whether Send is enabled.
+                const replay = restoreUserMessageContent(message.content)
+                setEditText(replay.content)
+                setEditHasAttachments(!!replay.attachments?.length)
                 setEditing(true)
               }}
               className="text-muted-foreground/40 hover:text-foreground transition-colors p-1"

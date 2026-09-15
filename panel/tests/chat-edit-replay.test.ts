@@ -113,7 +113,12 @@ describe('Persisted user content replay', () => {
     ]))
     expect(result).toEqual({ content: 'question\n\n[Attached file: a.json]\n{"n": 2}', attachments: undefined })
     const bubble = readFileSync('src/renderer/src/components/chat/MessageBubble.tsx', 'utf8')
-    expect(bubble).toContain('setEditText(restoreUserMessageContent(message.content).content)')
+    expect(bubble).toContain('const replay = restoreUserMessageContent(message.content)')
+    expect(bubble).toContain('setEditText(replay.content)')
+    expect(bubble).toContain('setEditHasAttachments(!!replay.attachments?.length)')
+    const editor = bubble.slice(bubble.indexOf('if (editing && onEdit)'), bubble.indexOf('{/* Edit button on hover */}'))
+    expect(editor).toContain('const canResend = !!editText.trim() || editHasAttachments')
+    expect(editor).not.toContain('restoreUserMessageContent(')
   })
 
   it('uses the same reconstruction for Regenerate', () => {

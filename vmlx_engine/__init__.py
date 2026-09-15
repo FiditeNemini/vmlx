@@ -14,6 +14,15 @@ Features:
 
 __version__ = "1.6.59"
 
+# Shared text/VLM expert matmul correctness. Installation is allocation-free;
+# hardware qualification happens only on the worker's first affected call.
+try:
+    from .patches.mlx_sorted_gather import install as _install_sorted_gather_guard
+except ImportError:  # MLX is unavailable on non-Apple source/test hosts.
+    pass
+else:
+    _install_sorted_gather_guard()
+
 # transformers >= 5.13 rejects mlx-lm's legacy STRING-form tokenizer
 # registration — mlx_lm/tokenizer_utils.py:505 does
 # AutoTokenizer.register("NewlineTokenizer", fast_tokenizer_class=...)

@@ -434,6 +434,14 @@ const api = {
       ipcRenderer.on('session:health', handler)
       return () => { ipcRenderer.removeListener('session:health', handler) }
     },
+    memoryWarnings: () => ipcRenderer.invoke('sessions:memoryWarnings'),
+    dismissMemoryWarning: (id: string, forModel: boolean) => ipcRenderer.invoke('sessions:dismissMemoryWarning', id, forModel),
+    copyMemoryWarningCommand: (id: string) => ipcRenderer.invoke('sessions:copyMemoryWarningCommand', id),
+    onMemoryWarnings: (callback: (data: import('../shared/metalWiredLimit').MetalMemoryNotice[]) => void) => {
+      const handler = (_: any, data: import('../shared/metalWiredLimit').MetalMemoryNotice[]) => callback(data)
+      ipcRenderer.on('session:memoryWarnings', handler)
+      return () => { ipcRenderer.removeListener('session:memoryWarnings', handler) }
+    },
     onLog: (callback: (data: any) => void) => {
       const handler = (_: any, data: any) => callback(data)
       ipcRenderer.on('session:log', handler)

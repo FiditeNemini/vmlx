@@ -16,6 +16,7 @@ import { ToastProvider } from './components/Toast'
 import { DownloadStatusBar } from './components/DownloadStatusBar'
 import { UpdateBanner } from './components/UpdateBanner'
 import { MtpComponentUpdatePrompt } from './components/MtpComponentUpdatePrompt'
+import { MetalMemoryNotice } from './components/MetalMemoryNotice'
 import { useAppState } from './contexts/AppStateContext'
 import { useSessionsContext } from './contexts/SessionsContext'
 import { ChatModeToolbar } from './components/layout/ChatModeToolbar'
@@ -245,6 +246,7 @@ function App() {
         <TitleBar />
         <UpdateBanner />
         <MtpComponentUpdatePrompt />
+        <MetalMemoryNotice />
         <DownloadStatusBar />
 
         <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden">

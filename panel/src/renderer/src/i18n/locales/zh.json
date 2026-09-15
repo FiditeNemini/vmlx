@@ -1048,7 +1048,7 @@
       "setupNetworkNote": "Thunderbolt 5：约 120 Gbps，0.1ms 延迟（最佳）。1GbE：流水线并行足够用。WiFi：可用但较慢。任何能 ping 通另一台 Mac 的网络都可以。",
       "embeddingModelTooltip": "启动时为 /v1/embeddings 端点预加载单独的嵌入模型。与主聊天模型并行运行。示例：mlx-community/embeddinggemma-300m-6bit。留空则禁用嵌入端点。",
       "additionalArgsTooltip": "附加到 serve 命令的原始命令行参数。用于上方 UI 未公开的标志。示例：--log-level DEBUG。参数按空白拆分并直接传递给 CLI。",
-      "metalWiredLimitHelp": "如果大模型出现 Metal 内存不足、SIGKILL 或内核崩溃风险，macOS 可能需要调整 Metal 常驻内存上限。大内存 Mac 示例：{{command}}。不要将其设为与物理内存相同；请为系统、WindowServer 和应用留出余量。在 128GB 的 Mac 上，115000-120000 MB 通常比 128000 MB 更安全。该命令需要管理员密码，重启后会重置。",
+      "metalWiredLimitHelp": "仅在实测用量达到上限或请求被内存保护拒绝时显示 Metal 内存提示。如硬件有余量，可提供提高上限的专用命令。SSD 缓存用量独立计算。vMLX 从不自动提高系统上限。",
       "pagedCacheCapacity": "有效内存缓存容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
       "pagedCacheMemoryIgnored": "启用内存分页缓存时，缓存 TTL 不生效。缓存内存上限 / 缓存内存百分比限制其对 Apple 统一内存的 L1 占用；最大缓存块数和块大小限制 token 容量。",
       "blockDiskCapacity": "有效 SSD 块索引容量：{{blockSize}} 个 token/块 x {{usableBlocks}} 个可用块（配置 {{maxBlocks}} 个，保留 1 个）= {{tokens}} 个 token",
@@ -2346,6 +2346,19 @@
     "allChecksPassed": "全部 {{count}} 项检查通过",
     "summaryDetail": "{{passed}} 项通过,{{failed}} 项失败,{{warnings}} 项警告",
     "checking": "检查中..."
+  },
+  "metalMemory": {
+    "title": "Metal 内存限制 — {model}",
+    "measured": "{time} 测量：活动内存 {active} GiB / 工作集上限 {limit} GiB。",
+    "guard": "请求触及引擎内存保护阈值并被拒绝。这是实测内存分配量，不是 SSD 用量，也不能据此确定变慢的原因。",
+    "reached": "实测内存分配量已达到工作集上限。请关闭其他应用或停止其他模型以释放内存。这不是 SSD 缓存用量。",
+    "manual": "可选择手动提高上限，并为系统保留空间（不保证安全）。请先检查其他应用。在终端运行；需要管理员密码；重启 Mac 后失效。之后重启模型。vMLX 不会执行此命令。",
+    "noIncrease": "根据这些测量值，无法建议保守提高系统上限。请释放内存、使用更小的量化模型，或检查启动配置中明确设置的引擎限制。",
+    "copy": "复制命令",
+    "copied": "命令已复制",
+    "dismiss": "关闭",
+    "dismissModel": "不再对此模型显示",
+    "actionFailed": "操作失败。提示仍可使用，请重试。"
   },
   "mtpFix": {
     "title": "模型修复可用",

@@ -13,7 +13,6 @@ import {
   pagedCacheControlsState,
   resolvePagedCacheCapacity,
 } from '../../../../shared/cacheCapacityDisplay'
-import { metalWiredLimitCommand } from '../../../../shared/metalWiredLimit'
 import { isLagunaMixedSwaTurboQuantEffective } from '../../../../shared/lagunaCachePolicy'
 import { normalizeMcpPolicyList } from '../../../../shared/mcpPolicy'
 import { canonicalizeToolParserId, describeDetectedToolParser } from '../../../../shared/toolParserAliases'
@@ -946,7 +945,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectiveContinuousBatching && (
           <InfoNote text={t('sessions.config.batchingOffDisablesNote')} />
         )}
-        <InfoNote text={t('sessions.config.metalWiredLimitHelp', { command: metalWiredLimitCommand })} />
+        <InfoNote text={t('sessions.config.metalWiredLimitHelp')} />
         {distributedActive && <div data-vmlx-section="retired-distributed">
           <InfoNote text={t('sessions.config.retiredDistributedNote')} />
           <CheckField label={t('sessions.config.enableDistributed')}

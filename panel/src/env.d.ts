@@ -729,6 +729,10 @@ declare global {
         onStopped: (callback: (data: any) => void) => () => void;
         onError: (callback: (data: any) => void) => () => void;
         onHealth: (callback: (data: any) => void) => () => void;
+        memoryWarnings: () => Promise<import('./shared/metalWiredLimit').MetalMemoryNotice[]>;
+        dismissMemoryWarning: (id: string, forModel: boolean) => Promise<void>;
+        copyMemoryWarningCommand: (id: string) => Promise<void>;
+        onMemoryWarnings: (callback: (data: import('./shared/metalWiredLimit').MetalMemoryNotice[]) => void) => () => void;
         onLog: (callback: (data: any) => void) => () => void;
         onCreated: (callback: (data: any) => void) => () => void;
         onDeleted: (callback: (data: any) => void) => () => void;

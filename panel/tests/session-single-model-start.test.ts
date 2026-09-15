@@ -53,20 +53,15 @@ describe('manual session single-model enforcement', () => {
     expect(block).toContain('this.singleModelStartTransitionPending = previous.then')
   })
 
-  it('shows the wired-limit dialog for UI starts without gating the spawn, and skips it for gateway JIT', () => {
+  it('never gates UI or gateway starts on a file-size-based wired-limit dialog', () => {
     const source = readFileSync('src/main/sessions.ts', 'utf8')
     const start = source.indexOf('private async _startSessionInner(')
     const end = source.indexOf('// Never kill arbitrary processes by port', start)
     const block = source.slice(start, end)
 
-    expect(block).toContain("options?.launchOrigin !== 'gateway'")
-    // Advisory only: the modal must be fire-and-forget. Awaiting it made the
-    // application-modal sheet gate the engine spawn until dismissed.
-    expect(block).toContain('void dialog.showMessageBox({')
-    expect(block).not.toContain('await dialog.showMessageBox({')
-    expect(block.indexOf("options?.launchOrigin !== 'gateway'")).toBeLessThan(
-      block.indexOf('void dialog.showMessageBox({'),
-    )
+    expect(block).not.toContain('dialog.showMessageBox')
+    expect(block).not.toContain('classifyWiredLimitPreflight')
+    expect(source).toContain('this.observeMetalMemory(session.id, data.metal_memory)')
     expect(block).toContain('this.emit(\'session:log\'')
   })
 

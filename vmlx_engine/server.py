@@ -151,6 +151,7 @@ from .logprobs import (
 )
 from .mlx_memory import clear_mlx_memory_cache
 from . import load_progress as _lifecycle_progress
+from . import memory_status as _memory_status
 from .reasoning import get_parser as _get_reasoning_parser_class
 from .reasoning.gptoss_parser import GptOssReasoningParser
 from .tool_parsers import ToolParserManager
@@ -7178,6 +7179,7 @@ async def check_metal_working_set_pressure(request: Request):
             f"(threshold {threshold_pct:.1f}%); rejecting to avoid "
             f"command-buffer OOM. active={active / (1024**3):.1f}GB"
         )
+        _memory_status.emit_guard_rejection(active, max_ws, threshold_pct)
     raise HTTPException(
         status_code=503,
         detail=(
@@ -13527,6 +13529,8 @@ async def health():
         result["health_gauges_cached"] = True
         result["wake_in_progress"] = _wake_in_progress
         result["load_progress"] = _lifecycle_progress.snapshot()
+        # Cheap current allocation counter, not the cached previous request.
+        result["metal_memory"] = _memory_status.snapshot()
         return result
 
     mcp_info = None
@@ -13798,6 +13802,7 @@ async def health():
         )
     result["wake_in_progress"] = _wake_in_progress
     result["load_progress"] = _lifecycle_progress.snapshot()
+    result["metal_memory"] = _memory_status.snapshot()
 
     model_loaded = bool(result.get("model_loaded"))
     model_bundle_provenance = _bundle_configuration_attestation(

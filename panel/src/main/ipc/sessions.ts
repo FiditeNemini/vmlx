@@ -96,6 +96,7 @@ const SESSION_EVENTS = [
   'session:stopped',
   'session:error',
   'session:health',
+  'session:memoryWarnings',
   'session:log',
   'session:deleted',
   'session:updated',
@@ -107,6 +108,15 @@ let handlersRegistered = false
 
 export function registerSessionHandlers(getWindow: () => BrowserWindow | null): void {
   if (!handlersRegistered) {
+    ipcMain.handle('sessions:memoryWarnings', () => sessionManager.getMemoryWarnings())
+    ipcMain.handle('sessions:dismissMemoryWarning', (_, id: string, forModel: boolean) => {
+      if (typeof id !== 'string' || typeof forModel !== 'boolean') throw new Error('Invalid memory warning dismissal')
+      sessionManager.dismissMemoryWarning(id, forModel)
+    })
+    ipcMain.handle('sessions:copyMemoryWarningCommand', (_, id: string) => {
+      if (typeof id !== 'string') throw new Error('Invalid memory warning')
+      sessionManager.copyMemoryWarningCommand(id)
+    })
     ipcMain.handle('sessions:list', async () => {
       try {
         return sessionManager.getSessions()

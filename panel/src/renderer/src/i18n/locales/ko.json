@@ -1048,7 +1048,7 @@
       "setupNetworkNote": "Thunderbolt 5: ~120 Gbps, 0.1ms 지연 (최상). 1GbE: 파이프라인 병렬에 충분합니다. WiFi: 작동하지만 느립니다. 다른 Mac에 ping이 되는 네트워크라면 모두 작동합니다.",
       "embeddingModelTooltip": "/v1/embeddings 엔드포인트를 위해 시작 시 별도의 임베딩 모델을 미리 로드합니다. 메인 채팅 모델과 함께 실행됩니다. 예: mlx-community/embeddinggemma-300m-6bit. 비워 두면 임베딩 엔드포인트가 비활성화됩니다.",
       "additionalArgsTooltip": "serve 명령에 추가되는 원시 명령줄 인수입니다. 위 UI에 노출되지 않은 플래그에 사용하세요. 예: --log-level DEBUG. 인수는 공백으로 분할되어 CLI에 직접 전달됩니다.",
-      "metalWiredLimitHelp": "대용량 모델에서 Metal 메모리 부족, SIGKILL 또는 커널 패닉 위험이 발생하면 macOS의 Metal 고정 메모리 한도를 조정해야 할 수 있습니다. 메모리가 큰 Mac 예시: {{command}}. 물리 RAM과 같은 값으로 설정하지 말고 OS/WindowServer/앱 여유를 남기세요. 128GB Mac에서는 보통 128000 MB보다 115000~120000 MB가 더 안전합니다. 이 명령은 관리자 암호가 필요하며 재부팅하면 초기화됩니다.",
+      "metalWiredLimitHelp": "Metal 메모리 알림은 실측 사용량이 한도에 도달하거나 메모리 보호로 요청이 거부될 때만 표시됩니다. 하드웨어에 여유가 있으면 한도 증가 명령을 제공합니다. SSD 캐시 사용량과는 별개입니다. vMLX는 시스템 한도를 자동으로 높이지 않습니다.",
       "pagedCacheCapacity": "실효 메모리 내 캐시 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
       "pagedCacheMemoryIgnored": "메모리 내 페이지 캐시가 켜져 있는 동안에는 캐시 TTL이 적용되지 않습니다. 캐시 메모리 제한 / 캐시 메모리 %는 Apple 통합 메모리의 L1 사용량을 제한하고, 최대 캐시 블록 수와 블록 크기가 토큰 용량을 제한합니다.",
       "blockDiskCapacity": "실효 SSD 블록 인덱스 용량: 블록당 {{blockSize}} 토큰 x 사용 가능 블록 {{usableBlocks}}개 ({{maxBlocks}}개 구성, 1개 예약) = {{tokens}} 토큰",
@@ -2346,6 +2346,19 @@
     "allChecksPassed": "{{count}}개 점검 모두 통과",
     "summaryDetail": "{{passed}}개 통과, {{failed}}개 실패, {{warnings}}개 경고",
     "checking": "확인 중..."
+  },
+  "metalMemory": {
+    "title": "Metal 메모리 한도 — {model}",
+    "measured": "{time} 측정: 활성 메모리 {active} GiB / 작업 집합 한도 {limit} GiB.",
+    "guard": "요청이 엔진 메모리 보호 임계값에 도달하여 거부되었습니다. 실측 할당량이며 SSD 사용량이나 속도 저하 원인의 증거가 아닙니다.",
+    "reached": "실측 할당량이 작업 집합 한도에 도달했습니다. 다른 앱을 닫거나 다른 모델을 중지하여 메모리를 확보하세요. SSD 캐시 사용량이 아닙니다.",
+    "manual": "OS 여유 공간을 남기는 선택적 수동 증가입니다(안전을 보장하지 않음). 먼저 다른 앱을 확인하세요. 터미널에서 실행하며 관리자 암호가 필요하고 Mac 재부팅 후 초기화됩니다. 이후 모델을 다시 시작하세요. vMLX는 이 명령을 실행하지 않습니다.",
+    "noIncrease": "이 측정값으로는 보수적인 시스템 한도 증가를 권장할 수 없습니다. 메모리를 확보하거나 더 작은 양자화 모델을 사용하거나 시작 구성의 명시적 엔진 한도를 확인하세요.",
+    "copy": "명령 복사",
+    "copied": "명령 복사됨",
+    "dismiss": "닫기",
+    "dismissModel": "이 모델에 대해 다시 표시하지 않기",
+    "actionFailed": "작업에 실패했습니다. 알림을 계속 사용할 수 있습니다. 다시 시도하세요."
   },
   "mtpFix": {
     "title": "모델 수정 사항 사용 가능",

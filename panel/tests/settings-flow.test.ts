@@ -3831,7 +3831,7 @@ describe('JIT Toggle', () => {
         expect(form).not.toContain('nativeCacheRequiresPaged')
     })
 
-    it('settings form surfaces the macOS Metal wired-limit sudo command near memory/cache controls', () => {
+    it('settings form explains measured Metal warnings without an unmeasured sudo command', () => {
         const fs = require('fs')
         const form = fs.readFileSync(
             'src/renderer/src/components/sessions/SessionConfigForm.tsx',
@@ -3839,22 +3839,19 @@ describe('JIT Toggle', () => {
         )
         const shared = fs.readFileSync('src/shared/metalWiredLimit.ts', 'utf-8')
 
-        // The COMMAND still comes from the shared module (main reuses it in
-        // error messages); only the prose moved behind t() so it localizes —
-        // with the app in Korean this note was one of only two English
-        // sentences left on the whole form.
+        // Guidance localizes. Only an actual measured warning may offer a
+        // hardware-bounded command; the generic form must not guess one.
         const catalog = fs.readFileSync(
             'src/renderer/src/i18n/locales/en.json',
             'utf-8',
         )
-        expect(form).toContain('metalWiredLimitCommand')
+        expect(form).not.toContain('metalWiredLimitCommand')
         expect(form).toContain(
-            "<InfoNote text={t('sessions.config.metalWiredLimitHelp', { command: metalWiredLimitCommand })} />",
+            "<InfoNote text={t('sessions.config.metalWiredLimitHelp')} />",
         )
-        expect(shared).toContain('sudo sysctl iogpu.wired_limit_mb=120000')
+        expect(shared).not.toContain('sudo sysctl iogpu.wired_limit_mb=120000')
         expect(shared).toContain('kIOGPUCommandBufferCallbackErrorOutOfMemory')
-        expect(catalog).toContain('Metal wired-memory limit')
-        expect(catalog).toContain('{{command}}')
+        expect(catalog).toContain('measured Metal memory')
     })
 
     it('settings form and launch code treat Step3.7 full/sliding KV subtype as typed SSD-only cache', () => {

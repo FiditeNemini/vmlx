@@ -8,7 +8,7 @@ import {
 } from '../shared/enginePatienceWindows'
 import { spawn, ChildProcess, execSync, execFileSync } from 'child_process'
 import { lookup } from 'dns'
-import { clipboard, dialog, powerSaveBlocker } from 'electron'
+import { clipboard, powerSaveBlocker } from 'electron'
 import { EventEmitter } from 'events'
 import { existsSync, readdirSync, readFileSync } from 'fs'
 import { createServer } from 'net'
@@ -47,7 +47,8 @@ import {
   MODEL_PARSER_DEFAULTS_VERSION,
   migrateModelParserDefaults,
 } from '../shared/sessionConfigMigrations'
-import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight, classifyWiredLimitPreflight } from '../shared/metalWiredLimit'
+import { appendMetalWiredLimitGuidance, classifyLargeModelMemoryPreflight } from '../shared/metalWiredLimit'
+import { MemoryWarningStore } from './memory-warning-store'
 import { sessionMatchesModelPath } from '../shared/sessionUtils'
 import { normalizeHfTokenSetting } from '../shared/hfSettings'
 import { shouldUseProofOwnedEngineLifecycle } from '../shared/userDataOverride'
@@ -1491,6 +1492,35 @@ export async function resolveUrl(url: string): Promise<string> {
 
 export class SessionManager extends EventEmitter {
   private processes = new Map<string, ManagedProcess>()
+  private memoryWarnings = new MemoryWarningStore(db)
+
+  getMemoryWarnings() { return this.memoryWarnings.list() }
+
+  dismissMemoryWarning(id: string, forModel: boolean): void {
+    this.memoryWarnings.dismiss(id, forModel)
+    this.emit('session:memoryWarnings', this.memoryWarnings.list())
+  }
+
+  copyMemoryWarningCommand(id: string): void {
+    const command = this.memoryWarnings.get(id)?.command
+    if (!command) throw new Error('No measured wired-limit recommendation available')
+    clipboard.writeText(command)
+  }
+
+  private observeMetalMemory(sessionId: string, value: unknown): void {
+    const session = db.getSession(sessionId)
+    if (!session || session.type === 'remote') return
+    const managed = this.processes.get(sessionId)
+    const pid = managed?.process?.pid || managed?.adoptedPid || session.pid
+    if (!pid) return
+    try {
+      if (this.memoryWarnings.observe({ sessionId, modelPath: session.modelPath, modelName: session.modelName || basename(session.modelPath), pid }, value)) {
+        this.emit('session:memoryWarnings', this.memoryWarnings.list())
+      }
+    } catch (error) {
+      console.warn('[SESSION] Optional memory warning unavailable:', error)
+    }
+  }
   private monitorInterval: ReturnType<typeof setInterval> | null = null
   private failCounts = new Map<string, number>()
   /** Refcounted user-requested stops that are actively terminating a backend. */
@@ -2011,6 +2041,14 @@ export class SessionManager extends EventEmitter {
 
   /** Append log data to the per-session ring buffer */
   pushLog(sessionId: string, data: string): void {
+    // Python logging writes complete lines through normalizeBackendStderrChunk.
+    // Only the dedicated diagnostic logger is accepted, not arbitrary model text.
+    for (const line of data.split('\n')) {
+      const match = line.match(/^(?:INFO|WARNING):vmlx_engine\.memory_status:MEMORYSTATUS (\{.*\})\s*$/)
+      if (match) {
+        try { this.observeMetalMemory(sessionId, JSON.parse(match[1])) } catch { /* invalid diagnostic */ }
+      }
+    }
     let buffer = this.logBuffers.get(sessionId)
     if (!buffer) {
       buffer = []
@@ -2789,7 +2827,7 @@ export class SessionManager extends EventEmitter {
 
   private async _startSessionInner(
     sessionId: string,
-    options?: { launchOrigin?: 'manual' | 'gateway' },
+    _options?: { launchOrigin?: 'manual' | 'gateway' },
   ): Promise<void> {
     const session = db.getSession(sessionId)
     if (!session) throw new Error(`Session ${sessionId} not found`)
@@ -3171,46 +3209,8 @@ export class SessionManager extends EventEmitter {
       // No `block` arm: classifyLargeModelMemoryPreflight can no longer return
       // one (the variant was deleted from its type on 2026-08-17). Preflight
       // advises; it never refuses.
-      // Wired-limit recommendation (Eric, 2026-08-29): compare the model's
-      // resident footprint to the user's EFFECTIVE Metal wired limit. Manual
-      // UI starts show the exact sysctl command and explicitly wait for the
-      // user's choice. API-gateway JIT starts must stay non-interactive: an
-      // application-modal dialog blocks Electron's gateway and prevents the
-      // engine child from spawning until someone clicks Continue. The warning
-      // remains in the session log for those headless/API starts.
-      try {
-        let wiredLimitMb = 0
-        try {
-          wiredLimitMb = parseInt(
-            execFileSync('sysctl', ['-n', 'iogpu.wired_limit_mb'], { timeout: 3000 })
-              .toString().trim(), 10) || 0
-        } catch { /* non-macOS or sysctl unavailable — default fraction used */ }
-        const wiredPreflight = classifyWiredLimitPreflight({ modelSizeBytes, wiredLimitMb, totalBytes })
-        if (wiredPreflight.action === 'recommend') {
-          const logLine = `${wiredPreflight.message} ${wiredPreflight.detail.replace(/\n+/g, ' ')}`
-          console.warn(`[SESSION] ${logLine}`)
-          this.emit('session:log', { sessionId, data: `⚠️  ${logLine}\n` })
-          if (options?.launchOrigin !== 'gateway') {
-            // Advisory only: never await this dialog. Awaiting made the
-            // application-modal sheet gate the engine spawn (and freeze the
-            // whole window for automation) until someone clicked Continue -
-            // the launch proceeded only after dismissal. The recommendation
-            // stays visible while the load runs; Copy still works.
-            const command = wiredPreflight.command
-            void dialog.showMessageBox({
-              type: 'warning',
-              title: 'Metal wired-memory limit recommendation',
-              message: wiredPreflight.message,
-              detail: wiredPreflight.detail,
-              buttons: ['Copy Command', 'Continue'],
-              defaultId: 0,
-              cancelId: 1,
-            }).then(async (result) => {
-              if (result.response === 0) await clipboard.writeText(command)
-            }).catch(() => { /* advisory-only path must never break a launch */ })
-          }
-        }
-      } catch { /* advisory-only path must never break a launch */ }
+      // File-size estimates remain logs only. Actual load/health measurements
+      // own the nonblocking memory warning; neither UI nor gateway waits on it.
       const memoryPreflight = classifyLargeModelMemoryPreflight({ modelSizeBytes, availableBytes, totalBytes })
       if (memoryPreflight.action === 'warn') {
         if (modelSizeBytes > availableBytes * 0.9) {
@@ -4456,6 +4456,7 @@ export class SessionManager extends EventEmitter {
               enginePid: data.runtime_provenance?.pid,
               ssdPool: readManagedSsdPoolBudget(data.cache),
             })
+            this.observeMetalMemory(session.id, data.metal_memory)
           } else {
             await this.incrementFailAndCheck(session.id)
           }

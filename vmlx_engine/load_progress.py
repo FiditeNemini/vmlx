@@ -61,6 +61,9 @@ def _emit(snap: dict) -> None:
     # One parseable line per update. INFO so it rides the normal engine log
     # stream the panel already consumes.
     logger.info("LOADPROGRESS %s", json.dumps(snap, separators=(",", ":")))
+    # Separate measured diagnostic, never an input to the progress percentage.
+    from .memory_status import emit_snapshot
+    emit_snapshot()
 
 
 def begin_attempt(phase: str = PHASE_STARTING) -> int:

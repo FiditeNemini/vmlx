@@ -8,6 +8,7 @@ import { SingleModelPreference } from './components/layout/SingleModelPreference
 import { SessionDashboard } from './components/sessions/SessionDashboard'
 import { CreateSession } from './components/sessions/CreateSession'
 import { SessionView } from './components/sessions/SessionView'
+import { SessionSsdPoolNotice, type SsdPoolSession } from './components/sessions/SsdPoolNotice'
 import { SessionSettings } from './components/sessions/SessionSettings'
 import { ChatInterface } from './components/chat/ChatInterface'
 import { SetupScreen } from './components/setup/SetupScreen'
@@ -284,6 +285,7 @@ function App() {
                 sessionEndpoint={sessionEndpoint}
                 sessionStatus={activeSession?.status}
                 activeSessionId={activeSession?.id || state.activeSessionId}
+                ssdSession={activeSession}
                 onNewChat={handleNewChat}
                 onSessionChange={handleSessionChange}
               />
@@ -321,11 +323,12 @@ function App() {
 
 // ─── Chat Mode Content ──────────────────────────────────────────────────────
 
-function ChatModeContent({ activeChatId, sessionEndpoint, sessionStatus, activeSessionId, onNewChat, onSessionChange }: {
+function ChatModeContent({ activeChatId, sessionEndpoint, sessionStatus, activeSessionId, ssdSession, onNewChat, onSessionChange }: {
   activeChatId: string | null
   sessionEndpoint?: { host: string; port: number }
   sessionStatus?: string
   activeSessionId: string | null
+  ssdSession?: SsdPoolSession
   onNewChat: () => void
   onSessionChange: (sessionId: string) => void
 }) {
@@ -343,6 +346,7 @@ function ChatModeContent({ activeChatId, sessionEndpoint, sessionStatus, activeS
         onSessionChange={onSessionChange}
         onOverridesChanged={() => setOverridesVersion(v => v + 1)}
       />
+      <SessionSsdPoolNotice session={ssdSession} />
       <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
         <ChatInterface
           chatId={activeChatId}

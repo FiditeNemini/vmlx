@@ -4,6 +4,25 @@ import { useTranslation } from '../../i18n'
 import { Modal } from '../ui/Modal'
 import { formatCacheStorageBytes } from './CachePanel'
 import { readSsdPoolSnapshot, ssdPoolNoticeKind, type SsdPoolSnapshot } from './ssdPoolNoticeState'
+import { isImageSession } from '../../../../shared/sessionUtils'
+
+export interface SsdPoolSession {
+  id: string
+  host: string
+  port: number
+  pid?: number
+  status: string
+  type?: string
+  config?: string
+}
+
+/** Both Chat and server detail must use the current local engine's pool. */
+export function SessionSsdPoolNotice({ session }: { session?: SsdPoolSession | null }) {
+  if (!session || session.status !== 'running' || session.type === 'remote'
+      || isImageSession(session) || !Number.isInteger(session.pid) || (session.pid ?? 0) <= 0) return null
+  return <SsdPoolNotice key={`${session.id}:${session.pid}:${session.host}:${session.port}`}
+    sessionId={session.id} host={session.host} port={session.port} pid={session.pid} />
+}
 
 /** Mount with a session/PID key: no dismissals or late replies cross engines. */
 export function SsdPoolNotice({ sessionId, host, port, pid }: { sessionId: string; host: string; port: number; pid?: number }) {

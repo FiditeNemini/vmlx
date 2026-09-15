@@ -16363,6 +16363,11 @@ async def model_capabilities(model_id: str) -> dict:
         cfg=cfg,
         turboquant_status=turboquant_status,
     )
+    if native_cache.get("native_checkpoint_ssd") is True:
+        # This backend owns typed checkpoints, not a generic trie or paged
+        # manager. Report the instantiated backend instead of "disabled".
+        cache_type = "native_checkpoint_ssd"
+        prefix_cache_enabled = True
     quantization_status = _model_quantization_status(bundle_path)
     acceleration_status = _model_acceleration_status(bundle_path)
     mtp_status = _model_mtp_status_with_loaded_runtime(bundle_path)

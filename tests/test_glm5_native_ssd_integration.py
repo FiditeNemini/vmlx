@@ -216,6 +216,30 @@ def test_native_health_reports_real_pool_not_generic_blocks(tmp_path):
         native.close()
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_native_capabilities_type_matches_instantiated_backend(tmp_path, monkeypatch, enabled):
+    from vmlx_engine import model_config_registry, server
+
+    native = native_facade(tmp_path) if enabled else None
+    scheduler = SimpleNamespace(native_glm_cache=native,
+                                config=SimpleNamespace(enable_prefix_cache=enabled))
+    registry = SimpleNamespace(lookup=lambda _: SimpleNamespace(family_name="glm5_next"))
+    monkeypatch.setattr(model_config_registry, "get_model_config_registry", lambda: registry)
+    monkeypatch.setattr(server, "_get_scheduler", lambda: scheduler)
+    monkeypatch.setattr(server, "_engine", None)
+    monkeypatch.setattr(server, "_model_path", str(tmp_path))
+    monkeypatch.setattr(server, "_model_name", "native-ssd-capability-test")
+    try:
+        cache = asyncio.run(server.model_capabilities("native-ssd-capability-test"))["cache"]
+        assert cache["type"] == ("native_checkpoint_ssd" if enabled else "disabled")
+        assert cache["prefix"] is enabled
+        assert cache["paged"] is cache["block_disk_l2"] is cache["block_disk_only"] is False
+        assert bool(cache["native"].get("native_checkpoint_ssd")) is enabled
+    finally:
+        if native is not None:
+            native.close()
+
+
 @pytest.mark.parametrize("busy", [True, False, "unknown"])
 def test_native_idle_maintenance_requires_quiet_and_no_inference(busy):
     cache = Glm5NativePrefixCache.__new__(Glm5NativePrefixCache)

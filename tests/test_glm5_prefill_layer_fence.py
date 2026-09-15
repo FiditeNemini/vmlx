@@ -46,11 +46,11 @@ def test_prefill_and_connected_decode_exact(monkeypatch, dtype, length, embedded
     ids = (mx.arange(length) % config["text_config"]["vocab_size"])[None, :]
     kwargs = {"inputs_embeds": model.model.embed_tokens(ids)} if embedded else {}
     left, right = model.make_cache(), model.make_cache()
-    monkeypatch.delenv("VMLX_GLM5_PREFILL_LAYER_FENCE", raising=False)
+    monkeypatch.setenv("VMLX_GLM5_PREFILL_LAYER_FENCE", "0")
     expected = model(ids, cache=left, **kwargs)
     mx.eval(expected, *(v for c in left for v in c.state if v is not None))
     assert model.model._prefill_layer_fence_calls == 0
-    monkeypatch.setenv("VMLX_GLM5_PREFILL_LAYER_FENCE", "1")
+    monkeypatch.delenv("VMLX_GLM5_PREFILL_LAYER_FENCE", raising=False)
     actual = model(ids, cache=right, **kwargs)
     mx.eval(actual, *(v for c in right for v in c.state if v is not None))
     assert model.model._prefill_layer_fence_calls == len(model.model.layers)
@@ -71,20 +71,34 @@ def test_no_cache_and_short_forwards_keep_lazy_path(monkeypatch):
     config = copy.deepcopy(TINY_CFG)
     config["text_config"]["num_nextn_predict_layers"] = 0
     model = Model(ModelArgs.from_dict(config))
-    monkeypatch.setenv("VMLX_GLM5_PREFILL_LAYER_FENCE", "1")
+    monkeypatch.delenv("VMLX_GLM5_PREFILL_LAYER_FENCE", raising=False)
     mx.eval(model(mx.array([[1, 2, 3]]), cache=model.make_cache()))
     mx.eval(model(mx.arange(129)[None, :]))
     assert model.model._prefill_layer_fence_calls == 0
 
 
-def test_experimental_namespace_is_glm_only(monkeypatch):
+def test_default_and_explicit_namespace_policy_is_glm_only(monkeypatch):
     from types import SimpleNamespace
     from vmlx_engine.prefix_cache import compute_model_cache_key
 
-    for family in ("glm5_next", "qwen4_exp", "qwen3_5"):
+    for family in ("glm5_next", "glm5_next_text", "qwen4_exp", "qwen3_5"):
         model = SimpleNamespace(args=SimpleNamespace(model_type=family))
-        monkeypatch.delenv("VMLX_GLM5_PREFILL_LAYER_FENCE", raising=False)
+        monkeypatch.setenv("VMLX_GLM5_PREFILL_LAYER_FENCE", "0")
         control = compute_model_cache_key(model)
+        monkeypatch.delenv("VMLX_GLM5_PREFILL_LAYER_FENCE", raising=False)
+        default = compute_model_cache_key(model)
         monkeypatch.setenv("VMLX_GLM5_PREFILL_LAYER_FENCE", "1")
         candidate = compute_model_cache_key(model)
-        assert (control != candidate) == (family == "glm5_next")
+        assert default == candidate
+        assert (control != candidate) == family.startswith("glm5_next")
+
+
+@pytest.mark.parametrize("value,expected", [(None, True), ("1", True), ("0", False)])
+def test_shared_policy_default_and_override(monkeypatch, value, expected):
+    from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
+
+    if value is None:
+        monkeypatch.delenv("VMLX_GLM5_PREFILL_LAYER_FENCE", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_GLM5_PREFILL_LAYER_FENCE", value)
+    assert glm5_prefill_layer_fence_enabled() is expected

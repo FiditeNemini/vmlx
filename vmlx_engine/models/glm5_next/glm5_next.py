@@ -49,6 +49,8 @@ from mlx_lm.models.base import BaseModelArgs
 from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
+from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
+
 from vmlx_engine.metal.affine_moe_pair_decode import (
     affine_moe_routed_output,
     install_affine_moe_pair_decode,
@@ -1986,13 +1988,13 @@ class Glm5NextModel(nn.Module):
                 f"tokens (requested {seen})")
         streams = mx.broadcast_to(x[:, :, None, :],
                                   (*x.shape[:2], self.args.hc_mult, x.shape[-1]))
-        # Qualification-only graph-lifetime control. Unlike splitting the
+        # Bound completed-layer graph lifetime by default. Unlike splitting the
         # token sequence, this preserves every projection/attention shape and
         # KDA recurrence boundary. Native cache outputs can otherwise keep a
         # completed layer's side graphs alive until the final logits eval.
         # Do not fence decode or short speculative verification forwards.
         fence_layers = (
-            os.environ.get("VMLX_GLM5_PREFILL_LAYER_FENCE", "0") == "1"
+            glm5_prefill_layer_fence_enabled()
             and x.shape[1] > 64
             and cache is not None
             and n_confirmed == 0

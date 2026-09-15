@@ -572,10 +572,11 @@ def compute_model_cache_key(
     # Experimental GLM arithmetic must not share persisted state with the
     # control arm before full-model equivalence is qualified.
     if any(p in {"model_type=glm5_next", "model_type=glm5_next_text"} for p in parts):
+        from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
         from vmlx_engine.metal.glm5_kda_row_block import MATH_ABI, requested
         if requested():
             parts.append("glm5_kda_row_block=" + MATH_ABI)
-        if os.environ.get("VMLX_GLM5_PREFILL_LAYER_FENCE", "0") == "1":
+        if glm5_prefill_layer_fence_enabled():
             parts.append("glm5_prefill_layer_fence=same_shape_v1")
 
     # DSV4 cache correctness depends on runtime cache shape. Keep these in

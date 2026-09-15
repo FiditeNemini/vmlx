@@ -401,6 +401,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
+  const nativeGlmSsdActive = normalizedDetectedFamily === 'glm5-next' && detectedNativeGlmSsd === true
   const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(normalizedDetectedFamily, detectedNativeGlmSsd)
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
@@ -968,9 +969,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.prefixCacheHint')} />}
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4PrefixReuseNote')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguTypedCacheNote')} />}
+        {nativeGlmSsdActive && <div data-vmlx-section="nativeGlmSsd"><InfoNote text={t('sessions.config.glmNativeSsdNote')} /></div>}
         {batchingOff && <IncompatWarning text={t('sessions.config.prefixCacheRequiresBatching')} />}
         <CheckField label={t('sessions.config.enablePrefixCache')} tooltip={t('sessions.config.enablePrefixCacheTooltip')} checked={effectivePrefixCacheEnabled} onChange={v => onChange('enablePrefixCache', v)} />
-        {!dsv4Active && !blockDiskOnly && effectivePrefixCacheEnabled && (
+        {!nativeGlmSsdActive && !dsv4Active && !blockDiskOnly && effectivePrefixCacheEnabled && (
           <>
             {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguMemoryAwareNote')} />}
             <CheckField label={t('sessions.config.legacyEntryCountCache')} tooltip={t('sessions.config.legacyEntryCountCacheTooltip')} checked={exactTypedPromptDiskCache ? false : config.noMemoryAwareCache} onChange={v => onChange('noMemoryAwareCache', v)} disabled={exactTypedPromptDiskCache} />
@@ -1061,7 +1063,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
         {dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={blockDiskOnly
           ? t('sessions.config.dsv4SsdOnlyNote')
           : t('sessions.config.dsv4RamL1Note')} />}
-        {architectureBlockDiskOnlySupported && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
+        {architectureBlockDiskOnlySupported && !nativeGlmSsdActive && !m3Active && !dsv4Active && cachePolicy.blockDiskCacheChecked && <InfoNote text={mixedSwaBlockDiskOnlySupported
           ? stepMixedSwaBlockDiskOnly
             ? t('sessions.config.stepSsdOnlyNote')
             : t('sessions.config.mixedSwaSsdOnlyNote')
@@ -1070,7 +1072,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           ? t('sessions.config.m3SsdOnlyNote')
           : t('sessions.config.m3NativeMsaNote')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguNoPagedNote')} />}
-        {(effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
+        {!nativeGlmSsdActive && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked) && (
           <>
             <InfoNote text={effectiveBlockDiskCapacityText} />
             <SliderField settingKey="pagedCacheBlockSize"
@@ -1102,7 +1104,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             />
           </>
         )}
-        {!batchingOff && !effectiveUsePagedCache && <InfoNote text={t('sessions.config.blockDiskPureSsdNote')} />}
+        {!nativeGlmSsdActive && !batchingOff && !effectiveUsePagedCache && <InfoNote text={t('sessions.config.blockDiskPureSsdNote')} />}
         <CheckField
           label={t('sessions.cache.blockDiskCache')}
           tooltip={t('sessions.config.blockDiskCacheTooltip')}
@@ -1238,7 +1240,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             <option value="auto">{dsv4Active ? t('sessions.config.storedQuantNativeTyped') : t('sessions.config.storedQuantAuto')}</option>
           </select>
         </div>
-        {(exactTypedPromptDiskCache || cachePolicy.legacyDiskCacheChecked) && <div data-vmlx-section="typed-disk-cache">
+        {!nativeGlmSsdActive && (exactTypedPromptDiskCache || cachePolicy.legacyDiskCacheChecked) && <div data-vmlx-section="typed-disk-cache">
         {!effectivelyNoBatching && <PerformanceHint text={t('sessions.config.diskCacheHint')} />}
         {openPanguExactTypedCache && <InfoNote text={t('sessions.config.openPanguDiskNote')} />}
         {batchingOff && <IncompatWarning text={t('sessions.config.diskCacheRequiresBatching')} />}

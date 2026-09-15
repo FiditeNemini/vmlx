@@ -843,6 +843,7 @@
       "stepSsdOnlyNote": "Step full/sliding-KV SSD-only mode is available: typed KV blocks and rotating metadata stay in Block Disk L2 without RAM payloads. Under tight Metal headroom, long cold-prompt stores can be skipped to avoid an unsafe second clean prefill; existing SSD blocks remain reusable.",
       "mixedSwaSsdOnlyNote": "Native sliding/mixed-SWA SSD-only mode keeps typed KV blocks and rotating-window metadata in Block Disk L2 without retaining RAM payloads.",
       "hybridSsdOnlyNote": "Hybrid/Mamba SSD-only mode keeps attention KV blocks in Block Disk L2 while restoring full-precision SSM/GDN companion state from its typed SSD store or clean-prefill rederive.",
+      "glmNativeSsdNote": "Experimental GLM native SSD checkpoints: text-only reuse with one active request, no retained RAM payload and no generic KV blocks. Turning SSD off disables reuse. Media reuse is not supported; the running engine reports actual availability.",
       "m3SsdOnlyNote": "MiniMax-M3 SSD-only mode preserves native MSA keys, values, idx_keys, and absolute offsets in Block Disk L2 while keeping persistent RAM payloads disabled.",
       "m3NativeMsaNote": "MiniMax-M3's retained RAM tier is disabled. Enable Block Disk Cache for persistent typed MSA prefix reuse; generic KV q4/q8 remains disabled.",
       "openPanguNoPagedNote": "openPangu does not use generic paged blocks: causal-convolution state is cumulative and cannot be reconstructed from an arbitrary block. Use Prefix Cache plus prompt-level Disk Cache (L2) instead.",

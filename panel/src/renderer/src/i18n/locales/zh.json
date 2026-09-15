@@ -843,6 +843,7 @@
       "stepSsdOnlyNote": "Step full/sliding-KV 纯 SSD 模式可用：类型化 KV 块和轮转元数据保留在 Block Disk L2 中，不占 RAM 负载。Metal 余量紧张时，可能跳过长冷提示词的存储以避免不安全的第二次干净预填充；现有 SSD 块仍可复用。",
       "mixedSwaSsdOnlyNote": "原生 sliding/mixed-SWA 纯 SSD 模式将类型化 KV 块和轮转窗口元数据保存在 Block Disk L2 中，不保留 RAM 负载。",
       "hybridSsdOnlyNote": "混合/Mamba 纯 SSD 模式将注意力 KV 块保存在 Block Disk L2 中，并从类型化 SSD 存储或干净预填充恢复全精度 SSM/GDN 状态。",
+      "glmNativeSsdNote": "实验性 GLM 原生 SSD 检查点：仅支持单个活动请求的文本前缀复用，不在 RAM 中保留载荷，也不使用通用 KV 块。关闭 SSD 将禁用复用。不支持媒体复用；实际可用性由运行中的引擎报告。",
       "m3SsdOnlyNote": "MiniMax-M3 纯 SSD 模式在 Block Disk L2 中保留原生 MSA 的 keys、values、idx_keys 和绝对偏移，同时保持持久化 RAM 负载禁用。",
       "m3NativeMsaNote": "MiniMax-M3 使用原生类型化 MSA 分页缓存，保留 keys、values、idx_keys 和绝对偏移。块磁盘缓存提供其持久化 L2；通用 KV q4/q8 保持禁用。",
       "openPanguNoPagedNote": "openPangu 不使用通用分页块：因果卷积状态是累积的，无法从任意块重建。请改用前缀缓存加提示词级磁盘缓存 (L2)。",

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { detectModelConfigFromDir } from '../src/main/model-config-registry'
@@ -60,5 +60,18 @@ describe('GLM native SSD opt-in, not a saved default migration', () => {
     expect(usesExactTypedPromptDiskCache('glm5-next')).toBe(true)
     expect(usesExactTypedPromptDiskCache('openpangu_v2', true)).toBe(true)
     expect(usesExactTypedPromptDiskCache('qwen4_exp', true)).toBe(false)
+  })
+
+  it('hides non-applicable RAM and generic block controls only for native GLM', () => {
+    const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+    expect(form).toContain("normalizedDetectedFamily === 'glm5-next' && detectedNativeGlmSsd === true")
+    expect(form).toContain('!nativeGlmSsdActive && !dsv4Active && !blockDiskOnly')
+    expect(form).toContain('!nativeGlmSsdActive && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked)')
+    expect(form).toContain('!nativeGlmSsdActive && (exactTypedPromptDiskCache || cachePolicy.legacyDiskCacheChecked)')
+    expect(form).toContain('data-vmlx-section="nativeGlmSsd"')
+    for (const language of ['en', 'zh', 'ko', 'ja', 'es']) {
+      const locale = JSON.parse(readFileSync(`src/renderer/src/i18n/locales/${language}.json`, 'utf8'))
+      expect(locale.sessions.config.glmNativeSsdNote.length).toBeGreaterThan(40)
+    }
   })
 })

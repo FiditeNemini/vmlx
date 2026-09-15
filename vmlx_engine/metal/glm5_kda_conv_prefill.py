@@ -61,4 +61,5 @@ def kda_conv_prefill(x, weight, state=None):
         tail = x[:, -(width-1):]
     else:
         tail = mx.concatenate([state, x], axis=1)[:, -(width-1):]
-    return y, tail
+    # Persist only the raw-input tail, not the whole projected prompt buffer.
+    return y, mx.array(tail)

@@ -276,7 +276,11 @@ def short_conv(
     for w in range(W):
         y = y + padded[:, w : w + T].astype(mx.float32) * weight[:, w].astype(mx.float32)
 
-    new_state = padded[:, padded.shape[1] - (W - 1):]
+    # A slice owns the full padded projection's backing buffer, even though
+    # only W-1 rows are logically cached. Copy the tail so evaluated native
+    # state stays O(W*C), not O(T*C), after a long prefill. Preserve its exact
+    # dtype/values; the output and convolution arithmetic are unchanged.
+    new_state = mx.array(padded[:, padded.shape[1] - (W - 1):])
     y = y * mx.sigmoid(y)                    # silu
     return y.astype(x.dtype), new_state
 
@@ -301,7 +305,7 @@ def short_conv_with_states(
             :, w
         ].astype(mx.float32)
 
-    states = [padded[:, t + 1 : t + W] for t in range(T)]
+    states = [mx.array(padded[:, t + 1 : t + W]) for t in range(T)]
     y = y * mx.sigmoid(y)
     return y.astype(x.dtype), states[-1], states
 

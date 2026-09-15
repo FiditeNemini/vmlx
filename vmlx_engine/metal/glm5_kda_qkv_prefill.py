@@ -113,7 +113,9 @@ def kda_qkv_prefill(xs, weights, states, *, enabled: bool):
         tails = tuple(x[:, -(width-1):] if tokens >= width-1 else
                       mx.concatenate([s, x], axis=1)[:, -(width-1):]
                       for x, s in zip(xs, states))
-        return tuple(zip(outputs, tails))
+        # Strided projection-group views can share one full QKV allocation.
+        # Each persisted tail needs its own bounded, byte-identical storage.
+        return tuple(zip(outputs, (mx.array(tail) for tail in tails)))
     except (RuntimeError, ValueError) as exc:
         _FAILED = True
         logger.warning("GLM KDA QKV prefill disabled after launch failure: %s", exc)

@@ -4,6 +4,15 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.59] - 2026-09-14
+
+- Chat editing: preserve image and video attachments when editing saved user messages; avoid reparsing media while typing and stop cleanly if history truncation fails.
+- Streaming: preserve Responses reasoning deltas when tool buffering begins or ends. Error-only stream sentinels no longer count as generated output, and context-limit messages distinguish prompt and output budgets.
+- SSD caching: show capacity notices and Clear SSD Cache controls in the active Chat surface. Refused SSD publications no longer claim durable storage; retained-prefix coverage reflects the actual published state.
+- Desktop runtime: upgrade Electron to 44.3.0 and the SQLite binding to 13.0.3, and await asynchronous native clipboard operations. Existing database schemas and saved chat/session settings are preserved.
+- Qwen media handling: derive positions from complete vision blocks. Sparse-prefill and related numerical experiments remain opt-in; this release does not promise universal speedups, an AR speed floor or unchanged factual answers across quantizations.
+- Independent-provider native Responses reasoning/history qualification remains deferred. Public-provider Chat tool/history checks do not certify unsupported routes, undisclosed reasoning behavior or missing usage fields. Previously documented model-quality and multimodal-cache limitations remain in scope as limitations, not passes.
+
 ## [1.6.58] - 2026-09-14
 
 - Remote sessions: normalize API base URLs, preserve provider-advertised reasoning controls, use protocol-specific Chat/Responses request fields, and retain tool-call IDs when providers stream IDs separately from names and arguments. Remote token counts are accumulated per request and rates are labelled as observed request-window measurements.

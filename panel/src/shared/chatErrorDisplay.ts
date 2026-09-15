@@ -61,10 +61,16 @@ export function promptTooLongChatErrorContent(
     )
   }
 
+  // A session setting can lower a model's ceiling, not extend it. Keep the
+  // secondary help consistent with the engine's declared-context rejection
+  // on both plain streaming errors and unwrapped JSON errors.
+  const limitHelp = /declared context/i.test(detail)
+    ? "Raising the session limit cannot extend the model's declared context."
+    : "You can raise the session's max context in Settings only up to the model's declared limit."
   return (
     `${PROMPT_TOO_LONG_BUBBLE_PREFIX}${detail}\n\n` +
-    "In the app: shorten this message, remove large attachments, raise the " +
-    "session's max context in Settings, or start a new chat."
+    "In the app: shorten this message, remove large attachments, or start a new chat. " +
+    limitHelp
   )
 }
 

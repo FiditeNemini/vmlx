@@ -3437,8 +3437,12 @@ class MLLMScheduler:
                 if prompt_ids:
                     request.num_prompt_tokens = len(prompt_ids)
 
-            # Append token to request
-            request.output_tokens.append(response.token)
+            # Error responses carry a placeholder, not a sampled token. Do
+            # not count or detokenize it, including errors after real output.
+            # Token id 0 remains valid on ordinary generation responses.
+            is_error = response.finish_reason == "error"
+            if not is_error:
+                request.output_tokens.append(response.token)
             request.num_output_tokens = len(request.output_tokens)
             request.total_output_tokens = (
                 request._retry_output_base + request.num_output_tokens
@@ -3471,7 +3475,7 @@ class MLLMScheduler:
                 )
             _gen_prefix = request._gen_prefix_tokens
             _skip_this_token = False
-            if _gen_prefix:
+            if _gen_prefix and not is_error:
                 _out_idx = request.num_output_tokens - 1  # 0-based index of this token
                 if _out_idx < len(_gen_prefix):
                     _expected = _gen_prefix[_out_idx]
@@ -3500,7 +3504,7 @@ class MLLMScheduler:
             if _skip_this_token:
                 # Token consumed by gen-prefix suppression; no delta to emit
                 new_text = ""
-            elif not is_stop:
+            elif not is_stop and not is_error:
                 detok.add_token(response.token)
                 new_text = detok.last_segment
 
@@ -3531,7 +3535,7 @@ class MLLMScheduler:
             # Create output
             output = RequestOutput(
                 request_id=request_id,
-                new_token_ids=[response.token],
+                new_token_ids=[] if is_error else [response.token],
                 new_text=new_text,
                 output_token_ids=list(request.output_tokens),
                 prompt_tokens=request.num_prompt_tokens,

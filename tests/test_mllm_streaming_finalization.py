@@ -111,6 +111,59 @@ def test_coalesced_terminal_flush_is_appended_to_burst_delta():
     assert outputs[0].output_text == "A]"
 
 
+@pytest.mark.parametrize("code", ["prompt_too_long", "media_controls_unmeetable", "media_input_invalid", None])
+@pytest.mark.parametrize("after_token", [False, True])
+def test_error_sentinel_is_not_generated_or_detokenized(code, after_token):
+    scheduler = _scheduler("error-sentinel")
+    request = scheduler.running["error-sentinel"]
+    if after_token:
+        # Token zero is a real token on a normal response, not a magic value
+        # to discard. Its pending detokenizer tail must survive the error.
+        outputs, finished = scheduler._process_batch_responses(
+            [_response("error-sentinel", 0)]
+        )
+        assert outputs[0].new_token_ids == [0]
+        assert outputs[0].new_text == "A"
+        assert not finished
+    response = _response("error-sentinel", 0, "error")
+    response.error = "rejected before generating this step"
+    response.error_code = code
+    response.error_prompt_tokens = 262144
+    response.error_max_prompt_tokens = 262143
+    response.error_source = "declared_context"
+    outputs, finished = scheduler._process_batch_responses([response])
+    output, = outputs
+    assert finished == {"error-sentinel"}
+    assert output.finished and output.finish_reason == "error"
+    assert output.new_token_ids == []
+    assert output.output_token_ids == ([0] if after_token else [])
+    assert output.completion_tokens == int(after_token)
+    assert request.num_output_tokens == request.total_output_tokens == int(after_token)
+    assert scheduler.total_completion_tokens == int(after_token)
+    assert output.new_text == ("]" if after_token else "")
+    assert output.output_text == ("A]" if after_token else "")
+    assert output.error == response.error
+    assert request._prefill_error == response.error
+    if code:
+        assert output.error_code == code
+        assert output.error_prompt_tokens == 262144
+        assert output.error_max_prompt_tokens == 262143
+        assert output.error_source == "declared_context"
+
+
+def test_error_sentinel_does_not_mutate_pending_generation_prefix():
+    scheduler = _scheduler("error-prefix")
+    request = scheduler.running["error-prefix"]
+    request._gen_prefix_tokens = [8, 9]
+    request.sampling_params.stop = ["A"]
+    response = _response("error-prefix", 0, "error")
+    response.error = "prefill rejected"
+    outputs, _ = scheduler._process_batch_responses([response])
+    assert request._gen_prefix_tokens == [8, 9]
+    assert outputs[0].finish_reason == "error"
+    assert outputs[0].new_text == ""
+
+
 def test_terminal_reconciliation_appends_only_an_authoritative_suffix():
     assert _reconcile_mllm_terminal_delta(
         "assert value == [",

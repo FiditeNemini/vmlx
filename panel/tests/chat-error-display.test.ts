@@ -65,6 +65,26 @@ describe('chat error display policy', () => {
     expect(content).toContain('30000 tokens')
   })
 
+  it.each(['plain', 'stream', 'json'])('does not suggest extending a declared model ceiling (%s)', (lane) => {
+    const detail = 'prompt_too_long: tokenized prompt has 262144 tokens; the model has a declared context of 262144 tokens including input and output. At least one output token must remain (maximum input 262143). Shorten the prompt/history or use a larger-context model.'
+    const message = lane === 'json'
+      ? `API error: 413 - ${JSON.stringify({ error: { message: detail, code: 'prompt_too_long' } })}`
+      : lane === 'stream' ? `Server error: ${detail}` : detail
+    const content = promptTooLongChatErrorContent(message)
+    expect(content).toContain(detail)
+    expect(content).toContain("Raising the session limit cannot extend the model's declared context")
+    expect(content).not.toContain("raise the session's max context")
+    expect(isPromptTooLongBubbleContent(content)).toBe(true)
+  })
+
+  it('bounds the settings remedy for a lower configured prompt cap', () => {
+    const content = promptTooLongChatErrorContent(
+      'prompt_too_long: tokenized prompt has 3000 tokens, max prompt/context tokens is 2048',
+    )
+    expect(content).toContain("only up to the model's declared limit")
+    expect(content).toContain('start a new chat')
+  })
+
   it('strips the streaming "Server error:" wrapper (live-observed shape)', () => {
     const content = promptTooLongChatErrorContent(
       'Server error: prompt_too_long: tokenized prompt has 6251 tokens, max prompt/context tokens is 2048',

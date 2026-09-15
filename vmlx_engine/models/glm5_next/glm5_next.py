@@ -1957,6 +1957,7 @@ class Glm5NextModel(nn.Module):
         self.embed_tokens = nn.Embedding(args.vocab_size, args.hidden_size)
         self.layers = [DecoderLayer(args, i) for i in range(args.num_hidden_layers)]
         self.norm = RMSNorm(args.hidden_size, args.rms_norm_eps)
+        self._prefill_layer_fence_calls = 0
 
     def __call__(
         self,
@@ -1985,11 +1986,34 @@ class Glm5NextModel(nn.Module):
                 f"tokens (requested {seen})")
         streams = mx.broadcast_to(x[:, :, None, :],
                                   (*x.shape[:2], self.args.hc_mult, x.shape[-1]))
+        # Qualification-only graph-lifetime control. Unlike splitting the
+        # token sequence, this preserves every projection/attention shape and
+        # KDA recurrence boundary. Native cache outputs can otherwise keep a
+        # completed layer's side graphs alive until the final logits eval.
+        # Do not fence decode or short speculative verification forwards.
+        fence_layers = (
+            os.environ.get("VMLX_GLM5_PREFILL_LAYER_FENCE", "0") == "1"
+            and x.shape[1] > 64
+            and cache is not None
+            and n_confirmed == 0
+        )
         for i, layer in enumerate(self.layers):
             lc = cache[i] if cache is not None else None
             streams = layer(
                 streams, cache=lc, n_confirmed=n_confirmed
             )
+            if fence_layers:
+                state = list(lc.state) if lc is not None else []
+                # Realize physical capacity owners too, not only their logical
+                # slices. Neither layout nor retained token count changes.
+                state.extend(getattr(lc, "_capacity_buffers", ()))
+                mx.eval(streams, *(value for value in state if value is not None))
+                self._prefill_layer_fence_calls += 1
+                _LOG.info(
+                    "GLM prefill layer fence: layer=%d tokens=%d "
+                    "active_bytes=%d peak_bytes=%d",
+                    i, x.shape[1], mx.get_active_memory(), mx.get_peak_memory(),
+                )
         hidden = mx.mean(streams, axis=2)
         return hidden if return_pre_norm else self.norm(hidden)
 

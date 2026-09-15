@@ -50,6 +50,8 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
+from vmlx_engine.glm5_decode_policy import glm5_exact_moe_requested
+from vmlx_engine.metal.glm5_exact_moe_decode import glm5_exact_moe_output
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
     affine_moe_routed_output,
@@ -1841,6 +1843,7 @@ class MoEBlock(nn.Module):
         # Enabled only for base text layers by the post-hydration hook. The
         # optional MTP block is deliberately outside this qualification.
         self._compiled_router = False
+        self._exact_moe_decode = glm5_exact_moe_requested()
 
     def __call__(self, x: mx.array):
         # FP32 compute does not imply FP32 storage: real bundles keep BF16
@@ -1863,9 +1866,11 @@ class MoEBlock(nn.Module):
             w = w * self.scaling
         else:
             idx, w = route
-        routed, pair_fused = affine_moe_routed_output(
-            self.switch_mlp, x, idx, w
-        )
+        if self._exact_moe_decode:
+            routed = glm5_exact_moe_output(self.switch_mlp, x, idx, w, enabled=True)
+            pair_fused = routed is not None
+        else:
+            routed, pair_fused = affine_moe_routed_output(self.switch_mlp, x, idx, w)
         if not pair_fused:
             routed = self.switch_mlp(x, idx)               # [B, T, k, d]
             routed = mx.sum(

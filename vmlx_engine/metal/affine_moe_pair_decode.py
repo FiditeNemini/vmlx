@@ -52,6 +52,11 @@ def affine_moe_ar_scope():
         _AR_SCOPE.reset(token)
 
 
+def affine_moe_ar_scope_active() -> bool:
+    """Read the existing productive-AR boundary without widening its scope."""
+    return _AR_SCOPE.get()
+
+
 @dataclass(frozen=True)
 class _PairConfig:
     family: str

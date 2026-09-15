@@ -11317,14 +11317,6 @@ class Scheduler:
                                     cache_data,
                                     **_paged_store_kwargs,
                                 )
-                                self._retarget_ssm_rederive_to_paged_boundary(
-                                    request_id,
-                                    store_tokens,
-                                    _stored_block_table,
-                                )
-                                self._persist_hybrid_ssd_companion(
-                                    request, store_tokens, _stored_block_table,
-                                )
                                 self._dsv4_trace_timing(
                                     "store_cache",
                                     _t_store,
@@ -11332,24 +11324,31 @@ class Scheduler:
                                     tokens=len(store_tokens),
                                     layers=len(cache_data or []),
                                 )
-                                if cache_key_override is not None:
-                                    _coverage_note = (
-                                        f"key-aligned cache coverage "
-                                        f"{len(store_tokens)} tokens"
+                                _retained_tokens = getattr(_stored_block_table, "num_tokens", None)
+                                _coverage_note = f"retained cache coverage {_retained_tokens} tokens"
+                                if _PERSIST.record_paged_store(
+                                    request_id, _stored_block_table, len(store_tokens),
+                                    f"paged {_coverage_note}",
+                                ):
+                                    self._retarget_ssm_rederive_to_paged_boundary(
+                                        request_id, store_tokens, _stored_block_table,
+                                    )
+                                    self._persist_hybrid_ssd_companion(
+                                        request, store_tokens, _stored_block_table,
+                                    )
+                                    logger.info(
+                                        f"Stored paged cache for request {request_id} "
+                                        f"({len(store_tokens)} cache-key tokens from "
+                                        f"{len(prompt_tokens)} prompt tokens, "
+                                        f"{len(request._extracted_cache)} layers, "
+                                        f"{_coverage_note})"
                                     )
                                 else:
-                                    _coverage_note = (
-                                        f"cache truncated to "
-                                        f"{max(len(prompt_tokens) - 1, 0)} tokens"
+                                    logger.warning(
+                                        "Paged cache publication refused for %s: "
+                                        "requested_cache_key_tokens=%d; no valid retained boundary",
+                                        request_id, len(store_tokens),
                                     )
-                                logger.info(
-                                    f"Stored paged cache for request {request_id} "
-                                    f"({len(store_tokens)} cache-key tokens from "
-                                    f"{len(prompt_tokens)} prompt tokens, "
-                                    f"{len(request._extracted_cache)} layers, "
-                                    f"{_coverage_note})"
-                                )
-                                _PERSIST.record(request_id, "stored", f"paged {_coverage_note}", retained_tokens=len(store_tokens))
                         except Exception as e:
                             logger.warning(
                                 f"Failed to store paged cache for {request_id}: {e}"

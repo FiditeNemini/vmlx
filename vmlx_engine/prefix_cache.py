@@ -4667,6 +4667,10 @@ class BlockAwarePrefixCache:
             discarded_disk_only = self._discard_nondurable_disk_only_blocks(
                 disk_only_fallbacks
             )
+            # The numeric ownership table remains until normal request cleanup.
+            # It is no longer a successful publication receipt, even when some
+            # independent shorter prefixes remain discoverable in the cache.
+            write_fence["disk_only_publication_refused"] = True
             disk_only_fallbacks.clear()
             logger.error(
                 "Block-disk-only post-eviction fence discarded %d nondurable "
@@ -4809,6 +4813,15 @@ class BlockAwarePrefixCache:
                         "Could not clear settled SSD-only MLX writer buffers: %s",
                         clear_error,
                     )
+            if write_fence.get("disk_only_publication_refused"):
+                logger.warning(
+                    "SSD-only cache publication refused for %s: full requested "
+                    "prefix (%d tokens) was not retained after the write fence; "
+                    "surviving lookup entries and ownership cleanup preserved",
+                    request_id,
+                    len(tokens),
+                )
+                return None
             return result
         except BaseException:
             producer_aborted = True

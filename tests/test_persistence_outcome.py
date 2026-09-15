@@ -1,7 +1,38 @@
 """Terminal persistence outcome: the durability barrier reports what the store sites recorded, never 'persisted' by default."""
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from vmlx_engine.persistence_outcome import TerminalPersistenceLedger, format_outcome
+
+
+@pytest.mark.parametrize("retained", [1, 64, 130])
+def test_paged_store_records_returned_not_requested_coverage(retained):
+    ledger = TerminalPersistenceLedger()
+    table = SimpleNamespace(num_tokens=retained, block_ids=[1])
+    assert ledger.record_paged_store("paged", table, 130, "paged test") is True
+    assert ledger.take("paged") == {
+        "outcome": "stored", "detail": "paged test", "retained_tokens": retained,
+        "durable": None,
+    }
+
+
+@pytest.mark.parametrize("table,known_tokens", [
+    (None, None),
+    (SimpleNamespace(num_tokens=0, block_ids=[]), 0),
+    (SimpleNamespace(num_tokens=True, block_ids=[1]), None),
+    (SimpleNamespace(num_tokens="64", block_ids=[1]), None),
+    (SimpleNamespace(num_tokens=131, block_ids=[1]), None),
+    (SimpleNamespace(num_tokens=64, block_ids=[]), None),
+])
+def test_paged_store_refusal_does_not_fabricate_coverage(table, known_tokens):
+    ledger = TerminalPersistenceLedger()
+    assert ledger.record_paged_store("paged", table, 130, "paged test") is False
+    entry = ledger.take("paged")
+    assert entry["outcome"] == "refused"
+    assert entry["retained_tokens"] == known_tokens
+    assert entry["durable"] is False
 
 
 def test_unknown_by_default_and_take_clears():

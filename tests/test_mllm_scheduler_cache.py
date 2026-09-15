@@ -2909,11 +2909,18 @@ class TestMLLMMixedSWACleanStorePolicy:
         self, monkeypatch, caplog
     ):
         import logging
+        from vmlx_engine.persistence_outcome import TerminalPersistenceLedger
+        from vmlx_engine import mllm_scheduler
+
+        ledger = TerminalPersistenceLedger()
+        monkeypatch.setattr(mllm_scheduler, "_PERSIST", ledger)
 
         scheduler = self._scheduler([10, 11, 12, 13], monkeypatch)
 
         with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
             scheduler._cleanup_finished({"mimo-clean"})
+
+        assert ledger.take("mimo-clean")["outcome"] == "refused"
 
         assert any(
             "returned incomplete retention receipt for mimo-clean" in message
@@ -2928,6 +2935,11 @@ class TestMLLMMixedSWACleanStorePolicy:
         self, monkeypatch, caplog
     ):
         import logging
+        from vmlx_engine.persistence_outcome import TerminalPersistenceLedger
+        from vmlx_engine import mllm_scheduler
+
+        ledger = TerminalPersistenceLedger()
+        monkeypatch.setattr(mllm_scheduler, "_PERSIST", ledger)
 
         scheduler = self._scheduler(
             [10, 11, 12, 13],
@@ -2937,6 +2949,8 @@ class TestMLLMMixedSWACleanStorePolicy:
 
         with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
             scheduler._cleanup_finished({"mimo-clean"})
+
+        assert ledger.take("mimo-clean")["outcome"] == "refused"
 
         assert any(
             "retained no cache-key tokens for mimo-clean: 1 layers, "

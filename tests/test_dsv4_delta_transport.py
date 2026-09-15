@@ -1710,6 +1710,44 @@ class _NativeHoldPaged:
         self.enforced += 1
 
 
+@pytest.mark.parametrize("retained", [False, True])
+def test_store_wrapper_refuses_lost_publication_without_changing_ownership(retained):
+    from vmlx_engine.prefix_cache import BlockAwarePrefixCache
+
+    cache = BlockAwarePrefixCache.__new__(BlockAwarePrefixCache)
+    cache.paged_cache = _NativeHoldPaged()
+    cache._prefix_index = {
+        "failed-prefix": ([1, 2, 3], [7], None),
+        "surviving-prefix": ([1], [5], None),
+    }
+    cache._shape_scoped_cache_extra_keys = lambda tokens, keys, **kwargs: keys
+    block_hash = b"f" * 32
+    disk = _FenceResultDisk(ready={block_hash} if retained else set())
+    block = SimpleNamespace(
+        block_id=7, block_hash=block_hash, cache_data=None,
+        cache_data_from_disk=False, keep_resident=False,
+    )
+    table = SimpleNamespace(num_tokens=130, block_ids=[5, 7])
+
+    def store(*args, _write_fence, **kwargs):
+        _write_fence.update(
+            disk_store=disk, fence_id="publication-result",
+            disk_only_fallbacks={block_hash: (block, object())},
+        )
+        return table
+
+    cache._store_cache_impl = store
+    result = cache.store_cache("publication-result", list(range(130)), [])
+
+    assert result is table if retained else result is None
+    # The internal ownership table survives for the normal ref-count cleanup;
+    # refusal must not erase a separate still-valid prefix or invent a RAM tier.
+    assert table.block_ids == [5, 7] and table.num_tokens == 130
+    assert "surviving-prefix" in cache._prefix_index
+    assert block.cache_data is None
+    assert cache.paged_cache.noted == []
+
+
 def test_disk_only_fence_error_discards_payload_instead_of_retaining_ram():
     from vmlx_engine.prefix_cache import BlockAwarePrefixCache
 

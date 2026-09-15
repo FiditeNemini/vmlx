@@ -4557,10 +4557,9 @@ class MLLMScheduler:
                                                         else ""
                                                     ),
                                                 )
-                                            _PERSIST.record(
-                                                request_id, "stored",
+                                            _PERSIST.record_paged_store(
+                                                request_id, stored_table, len(truncated_tokens),
                                                 f"paged {len(cache_states)} layers, blocks={block_table_blocks}",
-                                                retained_tokens=int(retained_tokens) if isinstance(retained_tokens, int) else None,
                                             )
                                         else:
                                             _PERSIST.record(request_id, "skipped", "no storable layer states")

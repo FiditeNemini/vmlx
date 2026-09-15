@@ -70,6 +70,31 @@ class TerminalPersistenceLedger:
             entry = self._entries.pop(str(request_id), None)
         return entry or {"outcome": "unknown", "detail": "cleanup completed; no store outcome recorded", "retained_tokens": None, "durable": None}
 
+    def record_paged_store(
+        self, request_id: Any, table: Any, requested_tokens: int, detail: str
+    ) -> bool:
+        """Record only the returned publication receipt, never the input length.
+
+        None means a refused/unknown publication, not proof that every older
+        prefix disappeared. Keep that coverage unknown; an explicit empty table
+        can report zero. A valid shorter table records its actual boundary.
+        This does not infer SSD durability from a RAM-capable block table.
+        """
+        retained = getattr(table, "num_tokens", None)
+        block_ids = getattr(table, "block_ids", None)
+        count_valid = type(retained) is int and 0 <= retained <= requested_tokens
+        if not (count_valid and retained > 0
+                and isinstance(block_ids, (list, tuple)) and block_ids):
+            self.record(
+                request_id, "refused",
+                f"paged store has no valid publication receipt; requested={requested_tokens}",
+                retained_tokens=0 if count_valid and retained == 0 else None,
+                durable=False,
+            )
+            return False
+        self.record(request_id, "stored", detail, retained_tokens=retained)
+        return True
+
     def peek(self, request_id: Any) -> Optional[Dict[str, Any]]:
         with self._lock:
             return dict(self._entries[str(request_id)]) if str(request_id) in self._entries else None

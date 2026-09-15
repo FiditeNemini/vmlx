@@ -52,11 +52,12 @@ from mlx_lm.models.switch_layers import SwitchGLU
 from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
 from vmlx_engine.glm5_decode_policy import (
     glm5_compiled_dsa_requested, glm5_exact_moe_requested,
-    glm5_kda_lowrank_requested,
+    glm5_kda_lowrank_requested, glm5_router_matvec_requested,
 )
 from vmlx_engine.metal.glm5_kda_lowrank import Glm5KDALowRankGroup
 from vmlx_engine.metal.glm5_compiled_dsa_decode import glm5_compiled_dsa_output
 from vmlx_engine.metal.glm5_exact_moe_decode import glm5_exact_moe_output
+from vmlx_engine.metal.glm5_router_matvec import glm5_router_logits
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
     affine_moe_routed_output,
@@ -1892,11 +1893,18 @@ class MoEBlock(nn.Module):
         # optional MTP block is deliberately outside this qualification.
         self._compiled_router = False
         self._exact_moe_decode = glm5_exact_moe_requested()
+        self._router_matvec = glm5_router_matvec_requested()
 
     def __call__(self, x: mx.array):
         # FP32 compute does not imply FP32 storage: real bundles keep BF16
         # router weights. Preserve their storage and cast at the owning matmul.
-        logits = x.astype(mx.float32) @ self.gate.weight.astype(mx.float32).T
+        logits = None
+        if self._router_matvec:
+            logits = glm5_router_logits(
+                x, self.gate.weight, enabled=True, training=self.training
+            )
+        if logits is None:
+            logits = x.astype(mx.float32) @ self.gate.weight.astype(mx.float32).T
         route = None
         if self._compiled_router:
             route = glm5_router_post(

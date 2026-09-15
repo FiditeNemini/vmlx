@@ -573,7 +573,9 @@ def compute_model_cache_key(
     # control arm before full-model equivalence is qualified.
     if any(p in {"model_type=glm5_next", "model_type=glm5_next_text"} for p in parts):
         from vmlx_engine.glm5_decode_policy import (
+            GLM5_COMPILED_DSA_MATH_ABI,
             GLM5_EXACT_MOE_MATH_ABI,
+            glm5_compiled_dsa_requested,
             glm5_exact_moe_requested,
         )
         from vmlx_engine.glm5_prefill_policy import (
@@ -590,6 +592,8 @@ def compute_model_cache_key(
             parts.append("glm5_register_pairwise_sum=" + GLM5_REGISTER_SUM_MATH_ABI)
         if glm5_exact_moe_requested():
             parts.append("glm5_exact_moe_decode=" + GLM5_EXACT_MOE_MATH_ABI)
+        if glm5_compiled_dsa_requested():
+            parts.append("glm5_compiled_dsa_decode=" + GLM5_COMPILED_DSA_MATH_ABI)
 
     # DSV4 cache correctness depends on runtime cache shape. Keep these in
     # the model key so L1/L2 prefix cache entries never cross between SWA-only

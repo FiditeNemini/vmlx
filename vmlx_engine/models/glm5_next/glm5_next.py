@@ -50,7 +50,8 @@ from mlx_lm.models.cache import ArraysCache, KVCache
 from mlx_lm.models.switch_layers import SwitchGLU
 
 from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
-from vmlx_engine.glm5_decode_policy import glm5_exact_moe_requested
+from vmlx_engine.glm5_decode_policy import glm5_compiled_dsa_requested, glm5_exact_moe_requested
+from vmlx_engine.metal.glm5_compiled_dsa_decode import glm5_compiled_dsa_output
 from vmlx_engine.metal.glm5_exact_moe_decode import glm5_exact_moe_output
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
@@ -1434,6 +1435,7 @@ class MLAAttention(nn.Module):
         self.o_proj = nn.Linear(self.n_heads * self.vd, d, bias=False)
         self.indexer = Glm5NextIndexer(args)
         self.scale = self.qk ** -0.5
+        self._compiled_dsa_decode = glm5_compiled_dsa_requested()
         # Absorbed per-head kv_b factors, hydrated lazily after quantization.
         # They are derived runtime state rather than checkpoint parameters.
         self._w_kb_nope: mx.array | None = None
@@ -1474,6 +1476,14 @@ class MLAAttention(nn.Module):
         past: int,
     ) -> mx.array:
         """Attend to each query's selected latent rows without dense masks."""
+
+        if getattr(self, "_compiled_dsa_decode", False):
+            compiled = glm5_compiled_dsa_output(
+                queries, latent, indices, valid, past=past, scale=self.scale,
+                enabled=True,
+            )
+            if compiled is not None:
+                return compiled
 
         B, n_heads, S, rank = queries.shape
         K = int(indices.shape[-1])

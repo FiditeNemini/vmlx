@@ -119,7 +119,11 @@ function buildMenu(
     },
     {
       label: t('main.tray.copyApiUrl'),
-      click: () => clipboard.writeText(`http://localhost:${gwPort}`),
+      click: () => {
+        void clipboard.writeText(`http://localhost:${gwPort}`).catch(error => {
+          console.warn('[TRAY] Failed to copy API URL:', error)
+        })
+      },
     },
     {
       label: t('main.tray.singleModelMode'),
@@ -173,7 +177,9 @@ function buildMenu(
         {
           label: t('main.tray.copyApiUrl'),
           click: () => {
-            clipboard.writeText(`http://127.0.0.1:${proc.port}/v1`)
+            void clipboard.writeText(`http://127.0.0.1:${proc.port}/v1`).catch(error => {
+              console.warn('[TRAY] Failed to copy API URL:', error)
+            })
           },
         },
         {
@@ -220,7 +226,11 @@ function buildMenu(
         submenu: [
           {
             label: t('main.tray.copyApiUrl'),
-            click: () => { clipboard.writeText(`http://${connectHost(s.host)}:${s.port}/v1`) },
+            click: () => {
+              void clipboard.writeText(`http://${connectHost(s.host)}:${s.port}/v1`).catch(error => {
+                console.warn('[TRAY] Failed to copy API URL:', error)
+              })
+            },
           },
           { type: 'separator' },
           ...(isSleeping ? [{

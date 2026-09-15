@@ -214,9 +214,9 @@ export async function executeBuiltinTool(
       case 'count_tokens':
         result = countTokens(args.text); break
       case 'clipboard_read':
-        result = clipboardRead(); break
+        result = await clipboardRead(); break
       case 'clipboard_write':
-        result = clipboardWrite(args.text); break
+        result = await clipboardWrite(args.text); break
       case 'git':
         result = gitCommand(args.command, workingDir); break
       case 'get_current_datetime':
@@ -1510,15 +1510,15 @@ function countTokens(text: string): ToolResult {
 
 // ─── Clipboard ───────────────────────────────────────────────────────────────
 
-function clipboardRead(): ToolResult {
-  const text = clipboard.readText()
+async function clipboardRead(): Promise<ToolResult> {
+  const text = await clipboard.readText()
   if (!text) return { content: '(clipboard is empty)', is_error: false }
   return { content: `Clipboard (${text.length} chars):\n\n${text}`, is_error: false }
 }
 
-function clipboardWrite(text: string): ToolResult {
+async function clipboardWrite(text: string): Promise<ToolResult> {
   if (text === undefined || text === null) return { content: 'Missing required parameter: text', is_error: true }
-  clipboard.writeText(text)
+  await clipboard.writeText(text)
   return { content: `Written ${text.length} characters to clipboard.`, is_error: false }
 }
 

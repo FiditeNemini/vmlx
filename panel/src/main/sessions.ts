@@ -3204,8 +3204,8 @@ export class SessionManager extends EventEmitter {
               buttons: ['Copy Command', 'Continue'],
               defaultId: 0,
               cancelId: 1,
-            }).then((result) => {
-              if (result.response === 0) clipboard.writeText(command)
+            }).then(async (result) => {
+              if (result.response === 0) await clipboard.writeText(command)
             }).catch(() => { /* advisory-only path must never break a launch */ })
           }
         }

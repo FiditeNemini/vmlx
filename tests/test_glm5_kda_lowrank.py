@@ -72,6 +72,18 @@ def test_ineligible_activation_never_enters_grouped_matmul(monkeypatch):
     assert group.observed_calls == 0
 
 
+def test_scheduled_dispatch_is_logged_once(monkeypatch, caplog):
+    from vmlx_engine.metal import glm5_kda_lowrank as candidate
+    monkeypatch.setattr(candidate,"_OBSERVED",False)
+    group = Glm5KDALowRankGroup(*projections())
+    with caplog.at_level("INFO"):
+        for _ in range(2):
+            mx.eval(group.decode(mx.zeros((1,1,128),dtype=mx.bfloat16)))
+    assert caplog.text.count("GLM paired KDA projections scheduled:") == 1
+    assert "hidden=128 rank=128 heads=2 dtype=mlx.core.bfloat16" in caplog.text
+    assert group.observed_calls == 2
+
+
 def test_default_off_and_only_glm_cache_identity(monkeypatch):
     from vmlx_engine.prefix_cache import compute_model_cache_key
     for family in ("glm5_next","glm5_next_text","qwen4_exp","qwen3_5"):

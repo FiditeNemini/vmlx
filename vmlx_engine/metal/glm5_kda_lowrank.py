@@ -7,8 +7,13 @@ BF16 intermediate; beta remains separate. Packed views retain original-size
 calls for prefill, multiple requests, other dtypes and speculative forwards.
 """
 
+import logging
+
 import mlx.core as mx
 import mlx.nn as nn
+
+_LOG = logging.getLogger(__name__)
+_OBSERVED = False
 
 
 class Glm5KDALowRankGroup(nn.Module):
@@ -51,6 +56,14 @@ class Glm5KDALowRankGroup(nn.Module):
         high = low @ self.output_weights.transpose(0, 2, 1)
         beta = x @ self.beta_weight.T
         self.observed_calls += 1
+        global _OBSERVED
+        if not _OBSERVED:
+            _OBSERVED = True
+            _LOG.info(
+                "GLM paired KDA projections scheduled: hidden=%d rank=%d heads=%d dtype=%s",
+                self.input_weights.shape[-1], self.input_weights.shape[-2],
+                self.beta_weight.shape[0], x.dtype,
+            )
         return high[0:1], high[1:2], beta
 
     def decay(self, x):

@@ -569,6 +569,13 @@ def compute_model_cache_key(
                 # state. This is read-only and never imports a Metal module.
                 parts.append("qwen4_qsa_native=" + _qwen4_native_artifact_identity())
 
+    # Experimental GLM arithmetic must not share persisted state with the
+    # control arm before full-model equivalence is qualified.
+    if any(p in {"model_type=glm5_next", "model_type=glm5_next_text"} for p in parts):
+        from vmlx_engine.metal.glm5_kda_row_block import MATH_ABI, requested
+        if requested():
+            parts.append("glm5_kda_row_block=" + MATH_ABI)
+
     # DSV4 cache correctness depends on runtime cache shape. Keep these in
     # the model key so L1/L2 prefix cache entries never cross between SWA-only
     # and tri-mode SWA+CSA/HCA, or between different DSV4 composite-cache

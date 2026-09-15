@@ -12,6 +12,8 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+from . import glm5_kda_row_block as row_block
+
 _OBSERVED = False
 
 
@@ -114,6 +116,12 @@ def glm5_kda_step_decode(
     if key_dim <= 0 or value_dim <= 0 or key_dim > 256:
         return None
 
+    blocked = row_block.glm5_kda_row_block(q, k, v, g, beta, state)
+    if blocked is not None:
+        global _OBSERVED
+        _OBSERVED = True
+        return blocked
+
     output, next_state = _kernel(heads, key_dim, value_dim)(
         inputs=[q, k, v, g, beta, state],
         grid=(32 * heads * value_dim, 1, 1),
@@ -121,7 +129,6 @@ def glm5_kda_step_decode(
         output_shapes=[(1, heads, value_dim), tuple(state.shape)],
         output_dtypes=[mx.float32, mx.float32],
     )
-    global _OBSERVED
     if not _OBSERVED:
         _OBSERVED = True
     return output, next_state
@@ -131,6 +138,7 @@ def glm5_kda_step_status() -> dict[str, object]:
     return {
         "installed": _OBSERVED,
         "observed_calls": int(_OBSERVED),
+        "row_block_calls": row_block.observed_calls(),
         "reason": None,
     }
 

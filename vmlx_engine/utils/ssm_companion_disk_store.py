@@ -91,6 +91,16 @@ _ENV_NAMESPACE = "VMLX_SSM_DISK_CACHE_NAMESPACE"
 _DEFAULT_BUDGET_GB = 10.0
 _RECORD_VERSION = 3
 _RECORD_ID_METADATA_KEY = "vmlx_ssm_record_id"
+_GLM5_NATIVE_CLASSES = frozenset({"Glm5KDACache", "Glm5MLACache"})
+
+
+def _glm5_native_class(name: str):
+    """Resolve only engine-owned typed classes, never a serialized import."""
+    if name not in _GLM5_NATIVE_CLASSES:
+        raise ValueError("unknown GLM native cache class")
+    from ..models.glm5_next.glm5_next import Glm5KDACache, Glm5MLACache
+
+    return {"Glm5KDACache": Glm5KDACache, "Glm5MLACache": Glm5MLACache}[name]
 
 
 def _runtime_cache_fingerprint() -> str:
@@ -290,6 +300,24 @@ class SSMCompanionDiskStore:
     def _layer_meta(layer: Any) -> Dict[str, Any]:
         """Capture the minimal info needed to re-instantiate the layer."""
         meta: Dict[str, Any] = {"kind": "opaque"}
+        name = type(layer).__name__
+        if name in _GLM5_NATIVE_CLASSES:
+            cls = _glm5_native_class(name)
+            if type(layer) is not cls:
+                raise ValueError("GLM native cache class identity mismatch")
+            state = list(layer.state)
+            native_meta = tuple(layer.meta_state)
+            # Validate before admitting a record. KDA cannot be rewound, and
+            # MLA's logical offset/pool state cannot be inferred from a generic
+            # ArraysCache list or its spare physical capacity.
+            cls.from_state(state, native_meta)
+            return {
+                "kind": "Glm5NativeCache",
+                "class": name,
+                "native_meta_state": list(native_meta),
+                "state_len": len(state),
+                "state_present": [value is not None for value in state],
+            }
         # ArraysCache shape: .cache list + optional .lengths
         if hasattr(layer, "cache") and isinstance(getattr(layer, "cache", None), list):
             meta["kind"] = "ArraysCache"
@@ -314,6 +342,14 @@ class SSMCompanionDiskStore:
     def _flatten_layer(prefix: str, layer: Any) -> Dict[str, mx.array]:
         """Extract MLX arrays from a layer, keyed by a dotted prefix."""
         flat: Dict[str, mx.array] = {}
+        if type(layer).__name__ in _GLM5_NATIVE_CLASSES:
+            # .state is the portable logical boundary; .cache may include
+            # capacity-owned lanes whose reconstruction needs typed metadata.
+            return {
+                f"{prefix}.state.{i}": value
+                for i, value in enumerate(layer.state)
+                if value is not None
+            }
         cache_attr = getattr(layer, "cache", None)
         if isinstance(cache_attr, list):
             for i, a in enumerate(cache_attr):
@@ -472,7 +508,11 @@ class SSMCompanionDiskStore:
         layer_metas: List[Dict[str, Any]] = []
         opaque_blobs: Dict[str, bytes] = {}
         for n, layer in enumerate(states):
-            meta = self._layer_meta(layer)
+            try:
+                meta = self._layer_meta(layer)
+            except (ValueError, TypeError) as exc:
+                logger.warning("SSM disk store rejected typed layer %d: %s", n, exc)
+                return None
             layer_metas.append(meta)
             if meta["kind"] == "opaque":
                 # Pickle as a last-resort fallback. Stored alongside the
@@ -832,7 +872,37 @@ class SSMCompanionDiskStore:
         states: List[Any] = []
         for n, meta in enumerate(layer_metas):
             kind = meta.get("kind", "opaque")
-            if kind == "ArraysCache":
+            if kind == "Glm5NativeCache":
+                try:
+                    cls = _glm5_native_class(meta.get("class", ""))
+                    present = meta.get("state_present")
+                    native_meta = meta.get("native_meta_state")
+                    if (
+                        type(meta.get("state_len")) is not int
+                        or meta["state_len"] != 4
+                        or not isinstance(present, list)
+                        or len(present) != 4
+                        or any(type(value) is not bool for value in present)
+                        or not isinstance(native_meta, list)
+                        or any(not isinstance(value, str) for value in native_meta)
+                    ):
+                        raise ValueError("invalid GLM native record descriptor")
+                    state = []
+                    for i, populated in enumerate(present):
+                        value = flat.get(f"L{n}.state.{i}")
+                        if populated != (value is not None):
+                            raise ValueError("GLM native array presence mismatch")
+                        state.append(value)
+                    states.append(cls.from_state(state, native_meta))
+                except (ValueError, TypeError, KeyError) as exc:
+                    logger.info("SSM disk rejected GLM native layer %d: %s", n, exc)
+                    return None
+            elif meta.get("class") in _GLM5_NATIVE_CLASSES:
+                # Old generic records discarded GLM pool/offset/schema state.
+                # They are misses, never a plain ArraysCache substitute.
+                logger.info("SSM disk rejected untyped GLM layer %d", n)
+                return None
+            elif kind == "ArraysCache":
                 cache_len = int(meta.get("cache_len", 0))
                 cache_present = meta.get("cache_present") or [True] * cache_len
                 rebuilt_cache: List[Any] = []

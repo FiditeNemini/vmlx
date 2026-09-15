@@ -707,6 +707,20 @@ class SSMCompanionCache:
         cloned_states: List[Any] = []
         for s in states:
             try:
+                if type(s).__name__ in {"Glm5KDACache", "Glm5MLACache"}:
+                    from ..models.glm5_next.glm5_next import (
+                        clone_glm5_next_layer_cache,
+                    )
+
+                    # Match the native text-cache ownership contract. Typed
+                    # MLA marks shared capacity copy-on-write; a shallow
+                    # __dict__ copy would leave stale private buffer owners.
+                    c = clone_glm5_next_layer_cache(s, copy_fn=lambda value: value)
+                    arrays = [value for value in c.state if value is not None]
+                    if arrays:
+                        _mx_materialize(*arrays)
+                    cloned_states.append(c)
+                    continue
                 src_dict = getattr(s, "__dict__", None)
                 if src_dict is None:
                     c = deepcopy(s)

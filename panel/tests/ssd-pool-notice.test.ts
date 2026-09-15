@@ -1,8 +1,26 @@
 import { describe, expect, it } from 'vitest'
 import { readSsdPoolSnapshot, ssdPoolNoticeKind } from '../src/renderer/src/components/sessions/ssdPoolNoticeState'
+import { readManagedSsdPoolBudget } from '../src/shared/ssdPoolHealth'
 
 const snapshot = { root: '/cache', used: 950, cap: 1000, capacityEvicted: 0 }
 describe('SSD pool capacity notice', () => {
+  it('uses companion-only aggregate telemetry for the native SSD backend', () => {
+    const budget = { root: '/cache', bytes_after: 950, max_size_bytes: 1000, accounted: true }
+    const cache = { ssm_companion: { disk: { bytes: 1, global_budget: budget } } }
+    expect(readManagedSsdPoolBudget(cache)).toBe(budget)
+    expect(readSsdPoolSnapshot(cache)).toEqual(snapshot)
+    expect(readSsdPoolSnapshot({ ssm_companion: { disk: { bytes: 950 } } })).toBeNull()
+    expect(readSsdPoolSnapshot({ ssm_companion: { disk: { global_budget: {
+      ...budget, telemetry_stale: true,
+    } } } })).toBeNull()
+  })
+  it('preserves the paged pool selection when both transports report it', () => {
+    const block = { root: '/block' }
+    const companion = { root: '/companion' }
+    expect(readManagedSsdPoolBudget({ block_disk_cache: { global_budget: block },
+      ssm_companion: { disk: { global_budget: companion } } })).toBe(block)
+    expect(readManagedSsdPoolBudget(undefined)).toBeNull()
+  })
   it('does not turn a stale maintenance-time snapshot into a new capacity warning', () => {
     const budget = {
       root: '/cache', bytes_after: 2000, max_size_bytes: 1000,

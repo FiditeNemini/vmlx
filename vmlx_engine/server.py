@@ -15871,6 +15871,11 @@ async def clear_cache(
         store = getattr(manager, "_disk_store", None)
         budget = getattr(store, "global_budget", None)
         if budget is None:
+            # Native whole-state SSD has no generic paged manager. Its
+            # companion transport still participates in the same managed pool.
+            companion = getattr(scheduler, "_ssm_companion_disk_store", None)
+            budget = getattr(companion, "_global_budget", None)
+        if budget is None:
             raise HTTPException(status_code=409, detail="No managed SSD pool is available")
         if expected_pid != os.getpid() or expected_root != str(budget.root):
             raise HTTPException(status_code=409, detail="SSD pool or engine identity changed; refresh before clearing")

@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 
-@pytest.fixture
-def context(monkeypatch):
+@pytest.fixture(params=["paged", "native_companion"])
+def context(monkeypatch, request):
     import vmlx_engine.server as server
     engine_stats = {"engine_collector_request_ids": [], "engine_collector_count": 0,
                     "terminal_cleanup_pending": False}
@@ -20,6 +20,10 @@ def context(monkeypatch):
     scheduler = SimpleNamespace(get_stats=lambda: scheduler_stats,
         block_aware_cache=SimpleNamespace(retire_missing_disk_hints=Mock(return_value=3)),
         paged_cache_manager=SimpleNamespace(_disk_store=SimpleNamespace(global_budget=budget)))
+    if request.param == "native_companion":
+        scheduler.paged_cache_manager = None
+        scheduler.block_aware_cache = None
+        scheduler._ssm_companion_disk_store = SimpleNamespace(_global_budget=budget)
     monkeypatch.setattr(server, "_engine", SimpleNamespace(get_stats=lambda: engine_stats))
     monkeypatch.setattr(server, "_get_scheduler", lambda: scheduler)
     return server, engine_stats, scheduler_stats, budget
@@ -52,8 +56,10 @@ def test_clear_reports_actual_bytes_not_empty_directory(context):
     assert response["remaining_bytes"] == 50
     assert response["effective_cap_bytes"] == 1000
     assert response["resident_cache_preserved"] is True
-    assert response["retired_disk_hints"] == 3
-    server._get_scheduler().block_aware_cache.retire_missing_disk_hints.assert_called_once_with()
+    block_cache = server._get_scheduler().block_aware_cache
+    assert response["retired_disk_hints"] == (3 if block_cache is not None else 0)
+    if block_cache is not None:
+        block_cache.retire_missing_disk_hints.assert_called_once_with()
 
 
 def test_other_engine_refusal_is_typed_and_not_success(context):

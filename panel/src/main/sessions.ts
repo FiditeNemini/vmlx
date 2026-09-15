@@ -23,6 +23,7 @@ import {
   LEGACY_BLOCK_DISK_CACHE_MAX_GB,
 } from '../shared/cacheDefaults'
 import { buildCacheLaunchArgs } from '../shared/cacheLaunchArgs'
+import { readManagedSsdPoolBudget } from '../shared/ssdPoolHealth'
 import {
   applyLagunaJitDefaultEnvironment,
   DISABLE_JANG_AFFINE_JIT_DEFAULT_ENV,
@@ -4453,7 +4454,7 @@ export class SessionManager extends EventEmitter {
               // Reuse the existing idle-cached health snapshot. A separate
               // cache-stats poll here would contend with active GPU decoding.
               enginePid: data.runtime_provenance?.pid,
-              ssdPool: data.cache?.block_disk_cache?.global_budget,
+              ssdPool: readManagedSsdPoolBudget(data.cache),
             })
           } else {
             await this.incrementFailAndCheck(session.id)

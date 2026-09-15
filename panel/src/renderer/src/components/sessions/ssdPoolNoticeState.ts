@@ -1,3 +1,5 @@
+import { readManagedSsdPoolBudget } from '../../../../shared/ssdPoolHealth'
+
 export interface SsdPoolSnapshot {
   root: string
   used: number
@@ -6,7 +8,7 @@ export interface SsdPoolSnapshot {
 }
 
 export function readSsdPoolSnapshot(stats: any): SsdPoolSnapshot | null {
-  const b = stats?.block_disk_cache?.global_budget
+  const b = readManagedSsdPoolBudget(stats)
   const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0
   if (!b || b.accounted !== true || b.telemetry_stale === true || typeof b.root !== 'string' || !b.root
     || !finite(b.bytes_after) || !finite(b.max_size_bytes)) return null

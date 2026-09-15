@@ -8332,6 +8332,7 @@ class MLLMBatchGenerator:
         enable_prefix_cache: bool = True,
         uses_zaya_cache: Optional[bool] = None,
         mixed_attention_cache_model: bool = False,
+        native_glm_cache: Optional[Any] = None,
     ):
         """
         Initialize MLLM batch generator.
@@ -8407,6 +8408,7 @@ class MLLMBatchGenerator:
         self.memory_aware_cache = memory_aware_cache
         self.prefix_cache = prefix_cache
         self.disk_cache = disk_cache
+        self.native_glm_cache = native_glm_cache
         self._kv_cache_bits = kv_cache_bits
         self._kv_cache_group_size = kv_cache_group_size
         self._uses_zaya_cache = bool(
@@ -11461,6 +11463,12 @@ class MLLMBatchGenerator:
                 "answer-byte gate pending — see the comment at this decision)"
             )
         _hybrid_blocks_chunk = self._is_hybrid and not _allow_hybrid_chunked
+        if getattr(self, "native_glm_cache", None) is not None and not has_media_payload:
+            # This experimental route owns an exact materialized N-1 state,
+            # never a post-decode rewind. Keep the final prompt token separate
+            # on both cold and restored text requests.
+            _hybrid_blocks_chunk = False
+            _hybrid_path_reason = "experimental GLM native SSD exact N-1 boundary"
         _allow_native_mtp_hybrid_text_split = (
             os.environ.get("VMLINUX_ENABLE_NATIVE_MTP_HYBRID_TEXT_SPLIT")
             or os.environ.get("VMLX_ENABLE_NATIVE_MTP_HYBRID_TEXT_SPLIT")
@@ -11862,6 +11870,7 @@ class MLLMBatchGenerator:
                     # unrecoverable. Capture it NOW, while the buffer is still
                     # a temporal post-concat state.
                     self._maybe_capture_mixed_swa_boundary(request, cache)
+                    self._store_glm_native_boundary(request, cache)
                     output = lm(
                         input_ids[:, final_start:],
                         **_lm_kwargs_for(final_start, seq_len),
@@ -12834,6 +12843,7 @@ class MLLMBatchGenerator:
                 # BEFORE the single-token final forward trims the rotating
                 # buffers' overhang (see the short-prompt lane above).
                 self._maybe_capture_mixed_swa_boundary(request, cache)
+                self._store_glm_native_boundary(request, cache)
                 # Final chunk: get logits from last token
                 last_chunk = input_ids[:, processed:]
                 output = lm(last_chunk, **_lm_kwargs_for(processed, seq_len))
@@ -13699,6 +13709,68 @@ class MLLMBatchGenerator:
                 pass
         return step
 
+    def _restore_glm_native_prefix(self, request) -> None:
+        native = getattr(self, "native_glm_cache", None)
+        if native is None:
+            return
+        from .persistence_outcome import LEDGER
+        tokens = getattr(request, "_glm_native_full_token_ids", None) or []
+        bypass = bool(getattr(request, "_bypass_prefix_cache", False))
+        media = self._request_has_media_cache_context(request, tokens)
+        if bypass or media:
+            LEDGER.record(
+                request.request_id, "skipped",
+                "GLM native SSD explicit bypass" if bypass else "GLM native SSD media not yet supported",
+                retained_tokens=0, durable=False,
+            )
+            return
+        try:
+            found = native.fetch(
+                tokens, extra_keys=getattr(request, "_cache_extra_keys", None),
+                request_id=request.request_id,
+            )
+            if found is not None:
+                boundary, state = found
+                tail = mx.array([tokens[boundary:]])
+                execution = dict(getattr(request, "_cache_execution", None) or {})
+                execution.update({
+                    "attempted_cached_tokens": boundary,
+                    "reconstructed": True, "dequantized": False,
+                    "reconstruction_seconds": native.last_fetch["seconds"],
+                })
+                request.prompt_cache = state
+                request._cached_tokens = boundary
+                request._cache_detail = "native-glm+disk"
+                request.input_ids = tail
+                request.attention_mask = None
+                request._cache_execution = execution
+        except Exception as exc:
+            logger.warning("GLM native SSD fetch refused for %s: %s", request.request_id, exc)
+
+    def _store_glm_native_boundary(self, request, cache) -> None:
+        native = getattr(self, "native_glm_cache", None)
+        if native is None or getattr(request, "_bypass_prefix_cache", False):
+            return
+        tokens = getattr(request, "_glm_native_full_token_ids", None) or []
+        if len(tokens) < 2 or self._request_has_media_cache_context(request, tokens):
+            return
+        from .persistence_outcome import LEDGER
+        try:
+            receipt = native.store(
+                tokens, len(tokens) - 1, cache,
+                extra_keys=getattr(request, "_cache_extra_keys", None),
+                request_id=request.request_id,
+            )
+        except Exception as exc:
+            logger.warning("GLM native SSD boundary failed for %s: %s", request.request_id, exc)
+            LEDGER.record(request.request_id, "failed", "native SSD boundary failed",
+                          retained_tokens=0, durable=False)
+            return
+        LEDGER.record(
+            request.request_id, receipt["outcome"], receipt["detail"],
+            retained_tokens=receipt["retained_tokens"], durable=receipt["durable"],
+        )
+
     def _process_prompts(
         self, requests: List[MLLMBatchRequest], force_batch_cache: bool = False
     ) -> MLLMBatch:
@@ -13829,6 +13901,11 @@ class MLLMBatchGenerator:
                 getattr(req, "_cache_extra_keys", None),
                 _media_extra_keys,
             )
+            if getattr(self, "native_glm_cache", None) is not None:
+                # Native KDA/DSA checkpoints own the full effective template,
+                # including its generation suffix. Leave the legacy key and
+                # usage fields below unchanged for other backends/surfaces.
+                req._glm_native_full_token_ids = _all_tokens
             # Strip generation prompt tokens from the cache key.
             # Chat templates append assistant role tokens (e.g. <|im_start|>assistant\n<think>\n)
             # at the end. The store path in mllm_scheduler._cleanup_finished() strips these
@@ -15141,6 +15218,8 @@ class MLLMBatchGenerator:
                     except Exception as e:
                         logger.warning(f"Failed to fetch VLM cache for {req.request_id}: {e}")
 
+            self._restore_glm_native_prefix(req)
+
             # L2: Disk cache fallback when in-memory cache missed.
             # Prefer longest-prefix lookup so fresh-process MLLM restore has
             # the same prefix-cache semantics as the text scheduler. Exact
@@ -15668,7 +15747,8 @@ class MLLMBatchGenerator:
                 _raise_if_prefill_cancelled(req)
                 execution = dict(getattr(req, "_cache_execution", None) or {})
                 _prompt_tokens = len(
-                    getattr(req, "_original_token_ids", None) or []
+                    getattr(req, "_glm_native_full_token_ids", None)
+                    or getattr(req, "_original_token_ids", None) or []
                 )
                 _final_cached_tokens = int(
                     getattr(req, "_cached_tokens", 0) or 0
@@ -18742,7 +18822,8 @@ class MLLMBatchGenerator:
                     finish_reason=finish_reason,
                     prompt_cache=cache_fn,
                     prompt_token_ids=(
-                        getattr(req, '_original_token_ids', None)
+                        getattr(req, '_glm_native_full_token_ids', None)
+                        or getattr(req, '_original_token_ids', None)
                         or (req.input_ids[0].tolist() if req.input_ids is not None and req.input_ids.ndim > 1
                             else req.input_ids.tolist() if req.input_ids is not None
                             else [])

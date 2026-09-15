@@ -22,6 +22,7 @@ declare global {
         ) => Promise<{ success: boolean }>;
         browseDirectory: () => Promise<{ canceled: boolean; path?: string }>;
         detectConfig: (modelPath: string) => Promise<{
+          nativeGlmSsd?: boolean
           family?: string;
           toolParser?: string;
           reasoningParser?: string;

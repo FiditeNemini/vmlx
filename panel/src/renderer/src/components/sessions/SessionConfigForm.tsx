@@ -299,6 +299,7 @@ interface SessionConfigFormProps {
   detectedFamily?: string
   /** Bundle-grounded per-architecture hints that do not change generic cache controls */
   detectedArchitectureHints?: Record<string, string | number | boolean>
+  detectedNativeGlmSsd?: boolean
   detectedToolParser?: string
   detectedReasoningParser?: string
   detectedEnableAutoToolChoice?: boolean
@@ -335,7 +336,7 @@ interface SessionConfigFormProps {
   modelIdentity?: string
 }
 
-export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedRuntimeModalities, liveRuntimeModalities, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
+export function SessionConfigForm({ config, onChange, onReset, detectedCacheType, detectedCacheSubtype, detectedFamily, detectedArchitectureHints, detectedNativeGlmSsd, detectedToolParser, detectedReasoningParser, detectedEnableAutoToolChoice, detectedIsTurboQuant, detectedIsMultimodal, detectedForceTextOnly, detectedRuntimeModalities, liveRuntimeModalities, detectedMaxContext, detectedNativeMtp, modelType, imageMode, sessionId, modelIdentity }: SessionConfigFormProps) {
   const { t } = useTranslation()
   const isImage = modelType === 'image'
   const isImageEdit = isImage && (imageMode === 'edit' || config.imageMode === 'edit')
@@ -400,7 +401,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
-  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(normalizedDetectedFamily)
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(normalizedDetectedFamily, detectedNativeGlmSsd)
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
   const effectiveDistributedActive = !!config.distributedEnabled && !dsv4Active

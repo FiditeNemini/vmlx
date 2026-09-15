@@ -2946,7 +2946,8 @@ describe('Default IP and New Settings', () => {
         const source = readFileSync('src/main/sessions.ts', 'utf8')
         const familyStart = source.indexOf("} else if (detectedFamily === 'openpangu_v2')")
         const familyBlock = source.slice(familyStart, source.indexOf('return changed', familyStart))
-        const launchStart = source.indexOf('const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)', 3000)
+        const launchStart = source.lastIndexOf("const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')")
+        expect(launchStart).toBeGreaterThanOrEqual(0)
         const launchBlock = source.slice(launchStart, source.indexOf('const prefixCacheOff', launchStart))
 
         expect(familyBlock).toContain('config.enablePrefixCache = true')
@@ -2964,7 +2965,7 @@ describe('Default IP and New Settings', () => {
             'src/renderer/src/components/sessions/SessionSettings.tsx',
         ]) {
             const ui = readFileSync(file, 'utf8')
-            const start = ui.indexOf('usesExactTypedPromptDiskCache(detected.family)')
+            const start = ui.indexOf('usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)')
             const block = ui.slice(start, start + 450)
             expect(start, file).toBeGreaterThanOrEqual(0)
             expect(block, file).toContain('enablePrefixCache = true')
@@ -2992,9 +2993,11 @@ describe('Default IP and New Settings', () => {
         expect(usesExactTypedPromptDiskCache('glm5-next')).toBe(true)
 
         const source = readFileSync('src/main/sessions.ts', 'utf8')
-        const familyStart = source.indexOf("} else if (detectedFamily === 'glm5-next')")
+        const familyStart = source.indexOf("} else if (detectedFamily === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD !== '1')")
+        expect(familyStart).toBeGreaterThanOrEqual(0)
         const familyBlock = source.slice(familyStart, source.indexOf("} else if (detectedFamily === 'openpangu_v2')", familyStart))
-        const freshStart = source.indexOf("} else if (freshFamily === 'glm5-next')")
+        const freshStart = source.indexOf("} else if (freshFamily === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD !== '1')")
+        expect(freshStart).toBeGreaterThanOrEqual(0)
         const freshBlock = source.slice(freshStart, source.indexOf("} else if (freshFamily === 'openpangu_v2')", freshStart))
 
         for (const block of [familyBlock, freshBlock]) {
@@ -3006,8 +3009,8 @@ describe('Default IP and New Settings', () => {
             expect(block).toContain("config.kvCacheQuantization = 'auto'")
         }
 
-        expect(source).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily)')
-        expect(source).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily)')
+        expect(source).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === \'1\')')
+        expect(source).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === \'1\')')
         expect(source).toContain('enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache')
 
         for (const file of [
@@ -3016,7 +3019,7 @@ describe('Default IP and New Settings', () => {
             'src/renderer/src/components/sessions/SessionSettings.tsx',
         ]) {
             const ui = readFileSync(file, 'utf8')
-            expect(ui, file).toContain('usesExactTypedPromptDiskCache(detected.family)')
+            expect(ui, file).toContain('usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)')
         }
     })
 
@@ -3186,8 +3189,8 @@ describe('Default IP and New Settings', () => {
         const end = source.indexOf('applyBundleStartupDefaults(defaultConfig', start)
         const block = source.slice(start, end)
 
-        expect(block).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily)')
-        expect(block).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily)')
+        expect(block).toContain('enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === \'1\')')
+        expect(block).toContain('enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === \'1\')')
     })
 
     it('reset persists paged RAM off, SSD L2, and force-text-only values explicitly', () => {

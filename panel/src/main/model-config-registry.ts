@@ -167,6 +167,8 @@ interface ModelConfig {
 
 export interface DetectedConfig {
   family: string
+  /** Runtime experiment only; not a saved model/user default or capability proof. */
+  nativeGlmSsd?: boolean
   toolParser?: string
   reasoningParser?: string
   supportsThinking?: boolean
@@ -2058,6 +2060,9 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
           }
           detected = applyLagunaVariantHint(detected, parsed, parsedJangConfig)
           detected = applyConfigMetadataOverrides(detected, parsed)
+          if (detected.family === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD === '1') {
+            detected.nativeGlmSsd = true
+          }
           return detected
         }
       }

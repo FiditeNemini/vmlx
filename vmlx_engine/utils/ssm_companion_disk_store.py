@@ -71,7 +71,7 @@ import uuid
 from collections import Counter, OrderedDict
 from contextlib import nullcontext, suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import mlx.core as mx
 
@@ -151,6 +151,7 @@ class SSMCompanionDiskStore:
         budget_bytes: Optional[int] = None,
         global_budget: Optional[Any] = None,
         max_pending_write_bytes: Optional[int] = None,
+        idle_maintenance: Optional[Callable[[], None]] = None,
     ):
         self._dir = Path(directory) if directory else _default_dir()
         self._budget = (
@@ -159,6 +160,7 @@ class SSMCompanionDiskStore:
             else _budget_bytes()
         )
         self._global_budget = global_budget
+        self._idle_maintenance = idle_maintenance
         initial_budget_result = (
             global_budget.last_result if global_budget is not None else None
         )
@@ -673,6 +675,15 @@ class SSMCompanionDiskStore:
             try:
                 item = self._write_queue.get(timeout=0.2)
             except queue.Empty:
+                maintenance = self._idle_maintenance
+                if maintenance is not None:
+                    with self._stats_lock:
+                        quiet = not self._pending_write_jobs and not self._active_write_producers
+                    if quiet:
+                        try:
+                            maintenance()
+                        except Exception as exc:
+                            logger.warning("Native SSD idle maintenance failed: %s", exc)
                 continue
             job_id, key, data_bytes, sidecar_bytes, num_tokens, reserved = item
             with self._stats_lock:

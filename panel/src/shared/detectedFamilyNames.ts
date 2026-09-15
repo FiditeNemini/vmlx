@@ -68,7 +68,10 @@ export function isZayaCcaFamily(family?: string): boolean {
  * reconstruct their path-dependent recurrent/indexer state, so the product
  * must select prompt-level disk L2 and keep block-disk L2 off.
  */
-export function usesExactTypedPromptDiskCache(family?: string): boolean {
+export function usesExactTypedPromptDiskCache(family?: string, nativeGlmSsd = false): boolean {
   const normalized = normalizeDetectedFamilyName(family)
-  return normalized === 'openpangu_v2' || normalized === 'glm5-next'
+  // Experimental native GLM checkpoints use the configured aggregate SSD
+  // pool, not the separate legacy prompt-L2 budget. Only the main process's
+  // explicit runtime opt-in is propagated to the renderer; never persist it.
+  return normalized === 'openpangu_v2' || (normalized === 'glm5-next' && !nativeGlmSsd)
 }

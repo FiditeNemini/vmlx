@@ -51,6 +51,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
   const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
+  const [detectedNativeGlmSsd, setDetectedNativeGlmSsd] = useState(false)
   const [detectedArchitectureHints, setDetectedArchitectureHints] = useState<Record<string, string | number | boolean> | undefined>()
   const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>()
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>()
@@ -137,6 +138,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
     setDetectedUsePagedCache(detected?.usePagedCache)
     setDetectedCacheSubtype(detected?.cacheSubtype)
     setDetectedArchitectureHints(detected?.architectureHints)
+    setDetectedNativeGlmSsd(detected?.nativeGlmSsd === true)
     if (detected?.family && detected.family !== 'unknown') setDetectedFamily(detected.family)
     else setDetectedFamily(undefined)
     setDetectedToolParser(detected?.toolParser)
@@ -263,7 +265,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (usesExactTypedPromptDiskCache(detected.family)) {
+          } else if (usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true
@@ -281,6 +283,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedEnableAutoToolChoice(detected.enableAutoToolChoice)
           setDetectedCacheSubtype(detected.cacheSubtype)
           setDetectedArchitectureHints(detected.architectureHints)
+          setDetectedNativeGlmSsd(detected.nativeGlmSsd === true)
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
@@ -292,6 +295,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
           setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
           setDetectedArchitectureHints(undefined)
+          setDetectedNativeGlmSsd(false)
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
@@ -306,6 +310,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
         setDetectedEnableAutoToolChoice(undefined)
         setDetectedCacheSubtype(undefined)
         setDetectedArchitectureHints(undefined)
+        setDetectedNativeGlmSsd(false)
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
@@ -723,6 +728,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
                                 setDetectedUsePagedCache(det?.usePagedCache)
                                 setDetectedCacheSubtype(det?.cacheSubtype)
                                 setDetectedArchitectureHints(det?.architectureHints)
+                                setDetectedNativeGlmSsd(det?.nativeGlmSsd === true)
                                 if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
                                 else setDetectedFamily(undefined)
                                 setDetectedToolParser(det?.toolParser)
@@ -1004,7 +1010,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             </p>
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedArchitectureHints={detectedArchitectureHints} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedRuntimeModalities={detectedRuntimeModalities} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelIdentity={selectedModel} />
+          <SessionConfigForm config={config} onChange={handleChange} onReset={handleReset} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedNativeGlmSsd={detectedNativeGlmSsd} detectedArchitectureHints={detectedArchitectureHints} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedRuntimeModalities={detectedRuntimeModalities} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelIdentity={selectedModel} />
         )}
 
         {/* Launch */}

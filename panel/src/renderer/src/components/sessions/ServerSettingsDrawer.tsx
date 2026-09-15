@@ -50,6 +50,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
   const [detectedUsePagedCache, setDetectedUsePagedCache] = useState<boolean | undefined>(undefined)
   const [detectedCacheSubtype, setDetectedCacheSubtype] = useState<string | undefined>()
   const [detectedFamily, setDetectedFamily] = useState<string | undefined>()
+  const [detectedNativeGlmSsd, setDetectedNativeGlmSsd] = useState(false)
   const [detectedArchitectureHints, setDetectedArchitectureHints] = useState<Record<string, string | number | boolean> | undefined>()
   const [detectedToolParser, setDetectedToolParser] = useState<string | undefined>()
   const [detectedReasoningParser, setDetectedReasoningParser] = useState<string | undefined>()
@@ -97,6 +98,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
     setDetectedCacheSubtype(undefined)
     setDetectedFamily(undefined)
     setDetectedArchitectureHints(undefined)
+    setDetectedNativeGlmSsd(false)
     setDetectedToolParser(undefined)
     setDetectedReasoningParser(undefined)
     setDetectedEnableAutoToolChoice(undefined)
@@ -141,6 +143,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         setDetectedUsePagedCache(det?.usePagedCache)
         setDetectedCacheSubtype(det?.cacheSubtype)
         setDetectedArchitectureHints(det?.architectureHints)
+        setDetectedNativeGlmSsd(det?.nativeGlmSsd === true)
         if (det?.family && det.family !== 'unknown') setDetectedFamily(det.family)
         else setDetectedFamily(undefined)
         setDetectedToolParser(det?.toolParser)
@@ -161,6 +164,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
           setDetectedArchitectureHints(undefined)
+          setDetectedNativeGlmSsd(false)
         }
       }
     }
@@ -293,7 +297,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (usesExactTypedPromptDiskCache(detected.family)) {
+          } else if (usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true
@@ -311,6 +315,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedEnableAutoToolChoice(detected.enableAutoToolChoice)
           setDetectedCacheSubtype(detected.cacheSubtype)
           setDetectedArchitectureHints(detected.architectureHints)
+          setDetectedNativeGlmSsd(detected.nativeGlmSsd === true)
           setDetectedIsTurboQuant(!!detected.isTurboQuant)
           setDetectedIsMultimodal(!!detected.isMultimodal)
           setDetectedForceTextOnly(!!detected.forceTextOnly)
@@ -321,6 +326,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
           setDetectedEnableAutoToolChoice(undefined)
           setDetectedCacheSubtype(undefined)
           setDetectedArchitectureHints(undefined)
+          setDetectedNativeGlmSsd(false)
           setDetectedIsTurboQuant(false)
           setDetectedIsMultimodal(false)
           setDetectedForceTextOnly(false)
@@ -333,6 +339,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
         setDetectedEnableAutoToolChoice(undefined)
         setDetectedCacheSubtype(undefined)
         setDetectedArchitectureHints(undefined)
+        setDetectedNativeGlmSsd(false)
         setDetectedIsTurboQuant(false)
         setDetectedIsMultimodal(false)
         setDetectedForceTextOnly(false)
@@ -448,7 +455,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             />
           </div>
         ) : (
-          <SessionConfigForm config={config} onChange={handleChange} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedArchitectureHints={detectedArchitectureHints} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedRuntimeModalities={detectedRuntimeModalities} liveRuntimeModalities={liveRuntimeModalities} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} imageMode={(() => { try { return JSON.parse(session.config || '{}').imageMode } catch { return undefined } })()} sessionId={session.id} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
+          <SessionConfigForm config={config} onChange={handleChange} detectedCacheType={detectedCacheType} detectedUsePagedCache={detectedUsePagedCache} detectedCacheSubtype={detectedCacheSubtype} detectedFamily={detectedFamily} detectedNativeGlmSsd={detectedNativeGlmSsd} detectedArchitectureHints={detectedArchitectureHints} detectedToolParser={detectedToolParser} detectedReasoningParser={detectedReasoningParser} detectedEnableAutoToolChoice={detectedEnableAutoToolChoice} detectedIsTurboQuant={detectedIsTurboQuant} detectedIsMultimodal={detectedIsMultimodal} detectedForceTextOnly={detectedForceTextOnly} detectedRuntimeModalities={detectedRuntimeModalities} liveRuntimeModalities={liveRuntimeModalities} detectedMaxContext={detectedMaxContext} detectedNativeMtp={detectedNativeMtp} modelType={(() => { try { return JSON.parse(session.config || '{}').modelType } catch { return undefined } })()} imageMode={(() => { try { return JSON.parse(session.config || '{}').imageMode } catch { return undefined } })()} sessionId={session.id} modelIdentity={`${session.modelName || ''} ${session.modelPath}`} />
         )}
       </div>
 

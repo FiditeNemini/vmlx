@@ -661,6 +661,8 @@ class MLLMScheduler:
         self.memory_aware_cache = None
         self.prefix_cache = None
         self.disk_cache = None
+        self.native_glm_cache = None
+        self._native_glm_ssd_selected = False
         self._block_disk_l2_enabled = False
         self._ssm_companion_disk_store = None
         self._ssm_companion_model_key = ""
@@ -723,6 +725,65 @@ class MLLMScheduler:
         except Exception as e:
             logger.debug(f"Mixed-attention detection failed: {e}")
 
+        # Experimental native whole-state SSD route. It shares the configured
+        # block-pool budget but never instantiates generic KV blocks or RAM L1.
+        # An observed make_cache layout, not a family-name guess, admits it.
+        if os.environ.get("VMLX_GLM5_NATIVE_SSD") == "1":
+            from .utils.glm5_native_prefix_cache import (
+                Glm5NativePrefixCache, glm5_native_layout,
+            )
+            try:
+                native_layout = glm5_native_layout(lang_model.make_cache())
+            except Exception:
+                native_layout = None
+            if native_layout is not None:
+                self._native_glm_ssd_selected = True
+                self.config.use_memory_aware_cache = False
+                if (
+                    self.config.enable_prefix_cache
+                    and self.config.enable_block_disk_cache
+                    and not self.config.use_paged_cache
+                    and self.config.max_num_seqs == 1
+                ):
+                    try:
+                        from .prefix_cache import build_block_cache_namespace
+                        root = self.config.block_disk_cache_dir or os.path.expanduser(
+                            "~/.cache/vmlx-engine/block-cache"
+                        )
+                        model_key = build_block_cache_namespace(
+                            model=self.model, model_path=self.config.model_path,
+                            quant_tag="native-glm-full-precision", tq_native_tag="off",
+                        )
+                        self.native_glm_cache = Glm5NativePrefixCache(
+                            root=root,
+                            max_size_bytes=int(self.config.block_disk_cache_max_gb * 1024**3),
+                            model_key=model_key, layout=native_layout,
+                            allow_legacy_hashed_namespaces=self.config.block_disk_cache_dir is None,
+                            allow_legacy_direct_namespace=self.config.block_disk_cache_dir is not None,
+                            activity_probe=lambda: bool(
+                                getattr(self, "running", None) or getattr(self, "waiting", None)
+                            ),
+                        )
+                        # Expose the existing disk transport to shared health,
+                        # clear and aggregate-budget controls, not the generic
+                        # companion prefill/re-derive machinery.
+                        self._ssm_companion_disk_store = self.native_glm_cache.disk
+                        logger.info(
+                            "GLM native SSD experimental backend: root=%s cap_bytes=%d "
+                            "layers=%d RAM_retention=0 media=unsupported batch=1",
+                            self.native_glm_cache.budget.root,
+                            self.native_glm_cache.disk.budget_bytes, len(native_layout),
+                        )
+                    except Exception as exc:
+                        logger.warning("GLM native SSD initialization refused: %s", exc)
+                if self.native_glm_cache is None:
+                    self._prefix_cache_unavailable_reason = (
+                        "experimental GLM native SSD unavailable: requires enabled prefix/SSD, "
+                        "paged RAM off, batch=1 and a valid native pool"
+                    )
+                    self.config.enable_prefix_cache = False
+                    logger.warning("%s", self._prefix_cache_unavailable_reason)
+
         if self._uses_zaya_cache and self.config.enable_prefix_cache:
             # In-RAM paged cache is OFF for every family; SSD block-disk L2 is
             # the only tier. ZAYA used to escalate to paged RAM here. It no
@@ -770,7 +831,7 @@ class MLLMScheduler:
                 self.config.enable_prefix_cache = False
 
         # --- Cache initialization chain (block-aware > memory-aware > legacy) ---
-        if self.config.enable_prefix_cache:
+        if self.config.enable_prefix_cache and not self._native_glm_ssd_selected:
             if self.config.use_paged_cache or self.config.enable_block_disk_cache:
                 # Paged RAM with optional L2, or authoritative disk-only blocks.
                 block_disk_only = bool(
@@ -1078,7 +1139,8 @@ class MLLMScheduler:
                     logger.warning(f"VLM prefix cache init failed: {e}")
 
         # Disk cache L2 (persistent across restarts, for non-paged paths)
-        if self.config.enable_disk_cache and self.config.enable_prefix_cache:
+        if (self.config.enable_disk_cache and self.config.enable_prefix_cache
+                and not self._native_glm_ssd_selected):
             base_dir = self.config.disk_cache_dir or os.path.expanduser(
                 "~/.cache/vmlx-engine/prompt-cache"
             )
@@ -2646,11 +2708,14 @@ class MLLMScheduler:
             memory_aware_cache=self.memory_aware_cache,
             prefix_cache=self.prefix_cache,
             disk_cache=self.disk_cache,
+            native_glm_cache=self.native_glm_cache,
             kv_cache_bits=self._kv_cache_bits,
             kv_cache_group_size=self._kv_cache_group_size,
             ssm_state_cache_size=self.config.ssm_state_cache_size,
             ssm_state_cache_max_mb=self.config.ssm_state_cache_max_mb,
-            ssm_state_disk_store=self._ssm_companion_disk_store,
+            ssm_state_disk_store=(
+                None if self.native_glm_cache is not None else self._ssm_companion_disk_store
+            ),
             ssm_state_cache_model_key=self._ssm_companion_model_key,
             enable_prefix_cache=self.config.enable_prefix_cache,
             uses_zaya_cache=self._uses_zaya_cache,
@@ -3833,6 +3898,12 @@ class MLLMScheduler:
             if request is not None and getattr(request, '_bypass_prefix_cache', False):
                 _skip_cache_store = True
                 _skip_cache_store_reason = "explicit prefix-cache bypass"
+            elif getattr(self, "native_glm_cache", None) is not None:
+                _skip_cache_store = True
+                _skip_cache_store_reason = "GLM native checkpoint publication is owned by prefill"
+                if _PERSIST.peek(request_id) is None:
+                    _PERSIST.record(request_id, "skipped", "no admissible GLM native boundary",
+                                    retained_tokens=0, durable=False)
             elif getattr(self, "_prefix_cache_unavailable_reason", None):
                 _skip_cache_store = True
                 _skip_cache_store_reason = self._prefix_cache_unavailable_reason
@@ -5270,6 +5341,11 @@ class MLLMScheduler:
         block_disk_store: Optional[Any],
     ) -> None:
         """Release asynchronous L2 resources after partial cache construction."""
+        native_glm = getattr(self, "native_glm_cache", None)
+        if native_glm is not None:
+            native_glm.close()
+            self.native_glm_cache = None
+            self._ssm_companion_disk_store = None
         ssm_disk_store = getattr(self, "_ssm_companion_disk_store", None)
         if ssm_disk_store is not None:
             try:
@@ -5351,6 +5427,11 @@ class MLLMScheduler:
         # The SSM companion publishes through its own asynchronous worker but
         # shares BlockDiskStore's aggregate-budget lease. Drain it before the
         # block store releases that lease.
+        native_glm = getattr(self, "native_glm_cache", None)
+        if native_glm is not None:
+            native_glm.close()
+            self.native_glm_cache = None
+            self._ssm_companion_disk_store = None
         ssm_disk_store = getattr(self, "_ssm_companion_disk_store", None)
         if ssm_disk_store is not None:
             ssm_disk_store.shutdown(timeout=None)

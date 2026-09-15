@@ -432,7 +432,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.enableJit = false
         changed = true
       }
-    } else if (detectedFamily === 'glm5-next') {
+    } else if (detectedFamily === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD !== '1') {
       // GLM-5.3's KDA recurrent/conv state plus MLA/DSA indexer state is
       // persisted as one exact typed N-1 snapshot. The generic block store
       // cannot represent that boundary. Migrate the old generic default pair
@@ -896,7 +896,7 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
   )
   const dsv4Active = effectiveFamily === 'deepseek-v4'
-  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')
   // In-RAM paged cache is OFF for EVERY family, DSV4 included. SSD block-disk
   // L2 is the only cache tier. Seeding a saved `true` here (even though the
   // launch choke point forces --no-paged-cache) would persist a config that
@@ -1011,7 +1011,7 @@ function applySsdFirstCacheDefaults(
   // Exact typed prompt-snapshot families own a separate prompt-L2 format.
   // Apply the RAM-off normalization above, but do not rewrite their disk
   // format into the generic block tier below.
-  if (usesExactTypedPromptDiskCache(detectedFamily)) return changed
+  if (usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')) return changed
   if (config.enableBlockDiskCache !== true) {
     // SSD-only is only cheap when the disk tier is actually on.
     config.enableBlockDiskCache = true
@@ -2976,7 +2976,7 @@ export class SessionManager extends EventEmitter {
                   ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
                   : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
             }
-          } else if (freshFamily === 'glm5-next') {
+          } else if (freshFamily === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD !== '1') {
             const staleGenericDiskPair =
               config.enableDiskCache !== true && config.enableBlockDiskCache === true
             const glmChanged =
@@ -4061,7 +4061,7 @@ export class SessionManager extends EventEmitter {
           // typed exception and stays on prompt-level disk L2.
           // Paged RAM is OFF for every family, DSV4 included (SSD L2 only).
           usePagedCache: false,
-          enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily),
+          enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1'),
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           // Size the index to the generic capacity target, never the old flat
           // 1000. At the 64-token generic block, 1000 indexes only 63,936
@@ -4073,7 +4073,7 @@ export class SessionManager extends EventEmitter {
           maxCacheBlocks: detectedFamily === 'deepseek-v4'
             ? DSV4_MAX_CACHE_BLOCKS
             : indexBlocksForCapacity(64),
-          enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily),
+          enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1'),
           // No GB cap: adopted sessions get the percent budget like everyone
           // else. This used to hardcode 10 AND stamp the defaults version
           // current, so the GB->percent migration could never reach it.
@@ -5241,7 +5241,7 @@ export class SessionManager extends EventEmitter {
     // Prefix cache — requires --continuous-batching to take effect in vmlx-engine
     // Tool sessions benefit from prefix reuse, but an explicit user opt-out must
     // stay an opt-out; do not silently re-enable cache because tools are present.
-    const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily)
+    const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')
     const effectivePagedCacheBlockSize = dsv4Active
       ? DSV4_PAGED_CACHE_BLOCK_SIZE
       : config.pagedCacheBlockSize

@@ -12043,6 +12043,36 @@ def _native_cache_status(
         ]
         memory_cache = getattr(scheduler, "memory_aware_cache", None)
         prompt_disk_cache = getattr(scheduler, "disk_cache", None)
+        native_glm_ssd = getattr(scheduler, "native_glm_cache", None)
+        if native_glm_ssd is not None:
+            return _with_runtime_layout({
+                "family": "glm5_next", "schema": native_schema,
+                "schema_implemented": True,
+                "cache_type": "native_mixed_state_exact_boundary",
+                "cache_subtype": native_schema, "components": native_components,
+                "reason": None, "experimental": True,
+                "cache_store_policy": {
+                    "prompt_boundary": "full_effective_n_minus_one",
+                    "native_checkpoint_ssd": "typed_full_state",
+                    "generic_prefix_restore": "unsupported",
+                    "generic_paged_blocks": "unsupported",
+                    "prompt_disk_l2": "disabled_native_pool_instead",
+                    "media": "unsupported",
+                    "every_request_recomputes_full_prefix": False,
+                },
+                "generic_turboquant_kv": {
+                    "enabled": False, "reason": "mixed_path_dependent_native_state",
+                },
+                "prefix_configured": prefix_configured,
+                "prompt_disk_l2_configured": prompt_disk_configured,
+                "block_disk_l2_configured": block_disk_configured,
+                "prefix": True, "paged": False, "prompt_disk_l2": False,
+                "block_disk_l2": False, "native_checkpoint_ssd": True,
+                "configured_pool": "block_disk_cache",
+                "retained_ram_bytes": native_glm_ssd.lookup.total_nbytes,
+                "last_native_ssd_store": native_glm_ssd.last_store,
+                "last_native_ssd_fetch": native_glm_ssd.last_fetch,
+            })
         if not schema_implemented:
             return _with_runtime_layout(
                 {

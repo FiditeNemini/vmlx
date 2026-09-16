@@ -4,6 +4,15 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.60] - 2026-09-15
+
+- GLM-5.3 Flash: correct native KDA/MLA cache-memory admission and release retained convolution prefill buffers. Guard affected MLX sorted expert operations against large-row corruption while preserving quantization metadata and reference arithmetic.
+- GLM prefill: automatically select the qualified exact reduction on M5 Max with MLX 0.32.2 and a single active sequence. Matched measurements improved median prefill from 332 to 426 tokens/s; other configurations retain their existing path. Decode experiments remain opt-in, with no universal throughput claim.
+- GLM persistent caching: enable typed native SSD checkpoints for eligible single-active multimodal sessions. Preserve exact image/video input identity, per-generation durable publication, restart refault, and saved SSD Off/root/size choices. Text-only sessions retain their separate cache route; adding new media may require a fresh prefill.
+- Cache controls: report the actual native backend and selection, include its usage in aggregate SSD capacity notices, and support guarded Clear SSD Cache on the companion-only pool.
+- Memory notices: use current measured Metal pressure, provide copyable wired-limit guidance only when applicable, and support per-model dismissal without recurring below-limit warnings. No system memory limit is changed automatically.
+- Existing Chat/Responses reasoning and tool-schema handling remain unchanged. Known GLM video-perception errors, model-selected invalid tool inputs, and independent-provider native Responses qualification remain explicit limitations; cache/transport acceptance is not a claim that those model-quality issues are resolved.
+
 ## [1.6.59] - 2026-09-14
 
 - Chat editing: preserve image and video attachments when editing saved user messages; avoid reparsing media while typing and stop cleanly if history truncation fails.

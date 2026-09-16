@@ -15,6 +15,7 @@ import {
 import type { RemoteDetectedConfig } from "../../shared/remoteModelCapabilities";
 import { remoteServerBaseUrl } from "../../shared/remoteApiUrl";
 import { accumulateChatToolCallDelta } from "../../shared/chatToolCallDeltas";
+import { formatMcpToolResult } from "../../shared/mcpToolResult";
 import {
   BUILTIN_TOOLS,
   isBuiltinTool,
@@ -4185,8 +4186,11 @@ export function registerChatHandlers(
                   );
                 } else {
                   const result = await execRes.json();
+                  resultText = formatMcpToolResult(
+                    result,
+                    overrides?.toolResultMaxChars || 50000,
+                  );
                   if (result.is_error) {
-                    resultText = `Error: ${result.error_message || "Unknown error"}`;
                     emitToolStatus(
                       "error",
                       tc.function.name,
@@ -4195,17 +4199,6 @@ export function registerChatHandlers(
                       tc.id,
                     );
                   } else {
-                    resultText =
-                      typeof result.content === "string"
-                        ? result.content
-                        : JSON.stringify(result.content, null, 2);
-                    // Apply same truncation as built-in tools to prevent context overflow
-                    const mcpMaxChars = overrides?.toolResultMaxChars || 50000;
-                    if (resultText.length > mcpMaxChars) {
-                      resultText =
-                        resultText.slice(0, mcpMaxChars) +
-                        `\n\n[Truncated — showing first ${mcpMaxChars} of ${resultText.length} characters]`;
-                    }
                     emitToolStatus(
                       "result",
                       tc.function.name,

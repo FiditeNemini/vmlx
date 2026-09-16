@@ -114,6 +114,9 @@ async def probe(server_path: str) -> dict:
         bad = await client.call_tool("always_fails", {"reason": "e2e"})
         report["echo_is_error"] = bool(good.is_error)
         report["failing_is_error"] = bool(bad.is_error)
+        report["failing_content"] = bad.content
+        report["failing_error_message"] = bad.error_message
+        report["failing_continuation"] = bad.to_message("mcp-e2e-error")
 
         report["checks"] = {
             "connected": True,
@@ -121,6 +124,16 @@ async def probe(server_path: str) -> dict:
             # An empty schema is the shipped failure: discovered but uncallable.
             "echo_schema_non_empty": schemas.get("echo") == ["text", "times"],
             "echo_call_succeeded": good.is_error is False,
+            "error_detail_preserved": (
+                isinstance(bad.content, str)
+                and "tool failed: e2e" in bad.content
+                and bad.error_message == bad.content
+            ),
+            "error_continuation_preserves_call_and_detail": bad.to_message("mcp-e2e-error") == {
+                "role": "tool",
+                "tool_call_id": "mcp-e2e-error",
+                "content": f"Error: {bad.content}",
+            },
             # Silently reporting a failure as success is the worse half.
             "failing_call_reports_error": bad.is_error is True,
         }

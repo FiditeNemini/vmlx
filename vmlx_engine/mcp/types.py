@@ -206,18 +206,30 @@ class MCPToolResult:
     is_error: bool = False
     error_message: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        # MCP execution failures carry their explanation in content (isError),
+        # not in a separate error_message field. Normalize once for the API,
+        # audit log and automatic tool loop, without rewriting the original data.
+        if self.is_error and not (self.error_message and self.error_message.strip()):
+            detail = self._content_text() if self.content is not None else ""
+            self.error_message = detail if detail.strip() else "Unknown error"
+
+    def _content_text(self) -> str:
+        if isinstance(self.content, str):
+            return self.content
+        import json
+
+        try:
+            return json.dumps(self.content, default=str)
+        except Exception:
+            return str(self.content)
+
     def to_message(self, tool_call_id: str) -> Dict[str, Any]:
         """Convert to OpenAI tool result message format."""
         if self.is_error:
             content = f"Error: {self.error_message}"
-        elif isinstance(self.content, str):
-            content = self.content
         else:
-            import json
-            try:
-                content = json.dumps(self.content, default=str)
-            except Exception:
-                content = str(self.content)
+            content = self._content_text()
 
         return {
             "role": "tool",

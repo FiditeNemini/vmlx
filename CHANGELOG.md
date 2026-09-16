@@ -4,6 +4,16 @@ All notable changes to vMLX Engine will be documented in this file.
 
 ---
 
+## [1.6.61] - 2026-09-16
+
+- Persistent caching: preserve each native tensor's precision and packed state during SSD storage. Validate explicit quantization metadata, geometry and cache chains before restoring affine-quantized entries; model weight precision is not treated as cache precision.
+- Hybrid tool and media continuations: retain a later safe checkpoint alongside a learned repair boundary, avoiding unnecessary re-prefill when both are needed. Release completed native snapshots after publication and discard snapshots from failed prefill attempts without disturbing active requests.
+- Qwen concurrent decoding: preserve each request's positions and sparse masks across unequal-length batches, completed-request removal and new continuations. Native SSD tool continuations remain request-specific.
+- GLM-5.3 Flash: queue concurrent clients behind the native runtime's single active sequence instead of admitting unsupported simultaneous native decoding. Server settings show the effective batch values while retaining saved preferences; health and cache statistics expose the admission policy.
+- Cache telemetry: distinguish resident native allocation from logical snapshot bytes instead of counting spare capacity as serialized state.
+- Tool and reasoning controls: preserve detailed MCP errors in tool-result continuations and keep a model's native default reasoning effort when the default is selected.
+- Scope: experimental GLM decode paths remain off by default. No universal throughput, all-family batching, identical outputs across quantizations, or resolution of the previously documented model-quality and independent-provider limitations is claimed.
+
 ## [1.6.60] - 2026-09-15
 
 - GLM-5.3 Flash: correct native KDA/MLA cache-memory admission and release retained convolution prefill buffers. Guard affected MLX sorted expert operations against large-row corruption while preserving quantization metadata and reference arithmetic.

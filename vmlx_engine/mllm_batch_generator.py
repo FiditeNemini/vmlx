@@ -7636,6 +7636,15 @@ def _release_cancelled_prefill_request(request: Any) -> None:
     request.extra_kwargs = {}
 
 
+def _discard_failed_media_checkpoints(request: Any) -> None:
+    """Drop snapshots of an aborted forward without touching other requests."""
+    request._media_clean_prefix_cache = None
+    request._media_clean_prefix_len = 0
+    request._media_clean_native = False
+    request._media_repair_ssm_checkpoint = None
+    request._media_clean_capture_boundaries = ()
+
+
 @dataclass
 class MLLMBatchResponse:
     """
@@ -16405,6 +16414,9 @@ class MLLMBatchGenerator:
                 # publication. The scheduler owns deferred block-ref cleanup.
                 continue
           except Exception as prefill_err:
+                # A failed forward can already have captured native boundaries.
+                # They refer to the aborted cache, not any subsequent retry.
+                _discard_failed_media_checkpoints(req)
                 # Broadcast shape errors from stale cache (prefix, paged blocks, or
                 # residual batch state) — retry with completely fresh cache.
                 # Don't require req.prompt_cache to be set: the stale shapes can come
@@ -16501,6 +16513,7 @@ class MLLMBatchGenerator:
                         succeeded_requests.append(req)
                         continue  # Successfully retried
                     except Exception as retry_err:
+                        _discard_failed_media_checkpoints(req)
                         # Nuclear retry: clear ALL paged cache blocks and try once more.
                         # Hybrid models (Mamba+Attention) can have stale state that
                         # persists even through make_cache() and mx.clear_cache().
@@ -16558,6 +16571,7 @@ class MLLMBatchGenerator:
                                 succeeded_requests.append(req)
                                 continue
                             except Exception as nuclear_err:
+                                _discard_failed_media_checkpoints(req)
                                 logger.error(f"Nuclear retry also failed for {req.request_id}: {nuclear_err}")
                         else:
                             logger.error(f"Retry also failed for {req.request_id}: {retry_err}")

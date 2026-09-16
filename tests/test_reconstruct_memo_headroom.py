@@ -58,7 +58,7 @@ def _patch(monkeypatch, *, active, max_ws, copy_bytes):
         "get_effective_metal_working_set_bytes",
         lambda mx_module=None: (active, max_ws),
     )
-    monkeypatch.setattr(mc, "estimate_kv_cache_memory", lambda _caches: copy_bytes)
+    monkeypatch.setattr(mc, "estimate_kv_cache_memory", lambda _caches, *, resident: copy_bytes)
 
 
 def test_ssd_only_mode_refuses_and_drops_reconstruct_memo(monkeypatch):

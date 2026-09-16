@@ -165,3 +165,190 @@ def test_output_guard_keeps_reserves_and_rejects_real_exhaustion(config,monkeypa
     with pytest.raises(HTTPException) as rejected:
         server._apply_projected_output_guard(4096,explicit=True)
     assert rejected.value.status_code==413
+
+
+def _grown_native_cache():
+    mx = pytest.importorskip("mlx.core")
+    from vmlx_engine.models.glm5_next.glm5_next import Glm5MLACache
+
+    cache = Glm5MLACache(4, absorbed=True)
+    for count in (2048, 1):
+        cache.update_latent(mx.ones((1, 1, count, 8), mx.bfloat16))
+        cache.update_packed(mx.full((1, count, 8), 2, mx.float32))
+    mx.eval(cache.state)
+    return cache
+
+
+def test_grown_native_cache_resident_estimate():
+    from vmlx_engine.memory_cache import _CacheEntry, estimate_kv_cache_memory
+
+    cache = _grown_native_cache()
+    assert sum(x.nbytes for x in cache.state) == 98_352
+    assert cache.nbytes == 196_608
+    assert estimate_kv_cache_memory([cache]) == cache.nbytes
+    assert _CacheEntry.create([1, 2, 3], [cache]).memory_bytes == cache.nbytes
+    assert estimate_kv_cache_memory([cache], resident=False) == 98_352
+
+
+@pytest.mark.parametrize("operation", ["clone", "extract", "merge"])
+def test_grown_native_cache_shared_resident_bound(operation):
+    from vmlx_engine.memory_cache import estimate_kv_cache_memory
+    from vmlx_engine.models.glm5_next.glm5_next import (
+        Glm5MLACache,
+        clone_glm5_next_layer_cache,
+    )
+    from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
+
+    source = _grown_native_cache()
+    if operation == "clone":
+        shared = clone_glm5_next_layer_cache(source, copy_fn=lambda x: x)
+    elif operation == "extract":
+        shared = source.extract(0)
+    else:
+        shared = Glm5MLACache.merge([source])
+    assert shared.nbytes == source.nbytes
+    assert estimate_kv_cache_memory([shared]) == source.nbytes
+    assert SSMCompanionCache._estimate_state_nbytes([shared]) == source.nbytes
+
+
+def test_grown_native_cache_l1_budget_counts_shared_capacity():
+    from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
+
+    source = _grown_native_cache()
+    companion = SSMCompanionCache(max_entries=1, max_bytes=120_000, disk_store=False)
+    companion.store([1, 2, 3], 3, [source])
+    assert companion.size == 0
+    assert companion.total_nbytes == 0
+
+
+def test_grown_native_cache_detach_copies_and_trim():
+    mx = pytest.importorskip("mlx.core")
+    from vmlx_engine.models.glm5_next.glm5_next import clone_glm5_next_layer_cache
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    source = _grown_native_cache()
+    copied = SingleBatchGenerator._clone_cache_object(source)
+    assert copied.nbytes == 98_352
+    source.trim(2048)
+    assert source.nbytes == 196_608
+    # Even a distinct array view is not an independently copied allocation.
+    shared = clone_glm5_next_layer_cache(source, copy_fn=lambda x: x[...])
+    assert shared.nbytes == 196_608
+    shared.update_latent(mx.zeros((1, 1, 1, 8), mx.bfloat16))
+    mx.eval(shared.state)
+    assert shared.nbytes == 32_768 + 131_072
+    assert source.nbytes == 196_608
+    assert copied.offset == 2049
+    assert source.offset == 1
+    assert mx.array_equal(source.cache[0], mx.ones((1, 1, 1, 8), mx.bfloat16))
+    shared.update_packed(mx.zeros((1, 1, 8), mx.float32))
+    mx.eval(shared.state)
+    assert shared.nbytes == 98_304
+    source.trim(1)
+    assert source.nbytes == 196_608
+    assert source.extract(0).nbytes == 196_608
+    empty = clone_glm5_next_layer_cache(source, copy_fn=lambda x: x)
+    assert empty.nbytes == 0
+
+
+@pytest.mark.parametrize("basic_index", [slice(0, 1), Ellipsis, (slice(0, 1),)])
+def test_grown_native_cache_filter_extend_and_metadata(basic_index):
+    mx = pytest.importorskip("mlx.core")
+    from vmlx_engine.memory_cache import estimate_kv_cache_memory
+    from vmlx_engine.models.glm5_next.glm5_next import Glm5MLACache
+    from vmlx_engine.utils.ssm_companion_cache import SSMCompanionCache
+
+    source = _grown_native_cache()
+    source.filter(basic_index)
+    mx.eval(source.state)
+    assert source.nbytes == 196_608
+    source.filter(mx.array([0]))
+    mx.eval(source.state)
+    assert source.nbytes == 98_352
+    source.extend(_grown_native_cache())
+    mx.eval(source.state)
+    assert source.nbytes == 196_704
+    row = source.extract(0)
+    assert row.nbytes == source.nbytes  # Do not divide a shared allocation.
+    merged = Glm5MLACache.merge([row, row])
+    mx.eval(merged.state)
+    assert merged.nbytes == 196_704
+    row.left_padding = row.lengths = mx.array([0], mx.int32)
+    assert estimate_kv_cache_memory([row]) == row.nbytes + 4
+    assert SSMCompanionCache._estimate_state_nbytes([row]) == row.nbytes + 4
+
+
+def test_grown_native_cache_snapshot_budget_stays_logical():
+    from vmlx_engine.memory_cache import estimate_kv_cache_memory
+    from vmlx_engine.utils.single_batch_generator import SingleBatchGenerator
+
+    source = _grown_native_cache()
+    generator = object.__new__(SingleBatchGenerator)
+    generator.prompt_snapshot_max_bytes = 120_000
+    generator.prompt_snapshot_oversize_skips = 0
+    snapshot = generator._clone_admissible_prompt_cache_snapshot([source])
+    assert snapshot is not None
+    assert generator.prompt_snapshot_oversize_skips == 0
+    assert generator.prompt_snapshot_last_estimated_bytes == 98_352
+    assert snapshot[0].nbytes == 98_352
+    nested = SimpleNamespace(caches=[source])
+    assert estimate_kv_cache_memory([nested]) == 196_608
+    assert estimate_kv_cache_memory([nested], resident=False) == 98_352
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_native_capacity_does_not_override_quantized_kv_accounting(bits):
+    mx = pytest.importorskip("mlx.core")
+    from mlx_lm.models.cache import QuantizedKVCache
+
+    from vmlx_engine.memory_cache import estimate_kv_cache_memory
+
+    cache = QuantizedKVCache(group_size=32, bits=bits)
+    value = mx.ones((1, 1, 3, 64), mx.bfloat16)
+    cache.update_and_fetch(value, value)
+    mx.eval(cache.state)
+    packed = sum(x.nbytes for side in (cache.keys, cache.values) for x in side)
+    assert estimate_kv_cache_memory([cache]) == packed
+    assert estimate_kv_cache_memory([cache], resident=False) == packed
+    plain = SimpleNamespace(cache=[value], nbytes=123_456_789)
+    assert estimate_kv_cache_memory([plain]) == value.nbytes
+
+
+def test_grown_native_cache_ssd_budget_uses_logical_state(tmp_path):
+    mx = pytest.importorskip("mlx.core")
+    from vmlx_engine.models.glm5_next.glm5_next import Glm5KDACache
+    from vmlx_engine.utils.glm5_native_prefix_cache import (
+        Glm5NativePrefixCache,
+        glm5_native_layout,
+    )
+
+    source = _grown_native_cache()
+    kda = Glm5KDACache()
+    kda.cache = [mx.ones((1, 3, 8), mx.bfloat16) for _ in range(3)]
+    kda.cache.append(mx.ones((1, 2, 4, 4), mx.float32))
+    original = [kda, source]
+    tokens = list(range(2049))
+    options = dict(root=tmp_path, max_size_bytes=120_000,
+                   model_key="native-capacity-test", layout=glm5_native_layout(original))
+    cache = Glm5NativePrefixCache(**options)
+    try:
+        result = cache.store(tokens, len(tokens), original)
+        assert result["outcome"] == "stored"
+        assert result["durable"] is True
+        assert cache.lookup.total_nbytes == 0
+    finally:
+        cache.close()
+    reopened = Glm5NativePrefixCache(**options)
+    try:
+        # Serving restores at most N-1, leaving the next prompt token to run.
+        boundary, layers = reopened.fetch(tokens + [2050])
+        assert boundary == 2049
+        restored = layers[1]
+        assert restored.nbytes == 98_352
+        assert source.nbytes == 196_608
+        for before, after in zip(source.state, restored.state):
+            assert before.dtype == after.dtype
+            assert before.shape == after.shape
+            assert mx.array_equal(before, after)
+    finally:
+        reopened.close()

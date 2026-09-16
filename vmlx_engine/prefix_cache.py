@@ -6948,7 +6948,9 @@ class BlockAwarePrefixCache:
         try:
             from .memory_cache import estimate_kv_cache_memory
 
-            copy_bytes = int(estimate_kv_cache_memory(reconstructed_caches) or 0)
+            copy_bytes = int(
+                estimate_kv_cache_memory(reconstructed_caches, resident=False) or 0
+            )
         except Exception:  # noqa: BLE001
             return False
         if copy_bytes <= 0:

@@ -340,6 +340,7 @@ class SingleBatchGenerator:
                 return clone_glm5_next_layer_cache(
                     cache_obj,
                     copy_fn=cls._clone_array,
+                    copy_is_detached=True,
                 )
             except Exception:
                 return None
@@ -423,7 +424,7 @@ class SingleBatchGenerator:
             try:
                 from ..memory_cache import estimate_kv_cache_memory
 
-                estimated = int(estimate_kv_cache_memory(list(cache)))
+                estimated = int(estimate_kv_cache_memory(list(cache), resident=False))
             except Exception as exc:
                 logger.debug("typed prompt snapshot size estimate failed: %s", exc)
             else:

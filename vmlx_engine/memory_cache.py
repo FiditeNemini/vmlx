@@ -196,15 +196,17 @@ def _estimate_state_memory(state: Any, _seen: set[int] | None = None) -> int:
     return 0
 
 
-def estimate_kv_cache_memory(cache: list[Any]) -> int:
+def estimate_kv_cache_memory(cache: list[Any], *, resident: bool = True) -> int:
     """
-    Estimate memory usage of any cache type in bytes.
+    Estimate retained cache bytes, or logical snapshot bytes with resident=False.
 
     Supports KVCache, RotatingKVCache, QuantizedKVCache, MambaCache,
     ArraysCache, and CacheList.
 
     Args:
         cache: List of layer cache objects.
+        resident: Honor explicit native backing-allocation accounting. False
+            describes independent logical copies/serialization, not live views.
 
     Returns:
         Estimated memory usage in bytes.
@@ -215,6 +217,12 @@ def estimate_kv_cache_memory(cache: list[Any]) -> int:
     total_bytes = 0
 
     for layer_cache in cache:
+        # Explicit opt-in contract, not arbitrary .nbytes from an unknown
+        # family. Native capacity/slack must not inflate SSD snapshot admission.
+        resident_bytes = getattr(layer_cache, "resident_nbytes", None) if resident else None
+        if isinstance(resident_bytes, int) and resident_bytes >= 0:
+            total_bytes += resident_bytes
+            continue
         # Extracted state dict (from _extract_cache_states)
         if isinstance(layer_cache, dict) and "state" in layer_cache:
             total_bytes += _estimate_state_memory(layer_cache["state"])
@@ -270,7 +278,9 @@ def estimate_kv_cache_memory(cache: list[Any]) -> int:
         elif hasattr(layer_cache, "caches") and isinstance(
             getattr(layer_cache, "caches", None), (list, tuple)
         ):
-            total_bytes += estimate_kv_cache_memory(list(layer_cache.caches))
+            total_bytes += estimate_kv_cache_memory(
+                list(layer_cache.caches), resident=resident
+            )
 
         # Fallback: cache object with .state property
         elif hasattr(layer_cache, "state") and not isinstance(layer_cache, dict):

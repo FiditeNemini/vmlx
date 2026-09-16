@@ -1093,6 +1093,12 @@ class SSMCompanionCache:
                 pass
 
         for layer in states:
+            resident_bytes = getattr(layer, "resident_nbytes", None)
+            if isinstance(resident_bytes, int) and resident_bytes >= 0:
+                if id(layer) not in seen:
+                    seen.add(id(layer))
+                    total += resident_bytes
+                continue
             cache = getattr(layer, "cache", None)
             if isinstance(cache, (list, tuple)):
                 for arr in cache:

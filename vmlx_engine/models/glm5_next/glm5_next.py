@@ -298,6 +298,9 @@ class Glm5MLACache(ArraysCache):
         self._capacity_buffers: list[mx.array | None] = [None] * 4
         self._capacity_lengths = [0] * 4
         self._capacity_shared = [False] * 4
+        # Identity clones and row views can retain larger backing allocations
+        # than their logical tensor shapes. Accounting only; never serialized.
+        self._retained_capacity_bytes = [0] * 4
 
     @staticmethod
     def _capacity_axis(slot: int) -> int:
@@ -324,6 +327,7 @@ class Glm5MLACache(ArraysCache):
         self._capacity_buffers = [None] * 4
         self._capacity_lengths = [0] * 4
         self._capacity_shared = [False] * 4
+        self._retained_capacity_bytes = [0] * 4
         if not self.absorbed:
             return
         for slot in (MLA_LATENT, MLA_LATENT_PACKED, MLA_LATENT_POOL_KEYS):
@@ -341,6 +345,19 @@ class Glm5MLACache(ArraysCache):
             if self._capacity_buffers[slot] is not None:
                 self._capacity_shared[slot] = True
 
+    def _resident_slot_bytes(self, slot: int) -> int:
+        value = self._capacity_buffers[slot]
+        return max(
+            int(value.nbytes) if value is not None else 0,
+            self._retained_capacity_bytes[slot],
+        )
+
+    def _retain_absorbed_capacity(self, source: Glm5MLACache) -> None:
+        """Carry a conservative per-slot backing bound for shared views."""
+        for slot in (MLA_LATENT, MLA_LATENT_PACKED, MLA_LATENT_POOL_KEYS):
+            if self.cache[slot] is not None:
+                self._retained_capacity_bytes[slot] = source._resident_slot_bytes(slot)
+
     def _append_absorbed_capacity(
         self,
         slot: int,
@@ -357,6 +374,7 @@ class Glm5MLACache(ArraysCache):
             self._capacity_buffers[slot] = value
             self._capacity_lengths[slot] = count
             self._capacity_shared[slot] = False
+            self._retained_capacity_bytes[slot] = 0
             self.cache[slot] = value
             return value
         if count == 0:
@@ -374,6 +392,7 @@ class Glm5MLACache(ArraysCache):
             buffer = mx.array(self._logical_slice(buffer, axis, logical))
             self._capacity_buffers[slot] = buffer
             self._capacity_shared[slot] = False
+            self._retained_capacity_bytes[slot] = 0
 
         needed = logical + count
         capacity = int(buffer.shape[axis])
@@ -412,6 +431,7 @@ class Glm5MLACache(ArraysCache):
         ]
         if self.absorbed:
             extracted._reset_absorbed_capacity()
+            extracted._retain_absorbed_capacity(self)
             self._mark_absorbed_capacity_shared()
             extracted._mark_absorbed_capacity_shared()
         return extracted
@@ -433,6 +453,7 @@ class Glm5MLACache(ArraysCache):
         if merged.absorbed:
             merged._reset_absorbed_capacity()
             if len(caches) == 1:
+                merged._retain_absorbed_capacity(caches[0])
                 caches[0]._mark_absorbed_capacity_shared()
                 merged._mark_absorbed_capacity_shared()
         return merged
@@ -484,8 +505,17 @@ class Glm5MLACache(ArraysCache):
         self._reset_absorbed_capacity()
 
     def filter(self, batch_indices):
+        # Advanced indexing creates new arrays; a basic slice remains a view.
+        retained = (
+            [self._resident_slot_bytes(slot) for slot in range(4)]
+            if self.absorbed and not isinstance(batch_indices, (list, mx.array))
+            else None
+        )
         super().filter(batch_indices)
         self._reset_absorbed_capacity()
+        if retained is not None:
+            self._retained_capacity_bytes = retained
+            self._mark_absorbed_capacity_shared()
 
     def extend(self, other):
         super().extend(other)
@@ -496,10 +526,24 @@ class Glm5MLACache(ArraysCache):
         if not self.absorbed:
             return super().nbytes
         return sum(
-            value.nbytes
-            for value in self._capacity_buffers
-            if value is not None
+            self._resident_slot_bytes(slot) for slot in range(4)
         )
+
+    @property
+    def resident_nbytes(self) -> int:
+        """Retained object budget, distinct from logical copy/SSD state bytes.
+
+        Shared owners are conservatively charged separately, not presented as
+        a globally deduplicated allocator measurement.
+        """
+        total = int(self.nbytes)
+        seen = {id(value) for value in self.cache if value is not None}
+        seen.update(id(value) for value in self._capacity_buffers if value is not None)
+        for value in (self.left_padding, self.lengths):
+            if value is not None and id(value) not in seen:
+                total += int(value.nbytes)
+                seen.add(id(value))
+        return total
 
     @property
     def offset(self) -> int:
@@ -755,8 +799,13 @@ def clone_glm5_next_layer_cache(
     source: Glm5KDACache | Glm5MLACache,
     *,
     copy_fn: Callable[[mx.array], mx.array],
+    copy_is_detached: bool = False,
 ) -> Glm5KDACache | Glm5MLACache:
-    """Return an isolated copy of one exact GLM native-state boundary."""
+    """Return an isolated wrapper of one exact GLM native-state boundary.
+
+    A distinct array object can still be a view. Unless the caller guarantees
+    a materialized independent copy, preserve backing bounds and copy-on-write.
+    """
 
     if type(source).__name__ not in {"Glm5KDACache", "Glm5MLACache"}:
         raise TypeError(f"unexpected GLM cache class: {type(source).__name__}")
@@ -766,12 +815,13 @@ def clone_glm5_next_layer_cache(
     ]
     cloned = type(source).from_state(copied_state, source.meta_state)
     if isinstance(source, Glm5MLACache) and source.absorbed:
-        shares_storage = any(
+        shares_storage = not copy_is_detached or any(
             original is copied
             for original, copied in zip(source_state, copied_state)
             if original is not None
         )
         if shares_storage:
+            cloned._retain_absorbed_capacity(source)
             source._mark_absorbed_capacity_shared()
             cloned._mark_absorbed_capacity_shared()
     return cloned

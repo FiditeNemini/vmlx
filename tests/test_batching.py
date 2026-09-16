@@ -1356,7 +1356,7 @@ class TestSchedulerBasic:
         monkeypatch.setattr(
             memory_cache,
             "estimate_kv_cache_memory",
-            lambda _cache: 300 * mb,
+            lambda _cache, *, resident: 300 * mb,
         )
         monkeypatch.setattr(
             psutil,

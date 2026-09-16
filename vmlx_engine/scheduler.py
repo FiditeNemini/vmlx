@@ -8867,7 +8867,9 @@ class Scheduler:
                     try:
                         from .memory_cache import estimate_kv_cache_memory
 
-                        cache_bytes = estimate_kv_cache_memory(cache_to_use)
+                        cache_bytes = estimate_kv_cache_memory(
+                            cache_to_use, resident=False
+                        )
                         import psutil
 
                         avail = psutil.virtual_memory().available

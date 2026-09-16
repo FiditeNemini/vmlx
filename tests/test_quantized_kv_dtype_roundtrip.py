@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Quantized-KV scales/biases must survive an L2 round-trip unchanged.
 
-safetensors cannot hold bfloat16, so the block store casts bf16 -> float32 on
-the way to disk and restores the original dtype on the way back using
-``__orig_dtypes__``. Five tags recorded that; the ``quantized_kv`` branches did
-NOT. So a block that round-tripped through L2 came back with fp32 scales where a
-fresh recompute produces bf16 — a hit != recompute numerics change, and one that
-sits OUTSIDE TurboQuant, so the TQ asymmetry guard never covered it.
+Legacy NumPy-backed safetensors writes widened BF16 to FP32 and needed
+``__orig_dtypes__`` to restore the scales. Current writes preserve raw BF16 bits
+in U16 carriers with per-tensor declarations. These cases retain the historical
+FP32 compatibility contract; actual current disk I/O is covered separately.
 
 The packed data itself is integer and is deliberately left alone.
 """
@@ -37,10 +35,15 @@ def _block():
 
 
 def _cast_like_safetensors(tensors):
-    return {
+    # Simulate an actual legacy record, before per-tensor dtype metadata.
+    meta = json.loads(bytes(tensors["__vmlx_block_meta__"].tolist()).decode())
+    meta.pop("__tensor_dtypes__", None)
+    result = {
         k: (v.astype(mx.float32) if "bfloat16" in str(getattr(v, "dtype", "")) else v)
         for k, v in tensors.items()
     }
+    result["__vmlx_block_meta__"] = mx.array(list(json.dumps(meta).encode()), dtype=mx.uint8)
+    return result
 
 
 def test_scale_and_bias_dtypes_are_recorded():

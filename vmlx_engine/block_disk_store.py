@@ -421,6 +421,65 @@ def _restore_serialized_dtype(arr, target):
     return arr.astype(target)
 
 
+_BLOCK_TENSOR_DTYPES = frozenset({
+    "bool_", "int8", "int16", "int32", "int64", "uint8", "uint16",
+    "uint32", "uint64", "float16", "bfloat16", "float32", "complex64",
+})
+_BLOCK_SAFETENSORS_DTYPES = {
+    "BOOL": "bool_", "I8": "int8", "I16": "int16", "I32": "int32",
+    "I64": "int64", "U8": "uint8", "U16": "uint16", "U32": "uint32",
+    "U64": "uint64", "F16": "float16", "BF16": "bfloat16",
+    "F32": "float32", "C64": "complex64",
+}
+
+
+def _block_tensor_dtype_name(dtype) -> str:
+    name = str(dtype).split(".")[-1]
+    return "bool_" if name == "bool" else name
+
+
+def _restore_block_tensor_dtypes(data, declared) -> bool:
+    """Restore lossless carriers without conflating independent native lanes.
+
+    A QSA index is FP32 even when its attention KV is BF16. Quantized cache
+    scales/biases and nested recurrent state likewise own their own precision.
+    Only BF16->U16 is a transport reinterpretation; integer packed data and all
+    other dtypes must remain exactly as declared. Bad metadata is a cache miss.
+    """
+    if not isinstance(declared, dict) or set(declared) != set(data):
+        return False
+    restored = {}
+    for name, value in data.items():
+        wanted = declared[name]
+        if not isinstance(wanted, str) or wanted not in _BLOCK_TENSOR_DTYPES:
+            return False
+        actual = _block_tensor_dtype_name(getattr(value, "dtype", ""))
+        if actual == wanted:
+            restored[name] = value
+        elif wanted == "bfloat16" and actual == "uint16":
+            restored[name] = _restore_serialized_dtype(value, mx.bfloat16)
+        else:
+            return False
+    data.update(restored)
+    return True
+
+
+def _block_tree_dtypes_match(node, declared) -> bool:
+    """Reject conflicting tree metadata instead of recasting restored leaves."""
+    if isinstance(node, dict):
+        if node.get("kind") == "tensor":
+            key = node.get("key")
+            return (
+                isinstance(key, str)
+                and key in declared
+                and _block_tensor_dtype_name(node.get("orig_dtype")) == declared[key]
+            )
+        return all(_block_tree_dtypes_match(value, declared) for value in node.values())
+    if isinstance(node, list):
+        return all(_block_tree_dtypes_match(value, declared) for value in node)
+    return True
+
+
 class BlockDiskStore:
     """
     Content-addressable block storage on disk for paged KV cache.
@@ -4478,6 +4537,16 @@ def _serialize_block(
     else:
         dtype = "kv"
 
+    # Capture every leaf independently before the worker converts BF16 into
+    # its lossless U16 carrier. A single dtype per layer loses mixed QSA index
+    # precision and omitted nested quantized scales/cumulative-state dtypes.
+    # Keep legacy declarations for older readers, but new readers use this
+    # complete map and never reapply the coarser per-layer conversions.
+    meta["__tensor_dtypes__"] = {
+        name: _block_tensor_dtype_name(value.dtype)
+        for name, value in tensors.items()
+    }
+
     # Store metadata as a serialized JSON tensor.
     # Use a non-reserved key — safetensors has a special "__metadata__"
     # header that expects a string-to-string dict. Writing a uint8 tensor
@@ -4570,6 +4639,29 @@ def _load_reconstruction_payload_without_stale_rotating(
             if not omitted_layers:
                 return None
 
+            declared_dtypes = decoded.get("__tensor_dtypes__")
+            if "__tensor_dtypes__" in decoded and (
+                not isinstance(declared_dtypes, dict)
+                or set(declared_dtypes) != set(tensor_names) - {meta_key}
+            ):
+                return None  # ordinary full reader will reject the record
+            if declared_dtypes is not None:
+                # Validate even omitted payloads from header-only dtype data.
+                # Do not let pruning hide corrupt declarations on old rings.
+                for name, wanted in declared_dtypes.items():
+                    physical = _BLOCK_SAFETENSORS_DTYPES.get(
+                        handle.get_slice(name).get_dtype()
+                    )
+                    if (
+                        not isinstance(wanted, str)
+                        or wanted not in _BLOCK_TENSOR_DTYPES
+                        or not (
+                            physical == wanted
+                            or (physical == "uint16" and wanted == "bfloat16")
+                        )
+                    ):
+                        return None
+
             selected: Dict[str, Any] = {}
             for name in tensor_names:
                 layer_idx: Optional[int] = None
@@ -4590,6 +4682,18 @@ def _load_reconstruction_payload_without_stale_rotating(
                 else:
                     numpy_array = handle.get_tensor(name)
                 selected[name] = mx.array(numpy_array)
+
+            if declared_dtypes is not None:
+                # The selective reader intentionally omits old rotating rings.
+                # Bind the metadata to exactly the payload it returns, retaining
+                # the complete-map validation above against the original file.
+                decoded["__tensor_dtypes__"] = {
+                    name: declared_dtypes[name]
+                    for name in selected if name != meta_key
+                }
+                selected[meta_key] = mx.array(
+                    list(json.dumps(decoded).encode("utf-8")), dtype=mx.uint8
+                )
 
         return selected, omitted_layers
     except Exception as exc:  # noqa: BLE001 - optimization must fail open
@@ -4647,10 +4751,21 @@ def _deserialize_block(
         )
         return []
 
+    if "__tensor_dtypes__" in meta:
+        if (
+            not _restore_block_tensor_dtypes(data, meta["__tensor_dtypes__"])
+            or not _block_tree_dtypes_match(meta, meta["__tensor_dtypes__"])
+        ):
+            logger.warning("Disk cache block tensor dtype metadata is incompatible; treating as miss")
+            return []
+        # These legacy declarations group independent tensor lanes. Reapplying
+        # them would narrow a restored FP32 QSA index to the KV's BF16 dtype.
+        orig_dtypes = {}
+    else:
+        orig_dtypes = meta.get("__orig_dtypes__", {})
+
     # Per-layer type map (new format with __layer_types__)
     layer_types = meta.get("__layer_types__", {})
-    # Per-layer original dtypes (for restoring bfloat16 after float16 cast)
-    orig_dtypes = meta.get("__orig_dtypes__", {})
 
     # Find all layer indices
     layer_indices: Dict[int, str] = {}
@@ -4838,6 +4953,13 @@ def _deserialize_block(
                             data[f"layer_{i}_sub_{j}_values_scales"],
                             data[f"layer_{i}_sub_{j}_values_zeros"],
                         )
+                        if any(
+                            part.dtype == mx.uint16
+                            for parts in (keys_tuple, values_tuple) for part in parts[1:]
+                        ):
+                            # Legacy nested records omitted the scale dtype;
+                            # an undeclared U16 floating-role payload is unsafe.
+                            return []
                         sub_slices.append((
                             "quantized_kv",
                             keys_tuple,
@@ -4912,6 +5034,11 @@ def _deserialize_block(
                         data[f"layer_{i}_zaya_values_scales"],
                         data[f"layer_{i}_zaya_values_zeros"],
                     )
+                    if any(
+                        part.dtype == mx.uint16
+                        for parts in (zkt, zvt) for part in parts[1:]
+                    ):
+                        return []
                     kv_entry = (
                         "quantized_kv",
                         zkt,

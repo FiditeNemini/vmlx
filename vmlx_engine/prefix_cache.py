@@ -2521,6 +2521,19 @@ def _entry_has_native_tq(entry) -> bool:
     return False
 
 
+def _entry_has_native_quantized_kv(entry) -> bool:
+    """Native affine KV keeps packed data, scales, biases and quant metadata."""
+    if not isinstance(entry, (tuple, list)) or not entry:
+        return False
+    if entry[0] == "quantized_kv":
+        return True
+    if entry[0] == "cache_list" and len(entry) > 1:
+        return any(_entry_has_native_quantized_kv(sub) for sub in entry[1] or [])
+    if entry[0] == "zaya_cca" and len(entry) > 1:
+        return _entry_has_native_quantized_kv(entry[1])
+    return False
+
+
 def _dots3_window_boundary_checkpoint(layer_state, boundary: int):
     """Boundary checkpoint for a windowed dots3 latent layer (ledger row 152).
 
@@ -5326,57 +5339,10 @@ class BlockAwarePrefixCache:
                     try:
                         keys, values = state
                         if isinstance(keys, (tuple, list)):
-                            # Quantized KV (QuantizedKVCache / TurboQuantKVCache).
-                            # state = ((w_packed, scales, biases), (w_packed, scales, biases))
-                            # Dequantize to float16 for the numpy extraction path so the
-                            # block disk cache can serialize per-block slices. Without
-                            # this, np_sources stays empty for quantized layers and the
-                            # block disk write-through silently drops everything.
-                            #
-                            # Trade-off: disk cache entries are ~4x larger for q8 (vs.
-                            # storing packed bytes), but storage works.
-                            if len(keys) < 2 or len(values) < 2:
-                                logger.debug(
-                                    f"np_sources skip layer {idx}: quantized state "
-                                    f"arity keys={len(keys)} values={len(values)}"
-                                )
-                                continue
-                            meta = layer_state.get("meta_state", ())
-                            # meta_state typically ends with (group_size, bits)
-                            g_size, q_bits = 64, 8
-                            if isinstance(meta, (tuple, list)) and len(meta) >= 2:
-                                try:
-                                    g_size = int(meta[-2])
-                                    q_bits = int(meta[-1])
-                                except (ValueError, TypeError):
-                                    pass
-                            k_w, k_s = keys[0], keys[1]
-                            k_b = keys[2] if len(keys) >= 3 else mx.zeros_like(k_s)
-                            v_w, v_s = values[0], values[1]
-                            v_b = values[2] if len(values) >= 3 else mx.zeros_like(v_s)
-                            k_dq = mx.dequantize(
-                                k_w, k_s, k_b, group_size=g_size, bits=q_bits,
-                            )
-                            v_dq = mx.dequantize(
-                                v_w, v_s, v_b, group_size=g_size, bits=q_bits,
-                            )
-                            original_dtype = k_dq.dtype
-                            if 'bfloat16' in str(original_dtype):
-                                # Use float32 (not float16) for the numpy round-trip.
-                                # fp16 has only 5 exponent bits vs bf16's 8 — casting
-                                # down silently clips/loses precision for many
-                                # attention KV values. On Gemma 4 JANG this caused
-                                # "step-by-step" word loops on the 3rd multi-turn
-                                # request because the cached KV drift pushed the
-                                # sampler into a degenerate rep_pen-proof basin.
-                                k_dq = k_dq.astype(mx.float32)
-                                v_dq = v_dq.astype(mx.float32)
-                            mx.eval(k_dq, v_dq)
-                            np_sources[idx] = (
-                                _readonly_numpy_buffer_view(k_dq),
-                                _readonly_numpy_buffer_view(v_dq),
-                                original_dtype,
-                            )
+                            # The typed extractor slices packed native KV below.
+                            # A dense NumPy mirror both expands q4/q8 storage and
+                            # loses the native cache class/quantization metadata
+                            # on restart. Do not dequantize or infer missing bits.
                             continue
                         if hasattr(keys, 'shape'):
                             k_np, v_np = keys, values
@@ -5837,7 +5803,15 @@ class BlockAwarePrefixCache:
                     # disk payload for every block caused unbounded cleanup
                     # growth and a live SIGKILL on a 6K tool continuation.
                     if disk_store is not None:
-                        if has_minimax_m3_cache_data or has_dsv4_delta_cache_data:
+                        has_native_quantized = any(
+                            _entry_has_native_quantized_kv(entry)
+                            for entry in block_kv_data
+                        )
+                        if (
+                            has_minimax_m3_cache_data
+                            or has_dsv4_delta_cache_data
+                            or has_native_quantized
+                        ):
                             np_block = block_kv_data
                         else:
                             np_block = _numpy_block_slice(
@@ -5890,12 +5864,12 @@ class BlockAwarePrefixCache:
                                 _entry_has_native_tq(_entry)
                                 for _entry in np_block
                             )
-                            if self._write_block_immediately_for_store(
+                            if has_native_quantized or self._write_block_immediately_for_store(
                                 disk_only=_disk_only,
                                 minimax_m3=has_minimax_m3_cache_data,
                                 native_tq=_has_native_tq,
                             ):
-                                # Native TQ entries contain lazy MLX encode graphs.
+                                # Native affine/TQ entries contain MLX slice or encode graphs.
                                 # SSD-only plain KV has the same boundedness need:
                                 # deferring every independent page duplicates the
                                 # whole prompt in pending_disk_writes before queue
@@ -5904,7 +5878,7 @@ class BlockAwarePrefixCache:
                                 # publication and indexing off-thread.
                                 logger.debug(
                                     f"Block disk: writing bounded "
-                                    f"{'MiniMax-M3' if has_minimax_m3_cache_data else 'TQ' if _has_native_tq else 'SSD-only'} block "
+                                    f"{'MiniMax-M3' if has_minimax_m3_cache_data else 'quantized-KV' if has_native_quantized else 'TQ' if _has_native_tq else 'SSD-only'} block "
                                     f"{block.block_id} ({_layer_summary}, "
                                     f"{len(block_tokens)} tokens)"
                                 )

@@ -57,7 +57,8 @@ MAX_CACHE_OFFSET = 2_000_000
 MAX_CACHE_LAYERS = 1024
 MAX_CACHE_GROUP_SIZE = 4096
 ALLOWED_CACHE_BITS = {2, 3, 4, 8}
-ALLOWED_TQ_DTYPES = {"bfloat16", "float16", "float32"}
+_TQ_DTYPE_BYTES = {"bfloat16": 2, "float16": 2, "float32": 4}
+ALLOWED_TQ_DTYPES = set(_TQ_DTYPE_BYTES)
 
 
 class CacheValidationError(ValueError):
@@ -475,10 +476,18 @@ def validate_cache_record(
                     f"layer {i} 'turboquant_kv': config is "
                     f"{type(tq_config).__name__}, expected dict"
                 ), total_bytes
-            for label, obj, fields in (
+            for key in ("key_dtype", "value_dtype"):
+                dtype = tq_config.get(key)
+                if dtype not in ALLOWED_TQ_DTYPES:
+                    return False, (
+                        f"layer {i} 'turboquant_kv'.{key}: {dtype!r} not in "
+                        f"{sorted(ALLOWED_TQ_DTYPES)}"
+                    ), total_bytes
+            for label, obj, dtype_key, fields in (
                 (
                     "encoded_keys",
                     encoded_keys,
+                    "key_dtype",
                     (
                         "indices_packed",
                         "qjl_packed",
@@ -489,6 +498,7 @@ def validate_cache_record(
                 (
                     "encoded_values",
                     encoded_values,
+                    "value_dtype",
                     ("indices_packed", "vector_norms"),
                 ),
             ):
@@ -506,7 +516,7 @@ def validate_cache_record(
                 ok_shape, shape_reason, _ = _validate_shape_list(
                     shape,
                     label=f"layer {i} 'turboquant_kv'.{label}.shape",
-                    bytes_per_elem=2,
+                    bytes_per_elem=_TQ_DTYPE_BYTES[tq_config[dtype_key]],
                 )
                 if not ok_shape:
                     return False, shape_reason, total_bytes
@@ -531,13 +541,6 @@ def validate_cache_record(
                     return False, (
                         f"layer {i} 'turboquant_kv'.{key}: {bits} not in "
                         f"{sorted(ALLOWED_CACHE_BITS)}"
-                    ), total_bytes
-            for key in ("key_dtype", "value_dtype"):
-                dtype = tq_config.get(key)
-                if dtype not in ALLOWED_TQ_DTYPES:
-                    return False, (
-                        f"layer {i} 'turboquant_kv'.{key}: {dtype!r} not in "
-                        f"{sorted(ALLOWED_TQ_DTYPES)}"
                     ), total_bytes
             for key, lo, hi in (
                 ("key_dim", 1, MAX_TENSOR_DIM),
@@ -1706,15 +1709,24 @@ def validate_tq_native_metadata(
         if missing:
             return False, f"{label}: missing compressed tensors {missing}"
 
+        for suffix in ("key_dtype", "value_dtype"):
+            dtype = metadata.get(f"__{prefix}_{suffix}__")
+            if dtype not in ALLOWED_TQ_DTYPES:
+                return False, (
+                    f"{label}.{suffix}: {dtype!r} not in "
+                    f"{sorted(ALLOWED_TQ_DTYPES)}"
+                )
+
         decoded_shapes: dict[str, list[int]] = {}
-        for suffix in ("ck_shape", "cv_shape"):
+        for suffix, dtype_suffix in (("ck_shape", "key_dtype"), ("cv_shape", "value_dtype")):
             raw = metadata.get(f"__{prefix}_{suffix}__", "[]")
             try:
                 shape = json.loads(raw)
             except json.JSONDecodeError as e:
                 return False, f"{label}.{suffix}: invalid JSON {raw!r}: {e}"
             ok_shape, shape_reason, nbytes = _validate_shape_list(
-                shape, label=f"{label}.{suffix}", bytes_per_elem=2
+                shape, label=f"{label}.{suffix}",
+                bytes_per_elem=_TQ_DTYPE_BYTES[metadata[f"__{prefix}_{dtype_suffix}__"]],
             )
             if not ok_shape:
                 return False, shape_reason
@@ -1750,15 +1762,6 @@ def validate_tq_native_metadata(
                     return False, (
                         f"{label}.{suffix}: {bits} not in {sorted(ALLOWED_CACHE_BITS)}"
                     )
-
-        for suffix in ("key_dtype", "value_dtype"):
-            key = f"__{prefix}_{suffix}__"
-            dtype = metadata.get(key)
-            if dtype not in ALLOWED_TQ_DTYPES:
-                return False, (
-                    f"{label}.{suffix}: {dtype!r} not in "
-                    f"{sorted(ALLOWED_TQ_DTYPES)}"
-                )
 
         for suffix in ("offset", "compressed_tokens", "sink_tokens"):
             key = f"__{prefix}_{suffix}__"

@@ -116,7 +116,8 @@ describe('the v17 SSD-first default runs as a post-pass', () => {
     expect(fn).not.toContain('isZayaCacheStackMigrationTarget')
     // the exact-typed prompt-L2 families (openPangu v2, GLM5-Next) keep their own disk format: the
     // post-pass returns before rewriting it, through the shared family helper
-    expect(fn).toContain('if (usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === \'1\')) return changed')
+    expect(fn).toContain("normalizeDetectedFamilyName(detectedFamily) === 'glm5-next'")
+    expect(fn).toContain('|| usesExactTypedPromptDiskCache(detectedFamily)) return changed')
     expect(usesExactTypedPromptDiskCache('openpangu_v2')).toBe(true)
     expect(usesExactTypedPromptDiskCache('qwen3_5')).toBe(false)
   })

@@ -1,4 +1,4 @@
-"""Opt-in GLM native SSD admission, prefill ownership and idle maintenance.
+"""GLM native SSD admission, prefill ownership and idle maintenance.
 
 Tiny native states exercise wiring, not real-model numerical equivalence.
 """
@@ -49,8 +49,12 @@ def tiny_processor():
     ({"enable_block_disk_cache": False}, False),
     ({"use_paged_cache": True}, False), ({"max_num_seqs": 2}, False),
 ])
-def test_scheduler_admits_only_explicit_ssd_single_native_layout(tmp_path, monkeypatch, override, eligible):
-    monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", "1")
+@pytest.mark.parametrize("flag", [None, "1"], ids=["normal", "explicit"])
+def test_scheduler_admits_only_ssd_single_native_layout(tmp_path, monkeypatch, override, eligible, flag):
+    if flag is None:
+        monkeypatch.delenv("VMLX_GLM5_NATIVE_SSD", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", flag)
     config = dict(enable_prefix_cache=True, enable_block_disk_cache=True,
                   use_paged_cache=False, use_memory_aware_cache=True, max_num_seqs=1,
                   enable_disk_cache=True, disk_cache_dir=str(tmp_path / "unused-legacy"),
@@ -86,8 +90,8 @@ def test_scheduler_admits_only_explicit_ssd_single_native_layout(tmp_path, monke
     assert scheduler._ssm_companion_disk_store is None
 
 
-def test_native_default_off_does_not_instantiate_backend(tmp_path, monkeypatch):
-    monkeypatch.delenv("VMLX_GLM5_NATIVE_SSD", raising=False)
+def test_native_explicit_off_does_not_instantiate_backend(tmp_path, monkeypatch):
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", "0")
     scheduler = MLLMScheduler(tiny_model(), tiny_processor(), MLLMSchedulerConfig(
         enable_prefix_cache=True, enable_block_disk_cache=False,
         use_paged_cache=False, enable_disk_cache=True,
@@ -99,6 +103,27 @@ def test_native_default_off_does_not_instantiate_backend(tmp_path, monkeypatch):
         assert scheduler.config.enable_prefix_cache is False
     finally:
         asyncio.run(scheduler.stop())
+
+
+@pytest.mark.parametrize("config,expected", [
+    ({"model_type": "glm5_next"}, True),
+    (SimpleNamespace(model_type="glm5_next_text"), True),
+    ({"model_type": "qwen4_exp"}, False),
+    ({"model_type": "qwen3_5"}, False),
+    ({"model_type": "deepseek_v4"}, False),
+    ({"model_type": ["glm5_next"]}, False), (None, False),
+])
+def test_default_candidate_filter_is_not_a_folder_or_other_family(config, expected, monkeypatch):
+    from vmlx_engine.utils.glm5_cache_policy import glm5_native_ssd_requested
+    monkeypatch.delenv("VMLX_GLM5_NATIVE_SSD", raising=False)
+    assert glm5_native_ssd_requested(SimpleNamespace(config=config)) is expected
+
+
+@pytest.mark.parametrize("flag,expected", [("1", True), ("0", False), ("true", False), ("", False)])
+def test_native_explicit_switch_semantics_survive_default_adoption(flag, expected, monkeypatch):
+    from vmlx_engine.utils.glm5_cache_policy import glm5_native_ssd_requested
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", flag)
+    assert glm5_native_ssd_requested(TinyLanguageModel()) is expected
 
 
 def test_cleanup_keeps_prefill_receipt_without_post_decode_rederive(tmp_path, monkeypatch):

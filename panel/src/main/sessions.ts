@@ -105,6 +105,8 @@ import {
   isZayaCcaFamily,
   normalizeDetectedFamilyName,
   usesExactTypedPromptDiskCache,
+  usesGlmNativeSsdPool,
+  resolveGlmDiskCacheControls,
 } from '../shared/detectedFamilyNames'
 import { cacheTypeRequiresPaged } from '../shared/cacheTypeCapabilities'
 import {
@@ -434,7 +436,7 @@ function applyFamilyStartupDefaults(config: Partial<ServerConfig>, modelPath?: s
         config.enableJit = false
         changed = true
       }
-    } else if (detectedFamily === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD !== '1') {
+    } else if (detectedFamily === 'glm5-next' && !usesGlmNativeSsdPool(detected, config)) {
       // GLM-5.3's KDA recurrent/conv state plus MLA/DSA indexer state is
       // persisted as one exact typed N-1 snapshot. The generic block store
       // cannot represent that boundary. Migrate the old generic default pair
@@ -882,6 +884,7 @@ function normalizeCacheStackMutualExclusion(config: Partial<ServerConfig>): bool
 function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, modelPath?: string): boolean {
   const targetPath = modelPath || config.modelPath
   let detectedFamily: string | undefined
+  let nativeGlmSsd = false
   // No per-family paged capability is read here any more: in-RAM paged cache is
   // OFF for every family and SSD block-disk L2 is the only tier, so there is
   // nothing for a registry capability to decide.
@@ -889,6 +892,7 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     try {
       const detected = detectModelConfigFromDir(targetPath)
       detectedFamily = normalizeDetectedFamilyName(detected.family)
+      nativeGlmSsd = usesGlmNativeSsdPool(detected, config)
     } catch {
       /* detection is best-effort here; buildArgs repeats detection at launch */
     }
@@ -898,7 +902,7 @@ function applyMissingCacheStackStartupDefaults(config: Partial<ServerConfig>, mo
     resolveEffectiveModelFamily(config.modelFamily, detectedFamily),
   )
   const dsv4Active = effectiveFamily === 'deepseek-v4'
-  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, nativeGlmSsd)
   // In-RAM paged cache is OFF for EVERY family, DSV4 included. SSD block-disk
   // L2 is the only cache tier. Seeding a saved `true` here (even though the
   // launch choke point forces --no-paged-cache) would persist a config that
@@ -1013,7 +1017,11 @@ function applySsdFirstCacheDefaults(
   // Exact typed prompt-snapshot families own a separate prompt-L2 format.
   // Apply the RAM-off normalization above, but do not rewrite their disk
   // format into the generic block tier below.
-  if (usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')) return changed
+  // GLM previously stored false as both an old default and an intentional
+  // SSD opt-out. Those are indistinguishable; adopting the native backend
+  // must not turn either into On or rewrite its saved root/cap.
+  if (normalizeDetectedFamilyName(detectedFamily) === 'glm5-next'
+      || usesExactTypedPromptDiskCache(detectedFamily)) return changed
   if (config.enableBlockDiskCache !== true) {
     // SSD-only is only cheap when the disk tier is actually on.
     config.enableBlockDiskCache = true
@@ -1054,6 +1062,20 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
   if (cacheDefaultsVersion >= CACHE_STACK_STARTUP_DEFAULTS_VERSION) {
     return false
   }
+  let detected: ReturnType<typeof detectModelConfigFromDir> | undefined
+  try {
+    detected = detectModelConfigFromDir(String(modelPath || config.modelPath || ''))
+  } catch {
+    /* Unavailable bundles retain the existing retry/stamp rules below. */
+  }
+  if (usesGlmNativeSsdPool(detected, config)) {
+    // Native adoption is not permission to replay generic legacy migrations
+    // over saved GLM toggles, directories or ceilings. Missing fields have
+    // already been filled separately; explicit values remain user-owned.
+    const retiredRam = config.usePagedCache === true
+    if (retiredRam) config.usePagedCache = false
+    return markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath) || retiredRam
+  }
   const legacyChanged = applyLegacyCacheStackMigrations(config, modelPath)
   markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath)
   if (
@@ -1067,12 +1089,6 @@ function applyCacheStackStartupDefaultMigration(config: Partial<ServerConfig>, m
     // retry matches on, and the retry then never fires. Models live on an
     // external drive here, so this path is routine.
     return legacyChanged
-  }
-  let detected: ReturnType<typeof detectModelConfigFromDir> | undefined
-  try {
-    detected = detectModelConfigFromDir(String(modelPath || config.modelPath || ''))
-  } catch {
-    /* detection best-effort; an unresolvable bundle just gets the generic flip */
   }
   const ssdFirstChanged = applySsdFirstCacheDefaults(
     config,
@@ -3015,7 +3031,7 @@ export class SessionManager extends EventEmitter {
                   ? '[INFO] MiniMax-M3 detected; using typed MSA SSD-only prefix cache with idx_keys, persistent RAM payloads disabled, generic KV quantization off, and JIT off'
                   : '[INFO] MiniMax-M3 detected; prefix cache enabled without paged RAM or block-disk L2')
             }
-          } else if (freshFamily === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD !== '1') {
+          } else if (freshFamily === 'glm5-next' && !usesGlmNativeSsdPool(freshConfig, config)) {
             const staleGenericDiskPair =
               config.enableDiskCache !== true && config.enableBlockDiskCache === true
             const glmChanged =
@@ -4062,7 +4078,7 @@ export class SessionManager extends EventEmitter {
           // typed exception and stays on prompt-level disk L2.
           // Paged RAM is OFF for every family, DSV4 included (SSD L2 only).
           usePagedCache: false,
-          enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1'),
+          enableDiskCache: usesExactTypedPromptDiskCache(detectedFamily, usesGlmNativeSsdPool(detected)),
           pagedCacheBlockSize: detectedFamily === 'deepseek-v4' ? DSV4_PAGED_CACHE_BLOCK_SIZE : 64,
           // Size the index to the generic capacity target, never the old flat
           // 1000. At the 64-token generic block, 1000 indexes only 63,936
@@ -4074,7 +4090,7 @@ export class SessionManager extends EventEmitter {
           maxCacheBlocks: detectedFamily === 'deepseek-v4'
             ? DSV4_MAX_CACHE_BLOCKS
             : indexBlocksForCapacity(64),
-          enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1'),
+          enableBlockDiskCache: !usesExactTypedPromptDiskCache(detectedFamily, usesGlmNativeSsdPool(detected)),
           // No GB cap: adopted sessions get the percent budget like everyone
           // else. This used to hardcode 10 AND stamp the defaults version
           // current, so the GB->percent migration could never reach it.
@@ -5243,7 +5259,9 @@ export class SessionManager extends EventEmitter {
     // Prefix cache — requires --continuous-batching to take effect in vmlx-engine
     // Tool sessions benefit from prefix reuse, but an explicit user opt-out must
     // stay an opt-out; do not silently re-enable cache because tools are present.
-    const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, process.env.VMLX_GLM5_NATIVE_SSD === '1')
+    const nativeGlmSsd = usesGlmNativeSsdPool(detected, config)
+    const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, nativeGlmSsd)
+    const diskControls = resolveGlmDiskCacheControls(detectedFamily, nativeGlmSsd, config)
     const effectivePagedCacheBlockSize = dsv4Active
       ? DSV4_PAGED_CACHE_BLOCK_SIZE
       : config.pagedCacheBlockSize
@@ -5256,8 +5274,8 @@ export class SessionManager extends EventEmitter {
       // Accepted for migration compatibility only. The shared builder always
       // emits --no-paged-cache and never its positive counterpart.
       usePagedCache: false,
-      enableDiskCache: !!config.enableDiskCache,
-      enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache,
+      enableDiskCache: !!diskControls.enableDiskCache,
+      enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
       noMemoryAwareCache: !!config.noMemoryAwareCache,
       forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
       prefixCacheSize: config.prefixCacheSize,

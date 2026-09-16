@@ -15,7 +15,7 @@ import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
 } from '../../../../shared/sessionGenerationDefaults'
-import { usesExactTypedPromptDiskCache } from '../../../../shared/detectedFamilyNames'
+import { usesExactTypedPromptDiskCache, usesGlmNativeSsdPool } from '../../../../shared/detectedFamilyNames'
 import { resolveNativeMtpStartupMode } from '../../../../shared/nativeMtpLaunchArgs'
 import { hasLiveLocalSession } from '../../../../shared/sessionConfigLifecycle'
 import { apiCapabilityKey, sessionCapabilityModalities } from '../../../../shared/apiModelCapabilities'
@@ -297,7 +297,7 @@ export function ServerSettingsDrawer({ session, isRemote, onClose, onSessionUpda
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)) {
+          } else if (usesExactTypedPromptDiskCache(detected.family, usesGlmNativeSsdPool(detected))) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true

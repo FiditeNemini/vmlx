@@ -725,10 +725,11 @@ class MLLMScheduler:
         except Exception as e:
             logger.debug(f"Mixed-attention detection failed: {e}")
 
-        # Experimental native whole-state SSD route. It shares the configured
+        # Native whole-state SSD route. It shares the configured
         # block-pool budget but never instantiates generic KV blocks or RAM L1.
         # An observed make_cache layout, not a family-name guess, admits it.
-        if os.environ.get("VMLX_GLM5_NATIVE_SSD") == "1":
+        from .utils.glm5_cache_policy import glm5_native_ssd_requested
+        if glm5_native_ssd_requested(lang_model):
             from .utils.glm5_native_prefix_cache import (
                 Glm5NativePrefixCache, glm5_native_layout,
             )
@@ -770,7 +771,7 @@ class MLLMScheduler:
                         # companion prefill/re-derive machinery.
                         self._ssm_companion_disk_store = self.native_glm_cache.disk
                         logger.info(
-                            "GLM native SSD experimental backend: root=%s cap_bytes=%d "
+                            "GLM native SSD backend: root=%s cap_bytes=%d "
                             "layers=%d RAM_retention=0 media=%s batch=1",
                             self.native_glm_cache.budget.root,
                             self.native_glm_cache.disk.budget_bytes, len(native_layout),
@@ -781,7 +782,7 @@ class MLLMScheduler:
                         logger.warning("GLM native SSD initialization refused: %s", exc)
                 if self.native_glm_cache is None:
                     self._prefix_cache_unavailable_reason = (
-                        "experimental GLM native SSD unavailable: requires enabled prefix/SSD, "
+                        "GLM native SSD unavailable: requires enabled prefix/SSD, "
                         "paged RAM off, batch=1 and a valid native pool"
                     )
                     self.config.enable_prefix_cache = False

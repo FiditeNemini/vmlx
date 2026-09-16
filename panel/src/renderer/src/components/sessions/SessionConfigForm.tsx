@@ -22,6 +22,8 @@ import {
   isZayaCcaFamily,
   normalizeDetectedFamilyName,
   usesExactTypedPromptDiskCache,
+  usesGlmNativeSsdPool,
+  resolveGlmDiskCacheControls,
 } from '../../../../shared/detectedFamilyNames'
 import { isRuntimeVideoCapable } from '../../../../shared/videoCapableFamilies'
 import { computeEffectiveJit, isJitSuppressedByRuntime, resolveRequestedJit } from '../../../../shared/jitPolicy'
@@ -400,8 +402,12 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
-  const nativeGlmSsdActive = normalizedDetectedFamily === 'glm5-next' && detectedNativeGlmSsd === true
-  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(normalizedDetectedFamily, detectedNativeGlmSsd)
+  const nativeGlmSsdActive = usesGlmNativeSsdPool({
+    family: normalizedDetectedFamily, nativeGlmSsd: detectedNativeGlmSsd,
+    isMultimodal: detectedIsMultimodal, forceTextOnly: detectedForceTextOnly,
+  }, config)
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(normalizedDetectedFamily, nativeGlmSsdActive)
+  const diskControls = resolveGlmDiskCacheControls(normalizedDetectedFamily, nativeGlmSsdActive, config)
   const effectiveSmeltActive = !!config.smelt && !dsv4Active
   const effectiveFlashMoeActive = !!config.flashMoe && !dsv4Active
   const effectiveDistributedActive = !!config.distributedEnabled && !dsv4Active
@@ -487,8 +493,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
     usePagedCache: exactTypedPromptDiskCache ? false : config.usePagedCache,
-    enableDiskCache: dsv4Active ? false : config.enableDiskCache,
-    enableBlockDiskCache: exactTypedPromptDiskCache ? false : config.enableBlockDiskCache,
+    enableDiskCache: dsv4Active ? false : diskControls.enableDiskCache,
+    enableBlockDiskCache: exactTypedPromptDiskCache ? false : diskControls.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }
@@ -1250,7 +1256,13 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           label={t('sessions.config.enableDiskCache')}
           tooltip={t('sessions.config.enableDiskCacheTooltip')}
           checked={cachePolicy.legacyDiskCacheChecked}
-          onChange={v => applyCacheControlUpdates(cacheControlUpdatesForDiskToggle(v, cacheControlState))}
+          onChange={v => {
+            // When switching from native VL to typed text, the old native On
+            // bit represents the same disk choice. Explicit text-disk Off
+            // must clear it too, or launch normalization would re-enable it.
+            if (normalizedDetectedFamily === 'glm5-next' && !nativeGlmSsdActive) onChange('enableBlockDiskCache', false)
+            applyCacheControlUpdates(cacheControlUpdatesForDiskToggle(v, cacheControlState))
+          }}
           disabled={dsv4Active || cachePolicy.legacyDiskCacheDisabled}
         />
         {cachePolicy.legacyDiskCacheChecked && (

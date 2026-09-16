@@ -17,6 +17,7 @@ import {
   type ReasoningEffort,
 } from '../shared/reasoningEffortPolicy'
 import { familySupportsThinkingBudget } from '../shared/thinkingBudgetFamilies'
+import { glmNativeSsdRuntimeEnabled } from '../shared/detectedFamilyNames'
 
 const MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
 
@@ -2060,7 +2061,7 @@ export function detectModelConfigFromDir(modelPath: string): DetectedConfig {
           }
           detected = applyLagunaVariantHint(detected, parsed, parsedJangConfig)
           detected = applyConfigMetadataOverrides(detected, parsed)
-          if (detected.family === 'glm5-next' && process.env.VMLX_GLM5_NATIVE_SSD === '1') {
+          if (detected.family === 'glm5-next' && glmNativeSsdRuntimeEnabled(process.env.VMLX_GLM5_NATIVE_SSD)) {
             detected.nativeGlmSsd = true
           }
           return detected

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { detectModelConfigFromDir } from '../src/main/model-config-registry'
-import { usesExactTypedPromptDiskCache } from '../src/shared/detectedFamilyNames'
+import { glmNativeSsdRuntimeEnabled, resolveGlmDiskCacheControls, usesExactTypedPromptDiskCache, usesGlmNativeSsdPool } from '../src/shared/detectedFamilyNames'
 import { buildCacheLaunchArgs } from '../src/shared/cacheLaunchArgs'
 
 const dirs: string[] = []
@@ -12,20 +12,78 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-describe('GLM native SSD opt-in, not a saved default migration', () => {
-  it.each(['1', '0', 'true'])('propagates only the explicit runtime opt-in %s', (flag) => {
+describe('GLM native SSD defaults preserve runtime route and saved choices', () => {
+  it.each([undefined, '1', '0', 'true', ''])('propagates normal startup and explicit disable %s', (flag) => {
     vi.stubEnv('VMLX_GLM5_NATIVE_SSD', flag)
     const dir = mkdtempSync(join(tmpdir(), 'vmlx-glm-native-policy-'))
     dirs.push(dir)
     writeFileSync(join(dir, 'config.json'), JSON.stringify({
       model_type: 'glm5_next', text_config: { model_type: 'glm5_next_text' },
+      vision_config: { model_type: 'glm5_next_vision' },
     }))
     const detected = detectModelConfigFromDir(dir)
     expect(detected.family).toBe('glm5-next')
-    expect(detected.nativeGlmSsd).toBe(flag === '1' ? true : undefined)
-    expect(usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)).toBe(flag !== '1')
+    const enabled = flag === undefined || flag === '1'
+    expect(glmNativeSsdRuntimeEnabled(flag)).toBe(enabled)
+    expect(detected.nativeGlmSsd).toBe(enabled ? true : undefined)
+    expect(usesGlmNativeSsdPool(detected)).toBe(enabled)
+    expect(usesExactTypedPromptDiskCache(detected.family, usesGlmNativeSsdPool(detected))).toBe(!enabled)
     // The setting is main-process runtime metadata, never stamped into a bundle.
     expect(detected.cacheSubtype).toBe('glm5_next_native_v2')
+  })
+
+  it.each([
+    [{}, {}, true],
+    [{}, { isMultimodal: false }, false],
+    [{}, { smelt: true }, false],
+    [{ forceTextOnly: true }, { isMultimodal: true }, false],
+    [{ isMultimodal: false }, {}, false],
+    [{ isMultimodal: false }, { isMultimodal: true }, true],
+    [{ nativeGlmSsd: false }, {}, false],
+    [{ family: 'qwen4_exp' }, {}, false],
+    [{ family: 'openpangu_v2' }, {}, false],
+  ] as const)('uses the effective route without changing it: %j %j', (overrides, config, expected) => {
+    const detected = { family: 'glm5-next', nativeGlmSsd: true, isMultimodal: true, ...overrides }
+    expect(usesGlmNativeSsdPool(detected, config)).toBe(expected)
+    expect(usesExactTypedPromptDiskCache('glm5-next', usesGlmNativeSsdPool(detected, config))).toBe(!expected)
+  })
+
+  it('preserves saved SSD/prefix opt-outs, old directories and ceilings', () => {
+    const detected = { family: 'glm5-next', nativeGlmSsd: true, isMultimodal: true }
+    for (const enablePrefixCache of [false, true]) {
+      const saved = {
+        isMultimodal: true, continuousBatching: true, enablePrefixCache, enableBlockDiskCache: false,
+        enableDiskCache: true, blockDiskCacheDir: '/saved/pool', diskCacheDir: '/saved/legacy',
+        blockDiskCacheMaxGb: 3, blockDiskCacheMaxPercent: 7, maxTokens: 4096,
+      }
+      const before = JSON.stringify(saved)
+      const native = usesGlmNativeSsdPool(detected, saved)
+      const result = buildCacheLaunchArgs({ ...saved, ...resolveGlmDiskCacheControls(detected.family, native, saved) })
+      expect(JSON.stringify(saved)).toBe(before)
+      expect(result.args).not.toContain('--enable-disk-cache')
+      expect(result.args).not.toContain('--enable-block-disk-cache')
+      expect(result.args).toContain(enablePrefixCache ? '--disable-block-disk-cache' : '--disable-prefix-cache')
+    }
+    const source = readFileSync('src/main/sessions.ts', 'utf8')
+    const start = source.indexOf('function applyCacheStackStartupDefaultMigration(')
+    const block = source.slice(start, source.indexOf('function applyLegacyCacheStackMigrations(', start))
+    expect(block.indexOf('if (usesGlmNativeSsdPool(detected, config))')).toBeLessThan(block.indexOf('const legacyChanged'))
+    expect(block).toContain('return markCacheStackStartupDefaultsCurrent(config, modelPath || config.modelPath) || retiredRam')
+  })
+
+  it.each([false, true])('keeps the text route preview and explicit off aligned (SSD=%s)', (enabled) => {
+    const saved = { enableDiskCache: false, enableBlockDiskCache: enabled }
+    const before = JSON.stringify(saved)
+    const text = resolveGlmDiskCacheControls('glm5-next', false, saved)
+    expect(text).toEqual({ enableDiskCache: enabled, enableBlockDiskCache: false })
+    const args = buildCacheLaunchArgs({ continuousBatching: true, enablePrefixCache: true, ...text }).args
+    expect(args.includes('--enable-disk-cache')).toBe(enabled)
+    expect(args).toContain('--disable-block-disk-cache')
+    expect(resolveGlmDiskCacheControls('glm5-next', true, saved)).toEqual(saved)
+    expect(resolveGlmDiskCacheControls('qwen4_exp', false, saved)).toEqual(saved)
+    expect(JSON.stringify(saved)).toBe(before)
+    const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
+    expect(form).toContain("if (normalizedDetectedFamily === 'glm5-next' && !nativeGlmSsdActive) onChange('enableBlockDiskCache', false)")
   })
 
   it.each(['glm5_next', 'glm5_next_text', 'glm5-next'])('preserves the explicit SSD switch and cap for %s', (family) => {
@@ -56,7 +114,7 @@ describe('GLM native SSD opt-in, not a saved default migration', () => {
     }
   })
 
-  it('does not change normal GLM or other family policy', () => {
+  it('keeps GLM text-only and other family prompt-cache policies distinct', () => {
     expect(usesExactTypedPromptDiskCache('glm5-next')).toBe(true)
     expect(usesExactTypedPromptDiskCache('openpangu_v2', true)).toBe(true)
     expect(usesExactTypedPromptDiskCache('qwen4_exp', true)).toBe(false)
@@ -64,7 +122,8 @@ describe('GLM native SSD opt-in, not a saved default migration', () => {
 
   it('hides non-applicable RAM and generic block controls only for native GLM', () => {
     const form = readFileSync('src/renderer/src/components/sessions/SessionConfigForm.tsx', 'utf8')
-    expect(form).toContain("normalizedDetectedFamily === 'glm5-next' && detectedNativeGlmSsd === true")
+    expect(form).toContain('const nativeGlmSsdActive = usesGlmNativeSsdPool({')
+    expect(form).toContain('isMultimodal: detectedIsMultimodal, forceTextOnly: detectedForceTextOnly')
     expect(form).toContain('!nativeGlmSsdActive && !dsv4Active && !blockDiskOnly')
     expect(form).toContain('!nativeGlmSsdActive && (effectiveUsePagedCache || cachePolicy.blockDiskCacheChecked)')
     expect(form).toContain('!nativeGlmSsdActive && (exactTypedPromptDiskCache || cachePolicy.legacyDiskCacheChecked)')
@@ -72,6 +131,12 @@ describe('GLM native SSD opt-in, not a saved default migration', () => {
     for (const language of ['en', 'zh', 'ko', 'ja', 'es']) {
       const locale = JSON.parse(readFileSync(`src/renderer/src/i18n/locales/${language}.json`, 'utf8'))
       expect(locale.sessions.config.glmNativeSsdNote.length).toBeGreaterThan(40)
+    }
+    for (const path of ['src/main/sessions.ts', 'src/renderer/src/components/sessions/SessionSettings.tsx']) {
+      const source = readFileSync(path, 'utf8')
+      expect(source).toContain('const nativeGlmSsd = usesGlmNativeSsdPool(detected, config)')
+      expect(source).toContain('const diskControls = resolveGlmDiskCacheControls(detectedFamily, nativeGlmSsd, config)')
+      expect(source).toContain('enableDiskCache: !!diskControls.enableDiskCache')
     }
   })
 })

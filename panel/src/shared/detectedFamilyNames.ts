@@ -62,6 +62,38 @@ export function isZayaCcaFamily(family?: string): boolean {
   return normalized === 'zaya' || normalized === 'zaya1-vl'
 }
 
+/** Explicit non-1 values retain the native-backend opt-out. */
+export function glmNativeSsdRuntimeEnabled(flag?: string): boolean {
+  return flag === undefined || flag === '1'
+}
+
+/** The MLLM pool is distinct from GLM's Force Text Only prompt-L2 backend. */
+export function usesGlmNativeSsdPool(
+  detected?: { family?: string; nativeGlmSsd?: boolean; isMultimodal?: boolean; forceTextOnly?: boolean } | null,
+  config?: { isMultimodal?: boolean; smelt?: boolean },
+): boolean {
+  return normalizeDetectedFamilyName(detected?.family) === 'glm5-next'
+    && detected?.nativeGlmSsd === true
+    && !detected.forceTextOnly && !config?.smelt
+    && config?.isMultimodal !== false
+    && (detected.isMultimodal === true || config?.isMultimodal === true)
+}
+
+/** Translate a GLM route switch consistently without mutating saved choices. */
+export function resolveGlmDiskCacheControls(
+  family: string | undefined,
+  nativePool: boolean,
+  config: { enableDiskCache?: boolean; enableBlockDiskCache?: boolean },
+): { enableDiskCache?: boolean; enableBlockDiskCache?: boolean } {
+  if (normalizeDetectedFamilyName(family) !== 'glm5-next') {
+    return { enableDiskCache: config.enableDiskCache, enableBlockDiskCache: config.enableBlockDiskCache }
+  }
+  return nativePool
+    ? { enableDiskCache: false, enableBlockDiskCache: config.enableBlockDiskCache }
+    : { enableDiskCache: config.enableDiskCache === true || config.enableBlockDiskCache === true,
+        enableBlockDiskCache: false }
+}
+
 /**
  * Families whose architecture-native state is persisted as one exact typed
  * N-1 prompt snapshot. Generic content-addressed block records cannot
@@ -70,8 +102,8 @@ export function isZayaCcaFamily(family?: string): boolean {
  */
 export function usesExactTypedPromptDiskCache(family?: string, nativeGlmSsd = false): boolean {
   const normalized = normalizeDetectedFamilyName(family)
-  // Experimental native GLM checkpoints use the configured aggregate SSD
-  // pool, not the separate legacy prompt-L2 budget. Only the main process's
-  // explicit runtime opt-in is propagated to the renderer; never persist it.
+  // Native MLLM GLM checkpoints use the aggregate pool, not the separate
+  // text-scheduler prompt-L2 budget. Callers pass the effective route, never
+  // infer it just from the family or a persisted experimental flag.
   return normalized === 'openpangu_v2' || (normalized === 'glm5-next' && !nativeGlmSsd)
 }

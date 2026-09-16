@@ -843,7 +843,7 @@
       "stepSsdOnlyNote": "Step の full/sliding-KV SSD 専用モードが利用可能です。型付き KV ブロックと回転メタデータは RAM ペイロードなしで Block Disk L2 に保持されます。Metal の余裕が少ない場合、安全でない 2 回目のクリーンプレフィルを避けるため長いコールドプロンプトの保存はスキップされることがありますが、既存の SSD ブロックは再利用可能なままです。",
       "mixedSwaSsdOnlyNote": "ネイティブ sliding/mixed-SWA SSD 専用モードは、RAM ペイロードを保持せず、型付き KV ブロックと回転ウィンドウメタデータを Block Disk L2 に保存します。",
       "hybridSsdOnlyNote": "ハイブリッド/Mamba SSD 専用モードは Attention KV ブロックを Block Disk L2 に保存し、完全精度の SSM/GDN 状態を型付き SSD ストアまたはクリーンプレフィルから復元します。",
-      "glmNativeSsdNote": "実験的な GLM ネイティブ SSD チェックポイント：同時実行1件のテキスト接頭辞のみ再利用し、RAM へのペイロード保持や汎用 KV ブロックは使用しません。SSD をオフにすると再利用も無効になります。メディアの再利用は未対応です。実際の利用可否は稼働中のエンジンが報告します。",
+      "glmNativeSsdNote": "GLM は共有 SSD プールに正確なネイティブチェックポイントを保存し、RAM へのペイロード保持や汎用 KV ブロックは使用しません。再利用には同時実行1件、接頭辞キャッシュと SSD の有効化が必要です。画像・動画の再利用にはメディア入力全体の一致が必要です。実際の利用可否は稼働中のエンジンが報告します。SSD をオフにすると再利用も無効になります。",
       "m3SsdOnlyNote": "MiniMax-M3 の SSD 専用モードは、永続的な RAM ペイロードを無効のままにしつつ、ネイティブ MSA の keys、values、idx_keys、絶対オフセットを Block Disk L2 に保持します。",
       "m3NativeMsaNote": "MiniMax-M3 は keys、values、idx_keys、絶対オフセットを保持するネイティブ型付き MSA ページキャッシュを使用します。ブロックディスクキャッシュが永続 L2 を提供し、汎用 KV q4/q8 は無効のままです。",
       "openPanguNoPagedNote": "openPangu は汎用ページブロックを使用しません。因果畳み込み状態は累積的で、任意のブロックから再構築できません。代わりにプレフィックスキャッシュとプロンプトレベルのディスクキャッシュ (L2) を使用してください。",

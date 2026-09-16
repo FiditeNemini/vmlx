@@ -17,7 +17,7 @@ import {
   applyBundleDsv4PoolQuantToSessionConfig,
   applyBundleGenerationDefaultsToSessionConfig,
 } from '../../../../shared/sessionGenerationDefaults'
-import { usesExactTypedPromptDiskCache } from '../../../../shared/detectedFamilyNames'
+import { usesExactTypedPromptDiskCache, usesGlmNativeSsdPool } from '../../../../shared/detectedFamilyNames'
 import { resolveNativeMtpStartupMode } from '../../../../shared/nativeMtpLaunchArgs'
 
 interface ModelInfo {
@@ -265,7 +265,7 @@ export function CreateSession({ initialModelPath, onBack, onCreated, filterType:
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)) {
+          } else if (usesExactTypedPromptDiskCache(detected.family, usesGlmNativeSsdPool(detected))) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true

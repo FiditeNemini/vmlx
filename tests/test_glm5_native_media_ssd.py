@@ -78,8 +78,8 @@ def test_unavailable_identity_raises_instead_of_guessing(kind):
         glm5_media_input_key(req, tokens, {999})
 
 
-def test_default_off_and_unavailable_input_remain_skips(monkeypatch):
-    monkeypatch.delenv("VMLX_GLM5_NATIVE_MEDIA_SSD", raising=False)
+def test_explicit_off_and_unavailable_input_remain_skips(monkeypatch):
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_MEDIA_SSD", "0")
     assert not glm5_native_media_ssd_enabled()
     gen = generator(Mock())
     req = request("media-default-off")
@@ -94,6 +94,21 @@ def test_default_off_and_unavailable_input_remain_skips(monkeypatch):
     gen._restore_glm_native_prefix(req)
     assert "identity unavailable" in LEDGER.take(req.request_id)["detail"]
     gen.native_glm_cache.fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("video", [False, True])
+def test_normal_startup_prepares_complete_media_identity(monkeypatch, video):
+    monkeypatch.delenv("VMLX_GLM5_NATIVE_MEDIA_SSD", raising=False)
+    assert glm5_native_media_ssd_enabled()
+    native = Mock()
+    native.fetch.return_value = None
+    gen = generator(native)
+    req = request(f"normal-media-{video}", video=video)
+    gen._prepare_glm_native_media_identity(req, TOKENS)
+    assert req._glm_native_media_key
+    assert req._cache_extra_keys[GLM5_MEDIA_KEY] == req._glm_native_media_key
+    gen._restore_glm_native_prefix(req)
+    native.fetch.assert_called_once()
 
 
 @pytest.mark.parametrize("video", [False, True])
@@ -228,8 +243,8 @@ def test_health_advertises_only_explicit_media_opt_in(tmp_path, monkeypatch):
         native.close()
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_startup_log_matches_effective_native_media_policy(tmp_path, monkeypatch, caplog, enabled):
+@pytest.mark.parametrize("flag,enabled", [(None, True), ("0", False), ("1", True)])
+def test_startup_log_matches_effective_native_media_policy(tmp_path, monkeypatch, caplog, flag, enabled):
     import asyncio
     import logging
 
@@ -238,10 +253,10 @@ def test_startup_log_matches_effective_native_media_policy(tmp_path, monkeypatch
     from vmlx_engine.server import _native_cache_status
 
     monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", "1")
-    if enabled:
-        monkeypatch.setenv("VMLX_GLM5_NATIVE_MEDIA_SSD", "1")
-    else:
+    if flag is None:
         monkeypatch.delenv("VMLX_GLM5_NATIVE_MEDIA_SSD", raising=False)
+    else:
+        monkeypatch.setenv("VMLX_GLM5_NATIVE_MEDIA_SSD", flag)
     with caplog.at_level(logging.INFO, logger="vmlx_engine.mllm_scheduler"):
         scheduler = MLLMScheduler(tiny_model(), tiny_processor(), MLLMSchedulerConfig(
             enable_prefix_cache=True, enable_block_disk_cache=True,
@@ -252,7 +267,7 @@ def test_startup_log_matches_effective_native_media_policy(tmp_path, monkeypatch
     try:
         policy = _native_cache_status(scheduler, family="glm5_next")["cache_store_policy"]["media"]
         messages = [record.message for record in caplog.records
-                    if "GLM native SSD experimental backend:" in record.message]
+                    if "GLM native SSD backend:" in record.message]
         assert len(messages) == 1
         assert f"media={policy} batch=1" in messages[0]
         assert "RAM_retention=0" in messages[0]

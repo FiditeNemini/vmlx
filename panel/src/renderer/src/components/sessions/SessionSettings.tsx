@@ -26,6 +26,8 @@ import {
   isZayaCcaFamily,
   normalizeDetectedFamilyName,
   usesExactTypedPromptDiskCache,
+  usesGlmNativeSsdPool,
+  resolveGlmDiskCacheControls,
 } from '../../../../shared/detectedFamilyNames'
 import {
   applyBundleDsv4PoolQuantToSessionConfig,
@@ -291,7 +293,9 @@ function buildCommandPreview(
   const detectedFamily = normalizeDetectedFamilyName(detected?.family)
   const dsv4Active = detectedFamily === 'deepseek-v4'
   const m3Active = detectedFamily === 'minimax_m3'
-  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, detected?.nativeGlmSsd)
+  const nativeGlmSsd = usesGlmNativeSsdPool(detected, config)
+  const exactTypedPromptDiskCache = usesExactTypedPromptDiskCache(detectedFamily, nativeGlmSsd)
+  const diskControls = resolveGlmDiskCacheControls(detectedFamily, nativeGlmSsd, config)
   const effectiveSmelt = !!(config as any).smelt && !dsv4Active
   // User explicitly toggled multimodal OFF (Force Off) — must beat detected VL.
   // Mirror buildArgs (sessions.ts): m3Active stands in for m3VlRoute since the
@@ -409,8 +413,8 @@ function buildCommandPreview(
     continuousBatching: cacheStackActive,
     enablePrefixCache: config.enablePrefixCache !== false,
     usePagedCache: false,
-    enableDiskCache: !!config.enableDiskCache,
-    enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!config.enableBlockDiskCache,
+    enableDiskCache: !!diskControls.enableDiskCache,
+    enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
     noMemoryAwareCache: !!config.noMemoryAwareCache,
     forceMemoryAwareCache: exactTypedPromptDiskCache || dsv4Active,
     prefixCacheSize: config.prefixCacheSize,
@@ -747,7 +751,7 @@ export function SessionSettings({ sessionId, onBack }: SessionSettingsProps) {
             base.kvCacheQuantization = 'auto'
             base.pagedCacheBlockSize = DSV4_PAGED_CACHE_BLOCK_SIZE
             base.maxCacheBlocks = DSV4_MAX_CACHE_BLOCKS
-          } else if (usesExactTypedPromptDiskCache(detected.family, detected.nativeGlmSsd)) {
+          } else if (usesExactTypedPromptDiskCache(detected.family, usesGlmNativeSsdPool(detected))) {
             base.enablePrefixCache = true
             base.usePagedCache = false
             base.enableDiskCache = true

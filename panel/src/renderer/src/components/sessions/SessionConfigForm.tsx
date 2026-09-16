@@ -841,7 +841,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.prefillBatchSize}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}
+          unlimitedLabel={t('sessions.config.defaultWithValue', { n: glmSingleActive ? 1 : 512 })}
           disabled={singleActiveControls}
         />
         <SliderField settingKey="prefillStepSize"
@@ -869,7 +869,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           defaultValue={DEFAULT_CONFIG.completionBatchSize}
           allowUnlimited
           unlimitedValue={0}
-          unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}
+          unlimitedLabel={t('sessions.config.defaultWithValue', { n: glmSingleActive ? 1 : 512 })}
           disabled={singleActiveControls}
         />
         <CheckField

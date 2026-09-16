@@ -129,6 +129,9 @@ describe('GLM effective single-active concurrency preserves requested settings',
       expect(field).toContain('disabled={singleActiveControls}')
       expect(field).toContain(`onChange={v => onChange('${key}', v)}`)
       expect(source).not.toContain(`onChange('${key}', 1)`)
+      if (key !== 'maxNumSeqs') {
+        expect(field).toContain("unlimitedLabel={t('sessions.config.defaultWithValue', { n: glmSingleActive ? 1 : 512 })}")
+      }
     }
     const start = source.indexOf('<SliderField settingKey="prefillStepSize"')
     const field = source.slice(start, source.indexOf('/>', start))

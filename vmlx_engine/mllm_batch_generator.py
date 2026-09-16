@@ -7626,7 +7626,8 @@ def _release_cancelled_prefill_request(request: Any) -> None:
     _clear_mllm_request_media_payloads(request)
     for attr in (
         "input_ids", "attention_mask", "prompt_cache",
-        "_media_clean_prefix_cache", "_inline_ssm_capture",
+        "_media_clean_prefix_cache", "_media_repair_ssm_checkpoint",
+        "_media_clean_capture_boundaries", "_inline_ssm_capture",
         "_inline_ssm_checkpoints", "_mixed_swa_boundary", "_dots3_media_boundary",
         "_qwen_media_tail_full_input_ids",
     ):
@@ -9998,6 +9999,11 @@ class MLLMBatchGenerator:
                 pass
 
         request.prompt_cache = None
+        # A retry must not publish a snapshot from the discarded forward.
+        request._media_clean_prefix_cache = None
+        request._media_clean_prefix_len = 0
+        request._media_repair_ssm_checkpoint = None
+        request._media_clean_capture_boundaries = ()
         request._cached_tokens = 0  # type: ignore[attr-defined]
         request._cache_detail = None  # type: ignore[attr-defined]
         request.input_ids = mx.array(
@@ -10177,6 +10183,8 @@ class MLLMBatchGenerator:
         self,
         request: "MLLMBatchRequest",
         token_ids: List[int],
+        *,
+        honor_learned: bool = True,
     ) -> int:
         """Choose the media KV+SSM boundary, honoring a learned KV-only miss.
 
@@ -10198,6 +10206,8 @@ class MLLMBatchGenerator:
                 getattr(request, "_ssm_required_checkpoint_tokens", 0) or 0
             )
         except (TypeError, ValueError):
+            required = 0
+        if not honor_learned:
             required = 0
         block_size = int(getattr(self.block_aware_cache, "block_size", 0) or 0)
         # The fetch side can never restore a hit that cuts THROUGH a
@@ -13049,9 +13059,14 @@ class MLLMBatchGenerator:
                 request, int(full_input_ids.shape[1]), cache,
                 allow_conditioned_tail=True,
             )
+            clean_boundaries = tuple(
+                getattr(request, "_media_clean_capture_boundaries", ())
+                or ((clean_boundary,) if clean_boundary > 0 else ())
+            )
             bounds = set(range(chunk, tail_len, chunk)) | {tail_len}
-            if cached_tokens < clean_boundary < cached_tokens + tail_len:
-                bounds.add(clean_boundary - cached_tokens)
+            for boundary in clean_boundaries:
+                if cached_tokens < boundary < cached_tokens + tail_len:
+                    bounds.add(boundary - cached_tokens)
             start = 0
             for end in sorted(bounds):
                 full_start = cached_tokens + start
@@ -13064,11 +13079,11 @@ class MLLMBatchGenerator:
                     position_ids=position_ids[..., full_start:full_end],
                 )
                 if (
-                    full_end == clean_boundary
+                    full_end in clean_boundaries
                     and getattr(request, "_media_clean_snapshot_allowed", True)
                 ):
                     self._snapshot_native_media_clean_boundary(
-                        request, cache, clean_boundary
+                        request, cache, full_end
                     )
                 start = end
             if output is None:
@@ -13107,6 +13122,8 @@ class MLLMBatchGenerator:
                 "_media_clean_prefix_cache",
                 "_media_clean_prefix_len",
                 "_media_clean_native",
+                "_media_repair_ssm_checkpoint",
+                "_media_clean_capture_boundaries",
             ):
                 try:
                     delattr(request, attr)
@@ -13227,6 +13244,10 @@ class MLLMBatchGenerator:
         # cached and uncached answers on media prompts only (text prompts,
         # whose stores slice the main pass, were byte-identical).
         clean_boundary = self._native_media_clean_boundary(request, seq_len, cache)
+        clean_boundaries = tuple(
+            getattr(request, "_media_clean_capture_boundaries", ())
+            or ((clean_boundary,) if clean_boundary > 0 else ())
+        )
         glm_native_boundary = 0
         if (
             getattr(self, "native_glm_cache", None) is not None
@@ -13296,8 +13317,8 @@ class MLLMBatchGenerator:
             if chunk > 0 and seq_len > max(chunk, min_chunk_seq)
             else [seq_len]
         )
-        if clean_boundary > 0:
-            bounds = sorted(set(bounds) | {int(clean_boundary)})
+        if clean_boundaries:
+            bounds = sorted(set(bounds) | set(clean_boundaries))
         if glm_native_boundary > 0:
             bounds = sorted(set(bounds) | {glm_native_boundary})
 
@@ -13413,13 +13434,13 @@ class MLLMBatchGenerator:
                 )
             if end == glm_native_boundary:
                 self._store_glm_native_boundary(request, cache)
-            if end == clean_boundary and getattr(request, "_media_clean_snapshot_allowed", True):
-                self._snapshot_native_media_clean_boundary(request, cache, clean_boundary)
+            if end in clean_boundaries and getattr(request, "_media_clean_snapshot_allowed", True):
+                self._snapshot_native_media_clean_boundary(request, cache, end)
                 if _diag_fingerprints_enabled():
                     logger.info(
                         "restore fingerprint COLD cache-at-boundary for %s at %d: %s",
-                        getattr(request, "request_id", "?"), clean_boundary,
-                        _diag_cache_fingerprint(cache, self._hybrid_kv_positions, clean_boundary),
+                        getattr(request, "request_id", "?"), end,
+                        _diag_cache_fingerprint(cache, self._hybrid_kv_positions, end),
                     )
             if _diag_fingerprints_enabled() and clean_boundary > 0 and end == seq_len and output is not None:
                 logger.info("restore fingerprint COLD first-token logits for %s: %s", getattr(request, "request_id", "?"), _diag_logits_fp(output))
@@ -13515,14 +13536,18 @@ class MLLMBatchGenerator:
         self, request: "MLLMBatchRequest", seq_len: int, cache: Optional[List[Any]],
         *, allow_conditioned_tail: bool = False,
     ) -> int:
-        """The clean media boundary to snapshot INSIDE the main forward, or 0.
+        """Plan at most two native capture edges; return the later one, or 0.
 
         Cold hybrid media requests and explicitly conditioned warm tails.
         A warm request owns its restored boundary, not the longer boundary
         produced by this prefill. The boundary is the one the fetch side can use
         (``_media_clean_cache_boundary_for``) and must lie strictly inside the
         prompt. Opt out with VMLX_DISABLE_NATIVE_MEDIA_BOUNDARY=1 (the
-        auxiliary clean prefill then runs as before)."""
+        auxiliary clean prefill then runs as before). A learned repair edge
+        remains useful for a diverging sibling, but must not replace the later
+        checkpoint needed by this request's immediate tool continuation.
+        """
+        request._media_clean_capture_boundaries = ()
         if os.environ.get("VMLX_DISABLE_NATIVE_MEDIA_BOUNDARY") in ("1", "true", "True", "yes", "on"):
             return 0
         if cache is None or not getattr(self, "_is_hybrid", False) or getattr(self, "_ssm_state_cache", None) is None:
@@ -13551,21 +13576,32 @@ class MLLMBatchGenerator:
                 self._media_prefix_cache_allowed(request, tokens)
             )
             boundary = int(self._media_clean_cache_boundary_for(request, tokens) or 0)
+            terminal = int(self._media_clean_cache_boundary_for(
+                request, tokens, honor_learned=False
+            ) or 0)
         except Exception as exc:  # noqa: BLE001
             logger.info("MLLM media prefix cache: native boundary not chosen for %s: %s", getattr(request, "request_id", "?"), exc)
             return 0
-        if boundary <= cached_tokens or boundary >= len(tokens):
-            return 0
-        return boundary
+        boundaries = tuple(sorted({
+            point for point in (boundary, terminal)
+            if cached_tokens < point < len(tokens)
+        }))
+        request._media_clean_capture_boundaries = boundaries
+        return boundaries[-1] if boundaries else 0
 
     def _snapshot_native_media_clean_boundary(
         self, request: "MLLMBatchRequest", cache: List[Any], boundary: int
     ) -> None:
         """Clone the recurrent layers of the live cache at ``boundary`` and
-        stash them where the store reads the clean media companion from
-        (``_media_clean_prefix_cache`` / ``_media_clean_prefix_len``)."""
+        stash the latest state in the primary clean-media slot. Keep at most
+        one earlier recurrent-only repair checkpoint, never a second KV copy.
+        """
         from copy import deepcopy
 
+        previous = getattr(request, "_media_clean_prefix_cache", None)
+        previous_boundary = int(getattr(request, "_media_clean_prefix_len", 0) or 0)
+        if previous is not None and previous_boundary >= boundary:
+            return
         kv_set = set(self._hybrid_kv_positions or [])
         clean: List[Any] = []
         materialize: List[Any] = []
@@ -13589,6 +13625,18 @@ class MLLMBatchGenerator:
                 clean.append(cache_obj)
         if materialize:
             mx.eval(*materialize)
+        if previous is not None and not getattr(
+            request, "_media_repair_ssm_checkpoint", None
+        ):
+            tokens = list(getattr(request, "_original_token_ids", None) or [])
+            layers = [
+                layer for index, layer in enumerate(previous)
+                if index not in kv_set and not _companion_exempt_cache(layer)
+            ]
+            if layers and 0 < previous_boundary < boundary <= len(tokens):
+                request._media_repair_ssm_checkpoint = (
+                    previous_boundary, tokens[:previous_boundary], layers
+                )
         request._media_clean_prefix_cache = clean  # type: ignore[attr-defined]
         request._media_clean_prefix_len = int(boundary)  # type: ignore[attr-defined]
         request._media_clean_native = True  # type: ignore[attr-defined]
@@ -13597,6 +13645,46 @@ class MLLMBatchGenerator:
             "at %d tokens inside the main prefill (no auxiliary forward)",
             getattr(request, "request_id", "?"),
             int(boundary),
+        )
+
+    def _store_native_media_repair_checkpoint(
+        self, request: "MLLMBatchRequest", cache_extra_keys: Any
+    ) -> None:
+        """Submit the one earlier native companion before terminal publication.
+
+        The later paged KV chain contains its blocks; no second KV publication
+        or text-only re-derive is needed. Drop request ownership even if the
+        store raises, so cancellation/retry cannot retain this extra state.
+        An optional repair failure must not skip the later primary store.
+        """
+        checkpoint = getattr(request, "_media_repair_ssm_checkpoint", None)
+        request._media_repair_ssm_checkpoint = None
+        if checkpoint is None:
+            return
+        boundary, tokens, layers = checkpoint
+        primary = int(getattr(request, "_media_clean_prefix_len", 0) or 0)
+        original = list(getattr(request, "_original_token_ids", None) or [])
+        if not (
+            layers and 0 < boundary < primary <= len(original)
+            and tokens == original[:boundary]
+        ):
+            return
+        try:
+            self._ssm_state_cache.store(
+                tokens, boundary, layers, is_complete=True,
+                cache_extra_keys=cache_extra_keys,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "MLLM media prefix cache: learned repair companion failed for "
+                "%s at %d tokens; continuing with terminal %d: %s",
+                getattr(request, "request_id", "?"), boundary, primary, exc,
+            )
+            return
+        logger.info(
+            "MLLM media prefix cache: submitted learned repair companion for %s "
+            "at %d tokens alongside terminal %d (one extra native checkpoint)",
+            getattr(request, "request_id", "?"), boundary, primary,
         )
 
     def _mrope_tail_position_ids(
@@ -16097,6 +16185,9 @@ class MLLMBatchGenerator:
                                     else len(all_tokens)
                                 )
                             if clean_ssm_layers and prompt_len > 0:
+                                self._store_native_media_repair_checkpoint(
+                                    req, _ssm_extra_keys
+                                )
                                 self._ssm_state_cache.store(
                                     all_tokens[:prompt_len],
                                     prompt_len,

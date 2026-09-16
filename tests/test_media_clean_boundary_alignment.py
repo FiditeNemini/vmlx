@@ -384,7 +384,7 @@ def test_qwen_hybrid_media_tail_forwards_conditioned_suffix_over_native_cache(bo
     generator._ssm_state_cache = object()
     generator._hybrid_kv_positions = [0]
     generator._media_prefix_cache_allowed = lambda req, tokens: True
-    generator._media_clean_cache_boundary_for = lambda req, tokens: boundary
+    generator._media_clean_cache_boundary_for = lambda req, tokens, **options: boundary
     snapshots = []
     generator._snapshot_native_media_clean_boundary = (
         lambda req, native_cache, point: snapshots.append(

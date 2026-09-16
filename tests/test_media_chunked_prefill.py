@@ -609,6 +609,125 @@ class TestNativeCleanMediaBoundary:
         ) == 0
 
 
+class TestLearnedMediaCheckpoints:
+    """A short repair must not strand the next tool at that short prefix."""
+
+    def _gen(self, *, family="qwen3_5", cached=0):
+        tokens = [1] * 100 + [99] * 128 + [2] * 3792
+        n = len(tokens) + 7
+        gen, cache, req = TestNativeCleanMediaBoundary()._gen(n, tokens)
+        gen._model_type = family
+        req._ssm_required_checkpoint_tokens = 64
+        req._cached_tokens = cached
+        return gen, cache, req, tokens, n
+
+    def test_short_repair_and_later_terminal_share_one_forward(self):
+        gen, cache, req, tokens, n = self._gen()
+        gen._media_forward(req, _FakeIds(n), n, cache, {})
+        assert req._media_clean_prefix_len == 3968
+        assert gen.language_model.spans == [64, 3904, n - 3968]
+        assert float(req._media_clean_prefix_cache[1].cache[0].item()) == 3968
+        boundary, key, layers = req._media_repair_ssm_checkpoint
+        assert boundary == 64 and key == tokens[:64]
+        assert len(layers) == 1  # no duplicate attention KV cache
+        assert float(layers[0].cache[0].item()) == 64
+        assert float(cache[1].cache[0].item()) == n
+        assert req._media_clean_prefix_cache[0] is cache[0]
+
+    def test_warm_tail_filters_old_repair_but_keeps_new_terminal(self):
+        gen, cache, req, _, n = self._gen(cached=64)
+        assert gen._native_media_clean_boundary(
+            req, n, cache, allow_conditioned_tail=True
+        ) == 3968
+        assert req._media_clean_capture_boundaries == (3968,)
+
+    def test_flash_does_not_add_an_unrestorable_short_checkpoint(self):
+        gen, cache, req, _, n = self._gen(family="qwen4_exp")
+        gen._media_forward(req, _FakeIds(n), n, cache, {})
+        assert req._media_clean_prefix_len == 3968
+        assert gen.language_model.spans == [3968, n - 3968]
+        assert getattr(req, "_media_repair_ssm_checkpoint", None) is None
+
+    def test_bypass_keeps_same_edges_without_retaining_snapshots(self):
+        gen, cache, req, _, n = self._gen()
+        req._bypass_prefix_cache = True
+        gen._media_prefix_cache_allowed = lambda request, tokens: False
+        gen._media_forward(req, _FakeIds(n), n, cache, {})
+        assert gen.language_model.spans == [64, 3904, n - 3968]
+        assert getattr(req, "_media_clean_prefix_cache", None) is None
+        assert getattr(req, "_media_repair_ssm_checkpoint", None) is None
+
+    def test_repair_store_uses_same_media_identity_and_releases_extra_state(self):
+        from types import SimpleNamespace
+        gen, cache, req, tokens, n = self._gen()
+        calls = []
+        gen._ssm_state_cache = SimpleNamespace(
+            store=lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+        gen._media_forward(req, _FakeIds(n), n, cache, {})
+        media_key = {"media_sha256": "separate-image-and-video-identity"}
+        gen._store_native_media_repair_checkpoint(req, media_key)
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args[:2] == (tokens[:64], 64)
+        assert len(args[2]) == 1 and float(args[2][0].cache[0].item()) == 64
+        assert kwargs == {"is_complete": True, "cache_extra_keys": media_key}
+        assert kwargs["cache_extra_keys"] is media_key
+        assert req._media_repair_ssm_checkpoint is None
+        assert req._media_clean_prefix_len == 3968
+        gen._store_native_media_repair_checkpoint(req, media_key)
+        assert len(calls) == 1
+
+    def test_repair_store_failure_keeps_primary_and_drops_reference(self, caplog):
+        from types import SimpleNamespace
+        gen, cache, req, _, n = self._gen()
+        def fail(*args, **kwargs):
+            raise RuntimeError("storage refusal")
+        gen._ssm_state_cache = SimpleNamespace(store=fail)
+        gen._media_forward(req, _FakeIds(n), n, cache, {})
+        gen._store_native_media_repair_checkpoint(req, None)
+        assert req._media_repair_ssm_checkpoint is None
+        assert req._media_clean_prefix_len == 3968
+        assert "continuing with terminal 3968: storage refusal" in caplog.text
+
+    @pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+    def test_extra_checkpoint_preserves_each_native_leaf_dtype(self, dtype_name):
+        import mlx.core as mx
+        gen, cache, req, _, _ = self._gen()
+        dtype = getattr(mx, dtype_name)
+        cache[1].cache = [mx.full((1, 4), 64, dtype), mx.full((2, 3), 64, mx.float32)]
+        gen._snapshot_native_media_clean_boundary(req, cache, 64)
+        cache[1].cache = [mx.full((1, 4), 3968, dtype), mx.full((2, 3), 3968, mx.float32)]
+        gen._snapshot_native_media_clean_boundary(req, cache, 3968)
+        early = req._media_repair_ssm_checkpoint[2][0].cache
+        later = req._media_clean_prefix_cache[1].cache
+        for snapshot, value in ((early, 64), (later, 3968)):
+            assert [leaf.dtype for leaf in snapshot] == [dtype, mx.float32]
+            assert [leaf.shape for leaf in snapshot] == [(1, 4), (2, 3)]
+            leaf_bytes = 4 if dtype_name == "float32" else 2
+            assert sum(leaf.nbytes for leaf in snapshot) == 4 * leaf_bytes + 6 * 4
+            assert all(bool(mx.all(leaf == value)) for leaf in snapshot)
+
+    def test_cancellation_releases_both_snapshots(self):
+        from vmlx_engine.mllm_batch_generator import _release_cancelled_prefill_request
+        gen, cache, req, _, n = self._gen()
+        gen._media_forward(req, _FakeIds(n), n, cache, {})
+        _release_cancelled_prefill_request(req)
+        assert req._media_repair_ssm_checkpoint is None
+        assert req._media_clean_prefix_cache is None
+        assert req._media_clean_capture_boundaries is None
+
+    def test_exact_n_minus_1_and_duplicate_edges_remain_bounded(self):
+        tokens = [1] * 100 + [99] * 1664 + [2] * 8
+        gen, cache, req = TestNativeCleanMediaBoundary()._gen(len(tokens), tokens)
+        req._ssm_required_checkpoint_tokens = 64
+        assert gen._native_media_clean_boundary(req, len(tokens), cache) == 1771
+        assert req._media_clean_capture_boundaries == (64, 1771)
+        req._ssm_required_checkpoint_tokens = 0
+        assert gen._native_media_clean_boundary(req, len(tokens), cache) == 1771
+        assert req._media_clean_capture_boundaries == (1771,)
+
+
 class TestMediaHitTextTailKeepsMRoPEPositions:
     """First divergent computation between cached and uncached video answers (fingerprints on the box): the warm tail,
     text after a fully cached video, was forwarded with absolute text positions (1771..1778) while the cold pass gave

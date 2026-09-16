@@ -5098,8 +5098,14 @@ class MLXMultimodalLM:
             tool_calls = _normalize_tool_calls_for_template(msg.get("tool_calls"))
             tool_call_id = msg.get("tool_call_id")
             msg_name = msg.get("name")
+            reasoning_content = msg.get("reasoning_content")
+            has_reasoning = (
+                role == "assistant"
+                and isinstance(reasoning_content, str)
+                and bool(reasoning_content)
+            )
 
-            if msg_text or msg_image_count > 0 or msg_video_count > 0 or msg_audio_count > 0 or tool_calls or role == "tool":
+            if msg_text or msg_image_count > 0 or msg_video_count > 0 or msg_audio_count > 0 or tool_calls or has_reasoning or role == "tool":
                 if (msg_image_count > 0 or msg_video_count > 0 or msg_audio_count > 0) and role in ("user", "assistant"):
                     # Build multimodal content list with image markers for
                     # any role that carries media (user or assistant).
@@ -5126,11 +5132,18 @@ class MLXMultimodalLM:
                     out_msg: dict = {"role": role, "content": content_list}
                     if role == "assistant" and tool_calls:
                         out_msg["tool_calls"] = tool_calls
+                    if role == "assistant" and "reasoning_content" in msg:
+                        out_msg["reasoning_content"] = reasoning_content
                     chat_messages.append(out_msg)
                 elif role == "assistant":
                     out_msg = {"role": role, "content": msg_text}
                     if tool_calls:
                         out_msg["tool_calls"] = tool_calls
+                    # The native template decides whether to retain reasoning
+                    # from prior turns. Media normalization must not discard
+                    # the current tool generation's reasoning before it does.
+                    if "reasoning_content" in msg:
+                        out_msg["reasoning_content"] = reasoning_content
                     chat_messages.append(out_msg)
                 elif role == "tool":
                     out_msg = {"role": role, "content": msg_text}

@@ -2209,15 +2209,19 @@ class BatchedEngine(BaseEngine):
                         count = owned[index]
                         if index == last_user_idx and surplus:
                             count += surplus
-                        built.append(
-                            get_message_json(
-                                model_type_arg,
-                                text,
-                                role,
-                                skip_image_token=(count == 0),
-                                num_images=count,
-                            )
+                        built_message = get_message_json(
+                            model_type_arg,
+                            text,
+                            role,
+                            skip_image_token=(count == 0),
+                            num_images=count,
                         )
+                        # Formatting image markers is not a reasoning-history
+                        # policy. Keep the native assistant field for the real
+                        # template to retain or clear, just as the text route.
+                        if role == "assistant" and "reasoning_content" in message:
+                            built_message["reasoning_content"] = message["reasoning_content"]
+                        built.append(built_message)
                     return built
 
                 def _normalize_processor_messages(messages_arg):

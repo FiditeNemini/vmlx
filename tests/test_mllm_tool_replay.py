@@ -11,6 +11,79 @@ from vmlx_engine.engine.base import GenerationOutput
 from vmlx_engine.models.mllm import MLXMultimodalLM
 
 
+@pytest.mark.parametrize("assistant_content", [None, "", "visible", [
+    {"type": "image_url", "image_url": {"url": "assistant.png"}},
+    {"type": "text", "text": "visible"},
+]])
+@pytest.mark.parametrize("with_call", [False, True])
+def test_media_normalizer_preserves_native_reasoning_and_reasoning_only_turns(
+    assistant_content, with_call
+):
+    reasoning = "  preserve indentation\nreal newline; literal \\n\n"
+    assistant = {
+        "role": "assistant", "content": assistant_content,
+        "reasoning_content": reasoning,
+    }
+    if with_call:
+        assistant["tool_calls"] = [{"id": "call_reasoning", "type": "function", "function": {
+            "name": "read_file", "arguments": '{"path":"fixture.json"}',
+        }}]
+    messages = [{"role": "user", "content": "read the fixture"}, assistant]
+    original = copy.deepcopy(messages)
+    normalized, _, _, _ = MLXMultimodalLM._extract_multimodal_messages(messages)
+    assert len(normalized) == len(messages), "reasoning-only assistant was discarded"
+    assert normalized[1]["reasoning_content"] == reasoning
+    if with_call:
+        assert normalized[1]["tool_calls"][0]["function"]["arguments"] == {"path": "fixture.json"}
+    assert messages == original
+
+
+@pytest.mark.parametrize("media", ["image", "video", "audio"])
+def test_batched_media_template_receives_reasoning_without_clearing_policy(media, caplog):
+    """All media render routes must hand the original field to the template."""
+    from vmlx_engine.engine.batched import BatchedEngine
+
+    class TextFallback:
+        def apply_chat_template(self, messages, **kwargs):
+            return "WRONG_TEXT_FALLBACK"
+
+    class Processor:
+        tokenizer = TextFallback()
+
+        def apply_chat_template(self, messages, **kwargs):
+            return json.dumps(messages, ensure_ascii=False)
+
+    engine = object.__new__(BatchedEngine)
+    engine._is_mllm = True
+    engine._processor = Processor()
+    engine._model = SimpleNamespace(config={"model_type": "qwen3_5"})
+    engine._model_name = "local-template-fixture"
+    engine._model_family_name = lambda: "qwen3_5"
+    media_part = {
+        "image": {"type": "image_url", "image_url": {"url": "fixture.png"}},
+        "video": {"type": "video_url", "video_url": {"url": "fixture.mp4"}},
+        "audio": {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+    }[media]
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "inspect"}, media_part]},
+        {"role": "assistant", "content": "earlier answer", "reasoning_content": "prior reasoning"},
+        {"role": "user", "content": "now read the fixture"},
+        {"role": "assistant", "content": None, "reasoning_content": "current tool reasoning", "tool_calls": [
+            {"id": "call_r", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"fixture.json"}'}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_r", "content": "actual result"},
+    ]
+    original = copy.deepcopy(messages)
+    counts = {"num_images": int(media == "image"), "num_videos": int(media == "video"), "num_audio": int(media == "audio")}
+    built = json.loads(engine._apply_chat_template(messages, **counts))
+    assert "Failed to apply MLLM chat template" not in caplog.text
+    assert built[1]["reasoning_content"] == "prior reasoning"
+    assert built[3]["reasoning_content"] == "current tool reasoning"
+    assert built[3]["tool_calls"][0]["function"]["arguments"] == {"path": "fixture.json"}
+    assert built[4]["tool_call_id"] == "call_r"
+    assert messages == original
+
+
 @pytest.mark.parametrize("wire_json", [True, False])
 @pytest.mark.parametrize("tool_content", [None, ""])
 def test_batched_image_tool_history_normalizes_before_processor_without_mutation(

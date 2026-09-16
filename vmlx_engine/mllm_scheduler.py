@@ -3051,6 +3051,12 @@ class MLLMScheduler:
             with self._queue_lock:
                 self._cleanup_aborted_paged_request(request_id)
                 self._cleanup_detokenizer(request_id)
+                # Only the worker may retire these: the cancelled forward can
+                # still publish a handoff until generator.remove() succeeds.
+                for name in ("_clean_boundary_snapshots", "_mixed_swa_boundary_snapshots"):
+                    snapshots = getattr(self.batch_generator, name, None)
+                    if isinstance(snapshots, dict):
+                        snapshots.pop(str(request_id), None)
                 request = self.requests.pop(request_id, None)
                 if request is not None:
                     request._extracted_cache = None
@@ -4921,6 +4927,17 @@ class MLLMScheduler:
                 )
                 if isinstance(_swa_snapshots, dict):
                     _swa_snapshots.pop(str(request_id), None)
+                # Text-only clean-hybrid assembly consumes this handoff, but
+                # warm media can also capture inline recurrent checkpoints
+                # without taking that branch. Retire them after every store
+                # outcome, including a bypass or failure. Otherwise completed
+                # requests retain native Metal state outside all RAM-cache
+                # accounting despite having already submitted it to SSD.
+                _native_snapshots = getattr(
+                    self.batch_generator, "_clean_boundary_snapshots", None
+                )
+                if isinstance(_native_snapshots, dict):
+                    _native_snapshots.pop(str(request_id), None)
             _trace_mark("cache_store_s")
 
             # Remove per-request stop tokens from batch generator.

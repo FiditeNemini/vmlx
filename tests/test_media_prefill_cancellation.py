@@ -116,6 +116,35 @@ def test_failed_worker_removal_cannot_report_idle(monkeypatch):
     scheduler._schedule_waiting.assert_not_called()
 
 
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_deferred_abort_retires_native_handoffs_only_after_removal(monkeypatch, fail_first):
+    scheduler, request, _ = _scheduler(monkeypatch)
+    snapshots = [object()]
+    names = ("_clean_boundary_snapshots", "_mixed_swa_boundary_snapshots")
+    for name in names:
+        setattr(scheduler.batch_generator, name, {request.request_id: snapshots, "sibling": snapshots})
+
+    def remove(uids):
+        assert uids == [7]
+        for name in names:
+            assert getattr(scheduler.batch_generator, name)[request.request_id] is snapshots
+        if fail_first:
+            raise RuntimeError("worker still owns the request")
+
+    scheduler.batch_generator.remove.side_effect = remove
+    scheduler.abort_request(request.request_id)
+    scheduler._process_pending_aborts()
+    if fail_first:
+        assert request.request_id in scheduler._pending_aborts
+        for name in names:
+            assert request.request_id in getattr(scheduler.batch_generator, name)
+        fail_first = False
+        scheduler._process_pending_aborts()
+    for name in names:
+        assert getattr(scheduler.batch_generator, name) == {"sibling": snapshots}
+    assert not scheduler._pending_aborts
+
+
 def test_waiting_abort_needs_no_deferred_worker_removal(monkeypatch):
     scheduler, request, _ = _scheduler(monkeypatch, waiting=True)
     assert scheduler.abort_request(request.request_id)

@@ -1946,6 +1946,65 @@ class TestCleanupFinishedCacheStore:
         assert "bookkeeping_ms=" in caplog.text
         assert "clear_memory_ms=" in caplog.text
 
+    @pytest.mark.parametrize("mode", ["stored", "store-failed", "bypass", "no-cache", "missing-request"])
+    def test_cleanup_retires_native_handoff_after_store(self, mode):
+        """A media turn need not consume the text-only clean-boundary handoff."""
+        import mlx.core as mx
+
+        scheduler = MLLMScheduler.__new__(MLLMScheduler)
+        request = SimpleNamespace(
+            num_output_tokens=3,
+            _bypass_prefix_cache=mode == "bypass",
+            _extracted_cache=[mx.ones((1, 2), dtype=mx.bfloat16)],
+            _extracted_tokens=[1, 2, 3, 4, 5],
+            _added_stop_tokens=set(),
+        )
+        sibling = SimpleNamespace(_added_stop_tokens=set())
+        checkpoints = [(4, [1, 2, 3, 4], [mx.ones((1, 2), dtype=mx.float32)])]
+        scheduler.batch_generator = SimpleNamespace(
+            _clean_boundary_snapshots={"finished": checkpoints, "active": checkpoints},
+            _mixed_swa_boundary_snapshots={"finished": checkpoints, "active": checkpoints},
+        )
+        scheduler.running = {"active": sibling}
+        if mode != "missing-request":
+            scheduler.running["finished"] = request
+        scheduler.requests = dict(scheduler.running)
+        scheduler.block_aware_cache = scheduler.memory_aware_cache = None
+        scheduler.prefix_cache = None if mode == "no-cache" else MagicMock()
+        scheduler.disk_cache = scheduler.paged_cache_manager = None
+        scheduler._is_hybrid = False
+        scheduler._kv_cache_bits = 0
+        scheduler._mllm_request_has_media_cache_context = lambda *args: False
+        scheduler._prepare_tq_cache_for_storage = lambda cache: cache
+        scheduler._truncate_hybrid_cache = lambda cache, length: cache
+        scheduler._validate_cache = lambda *args, **kwargs: True
+        scheduler.stop_tokens = set()
+        scheduler.request_id_to_uid = {}
+        scheduler.uid_to_request_id = {}
+        scheduler.finished_req_ids = set()
+        scheduler._cleanup_detokenizer = MagicMock()
+
+        def store(tokens, cache):
+            # Retirement must follow storage, never remove an in-use handoff.
+            assert scheduler.batch_generator._clean_boundary_snapshots["finished"] is checkpoints
+            assert tokens == [1, 2, 3, 4]
+            assert cache[0].dtype == mx.bfloat16
+            if mode == "store-failed":
+                raise RuntimeError("test store failure")
+
+        if scheduler.prefix_cache is not None:
+            scheduler.prefix_cache.store_cache.side_effect = store
+        with patch("vmlx_engine.mllm_scheduler.clear_mlx_memory_cache"):
+            scheduler._cleanup_finished({"finished"})
+
+        for name in ("_clean_boundary_snapshots", "_mixed_swa_boundary_snapshots"):
+            assert getattr(scheduler.batch_generator, name) == {"active": checkpoints}
+        assert scheduler.running == {"active": sibling}
+        assert scheduler.requests == {"active": sibling}
+        assert scheduler.finished_req_ids == {"finished"}
+        if scheduler.prefix_cache is not None:
+            assert scheduler.prefix_cache.store_cache.call_count == int(mode in {"stored", "store-failed"})
+
     def test_cleanup_releases_paged_request_refs_before_detach(self):
         """Completed VLM prefixes must become cached-but-free LRU blocks.
 

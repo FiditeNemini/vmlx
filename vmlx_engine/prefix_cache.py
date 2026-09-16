@@ -7269,7 +7269,11 @@ class BlockAwarePrefixCache:
             # ``[metal::malloc]`` request. Validate up-front; on any
             # failure, force cache miss and let the scheduler re-prefill.
             try:
-                from .cache_record_validator import reject_or_warn as _reject_or_warn
+                from .cache_record_validator import (
+                    parse_quantized_kv_meta,
+                    reject_or_warn as _reject_or_warn,
+                    validate_quantized_cache_chain,
+                )
             except Exception:
                 _reject_or_warn = None
             if _reject_or_warn is not None:
@@ -7282,6 +7286,14 @@ class BlockAwarePrefixCache:
                         expected_num_layers=_expected_layers,
                         source=f"reconstruct[block={_bi}]",
                     ):
+                        return None
+                if any(
+                    _entry_has_native_quantized_kv(entry)
+                    for block_data in all_block_data for entry in block_data
+                ):
+                    _chain_ok, _chain_reason = validate_quantized_cache_chain(all_block_data)
+                    if not _chain_ok:
+                        logger.warning("Cannot reconstruct cache: %s", _chain_reason)
                         return None
 
             # Import cache classes
@@ -7505,12 +7517,7 @@ class BlockAwarePrefixCache:
                         mx.eval(*ck, *cv)
                         try:
                             from mlx_lm.models.cache import QuantizedKVCache as QKVCache
-                            g_size, q_bits = 64, 8
-                            if sub_qkv_meta and len(sub_qkv_meta) >= 3:
-                                try:
-                                    _, g_size, q_bits = map(int, sub_qkv_meta[:3])
-                                except (ValueError, TypeError):
-                                    pass
+                            _, g_size, q_bits = parse_quantized_kv_meta(sub_qkv_meta)
                             kv_cache = QKVCache(group_size=g_size, bits=q_bits)
                             kv_cache.keys = ck
                             kv_cache.values = cv
@@ -7657,27 +7664,7 @@ class BlockAwarePrefixCache:
 
                     try:
                         from mlx_lm.models.cache import QuantizedKVCache as QKVCache
-                        # Parse meta_state for group_size and bits
-                        g_size, q_bits = 64, 8
-                        if quantized_meta and len(quantized_meta) >= 3:
-                            try:
-                                _, g_size, q_bits = map(int, quantized_meta[:3])
-                            except (ValueError, TypeError):
-                                logger.warning(
-                                    f"Layer {layer_idx}: failed to parse quantized meta "
-                                    f"{quantized_meta!r}, using defaults "
-                                    f"g_size={g_size} bits={q_bits} — "
-                                    f"dequantize may produce wrong values"
-                                )
-                        elif quantized_kv_slices_keys:
-                            # Have quantized data but no valid metadata —
-                            # this is a corruption risk (wrong dequantize params)
-                            logger.warning(
-                                f"Layer {layer_idx}: quantized cache block has no "
-                                f"metadata (meta={quantized_meta!r}), "
-                                f"using defaults g_size={g_size} bits={q_bits} — "
-                                f"possible stale disk cache"
-                            )
+                        _, g_size, q_bits = parse_quantized_kv_meta(quantized_meta)
                         cache = QKVCache(group_size=g_size, bits=q_bits)
                         cache.keys = concat_keys
                         cache.values = concat_values
@@ -8369,12 +8356,7 @@ class BlockAwarePrefixCache:
                             mx.eval(*ck, *cv)
                             try:
                                 from mlx_lm.models.cache import QuantizedKVCache as QKVCache
-                                g_size, q_bits = 64, 8
-                                if sub_qkv_meta and len(sub_qkv_meta) >= 3:
-                                    try:
-                                        _, g_size, q_bits = map(int, sub_qkv_meta[:3])
-                                    except (ValueError, TypeError):
-                                        pass
+                                _, g_size, q_bits = parse_quantized_kv_meta(sub_qkv_meta)
                                 sc = QKVCache(group_size=g_size, bits=q_bits)
                                 sc.keys = ck
                                 sc.values = cv

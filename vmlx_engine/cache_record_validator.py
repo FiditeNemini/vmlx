@@ -57,6 +57,8 @@ MAX_CACHE_OFFSET = 2_000_000
 MAX_CACHE_LAYERS = 1024
 MAX_CACHE_GROUP_SIZE = 4096
 ALLOWED_CACHE_BITS = {2, 3, 4, 8}
+# QuantizedKVCache uses MLX's affine decoder, not MXFP/NVFP weight codecs.
+AFFINE_CACHE_GROUP_SIZES = {32, 64, 128}
 _TQ_DTYPE_BYTES = {"bfloat16": 2, "float16": 2, "float32": 4}
 ALLOWED_TQ_DTYPES = set(_TQ_DTYPE_BYTES)
 
@@ -177,6 +179,8 @@ def _decode_meta_sequence(meta: Any) -> list[Any]:
 
 
 def _validate_quant_meta(meta: Any, *, label: str) -> Tuple[bool, str]:
+    # Legacy optional DSV4 local metadata. Ordinary packed affine records use
+    # parse_quantized_kv_meta below: their codec must never be guessed.
     if meta in (None, "", (), [], {}):
         return True, ""
 
@@ -217,6 +221,125 @@ def _validate_quant_meta(meta: Any, *, label: str) -> Tuple[bool, str]:
         return False, reason
     if bits not in ALLOWED_CACHE_BITS:
         return False, f"{label}.bits: {bits} not in {sorted(ALLOWED_CACHE_BITS)}"
+    return True, ""
+
+
+def parse_quantized_kv_meta(meta: Any) -> tuple[int, int, int]:
+    """Read the explicit affine codec used by BOTH validation and restoration.
+
+    Old tagged records may carry dictionaries or textual sequences. Offset is
+    optional only in a dictionary: pages retain their producer's capture offset,
+    while reconstruction derives the new offset from the concatenated length.
+    Group size and bits are never optional or inferred from tensor/model names.
+    """
+    if isinstance(meta, dict):
+        if "bits" not in meta or not ({"group_size", "groupSize"} & meta.keys()):
+            raise CacheValidationError("quantized meta requires explicit group_size and bits")
+        values = (meta.get("offset", 0), meta.get("group_size", meta.get("groupSize")), meta["bits"])
+    else:
+        values = _decode_meta_sequence(meta)
+        if len(values) != 3:
+            raise CacheValidationError("quantized meta requires (offset, group_size, bits)")
+
+    parsed = []
+    for name, value, lo, hi in zip(
+        ("offset", "group_size", "bits"), values,
+        (0, 1, 1), (MAX_CACHE_OFFSET, MAX_CACHE_GROUP_SIZE, 16),
+    ):
+        ok, number, reason = _validate_int_range(value, label=f"quantized meta.{name}", lo=lo, hi=hi)
+        if not ok:
+            raise CacheValidationError(reason)
+        if not isinstance(value, str) and value != number:
+            raise CacheValidationError(f"quantized meta.{name}: fractional integer {value!r}")
+        parsed.append(number)
+    if parsed[2] not in ALLOWED_CACHE_BITS:
+        raise CacheValidationError(f"quantized meta.bits: {parsed[2]} not in {sorted(ALLOWED_CACHE_BITS)}")
+    if parsed[1] not in AFFINE_CACHE_GROUP_SIZES:
+        raise CacheValidationError(
+            f"quantized meta.group_size: {parsed[1]} not in {sorted(AFFINE_CACHE_GROUP_SIZES)}"
+        )
+    if isinstance(meta, dict) and "group_size" in meta and "groupSize" in meta:
+        alias = parse_quantized_kv_meta({"group_size": meta["groupSize"], "bits": parsed[2]})[1]
+        if alias != parsed[1]:
+            raise CacheValidationError("quantized meta has conflicting group_size/groupSize")
+    return tuple(parsed)
+
+
+def _validate_quantized_kv_layout(entry: Any) -> tuple[bool, str]:
+    try:
+        _, group, bits = parse_quantized_kv_meta(entry[3])
+    except (CacheValidationError, IndexError) as exc:
+        return False, f"quantized_kv.meta: {exc}"
+    for label, side in (("keys", entry[1]), ("values", entry[2])):
+        shapes = [getattr(t, "shape", ()) for t in side]
+        data, scale, bias = shapes
+        if not (2 <= len(data) <= 4 and len(scale) == len(data) and scale == bias):
+            return False, f"quantized_kv {label}: incompatible packed/scale/bias ranks or shapes"
+        if data[:-1] != scale[:-1] or not data[-1] or not scale[-1]:
+            return False, f"quantized_kv {label}: incompatible packed/scale/bias axes"
+        if data[-1] * 32 != scale[-1] * group * bits:
+            return False, f"quantized_kv {label}: packed width disagrees with group_size/bits"
+        dtypes = [str(getattr(t, "dtype", "")).split(".")[-1] for t in side]
+        if dtypes[0] != "uint32" or dtypes[1] not in ALLOWED_TQ_DTYPES or dtypes[2] != dtypes[1]:
+            return False, f"quantized_kv {label}: invalid packed/scale/bias dtypes {dtypes}"
+    if entry[1][0].shape[:-1] != entry[2][0].shape[:-1]:
+        return False, "quantized_kv: keys/values batch/head/token axes differ"
+    return True, ""
+
+
+def validate_quantized_cache_chain(blocks: list[Any]) -> tuple[bool, str]:
+    """Reject mixed positional codecs/layouts before any concatenation/decode.
+
+    Per-page validation alone cannot detect individually valid pages encoded
+    with different codecs. Compare each positional slot, not whole-model bits;
+    K/V widths, layer widths and nested cache codecs may legitimately differ.
+    Offsets/token lengths are intentionally absent from the signature.
+    """
+    layouts = {}
+
+    def contains_quantized(entry):
+        if not isinstance(entry, (tuple, list)) or not entry:
+            return False
+        if entry[0] == "quantized_kv":
+            return True
+        if entry[0] == "cache_list":
+            return any(contains_quantized(sub) for sub in entry[1])
+        if entry[0] == "zaya_cca":
+            return contains_quantized(entry[1])
+        return False
+
+    def visit(entry, path):
+        if not isinstance(entry, (tuple, list)) or not entry:
+            return
+        tag = entry[0]
+        if tag == "cache_list":
+            yield path, (tag, len(entry[1])), contains_quantized(entry)
+            for index, sub in enumerate(entry[1]):
+                yield from visit(sub, path + (index,))
+        elif tag == "zaya_cca":
+            yield path, (tag,), contains_quantized(entry)
+            yield from visit(entry[1], path + ("cca_kv",))
+        elif tag == "quantized_kv":
+            _, group, bits = parse_quantized_kv_meta(entry[3])
+            layout = tuple(
+                (tuple(t.shape[:-2]), t.shape[-1], str(t.dtype))
+                for side in entry[1:3] for t in side
+            )
+            yield path, (tag, group, bits, layout), True
+        else:
+            yield path, (tag,), False
+
+    try:
+        for block in blocks:
+            for layer, entry in enumerate(block):
+                for path, layout, affine in visit(entry, (layer,)):
+                    previous, previous_affine = layouts.setdefault(path, (layout, affine))
+                    if (previous_affine or affine) and previous != layout:
+                        return False, f"quantized_kv slot {path}: inconsistent codec/layout across pages"
+                    if affine and not previous_affine:
+                        layouts[path] = (layout, True)
+    except (CacheValidationError, IndexError, TypeError, AttributeError) as exc:
+        return False, f"quantized cache chain: {exc}"
     return True, ""
 
 
@@ -439,10 +562,11 @@ def validate_cache_record(
                         ), total_bytes
 
         elif tag == "quantized_kv":
-            # ("quantized_kv", (data, scales, zeros), (data, scales, zeros), meta?)
-            if len(entry) < 3:
+            # The explicit codec is required; a guessed default can interpret
+            # the same packed bytes with a different width and precision.
+            if len(entry) != 4:
                 return False, (
-                    f"layer {i} 'quantized_kv': len={len(entry)} < 3"
+                    f"layer {i} 'quantized_kv'.meta: expected four-field record"
                 ), total_bytes
             for tup_label, tup in (("keys", entry[1]), ("values", entry[2])):
                 if not isinstance(tup, (tuple, list)) or len(tup) != 3:
@@ -458,12 +582,9 @@ def validate_cache_record(
                     if not ok:
                         return False, reason, total_bytes
                     total_bytes += nb
-            if len(entry) > 3:
-                ok, reason = _validate_quant_meta(
-                    entry[3], label=f"layer {i} 'quantized_kv'.meta"
-                )
-                if not ok:
-                    return False, reason, total_bytes
+            ok, reason = _validate_quantized_kv_layout(entry)
+            if not ok:
+                return False, f"layer {i} {reason}", total_bytes
 
         elif tag == "turboquant_kv":
             if len(entry) != 4:

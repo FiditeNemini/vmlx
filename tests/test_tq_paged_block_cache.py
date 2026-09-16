@@ -622,12 +622,12 @@ def test_nested_cache_list_quantized_kv_roundtrip_preserves_metadata():
     from vmlx_engine.cache_record_validator import validate_cache_record
 
     keys = (
-        mx.arange(16, dtype=mx.uint32).reshape(1, 1, 4, 4),
+        mx.arange(64, dtype=mx.uint32).reshape(1, 1, 4, 16),
         mx.ones((1, 1, 4, 1), dtype=mx.float16),
         mx.zeros((1, 1, 4, 1), dtype=mx.float16),
     )
     values = (
-        mx.arange(16, dtype=mx.uint32).reshape(1, 1, 4, 4) + 11,
+        mx.arange(64, dtype=mx.uint32).reshape(1, 1, 4, 16) + 11,
         mx.ones((1, 1, 4, 1), dtype=mx.float16) * 2,
         mx.zeros((1, 1, 4, 1), dtype=mx.float16) + 3,
     )

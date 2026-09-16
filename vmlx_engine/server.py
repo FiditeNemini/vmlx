@@ -28723,14 +28723,22 @@ async def stream_responses_api(
             elif reasoning_text:
                 cleaned_text = reasoning_text
 
-        # Finalize the text message with whatever content was before the tool call
-        final_text = (cleaned_text or "").strip()
-        final_text = _finalize_visible_text_for_request(final_text, request, minimum_partial=4)
+        # A native tool parser may intentionally return no cleaned prose (GLM47
+        # does so when a call is present). That cannot retract output_text bytes
+        # already delivered. Append only a compatible cleaned suffix, then use
+        # the same monotonic text for every done event and the completed item.
+        final_candidate = cleaned_text or ""
+        if not streamed_text:
+            final_candidate = final_candidate.strip()
+        final_delta = _terminal_visible_stream_suffix(
+            final_candidate, streamed_text, request=request,
+        )
+        final_text = streamed_text + final_delta
+        display_text = final_text
         if final_text or message_item_started:
-            _message_was_started = message_item_started
             for _event in _start_message_item_events():
                 yield _event
-            if final_text and not _message_was_started:
+            if final_delta:
                 yield _sse(
                     "response.output_text.delta",
                     {
@@ -28738,7 +28746,7 @@ async def stream_responses_api(
                         "item_id": msg_id,
                         "output_index": message_output_index,
                         "content_index": 0,
-                        "delta": final_text,
+                        "delta": final_delta,
                     },
                 )
             yield _sse(

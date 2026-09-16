@@ -63,6 +63,8 @@ from vmlx_engine.metal.gated_rmsnorm_decode import (
     fused_gated_rmsnorm_requested,
     sigmoid_gated_rmsnorm_small_rows,
 )
+from vmlx_engine.metal.qwen4_precise_sigmoid_epilogue import precise_sigmoid_epilogue
+from vmlx_engine.qwen4_decode_policy import precise_gdn_epilogue_requested
 from vmlx_engine.metal.ple_conv_decode import (
     fused_ple_conv_requested,
     qwen4_ple_conv_decode,
@@ -521,8 +523,11 @@ class RMSNormGatedSigmoid(nn.Module):
         self.weight = mx.ones((dims,))
         self.eps = eps
         self._fused_decode = fused_gated_rmsnorm_requested()
+        self._precise_epilogue_graph_calls = 0
 
-    def __call__(self, x: mx.array, gate: mx.array) -> mx.array:
+    def __call__(
+        self, x: mx.array, gate: mx.array, *, precise_epilogue: bool = False
+    ) -> mx.array:
         fused = sigmoid_gated_rmsnorm_small_rows(
             x,
             gate,
@@ -534,6 +539,22 @@ class RMSNormGatedSigmoid(nn.Module):
         if fused is not None:
             return fused
         normed = mx.fast.rms_norm(x, self.weight, self.eps)
+        if precise_epilogue and not self._fused_decode and not self.training:
+            precise = precise_sigmoid_epilogue(
+                normed, gate, output_dtype=x.dtype, enabled=True,
+            )
+            if precise is not None:
+                self._precise_epilogue_graph_calls += 1
+                if self._precise_epilogue_graph_calls == 1:
+                    logger.info(
+                        "QWEN4_PRECISE_GDN_EPILOGUE graph_built "
+                        "shape=%s x_dtype=%s normed_dtype=%s gate_dtype=%s "
+                        "weight_dtype=%s output_dtype=%s device=%s "
+                        "qualification=mlx0322_m5max scope=productive_ar",
+                        normed.shape, x.dtype, normed.dtype, gate.dtype,
+                        self.weight.dtype, precise.dtype, mx.default_device(),
+                    )
+                return precise
         return (normed.astype(mx.float32) * mx.sigmoid(gate.astype(mx.float32))).astype(
             x.dtype
         )
@@ -1108,6 +1129,7 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
         self._fused_conv_decode = fused_gdn_conv_requested()
         self._unified_gdn_verify = unified_gdn_verify_requested()
         self._unified_gdn_verify_graph_calls = 0
+        self._precise_gdn_epilogue = precise_gdn_epilogue_requested()
 
     def _process_chunk(
         self,
@@ -1178,6 +1200,9 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
         prefill_checkpoint_steps: tuple[int, ...] = (),
     ) -> mx.array:
         batch_size, seq_len, _ = inputs.shape
+        # A mask discarded by the existing incompatible-batch handling below
+        # must not accidentally authorize the new single-token arithmetic.
+        precise_unmasked = mask is None
         if self.sharding_group is not None:
             if n_confirmed or prefill_checkpoint_steps:
                 raise NotImplementedError(
@@ -1356,7 +1381,25 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             if callable(advance):
                 advance(seq_len)
         if unified is None:
-            out = self.norm(out, z)
+            if (
+                self._precise_gdn_epilogue
+                and (batch_size, seq_len) == (1, 1)
+                and n_confirmed == 0
+                and not prefill_checkpoint_steps
+                and precise_unmasked
+                and mask is None
+                and cache is not None
+                and getattr(cache, "lengths", None) is None
+                and not self.training
+                and type(self.norm) is RMSNormGatedSigmoid
+                and not self.norm._fused_decode
+                and not self._fused_conv_decode
+                and (self.num_k_heads, self.num_v_heads, self.head_k_dim,
+                     self.head_v_dim, self.conv_kernel_size) == (16, 48, 128, 128, 4)
+            ):
+                out = self.norm(out, z, precise_epilogue=True)
+            else:
+                out = self.norm(out, z)
         return self.out_proj(out.reshape(batch_size, seq_len, -1))
 
 

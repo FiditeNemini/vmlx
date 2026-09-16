@@ -535,6 +535,17 @@ def compute_model_cache_key(
     # Opt-in Qwen4 math paths can differ in floating-point accumulation.
     # Separate persisted state across configurations even within one release.
     if any(p in {"model_type=qwen4_exp", "model_type=qwen4_exp_text"} for p in parts):
+        from vmlx_engine.qwen4_decode_policy import (
+            QWEN4_PRECISE_GDN_EPILOGUE_MATH_ABI,
+            precise_gdn_epilogue_requested,
+        )
+        # Request identity, not a claim that any particular array was eligible.
+        # Leave OFF namespaces unchanged and isolate ON even if device/shape
+        # admission later keeps stock. Never share experimental native state.
+        if precise_gdn_epilogue_requested():
+            parts.append(
+                "qwen4_precise_gdn_epilogue=" + QWEN4_PRECISE_GDN_EPILOGUE_MATH_ABI
+            )
         for flag in (
             "VMLX_QWEN4_GDN_BLOCKED_PREFILL",
             "VMLX_QWEN4_VERIFY_SDPA",

@@ -5,6 +5,24 @@ export interface ToolAutoContinueInput {
   thresholdTokens: number
 }
 
+/** Describe only observed loop/recovery state; do not imply a tool succeeded. */
+export function noVisibleToolAnswerWarning(input: {
+  toolIteration: number
+  maxToolIterations: number
+  recoveryAttempted: boolean
+}): string {
+  if (input.toolIteration >= input.maxToolIterations) {
+    const recovery = input.recoveryAttempted
+      ? 'A direct-answer recovery was attempted.'
+      : 'No direct-answer recovery was attempted.'
+    return `The tool loop reached its iteration limit (${input.maxToolIterations}) without a visible answer. ${recovery}`
+  }
+  if (input.recoveryAttempted) {
+    return 'The tool loop ended without a visible answer after a direct-answer recovery was attempted.'
+  }
+  return 'The tool loop ended without a visible answer before reaching its iteration limit. No direct-answer recovery was attempted.'
+}
+
 interface NamedToolDefinition {
   function: {
     name: string

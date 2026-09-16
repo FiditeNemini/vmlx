@@ -46,6 +46,7 @@ import {
   applyPostToolRequestFields,
   captureToolRequestFields,
   isToolAuthorizedForCurrentTurn,
+  noVisibleToolAnswerWarning,
   requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
@@ -4558,8 +4559,11 @@ export function registerChatHandlers(
           !allGeneratedContent.trim() &&
           !fullContent.trim()
         ) {
-          const noVisibleAnswerWarning =
-            "The tool completed, but the model produced no visible answer after one direct-answer recovery.";
+          const noVisibleAnswerWarning = noVisibleToolAnswerWarning({
+            toolIteration,
+            maxToolIterations: MAX_TOOL_ITERATIONS,
+            recoveryAttempted: finalAnswerRecovery,
+          });
           responseWarnings = Array.from(
             new Set([...(responseWarnings || []), noVisibleAnswerWarning]),
           );

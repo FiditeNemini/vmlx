@@ -5,6 +5,7 @@ import {
   captureToolRequestFields,
   isToolAuthorizedForCurrentTurn,
   isToolNameProvidedForCurrentTurn,
+  noVisibleToolAnswerWarning,
   requiredToolChoiceNamesForCurrentTurn,
   requestedExactFinalToolNames,
   requestedOnceToolNames,
@@ -22,6 +23,51 @@ import {
   toolChoiceForCurrentTurn,
   unavailableRequestedToolNames,
 } from '../src/shared/toolAutoContinue'
+
+describe('no-visible tool answer diagnostic', () => {
+  it('reports the actual ten-iteration ceiling without inventing recovery or tool success', () => {
+    expect(noVisibleToolAnswerWarning({
+      toolIteration: 10,
+      maxToolIterations: 10,
+      recoveryAttempted: false,
+    })).toBe('The tool loop reached its iteration limit (10) without a visible answer. No direct-answer recovery was attempted.')
+  })
+
+  it('reports attempted recovery without claiming it completed or ran exactly once', () => {
+    expect(noVisibleToolAnswerWarning({
+      toolIteration: 1,
+      maxToolIterations: 10,
+      recoveryAttempted: true,
+    })).toBe('The tool loop ended without a visible answer after a direct-answer recovery was attempted.')
+  })
+
+  it('distinguishes early termination without recovery from the ceiling', () => {
+    expect(noVisibleToolAnswerWarning({
+      toolIteration: 1,
+      maxToolIterations: 10,
+      recoveryAttempted: false,
+    })).toBe('The tool loop ended without a visible answer before reaching its iteration limit. No direct-answer recovery was attempted.')
+  })
+
+  it('preserves both facts when recovery was attempted and a custom limit was reached', () => {
+    expect(noVisibleToolAnswerWarning({
+      toolIteration: 3,
+      maxToolIterations: 3,
+      recoveryAttempted: true,
+    })).toBe('The tool loop reached its iteration limit (3) without a visible answer. A direct-answer recovery was attempted.')
+  })
+
+  it('wires observed loop and recovery state into the existing warning/status path', () => {
+    const source = readFileSync('src/main/ipc/chat.ts', 'utf8')
+    const diagnostic = source.indexOf('const noVisibleAnswerWarning = noVisibleToolAnswerWarning({')
+    expect(diagnostic).toBeGreaterThan(-1)
+    expect(source.slice(diagnostic, diagnostic + 240)).toContain('maxToolIterations: MAX_TOOL_ITERATIONS')
+    expect(source.slice(diagnostic, diagnostic + 240)).toContain('recoveryAttempted: finalAnswerRecovery')
+    expect(source).not.toContain('after one direct-answer recovery.')
+    expect(source.slice(diagnostic, diagnostic + 550)).toContain('new Set([...(responseWarnings || []), noVisibleAnswerWarning])')
+    expect(source.slice(diagnostic, diagnostic + 550)).toContain('noVisibleAnswerWarning,')
+  })
+})
 
 describe('tool auto-continue policy', () => {
   it('keeps every completed exactly-once continuation on the cache-stable render', () => {
@@ -722,8 +768,9 @@ describe('tool auto-continue policy', () => {
     expect(source).toContain('applyPostToolRequestFields(obj')
     expect(source).toContain('obj.enable_thinking = false')
     expect(source).toContain(
-      'The tool completed, but the model produced no visible answer after one direct-answer recovery.',
+      'const noVisibleAnswerWarning = noVisibleToolAnswerWarning({',
     )
+    expect(source).toContain('recoveryAttempted: finalAnswerRecovery')
   })
 
   it('preserves the completed tool render before the exact-final follow-up', () => {

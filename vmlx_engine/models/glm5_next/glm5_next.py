@@ -53,11 +53,13 @@ from vmlx_engine.glm5_prefill_policy import glm5_prefill_layer_fence_enabled
 from vmlx_engine.glm5_decode_policy import (
     glm5_compiled_dsa_requested, glm5_exact_moe_requested,
     glm5_kda_lowrank_requested, glm5_router_matvec_requested,
+    glm5_output_norm_requested,
 )
 from vmlx_engine.metal.glm5_kda_lowrank import Glm5KDALowRankGroup
 from vmlx_engine.metal.glm5_compiled_dsa_decode import glm5_compiled_dsa_output
 from vmlx_engine.metal.glm5_exact_moe_decode import glm5_exact_moe_output
 from vmlx_engine.metal.glm5_router_matvec import glm5_router_logits
+from vmlx_engine.metal.glm5_output_norm import glm5_output_norm
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
     affine_moe_routed_output,
@@ -985,6 +987,7 @@ class KDAAttention(nn.Module):
         self.qkv_group = None
         self.lowrank_group = None
         self._fused_gated_norm = fused_gated_rmsnorm_requested()
+        self._exact_output_norm = glm5_output_norm_requested()
         self._fused_kda_conv = fused_kda_conv_requested()
         self._fused_kda_prefill = os.environ.get("VMLX_GLM5_KDA_CONV_PREFILL", "0") == "1"
         self._fused_kda_prefill_observed = False
@@ -1146,14 +1149,17 @@ class KDAAttention(nn.Module):
             else:
                 o, s1 = kda_chunked(q, k, v, g, beta, s0)
             gate = self._output_gate(seg, grouped[1] if grouped is not None else None)
-            gated = sigmoid_gated_rmsnorm_small_rows(
-                o,
-                gate,
-                self.o_norm,
-                self.rms_eps,
-                output_dtype=seg.dtype,
-                enabled=self._fused_gated_norm,
-            )
+            gated = None
+            if self._exact_output_norm and n_confirmed == 0:
+                gated = glm5_output_norm(
+                    o, gate, self.o_norm, self.rms_eps,
+                    output_dtype=seg.dtype, enabled=True, training=self.training,
+                )
+            if gated is None:
+                gated = sigmoid_gated_rmsnorm_small_rows(
+                    o, gate, self.o_norm, self.rms_eps,
+                    output_dtype=seg.dtype, enabled=self._fused_gated_norm,
+                )
             if gated is None:
                 o32 = o.astype(mx.float32)
                 o32 = o32 * mx.rsqrt(

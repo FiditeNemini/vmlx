@@ -577,10 +577,12 @@ def compute_model_cache_key(
             GLM5_EXACT_MOE_MATH_ABI,
             GLM5_KDA_LOWRANK_MATH_ABI,
             GLM5_ROUTER_MATVEC_MATH_ABI,
+            GLM5_OUTPUT_NORM_MATH_ABI,
             glm5_compiled_dsa_requested,
             glm5_exact_moe_requested,
             glm5_kda_lowrank_requested,
             glm5_router_matvec_requested,
+            glm5_output_norm_requested,
         )
         from vmlx_engine.glm5_prefill_policy import (
             GLM5_REGISTER_SUM_MATH_ABI,
@@ -602,6 +604,8 @@ def compute_model_cache_key(
             parts.append("glm5_kda_lowrank_group=" + GLM5_KDA_LOWRANK_MATH_ABI)
         if glm5_router_matvec_requested():
             parts.append("glm5_router_matvec=" + GLM5_ROUTER_MATVEC_MATH_ABI)
+        if glm5_output_norm_requested():
+            parts.append("glm5_output_norm=" + GLM5_OUTPUT_NORM_MATH_ABI)
 
     # DSV4 cache correctness depends on runtime cache shape. Keep these in
     # the model key so L1/L2 prefix cache entries never cross between SWA-only

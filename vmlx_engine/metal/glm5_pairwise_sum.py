@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in exact GLM KDA pairwise row reduction without a product buffer.
+"""Qualified GLM KDA pairwise row reduction without a product buffer.
 
 The qualified MLX 0.32.2 width-128 contiguous sum uses 32 lanes, four
 consecutive elements per lane, initial +0, product + accumulator, then
 simd_sum. Preserve that tree and separate FP32 product rounding. This only
 replaces bulk-prefill pairwise sums, not recurrence, chunking, or cache state.
 Unsupported runtimes/shapes and first-launch failures retain the stock path.
+Automatic use is M5 Max/MLX0.32.2/B1; other existing opt-in shapes remain
+experimental. Selection policy lives in glm5_prefill_policy and the caller.
 """
 
 from functools import lru_cache

@@ -111,17 +111,79 @@ def test_first_launch_failure_disables_candidate_and_preserves_stock(qualified, 
     exact(kda._pairwise_sum(x, x, x), mx.full((1, 2, 64, 64), 128.0))
 
 
-def test_policy_off_and_namespace_isolation_glm_only(monkeypatch):
+@pytest.mark.parametrize("qualified_runtime", [False, True])
+def test_policy_qualified_default_and_namespace_isolation_glm_only(monkeypatch, qualified_runtime):
+    from vmlx_engine import glm5_prefill_policy as policy
     from vmlx_engine.glm5_prefill_policy import glm5_register_pairwise_sum_requested
     from vmlx_engine.prefix_cache import compute_model_cache_key
+    monkeypatch.setattr(policy, "_register_sum_default_qualified", lambda: qualified_runtime)
     monkeypatch.delenv("VMLX_GLM5_REGISTER_PAIRWISE_SUM", raising=False)
-    assert glm5_register_pairwise_sum_requested() is False
+    assert glm5_register_pairwise_sum_requested() is qualified_runtime
     for family in ("glm5_next", "glm5_next_text", "qwen4_exp", "qwen3_5"):
         model = SimpleNamespace(args=SimpleNamespace(model_type=family))
         monkeypatch.delenv("VMLX_GLM5_REGISTER_PAIRWISE_SUM", raising=False)
         default = compute_model_cache_key(model)
         monkeypatch.setenv("VMLX_GLM5_REGISTER_PAIRWISE_SUM", "0")
-        assert compute_model_cache_key(model) == default
+        off = compute_model_cache_key(model)
+        assert (off != default) == (qualified_runtime and family.startswith("glm5_next"))
         monkeypatch.setenv("VMLX_GLM5_REGISTER_PAIRWISE_SUM", "1")
         assert glm5_register_pairwise_sum_requested() is True
-        assert (compute_model_cache_key(model) != default) == family.startswith("glm5_next")
+        on = compute_model_cache_key(model)
+        assert (on != off) == family.startswith("glm5_next")
+        assert default == (on if qualified_runtime else off)
+
+
+@pytest.mark.parametrize("value", ["0", "false", "off", "", "auto", "2"])
+def test_explicit_non_one_preserves_disable(monkeypatch, value):
+    from vmlx_engine import glm5_prefill_policy as policy
+    monkeypatch.setattr(policy, "_register_sum_default_qualified", lambda: True)
+    monkeypatch.setenv("VMLX_GLM5_REGISTER_PAIRWISE_SUM", value)
+    assert not policy.glm5_register_pairwise_sum_requested()
+
+
+@pytest.mark.parametrize("device,version,available,expected", [
+    ("Apple M5 Max", "0.32.2", True, True),
+    ("Apple M5 Pro", "0.32.2", True, False),
+    ("Apple M3 Ultra", "0.32.2", True, False),
+    ("Apple M5 Max", "0.32.3", True, False),
+    ("Apple M5 Max", "0.32.2", False, False),
+])
+def test_automatic_runtime_qualification(monkeypatch, device, version, available, expected):
+    import importlib.metadata
+    from vmlx_engine import glm5_prefill_policy as policy
+    policy._register_sum_default_qualified.cache_clear()
+    monkeypatch.setattr(importlib.metadata, "version", lambda _: version)
+    monkeypatch.setattr(mx, "device_info", lambda: {"device_name": device})
+    monkeypatch.setattr(mx.metal, "is_available", lambda: available)
+    try:
+        assert policy._register_sum_default_qualified() is expected
+    finally:
+        policy._register_sum_default_qualified.cache_clear()
+
+
+def test_automatic_runtime_lookup_failure_keeps_stock(monkeypatch):
+    from vmlx_engine import glm5_prefill_policy as policy
+    policy._register_sum_default_qualified.cache_clear()
+    def unavailable():
+        raise RuntimeError("controlled unavailable GPU")
+    monkeypatch.setattr(mx.metal, "is_available", unavailable)
+    try:
+        assert not policy._register_sum_default_qualified()
+    finally:
+        policy._register_sum_default_qualified.cache_clear()
+
+
+@pytest.mark.parametrize("batch,explicit,expected", [(1, False, True), (2, False, False), (2, True, True)])
+def test_automatic_selection_does_not_promote_batched_prefill(monkeypatch, batch, explicit, expected):
+    observed = []
+    def selection(left, right, gates, *, enabled):
+        observed.append(enabled)
+        return None
+    monkeypatch.setattr(kda, "glm5_pairwise_sum", selection)
+    monkeypatch.setattr(kda, "_REGISTER_PAIRWISE_REQUESTED", True)
+    monkeypatch.setattr(kda, "_REGISTER_PAIRWISE_EXPLICIT", explicit)
+    monkeypatch.setattr(kda, "_EXACT_PAIRWISE_REQUESTED", False)
+    x = mx.ones((batch, 1, 64, 128))
+    # Fallback is the actual native expression, not an invented result.
+    exact(kda._pairwise_sum(x, x, x), mx.full((batch, 1, 64, 64), 128.0))
+    assert observed == [expected]

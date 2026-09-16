@@ -38,6 +38,7 @@ from vmlx_engine.metal.glm5_pairwise_sum import glm5_pairwise_sum
 _LOGGER = logging.getLogger(__name__)
 _EXACT_PAIRWISE_OBSERVED = False
 _REGISTER_PAIRWISE_REQUESTED = glm5_register_pairwise_sum_requested()
+_REGISTER_PAIRWISE_EXPLICIT = os.environ.get("VMLX_GLM5_REGISTER_PAIRWISE_SUM") == "1"
 _EXACT_PAIRWISE_REQUESTED = os.environ.get(
     "VMLX_GLM5_EXACT_PAIRWISE_BUFFER", "0"
 ).strip().lower() not in {"", "0", "false", "off", "no"}
@@ -131,7 +132,11 @@ def _exact_pairwise_product(
 
 def _pairwise_sum(left, right, gates):
     reduced = glm5_pairwise_sum(
-        left, right, gates, enabled=_REGISTER_PAIRWISE_REQUESTED
+        left, right, gates,
+        # Automatic adoption is B1 only. Wider batches remain an explicit
+        # experiment; the kernel independently validates every operand.
+        enabled=_REGISTER_PAIRWISE_REQUESTED
+        and (_REGISTER_PAIRWISE_EXPLICIT or left.shape[0] == 1),
     )
     if reduced is not None:
         return reduced

@@ -493,8 +493,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     continuousBatching: effectiveContinuousBatching,
     enablePrefixCache: effectivePrefixCacheEnabled,
     usePagedCache: exactTypedPromptDiskCache ? false : config.usePagedCache,
-    enableDiskCache: dsv4Active ? false : diskControls.enableDiskCache,
-    enableBlockDiskCache: exactTypedPromptDiskCache ? false : diskControls.enableBlockDiskCache,
+    enableDiskCache: dsv4Active ? false : !!diskControls.enableDiskCache,
+    enableBlockDiskCache: exactTypedPromptDiskCache ? false : !!diskControls.enableBlockDiskCache,
     architectureRequiresPagedCache,
     architectureSupportsBlockDiskOnly: architectureBlockDiskOnlySupported,
   }

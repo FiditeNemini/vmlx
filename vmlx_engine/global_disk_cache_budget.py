@@ -668,6 +668,29 @@ class GlobalDiskCacheBudget:
                 self._accounting_path().unlink()
             return None
 
+    def cache_contents_revision_locked(self) -> tuple[int, int, int] | None:
+        """Return a shared invalidation token under a caller's mutation guard.
+
+        Native checkpoint discovery caches sidecar metadata in memory. Local
+        writer callbacks cannot tell that index about another writer, global
+        eviction or Clear. The shared ledger advances on finalized writes and
+        physical reconciliation, including same-size replacements and deletes.
+        Its scan timestamp also distinguishes a reset/rebuilt ledger.
+
+        This is not a content digest or HIT attestation. Callers must hold the
+        same shared/exclusive root guard while reading this token and deriving
+        their index; do not acquire refresh_health's exclusive lock inside it.
+        A missing/invalid ledger must not certify an old index as current.
+        """
+        state = self._read_accounting_locked()
+        if state is None:
+            return None
+        return (
+            state["accounting_generation"],
+            state["reconciliation_generation"],
+            state["reconciled_at_ns"],
+        )
+
     def _write_accounting_locked(self, state: dict[str, int]) -> None:
         temp = self.root / (
             f"{_ACCOUNTING_NAME}.{os.getpid()}.{threading.get_ident()}."

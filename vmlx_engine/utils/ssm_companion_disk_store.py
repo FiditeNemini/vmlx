@@ -194,6 +194,7 @@ class SSMCompanionDiskStore:
         # tiny metadata index to discover shorter on-disk checkpoints when the
         # block cache selected a longer shared prefix.
         self._token_lengths: Optional[set[int]] = None
+        self._token_lengths_revision: Optional[Tuple[int, int, int]] = None
         self._candidate_scans = 0
         self._max_pending_write_bytes = (
             max(1, int(max_pending_write_bytes))
@@ -713,8 +714,15 @@ class SSMCompanionDiskStore:
                         self._latest_write_by_key.pop(oldest_key, None)
                     if ok:
                         self._stores += 1
-                        if self._token_lengths is not None:
+                        if (
+                            self._global_budget is None
+                            and self._token_lengths is not None
+                        ):
                             self._token_lengths.add(int(num_tokens))
+                        # Managed indexes are derived under the root guard
+                        # from the shared ledger revision. Mutating that set
+                        # here would race its scanner and miss other writers
+                        # or entries the aggregate pool removed meanwhile.
                     else:
                         self._write_failures += 1
                     self._write_condition.notify_all()
@@ -1099,8 +1107,17 @@ class SSMCompanionDiskStore:
             with guard as locked:
                 if not locked:
                     return []
+                revision = None
+                if self._global_budget is not None:
+                    try:
+                        revision = self._global_budget.cache_contents_revision_locked()
+                    except OSError as exc:
+                        logger.debug("SSM candidate index revision unavailable: %s", exc)
+                    if revision is None or revision != self._token_lengths_revision:
+                        self._token_lengths = None
                 if self._token_lengths is None:
                     lengths: set[int] = set()
+                    scan_complete = True
                     current_runtime = _runtime_cache_fingerprint()
                     try:
                         for sub in self._dir.iterdir() if self._dir.exists() else []:
@@ -1119,8 +1136,10 @@ class SSMCompanionDiskStore:
                                     if metadata.get("runtime_cache_fingerprint") != current_runtime:
                                         continue
                                     num_tokens = int(metadata.get("num_tokens") or 0)
+                                except OSError:
+                                    scan_complete = False
+                                    continue
                                 except (
-                                    OSError,
                                     TypeError,
                                     ValueError,
                                     json.JSONDecodeError,
@@ -1129,10 +1148,16 @@ class SSMCompanionDiskStore:
                                 if num_tokens > 0:
                                     lengths.add(num_tokens)
                     except OSError:
-                        pass
-                    self._token_lengths = lengths
+                        scan_complete = False
+                    # An I/O failure is not evidence that a boundary is
+                    # absent. Use any discovered lengths for this lookup,
+                    # but retry on the next one even if the ledger is stable.
+                    self._token_lengths = lengths if scan_complete else None
+                    self._token_lengths_revision = revision if scan_complete else None
                     with self._stats_lock:
                         self._candidate_scans += 1
+                    if not scan_complete:
+                        return sorted((n for n in lengths if n <= max_len), reverse=True)
                 return sorted(
                     (n for n in self._token_lengths if n <= max_len),
                     reverse=True,

@@ -107,6 +107,7 @@ import {
   usesExactTypedPromptDiskCache,
   usesGlmNativeSsdPool,
   resolveGlmDiskCacheControls,
+  resolveGlmConcurrencyControls,
 } from '../shared/detectedFamilyNames'
 import { cacheTypeRequiresPaged } from '../shared/cacheTypeCapabilities'
 import {
@@ -5117,14 +5118,15 @@ export class SessionManager extends EventEmitter {
     // Concurrent processing
     // When value is 0 ("No limit" in UI), omit the flag so backend uses its default.
     // When value > 0, pass it explicitly to override the backend default.
-    const effectiveMaxNumSeqs = dsv4Active ? 1 : finitePositiveInteger(config.maxNumSeqs)
+    const concurrency = resolveGlmConcurrencyControls(detectedFamily, config)
+    const effectiveMaxNumSeqs = dsv4Active ? 1 : finitePositiveInteger(concurrency.maxNumSeqs)
     if (dsv4Active && config.maxNumSeqs && config.maxNumSeqs !== 1) {
       console.log(`[SESSION] DSV4-Flash detected: overriding maxNumSeqs ${config.maxNumSeqs} -> 1 (DSV4BatchGenerator is single-batch only)`)
     }
     if (effectiveMaxNumSeqs && effectiveMaxNumSeqs > 0) {
       args.push('--max-num-seqs', effectiveMaxNumSeqs.toString())
     }
-    const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)
+    const prefillBatchSize = finitePositiveInteger(concurrency.prefillBatchSize)
     if (!dsv4Active && prefillBatchSize != null) {
       args.push('--prefill-batch-size', prefillBatchSize.toString())
     }
@@ -5135,7 +5137,7 @@ export class SessionManager extends EventEmitter {
     if (prefillStepSize != null) {
       args.push('--prefill-step-size', prefillStepSize.toString())
     }
-    const completionBatchSize = finitePositiveInteger(config.completionBatchSize)
+    const completionBatchSize = finitePositiveInteger(concurrency.completionBatchSize)
     if (!dsv4Active && completionBatchSize != null) {
       args.push('--completion-batch-size', completionBatchSize.toString())
     }

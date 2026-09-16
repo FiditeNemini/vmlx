@@ -24,6 +24,8 @@ import {
   usesExactTypedPromptDiskCache,
   usesGlmNativeSsdPool,
   resolveGlmDiskCacheControls,
+  isGlmSingleActiveFamily,
+  resolveGlmConcurrencyControls,
 } from '../../../../shared/detectedFamilyNames'
 import { isRuntimeVideoCapable } from '../../../../shared/videoCapableFamilies'
 import { computeEffectiveJit, isJitSuppressedByRuntime, resolveRequestedJit } from '../../../../shared/jitPolicy'
@@ -399,6 +401,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
     resolveEffectiveModelFamily(config.modelFamily, normalizedDetectedFamily),
   )
   const dsv4Active = normalizedEffectiveFamily === 'deepseek-v4'
+  const glmSingleActive = isGlmSingleActiveFamily(normalizedDetectedFamily)
+  const singleActiveControls = dsv4Active || glmSingleActive
   const m3Active = normalizedDetectedFamily === 'minimax_m3'
   const hy3Active = normalizedDetectedFamily === 'hy_v3' || normalizedDetectedFamily === 'hy3'
   const openPanguExactTypedCache = normalizedDetectedFamily === 'openpangu_v2'
@@ -547,9 +551,10 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
                   : t('sessions.config.codecQwenHybrid')
               : t('sessions.config.codecEngineNative')
   const liveCacheCodecBadge = 'NATIVE · GENERIC TQ OFF'
-  const effectiveMaxNumSeqs = dsv4Active ? 1 : config.maxNumSeqs
-  const effectivePrefillBatchSize = dsv4Active ? 1 : config.prefillBatchSize
-  const effectiveCompletionBatchSize = dsv4Active ? 1 : config.completionBatchSize
+  const concurrency = resolveGlmConcurrencyControls(normalizedDetectedFamily, config)
+  const effectiveMaxNumSeqs = dsv4Active ? 1 : concurrency.maxNumSeqs!
+  const effectivePrefillBatchSize = dsv4Active ? 1 : concurrency.prefillBatchSize!
+  const effectiveCompletionBatchSize = dsv4Active ? 1 : concurrency.completionBatchSize!
   const detectedRuntimeVideoCapable = isRuntimeVideoCapable({
     normalizedFamily: normalizedDetectedFamily,
     runtimeModalities: detectedRuntimeModalities,
@@ -799,8 +804,8 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
 
       <Section title={t('sessions.config.concurrentProcessing')} sectionKey="concurrent" expanded={expandedSections.concurrent} onToggle={() => toggleSection('concurrent')} hidden={isImage}>
         <div className="flex items-center gap-2 mb-2">
-          {!dsv4Active && <PerformanceHint text={t('sessions.config.concurrentHint')} />}
-          {!dsv4Active && (
+          {!singleActiveControls && <PerformanceHint text={t('sessions.config.concurrentHint')} />}
+          {!singleActiveControls && (
             <button
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); setShowCachingHelp(true) }}
               className="w-6 h-6 flex items-center justify-center rounded-full bg-accent/50 text-accent-foreground hover:bg-accent hover:text-white transition-colors text-xs font-bold"
@@ -810,6 +815,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
             </button>
           )}
         </div>
+        {glmSingleActive && <InfoNote text={t('sessions.config.glmSequentialQueueNote')} />}
         <SliderField settingKey="maxNumSeqs"
           label={t('sessions.config.maxConcurrentSequences')}
           tooltip={t('sessions.config.maxConcurrentSequencesTooltip')}
@@ -822,7 +828,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           allowUnlimited
           unlimitedValue={0}
           unlimitedLabel={t('sessions.config.defaultWithValue', { n: 1 })}
-          disabled={dsv4Active}
+          disabled={singleActiveControls}
         />
         <SliderField settingKey="prefillBatchSize"
           label={t('sessions.config.prefillBatchSize')}
@@ -836,7 +842,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           allowUnlimited
           unlimitedValue={0}
           unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}
-          disabled={dsv4Active}
+          disabled={singleActiveControls}
         />
         <SliderField settingKey="prefillStepSize"
           label={t('sessions.config.prefillStepSize')}
@@ -864,7 +870,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           allowUnlimited
           unlimitedValue={0}
           unlimitedLabel={t('sessions.config.defaultWithValue', { n: 512 })}
-          disabled={dsv4Active}
+          disabled={singleActiveControls}
         />
         <CheckField
           label={t('sessions.config.smeltMode')}
@@ -943,7 +949,7 @@ export function SessionConfigForm({ config, onChange, onReset, detectedCacheType
           onChange={v => onChange('continuousBatching', v)}
           disabled={dsv4Active}
         />
-        {!dsv4Active && <PerformanceHint text={t('sessions.config.continuousBatchingHint')} />}
+        {!singleActiveControls && <PerformanceHint text={t('sessions.config.continuousBatchingHint')} />}
         {dsv4Active && <InfoNote text={t('sessions.config.dsv4BatchPathNote')} />}
         {!effectiveContinuousBatching && effectivePrefixCacheEnabled && (
           <InfoNote text={t('sessions.config.cacheFlagsOmittedNote')} />

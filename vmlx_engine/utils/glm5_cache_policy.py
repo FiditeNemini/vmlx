@@ -5,6 +5,14 @@ import os
 GLM5_MLA_CAPACITY_TOKENS = 2048
 
 
+def glm5_single_active_required(model) -> bool:
+    """The vendored GLM sparse path is B1-only, independently of SSD policy."""
+    config = getattr(model, "config", None)
+    model_type = (config.get("model_type") if isinstance(config, dict)
+                  else getattr(config, "model_type", None))
+    return isinstance(model_type, str) and model_type in {"glm5_next", "glm5_next_text"}
+
+
 def glm5_native_ssd_requested(model) -> bool:
     """Select native MLLM storage without probing unrelated model families.
 
@@ -15,10 +23,7 @@ def glm5_native_ssd_requested(model) -> bool:
     value = os.environ.get("VMLX_GLM5_NATIVE_SSD")
     if value is not None:
         return value == "1"
-    config = getattr(model, "config", None)
-    model_type = (config.get("model_type") if isinstance(config, dict)
-                  else getattr(config, "model_type", None))
-    return isinstance(model_type, str) and model_type in {"glm5_next", "glm5_next_text"}
+    return glm5_single_active_required(model)
 
 
 def glm5_native_media_ssd_enabled() -> bool:

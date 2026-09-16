@@ -28,6 +28,7 @@ import {
   usesExactTypedPromptDiskCache,
   usesGlmNativeSsdPool,
   resolveGlmDiskCacheControls,
+  resolveGlmConcurrencyControls,
 } from '../../../../shared/detectedFamilyNames'
 import {
   applyBundleDsv4PoolQuantToSessionConfig,
@@ -364,13 +365,14 @@ function buildCommandPreview(
   if (rateLimit != null) parts.push('--rate-limit', rateLimit.toString())
 
   // Concurrent processing
-  const effectiveMaxNumSeqs = dsv4Active ? 1 : finitePositiveInteger(config.maxNumSeqs)
+  const concurrency = resolveGlmConcurrencyControls(detectedFamily, config)
+  const effectiveMaxNumSeqs = dsv4Active ? 1 : finitePositiveInteger(concurrency.maxNumSeqs)
   if (effectiveMaxNumSeqs && effectiveMaxNumSeqs > 0) parts.push('--max-num-seqs', effectiveMaxNumSeqs.toString())
-  const prefillBatchSize = finitePositiveInteger(config.prefillBatchSize)
+  const prefillBatchSize = finitePositiveInteger(concurrency.prefillBatchSize)
   if (!dsv4Active && prefillBatchSize != null) parts.push('--prefill-batch-size', prefillBatchSize.toString())
   const prefillStepSize = finitePositiveInteger(config.prefillStepSize)
   if (prefillStepSize != null) parts.push('--prefill-step-size', prefillStepSize.toString())
-  const completionBatchSize = finitePositiveInteger(config.completionBatchSize)
+  const completionBatchSize = finitePositiveInteger(concurrency.completionBatchSize)
   if (!dsv4Active && completionBatchSize != null) parts.push('--completion-batch-size', completionBatchSize.toString())
 
   if (isVLM) parts.push('--is-mllm')

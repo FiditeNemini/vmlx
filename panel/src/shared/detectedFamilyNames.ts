@@ -52,6 +52,22 @@ export function normalizeDetectedFamilyName(family?: string): string | undefined
   return ENGINE_FAMILY_TO_REGISTRY[family] ?? family
 }
 
+/** Native GLM serves concurrent clients through a single-active queue, not B2. */
+export function isGlmSingleActiveFamily(family?: string): boolean {
+  return normalizeDetectedFamilyName(family) === 'glm5-next'
+}
+
+/** Effective launch/display values only; never rewrite the user's saved config. */
+export function resolveGlmConcurrencyControls(
+  family: string | undefined,
+  config: { maxNumSeqs?: number; prefillBatchSize?: number; completionBatchSize?: number },
+): { maxNumSeqs?: number; prefillBatchSize?: number; completionBatchSize?: number } {
+  return isGlmSingleActiveFamily(family)
+    ? { maxNumSeqs: 1, prefillBatchSize: 1, completionBatchSize: 1 }
+    : { maxNumSeqs: config.maxNumSeqs, prefillBatchSize: config.prefillBatchSize,
+        completionBatchSize: config.completionBatchSize }
+}
+
 /**
  * ZAYA's CCA cache is path-dependent, so several settings surfaces gate on it.
  * Always ask through the normalizer — the engine spells the VL variant

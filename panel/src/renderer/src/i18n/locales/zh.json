@@ -766,6 +766,7 @@
       "logLevelTooltip": "控制服务器日志的详细程度。DEBUG 显示所有内容（非常冗长）。INFO 为默认值。WARNING 和 ERROR 仅保留重要消息。",
       "corsOriginsTooltip": "允许跨域 API 请求（来自网页浏览器）的来源。使用 * 允许所有来源，或用逗号分隔列出特定来源（例如 http://localhost:3000,https://myapp.com）。仅在外部 Web 应用调用 API 时才有意义。",
       "concurrentHint": "控制服务器同时处理的请求数量。保持连续批处理开启以启用缓存引擎。",
+      "glmSequentialQueueNote": "GLM-5.3 在文本和多模态模式下每次只运行一个请求。其他请求在顺序队列中等待，并非模型同时批处理多个请求。最大序列数、预填充批大小和生成批大小的有效值均为 1。已保存的设置保持不变，预填充分块大小仍可调整。",
       "maxConcurrentSequences": "最大并发序列数",
       "maxConcurrentSequencesTooltip": "可同时处理的最大序列（请求）数。值越高可支持越多并行用户，但消耗更多内存。单用户本地使用 1-4 即可。多用户服务器视可用 RAM 设置 16-256。",
       "defaultWithValue": "默认 ({n})",

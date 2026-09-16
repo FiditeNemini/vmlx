@@ -766,6 +766,7 @@
       "logLevelTooltip": "Controls how much detail the server logs. DEBUG shows everything (very verbose). INFO is the default. WARNING and ERROR reduce noise to only important messages.",
       "corsOriginsTooltip": "Allowed origins for cross-origin API requests (from web browsers). Use * to allow all origins, or a comma-separated list of specific origins (e.g. http://localhost:3000,https://myapp.com). Only matters when external web apps call your API.",
       "concurrentHint": "Controls how many requests your server handles at once. Keep Continuous Batching ON to enable the caching engine.",
+      "glmSequentialQueueNote": "GLM-5.3 runs one active request at a time in text and multimodal modes. Additional requests wait in a sequential queue; this is not multi-request model batching. Maximum sequences, prefill batch size and completion batch size are effectively 1. Your saved values are preserved; prefill chunk size remains adjustable.",
       "maxConcurrentSequences": "Max Concurrent Sequences",
       "maxConcurrentSequencesTooltip": "Maximum number of sequences (requests) that can be processed simultaneously. Higher values allow more parallel users but consume more memory. For single-user local use, 1-4 is sufficient. For multi-user servers, 16-256 depending on available RAM.",
       "defaultWithValue": "Default ({n})",

@@ -680,6 +680,30 @@ class MLLMScheduler:
 
         # Detect hybrid models (mixed KVCache + MambaCache layers)
         lang_model = self.model.language_model if hasattr(self.model, "language_model") else self.model
+        # Match the text scheduler's existing GLM contract BEFORE checking SSD
+        # eligibility. Sparse DSA and native KDA/MLA state are single-active;
+        # larger client concurrency must queue, not disable SSD then enter the
+        # generic ArraysCache batching path. A storage opt-out is not a safety
+        # opt-out. Keep the requested values visible in runtime statistics.
+        from .utils.glm5_cache_policy import glm5_single_active_required
+
+        self._batch_admission_policy = None
+        if glm5_single_active_required(lang_model):
+            fields = ("max_num_seqs", "prefill_batch_size", "completion_batch_size")
+            requested = {name: getattr(self.config, name) for name in fields}
+            for name in fields:
+                setattr(self.config, name, 1)
+            self._batch_admission_policy = {
+                "policy": "glm5_native_single_active",
+                "requested": requested,
+                "effective": {name: 1 for name in fields},
+                "concurrent_clients": "queued",
+            }
+            logger.info(
+                "GLM native sparse/KDA runtime admits one active sequence; "
+                "concurrent clients queue serially (requested=%s effective=1). "
+                "Prefill step size is unchanged.", requested,
+            )
         # This is an observed runtime contract, not a family/config guess.
         # False proves the DSV4 terminal validator can be skipped; None keeps
         # BlockAwarePrefixCache fail-closed when make_cache() is unavailable.
@@ -5863,6 +5887,7 @@ class MLLMScheduler:
                 **self.get_request_lifecycle_stats(),
                 "num_finished": len(self.finished_req_ids),
                 "num_requests_processed": self.num_requests_processed,
+                "batch_admission": getattr(self, "_batch_admission_policy", None),
                 "total_prompt_tokens": self.total_prompt_tokens,
                 "total_completion_tokens": self.total_completion_tokens,
                 "cache_hit_requests": self._cache_hit_requests,

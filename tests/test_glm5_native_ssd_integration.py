@@ -44,10 +44,55 @@ def tiny_processor():
     return SimpleNamespace(tokenizer=SimpleNamespace(eos_token_id=0, eos_token_ids={0}))
 
 
+@pytest.mark.parametrize("ssd_flag", ["0", "1"])
+@pytest.mark.parametrize("prefix_enabled", [False, True])
+def test_glm_single_active_admission_is_independent_of_storage(
+    tmp_path, monkeypatch, ssd_flag, prefix_enabled,
+):
+    monkeypatch.setenv("VMLX_GLM5_NATIVE_SSD", ssd_flag)
+    config = MLLMSchedulerConfig(
+        max_num_seqs=2, prefill_batch_size=8, completion_batch_size=8,
+        prefill_step_size=256, enable_prefix_cache=prefix_enabled,
+        enable_block_disk_cache=True, use_paged_cache=False,
+        block_disk_cache_dir=str(tmp_path / "ssd"), block_disk_cache_max_gb=0.01,
+    )
+    scheduler = MLLMScheduler(tiny_model(), tiny_processor(), config)
+    try:
+        assert scheduler.config.max_num_seqs == 1
+        assert scheduler.config.prefill_batch_size == 1
+        assert scheduler.config.completion_batch_size == 1
+        assert scheduler.config.prefill_step_size == 256
+        assert (scheduler.native_glm_cache is not None) == (ssd_flag == "1" and prefix_enabled)
+        policy = scheduler.get_stats()["batch_admission"]
+        assert policy["requested"] == {"max_num_seqs": 2, "prefill_batch_size": 8, "completion_batch_size": 8}
+        assert policy["effective"] == {"max_num_seqs": 1, "prefill_batch_size": 1, "completion_batch_size": 1}
+        assert policy["concurrent_clients"] == "queued"
+    finally:
+        asyncio.run(scheduler.stop())
+
+
+@pytest.mark.parametrize("family", ["qwen4_exp", "qwen3_5", "gemma4"])
+def test_glm_admission_does_not_override_other_families(family, monkeypatch):
+    from mlx_lm.models.cache import KVCache
+
+    monkeypatch.delenv("VMLX_GLM5_NATIVE_SSD", raising=False)
+    language = SimpleNamespace(config=SimpleNamespace(model_type=family), make_cache=lambda: [KVCache()])
+    scheduler = MLLMScheduler(
+        SimpleNamespace(language_model=language, config=language.config), tiny_processor(),
+        MLLMSchedulerConfig(max_num_seqs=2, prefill_batch_size=8, completion_batch_size=8,
+                            enable_prefix_cache=False),
+    )
+    try:
+        assert (scheduler.config.max_num_seqs, scheduler.config.prefill_batch_size,
+                scheduler.config.completion_batch_size) == (2, 8, 8)
+    finally:
+        asyncio.run(scheduler.stop())
+
+
 @pytest.mark.parametrize("override,eligible", [
     ({}, True), ({"enable_prefix_cache": False}, False),
     ({"enable_block_disk_cache": False}, False),
-    ({"use_paged_cache": True}, False), ({"max_num_seqs": 2}, False),
+    ({"use_paged_cache": True}, False), ({"max_num_seqs": 2}, True),
 ])
 @pytest.mark.parametrize("flag", [None, "1"], ids=["normal", "explicit"])
 def test_scheduler_admits_only_ssd_single_native_layout(tmp_path, monkeypatch, override, eligible, flag):

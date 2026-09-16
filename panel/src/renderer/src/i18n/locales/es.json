@@ -766,6 +766,7 @@
       "logLevelTooltip": "Controla el nivel de detalle de los registros del servidor. DEBUG muestra todo (muy detallado). INFO es el valor predeterminado. WARNING y ERROR reducen el ruido a solo mensajes importantes.",
       "corsOriginsTooltip": "Orígenes permitidos para solicitudes API de origen cruzado (desde navegadores web). Use * para permitir todos los orígenes, o una lista separada por comas de orígenes específicos (p. ej., http://localhost:3000,https://myapp.com). Solo importa cuando aplicaciones web externas llaman a su API.",
       "concurrentHint": "Controla cuántas solicitudes maneja su servidor a la vez. Mantenga el Procesamiento por lotes continuo activado para habilitar el motor de caché.",
+      "glmSequentialQueueNote": "GLM-5.3 procesa una solicitud activa a la vez en modo texto y multimodal. Las demás esperan en una cola secuencial; no se agrupan varias solicitudes en el modelo. El máximo de secuencias y los tamaños de lote de prefill y finalización son efectivamente 1. Se conservan sus valores guardados; el tamaño del segmento de prefill sigue siendo ajustable.",
       "maxConcurrentSequences": "Máx. de secuencias concurrentes",
       "maxConcurrentSequencesTooltip": "Número máximo de secuencias (solicitudes) que se pueden procesar simultáneamente. Valores más altos permiten más usuarios en paralelo pero consumen más memoria. Para uso local de un solo usuario, 1-4 es suficiente. Para servidores multiusuario, 16-256 según la RAM disponible.",
       "defaultWithValue": "Predeterminado ({n})",

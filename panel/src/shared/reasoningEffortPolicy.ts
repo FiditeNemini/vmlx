@@ -136,6 +136,9 @@ export function applyReasoningRequestFields(
   if (!input.isRemote && input.detectedFamily !== 'deepseek-v4') {
     if (body.enable_thinking === false) body.thinking_mode = 'instruct'
     else if (body.enable_thinking === true && effort === 'max') body.thinking_mode = 'max'
-    else if (body.enable_thinking === true) body.thinking_mode = 'reasoning'
+    // On with model-default effort must leave the tier absent. The legacy
+    // `reasoning` alias otherwise inserts medium during API validation,
+    // overriding the bundle's native default even though no tier was chosen.
+    else if (body.enable_thinking === true && effort) body.thinking_mode = 'reasoning'
   }
 }

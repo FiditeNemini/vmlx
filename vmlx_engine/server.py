@@ -13390,6 +13390,25 @@ def _live_mllm_request_lifecycle_snapshot(
     )
 
 
+def _scheduler_single_active_admission(stats: dict[str, Any]) -> bool:
+    """Report enforced GLM admission without changing generator telemetry.
+
+    Policy ``requested`` values are scheduler inputs, not saved UI preferences.
+    Other families continue to use their existing generator signal.
+    """
+    policy = stats.get("batch_admission")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("policy") != "glm5_native_single_active"
+    ):
+        return False
+    effective = policy.get("effective")
+    return isinstance(effective, dict) and all(
+        type(effective.get(name)) is int and effective[name] == 1
+        for name in ("max_num_seqs", "prefill_batch_size", "completion_batch_size")
+    )
+
+
 def _health_status_value() -> str:
     if _standby_state:
         return f"standby_{_standby_state}"  # "standby_soft" or "standby_deep"
@@ -13655,9 +13674,11 @@ async def health():
             "num_running": scheduler_stats.get("num_running", 0),
             "engine_path": scheduler_stats.get("engine_path"),
             "batch_generator": scheduler_stats.get("batch_generator", {}),
+            "batch_admission": scheduler_stats.get("batch_admission"),
             "single_active_decode": (
                 scheduler_stats.get("batch_generator", {}) or {}
-            ).get("single_active_decode", False),
+            ).get("single_active_decode", False)
+            or _scheduler_single_active_admission(scheduler_stats),
             "ewma_ttft_seconds": scheduler_stats.get("ewma_ttft_seconds", 0),
             "cache_hit_requests": scheduler_stats.get("cache_hit_requests", 0),
             "cache_hit_tokens": scheduler_stats.get("cache_hit_tokens", 0),
@@ -14290,9 +14311,11 @@ async def cache_stats():
             "num_running": stats.get("num_running", 0),
             "engine_path": stats.get("engine_path"),
             "batch_generator": stats.get("batch_generator", {}),
+            "batch_admission": stats.get("batch_admission"),
             "single_active_decode": (
                 stats.get("batch_generator", {}) or {}
-            ).get("single_active_decode", False),
+            ).get("single_active_decode", False)
+            or _scheduler_single_active_admission(stats),
             "num_requests_processed": stats.get("num_requests_processed", 0),
             "total_prompt_tokens": stats.get("total_prompt_tokens", 0),
             "total_completion_tokens": stats.get("total_completion_tokens", 0),

@@ -17512,6 +17512,25 @@ async def ollama_show(fastapi_request: Request):
     }
 
 
+def _ollama_returned_error_response(result):
+    """Keep a returned Chat rejection out of the Ollama success converters."""
+    if not hasattr(result, "body") or int(getattr(result, "status_code", 200) or 200) < 400:
+        return None
+    try:
+        error = json.loads(result.body).get("error")
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        error = None
+    if isinstance(error, dict):
+        message = error.get("message") or error.get("type") or "request rejected"
+        code = error.get("code")
+        message = f"{code}: {message}" if code and str(code) not in str(message) else message
+    else:
+        message = str(error or "request rejected")
+    from starlette.responses import JSONResponse
+
+    return JSONResponse(status_code=int(result.status_code), content={"error": message})
+
+
 @app.post(
     "/api/chat",
     dependencies=[
@@ -17555,23 +17574,9 @@ async def ollama_chat(fastapi_request: Request):
     if not is_streaming:
         _ollama_started_ns = time.perf_counter_ns()
         result = await create_chat_completion(chat_req, fastapi_request)
-        # A typed rejection from the chat handler (4xx JSONResponse) keeps
-        # its status on the Ollama door as Ollama's {"error": "..."} row;
-        # live it was flattened into an empty 200 answer.
-        if hasattr(result, "body") and int(getattr(result, "status_code", 200) or 200) >= 400:
-            try:
-                _err = json.loads(result.body).get("error")
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                _err = None
-            if isinstance(_err, dict):
-                _msg = _err.get("message") or _err.get("type") or "request rejected"
-                _code = _err.get("code")
-                _msg = f"{_code}: {_msg}" if _code and str(_code) not in str(_msg) else _msg
-            else:
-                _msg = str(_err or "request rejected")
-            from starlette.responses import JSONResponse as _OllamaJR
-
-            return _OllamaJR(status_code=int(result.status_code), content={"error": _msg})
+        error_response = _ollama_returned_error_response(result)
+        if error_response is not None:
+            return error_response
         # Convert Pydantic response to dict
         if hasattr(result, "model_dump"):
             result_dict = result.model_dump(exclude_none=True)
@@ -18060,6 +18065,9 @@ async def ollama_generate(fastapi_request: Request):
         if not is_streaming:
             _ollama_started_ns = time.perf_counter_ns()
             result = await create_chat_completion(chat_req, fastapi_request)
+            error_response = _ollama_returned_error_response(result)
+            if error_response is not None:
+                return error_response
             if hasattr(result, "model_dump"):
                 result_dict = result.model_dump(exclude_none=True)
             elif hasattr(result, "body"):

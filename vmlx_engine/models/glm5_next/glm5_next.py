@@ -59,6 +59,10 @@ from vmlx_engine.metal.glm5_kda_lowrank import Glm5KDALowRankGroup
 from vmlx_engine.metal.glm5_compiled_dsa_decode import glm5_compiled_dsa_output
 from vmlx_engine.metal.glm5_exact_moe_decode import glm5_exact_moe_output
 from vmlx_engine.metal.glm5_router_matvec import glm5_router_logits
+from vmlx_engine.metal.glm5_router_shared import (
+    glm5_router_shared_requested,
+    try_glm5_router_shared,
+)
 from vmlx_engine.metal.glm5_output_norm import glm5_output_norm
 
 from vmlx_engine.metal.affine_moe_pair_decode import (
@@ -1951,12 +1955,22 @@ class MoEBlock(nn.Module):
         self._compiled_router = False
         self._exact_moe_decode = glm5_exact_moe_requested()
         self._router_matvec = glm5_router_matvec_requested()
+        # Only the base-layer post-hydration loop may arm this candidate.
+        self._router_shared = False
 
     def __call__(self, x: mx.array):
         # FP32 compute does not imply FP32 storage: real bundles keep BF16
         # router weights. Preserve their storage and cast at the owning matmul.
         logits = None
-        if self._router_matvec:
+        mixed = None
+        if self._router_shared:
+            mixed = try_glm5_router_shared(
+                x, self.gate.weight, self.shared_experts.gate_up_group,
+                enabled=True, training=self.training,
+            )
+            if mixed is not None:
+                logits = mixed[0]
+        if logits is None and self._router_matvec:
             logits = glm5_router_logits(
                 x, self.gate.weight, enabled=True, training=self.training
             )
@@ -1989,7 +2003,14 @@ class MoEBlock(nn.Module):
             routed = mx.sum(
                 routed * w[..., None].astype(routed.dtype), axis=-2
             )
-        return routed.astype(x.dtype) + self.shared_experts(x)
+        if mixed is None:
+            shared = self.shared_experts(x)
+        else:
+            _, gate, up = mixed
+            shared = self.shared_experts.down_proj(
+                _clamped_swiglu(gate, up, self.shared_experts.limit)
+            )
+        return routed.astype(x.dtype) + shared
 
 
 # ---------------------------------------------------------------- layers ---
@@ -2260,6 +2281,8 @@ class Model(nn.Module):
             )
             if dense.prepare_runtime():
                 base_dense_gate_up_groups += 1
+            if isinstance(layer.mlp, MoEBlock):
+                layer.mlp._router_shared = glm5_router_shared_requested()
         mtp_dense_gate_up_groups = 0
         if hasattr(self, "mtp") and self.mtp.mlp.shared_experts.prepare_runtime():
             mtp_dense_gate_up_groups = 1

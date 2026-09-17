@@ -65,6 +65,14 @@ from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
+
+class _BlockWriteConnectionError(RuntimeError):
+    """A failed publication could not safely reuse its SQLite connection."""
+
+    def __init__(self, message: str, block_hash: bytes | None = None):
+        super().__init__(message)
+        self.block_hash = block_hash
+
 _SAFETENSORS_NUMPY_DTYPE_CODES = {
     ("f", 8): "F64",
     ("f", 4): "F32",
@@ -719,6 +727,7 @@ class BlockDiskStore:
         self._budget_recovery_lock = threading.Lock()
         self._budget_recovery_interval_ns = int(5.0 * 1_000_000_000)
         self._last_budget_recovery_attempt_ns = 0
+        self._pending_publication_recovery: tuple[bytes | None, set[str]] | None = None
 
         # Publish the aggregate-budget owner only after local DB/read/thread
         # primitives are ready.  A constructor failure after lease publication
@@ -1833,6 +1842,9 @@ class BlockDiskStore:
     def _maybe_recover_global_budget_writes(self) -> bool:
         """Retry a failed aggregate reconcile at a bounded cadence."""
 
+        if self._pending_publication_recovery is not None:
+            # Cap compliance alone cannot certify a failed SQL publication.
+            return False
         if self._global_budget_write_enabled:
             return True
         now_ns = time.monotonic_ns()
@@ -1851,6 +1863,23 @@ class BlockDiskStore:
                 result.accounted and result.compliant
             )
             return self._global_budget_write_enabled
+
+    def _recover_pending_publication_locked(self, conn: sqlite3.Connection) -> None:
+        """Discharge failed publication ownership under the root-exclusive guard."""
+        pending = self._pending_publication_recovery
+        if pending is None:
+            return
+        block_hash, fence_ids = pending
+        if block_hash is not None:
+            self._cleanup_entry(conn, block_hash.hex())
+            path = self._hash_to_path(block_hash.hex())
+            path.unlink(missing_ok=True)
+            self._fsync_directory(path.parent)
+        self._release_write_fence_pins_locked(conn, fence_ids)
+        result = self.global_budget._enforce_locked()
+        if not result.accounted or not result.compliant:
+            raise RuntimeError("failed block publication recovery remains unaccounted")
+        self._pending_publication_recovery = None
 
     def begin_write_fence(
         self,
@@ -1907,12 +1936,26 @@ class BlockDiskStore:
     ) -> None:
         """Protect an unfinished fence block from root-global eviction."""
 
-        if not fence_id:
+        if not self._write_fence_pin_is_open(fence_id):
             return
+        self._insert_write_fence_pin_locked(conn, str(fence_id), block_hash)
+        conn.commit()
+
+    def _write_fence_pin_is_open(self, fence_id: Optional[str]) -> bool:
+        """Snapshot eligibility before opening a SQLite write transaction."""
+        if not fence_id:
+            return False
         with self._stats_lock:
             state = self._write_fences.get(str(fence_id))
-            if state is None or state.get("post_eviction_complete"):
-                return
+            return state is not None and not state.get("post_eviction_complete")
+
+    def _insert_write_fence_pin_locked(
+        self,
+        conn: sqlite3.Connection,
+        fence_id: str,
+        block_hash: bytes,
+    ) -> None:
+        """Insert an eligible pin; caller owns commit and takes no stats lock."""
         conn.execute(
             "INSERT OR IGNORE INTO block_write_pins "
             "(block_hash, owner_lease_id, fence_id, created_at) "
@@ -1924,7 +1967,6 @@ class BlockDiskStore:
                 time.time(),
             ),
         )
-        conn.commit()
 
     def _release_write_fence_pins_locked(
         self,
@@ -2712,11 +2754,36 @@ class BlockDiskStore:
         avoiding the overhead of opening/closing a SQLite connection per
         operation. The connection is created once at thread start.
         """
-        write_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-        write_conn.execute("PRAGMA journal_mode=WAL")
+        write_conn = None
 
         try:
             while not self._stop_event.is_set() or not self._write_queue.empty():
+                if write_conn is None:
+                    try:
+                        write_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+                        write_conn.execute("PRAGMA journal_mode=WAL")
+                    except Exception:
+                        if write_conn is not None:
+                            write_conn.close()
+                            write_conn = None
+                        self._disable_global_budget_writes()
+                        logger.exception("Block-disk writer connection unavailable; retrying")
+                        # Admission is disabled and existing queued data stays
+                        # bounded. A transient reopen must not kill the writer.
+                        time.sleep(0.2)
+                        continue
+                if self._pending_publication_recovery is not None:
+                    try:
+                        with self.global_budget.exclusive_mutation_guard() as locked:
+                            if not locked:
+                                raise RuntimeError("publication recovery root lock unavailable")
+                            self._recover_pending_publication_locked(write_conn)
+                    except Exception:
+                        logger.exception("Block publication cleanup remains pending; retrying")
+                        write_conn.close()
+                        write_conn = None
+                        time.sleep(0.2)
+                        continue
                 # Collect a batch: block on the first item (with timeout so we
                 # can check the stop event), then drain any remaining items.
                 batch = []
@@ -2766,6 +2833,11 @@ class BlockDiskStore:
                         batch_exc,
                         exc_info=True,
                     )
+                    if isinstance(batch_exc, _BlockWriteConnectionError):
+                        # The failed transaction was closed, not left for a
+                        # later item's commit to publish accidentally.
+                        write_conn.close()
+                        write_conn = None
                 finally:
                     self._complete_write_items(len(batch))
                     # _process_write_batch mutates data slots to None. Clear
@@ -2775,7 +2847,8 @@ class BlockDiskStore:
                     batch.clear()
                     item = None
         finally:
-            write_conn.close()
+            if write_conn is not None:
+                write_conn.close()
 
     _MAINTENANCE_QUIET_SECONDS = 1.0
 
@@ -3057,19 +3130,74 @@ class BlockDiskStore:
                                     if len(metadata) > 2
                                     else False
                                 ),
-                            )
-                            self._pin_write_fence_block_locked(
-                                write_conn,
-                                fence_id,
-                                block_hash,
+                                fence_id=fence_id,
                             )
                             net_payload_bytes += written_bytes
                             if written_bytes > 0:
                                 new_block_hashes.append(bytes(block_hash))
                             self._write_fence_completion(fence_id, failed=False)
                     except Exception as e:
+                        if not isinstance(e, _BlockWriteConnectionError):
+                            try:
+                                write_conn.rollback()
+                            except Exception as rollback_error:
+                                write_conn.close()
+                                self._disable_global_budget_writes()
+                                e = _BlockWriteConnectionError(
+                                    f"block writer rollback failed: {rollback_error}"
+                                )
                         if item and not isinstance(item[0], str):
                             self._write_fence_completion(fence_id, failed=True)
+                        if isinstance(e, _BlockWriteConnectionError):
+                            # Recovery already closed the poisoned connection.
+                            # Settle every unprocessed item and fail its fence;
+                            # do not run more SQL on this connection or certify
+                            # the earlier part of this batch from stale totals.
+                            for remaining in batch[idx + 1:]:
+                                if remaining and not isinstance(remaining[0], str):
+                                    remaining_fence = (
+                                        str(remaining[6])
+                                        if len(remaining) > 6 and remaining[6]
+                                        else None
+                                    )
+                                    self._write_fence_completion(remaining_fence, failed=True)
+                            failed_fences = batch_fence_ids | {
+                                str(entry[1]) for entry in batch
+                                if entry and entry[0] == "__fence__"
+                            }
+                            for failed_fence in failed_fences:
+                                self._mark_write_fence_failed(failed_fence, str(e))
+                            self._pending_publication_recovery = (e.block_hash, failed_fences)
+                            if e.block_hash is not None:
+                                # Invalidate bytes even when SQLite cannot yet
+                                # reconnect. A stale row must not restore them.
+                                try:
+                                    failed_path = self._hash_to_path(e.block_hash.hex())
+                                    failed_path.unlink(missing_ok=True)
+                                    self._fsync_directory(failed_path.parent)
+                                except OSError:
+                                    logger.exception("Failed block payload removal remains pending")
+                            # Do not leave pins from earlier successful items
+                            # stranded until another request happens to write.
+                            for recovery_attempt in range(2):
+                                recovery_conn = None
+                                try:
+                                    recovery_conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+                                    self._recover_pending_publication_locked(recovery_conn)
+                                    break
+                                except Exception:
+                                    logger.exception(
+                                        "Failed block publication recovery attempt %d",
+                                        recovery_attempt + 1,
+                                    )
+                                finally:
+                                    if recovery_conn is not None:
+                                        recovery_conn.close()
+                            try:
+                                self.global_budget._enforce_locked()
+                            except Exception:
+                                logger.exception("Failed block publication reconciliation failed")
+                            raise e
                         h = item[0] if isinstance(item[0], str) else (
                             item[0].hex()[:12] if isinstance(item[0], bytes) else "?"
                         )
@@ -3564,6 +3692,7 @@ class BlockDiskStore:
         parent_hash: Optional[bytes],
         *,
         replace_existing: bool = False,
+        fence_id: Optional[str] = None,
     ) -> int:
         """Write and publish a frozen block (background writer thread only)."""
         hash_hex = block_hash.hex()
@@ -3623,6 +3752,7 @@ class BlockDiskStore:
                     "block hash already exists with different parent ancestry"
                 )
             if not replace_existing:
+                self._pin_write_fence_block_locked(conn, fence_id, block_hash)
                 return 0
             replaced_file_size = max(0, int(existing_file_size or 0))
             replacing_existing = True
@@ -3646,6 +3776,10 @@ class BlockDiskStore:
         file_size = file_path.stat().st_size
         now = time.time()
 
+        # A new row and its eviction pin become visible in one transaction.
+        # Snapshot fence state BEFORE any DML: get_stats holds the stats lock
+        # while reading SQLite, so writers must commit before taking it again.
+        pin_new = not replacing_existing and self._write_fence_pin_is_open(fence_id)
         if replacing_existing:
             conn.execute(
                 """UPDATE blocks
@@ -3666,25 +3800,50 @@ class BlockDiskStore:
                 ),
             )
         else:
-            conn.execute(
-                """INSERT OR IGNORE INTO blocks
-                   (block_hash, parent_hash, ancestry_known,
-                    file_name, num_tokens, num_layers, dtype,
-                    file_size, created_at, last_accessed)
-                   VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    hash_hex,
-                    parent_hex,
-                    str(rel_path),
-                    token_count,
-                    num_layers,
-                    dtype,
-                    file_size,
-                    now,
-                    now,
-                ),
-            )
-        conn.commit()
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO blocks
+                       (block_hash, parent_hash, ancestry_known,
+                        file_name, num_tokens, num_layers, dtype,
+                        file_size, created_at, last_accessed)
+                       VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        hash_hex,
+                        parent_hex,
+                        str(rel_path),
+                        token_count,
+                        num_layers,
+                        dtype,
+                        file_size,
+                        now,
+                        now,
+                    ),
+                )
+                if pin_new:
+                    self._insert_write_fence_pin_locked(conn, str(fence_id), block_hash)
+                conn.commit()
+            except Exception:
+                # A COMMIT exception can occur before OR after durability.
+                # Roll back pending SQL and invalidate this attempted new hash
+                # before any later child/item can use it. Never remove a valid
+                # preexisting block here: replacements use the branch above.
+                try:
+                    conn.rollback()
+                    self._cleanup_entry(conn, hash_hex)
+                    file_path.unlink(missing_ok=True)
+                    self._fsync_directory(file_path.parent)
+                except Exception as recovery_error:
+                    try:
+                        conn.close()
+                    finally:
+                        self._disable_global_budget_writes()
+                    raise _BlockWriteConnectionError(
+                        "new block transaction recovery failed; connection discarded",
+                        block_hash,
+                    ) from recovery_error
+                raise
+        if replacing_existing:
+            conn.commit()
 
         with self._stats_lock:
             self.disk_writes += 1
@@ -3692,6 +3851,8 @@ class BlockDiskStore:
             f"Disk cache write: {hash_hex[:12]} ({dtype}, {num_layers} layers, "
             f"{file_size / 1024:.1f}KB, {token_count} tokens)"
         )
+        if replacing_existing:
+            self._pin_write_fence_block_locked(conn, fence_id, block_hash)
         return int(file_size) - replaced_file_size
 
     def _index_physical_bytes(self) -> int:

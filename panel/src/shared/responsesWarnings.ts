@@ -26,6 +26,12 @@ export interface ResponsesIncompleteDetailsLike {
 export const OUTPUT_TRUNCATED_WARNING =
   'Output truncated because the maximum output-token limit was reached. Increase Max Tokens or send a follow-up message to continue.'
 
+export const RESPONSE_CANCELLED_WARNING =
+  'Generation was cancelled before completion. Send a follow-up message to continue.'
+
+export const RESPONSE_INCOMPLETE_WARNING =
+  'Generation ended before completion. Send a follow-up message to continue.'
+
 /**
  * Translate a Responses terminal envelope without treating every incomplete
  * response as output truncation.
@@ -69,6 +75,23 @@ export function appendOutputTruncationWarning(
 ): string[] | null {
   if (finishReason !== 'length') return warnings
   return Array.from(new Set([...(warnings || []), OUTPUT_TRUNCATED_WARNING]))
+}
+
+/** Persist server-side interruption separately from an output-token limit.
+ * A cancelled stream can end normally at the transport layer; without a notice,
+ * its partial content looks like a completed answer after it is saved/reloaded.
+ * This metadata must never be appended to model text or tool history.
+ */
+export function appendResponseTerminalWarning(
+  warnings: string[] | null,
+  finishReason: unknown,
+): string[] | null {
+  const reason = typeof finishReason === 'string' ? finishReason.trim().toLowerCase() : ''
+  if (reason === 'length') return appendOutputTruncationWarning(warnings, reason)
+  const notice = ['cancelled', 'canceled', 'aborted', 'abort'].includes(reason)
+    ? RESPONSE_CANCELLED_WARNING
+    : reason === 'incomplete' ? RESPONSE_INCOMPLETE_WARNING : null
+  return notice ? Array.from(new Set([...(warnings || []), notice])) : warnings
 }
 
 /**

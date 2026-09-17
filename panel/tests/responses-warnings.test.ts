@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import {
   appendOutputTruncationWarning,
+  appendResponseTerminalWarning,
   extractResponsesWarnings,
   dropSupersededRecoveryWarnings,
   OUTPUT_TRUNCATED_WARNING,
+  RESPONSE_CANCELLED_WARNING,
+  RESPONSE_INCOMPLETE_WARNING,
   categorizeResponsesWarning,
   contextExhaustionNotice,
   effortSubstitutionNotice,
@@ -135,6 +138,107 @@ describe('appendOutputTruncationWarning', () => {
     ])
     expect(appendOutputTruncationWarning(null, undefined)).toBeNull()
   })
+
+  it.each(['cancelled', 'canceled', 'aborted', 'abort', 'incomplete'])(
+    'retains its length-only exported contract for %s',
+    (reason) => {
+      const warnings = ['Parser warning.']
+      expect(appendOutputTruncationWarning(null, reason)).toBeNull()
+      expect(appendOutputTruncationWarning(warnings, reason)).toBe(warnings)
+    },
+  )
+})
+
+describe('appendResponseTerminalWarning', () => {
+  it.each(['cancelled', 'canceled', 'aborted', 'abort', ' CANCELLED ', 'AbOrTeD'])(
+    'marks %s as cancelled/incomplete, not an output-token limit',
+    (reason) => {
+      const warnings = appendResponseTerminalWarning(null, reason)
+      expect(warnings).toHaveLength(1)
+      expect(warnings![0]).toMatch(/cancelled/i)
+      expect(warnings![0]).toMatch(/before completion/i)
+      expect(warnings).toEqual([RESPONSE_CANCELLED_WARNING])
+      expect(warnings).not.toContain(OUTPUT_TRUNCATED_WARNING)
+      expect(warnings![0]).not.toMatch(/max tokens|output-token limit|increase/i)
+      expect(warnings).toEqual(appendResponseTerminalWarning(null, 'cancelled'))
+    },
+  )
+
+  it('uses truthful notices without claiming any partial output exists', () => {
+    expect(RESPONSE_CANCELLED_WARNING).toBe(
+      'Generation was cancelled before completion. Send a follow-up message to continue.',
+    )
+    expect(RESPONSE_INCOMPLETE_WARNING).toBe(
+      'Generation ended before completion. Send a follow-up message to continue.',
+    )
+  })
+
+  it.each(['incomplete', ' INCOMPLETE '])(
+    'keeps %s distinct from cancellation and output truncation',
+    (reason) => {
+      const existing = ['Parser warning.', RESPONSE_INCOMPLETE_WARNING]
+      expect(appendResponseTerminalWarning(null, reason)).toEqual([
+        RESPONSE_INCOMPLETE_WARNING,
+      ])
+      expect(appendResponseTerminalWarning(existing, reason)).toEqual(existing)
+      expect(existing).toEqual(['Parser warning.', RESPONSE_INCOMPLETE_WARNING])
+      expect(appendResponseTerminalWarning(null, reason)).not.toContain(
+        RESPONSE_CANCELLED_WARNING,
+      )
+      expect(appendResponseTerminalWarning(null, reason)).not.toContain(
+        OUTPUT_TRUNCATED_WARNING,
+      )
+      expect(
+        appendResponseTerminalWarning(null, responsesTerminalFinishReason('incomplete', null)),
+      ).toEqual([RESPONSE_INCOMPLETE_WARNING])
+    },
+  )
+
+  it('adds one cancellation notice without changing existing warning input', () => {
+    const existing = ['Parser warning.']
+    const once = appendResponseTerminalWarning(existing, 'cancelled')!
+    expect(existing).toEqual(['Parser warning.'])
+    expect(once).toHaveLength(2)
+    expect(once[0]).toBe('Parser warning.')
+    expect(appendResponseTerminalWarning(once, 'abort')).toEqual(once)
+    expect(appendResponseTerminalWarning(once, 'canceled')).toEqual(once)
+    // Successful-recovery cleanup must not erase truthful cancellation metadata.
+    expect(dropSupersededRecoveryWarnings(once)).toEqual(once)
+  })
+
+  it.each(['stop', 'tool_calls', undefined, null, '', 42])(
+    'leaves normal or absent terminal %s warnings unmodified',
+    (reason) => {
+      const existing = ['Parser warning.']
+      expect(appendResponseTerminalWarning(existing, reason)).toBe(existing)
+      expect(appendResponseTerminalWarning(null, reason)).toBeNull()
+    },
+  )
+
+  it('preserves the existing length warning and deduplication behavior', () => {
+    expect(appendResponseTerminalWarning(null, 'length')).toEqual([
+      OUTPUT_TRUNCATED_WARNING,
+    ])
+    const existing = ['Parser warning.', OUTPUT_TRUNCATED_WARNING]
+    expect(appendResponseTerminalWarning(existing, 'length')).toEqual(
+      appendOutputTruncationWarning(existing, 'length'),
+    )
+    expect(existing).toEqual(['Parser warning.', OUTPUT_TRUNCATED_WARNING])
+  })
+
+  it.each(['cancelled', 'canceled', 'aborted', 'abort', ' CANCELLED '])(
+    'persists the mapped Responses incomplete cause %s as cancellation metadata',
+    (reason) => {
+      const finish = responsesTerminalFinishReason('incomplete', { reason })
+      expect(finish).toBe('cancelled')
+      expect(appendResponseTerminalWarning(null, finish)).toEqual(
+        appendResponseTerminalWarning(null, 'cancelled'),
+      )
+      expect(appendResponseTerminalWarning(null, finish)).not.toContain(
+        OUTPUT_TRUNCATED_WARNING,
+      )
+    },
+  )
 })
 
 describe('responsesTerminalFinishReason', () => {
@@ -214,7 +318,7 @@ describe('Responses warnings panel wiring', () => {
   it('main chat IPC handles completed and incomplete terminal warnings and usage', () => {
     const source = readFileSync(new URL('../src/main/ipc/chat.ts', import.meta.url), 'utf8')
     expect(source).toContain('dropSupersededRecoveryWarnings,')
-    expect(source).toContain('appendOutputTruncationWarning,')
+    expect(source).toContain('appendResponseTerminalWarning,')
     expect(source).toContain('responsesTerminalFinishReason,')
     expect(source).toContain('extractResponsesWarnings,')
     expect(source).toContain('from "../../shared/responsesWarnings"')
@@ -226,7 +330,8 @@ describe('Responses warnings panel wiring', () => {
     expect(source).toContain('const eventWarnings = extractResponsesWarnings(parsed)')
     expect(source).toContain('const completedWarnings = extractResponsesWarnings(')
     expect(source).toContain('const chatWarnings = extractResponsesWarnings(parsed)')
-    expect(source).toContain('const finalResponseWarnings = appendOutputTruncationWarning(')
+    expect(source).toContain('const finalResponseWarnings = appendResponseTerminalWarning(')
+    expect(source).not.toContain('const finalResponseWarnings = appendOutputTruncationWarning(')
     expect(source).toContain('responsesTerminalFinishReason(')
     expect(source).toContain('assistantMessage.warningsJson = JSON.stringify(finalResponseWarnings)')
     expect(source).toContain('warnings: finalResponseWarnings || undefined')

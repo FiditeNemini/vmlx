@@ -29,7 +29,7 @@ import { detectModelConfigFromDir } from "../model-config-registry";
 import { localEngineReadyFromHealthBody } from "../engineReadiness";
 import { getAuthHeaders } from "./utils";
 import {
-  appendOutputTruncationWarning,
+  appendResponseTerminalWarning,
   contextExhaustionNotice,
   dropSupersededRecoveryWarnings,
   effortSubstitutionNotice,
@@ -4803,7 +4803,7 @@ export function registerChatHandlers(
             replayReasoningSegments,
           );
         }
-        const finalResponseWarnings = appendOutputTruncationWarning(
+        const finalResponseWarnings = appendResponseTerminalWarning(
           responseWarnings as string[] | null,
           lastFinishReason,
         );

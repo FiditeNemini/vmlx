@@ -644,6 +644,8 @@ def affine_moe_pair_activation(
     try:
         output = _run_pair(switch, config, x, indices)
         if config.family not in _FIRST_FAST_CALL:
+            from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
+            guard_consumer_eval()
             mx.eval(output)
             logger.info(
                 "%s affine MoE pair fusion active: q%d/g%d hidden=%d intermediate=%d top_k=%d scope=%s",

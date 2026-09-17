@@ -72,6 +72,8 @@ def _launch(dots, head_dim, rows, pools):
             output_shapes=[(1, rows, pools)], output_dtypes=[mx.float32],
         )[0]
         if not _observed:
+            from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
+            guard_consumer_eval()
             mx.eval(result)
             _observed = True
             logger.info("Qwen4 QSA score reduction active: heads=4 dtype=float32")

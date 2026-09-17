@@ -18407,7 +18407,12 @@ class MLLMBatchGenerator:
         # Only _step owns productive AR and the AR handoff/calibration.
         # Native-MTP seed/draft/verify forwards use their separate owners.
         with affine_moe_ar_scope():
-            output = self.language_model(input_tokens, **lm_kwargs)
+            if (self._model_type in {"qwen4_exp", "qwen4_exp_text"}
+                    and os.environ.get("VMLX_QWEN4_DEFER_PACKED_PLE", "0") == "1"):
+                from vmlx_engine.models.qwen4_exp.deferred_ple_runtime import productive_ar_forward
+                output = productive_ar_forward(self, input_tokens, lm_kwargs)
+            else:
+                output = self.language_model(input_tokens, **lm_kwargs)
         if _diag_fingerprints_enabled():
             try:
                 for _req in (getattr(getattr(self, "active_batch", None), "requests", None) or []):

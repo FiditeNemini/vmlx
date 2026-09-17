@@ -210,6 +210,8 @@ def qwen4_exact_down(projection, activated, indices, scores, *, enabled=None):
             grid=(320*320, 1, 1), threadgroup=(320, 1, 1),
             output_shapes=[(1, 1, 2560)], output_dtypes=[activated.dtype])[0]
         if not _OBSERVED:
+            from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
+            guard_consumer_eval()
             mx.eval(output)
             _OBSERVED = True
             logger.info("Qwen exact down candidate active: bits=%s group=%s "

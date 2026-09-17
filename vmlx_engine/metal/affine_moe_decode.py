@@ -416,6 +416,8 @@ def _install_class_wrapper(switch_class: type) -> None:
             down = _MANAGER.run_projection(activated, config.down, ids, k)
             result = down.reshape(leading + (k, config.down.output_dims))
             if not config.first_call_evaluated:
+                from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
+                guard_consumer_eval()
                 mx.eval(result)
                 config.first_call_evaluated = True
             if not _FIRST_FAST_CALL_LOGGED:
@@ -541,6 +543,8 @@ def _install_weighted_moe_wrapper(moe_class: type) -> None:
         try:
             result = _weighted_decode(switch, config, x, indices, scores)
             if not config.first_call_evaluated:
+                from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
+                guard_consumer_eval()
                 mx.eval(result)
                 config.first_call_evaluated = True
             if not _FIRST_FAST_CALL_LOGGED:

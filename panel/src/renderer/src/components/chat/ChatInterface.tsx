@@ -38,6 +38,31 @@ interface Message {
   reasoningDone?: boolean
 }
 
+interface ToolStatusEntry {
+  phase: string
+  toolName: string
+  toolCallId?: string
+  detail?: string
+  iteration?: number
+  contentOffset?: number
+  timestamp: number
+}
+
+function mergeToolStatusHistory(saved: ToolStatusEntry[], live: ToolStatusEntry[]): ToolStatusEntry[] {
+  // The final DB transcript may overlap the suffix observed after a remount.
+  // Compare producer identity, not renderer timestamps or truncated DB detail.
+  const key = (s: ToolStatusEntry) => JSON.stringify([s.phase, s.toolName, s.toolCallId, s.iteration, s.contentOffset])
+  for (let overlap = Math.min(saved.length, live.length); overlap > 0; overlap--) {
+    const suffix = saved.slice(-overlap)
+    if (suffix.some(s => !!s.toolCallId) && suffix.every((s, i) => key(s) === key(live[i]))) {
+      return [...saved.slice(0, -overlap), ...live]
+    }
+  }
+  // Unanchored progress markers are not unique identities. Keep them rather
+  // than collapsing repeated events or distinct calls sharing a tool name.
+  return [...saved, ...live]
+}
+
 /** Hydrate metrics from DB metricsJson field */
 function hydrateMessages(msgs: Message[]): Message[] {
   return msgs.map(m => {
@@ -178,7 +203,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
   const [reasoningDoneMap, setReasoningDoneMap] = useState<Record<string, boolean>>({})
   const [answerPassMap, setAnswerPassMap] = useState<Record<string, boolean>>({})
   // Tool call status: track per-message tool call phases
-  const [toolStatusMap, setToolStatusMap] = useState<Record<string, Array<{ phase: string; toolName: string; toolCallId?: string; detail?: string; iteration?: number; contentOffset?: number; timestamp: number }>>>({})
+  const [toolStatusMap, setToolStatusMap] = useState<Record<string, ToolStatusEntry[]>>({})
   // Per-chat setting: hide tool status display
   const [hideToolStatus, setHideToolStatus] = useState(false)
   // ask_user tool: question from model and input state
@@ -202,10 +227,25 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     setStreamingMessageId(null)
     setCurrentMetrics(null)
 
+    let disposed = false
+    let terminalObserved = false
+    const liveMessageIds = new Set<string>()
+    const isCurrentChat = () => !disposed && chatIdRef.current === chatId
+
     // Load existing messages (hydrate persisted metrics, tool calls, reasoning)
     window.api.chat.getMessages(chatId).then(msgs => {
+      if (!isCurrentChat()) return
       const hydrated = hydrateMessages(msgs)
-      setMessages(hydrated)
+      // IPC hydration can arrive after live deltas or completion. Restore the
+      // older history without replacing the newer message/event state.
+      setMessages(prev => {
+        const live = new Map(prev.filter(m => liveMessageIds.has(m.id)).map(m => [m.id, m]))
+        const ids = new Set(hydrated.map(m => m.id))
+        return [
+          ...hydrated.map(m => live.has(m.id) ? { ...m, ...live.get(m.id)! } : m),
+          ...prev.filter(m => liveMessageIds.has(m.id) && !ids.has(m.id))
+        ]
+      })
       // Hydrate tool status map from persisted tool_calls_json
       const restoredTools: Record<string, any[]> = {}
       const restoredReasoning: Record<string, string> = {}
@@ -240,14 +280,20 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
         }
       }
       if (Object.keys(restoredTools).length > 0) {
-        setToolStatusMap(restoredTools)
+        setToolStatusMap(prev => {
+          const merged = { ...restoredTools, ...prev }
+          for (const id of Object.keys(restoredTools)) {
+            if (prev[id]) merged[id] = mergeToolStatusHistory(restoredTools[id], prev[id])
+          }
+          return merged
+        })
       }
       if (Object.keys(restoredReasoning).length > 0) {
-        setReasoningMap(restoredReasoning)
-        setReasoningDoneMap(restoredReasoningDone)
+        setReasoningMap(prev => ({ ...restoredReasoning, ...prev }))
+        setReasoningDoneMap(prev => ({ ...restoredReasoningDone, ...prev }))
       }
       if (Object.keys(restoredReasoningSegments).length > 0) {
-        setReasoningSegmentMap(restoredReasoningSegments)
+        setReasoningSegmentMap(prev => ({ ...restoredReasoningSegments, ...prev }))
       }
 
       // If the user navigates/reloads during TTFT, the DB already has the
@@ -255,7 +301,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
       // token. Keep it visually bound to the active request instead of
       // rendering it as a completed blank message.
       window.api.chat.isStreaming(chatId).then((isActive: boolean) => {
-        if (!isActive || chatIdRef.current !== chatId) return
+        if (!isActive || !isCurrentChat() || terminalObserved) return
         setLoading(true)
         setStreamingMessageId(prev => prev || latestPendingAssistantId(hydrated))
       })
@@ -263,7 +309,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     // Check if generation is still active for this chat (handles switch-away-and-back)
     window.api.chat.isStreaming(chatId).then((isActive: boolean) => {
-      if (isActive) {
+      if (isActive && isCurrentChat() && !terminalObserved) {
         setLoading(true)
         // streamingMessageId will be set by the next stream event
       }
@@ -271,7 +317,9 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     // Typing indicator: model is processing, waiting for first token
     const handleTyping = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
+      liveMessageIds.add(data.messageId)
+      setLoading(true)
       setStreamingMessageId(data.messageId)
       // Add placeholder assistant message so the typing indicator renders
       setMessages(prev => {
@@ -287,7 +335,9 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     }
 
     const handleStream = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
+      liveMessageIds.add(data.messageId)
+      setLoading(true)
       setStreamingMessageId(data.messageId)
       if (data.metrics) setCurrentMetrics(data.metrics)
 
@@ -348,19 +398,23 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     }
 
     const handleComplete = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
+      terminalObserved = true
+      liveMessageIds.add(data.messageId)
+      // A remounted chat has no handleSend promise whose finally can settle it.
+      setLoading(false)
       const responseWarnings = extractResponsesWarnings({ warnings: data.warnings }) ?? undefined
-      setMessages(prev => prev.map(m =>
-        m.id === data.messageId
-          ? {
-            ...m,
-            content: data.content || m.content,
-            tokens: data.metrics?.tokenCount,
-            metrics: data.metrics,
-            warnings: responseWarnings ?? m.warnings
-          }
-          : m
-      ))
+      setMessages(prev => {
+        const existing = prev.find(m => m.id === data.messageId)
+        const completed: Message = {
+          ...(existing ?? { id: data.messageId, chatId, role: 'assistant', timestamp: Date.now() }),
+          content: data.content || existing?.content || '',
+          tokens: data.metrics?.tokenCount,
+          metrics: data.metrics,
+          warnings: responseWarnings ?? existing?.warnings
+        }
+        return existing ? prev.map(m => m.id === data.messageId ? completed : m) : [...prev, completed]
+      })
       // Finalize reasoning state from completion event (ensures reasoning box persists
       // even if chat:reasoningDone was missed due to event ordering)
       if (data.reasoningContent) {
@@ -376,7 +430,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     }
 
     const handleReasoningDone = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
       setReasoningDoneMap(prev => ({ ...prev, [data.messageId]: true }))
       // Also store the final reasoning content
       if (data.reasoningContent) {
@@ -388,12 +442,12 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     }
 
     const handleAnswerPass = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
       setAnswerPassMap(prev => ({ ...prev, [data.messageId]: true }))
     }
 
     const handleToolStatus = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
       setToolStatusMap(prev => ({
         ...prev,
         [data.messageId]: [
@@ -413,7 +467,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
 
     // ask_user tool: model asks user a question mid-tool-loop
     const handleAskUser = (data: any) => {
-      if (data.chatId !== chatId) return
+      if (data.chatId !== chatId || !isCurrentChat()) return
       setAskUserQuestion(data.question)
       setAskUserInput('')
     }
@@ -428,6 +482,7 @@ export function ChatInterface({ chatId, onNewChat, sessionEndpoint, sessionId, s
     const cleanupAskUser = window.api.chat.onAskUser(handleAskUser)
 
     return () => {
+      disposed = true
       // Do NOT abort active generation when navigating away — the user explicitly
       // wants generation to continue in the background. Only clean up event listeners.
       // The abort button in InputBox handles explicit user cancellation.

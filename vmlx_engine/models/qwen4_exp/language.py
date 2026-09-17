@@ -39,6 +39,9 @@ from vmlx_engine.metal.qwen4_hc_norm import (
     hc_combine_norm_requested,
     hc_combine_norm,
 )
+from vmlx_engine.metal.qwen4_gdn_prework import (
+    gdn_prework_requested, gdn_prework_update,
+)
 from vmlx_engine.metal.qwen4_gdn_blocked_prefill import (
     qwen4_blocked_gated_delta_update as gated_delta_update,
 )
@@ -1145,6 +1148,7 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             )
         # else: keep the inherited silu-gated norm
         self._fused_conv_decode = fused_gdn_conv_requested()
+        self._gdn_prework = gdn_prework_requested()
         self._unified_gdn_verify = unified_gdn_verify_requested()
         self._unified_gdn_verify_graph_calls = 0
         self._precise_gdn_epilogue = precise_gdn_epilogue_requested()
@@ -1388,9 +1392,21 @@ class GatedDeltaNet(_Qwen35GatedDeltaNet):
             out = mx.concatenate([out_c, out_d], axis=1)
         else:
             lengths = getattr(cache, "lengths", None) if cache is not None else None
-            out, conv_f, ssm_f = self._process_chunk(
-                qkv, a, b, conv_state, ssm_state, mask, lengths=lengths
+            preworked = gdn_prework_update(
+                qkv, a, b, conv_state, self.conv1d.weight,
+                self.A_log, self.dt_bias, ssm_state,
+                enabled=(self._gdn_prework and (batch_size, seq_len) == (1, 1)
+                         and n_confirmed == 0 and not prefill_checkpoint_steps
+                         and precise_unmasked and cache is not None),
+                mask=mask, lengths=lengths, training=self.training,
+                incumbent_fused_conv=self._fused_conv_decode,
             )
+            if preworked is None:
+                out, conv_f, ssm_f = self._process_chunk(
+                    qkv, a, b, conv_state, ssm_state, mask, lengths=lengths
+                )
+            else:
+                out, conv_f, ssm_f = preworked
 
         if cache is not None:
             cache[0] = conv_f

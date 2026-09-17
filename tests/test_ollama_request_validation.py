@@ -133,7 +133,51 @@ def test_raw_nonstream_completion_returned_status(monkeypatch, is_mllm, rejected
         assert row['response'] == 'Raw result'
         assert row['done'] is True
         assert row['done_reason'] == 'length'
+        assert row['prompt_eval_count'] == 4
+        assert row['eval_count'] == 2
+        assert row['total_duration'] > 0
+        assert row['load_duration'] == 0
+        assert 'prompt_eval_duration' not in row
+        assert 'eval_duration' not in row
         assert 'error' not in row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('usage', [
+    {'prompt_tokens': 4, 'completion_tokens': 2},
+    {'prompt_tokens': 0, 'completion_tokens': 0},
+    {},
+])
+async def test_raw_nonstream_measures_total_without_inventing_split_or_counts(monkeypatch, usage):
+    from vmlx_engine import server
+
+    generation = AsyncMock(return_value={
+        'choices': [{'text': 'Raw result', 'finish_reason': 'stop'}],
+        'usage': usage,
+    })
+    monkeypatch.setattr(server, 'create_completion', generation)
+    monkeypatch.setattr(server, '_engine', SimpleNamespace(is_mllm=False))
+    monkeypatch.setattr(server, '_max_prompt_tokens', 0)
+    clock = Mock(side_effect=[100, 160])
+    monkeypatch.setattr(server.time, 'perf_counter_ns', clock)
+    request = SimpleNamespace(
+        json=AsyncMock(return_value={'model': 'test', 'prompt': 'hi', 'raw': True, 'stream': False}),
+        state=SimpleNamespace(vmlx_wake_ns=30),
+    )
+    row = await server.ollama_generate(request)
+    assert row['response'] == 'Raw result'
+    assert row['done_reason'] == 'stop'
+    assert row['total_duration'] == 90
+    assert row['load_duration'] == 30
+    assert 'eval_duration' not in row
+    assert 'prompt_eval_duration' not in row
+    for source, target in [('prompt_tokens', 'prompt_eval_count'), ('completion_tokens', 'eval_count')]:
+        if source in usage:
+            assert row[target] == usage[source]
+        else:
+            assert target not in row
+    generation.assert_awaited_once()
+    assert clock.call_count == 2
 
 @pytest.mark.parametrize('path,extra', [('/api/chat', {'messages': [{'role':'user','content':'hi'}]}),
     ('/api/generate', {'prompt':'hi'})])

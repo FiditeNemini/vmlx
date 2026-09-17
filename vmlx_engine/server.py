@@ -18169,6 +18169,7 @@ async def ollama_generate(fastapi_request: Request):
         # fastapi_request arg (unlike create_chat_completion which uses
         # it for disconnect detection). Pre-session regression from
         # v1.3.12 where the call passed 2 args causing TypeError.
+        _ollama_started_ns = time.perf_counter_ns()
         result = await create_completion(comp_req)
         error_response = _ollama_returned_error_response(result)
         if error_response is not None:
@@ -18183,7 +18184,7 @@ async def ollama_generate(fastapi_request: Request):
         if choices:
             text = choices[0].get("text", "")
 
-        return {
+        response = {
             "model": model_name,
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
             "response": text,
@@ -18192,6 +18193,20 @@ async def ollama_generate(fastapi_request: Request):
             if choices
             else "stop",
         }
+        # The completion producer already supplies measured token counts; the
+        # raw wrapper must preserve success accounting. Without a first-
+        # token timestamp, keep the prefill/decode duration split unavailable.
+        usage = result_dict.get("usage") or {}
+        for source, target in (
+            ("prompt_tokens", "prompt_eval_count"),
+            ("completion_tokens", "eval_count"),
+        ):
+            if usage.get(source) is not None:
+                response[target] = usage[source]
+        response.update(ollama_duration_fields(
+            _ollama_started_ns, None, time.perf_counter_ns(), _ollama_gen_wake_ns,
+        ))
+        return response
 
     # Streaming: wrap completions SSE → NDJSON
     from starlette.responses import StreamingResponse as _SR

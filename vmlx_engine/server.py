@@ -28495,7 +28495,9 @@ async def stream_responses_api(
         _stream_disconnected
         or (
             last_output is not None
-            and getattr(last_output, "finish_reason", None) == "aborted"
+            and _normalize_responses_finish_reason(
+                getattr(last_output, "finish_reason", None)
+            ) == "cancelled"
         )
     )
     _resp_finish = getattr(last_output, "finish_reason", None) if last_output else None

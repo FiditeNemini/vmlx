@@ -1302,6 +1302,9 @@ class MLLMScheduler:
 
         # Output queues for async streaming
         self.output_queues: Dict[str, asyncio.Queue] = {}
+        # Cancellation is terminal data, not just EOF. Keep its small snapshot
+        # outside the bounded queue so a slow consumer loses no queued deltas.
+        self._stream_abort_outputs: Dict[str, RequestOutput] = {}
         self._scheduler_trace_timings: Dict[str, Dict[str, float]] = {}
 
         # Streaming detokenizer pool for correct multi-byte character handling
@@ -2991,7 +2994,7 @@ class MLLMScheduler:
         """
         with self._queue_lock:
             request = self.requests.get(request_id)
-            if request is None or request.status == RequestStatus.FINISHED_ABORTED:
+            if request is None or RequestStatus.is_finished(request.status):
                 return False
             request.cancel_event.set()
 
@@ -3030,22 +3033,31 @@ class MLLMScheduler:
 
             # Mark as aborted
             request.status = RequestStatus.FINISHED_ABORTED
+            request.finish_reason = "aborted"
             self.finished_req_ids.add(request_id)
 
-            # Signal output queue (inside lock to prevent race with queue cleanup)
+            # Keep terminal metadata alive even when worker cleanup removes the
+            # request before its consumer resumes. output_text is NOT cumulative
+            # until natural completion; stream_outputs owns the partial text.
             if request_id in self.output_queues:
+                if not hasattr(self, "_stream_abort_outputs"):
+                    self._stream_abort_outputs = {}
+                self._stream_abort_outputs[request_id] = RequestOutput(
+                    request_id=request_id,
+                    output_token_ids=list(request.output_tokens),
+                    prompt_tokens=request.num_prompt_tokens,
+                    completion_tokens=request.num_output_tokens,
+                    cached_tokens=int(getattr(request, "_cached_tokens", 0) or 0),
+                    cache_detail=str(getattr(request, "_cache_detail", "") or ""),
+                    finished=True,
+                    finish_reason="aborted",
+                )
+                # Wake an empty consumer. A full queue already wakes it; it will
+                # drain that FIFO before taking the out-of-band abort terminal.
                 try:
                     self.output_queues[request_id].put_nowait(None)
                 except asyncio.QueueFull:
-                    # Force-deliver sentinel to prevent stream_outputs hang
-                    try:
-                        self.output_queues[request_id].get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                    try:
-                        self.output_queues[request_id].put_nowait(None)
-                    except asyncio.QueueFull:
-                        pass
+                    pass
 
         # Free Metal memory when all requests done
         if not self.running and not self._pending_aborts:
@@ -5258,6 +5270,10 @@ class MLLMScheduler:
         """Push step outputs to async queues. Must be called on the event loop thread."""
         if step_output.outputs:
             for req_output in step_output.outputs:
+                # A model step can finish after the event-loop cancel request.
+                # Its stale output must not replace the already-owned abort.
+                if req_output.request_id in getattr(self, "_stream_abort_outputs", {}):
+                    continue
                 queue = self.output_queues.get(req_output.request_id)
                 if queue is not None:
                     try:
@@ -5724,12 +5740,32 @@ class MLLMScheduler:
         if output_queue is None:
             return
 
+        emitted_text: List[str] = []
+        last_output = None
         try:
             while True:
-                output = await output_queue.get()
+                aborted_output = getattr(self, "_stream_abort_outputs", {}).get(request_id)
+                output = (
+                    aborted_output
+                    if aborted_output is not None and output_queue.empty()
+                    else await output_queue.get()
+                )
                 if output is None:
-                    break
-                if output.finished:
+                    output = getattr(self, "_stream_abort_outputs", {}).get(request_id)
+                    if output is None:
+                        break
+                is_abort = output.finished and output.finish_reason == "aborted"
+                if is_abort:
+                    output.output_text = "".join(emitted_text)
+                    if last_output is not None:
+                        output.prompt_tokens = max(output.prompt_tokens, last_output.prompt_tokens)
+                        output.completion_tokens = max(output.completion_tokens, last_output.completion_tokens)
+                        output.cached_tokens = max(output.cached_tokens, last_output.cached_tokens)
+                        output.cache_detail = output.cache_detail or last_output.cache_detail
+                    # An aborted row does not publish a new prefix. Its tensor
+                    # cleanup remains on the worker; do not report a normal
+                    # terminal durability/store receipt for this partial output.
+                elif output.finished:
                     # Match EngineCore: image/video/audio and hybrid MLLM tool
                     # turns must not publish their terminal event until typed,
                     # paged, SSM-companion, and disk cleanup is durable. Token
@@ -5763,9 +5799,15 @@ class MLLMScheduler:
                         _durability_was_pending,
                         _outcome,
                     )
+                if output.new_text:
+                    emitted_text.append(output.new_text)
+                last_output = output
                 yield output
+                if is_abort:
+                    break
         finally:
             # Cleanup queue — runs on normal exit AND GeneratorExit (client disconnect)
+            getattr(self, "_stream_abort_outputs", {}).pop(request_id, None)
             if request_id in self.output_queues:
                 del self.output_queues[request_id]
             # If the request is still running (client disconnected mid-stream),

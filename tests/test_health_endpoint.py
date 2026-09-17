@@ -1766,6 +1766,68 @@ class TestHealthBusySnapshot:
         finally:
             server._health_snapshot_cache["result"] = None
 
+    @pytest.mark.parametrize(
+        "cached_durability,live_durability",
+        [
+            ({"request_id": "completed-a"}, {"request_id": "completed-b", "retained_tokens": 128}),
+            (None, {"request_id": "completed-b", "retained_tokens": 128}),
+            ({"request_id": "completed-a"}, None),
+            ({"request_id": "completed-a"}, {}),
+        ],
+        ids=["new-completed-generation", "first-completed-generation", "absent", "empty"],
+    )
+    def test_busy_durability_tracks_last_completed_not_active_request(
+        self, cached_durability, live_durability
+    ):
+        from vmlx_engine import server
+
+        mock_engine, mock_scheduler = self._mock_engine_and_scheduler()
+        cached_generator = (
+            {"last_durability": cached_durability} if cached_durability else {}
+        )
+        mock_scheduler.get_stats.return_value["batch_generator"] = cached_generator
+        with (
+            patch.object(server, "_engine", mock_engine),
+            patch.object(server, "_model_name", "test-model"),
+            patch.object(server, "_model_load_error", None),
+            patch.object(server, "_mcp_manager", None),
+            patch.object(server, "_jang_metadata", None),
+            patch.object(server, "_last_request_time", 0.0),
+            patch.object(server, "_health_snapshot_cache", {"result": None}),
+        ):
+            idle_result = _run(server.health())
+            assert "health_gauges_cached" not in idle_result
+            engine_calls = mock_engine.get_stats.call_count
+            scheduler_calls = mock_scheduler.get_stats.call_count
+
+            mock_scheduler.running = {"active-c": object()}
+            mock_scheduler.batch_generator = SimpleNamespace(
+                _stats=SimpleNamespace(
+                    last_cache_execution={"request_id": "active-c"},
+                    last_durability=live_durability,
+                    last_native_mtp=None,
+                    last_native_mtp_skip=None,
+                )
+            )
+            busy_result = _run(server.health())
+
+            assert busy_result["health_gauges_cached"] is True
+            generator = busy_result["scheduler"]["batch_generator"]
+            assert generator["last_cache_execution"]["request_id"] == "active-c"
+            if live_durability:
+                assert generator["last_durability"] == live_durability
+                assert generator["last_durability"] is not live_durability
+                assert generator["last_durability"]["request_id"] != "active-c"
+            else:
+                assert "last_durability" not in generator
+            # No heavy collector or mutation of the retained idle snapshot.
+            assert mock_engine.get_stats.call_count == engine_calls
+            assert mock_scheduler.get_stats.call_count == scheduler_calls
+            assert (
+                server._health_snapshot_cache["result"]["scheduler"]["batch_generator"]
+                == cached_generator
+            )
+
     def test_busy_without_snapshot_computes_full_payload(self):
         from vmlx_engine import server
 

@@ -13486,6 +13486,14 @@ async def health():
                     _generator_block["last_cache_execution"] = _generator_lce
                 else:
                     _generator_block.pop("last_cache_execution", None)
+                # Durability belongs to the last completed generation, not
+                # necessarily the current execution. Keep its own request ID
+                # while newer work is active; never retain a stale idle record.
+                _durability = _live_generator_records.get("last_durability")
+                if _durability is not None:
+                    _generator_block["last_durability"] = _durability
+                else:
+                    _generator_block.pop("last_durability", None)
                 for _record_name in (
                     "last_native_mtp",
                     "last_native_mtp_skip",

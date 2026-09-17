@@ -18,6 +18,7 @@ import mlx.core as mx
 import numpy as np
 
 from vmlx_engine.utils.jang_affine_storage import expand_packed_1bit_to_2bit_mlx
+from .page_read_advice import SelectedPageReadAdvisor
 
 _DTYPES = {
     "BF16": np.uint16,
@@ -39,6 +40,7 @@ _PARALLEL_READ_MAX_ROWS = 128
 _PARALLEL_READ_MAX_WORKERS = 16
 _PREFETCH_MAX_ROWS = 8192
 _PREFETCH_MAX_PACKED_BYTES = 8 * 1024 * 1024
+_READ_ADVICE_MAX_ROWS = 128
 logger = logging.getLogger(__name__)
 
 
@@ -690,6 +692,17 @@ class FileBackedQuantizedNGramTable:
         # Keep pread separately selectable for qualification on cold SSD pages.
         # The existing parallel-read policy still applies to eligible gathers.
         self._prefetch_pread = os.environ.get("VMLX_QWEN4_PLE_PREFETCH_PREAD") == "1"
+        # Qualification switch: queue only selected nonresident file pages,
+        # then retain the original mmap reader and bit-exact dequantization.
+        # No whole-table preload, new cache or generation-state mutation.
+        self._read_advisor = (
+            SelectedPageReadAdvisor.create()
+            if os.environ.get("VMLX_QWEN4_PLE_READ_ADVICE") == "1"
+            else None
+        )
+        self.read_advice_stats = {
+            "calls": 0, "hinted_pages": 0, "hinted_bytes": 0, "fallbacks": 0,
+        }
         self._prefetch_lock = threading.Lock()
         self._prefetch_pool = None
         self._prefetch_ticket = None
@@ -949,6 +962,33 @@ class FileBackedQuantizedNGramTable:
             pool is not None and len(selections) > 1
             and unique_rows.size <= _PARALLEL_READ_MAX_ROWS
         )
+        advisor = getattr(self, "_read_advisor", None)
+        if (advisor is not None and not parallel and not use_pread
+                and unique_rows.size <= _READ_ADVICE_MAX_ROWS):
+            report = advisor.advise(
+                (reader, local_rows[selected])
+                for shard_id, selected in selections
+                for reader in (self.shards[shard_id].weight,
+                               self.shards[shard_id].scales,
+                               self.shards[shard_id].biases)
+            )
+            totals = self.read_advice_stats
+            first_hint = not totals["hinted_pages"] and report["hinted"] > 0
+            totals["calls"] += 1
+            totals["hinted_pages"] += report["hinted"]
+            totals["hinted_bytes"] += report["bytes"]
+            failed = report["status"] in {"unsupported", "limit", "error", "partial"}
+            first_fallback = failed and not totals["fallbacks"]
+            totals["fallbacks"] += int(failed)
+            if first_hint or first_fallback or totals["calls"] % 256 == 0:
+                logger.info(
+                    "Qwen PLE selected-page advice: status=%s calls=%d "
+                    "hinted_pages=%d hinted_bytes=%d fallbacks=%d "
+                    "max_rows=%d reader=unchanged_mmap",
+                    report["status"], totals["calls"], totals["hinted_pages"],
+                    totals["hinted_bytes"], totals["fallbacks"],
+                    _READ_ADVICE_MAX_ROWS,
+                )
         host_batches = {}
         if parallel:
             host_batches = _read_parallel_shards(

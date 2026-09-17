@@ -91,6 +91,50 @@ def test_nonstream_generate_success_keeps_content_reasoning_and_usage(monkeypatc
     assert 'error' not in row
     generation.assert_awaited_once()
 
+
+@pytest.mark.parametrize('is_mllm', [False, True])
+@pytest.mark.parametrize('rejected', [False, True])
+def test_raw_nonstream_completion_returned_status(monkeypatch, is_mllm, rejected):
+    """Keep the real completion handler's exception-to-response conversion."""
+    from vmlx_engine import server
+    from vmlx_engine.errors import PromptTooLongError
+
+    generation = AsyncMock(
+        side_effect=PromptTooLongError(33, 32) if rejected else None,
+        return_value=SimpleNamespace(text='Raw result', finish_reason='length',
+                                     prompt_tokens=4, completion_tokens=2),
+    )
+    engine = SimpleNamespace(is_mllm=is_mllm, generate=generation,
+                             chat=generation, stop=AsyncMock())
+    monkeypatch.setattr(server, '_engine', engine)
+    monkeypatch.setattr(server, '_api_key', None)
+    monkeypatch.setattr(server, '_standby_state', None)
+    monkeypatch.setattr(server, '_max_prompt_tokens', 0)
+    monkeypatch.setattr(server, '_model_path', None)
+    monkeypatch.setattr(server, '_model_name', 'test')
+    with TestClient(server.app, raise_server_exceptions=False) as client:
+        result = client.post('/api/generate', json={
+            'model': 'test', 'prompt': 'hi', 'stream': False, 'raw': True,
+            'options': {'num_ctx': 32, 'num_predict': 2, 'temperature': 0},
+        })
+
+    generation.assert_awaited_once()
+    assert generation.await_args.kwargs['max_prompt_tokens'] == 32
+    assert generation.await_args.kwargs['max_tokens'] == 2
+    if rejected:
+        assert result.status_code == 413, result.text
+        assert set(result.json()) == {'error'}
+        assert result.json()['error'].startswith('prompt_too_long: ')
+        assert '~33 tokens' in result.json()['error']
+        assert '~32 tokens' in result.json()['error']
+    else:
+        assert result.status_code == 200, result.text
+        row = result.json()
+        assert row['response'] == 'Raw result'
+        assert row['done'] is True
+        assert row['done_reason'] == 'length'
+        assert 'error' not in row
+
 @pytest.mark.parametrize('path,extra', [('/api/chat', {'messages': [{'role':'user','content':'hi'}]}),
     ('/api/generate', {'prompt':'hi'})])
 @pytest.mark.parametrize('stream', [False, True])

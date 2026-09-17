@@ -17513,7 +17513,7 @@ async def ollama_show(fastapi_request: Request):
 
 
 def _ollama_returned_error_response(result):
-    """Keep a returned Chat rejection out of the Ollama success converters."""
+    """Keep a returned completion rejection out of the Ollama success converters."""
     if not hasattr(result, "body") or int(getattr(result, "status_code", 200) or 200) < 400:
         return None
     try:
@@ -18162,6 +18162,9 @@ async def ollama_generate(fastapi_request: Request):
         # it for disconnect detection). Pre-session regression from
         # v1.3.12 where the call passed 2 args causing TypeError.
         result = await create_completion(comp_req)
+        error_response = _ollama_returned_error_response(result)
+        if error_response is not None:
+            return error_response
         if hasattr(result, "model_dump"):
             result_dict = result.model_dump(exclude_none=True)
         else:

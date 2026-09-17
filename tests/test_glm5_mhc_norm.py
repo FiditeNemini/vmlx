@@ -53,16 +53,20 @@ def test_scalar_guards(key, value):
     assert not hc.eligible(*metadata(), **kw)
 
 
-def test_default_off_and_scope_guards(monkeypatch):
+def test_default_on_explicit_off_and_scope_guards(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("declined path constructed a kernel")
     monkeypatch.setattr(hc, "_projection_kernel", forbidden)
     assert hc.glm5_mhc_norm_decode(*metadata(), **KW) is None
+    monkeypatch.setattr(hc, "_CALLS", 0)
     monkeypatch.delenv("VMLX_GLM5_MHC_WEIGHTED_RMS", raising=False)
-    assert hc.try_glm5_hc_norm(None, None, None) is None
-    monkeypatch.setenv("VMLX_GLM5_MHC_WEIGHTED_RMS", "1")
+    assert hc.glm5_mhc_norm_status() == {"requested": True, "graph_calls": 0}
     monkeypatch.setattr(hc, "affine_moe_ar_scope_active", lambda: False)
     assert hc.try_glm5_hc_norm(None, None, None) is None
+    monkeypatch.setenv("VMLX_GLM5_MHC_WEIGHTED_RMS", "0")
+    monkeypatch.setattr(hc, "affine_moe_ar_scope_active", lambda: True)
+    assert hc.try_glm5_hc_norm(None, None, None) is None
+    assert hc.glm5_mhc_norm_status() == {"requested": False, "graph_calls": 0}
 
 
 def test_admitted_failure_is_not_replayed(monkeypatch):
@@ -148,3 +152,54 @@ def test_component_all_outputs_word_exact(pattern, coefficient_dtype):
         assert_words_equal(got, want)
     for got, want in zip(production, (expected[0], expected[1], expected[3])):
         assert_words_equal(got, want)
+
+
+@pytest.mark.parametrize("case", ["runtime", "prefill", "batch", "parent_disabled"])
+def test_default_on_keeps_unsupported_paths_stock(monkeypatch, case):
+    streams, fn, base, scale, weight = metadata()
+    connection = SimpleNamespace(_fused_decode=case != "parent_disabled",
+        hc_fn=fn, hc_base=base, hc_scale=scale, rms_eps=KW["rms_eps"],
+        eps=KW["sink_eps"], iters=KW["iterations"])
+    norm = SimpleNamespace(weight=weight, eps=KW["norm_eps"])
+    if case == "prefill": streams.shape = (1, 2, 4, 4096)
+    elif case == "batch": streams.shape = (2, 1, 4, 4096)
+    monkeypatch.delenv("VMLX_GLM5_MHC_WEIGHTED_RMS", raising=False)
+    monkeypatch.setattr(hc, "_CALLS", 0)
+    monkeypatch.setattr(hc, "affine_moe_ar_scope_active", lambda: True)
+    monkeypatch.setattr(hc, "_compatible_runtime", lambda: case != "runtime")
+    monkeypatch.setattr(mx, "default_device", lambda: mx.gpu)
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported default path constructed a kernel")
+    monkeypatch.setattr(hc, "_projection_kernel", forbidden)
+    assert hc.try_glm5_hc_norm(streams, connection, norm) is None
+    assert hc.glm5_mhc_norm_status() == {"requested": True, "graph_calls": 0}
+
+
+@pytest.mark.parametrize("setting,requested", [(None, True), ("0", False), ("1", True)])
+def test_default_policy_selects_dispatch_without_claiming_gpu_execution(monkeypatch, setting, requested):
+    streams, fn, base, scale, weight = metadata()
+    connection = SimpleNamespace(_fused_decode=True, hc_fn=fn, hc_base=base,
+        hc_scale=scale, rms_eps=KW["rms_eps"], eps=KW["sink_eps"], iters=20)
+    norm = SimpleNamespace(weight=weight, eps=KW["norm_eps"])
+    monkeypatch.delenv("VMLX_GLM5_MHC_WEIGHTED_RMS", raising=False)
+    if setting is not None:
+        monkeypatch.setenv("VMLX_GLM5_MHC_WEIGHTED_RMS", setting)
+    monkeypatch.setattr(hc, "_CALLS", 0)
+    monkeypatch.setattr(hc, "affine_moe_ar_scope_active", lambda: True)
+    monkeypatch.setattr(hc, "_compatible_runtime", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.gpu)
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    outputs = (object(), object(), object())
+    calls = []
+    def dispatch(*args, **kwargs):
+        calls.append((args, kwargs))
+        return outputs
+    monkeypatch.setattr(hc, "glm5_mhc_norm_decode", dispatch)
+    actual = hc.try_glm5_hc_norm(streams, connection, norm)
+    assert actual is (outputs if requested else None)
+    assert len(calls) == int(requested)
+    assert hc.glm5_mhc_norm_status() == {
+        "requested": requested, "graph_calls": int(requested)}
+    if calls:
+        assert calls[0][1]["enabled"] is True

@@ -255,7 +255,7 @@ _CALLS = 0
 
 def try_glm5_hc_norm(streams, hc, norm):
     """Only entered by ordinary DecoderLayer; speculative/prefill stay stock."""
-    if (os.environ.get("VMLX_GLM5_MHC_WEIGHTED_RMS", "0") != "1"
+    if (os.environ.get("VMLX_GLM5_MHC_WEIGHTED_RMS", "1") != "1"
             or not affine_moe_ar_scope_active()
             or not hc._fused_decode or mx.default_device() != mx.gpu
             or not mx.metal.is_available() or not _compatible_runtime()):
@@ -273,5 +273,6 @@ def try_glm5_hc_norm(streams, hc, norm):
 
 
 def glm5_mhc_norm_status():
+    # Requested is policy, not installation or completed GPU execution.
     return {"graph_calls": _CALLS,
-            "requested": os.environ.get("VMLX_GLM5_MHC_WEIGHTED_RMS", "0") == "1"}
+            "requested": os.environ.get("VMLX_GLM5_MHC_WEIGHTED_RMS", "1") == "1"}

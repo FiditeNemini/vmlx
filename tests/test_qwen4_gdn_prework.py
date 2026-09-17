@@ -18,8 +18,10 @@ def metadata():
             for i, s in enumerate(shapes)]
 
 
-def test_default_off(monkeypatch):
+def test_default_requested_with_explicit_opt_out(monkeypatch):
     monkeypatch.delenv("VMLX_QWEN4_GDN_PREWORK", raising=False)
+    assert pre.gdn_prework_requested()
+    monkeypatch.setenv("VMLX_QWEN4_GDN_PREWORK", "0")
     assert not pre.gdn_prework_requested()
     monkeypatch.setenv("VMLX_QWEN4_GDN_PREWORK", "1")
     assert pre.gdn_prework_requested()

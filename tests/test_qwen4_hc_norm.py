@@ -16,9 +16,9 @@ def metadata():
             ((1, 1, 10240), (1, 1, 2560), (1, 1, 4), (10240,))]
 
 
-def test_default_off(monkeypatch):
+def test_default_requested_with_explicit_opt_out(monkeypatch):
     monkeypatch.delenv("VMLX_QWEN4_HC_COMBINE_NORM", raising=False)
-    assert not hc.hc_combine_norm_requested()
+    assert hc.hc_combine_norm_requested()
     monkeypatch.setenv("VMLX_QWEN4_HC_COMBINE_NORM", "0")
     assert not hc.hc_combine_norm_requested()
     monkeypatch.setenv("VMLX_QWEN4_HC_COMBINE_NORM", "1")

@@ -9,6 +9,27 @@ from vmlx_engine.metal import qwen4_exact_down as candidate
 from vmlx_engine.metal.affine_moe_pair_decode import affine_moe_ar_scope
 
 
+def test_default_requested_with_explicit_opt_out(monkeypatch):
+    monkeypatch.delenv("VMLX_QWEN4_EXACT_DOWN", raising=False)
+    assert candidate.exact_down_requested()
+    for value in ("0", "false", "off"):
+        monkeypatch.setenv("VMLX_QWEN4_EXACT_DOWN", value)
+        assert not candidate.exact_down_requested()
+    monkeypatch.setenv("VMLX_QWEN4_EXACT_DOWN", "1")
+    assert candidate.exact_down_requested()
+
+
+def test_unqualified_device_declines_before_tensor_inspection(monkeypatch):
+    monkeypatch.setattr(candidate, "affine_moe_ar_scope_active", lambda: True)
+    monkeypatch.setattr(mx, "default_device", lambda: mx.gpu)
+    monkeypatch.setattr(mx.metal, "is_available", lambda: True)
+    monkeypatch.setattr(candidate, "_compatible_runtime", lambda: False)
+    def forbidden(*args):
+        pytest.fail("unqualified runtime inspected candidate tensors")
+    monkeypatch.setattr(candidate, "_eligible", forbidden)
+    assert candidate.qwen4_exact_down(None, None, None, None, enabled=True) is None
+
+
 def projection(bits=3, group=64):
     mx.random.seed(813)
     p = QuantizedSwitchLinear(640, 2560, 12, bias=False, bits=bits, group_size=group)

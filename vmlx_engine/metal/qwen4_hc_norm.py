@@ -1,4 +1,4 @@
-"""Default-off FP16 HC residual combine followed by grouped native-order RMS.
+"""Guarded FP16 HC residual combine followed by grouped native-order RMS.
 
 Boundary inspired by ddalcu/mlx-serve 3c6206d94 hcReadPending; no Zig/BF16
 arithmetic is reused. Reduction adapted from Apple MLX 0.32.2 (1f8e74e3),
@@ -36,7 +36,7 @@ from .affine_moe_pair_decode import affine_moe_ar_scope_active
 
 
 def hc_combine_norm_requested():
-    return os.environ.get("VMLX_QWEN4_HC_COMBINE_NORM", "0") == "1"
+    return os.environ.get("VMLX_QWEN4_HC_COMBINE_NORM", "1") == "1"
 
 
 @lru_cache(maxsize=1)
@@ -151,7 +151,7 @@ def hc_combine_norm(residual, block, inject, weight, *, eps, group_size, enabled
     global _OBSERVED
     if not _OBSERVED:
         logging.getLogger(__name__).info(
-            "Qwen HC combine/norm candidate graph: rows=1 streams=4 hidden=2560 "
+            "Qwen HC combine/norm fusion graph: rows=1 streams=4 hidden=2560 "
             "dtype=float16 native_rms_reads=4 threads=640 stream=caller"
         )
         _OBSERVED = True

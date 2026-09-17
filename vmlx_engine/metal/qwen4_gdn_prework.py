@@ -1,4 +1,4 @@
-"""Experimental ordinary-AR FP16 GDN prework; no recurrence or cache mutation.
+"""Guarded ordinary-AR FP16 GDN prework; no recurrence or cache mutation.
 
 Boundary inspired by ddalcu/mlx-serve 3c6206d94 gdnPreworkFused. Arithmetic
 derived instead from Apple MLX 0.32.2 depthwise_conv_1d, rms_single_row,
@@ -35,7 +35,7 @@ from .affine_moe_pair_decode import affine_moe_ar_scope_active
 
 
 def gdn_prework_requested():
-    return os.environ.get("VMLX_QWEN4_GDN_PREWORK", "0") == "1"
+    return os.environ.get("VMLX_QWEN4_GDN_PREWORK", "1") == "1"
 
 
 @lru_cache(maxsize=1)

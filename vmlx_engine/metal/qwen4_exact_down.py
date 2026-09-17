@@ -17,7 +17,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""Experimental Qwen AR expert-down/weight/reduce dispatch, disabled by default.
+"""Qualified-shape Qwen AR expert-down/weight/reduce dispatch.
 
 Preserve native MLX gather_qmv lane arithmetic and the top-10 col_reduce_small
 tree, rather than importing a GGUF or eight-lane dot. Expert cohorts share one
@@ -36,7 +36,12 @@ import mlx.core as mx
 from .affine_moe_pair_decode import affine_moe_ar_scope_active, _projection_reason
 
 logger = logging.getLogger(__name__)
-_ENABLED = os.environ.get("VMLX_QWEN4_EXACT_DOWN", "0").lower() in {"1", "true", "yes", "on"}
+def exact_down_requested():
+    """Enabled by default; hardware, precision and productive-AR guards remain."""
+    return os.environ.get("VMLX_QWEN4_EXACT_DOWN", "1").lower() in {"1", "true", "yes", "on"}
+
+
+_ENABLED = exact_down_requested()
 _FAILED = False
 _OBSERVED = False
 
@@ -162,7 +167,7 @@ _SOURCE = r'''
 def _compatible_runtime():
     try:
         return (importlib.metadata.version("mlx") == "0.32.2"
-                and "Apple M5" in mx.device_info().get("device_name", ""))
+                and mx.device_info().get("device_name") == "Apple M5 Max")
     except (importlib.metadata.PackageNotFoundError, RuntimeError):
         return False
 
@@ -193,7 +198,7 @@ def _kernel():
 
 
 def qwen4_exact_down(projection, activated, indices, scores, *, enabled=None):
-    """Return the opt-in productive-AR candidate, or None without side effects."""
+    """Return the qualified productive-AR fusion, or None without side effects."""
     global _FAILED, _OBSERVED
     if not (_ENABLED if enabled is None else enabled):
         return None
@@ -212,11 +217,11 @@ def qwen4_exact_down(projection, activated, indices, scores, *, enabled=None):
         if not _OBSERVED:
             mx.eval(output)
             _OBSERVED = True
-            logger.info("Qwen exact down candidate active: bits=%s group=%s "
+            logger.info("Qwen exact down fusion active: bits=%s group=%s "
                         "fp16 K640 N2560 top10 scope=productive_ar math=mlx0322",
                         projection.bits, projection.group_size)
         return output
     except (RuntimeError, ValueError):
         _FAILED = True
-        logger.exception("Qwen exact down candidate failed; retaining native down/reduction")
+        logger.exception("Qwen exact down fusion failed; retaining native down/reduction")
         return None

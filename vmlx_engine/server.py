@@ -16930,6 +16930,8 @@ async def create_anthropic_message(
                             "message": err.get("message", "Generation failed"),
                             **({"code": err["code"]} if err.get("code") else {}),
                         },
+                        **({"usage": _anthropic_usage_block(chunk["usage"])}
+                           if isinstance(chunk.get("usage"), dict) else {}),
                     },
                 )
 
@@ -25447,6 +25449,7 @@ async def stream_chat_completion(
     cached_tokens = 0
     cache_detail: str | None = None
     last_output = None
+    explicitly_cancelled = False
     stream_logprob_offset = 0
     _decode_first_ts: float | None = None
     _decode_first_count = 1
@@ -25498,6 +25501,9 @@ async def stream_chat_completion(
                     await engine.abort_request(response_id)
                 return
 
+            if explicitly_cancelled:
+                continue
+
             delta_text = output.new_text
             last_output = output
 
@@ -25519,6 +25525,21 @@ async def stream_chat_completion(
                 cache_detail = _detail
             if getattr(output, "error", None):
                 raise RuntimeError(str(getattr(output, "error")))
+
+            if (
+                output.finished
+                and _normalize_responses_finish_reason(output.finish_reason)
+                == "cancelled"
+            ):
+                # Explicit cancellation is not EOS. Keep already delivered
+                # deltas and authoritative accounting, but do not flush a
+                # partial parser buffer, publish a tool call, or retry an
+                # answer after the user has cancelled this generation.
+                explicitly_cancelled = True
+                # Let the already-terminal iterator exhaust so the scheduler
+                # runs its queue/abort-map finally before adapters return on
+                # the error. Breaking here defers cleanup to async-generator GC.
+                continue
 
             if _draining_tool_parser_stop:
                 # The parsed native call is already frozen in
@@ -26210,6 +26231,43 @@ async def stream_chat_completion(
         return
     finally:
         _stop_nonstream_disconnect_drain()
+
+    if explicitly_cancelled:
+        cancelled_usage = Usage(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+        if cached_tokens > 0 or cache_detail:
+            cancelled_usage.prompt_tokens_details = PromptTokensDetails(
+                cached_tokens=cached_tokens, cache_detail=cache_detail
+            )
+        logger.info("Chat completion %s explicitly cancelled", response_id)
+        error_data = {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "error": {
+                "message": "Request was explicitly cancelled before completion.",
+                "type": "invalid_request_error",
+                "code": "request_cancelled",
+            },
+            # Native adapters may terminate on the error without consuming a
+            # later usage-only chunk. Preserve actual counters on that event;
+            # do not turn an intentional cancellation into a retryable 5xx.
+            "usage": cancelled_usage.model_dump(exclude_none=True),
+        }
+        yield f"data: {json.dumps(error_data)}\n\n"
+        if include_usage:
+            usage_chunk = ChatCompletionChunk(
+                id=response_id,
+                created=_created_ts,
+                model=request.model,
+                choices=[],
+                usage=cancelled_usage,
+            )
+            yield f"data: {_dump_chat_chunk(usage_chunk, terminal_usage=True)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     # ─── Post-stream: tool call extraction ───────────────────────────────
     # If we buffered text because of tool call markers, parse it now

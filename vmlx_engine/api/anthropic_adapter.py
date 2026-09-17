@@ -785,6 +785,10 @@ class AnthropicStreamAdapter:
             events.append(self._sse("error", {
                 "type": "error",
                 "error": {"type": etype, "message": emsg, **({"code": ecode} if ecode else {})},
+                # vMLX error diagnostics can carry partial actual usage. The
+                # error owns termination, so a later usage tail is ignored.
+                **({"usage": _anthropic_usage(chunk["usage"])}
+                   if isinstance(chunk.get("usage"), dict) else {}),
             }))
             self._errored = True
             return events

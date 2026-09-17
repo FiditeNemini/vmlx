@@ -81,8 +81,6 @@ Only a fresh mask is written, so compilation fallback cannot append cache twice.
         )[0]
         shape = (batch, rows)
         if shape not in _OBSERVED:
-            from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
-            guard_consumer_eval()
             mx.eval(result)
             _OBSERVED.add(shape)
             logger.info(

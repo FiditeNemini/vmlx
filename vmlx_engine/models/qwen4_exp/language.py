@@ -26,11 +26,6 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 from mlx_lm.models.cache import ArraysCache
-from vmlx_engine.models.qwen4_exp.deferred_ple import (
-    defer_embedding as _defer_packed_ple,
-    pending as _packed_ple_pending,
-    guard_consumer_eval as _guard_pending_ple_eval,
-)
 from vmlx_engine.metal.qwen4_verify_sdpa import qwen4_verify_sdpa
 from vmlx_engine.metal.qwen4_prefill_sdpa import qwen4_prefill_sdpa
 from vmlx_engine.metal.qwen4_qsa_mask import qsa_block_mask, qsa_mask_requested
@@ -931,14 +926,6 @@ class PLELayer(nn.Module):
         return table.prefetch_rows(self.hasher.hash_tokens(ids, prev).reshape(-1))
 
     def _embed(
-        self, input_ids, cache, profile=None, prepared=None,
-    ):
-        deferred = _defer_packed_ple(self, input_ids, cache)
-        if deferred is not None:
-            return deferred
-        return self._embed_immediate(input_ids, cache, profile=profile, prepared=prepared)
-
-    def _embed_immediate(
         self,
         input_ids: mx.array,
         cache,
@@ -2039,7 +2026,6 @@ class QSAAttention(nn.Module):
             if out is not None and not self._sparse_ar_observed:
                 # First qualified dispatch only. Runtime failures propagate;
                 # never replay an already advanced cache through the model.
-                _guard_pending_ple_eval()
                 mx.eval(out)
                 self._sparse_ar_observed = True
                 logger.info("QSA AR dispatch path=sparse_bitmap1024 context=%d "
@@ -2453,7 +2439,6 @@ class Qwen4ExpTextModel(nn.Module):
         _layer_fp = _layer_fingerprint_enabled(inputs)
         eager_dispatch = (
             self._eager_dispatch
-            and not _packed_ple_pending()
             and not profile
             and not _layer_fp
             and 0 < inputs.shape[0] * inputs.shape[1] <= _EAGER_DISPATCH_MAX_ROWS
@@ -2474,7 +2459,7 @@ class Qwen4ExpTextModel(nn.Module):
                 logger.info("QWEN4_LAYER_FP contiguous-state experiment applied before step %d", _LAYER_FP_STEPS["n"])
         prepared_reads = {}
         try:
-            if (self._ple_prefetch and not _packed_ple_pending() and not profile and not _layer_fp
+            if (self._ple_prefetch and not profile and not _layer_fp
                     and 0 < inputs.shape[0] * inputs.shape[1] <= _PLE_PREFETCH_MAX_TOKENS):
                 # Verification splits the PLE update at n_confirmed. Prepare
                 # only that exact first segment; draft and rollback reads keep

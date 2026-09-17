@@ -153,16 +153,12 @@ def sparse_merge_topk(negative_scores, *, k: int, enabled: bool):
                 output_dtypes=[mx.float32, mx.uint32],
             )
             if stage not in _VERIFIED_VARIANTS:
-                from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
-                guard_consumer_eval()
                 mx.eval(values, ids)
                 _VERIFIED_VARIANTS.add(stage)
             if out_n == _K:
                 break
             stage = "merge"
         if not _OBSERVED:
-            from vmlx_engine.models.qwen4_exp.deferred_ple import guard_consumer_eval
-            guard_consumer_eval()
             mx.eval(ids)
             _OBSERVED = True
             logger.info(

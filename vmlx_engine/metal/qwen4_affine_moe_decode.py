@@ -24,6 +24,7 @@ import mlx.nn as nn
 from vmlx_engine.metal.affine_moe_pair_decode import affine_moe_pair_activation
 from vmlx_engine.metal.qwen4_aligned_moe_prefill import aligned_switchglu
 from vmlx_engine.metal.qwen4_route_prepare import scatter_route_switchglu
+from vmlx_engine.metal.qwen4_exact_down import qwen4_exact_down
 
 logger = logging.getLogger(__name__)
 
@@ -338,6 +339,9 @@ def qwen4_affine_switchglu(
         return output, True
     activated, pair_fused = affine_moe_pair_activation(switch, x, indices)
     if pair_fused:
+        output = qwen4_exact_down(switch.down_proj, activated, indices, scores)
+        if output is not None:
+            return output, True
         selected = switch.down_proj(activated, indices).squeeze(-2)
         return (selected * scores[..., None]).sum(axis=-2), True
     if getattr(switch, _EXACT_OK_ATTR, False):

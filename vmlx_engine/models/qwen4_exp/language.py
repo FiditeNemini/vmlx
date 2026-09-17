@@ -35,6 +35,10 @@ from vmlx_engine.metal.qwen4_hc_combine import (
     exact_hc_combine,
     exact_hc_combine_requested,
 )
+from vmlx_engine.metal.qwen4_hc_norm import (
+    hc_combine_norm_requested,
+    hc_combine_norm,
+)
 from vmlx_engine.metal.qwen4_gdn_blocked_prefill import (
     qwen4_blocked_gated_delta_update as gated_delta_update,
 )
@@ -567,6 +571,7 @@ class GatedResidual(nn.Module):
     def __init__(self, args: Qwen4ExpTextArgs, use_combine: bool = True):
         super().__init__()
         self._exact_combine = exact_hc_combine_requested()
+        self._combine_norm = hc_combine_norm_requested()
         self._hc_view_split = os.environ.get("VMLX_QWEN4_HC_VIEW_SPLIT") == "1"
         self.hc_count = args.hc_count
         self.hidden_size = args.hidden_size
@@ -598,6 +603,19 @@ class GatedResidual(nn.Module):
 
     def _forward(self, hyper_input: mx.array):
         normed = self.hc_norm(hyper_input)
+        return self._forward_normed(hyper_input, normed)
+
+    def from_normed(self, hyper_input: mx.array, normed: mx.array):
+        """Use the existing projections after an admitted combine/norm graph."""
+        if getattr(self, "_compiled_forward", None) is not None:
+            forward = getattr(self, "_compiled_normed_forward", None)
+            if forward is None:
+                forward = mx.compile(self._forward_normed)
+                self._compiled_normed_forward = forward
+            return forward(hyper_input, normed)
+        return self._forward_normed(hyper_input, normed)
+
+    def _forward_normed(self, hyper_input: mx.array, normed: mx.array):
         input_inject_weight = getattr(self, "input_inject_weight", None)
         view_split = (
             self._hc_view_split
@@ -2302,7 +2320,22 @@ class DecoderLayer(nn.Module):
             )
         if profile_layer is not None:
             phase_ms["gdn" if self.is_linear else "qsa"] = _profile_eval(r)
-        h = self.attn_hyper_connection.combine(hyper, r, inject)
+        combined_norm = None
+        if (
+            self.mlp_hyper_connection._combine_norm
+            and profile_layer is None and mask is None and not self.training
+            and not n_confirmed and not prefill_checkpoint_steps
+            and not last_token_only
+        ):
+            norm = self.mlp_hyper_connection.hc_norm
+            combined_norm = hc_combine_norm(
+                hyper, r, inject, norm.weight, eps=norm.eps,
+                group_size=norm.group_size, enabled=True,
+            )
+        if combined_norm is None:
+            h = self.attn_hyper_connection.combine(hyper, r, inject)
+        else:
+            h, _ = combined_norm
         if profile_layer is not None:
             phase_ms["attn_combine"] = _profile_eval(h)
 
@@ -2311,7 +2344,10 @@ class DecoderLayer(nn.Module):
         # logits; all remaining operations are independent per token.
         if last_token_only:
             h = h[:, -1:, :]
-        x, hyper, inject = self.mlp_hyper_connection(h)
+        if combined_norm is None:
+            x, hyper, inject = self.mlp_hyper_connection(h)
+        else:
+            x, hyper, inject = self.mlp_hyper_connection.from_normed(h, combined_norm[1])
         if profile_layer is not None:
             phase_ms["mlp_hc"] = _profile_eval(x)
         r = self.mlp(x, phase_ms if profile_layer is not None else None)

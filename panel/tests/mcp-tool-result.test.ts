@@ -1,6 +1,49 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { formatMcpToolResult } from "../src/shared/mcpToolResult";
+import { boundToolResultText, formatMcpToolResult } from "../src/shared/mcpToolResult";
+
+describe("MCP shared text bound", () => {
+  it.each(["", "finite detail", "  indented\nline\t  ", "拒否 😀 café", String.raw`literal\n\t\"\\`])(
+    "preserves untruncated text exactly: %s", (text) => {
+      expect(boundToolResultText(text, text.length)).toBe(text);
+      expect(boundToolResultText(text, text.length + 1)).toBe(text);
+    },
+  );
+
+  it("keeps the existing leading UTF-16 slice plus suffix, not a total-length cap", () => {
+    const text = "A😀B";
+    expect(text.length).toBe(4);
+    expect(boundToolResultText(text, 2)).toBe(
+      "A\uD83D\n\n[Truncated — showing first 2 of 4 characters]",
+    );
+    expect(boundToolResultText(text, 3)).toBe(
+      "A😀\n\n[Truncated — showing first 3 of 4 characters]",
+    );
+    expect(boundToolResultText(text, 2).length).toBeGreaterThan(2);
+  });
+
+  it.each(["Error (503): ", "Tool execution error: "])(
+    "bounds the whole exceptional result including its %s prefix", (prefix) => {
+      const text = prefix + String.raw`  rejected\n"literal" 拒否 😀 `.repeat(12);
+      const maxChars = 40;
+      const expected = text.slice(0, maxChars) +
+        `\n\n[Truncated — showing first ${maxChars} of ${text.length} characters]`;
+      expect(boundToolResultText(text, maxChars)).toBe(expected);
+      expect(boundToolResultText(text, maxChars).startsWith(prefix)).toBe(true);
+      expect(boundToolResultText(text, text.length)).toBe(text);
+    },
+  );
+
+  it("retains the same bound for formatted success and tool rejection", () => {
+    const detail = "  rejected\\n 拒否 😀 ".repeat(10);
+    expect(formatMcpToolResult({ content: detail }, 31))
+      .toBe(boundToolResultText(detail, 31));
+    expect(formatMcpToolResult({ is_error: true, content: detail }, 31))
+      .toBe(boundToolResultText(`Error: ${detail}`, 31));
+    const source = readFileSync("src/shared/mcpToolResult.ts", "utf8");
+    expect(source).toMatch(/return boundToolResultText\(\s*text,\s*maxChars\s*\)/);
+  });
+});
 
 describe("MCP model-facing tool result", () => {
   it.each(["missing field: tax", "  indented\nline\\n\n", "null", "拒否: field"])(
@@ -56,5 +99,36 @@ describe("MCP model-facing tool result", () => {
     expect(mcp).toContain("call_id: tc.id,\n                    output: resultText");
     expect(mcp).toContain('role: "tool", tool_call_id: tc.id, content: resultText');
     expect(mcp).not.toContain('result.error_message || "Unknown error"');
+  });
+
+  it("bounds non-2xx and thrown errors before displaying or recording either wire result", () => {
+    const source = readFileSync("src/main/ipc/chat.ts", "utf8");
+    const start = source.indexOf('const execRes = await fetch(`${baseUrl}/v1/mcp/execute`');
+    const end = source.indexOf("// Inject media from read_image/read_video tool results", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const mcp = source.slice(start, end);
+    const httpStart = mcp.indexOf("if (!execRes.ok)");
+    const successStart = mcp.indexOf("const result = await execRes.json();");
+    const catchStart = mcp.indexOf("} catch (err: any)");
+    const flushStart = mcp.indexOf("await flushToolStatusToRenderer();");
+    expect(httpStart).toBeGreaterThan(-1);
+    expect(successStart).toBeGreaterThan(httpStart);
+    expect(catchStart).toBeGreaterThan(successStart);
+    expect(flushStart).toBeGreaterThan(catchStart);
+    const http = mcp.slice(httpStart, successStart);
+    const caught = mcp.slice(catchStart, flushStart);
+    expect(http).toMatch(/resultText = boundToolResultText\(\s*`Error \(\$\{execRes.status\}\): \$\{errText\}`,\s*overrides\?\.toolResultMaxChars \|\| 50000,?\s*\)/);
+    expect(caught).toMatch(/resultText = boundToolResultText\(\s*`Tool execution error: \$\{err.message\}`,\s*overrides\?\.toolResultMaxChars \|\| 50000,?\s*\)/);
+    const boundedDisplay = /emitToolStatus\(\s*"error",\s*tc.function.name,\s*resultText,\s*toolIteration,\s*tc.id,?\s*\)/;
+    expect(http).toMatch(boundedDisplay);
+    expect(caught).toMatch(boundedDisplay);
+    expect(caught).not.toMatch(/emitToolStatus\(\s*"error",\s*tc.function.name,\s*err.message,/);
+    const abortGuard = 'if (err?.name === "AbortError") throw err;';
+    expect(caught).toContain(abortGuard);
+    expect(caught.indexOf(abortGuard)).toBeLessThan(caught.indexOf("resultText = boundToolResultText("));
+    const continuation = mcp.slice(flushStart);
+    expect(continuation).toMatch(/type: "function_call_output",\s*call_id: tc.id,\s*output: resultText/);
+    expect(continuation).toMatch(/role: "tool",\s*tool_call_id: tc.id,\s*content: resultText/);
   });
 });

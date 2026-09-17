@@ -15,7 +15,7 @@ import {
 import type { RemoteDetectedConfig } from "../../shared/remoteModelCapabilities";
 import { remoteServerBaseUrl } from "../../shared/remoteApiUrl";
 import { accumulateChatToolCallDelta } from "../../shared/chatToolCallDeltas";
-import { formatMcpToolResult } from "../../shared/mcpToolResult";
+import { boundToolResultText, formatMcpToolResult } from "../../shared/mcpToolResult";
 import {
   BUILTIN_TOOLS,
   isBuiltinTool,
@@ -4176,7 +4176,10 @@ export function registerChatHandlers(
                 });
                 if (!execRes.ok) {
                   const errText = await execRes.text();
-                  resultText = `Error (${execRes.status}): ${errText}`;
+                  resultText = boundToolResultText(
+                    `Error (${execRes.status}): ${errText}`,
+                    overrides?.toolResultMaxChars || 50000,
+                  );
                   emitToolStatus(
                     "error",
                     tc.function.name,
@@ -4211,11 +4214,14 @@ export function registerChatHandlers(
               }
             } catch (err: any) {
               if (err?.name === "AbortError") throw err;
-              resultText = `Tool execution error: ${err.message}`;
+              resultText = boundToolResultText(
+                `Tool execution error: ${err.message}`,
+                overrides?.toolResultMaxChars || 50000,
+              );
               emitToolStatus(
                 "error",
                 tc.function.name,
-                err.message,
+                resultText,
                 toolIteration,
                 tc.id,
               );

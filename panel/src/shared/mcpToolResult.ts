@@ -4,6 +4,15 @@ export interface McpToolResultPayload {
   error_message?: string | null;
 }
 
+/** Bound tool-owned text identically for the display and model continuation. */
+export function boundToolResultText(text: string, maxChars: number): string {
+  if (text.length > maxChars) {
+    return text.slice(0, maxChars) +
+      `\n\n[Truncated — showing first ${maxChars} of ${text.length} characters]`;
+  }
+  return text;
+}
+
 /** Preserve tool execution feedback in both Chat and Responses continuations. */
 export function formatMcpToolResult(
   result: McpToolResultPayload,
@@ -24,9 +33,5 @@ export function formatMcpToolResult(
   }
   // Apply the existing successful-tool bound to errors too. A rejected call
   // must not bypass the session's tool-result context limit.
-  if (text.length > maxChars) {
-    return text.slice(0, maxChars) +
-      `\n\n[Truncated — showing first ${maxChars} of ${text.length} characters]`;
-  }
-  return text;
+  return boundToolResultText(text, maxChars);
 }

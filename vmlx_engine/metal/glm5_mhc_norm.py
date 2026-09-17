@@ -177,14 +177,15 @@ _SOURCE = r"""
 
 def eligible(streams, hc_fn, hc_base, hc_scale, weight, *,
              rms_eps, sink_eps, norm_eps, iterations):
-    """Metadata only. Actual retained bundle has BF16 fn/norm, F32 base/scale."""
+    """Preserve both stored F32 and hydrated BF16 coefficient arithmetic."""
     return (
         streams.shape == (1, 1, 4, 4096)
         and hc_fn.shape == (24, 16384)
         and hc_base.shape == (24,) and hc_scale.shape == (3,)
         and weight.shape == (4096,)
         and streams.dtype == hc_fn.dtype == weight.dtype == mx.bfloat16
-        and hc_base.dtype == hc_scale.dtype == mx.float32
+        and hc_base.dtype == hc_scale.dtype
+        and hc_base.dtype in (mx.float32, mx.bfloat16)
         and iterations == 20
         and all(isinstance(v, (int, float)) and math.isfinite(v) and v > 0
                 for v in (rms_eps, sink_eps, norm_eps))

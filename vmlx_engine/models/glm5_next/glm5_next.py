@@ -78,6 +78,7 @@ from vmlx_engine.metal.glm5_mhc_decode import (
     fused_glm5_mhc_requested,
     glm5_mhc_decode,
 )
+from vmlx_engine.metal.glm5_mhc_norm import try_glm5_hc_norm
 from vmlx_engine.metal.glm5_hc_place_decode import (
     fused_glm5_hc_place_requested,
     glm5_hc_place_decode,
@@ -2007,8 +2008,12 @@ class DecoderLayer(nn.Module):
 
     def __call__(self, streams: mx.array, cache=None, n_confirmed: int = 0):
         residual = streams
-        post, comb, x = self.attn_hc(streams)
-        attn_input = self.input_layernorm(x)
+        fused_hc_norm = try_glm5_hc_norm(streams, self.attn_hc, self.input_layernorm)
+        if fused_hc_norm is None:
+            post, comb, x = self.attn_hc(streams)
+            attn_input = self.input_layernorm(x)
+        else:
+            post, comb, attn_input = fused_hc_norm
         if self.is_linear:
             x = self.self_attn(
                 attn_input, cache=cache, n_confirmed=n_confirmed
@@ -2020,8 +2025,13 @@ class DecoderLayer(nn.Module):
         )
 
         residual = streams
-        post, comb, x = self.ffn_hc(streams)
-        x = self.mlp(self.post_attention_layernorm(x))
+        fused_hc_norm = try_glm5_hc_norm(streams, self.ffn_hc, self.post_attention_layernorm)
+        if fused_hc_norm is None:
+            post, comb, x = self.ffn_hc(streams)
+            x = self.post_attention_layernorm(x)
+        else:
+            post, comb, x = fused_hc_norm
+        x = self.mlp(x)
         return hc_place(
             post, comb, x, residual, fused_decode=self._fused_hc_place
         )
